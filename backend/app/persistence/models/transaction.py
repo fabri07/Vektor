@@ -1,10 +1,10 @@
 """ORM models: sales_entries, expense_entries, products."""
 
 import uuid
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,7 +32,7 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     def __repr__(self) -> str:
-        return f"<SaleEntry tenant={self.tenant_id} amount={self.amount} date={self.transaction_date}>"
+        return f"<SaleEntry tenant={self.tenant_id} amount={self.amount} date={self.transaction_date}>"  # noqa: E501
 
 
 class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):

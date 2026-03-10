@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,7 +22,7 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     subscriptions: Mapped[list["Subscription"]] = relationship(
         back_populates="tenant", cascade="all, delete-orphan"
     )
-    users: Mapped[list["User"]] = relationship(  # type: ignore[name-defined]
+    users: Mapped[list["User"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "User", back_populates="tenant", cascade="all, delete-orphan"
     )
 

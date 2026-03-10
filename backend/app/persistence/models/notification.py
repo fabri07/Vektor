@@ -4,10 +4,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -31,7 +31,7 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     channel: Mapped[str] = mapped_column(String(30), nullable=False, default="in_app")
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    metadata_: Mapped[dict | None] = mapped_column("metadata", PGJSONB, nullable=True)
 
     def __repr__(self) -> str:
         return f"<Notification tenant={self.tenant_id} type={self.notification_type!r}>"

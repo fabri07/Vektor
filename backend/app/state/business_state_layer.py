@@ -111,15 +111,24 @@ class BusinessStateLayer:
             avg_daily_sales=avg_daily_sales,
             transaction_count=transaction_count,
             liquidity_score=liq_score,
-            liquidity_explanation=f"Revenue {total_revenue:.2f} vs expenses {total_expenses:.2f} in {days} days.",
+            liquidity_explanation=(
+                f"Revenue {total_revenue:.2f} vs expenses {total_expenses:.2f} in {days} days."
+            ),
             profitability_score=prof_score,
-            profitability_explanation=f"Gross profit margin: {(gross_profit / total_revenue * 100) if total_revenue else 0:.1f}%.",
+            profitability_explanation=(
+                f"Gross profit margin: "
+                f"{(gross_profit / total_revenue * 100) if total_revenue else 0:.1f}%."
+            ),
             cost_control_score=cost_score,
             cost_control_explanation=f"Expense ratio: {expense_ratio * 100:.1f}% of revenue.",
             sales_momentum_score=momentum_score,
             sales_momentum_explanation=f"Average daily sales: {avg_daily_sales:.2f} ARS.",
             debt_coverage_score=debt_score,
-            debt_coverage_explanation=f"Gross profit covers {(gross_profit / total_expenses * 100) if total_expenses else 100:.1f}% of expenses.",
+            debt_coverage_explanation=(
+                f"Gross profit covers "
+                f"{(gross_profit / total_expenses * 100) if total_expenses else 100:.1f}%"
+                f" of expenses."
+            ),
         )
 
     # ── Private scoring helpers ───────────────────────────────────────────────
@@ -140,7 +149,7 @@ class BusinessStateLayer:
         ratio = float(expense_ratio)
         if ratio >= 1.0:
             return 0.0
-        return max(0.0, (1.0 - ratio) * 150)
+        return min(100.0, max(0.0, (1.0 - ratio) * 150))
 
     def _momentum_score(self, avg_daily: Decimal) -> float:
         # Basic: score based on daily sales threshold; extend with WoW comparison

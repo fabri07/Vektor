@@ -13,7 +13,6 @@ from app.persistence.db.session import get_db_session
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
-from app.schemas.common import MessageResponse
 
 router = APIRouter()
 

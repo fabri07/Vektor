@@ -3,7 +3,6 @@ Celery worker: health score recalculation tasks.
 """
 
 import asyncio
-import uuid
 
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger
@@ -27,9 +26,10 @@ def rebuild_weekly_history() -> None:
     s = get_settings()
 
     async def _run() -> None:
+        from sqlalchemy import select  # noqa: PLC0415
         from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
-        from sqlalchemy import select  # noqa: PLC0415
+
         from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
         engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
@@ -45,7 +45,9 @@ def rebuild_weekly_history() -> None:
 
         for tid in tenant_ids:
             async with factory() as session:
-                from app.application.services.health_score_service import HealthScoreService  # noqa: PLC0415
+                from app.application.services.health_score_service import (
+                    HealthScoreService,  # noqa: PLC0415
+                )
                 svc = HealthScoreService(session)
                 await svc.recalculate_for_tenant(
                     tenant_id=tid,

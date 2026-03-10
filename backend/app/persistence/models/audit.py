@@ -3,11 +3,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import Base, UUIDPrimaryKeyMixin
+from app.persistence.db.base import PGJSONB, Base, UUIDPrimaryKeyMixin
 
 
 class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
@@ -25,14 +25,14 @@ class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
         index=True,
     )
     decision_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    decision_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    decision_data: Mapped[dict] = mapped_column(PGJSONB, nullable=False)
     triggered_by: Mapped[str] = mapped_column(String(100), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    context: Mapped[dict | None] = mapped_column(PGJSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     def __repr__(self) -> str:

@@ -1,14 +1,14 @@
-"""ORM models: business_profiles, business_snapshots, insights, action_suggestions, momentum_profiles."""
+"""ORM models: business_profiles, business_snapshots, insights, action_suggestions, momentum_profiles."""  # noqa: E501
 
 import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, Boolean
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class BusinessProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -61,7 +61,7 @@ class BusinessSnapshot(UUIDPrimaryKeyMixin, Base):
     transaction_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # Raw data used for score computation (flexible)
-    raw_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    raw_data: Mapped[dict] = mapped_column(PGJSONB, nullable=False, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

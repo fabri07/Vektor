@@ -5,10 +5,10 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class HealthScoreSnapshot(UUIDPrimaryKeyMixin, Base):
@@ -27,7 +27,7 @@ class HealthScoreSnapshot(UUIDPrimaryKeyMixin, Base):
     )
     total_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     level: Mapped[str] = mapped_column(String(20), nullable=False)
-    dimensions: Mapped[dict] = mapped_column(JSONB, nullable=False)  # DimensionScore[]
+    dimensions: Mapped[dict] = mapped_column(PGJSONB, nullable=False)  # DimensionScore[]
     triggered_by: Mapped[str] = mapped_column(String(100), nullable=False)
     snapshot_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -49,7 +49,7 @@ class HeuristicRuleSet(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     vertical: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     version: Mapped[str] = mapped_column(String(20), nullable=False)
-    rules: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    rules: Mapped[dict] = mapped_column(PGJSONB, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

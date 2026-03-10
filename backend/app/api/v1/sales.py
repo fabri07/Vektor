@@ -1,6 +1,5 @@
 """Sales entry endpoints."""
 
-import uuid
 from datetime import date
 from uuid import UUID
 

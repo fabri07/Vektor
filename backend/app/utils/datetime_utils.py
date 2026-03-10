@@ -1,10 +1,10 @@
 """Date and time utility helpers."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def start_of_month(dt: date) -> date:

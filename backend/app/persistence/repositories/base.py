@@ -3,7 +3,7 @@ Generic async repository base.
 Every repository enforces tenant_id on all read/write operations.
 """
 
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 from uuid import UUID
 
 from sqlalchemy import select

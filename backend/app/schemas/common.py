@@ -3,7 +3,6 @@ Shared Pydantic schemas and response wrappers.
 """
 
 from typing import Generic, TypeVar
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 

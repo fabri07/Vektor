@@ -26,10 +26,10 @@ async def shutdown() -> None:
 # ── Database ──────────────────────────────────────────────────────────────────
 
 async def _init_database() -> None:
-    from app.persistence.db.engine import engine  # noqa: PLC0415
-
     # Validate connectivity on startup (fail fast)
     from sqlalchemy import text  # noqa: PLC0415
+
+    from app.persistence.db.engine import engine  # noqa: PLC0415
 
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))

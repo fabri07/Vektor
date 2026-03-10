@@ -15,9 +15,6 @@ def trigger_score_recalculation(tenant_id: str, triggered_by: str) -> None:
     import asyncio  # noqa: PLC0415
     import uuid  # noqa: PLC0415
 
-    from sqlalchemy import create_engine  # noqa: PLC0415
-    from sqlalchemy.orm import Session  # noqa: PLC0415
-
     from app.config.settings import get_settings  # noqa: PLC0415
     from app.observability.logger import get_logger  # noqa: PLC0415
 
@@ -25,14 +22,16 @@ def trigger_score_recalculation(tenant_id: str, triggered_by: str) -> None:
     s = get_settings()
 
     # Use sync engine for Celery (psycopg2)
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     async def _run() -> None:
         engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
         async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         async with async_session() as session:
-            from app.application.services.health_score_service import HealthScoreService  # noqa: PLC0415
+            from app.application.services.health_score_service import (
+                HealthScoreService,  # noqa: PLC0415
+            )
             svc = HealthScoreService(session)
             await svc.recalculate_for_tenant(
                 tenant_id=uuid.UUID(tenant_id),

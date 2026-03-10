@@ -31,6 +31,7 @@ def send_notification(
     async def _run() -> None:
         from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
+
         from app.config.settings import get_settings  # noqa: PLC0415
         from app.persistence.models.notification import Notification  # noqa: PLC0415
 
@@ -77,6 +78,5 @@ def _dispatch_email(title: str, body: str, user_id: str | None) -> None:
 
     from app.integrations.smtp import SMTPClient  # noqa: PLC0415
 
-    client = SMTPClient()
-    # In a real implementation, look up user email from DB
+    SMTPClient()  # noqa: F841 — placeholder until user lookup is implemented
     logger.info("notification_worker.email_dispatched", title=title)

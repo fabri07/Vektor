@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     # ── Computed properties ───────────────────────────────────────────────────
     @property
-    def DATABASE_URL(self) -> str:
+    def DATABASE_URL(self) -> str:  # noqa: N802
         """Async database URL for SQLAlchemy (asyncpg)."""
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
@@ -82,7 +82,7 @@ class Settings(BaseSettings):
         )
 
     @property
-    def DATABASE_URL_SYNC(self) -> str:
+    def DATABASE_URL_SYNC(self) -> str:  # noqa: N802
         """Sync database URL for Alembic / Celery tasks (psycopg2)."""
         return (
             f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"

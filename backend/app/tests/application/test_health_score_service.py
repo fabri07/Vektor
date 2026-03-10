@@ -1,7 +1,5 @@
 """Integration tests for HealthScoreService."""
 
-import uuid
-from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,11 +44,11 @@ class TestHealthScoreService:
     async def test_recalculate_with_sales_improves_score(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        from decimal import Decimal  # noqa: PLC0415
         from datetime import date  # noqa: PLC0415
+        from decimal import Decimal  # noqa: PLC0415
 
         # Add some sales
-        for i in range(10):
+        for _i in range(10):
             sale = SaleEntry(
                 tenant_id=sample_tenant.id,
                 amount=Decimal("50000"),

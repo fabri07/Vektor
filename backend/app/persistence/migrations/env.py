@@ -1,12 +1,10 @@
 """Alembic environment — supports both online (sync) and offline modes."""
 
-import asyncio
 import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 # Load all models so Alembic can detect schema changes
 import app.persistence.models  # noqa: F401

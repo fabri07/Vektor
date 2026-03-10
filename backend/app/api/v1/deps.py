@@ -5,6 +5,7 @@ Every business endpoint must inject `get_current_tenant` and
 `get_current_user` to enforce authentication and tenant isolation.
 """
 
+from collections.abc import Callable
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
@@ -65,7 +66,7 @@ async def get_current_tenant(
     return tenant
 
 
-def require_role(*roles: str):  # type: ignore[no-untyped-def]
+def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
     """Dependency factory that enforces role-based access."""
 
     async def _check(current_user: User = Depends(get_current_user)) -> User:
