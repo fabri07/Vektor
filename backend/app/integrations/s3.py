@@ -15,7 +15,7 @@ class S3Client:
     def __init__(self) -> None:
         s = get_settings()
         self._bucket = s.S3_BUCKET_NAME
-        self._client = boto3.client(
+        self._client = boto3.client(  # type: ignore[call-overload]
             "s3",
             region_name=s.S3_REGION,
             aws_access_key_id=s.S3_ACCESS_KEY_ID,

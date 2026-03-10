@@ -121,4 +121,4 @@ async def get_download_url(
 
     s3 = S3Client()
     url = await s3.generate_presigned_url(record.s3_key)
-    return {"url": url, "expires_in": 3600}
+    return {"url": url, "expires_in": "3600"}

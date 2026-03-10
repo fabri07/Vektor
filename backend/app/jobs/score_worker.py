@@ -10,7 +10,7 @@ from app.observability.logger import get_logger
 logger = get_logger(__name__)
 
 
-@celery_app.task(
+@celery_app.task(  # type: ignore[misc]
     name="jobs.rebuild_weekly_history",
     queue="scores",
     max_retries=3,
@@ -33,7 +33,7 @@ def rebuild_weekly_history() -> None:
         from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
         engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
-        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
             result = await session.execute(

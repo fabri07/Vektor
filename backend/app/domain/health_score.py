@@ -73,7 +73,7 @@ class HealthScore:
         snapshot_date: datetime,
         triggered_by: str,
     ) -> "HealthScore":
-        total = sum(d.weighted_value for d in dimensions)
+        total = sum((d.weighted_value for d in dimensions), Decimal("0"))
         return cls(
             tenant_id=tenant_id,
             total_score=total,

@@ -32,7 +32,7 @@ async def get_current_score(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No health score available yet. Add some sales or expenses to get started.",
         )
-    dimensions = snapshot.dimensions if isinstance(snapshot.dimensions, list) else []
+    dimensions: list[object] = snapshot.dimensions if isinstance(snapshot.dimensions, list) else []
     return HealthScoreResponse(
         id=snapshot.id,
         tenant_id=snapshot.tenant_id,

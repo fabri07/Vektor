@@ -3,6 +3,7 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -61,7 +62,7 @@ class BusinessSnapshot(UUIDPrimaryKeyMixin, Base):
     transaction_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # Raw data used for score computation (flexible)
-    raw_data: Mapped[dict] = mapped_column(PGJSONB, nullable=False, default=dict)
+    raw_data: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

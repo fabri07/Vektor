@@ -6,7 +6,7 @@ Imported by API endpoints to schedule async recalculations.
 from app.jobs.celery_app import celery_app
 
 
-@celery_app.task(name="jobs.trigger_score_recalculation", queue="scores")
+@celery_app.task(name="jobs.trigger_score_recalculation", queue="scores")  # type: ignore[misc]
 def trigger_score_recalculation(tenant_id: str, triggered_by: str) -> None:
     """
     Celery task entrypoint.
@@ -27,7 +27,7 @@ def trigger_score_recalculation(tenant_id: str, triggered_by: str) -> None:
 
     async def _run() -> None:
         engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
-        async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
         async with async_session() as session:
             from app.application.services.health_score_service import (
                 HealthScoreService,  # noqa: PLC0415

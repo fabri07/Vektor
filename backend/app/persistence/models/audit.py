@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
@@ -25,14 +26,14 @@ class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
         index=True,
     )
     decision_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    decision_data: Mapped[dict] = mapped_column(PGJSONB, nullable=False)
+    decision_data: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False)
     triggered_by: Mapped[str] = mapped_column(String(100), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    context: Mapped[dict | None] = mapped_column(PGJSONB, nullable=True)
+    context: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     def __repr__(self) -> str:

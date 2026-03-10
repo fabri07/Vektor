@@ -1,0 +1,89 @@
+name: CI — Backend
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - ".github/workflows/ci-backend.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - ".github/workflows/ci-backend.yml"
+
+jobs:
+  ci:
+    name: Lint · Type-check · Test · Docker build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Python 3.12 ───────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 3. Install dependencies (cached) ─────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      # ── 4. Ruff (linting) ────────────────────────────────────────────────────
+      - name: Ruff — lint
+        run: ruff check .
+
+      # ── 5. mypy (type checking) ───────────────────────────────────────────────
+      - name: mypy — type check
+        run: mypy app
+
+      # ── 6. pytest (coverage ≥ 60%) ────────────────────────────────────────────
+      - name: pytest — unit + integration
+        env:
+          # SQLite in-memory — no external services required
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          REDIS_URL: "redis://localhost:6379/0"
+          SECRET_KEY: "ci-test-secret-key-not-for-production"
+          ENVIRONMENT: "test"
+          ALLOWED_ORIGINS: "http://localhost:3000"
+          S3_ENDPOINT_URL: ""
+          S3_ACCESS_KEY: ""
+          S3_SECRET_KEY: ""
+          S3_BUCKET_NAME: "vektor-test"
+          SMTP_HOST: "localhost"
+          SMTP_PORT: "1025"
+          SMTP_USER: ""
+          SMTP_PASSWORD: ""
+          SMTP_FROM: "test@vektor.app"
+        run: |
+          pytest \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-fail-under=60 \
+            -v
+
+      # ── 7. Docker build (verify only, no push) ───────────────────────────────
+      - name: Docker — verify build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          tags: vektor-backend:ci

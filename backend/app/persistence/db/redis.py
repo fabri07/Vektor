@@ -12,7 +12,7 @@ settings = get_settings()
 _pool: ConnectionPool | None = None
 
 
-async def get_redis_pool() -> Redis:  # type: ignore[type-arg]
+async def get_redis_pool() -> Redis:
     global _pool  # noqa: PLW0603
     if _pool is None:
         _pool = ConnectionPool.from_url(
@@ -30,6 +30,6 @@ async def close_redis_pool() -> None:
         _pool = None
 
 
-async def get_redis() -> Redis:  # type: ignore[type-arg]
+async def get_redis() -> Redis:
     """FastAPI dependency for Redis client."""
     return await get_redis_pool()

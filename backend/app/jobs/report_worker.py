@@ -8,7 +8,7 @@ from app.observability.logger import get_logger
 logger = get_logger(__name__)
 
 
-@celery_app.task(
+@celery_app.task(  # type: ignore[misc]
     name="jobs.generate_report",
     queue="reports",
     max_retries=2,
