@@ -1,0 +1,104 @@
+services:
+  # ── PostgreSQL 16 ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vektor}
+      POSTGRES_USER: ${POSTGRES_USER:-vektor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vektor}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vektor} -d ${POSTGRES_DB:-vektor}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── Redis 7 ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Backend API ──────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+  # ── Celery Worker ─────────────────────────────────────────────────────────────
+  celery-worker:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    command: >
+      celery -A app.jobs.celery_app worker
+      --loglevel=info
+      --queues=default,scores,notifications,reports
+      --concurrency=4
+    env_file: .env
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+  # ── Celery Beat (scheduler) ──────────────────────────────────────────────────
+  celery-beat:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    command: celery -A app.jobs.celery_app beat --loglevel=info
+    env_file: .env
+    volumes:
+      - .:/app
+    depends_on:
+      - celery-worker
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+volumes:
+  postgres_data:
+  redis_data:

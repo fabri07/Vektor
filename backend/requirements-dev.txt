@@ -1,0 +1,22 @@
+-r requirements.txt
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+httpx==0.28.1                    # async test client for FastAPI
+factory-boy==3.3.1
+faker==33.1.0
+
+# ── Linting / Formatting ──────────────────────────────────────────────────────
+ruff==0.8.4
+mypy==1.13.0
+
+# ── Type stubs ────────────────────────────────────────────────────────────────
+types-python-dateutil==2.9.0.20241003
+types-passlib==1.7.7.20240819
+boto3-stubs[s3]==1.35.87
+
+# ── Dev utilities ─────────────────────────────────────────────────────────────
+ipython==8.30.0
+watchfiles==1.0.0
