@@ -1,0 +1,46 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary: #1a1a2e;
+    --color-accent: #e63946;
+    --color-mid: #4a4e69;
+  }
+
+  html {
+    @apply text-sm antialiased;
+    font-family: "Inter", system-ui, sans-serif;
+  }
+
+  body {
+    @apply bg-primary text-white;
+  }
+
+  * {
+    @apply border-white/10;
+  }
+}
+
+@layer components {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #4a4e69 transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: #4a4e69;
+    border-radius: 2px;
+  }
+}
