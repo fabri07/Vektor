@@ -1,5 +1,7 @@
 """Pydantic schemas for authentication endpoints."""
 
+from uuid import UUID
+
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
@@ -8,23 +10,12 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=8)
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-    expires_in: int  # seconds
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str
-
-
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     full_name: str = Field(min_length=2, max_length=200)
-    tenant_name: str = Field(min_length=2, max_length=200)
-    vertical: str = Field(pattern=r"^(kiosco|decoracion_hogar|limpieza)$")
+    business_name: str = Field(min_length=2, max_length=200)
+    vertical_code: str = Field(pattern=r"^(kiosco|decoracion_hogar|limpieza)$")
 
     @field_validator("password")
     @classmethod
@@ -34,6 +25,53 @@ class RegisterRequest(BaseModel):
         if not any(c.isalpha() for c in v):
             raise ValueError("Password must contain at least one letter.")
         return v
+
+
+class UserInAuthResponse(BaseModel):
+    """Embedded user data returned on register/login."""
+
+    user_id: UUID
+    email: str
+    role_code: str
+    tenant_id: UUID
+
+
+class AuthResponse(BaseModel):
+    """Response for POST /register and POST /login."""
+
+    access_token: str
+    token_type: str = "bearer"
+    user: UserInAuthResponse
+
+
+class SubscriptionInMeResponse(BaseModel):
+    plan_code: str
+    status: str
+
+
+class MeResponse(BaseModel):
+    """Response for GET /auth/me."""
+
+    user_id: UUID
+    email: str
+    full_name: str
+    role_code: str
+    tenant_id: UUID
+    subscription: SubscriptionInMeResponse | None
+    onboarding_completed: bool
+
+
+class TokenResponse(BaseModel):
+    """Used by POST /refresh only."""
+
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 class ChangePasswordRequest(BaseModel):

@@ -21,7 +21,7 @@ class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -30,7 +30,7 @@ class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
     triggered_by: Mapped[str] = mapped_column(String(100), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
         nullable=True,
     )
     context: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)

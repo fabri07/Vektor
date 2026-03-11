@@ -1,39 +1,65 @@
-"""ORM models: business_profiles, business_snapshots, insights, action_suggestions, momentum_profiles."""  # noqa: E501
+"""ORM models: business_profiles, business_snapshots, insights, action_suggestions, momentum_profiles.
+
+Column names match the migration schema exactly.
+BusinessProfile uses onboarding-friendly nullable fields for datos del negocio.
+MomentumProfile uses tenant_id as primary key (1-to-1 with tenants).
+"""  # noqa: E501
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
-class BusinessProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class BusinessProfile(TimestampMixin, Base):
+    """
+    Business profile created at registration with vertical_code.
+    All onboarding fields (legal_name, cuit, etc.) are filled during onboarding — NOT at register.
+    """
+
     __tablename__ = "business_profiles"
 
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,       # one profile per tenant
+        unique=True,
         index=True,
     )
-    legal_name: Mapped[str] = mapped_column(String(300), nullable=False)
-    trade_name: Mapped[str] = mapped_column(String(300), nullable=False)
-    cuit: Mapped[str] = mapped_column(String(20), nullable=False)
-    vertical: Mapped[str] = mapped_column(String(50), nullable=False)
-    size: Mapped[str] = mapped_column(String(20), nullable=False, default="micro")
-    province: Mapped[str] = mapped_column(String(100), nullable=False)
-    city: Mapped[str] = mapped_column(String(100), nullable=False)
-    employee_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    monthly_rent: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    vertical_code: Mapped[str] = mapped_column(Text, nullable=False)
+    data_mode: Mapped[str] = mapped_column(Text, nullable=False, default="M0")
+    data_confidence: Mapped[str] = mapped_column(Text, nullable=False, default="LOW")
+
+    # Financial estimates — nullable, filled during onboarding
+    monthly_sales_estimate_ars: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    monthly_inventory_spend_estimate_ars: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    monthly_fixed_expenses_estimate_ars: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    cash_on_hand_estimate_ars: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    supplier_count_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    product_count_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    heuristic_profile_version: Mapped[str] = mapped_column(Text, nullable=False, default="v1")
 
     def __repr__(self) -> str:
-        return f"<BusinessProfile tenant={self.tenant_id} name={self.trade_name!r}>"
+        return f"<BusinessProfile tenant={self.tenant_id} vertical={self.vertical_code!r}>"
 
 
 class BusinessSnapshot(UUIDPrimaryKeyMixin, Base):
@@ -46,23 +72,16 @@ class BusinessSnapshot(UUIDPrimaryKeyMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
     snapshot_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    # Financial aggregates for the period
-    total_revenue: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
-    total_expenses: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
-    gross_profit: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
-    avg_daily_sales: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
-    transaction_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-
-    # Raw data used for score computation (flexible)
-    raw_data: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False, default=dict)
+    snapshot_version: Mapped[str] = mapped_column(Text, nullable=False, default="v1")
+    raw_inputs_json: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
+    data_completeness_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    data_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence_level: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -70,23 +89,28 @@ class BusinessSnapshot(UUIDPrimaryKeyMixin, Base):
         return f"<BusinessSnapshot tenant={self.tenant_id} date={self.snapshot_date}>"
 
 
-class MomentumProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Sales trend and momentum metrics."""
+class MomentumProfile(Base):
+    """
+    Momentum and streak metrics. tenant_id is the primary key (1-to-1 with tenant).
+    No separate UUID — the tenant IS the key.
+    """
 
     __tablename__ = "momentum_profiles"
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
     )
-    week_over_week_growth: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
-    month_over_month_growth: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
-    avg_ticket: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
-    best_day_of_week: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    sales_trend: Mapped[str] = mapped_column(String(20), nullable=False, default="stable")
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    best_score_ever: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    best_score_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    active_goal_json: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
+    milestones_json: Mapped[list[Any]] = mapped_column(PGJSONB, nullable=False, default=list)
+    estimated_value_protected_ars: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    improving_streak_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     def __repr__(self) -> str:
         return f"<MomentumProfile tenant={self.tenant_id}>"
@@ -99,24 +123,18 @@ class Insight(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    title: Mapped[str] = mapped_column(String(300), nullable=False)
-    body: Mapped[str] = mapped_column(Text, nullable=False)
-    category: Mapped[str] = mapped_column(String(50), nullable=False)  # e.g. "cash_flow"
-    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="info")
-    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    source_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("business_snapshots.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    insight_type: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    severity_code: Mapped[str] = mapped_column(Text, nullable=False, default="MEDIUM")
+    heuristic_version: Mapped[str] = mapped_column(Text, nullable=False, default="v1")
 
     def __repr__(self) -> str:
-        return f"<Insight tenant={self.tenant_id} category={self.category!r}>"
+        return f"<Insight tenant={self.tenant_id} type={self.insight_type!r}>"
 
 
 class ActionSuggestion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -126,7 +144,7 @@ class ActionSuggestion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -135,11 +153,11 @@ class ActionSuggestion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("insights.id", ondelete="SET NULL"),
         nullable=True,
     )
-    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    action_type: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    priority: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
-    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
-    due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    risk_level: Mapped[str] = mapped_column(Text, nullable=False, default="LOW")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="SUGGESTED")
 
     def __repr__(self) -> str:
         return f"<ActionSuggestion tenant={self.tenant_id} status={self.status!r}>"

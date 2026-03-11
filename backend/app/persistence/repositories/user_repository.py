@@ -14,7 +14,7 @@ class UserRepository:
 
     async def get_by_id(self, user_id: UUID, tenant_id: UUID) -> User | None:
         result = await self._session.execute(
-            select(User).where(User.id == user_id, User.tenant_id == tenant_id)
+            select(User).where(User.user_id == user_id, User.tenant_id == tenant_id)
         )
         return result.scalar_one_or_none()
 

@@ -16,13 +16,13 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
     product_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("products.id", ondelete="SET NULL"),
+        ForeignKey("products.id", ondelete="SET NULL"),  # products uses UUIDPrimaryKeyMixin → col name 'id'
         nullable=True,
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -40,7 +40,7 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

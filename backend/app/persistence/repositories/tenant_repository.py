@@ -14,13 +14,7 @@ class TenantRepository:
 
     async def get_by_id(self, tenant_id: UUID) -> Tenant | None:
         result = await self._session.execute(
-            select(Tenant).where(Tenant.id == tenant_id)
-        )
-        return result.scalar_one_or_none()
-
-    async def get_by_slug(self, slug: str) -> Tenant | None:
-        result = await self._session.execute(
-            select(Tenant).where(Tenant.slug == slug)
+            select(Tenant).where(Tenant.tenant_id == tenant_id)
         )
         return result.scalar_one_or_none()
 
@@ -34,7 +28,7 @@ class TenantRepository:
             select(Subscription)
             .where(
                 Subscription.tenant_id == tenant_id,
-                Subscription.status == "active",
+                Subscription.status == "ACTIVE",
             )
             .order_by(Subscription.created_at.desc())
             .limit(1)

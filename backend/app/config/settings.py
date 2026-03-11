@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET_KEY: str = "insecure-jwt-change-me"
     JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # ── CORS ──────────────────────────────────────────────────────────────────

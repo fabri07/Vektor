@@ -10,6 +10,7 @@ from app.api.v1 import (
     health_scores,
     insights,
     notifications,
+    onboarding,
     products,
     sales,
     tenants,
@@ -35,3 +36,4 @@ api_router.include_router(
     notifications.router, prefix="/notifications", tags=["Notifications"]
 )
 api_router.include_router(files.router, prefix="/files", tags=["Files"])
+api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])

@@ -14,13 +14,13 @@ class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
         nullable=True,
     )
     original_filename: Mapped[str] = mapped_column(String(500), nullable=False)

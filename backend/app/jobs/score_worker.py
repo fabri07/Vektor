@@ -58,3 +58,44 @@ def rebuild_weekly_history() -> None:
         await engine.dispose()
 
     asyncio.run(_run())
+
+
+@celery_app.task(  # type: ignore[misc]
+    name="jobs.trigger_score_recalculation",
+    queue="scores",
+    max_retries=3,
+    default_retry_delay=30,
+)
+def trigger_score_recalculation(tenant_id: str, snapshot_id: str) -> None:
+    """
+    On-demand task: recalculate health score for a single tenant.
+    Triggered after onboarding or any business data write.
+    """
+    from app.config.settings import get_settings  # noqa: PLC0415
+
+    s = get_settings()
+
+    async def _run() -> None:
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+        from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
+
+        import uuid as _uuid  # noqa: PLC0415
+
+        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
+
+        async with factory() as session:
+            from app.application.services.health_score_service import (  # noqa: PLC0415
+                HealthScoreService,
+            )
+
+            svc = HealthScoreService(session)
+            await svc.recalculate_for_tenant(
+                tenant_id=_uuid.UUID(tenant_id),
+                triggered_by=f"onboarding:{snapshot_id}",
+            )
+            await session.commit()
+
+        await engine.dispose()
+
+    asyncio.run(_run())

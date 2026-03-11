@@ -7,7 +7,6 @@ Structure mirrors app/ directory.
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -63,13 +62,12 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
 @pytest_asyncio.fixture
 async def sample_tenant(db_session: AsyncSession) -> Tenant:
     tenant = Tenant(
-        id=uuid.uuid4(),
-        name="Kiosco El Rápido",
-        slug="kiosco-el-rapido",
-        vertical="kiosco",
-        status="active",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        tenant_id=uuid.uuid4(),
+        legal_name="Kiosco El Rápido",
+        display_name="Kiosco El Rápido",
+        currency="ARS",
+        pricing_reference_mode="MEP",
+        status="ACTIVE",
     )
     db_session.add(tenant)
     await db_session.commit()
@@ -79,15 +77,13 @@ async def sample_tenant(db_session: AsyncSession) -> Tenant:
 @pytest_asyncio.fixture
 async def sample_user(db_session: AsyncSession, sample_tenant: Tenant) -> User:
     user = User(
-        id=uuid.uuid4(),
-        tenant_id=sample_tenant.id,
+        user_id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
         email="owner@kiosco.com",
         full_name="Juan Pérez",
-        hashed_password=hash_password("password123"),
-        role="owner",
-        status="active",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        password_hash=hash_password("Secure123"),
+        role_code="OWNER",
+        is_active=True,
     )
     db_session.add(user)
     await db_session.commit()
@@ -98,9 +94,9 @@ async def sample_user(db_session: AsyncSession, sample_tenant: Tenant) -> User:
 async def auth_headers(sample_user: User, sample_tenant: Tenant) -> dict[str, str]:
     token = create_access_token(
         {
-            "sub": str(sample_user.id),
-            "tenant_id": str(sample_tenant.id),
-            "role": "owner",
+            "sub": str(sample_user.user_id),
+            "tenant_id": str(sample_tenant.tenant_id),
+            "role_code": "OWNER",
         }
     )
     return {"Authorization": f"Bearer {token}"}

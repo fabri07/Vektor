@@ -3,7 +3,7 @@ SQLAlchemy declarative base and shared mixins.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import JSON, DateTime, func
@@ -22,16 +22,22 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    """Adds created_at / updated_at to any model."""
+    """
+    Adds created_at / updated_at to any model.
+    Python-side defaults ensure timestamps are set in SQLite test environments
+    where server_default (func.now()) may not trigger.
+    """
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
+        default=lambda: datetime.now(UTC),
         onupdate=func.now(),
         nullable=False,
     )
