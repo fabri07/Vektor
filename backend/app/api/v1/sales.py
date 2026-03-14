@@ -1,6 +1,7 @@
 """Sales entry endpoints."""
 
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,9 +15,32 @@ from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
 from app.persistence.repositories.transaction_repository import SaleRepository
 from app.schemas.common import MessageResponse
-from app.schemas.transaction import CreateSaleRequest, SaleEntryResponse, UpdateSaleRequest
+from app.schemas.transaction import (
+    BulkSaleRequest,
+    CreateSaleRequest,
+    SaleEntryResponse,
+    SaleSummaryResponse,
+    UpdateSaleRequest,
+)
 
 router = APIRouter()
+
+
+@router.get("/summary", response_model=SaleSummaryResponse, summary="Last-30-day sales summary")
+async def sales_summary(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> SaleSummaryResponse:
+    repo = SaleRepository(session)
+    to_date = date.today()
+    from_date = to_date - timedelta(days=30)
+    total = await repo.total_revenue(tenant.tenant_id, from_date=from_date, to_date=to_date)
+    count = await repo.count_by_date_range(tenant.tenant_id, from_date=from_date, to_date=to_date)
+    return SaleSummaryResponse(
+        total_ars=Decimal(str(total)),
+        entry_count=count,
+        period_covered=f"{from_date} al {to_date}",
+    )
 
 
 @router.get("", response_model=list[SaleEntryResponse], summary="List sales entries")
@@ -30,8 +54,49 @@ async def list_sales(
 ) -> list[SaleEntry]:
     repo = SaleRepository(session)
     return await repo.list_by_tenant(
-        tenant.id, from_date=from_date, to_date=to_date, limit=limit, offset=offset
+        tenant.tenant_id, from_date=from_date, to_date=to_date, limit=limit, offset=offset
     )
+
+
+@router.post(
+    "/bulk",
+    response_model=list[SaleEntryResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Bulk-load sales for a period",
+)
+async def bulk_create_sales(
+    body: BulkSaleRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    _: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[SaleEntry]:
+    repo = SaleRepository(session)
+    if body.entries:
+        entries = [
+            SaleEntry(
+                tenant_id=tenant.tenant_id,
+                amount=item.amount_ars,
+                quantity=item.quantity,
+                transaction_date=body.period_date,
+                payment_method="cash",
+                product_id=item.product_id,
+            )
+            for item in body.entries
+        ]
+    else:
+        entries = [
+            SaleEntry(
+                tenant_id=tenant.tenant_id,
+                amount=body.total_amount_ars,
+                quantity=1,
+                transaction_date=body.period_date,
+                payment_method="cash",
+                notes=body.period_type,
+            )
+        ]
+    saved = await repo.bulk_save(entries)
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "sales_bulk_created")
+    return saved
 
 
 @router.post(
@@ -48,7 +113,7 @@ async def create_sale(
 ) -> SaleEntry:
     repo = SaleRepository(session)
     entry = SaleEntry(
-        tenant_id=tenant.id,
+        tenant_id=tenant.tenant_id,
         amount=body.amount,
         quantity=body.quantity,
         transaction_date=body.transaction_date,
@@ -57,8 +122,7 @@ async def create_sale(
         notes=body.notes,
     )
     saved = await repo.save(entry)
-    # Trigger async score recalculation (non-blocking)
-    trigger_score_recalculation.delay(str(tenant.id), "sale_entry_created")
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_created")
     return saved
 
 
@@ -69,7 +133,7 @@ async def get_sale(
     session: AsyncSession = Depends(get_db_session),
 ) -> SaleEntry:
     repo = SaleRepository(session)
-    entry = await repo.get_by_id(sale_id, tenant.id)
+    entry = await repo.get_by_id(sale_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
     return entry
@@ -83,7 +147,7 @@ async def update_sale(
     session: AsyncSession = Depends(get_db_session),
 ) -> SaleEntry:
     repo = SaleRepository(session)
-    entry = await repo.get_by_id(sale_id, tenant.id)
+    entry = await repo.get_by_id(sale_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
     if body.amount is not None:
@@ -97,7 +161,7 @@ async def update_sale(
     if body.notes is not None:
         entry.notes = body.notes
     saved = await repo.save(entry)
-    trigger_score_recalculation.delay(str(tenant.id), "sale_entry_updated")
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_updated")
     return saved
 
 
@@ -109,9 +173,9 @@ async def delete_sale(
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = SaleRepository(session)
-    entry = await repo.get_by_id(sale_id, tenant.id)
+    entry = await repo.get_by_id(sale_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
     await repo.delete(entry)
-    trigger_score_recalculation.delay(str(tenant.id), "sale_entry_deleted")
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_deleted")
     return MessageResponse(message="Sale entry deleted.")

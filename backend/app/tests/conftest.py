@@ -5,6 +5,7 @@ Structure mirrors app/ directory.
 """
 
 import asyncio
+import unittest.mock
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -100,6 +101,56 @@ async def auth_headers(sample_user: User, sample_tenant: Tenant) -> dict[str, st
         }
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+# ── Second tenant (for isolation tests) ──────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def second_tenant(db_session: AsyncSession) -> Tenant:
+    tenant = Tenant(
+        tenant_id=uuid.uuid4(),
+        legal_name="Limpieza Brillante",
+        display_name="Limpieza Brillante",
+        currency="ARS",
+        pricing_reference_mode="MEP",
+        status="ACTIVE",
+    )
+    db_session.add(tenant)
+    await db_session.commit()
+    return tenant
+
+
+@pytest_asyncio.fixture
+async def second_auth_headers(db_session: AsyncSession, second_tenant: Tenant) -> dict[str, str]:
+    user = User(
+        user_id=uuid.uuid4(),
+        tenant_id=second_tenant.tenant_id,
+        email="owner@limpieza.com",
+        full_name="Ana García",
+        password_hash=hash_password("Secure456"),
+        role_code="OWNER",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    token = create_access_token(
+        {
+            "sub": str(user.user_id),
+            "tenant_id": str(second_tenant.tenant_id),
+            "role_code": "OWNER",
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ── Celery mock (prevents Redis connection in tests) ─────────────────────────
+
+@pytest.fixture
+def mock_score_trigger():
+    from app.application.services.score_trigger_service import trigger_score_recalculation
+
+    with unittest.mock.patch.object(trigger_score_recalculation, "delay") as mock:
+        yield mock
 
 
 # ── HTTP test client ──────────────────────────────────────────────────────────

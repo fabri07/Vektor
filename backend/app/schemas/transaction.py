@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -44,7 +45,29 @@ class UpdateSaleRequest(BaseModel):
     notes: str | None = Field(default=None, max_length=1000)
 
 
+class BulkSaleEntryItem(BaseModel):
+    product_id: UUID | None = None
+    quantity: int = Field(ge=1, default=1)
+    amount_ars: Decimal = Field(gt=0, decimal_places=2)
+
+
+class BulkSaleRequest(BaseModel):
+    period_type: Literal["daily", "weekly", "monthly"]
+    period_date: date
+    total_amount_ars: Decimal = Field(gt=0, decimal_places=2)
+    entries: list[BulkSaleEntryItem] | None = None
+
+
+class SaleSummaryResponse(BaseModel):
+    total_ars: Decimal
+    entry_count: int
+    period_covered: str
+
+
 # ── Expenses ──────────────────────────────────────────────────────────────────
+
+EXPENSE_CATEGORIES = r"^(RENT|UTILITIES|PAYROLL|INVENTORY|MARKETING|OTHER)$"
+
 
 class ExpenseEntryResponse(BaseModel):
     model_config = {"from_attributes": True}
@@ -64,28 +87,29 @@ class ExpenseEntryResponse(BaseModel):
 
 class CreateExpenseRequest(BaseModel):
     amount: Decimal = Field(gt=0, decimal_places=2)
-    category: str = Field(
-        pattern=r"^(rent|utilities|salaries|suppliers|taxes|marketing|maintenance|financing|other)$"
-    )
-    transaction_date: date
-    description: str = Field(min_length=2, max_length=500)
+    category: str = Field(pattern=EXPENSE_CATEGORIES)
+    expense_date: date
+    notes: str | None = Field(default=None, max_length=1000)
+    description: str = Field(default="", max_length=500)
     is_recurring: bool = False
     payment_method: str = Field(
         pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$",
         default="transfer",
     )
     supplier_name: str | None = Field(default=None, max_length=300)
-    notes: str | None = Field(default=None, max_length=1000)
 
 
 class UpdateExpenseRequest(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, decimal_places=2)
-    category: str | None = Field(
-        default=None,
-        pattern=r"^(rent|utilities|salaries|suppliers|taxes|marketing|maintenance|financing|other)$",
-    )
-    transaction_date: date | None = None
-    description: str | None = Field(default=None, min_length=2, max_length=500)
+    category: str | None = Field(default=None, pattern=EXPENSE_CATEGORIES)
+    expense_date: date | None = None
+    description: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None
     supplier_name: str | None = Field(default=None, max_length=300)
     notes: str | None = Field(default=None, max_length=1000)
+
+
+class ExpenseSummaryResponse(BaseModel):
+    total_ars: Decimal
+    entry_count: int
+    period_covered: str

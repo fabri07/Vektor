@@ -5,6 +5,7 @@ pytest==8.3.4
 pytest-asyncio==0.24.0
 pytest-cov==6.0.0
 httpx==0.28.1                    # async test client for FastAPI
+aiosqlite==0.20.0                # async SQLite driver for in-memory test DB
 factory-boy==3.3.1
 faker==33.1.0
 

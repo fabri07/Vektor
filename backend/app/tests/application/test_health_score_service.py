@@ -18,11 +18,11 @@ class TestHealthScoreService:
         """With no sales or expenses, the score should be low."""
         svc = HealthScoreService(db_session)
         snapshot = await svc.recalculate_for_tenant(
-            tenant_id=sample_tenant.id,
+            tenant_id=sample_tenant.tenant_id,
             triggered_by="test",
         )
         await db_session.commit()
-        assert snapshot.tenant_id == sample_tenant.id
+        assert snapshot.tenant_id == sample_tenant.tenant_id
         assert float(snapshot.total_score) >= 0
         assert snapshot.level in ("critical", "warning", "fair", "good", "excellent")
 
@@ -31,13 +31,13 @@ class TestHealthScoreService:
     ) -> None:
         svc = HealthScoreService(db_session)
         await svc.recalculate_for_tenant(
-            tenant_id=sample_tenant.id,
+            tenant_id=sample_tenant.tenant_id,
             triggered_by="test",
         )
         await db_session.commit()
 
         repo = HealthScoreRepository(db_session)
-        latest = await repo.get_latest(sample_tenant.id)
+        latest = await repo.get_latest(sample_tenant.tenant_id)
         assert latest is not None
         assert latest.triggered_by == "test"
 
@@ -50,7 +50,7 @@ class TestHealthScoreService:
         # Add some sales
         for _i in range(10):
             sale = SaleEntry(
-                tenant_id=sample_tenant.id,
+                tenant_id=sample_tenant.tenant_id,
                 amount=Decimal("50000"),
                 quantity=1,
                 transaction_date=date.today(),
@@ -61,7 +61,7 @@ class TestHealthScoreService:
 
         svc = HealthScoreService(db_session)
         snapshot_with_sales = await svc.recalculate_for_tenant(
-            tenant_id=sample_tenant.id,
+            tenant_id=sample_tenant.tenant_id,
             triggered_by="test_with_sales",
         )
         await db_session.commit()

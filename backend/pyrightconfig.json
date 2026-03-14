@@ -1,0 +1,12 @@
+{
+  "include": ["app"],
+  "exclude": ["app/persistence/migrations", "htmlcov"],
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "warning",
+  "reportUnusedImport": "warning"
+}

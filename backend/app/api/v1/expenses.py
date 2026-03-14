@@ -1,6 +1,7 @@
 """Expense entry endpoints."""
 
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,10 +18,32 @@ from app.schemas.common import MessageResponse
 from app.schemas.transaction import (
     CreateExpenseRequest,
     ExpenseEntryResponse,
+    ExpenseSummaryResponse,
     UpdateExpenseRequest,
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/summary",
+    response_model=ExpenseSummaryResponse,
+    summary="Last-30-day expense summary",
+)
+async def expenses_summary(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ExpenseSummaryResponse:
+    repo = ExpenseRepository(session)
+    to_date = date.today()
+    from_date = to_date - timedelta(days=30)
+    total = await repo.total_expenses(tenant.tenant_id, from_date=from_date, to_date=to_date)
+    count = await repo.count_by_date_range(tenant.tenant_id, from_date=from_date, to_date=to_date)
+    return ExpenseSummaryResponse(
+        total_ars=Decimal(str(total)),
+        entry_count=count,
+        period_covered=f"{from_date} al {to_date}",
+    )
 
 
 @router.get("", response_model=list[ExpenseEntryResponse], summary="List expense entries")
@@ -35,7 +58,7 @@ async def list_expenses(
 ) -> list[ExpenseEntry]:
     repo = ExpenseRepository(session)
     return await repo.list_by_tenant(
-        tenant.id,
+        tenant.tenant_id,
         from_date=from_date,
         to_date=to_date,
         category=category,
@@ -58,10 +81,10 @@ async def create_expense(
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
     entry = ExpenseEntry(
-        tenant_id=tenant.id,
+        tenant_id=tenant.tenant_id,
         amount=body.amount,
         category=body.category,
-        transaction_date=body.transaction_date,
+        transaction_date=body.expense_date,
         description=body.description,
         is_recurring=body.is_recurring,
         payment_method=body.payment_method,
@@ -69,7 +92,7 @@ async def create_expense(
         notes=body.notes,
     )
     saved = await repo.save(entry)
-    trigger_score_recalculation.delay(str(tenant.id), "expense_entry_created")
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_created")
     return saved
 
 
@@ -82,7 +105,7 @@ async def get_expense(
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
-    entry = await repo.get_by_id(expense_id, tenant.id)
+    entry = await repo.get_by_id(expense_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
     return entry
@@ -98,15 +121,15 @@ async def update_expense(
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
-    entry = await repo.get_by_id(expense_id, tenant.id)
+    entry = await repo.get_by_id(expense_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
     if body.amount is not None:
         entry.amount = body.amount
     if body.category is not None:
         entry.category = body.category
-    if body.transaction_date is not None:
-        entry.transaction_date = body.transaction_date
+    if body.expense_date is not None:
+        entry.transaction_date = body.expense_date
     if body.description is not None:
         entry.description = body.description
     if body.is_recurring is not None:
@@ -116,7 +139,7 @@ async def update_expense(
     if body.notes is not None:
         entry.notes = body.notes
     saved = await repo.save(entry)
-    trigger_score_recalculation.delay(str(tenant.id), "expense_entry_updated")
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_updated")
     return saved
 
 
@@ -129,9 +152,9 @@ async def delete_expense(
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = ExpenseRepository(session)
-    entry = await repo.get_by_id(expense_id, tenant.id)
+    entry = await repo.get_by_id(expense_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
     await repo.delete(entry)
-    trigger_score_recalculation.delay(str(tenant.id), "expense_entry_deleted")
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_deleted")
     return MessageResponse(message="Expense entry deleted.")

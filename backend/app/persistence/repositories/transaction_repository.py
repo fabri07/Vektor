@@ -52,10 +52,29 @@ class SaleRepository:
         result = await self._session.execute(q)
         return float(result.scalar_one() or 0)
 
+    async def count_by_date_range(
+        self,
+        tenant_id: UUID,
+        from_date: date,
+        to_date: date,
+    ) -> int:
+        q = select(func.count(SaleEntry.id)).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.transaction_date >= from_date,
+            SaleEntry.transaction_date <= to_date,
+        )
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
+
     async def save(self, entry: SaleEntry) -> SaleEntry:
         self._session.add(entry)
         await self._session.flush()
         return entry
+
+    async def bulk_save(self, entries: list[SaleEntry]) -> list[SaleEntry]:
+        self._session.add_all(entries)
+        await self._session.flush()
+        return entries
 
     async def delete(self, entry: SaleEntry) -> None:
         await self._session.delete(entry)
@@ -107,6 +126,20 @@ class ExpenseRepository:
             q = q.where(ExpenseEntry.transaction_date <= to_date)
         result = await self._session.execute(q)
         return float(result.scalar_one() or 0)
+
+    async def count_by_date_range(
+        self,
+        tenant_id: UUID,
+        from_date: date,
+        to_date: date,
+    ) -> int:
+        q = select(func.count(ExpenseEntry.id)).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.transaction_date >= from_date,
+            ExpenseEntry.transaction_date <= to_date,
+        )
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
 
     async def save(self, entry: ExpenseEntry) -> ExpenseEntry:
         self._session.add(entry)

@@ -99,6 +99,21 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
 
+  # ── Test runner (dev image, SQLite in-memory, no external deps needed) ────────
+  test:
+    build:
+      context: .
+      target: dev
+    command: pytest app/tests/ -x --tb=short -q
+    env_file: .env
+    environment:
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+      PYTHONPATH: /app
+    volumes:
+      - .:/app
+    profiles:
+      - test
+
 volumes:
   postgres_data:
   redis_data:
