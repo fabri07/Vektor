@@ -48,6 +48,38 @@ class S3Client:
         logger.info("s3.uploaded", key=key, size=len(content))
         return key
 
+    async def upload_to_key(
+        self,
+        content: bytes,
+        key: str,
+        content_type: str,
+    ) -> str:
+        """Upload bytes to S3 using a caller-specified key. Returns the key."""
+        try:
+            self._client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=content,
+                ContentType=content_type,
+            )
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("s3.upload_failed", key=key, error=str(exc))
+            raise
+
+        logger.info("s3.uploaded", key=key, size=len(content))
+        return key
+
+    async def download(self, key: str) -> bytes:
+        """Download and return object bytes from S3."""
+        try:
+            response = self._client.get_object(Bucket=self._bucket, Key=key)
+            data: bytes = response["Body"].read()
+            logger.info("s3.downloaded", key=key, size=len(data))
+            return data
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("s3.download_failed", key=key, error=str(exc))
+            raise
+
     async def generate_presigned_url(self, key: str, expires_in: int = 3600) -> str:
         """Generate a pre-signed GET URL for a given S3 key."""
         try:

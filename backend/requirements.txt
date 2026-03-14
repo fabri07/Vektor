@@ -29,6 +29,13 @@ python-multipart==0.0.18         # file uploads
 # ── Storage ───────────────────────────────────────────────────────────────────
 boto3==1.35.87
 
+# ── File parsing / ingestion ───────────────────────────────────────────────────
+openpyxl==3.1.5                  # read .xlsx
+python-docx==1.1.2               # read .docx
+filetype==1.2.0                  # real MIME detection from magic bytes
+pytesseract==0.3.13              # OCR wrapper (requires tesseract binary)
+Pillow==11.1.0                   # image loading for OCR
+
 # ── Observability ─────────────────────────────────────────────────────────────
 structlog==24.4.0
 

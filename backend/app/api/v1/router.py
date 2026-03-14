@@ -8,6 +8,7 @@ from app.api.v1 import (
     expenses,
     files,
     health_scores,
+    ingestion,
     insights,
     notifications,
     onboarding,
@@ -36,4 +37,5 @@ api_router.include_router(
     notifications.router, prefix="/notifications", tags=["Notifications"]
 )
 api_router.include_router(files.router, prefix="/files", tags=["Files"])
+api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
 api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])

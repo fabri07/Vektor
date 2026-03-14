@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
 
+    # ── OCR ───────────────────────────────────────────────────────────────────
+    OCR_BACKEND: str = "tesseract"  # "tesseract" | "api" (future: external OCR API)
+
     # ── Computed properties ───────────────────────────────────────────────────
     @property
     def DATABASE_URL(self) -> str:  # noqa: N802

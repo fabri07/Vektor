@@ -6,6 +6,7 @@ Queues:
   - scores       : health score recalculations
   - notifications: email / push notifications
   - reports      : scheduled report generation
+  - ingestion    : file parsing jobs (spreadsheet, text, OCR)
 """
 
 from celery import Celery
@@ -22,6 +23,7 @@ celery_app = Celery(
         "app.jobs.score_worker",
         "app.jobs.notification_worker",
         "app.jobs.report_worker",
+        "app.jobs.ingestion_worker",
         "app.application.services.score_trigger_service",
     ],
 )
@@ -39,6 +41,9 @@ celery_app.conf.update(
         "jobs.trigger_score_recalculation": {"queue": "scores"},
         "jobs.send_notification": {"queue": "notifications"},
         "jobs.generate_report": {"queue": "reports"},
+        "jobs.process_spreadsheet": {"queue": "ingestion"},
+        "jobs.process_text_document": {"queue": "ingestion"},
+        "jobs.process_image_ocr": {"queue": "ingestion"},
     },
 )
 
