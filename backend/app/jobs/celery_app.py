@@ -21,6 +21,7 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "app.jobs.score_worker",
+        "app.jobs.recalculate_health_score",
         "app.jobs.notification_worker",
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
@@ -39,6 +40,7 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # one task at a time per worker
     task_routes={
         "jobs.trigger_score_recalculation": {"queue": "scores"},
+        "jobs.recalculate_health_score": {"queue": "scores"},
         "jobs.send_notification": {"queue": "notifications"},
         "jobs.generate_report": {"queue": "reports"},
         "jobs.process_spreadsheet": {"queue": "ingestion"},

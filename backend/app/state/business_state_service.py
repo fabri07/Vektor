@@ -64,6 +64,7 @@ class ProductSummary:
     product_id: UUID
     name: str
     stock_units: int
+    low_stock_threshold_units: int
     sale_price_ars: Decimal
 
 
@@ -128,6 +129,7 @@ def _serialize_state(state: BusinessState) -> str:
             "product_id": str(p.product_id),
             "name": p.name,
             "stock_units": p.stock_units,
+            "low_stock_threshold_units": p.low_stock_threshold_units,
             "sale_price_ars": str(p.sale_price_ars),
         }
         for p in state.products
@@ -147,6 +149,7 @@ def _deserialize_state(raw: str) -> BusinessState:
             product_id=UUID(p["product_id"]),
             name=p["name"],
             stock_units=p["stock_units"],
+            low_stock_threshold_units=p.get("low_stock_threshold_units", 0),
             sale_price_ars=Decimal(p["sale_price_ars"]),
         )
         for p in d["products"]
@@ -410,6 +413,7 @@ async def compute_business_state(
             product_id=p.id,
             name=p.name,
             stock_units=p.stock_units,
+            low_stock_threshold_units=p.low_stock_threshold_units,
             sale_price_ars=p.sale_price_ars,
         )
         for p in active_products

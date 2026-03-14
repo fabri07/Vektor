@@ -5,7 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,6 +16,15 @@ class HealthScoreSnapshot(UUIDPrimaryKeyMixin, Base):
     """
     Persisted health score snapshot.
     Only created when underlying data changes (not on every request).
+
+    Columns added in schema F1-01:
+      score_cash, score_margin, score_stock, score_supplier — explicit int subscores
+      source_snapshot_id — FK to business_snapshots (the BSL input)
+      heuristic_version  — e.g. "v1"
+      primary_risk_code  — e.g. "CASH_LOW"
+      confidence_level   — HIGH / MEDIUM / LOW
+      data_completeness_score — 0–100
+      score_inputs_json  — full BusinessState serialized for audit
     """
 
     __tablename__ = "health_score_snapshots"
@@ -32,6 +41,24 @@ class HealthScoreSnapshot(UUIDPrimaryKeyMixin, Base):
     triggered_by: Mapped[str] = mapped_column(String(100), nullable=False)
     snapshot_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # ── Subscore columns (schema F1-01) ───────────────────────────────────────
+    score_cash: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_margin: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_supplier: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    source_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("business_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    heuristic_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    primary_risk_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    confidence_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    data_completeness_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    score_inputs_json: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
 
     def __repr__(self) -> str:
         return (
