@@ -22,6 +22,7 @@ celery_app = Celery(
     include=[
         "app.jobs.score_worker",
         "app.jobs.recalculate_health_score",
+        "app.jobs.generate_insight",
         "app.jobs.notification_worker",
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
@@ -41,6 +42,7 @@ celery_app.conf.update(
     task_routes={
         "jobs.trigger_score_recalculation": {"queue": "scores"},
         "jobs.recalculate_health_score": {"queue": "scores"},
+        "jobs.generate_insight": {"queue": "scores"},
         "jobs.send_notification": {"queue": "notifications"},
         "jobs.generate_report": {"queue": "reports"},
         "jobs.process_spreadsheet": {"queue": "ingestion"},

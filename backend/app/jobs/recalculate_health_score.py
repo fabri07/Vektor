@@ -194,9 +194,13 @@ async def _run(tenant_id_str: str) -> None:
 
             await session.commit()
 
+        # ── 6. Dispatch generate_insight ──────────────────────────────────────
+        from app.jobs.generate_insight import generate_insight  # noqa: PLC0415
+        generate_insight.delay(tenant_id_str)
+
         duration_ms = int((time.monotonic() - t0) * 1000)
 
-        # ── 6. Structured log ─────────────────────────────────────────────────
+        # ── 7. Structured log ─────────────────────────────────────────────────
         logger.info(
             "recalculate_health_score.done",
             tenant_id=tenant_id_str,

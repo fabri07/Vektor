@@ -1,5 +1,6 @@
 """Insights and action suggestions endpoints."""
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -16,15 +17,19 @@ from app.schemas.common import MessageResponse
 router = APIRouter()
 
 
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+
 class InsightResponse(BaseModel):
     model_config = {"from_attributes": True}
 
     id: UUID
     title: str
-    body: str
-    category: str
-    severity: str
-    is_read: bool
+    description: str
+    insight_type: str
+    severity_code: str
+    heuristic_version: str
+    created_at: datetime
 
 
 class ActionSuggestionResponse(BaseModel):
@@ -33,41 +38,78 @@ class ActionSuggestionResponse(BaseModel):
     id: UUID
     title: str
     description: str
-    priority: str
+    action_type: str
+    risk_level: str
     status: str
+    created_at: datetime
+
+
+class CurrentInsightResponse(BaseModel):
+    insight: InsightResponse
+    action_suggestion: ActionSuggestionResponse | None
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/current",
+    response_model=CurrentInsightResponse,
+    summary="Active insight + action suggestion for the current tenant",
+)
+async def get_current_insight(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> CurrentInsightResponse:
+    """
+    Returns the most recent Insight and its associated ActionSuggestion.
+    Raises 404 if no insight has been generated yet.
+    """
+    insight_result = await session.execute(
+        select(Insight)
+        .where(Insight.tenant_id == tenant.tenant_id)
+        .order_by(Insight.created_at.desc())
+        .limit(1)
+    )
+    insight = insight_result.scalar_one_or_none()
+
+    if insight is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No insight available yet.",
+        )
+
+    action_result = await session.execute(
+        select(ActionSuggestion)
+        .where(
+            ActionSuggestion.tenant_id == tenant.tenant_id,
+            ActionSuggestion.insight_id == insight.id,
+        )
+        .order_by(ActionSuggestion.created_at.desc())
+        .limit(1)
+    )
+    action = action_result.scalar_one_or_none()
+
+    return CurrentInsightResponse(
+        insight=InsightResponse.model_validate(insight),
+        action_suggestion=ActionSuggestionResponse.model_validate(action) if action else None,
+    )
 
 
 @router.get("", response_model=list[InsightResponse], summary="List insights")
 async def list_insights(
-    is_read: bool | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[Insight]:
-    q = select(Insight).where(Insight.tenant_id == tenant.id)
-    if is_read is not None:
-        q = q.where(Insight.is_read == is_read)
-    q = q.order_by(Insight.created_at.desc()).limit(limit)
-    result = await session.execute(q)
-    return list(result.scalars().all())
-
-
-@router.post("/{insight_id}/read", response_model=MessageResponse, summary="Mark insight as read")
-async def mark_insight_read(
-    insight_id: UUID,
-    tenant: Tenant = Depends(get_current_tenant),
-    session: AsyncSession = Depends(get_db_session),
-) -> MessageResponse:
-    result = await session.execute(
-        select(Insight).where(Insight.id == insight_id, Insight.tenant_id == tenant.id)
+) -> list[InsightResponse]:
+    q = (
+        select(Insight)
+        .where(Insight.tenant_id == tenant.tenant_id)
+        .order_by(Insight.created_at.desc())
+        .limit(limit)
     )
-    insight = result.scalar_one_or_none()
-    if not insight:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Insight not found.")
-    insight.is_read = True
-    session.add(insight)
-    await session.flush()
-    return MessageResponse(message="Insight marked as read.")
+    result = await session.execute(q)
+    return [InsightResponse.model_validate(i) for i in result.scalars().all()]
 
 
 @router.get(
@@ -80,10 +122,10 @@ async def list_actions(
     limit: int = Query(default=20, ge=1, le=100),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[ActionSuggestion]:
-    q = select(ActionSuggestion).where(ActionSuggestion.tenant_id == tenant.id)
+) -> list[ActionSuggestionResponse]:
+    q = select(ActionSuggestion).where(ActionSuggestion.tenant_id == tenant.tenant_id)
     if status_filter:
         q = q.where(ActionSuggestion.status == status_filter)
     q = q.order_by(ActionSuggestion.created_at.desc()).limit(limit)
     result = await session.execute(q)
-    return list(result.scalars().all())
+    return [ActionSuggestionResponse.model_validate(a) for a in result.scalars().all()]
