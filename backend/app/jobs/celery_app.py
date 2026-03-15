@@ -28,6 +28,7 @@ celery_app = Celery(
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
         "app.jobs.update_momentum",
+        "app.jobs.send_weekly_email",
         "app.application.services.score_trigger_service",
     ],
 )
@@ -48,6 +49,8 @@ celery_app.conf.update(
         "jobs.update_momentum_profile": {"queue": "scores"},
         "jobs.update_momentum_all_tenants": {"queue": "scores"},
         "jobs.send_notification": {"queue": "notifications"},
+        "jobs.send_weekly_email_summary": {"queue": "notifications"},
+        "jobs.send_weekly_email_all_tenants": {"queue": "notifications"},
         "jobs.generate_report": {"queue": "reports"},
         "jobs.process_spreadsheet": {"queue": "ingestion"},
         "jobs.process_text_document": {"queue": "ingestion"},
@@ -71,5 +74,11 @@ celery_app.conf.beat_schedule = {
         # expressed as seconds: run via crontab from celery.schedules.
         "schedule": _crontab(hour=11, minute=0, day_of_week=1),
         "options": {"queue": "scores"},
+    },
+    "send-weekly-email-all-tenants": {
+        "task": "jobs.send_weekly_email_all_tenants",
+        # Every Monday at 08:30 ART (UTC-3 → 11:30 UTC), after momentum update.
+        "schedule": _crontab(hour=11, minute=30, day_of_week=1),
+        "options": {"queue": "notifications"},
     },
 }

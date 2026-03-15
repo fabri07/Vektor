@@ -1,10 +1,11 @@
 """Notification endpoints."""
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
@@ -17,7 +18,7 @@ from app.schemas.common import MessageResponse
 router = APIRouter()
 
 
-class NotificationResponse(BaseModel):
+class NotificationItem(BaseModel):
     model_config = {"from_attributes": True}
 
     id: UUID
@@ -26,28 +27,86 @@ class NotificationResponse(BaseModel):
     notification_type: str
     channel: str
     is_read: bool
+    created_at: datetime
 
 
-@router.get("", response_model=list[NotificationResponse], summary="List my notifications")
+class NotificationListResponse(BaseModel):
+    notifications: list[NotificationItem]
+    unread_count: int
+
+
+class CreateNotificationRequest(BaseModel):
+    user_id: UUID | None = None
+    title: str
+    body: str
+    notification_type: str
+    channel: str = "in_app"
+
+
+@router.post(
+    "",
+    response_model=NotificationItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create notification (internal)",
+    include_in_schema=False,
+)
+async def create_notification(
+    payload: CreateNotificationRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> Notification:
+    notification = Notification(
+        tenant_id=tenant.id,
+        user_id=payload.user_id,
+        title=payload.title,
+        body=payload.body,
+        notification_type=payload.notification_type,
+        channel=payload.channel,
+        is_read=False,
+    )
+    session.add(notification)
+    await session.flush()
+    await session.refresh(notification)
+    return notification
+
+
+@router.get("", response_model=NotificationListResponse, summary="List my notifications")
 async def list_notifications(
     is_read: bool | None = Query(default=None),
     limit: int = Query(default=30, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[Notification]:
-    q = select(Notification).where(
+) -> NotificationListResponse:
+    base_q = select(Notification).where(
         Notification.tenant_id == tenant.id,
         Notification.user_id == current_user.id,
     )
     if is_read is not None:
-        q = q.where(Notification.is_read == is_read)
-    q = q.order_by(Notification.created_at.desc()).limit(limit)
-    result = await session.execute(q)
-    return list(result.scalars().all())
+        base_q = base_q.where(Notification.is_read == is_read)
+
+    list_q = base_q.order_by(Notification.created_at.desc()).limit(limit)
+    result = await session.execute(list_q)
+    notifications = list(result.scalars().all())
+
+    unread_result = await session.execute(
+        select(func.count()).select_from(
+            select(Notification).where(
+                Notification.tenant_id == tenant.id,
+                Notification.user_id == current_user.id,
+                Notification.is_read.is_(False),
+            ).subquery()
+        )
+    )
+    unread_count: int = unread_result.scalar_one()
+
+    return NotificationListResponse(
+        notifications=[NotificationItem.model_validate(n) for n in notifications],
+        unread_count=unread_count,
+    )
 
 
-@router.post(
+@router.patch(
     "/{notification_id}/read",
     response_model=MessageResponse,
     summary="Mark notification as read",

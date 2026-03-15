@@ -71,6 +71,23 @@ export interface CurrentInsightResponse {
   action_suggestion: ActionSuggestionResponse | null;
 }
 
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export interface NotificationItem {
+  id: string;
+  title: string;
+  body: string;
+  notification_type: string;
+  channel: string;
+  is_read: boolean;
+  created_at: string;
+}
+
+export interface NotificationListResponse {
+  notifications: NotificationItem[];
+  unread_count: number;
+}
+
 // ── Momentum ──────────────────────────────────────────────────────────────────
 
 export interface WeeklyHistoryItem {
