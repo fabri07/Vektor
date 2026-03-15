@@ -70,3 +70,37 @@ export interface CurrentInsightResponse {
   insight: InsightResponse;
   action_suggestion: ActionSuggestionResponse | null;
 }
+
+// ── Momentum ──────────────────────────────────────────────────────────────────
+
+export interface WeeklyHistoryItem {
+  week_start: string;
+  week_end: string;
+  avg_score: number;
+  delta: number | null;
+  trend_label: string | null;
+}
+
+export interface ActiveGoalResponse {
+  weak_dimension: string;
+  goal: string;
+  action: string;
+  estimated_delta: number;
+  estimated_weeks: number;
+}
+
+export interface MilestoneItem {
+  code: string;
+  label: string;
+  unlocked_at: string;
+}
+
+export interface MomentumProfileResponse {
+  best_score_ever: number | null;
+  best_score_date: string | null;
+  active_goal: ActiveGoalResponse | null;
+  milestones_unlocked: MilestoneItem[];
+  estimated_value_protected_ars: number;
+  improving_streak_weeks: number;
+  weekly_history: WeeklyHistoryItem[];
+}

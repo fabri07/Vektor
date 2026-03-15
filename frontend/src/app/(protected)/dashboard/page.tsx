@@ -8,6 +8,7 @@ import { ActionCard } from "@/features/dashboard/ActionCard";
 import { SubscoresCard } from "@/features/dashboard/SubscoresCard";
 import { DashboardSkeleton } from "@/features/dashboard/DashboardSkeleton";
 import { EmptyState } from "@/features/dashboard/EmptyState";
+import { MomentumWidget } from "@/features/dashboard/MomentumWidget";
 import type { HealthScoreV2Response } from "@/types/api";
 
 function isCalculating(data: unknown): boolean {
@@ -82,6 +83,7 @@ export default function DashboardPage() {
         )}
         <SubscoresCard score={score} />
       </div>
+      <MomentumWidget />
     </div>
   );
 }
