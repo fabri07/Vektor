@@ -96,6 +96,34 @@ async def get_current_insight(
     )
 
 
+@router.patch(
+    "/actions/{action_id}/acknowledge",
+    response_model=ActionSuggestionResponse,
+    summary="Mark an action suggestion as acknowledged",
+)
+async def acknowledge_action(
+    action_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ActionSuggestionResponse:
+    result = await session.execute(
+        select(ActionSuggestion).where(
+            ActionSuggestion.id == action_id,
+            ActionSuggestion.tenant_id == tenant.tenant_id,
+        )
+    )
+    action = result.scalar_one_or_none()
+    if action is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Action suggestion not found.",
+        )
+    action.status = "acknowledged"
+    await session.commit()
+    await session.refresh(action)
+    return ActionSuggestionResponse.model_validate(action)
+
+
 @router.get("", response_model=list[InsightResponse], summary="List insights")
 async def list_insights(
     limit: int = Query(default=20, ge=1, le=100),

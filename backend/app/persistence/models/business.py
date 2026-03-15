@@ -58,6 +58,13 @@ class BusinessProfile(TimestampMixin, Base):
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     heuristic_profile_version: Mapped[str] = mapped_column(Text, nullable=False, default="v1")
 
+    # ── Weekly report scheduling (schema F3-04) ───────────────────────────────
+    # 0=Monday … 6=Sunday. v1: Celery Beat runs for all tenants with these defaults.
+    # TODO: implementar scheduler por tenant usando weekly_report_day
+    # y weekly_report_hour de business_profiles
+    weekly_report_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weekly_report_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     def __repr__(self) -> str:
         return f"<BusinessProfile tenant={self.tenant_id} vertical={self.vertical_code!r}>"
 

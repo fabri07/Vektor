@@ -105,5 +105,9 @@ class WeeklyScoreHistory(UUIDPrimaryKeyMixin, Base):
     level: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    # ── Momentum fields (schema F3-04) ────────────────────────────────────────
+    delta: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    trend_label: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     def __repr__(self) -> str:
         return f"<WeeklyScoreHistory tenant={self.tenant_id} week={self.week_start}>"

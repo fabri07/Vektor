@@ -10,6 +10,7 @@ from app.api.v1 import (
     health_scores,
     ingestion,
     insights,
+    momentum,
     notifications,
     onboarding,
     products,
@@ -39,3 +40,4 @@ api_router.include_router(
 api_router.include_router(files.router, prefix="/files", tags=["Files"])
 api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
 api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])
+api_router.include_router(momentum.router, prefix="/momentum", tags=["Momentum"])
