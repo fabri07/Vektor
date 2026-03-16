@@ -335,9 +335,13 @@ async def compute_business_state(
             return _deserialize_state(cached_blob)
 
     # ── 6. Resolve estimates (real data preferred, fallback to onboarding) ───
+    # Normalize to UTC-aware before comparing (SQLite returns naive datetimes).
+    _profile_updated_at = profile.updated_at
+    if _profile_updated_at.tzinfo is None:
+        _profile_updated_at = _profile_updated_at.replace(tzinfo=UTC)
     onboarding_recent = (
         profile.onboarding_completed
-        and profile.updated_at >= datetime.now(UTC) - timedelta(days=7)
+        and _profile_updated_at >= datetime.now(UTC) - timedelta(days=7)
     )
 
     monthly_sales_est = real_sales if sale_count > 0 else (

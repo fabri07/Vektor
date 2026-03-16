@@ -4,7 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,10 +37,10 @@ class NotificationListResponse(BaseModel):
 
 class CreateNotificationRequest(BaseModel):
     user_id: UUID | None = None
-    title: str
-    body: str
-    notification_type: str
-    channel: str = "in_app"
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=2000)
+    notification_type: str = Field(pattern=r"^[a-zA-Z0-9_]{1,50}$")
+    channel: str = Field(default="in_app", pattern=r"^(in_app|email|sms)$")
 
 
 @router.post(

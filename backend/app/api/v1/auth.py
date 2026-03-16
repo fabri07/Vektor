@@ -1,11 +1,12 @@
 """Auth endpoints: register, login, me, refresh, logout, change-password."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
 from app.application.services.auth_service import AuthService
+from app.main import limiter
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.user import User
@@ -31,7 +32,9 @@ router = APIRouter()
     status_code=status.HTTP_201_CREATED,
     summary="Register a new tenant and owner user",
 )
+@limiter.limit("5/10minutes")
 async def register(
+    request: Request,
     body: RegisterRequest,
     session: AsyncSession = Depends(get_db_session),
 ) -> AuthResponse:
@@ -44,7 +47,9 @@ async def register(
     response_model=AuthResponse,
     summary="Authenticate and receive a JWT access token",
 )
+@limiter.limit("10/5minutes")
 async def login(
+    request: Request,
     body: LoginRequest,
     session: AsyncSession = Depends(get_db_session),
 ) -> AuthResponse:

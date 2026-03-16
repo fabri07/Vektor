@@ -5,7 +5,7 @@ All fields are documented with their purpose and defaults.
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,6 +74,21 @@ class Settings(BaseSettings):
 
     # ── OCR ───────────────────────────────────────────────────────────────────
     OCR_BACKEND: str = "tesseract"  # "tesseract" | "api" (future: external OCR API)
+
+    # ── Production secret validation ──────────────────────────────────────────
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        if self.ENVIRONMENT == "production":
+            insecure_defaults = {"insecure-change-me", "insecure-jwt-change-me", ""}
+            if self.SECRET_KEY in insecure_defaults or len(self.SECRET_KEY) < 32:
+                raise ValueError(
+                    "SECRET_KEY must be at least 32 characters and not a default value in production."
+                )
+            if self.JWT_SECRET_KEY in insecure_defaults or len(self.JWT_SECRET_KEY) < 32:
+                raise ValueError(
+                    "JWT_SECRET_KEY must be at least 32 characters and not a default value in production."
+                )
+        return self
 
     # ── Computed properties ───────────────────────────────────────────────────
     @property

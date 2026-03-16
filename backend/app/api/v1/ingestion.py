@@ -7,16 +7,18 @@ GET    /ingestion/files/{file_id}/preview   — get parsed_summary_json
 POST   /ingestion/files/{file_id}/confirm  — confirm import (NEEDS_CONFIRMATION only)
 """
 
+import re
 import uuid
 from typing import Literal
 
 import filetype
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import process_image_ocr, process_spreadsheet, process_text_document
+from app.main import limiter
 from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
@@ -62,8 +64,21 @@ ALLOWED_MIMES = _SPREADSHEET_MIMES | _TEXT_MIMES | _IMAGE_MIMES | {"text/plain",
 
 FileHint = Literal["ventas", "gastos", "stock", "general"]
 
+# Filename sanitization: keep alphanumerics, dots, dashes, underscores only
+_SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _sanitize_filename(filename: str) -> str:
+    """Remove path traversal and unsafe characters from a filename."""
+    # Strip directory components
+    filename = filename.replace("\\", "/").split("/")[-1]
+    # Remove unsafe characters
+    filename = _SAFE_FILENAME_RE.sub("_", filename)
+    # Ensure non-empty
+    return filename or "upload"
+
 
 def _detect_mime(content: bytes, filename: str) -> str:
     """
@@ -110,7 +125,9 @@ def _pick_job(mime: str) -> object:
     status_code=status.HTTP_201_CREATED,
     summary="Upload a file and enqueue ingestion job",
 )
+@limiter.limit("20/hour")
 async def upload_file(
+    request: Request,
     file: UploadFile = File(...),
     file_hint: FileHint = Query(default="general"),
     tenant: Tenant = Depends(get_current_tenant),
@@ -125,7 +142,7 @@ async def upload_file(
             detail="El archivo supera el tamaño máximo de 10 MB.",
         )
 
-    filename = file.filename or "upload"
+    filename = _sanitize_filename(file.filename or "upload")
     detected_mime = _detect_mime(content, filename)
 
     # Build S3 key: uploads/{tenant_id}/{uuid}/{filename}

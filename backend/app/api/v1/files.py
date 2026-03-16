@@ -1,7 +1,9 @@
 """File upload/download endpoints."""
 
+import re
 from uuid import UUID
 
+import filetype
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -24,6 +26,15 @@ ALLOWED_CONTENT_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+_SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Remove path traversal and unsafe characters from a filename."""
+    filename = filename.replace("\\", "/").split("/")[-1]
+    filename = _SAFE_FILENAME_RE.sub("_", filename)
+    return filename or "upload"
 
 
 class UploadedFileResponse(BaseModel):
@@ -50,12 +61,6 @@ async def upload_file(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UploadedFile:
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"File type '{file.content_type}' is not supported.",
-        )
-
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
@@ -63,20 +68,31 @@ async def upload_file(
             detail="File exceeds maximum size of 10 MB.",
         )
 
+    # Validate via magic bytes (not just Content-Type header)
+    kind = filetype.guess(content[:2048])
+    detected_mime = kind.mime if kind else (file.content_type or "")
+    if detected_mime not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"File type '{detected_mime}' is not supported.",
+        )
+
+    filename = _sanitize_filename(file.filename or "upload")
+
     s3 = S3Client()
     s3_key = await s3.upload(
         content=content,
-        filename=file.filename or "upload",
-        content_type=file.content_type or "application/octet-stream",
+        filename=filename,
+        content_type=detected_mime,
         tenant_id=str(tenant.id),
     )
 
     record = UploadedFile(
         tenant_id=tenant.id,
         uploaded_by=current_user.id,
-        original_filename=file.filename or "upload",
+        original_filename=filename,
         s3_key=s3_key,
-        content_type=file.content_type or "application/octet-stream",
+        content_type=detected_mime,
         size_bytes=len(content),
         purpose=purpose,
         status="uploaded",
