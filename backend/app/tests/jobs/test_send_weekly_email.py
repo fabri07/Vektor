@@ -87,6 +87,8 @@ async def health_score(session: AsyncSession, tenant: Tenant) -> HealthScoreSnap
         level="GOOD",
         snapshot_date=datetime.now(tz=UTC),
         triggered_by="test",
+        dimensions={},
+        created_at=datetime.now(tz=UTC),
     )
     session.add(hs)
     await session.commit()
@@ -105,6 +107,7 @@ async def weekly_history(session: AsyncSession, tenant: Tenant) -> WeeklyScoreHi
         level="GOOD",
         delta=Decimal("5.00"),
         trend_label="IMPROVING",
+        created_at=datetime.now(tz=UTC),
     )
     session.add(wh)
     await session.commit()
@@ -140,6 +143,7 @@ async def momentum(session: AsyncSession, tenant: Tenant) -> MomentumProfile:
         milestones_json=[],
         estimated_value_protected_ars=Decimal("45000.00"),
         improving_streak_weeks=1,
+        updated_at=datetime.now(tz=UTC),
     )
     session.add(m)
     await session.commit()

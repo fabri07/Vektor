@@ -56,7 +56,7 @@ async def create_notification(
     session: AsyncSession = Depends(get_db_session),
 ) -> Notification:
     notification = Notification(
-        tenant_id=tenant.id,
+        tenant_id=tenant.tenant_id,
         user_id=payload.user_id,
         title=payload.title,
         body=payload.body,
@@ -79,8 +79,8 @@ async def list_notifications(
     session: AsyncSession = Depends(get_db_session),
 ) -> NotificationListResponse:
     base_q = select(Notification).where(
-        Notification.tenant_id == tenant.id,
-        Notification.user_id == current_user.id,
+        Notification.tenant_id == tenant.tenant_id,
+        Notification.user_id == current_user.user_id,
     )
     if is_read is not None:
         base_q = base_q.where(Notification.is_read == is_read)
@@ -92,8 +92,8 @@ async def list_notifications(
     unread_result = await session.execute(
         select(func.count()).select_from(
             select(Notification).where(
-                Notification.tenant_id == tenant.id,
-                Notification.user_id == current_user.id,
+                Notification.tenant_id == tenant.tenant_id,
+                Notification.user_id == current_user.user_id,
                 Notification.is_read.is_(False),
             ).subquery()
         )
@@ -120,8 +120,8 @@ async def mark_notification_read(
     result = await session.execute(
         select(Notification).where(
             Notification.id == notification_id,
-            Notification.tenant_id == tenant.id,
-            Notification.user_id == current_user.id,
+            Notification.tenant_id == tenant.tenant_id,
+            Notification.user_id == current_user.user_id,
         )
     )
     notification = result.scalar_one_or_none()
@@ -146,8 +146,8 @@ async def mark_all_read(
     await session.execute(
         update(Notification)
         .where(
-            Notification.tenant_id == tenant.id,
-            Notification.user_id == current_user.id,
+            Notification.tenant_id == tenant.tenant_id,
+            Notification.user_id == current_user.user_id,
             Notification.is_read.is_(False),
         )
         .values(is_read=True)
