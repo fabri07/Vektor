@@ -25,6 +25,12 @@ export interface UserResponse {
   created_at: string;
 }
 
+export interface AuthResponse {
+  access_token: string;
+  token_type: "bearer";
+  user: UserResponse;
+}
+
 export interface HealthScoreV2Response {
   id: string;
   tenant_id: string;

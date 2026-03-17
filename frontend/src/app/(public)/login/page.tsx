@@ -1,17 +1,71 @@
+import { LoginForm } from "@/features/auth/LoginForm";
+
+const CHECK_ITEMS = [
+  "Salud financiera en tiempo real",
+  "Diseñado para PYMEs argentinas",
+  "Sin contabilidad, sin complejidad",
+];
+
+const TRUST_ITEMS = [
+  "Tus datos permanecen bajo tu control",
+  "Sin contabilidad obligatoria",
+  "Para negocios argentinos",
+];
+
 export default function LoginPage() {
   return (
-    <main className="flex min-h-screen items-center justify-center bg-primary px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <span className="text-2xl font-bold tracking-tight text-white">
-            Véktor
+    <main className="min-h-screen md:grid md:grid-cols-2">
+      {/* Left panel — desktop only */}
+      <div className="hidden md:flex flex-col bg-[#0F1623] px-12 py-12">
+        <div className="flex-1">
+          <span className="text-[28px] font-bold tracking-tight text-white">
+            VÉKTOR
           </span>
-          <p className="mt-1 text-sm text-white/50">Salud financiera para tu negocio</p>
+          <p className="mt-3 text-base text-[#8A9BB0]">
+            No trabajes más. Decidí mejor.
+          </p>
+
+          <ul className="mt-10 space-y-4">
+            {CHECK_ITEMS.map((item) => (
+              <li key={item} className="flex items-center gap-3 text-white">
+                <span
+                  className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#2B7FD4]/20 text-[#2B7FD4] text-xs font-bold"
+                  aria-hidden="true"
+                >
+                  ✓
+                </span>
+                <span className="text-sm text-gray-200">{item}</span>
+              </li>
+            ))}
+          </ul>
         </div>
-        <div className="rounded-xl border border-white/10 bg-white/5 p-8">
-          <h1 className="mb-6 text-lg font-semibold text-white">Iniciar sesión</h1>
-          {/* TODO: LoginForm feature component */}
-          <p className="text-sm text-white/40">Formulario de login — próximamente</p>
+
+        {/* Trust band */}
+        <div className="border-t border-white/10 pt-6 space-y-2">
+          {TRUST_ITEMS.map((item) => (
+            <p key={item} className="text-xs text-[#8A9BB0]">
+              {item}
+            </p>
+          ))}
+        </div>
+      </div>
+
+      {/* Right panel — form */}
+      <div className="flex min-h-screen items-center justify-center bg-white px-8 py-12 md:min-h-0">
+        <div className="w-full max-w-[400px]">
+          {/* Mobile logo */}
+          <div className="mb-8 md:hidden">
+            <span className="text-2xl font-bold tracking-tight text-[#1A2744]">VÉKTOR</span>
+          </div>
+
+          <h1 className="mb-2 text-2xl font-semibold text-[#1A2744]">
+            Iniciá sesión
+          </h1>
+          <p className="mb-8 text-sm text-gray-500">
+            Bienvenido de vuelta a tu salud financiera.
+          </p>
+
+          <LoginForm />
         </div>
       </div>
     </main>

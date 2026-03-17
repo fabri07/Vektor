@@ -1,13 +1,22 @@
 import { api } from "@/lib/api";
-import type { TokenResponse, UserResponse } from "@/types/api";
-import type { LoginInput } from "@/validation/auth";
+import type { AuthResponse, UserResponse } from "@/types/api";
+import type { LoginInput, RegisterInput } from "@/validation/auth";
 
-export async function loginRequest(data: LoginInput): Promise<TokenResponse> {
-  const form = new URLSearchParams();
-  form.append("username", data.email);
-  form.append("password", data.password);
-  const res = await api.post<TokenResponse>("/auth/login", form, {
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+export async function loginRequest(data: LoginInput): Promise<AuthResponse> {
+  const res = await api.post<AuthResponse>("/auth/login", {
+    email: data.email,
+    password: data.password,
+  });
+  return res.data;
+}
+
+export async function registerRequest(data: RegisterInput): Promise<AuthResponse> {
+  const res = await api.post<AuthResponse>("/auth/register", {
+    email: data.email,
+    password: data.password,
+    full_name: data.full_name,
+    business_name: data.business_name,
+    vertical_code: data.vertical_code,
   });
   return res.data;
 }

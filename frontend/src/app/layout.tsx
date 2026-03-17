@@ -3,8 +3,28 @@ import "@/styles/globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "Véktor — Salud Financiera para PYMEs",
-  description: "Plataforma de salud financiera para pequeñas y medianas empresas argentinas.",
+  title: "Véktor — Salud financiera para PYMEs argentinas",
+  description:
+    "Controlá caja, margen y stock en tiempo real. Sin contabilidad, sin hojas de cálculo.",
+  openGraph: {
+    title: "Véktor — Salud financiera para PYMEs argentinas",
+    description:
+      "Controlá caja, margen y stock en tiempo real. Sin contabilidad, sin hojas de cálculo.",
+    siteName: "Véktor",
+    locale: "es_AR",
+    type: "website",
+    images: [
+      {
+        url: "/og-image.png",
+        width: 1200,
+        height: 630,
+        alt: "Véktor — Salud financiera para PYMEs",
+      },
+    ],
+  },
+  icons: {
+    icon: "/favicon.ico",
+  },
 };
 
 export default function RootLayout({
