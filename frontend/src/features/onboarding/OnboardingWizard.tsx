@@ -7,6 +7,7 @@ import { Step2Form, type Step2Data } from "./Step2Form";
 import { Step3Upload } from "./Step3Upload";
 import { Step4Loading } from "./Step4Loading";
 import { onboardingService } from "@/services/onboarding.service";
+import { api } from "@/lib/api";
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -59,24 +60,20 @@ export function OnboardingWizard() {
         main_concern: state.formData.main_concern,
       });
 
-      // File upload is best-effort — not blocking
       if (file) {
+        const fd = new FormData();
+        fd.append("file", file);
         try {
-          const fd = new FormData();
-          fd.append("file", file);
-          // Fire-and-forget; failure doesn't block the flow
-          void fetch(
-            `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/v1/files/upload`,
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${localStorage.getItem("vektor_token") ?? ""}`,
-              },
-              body: fd,
-            },
-          );
+          await api.post("/files/upload", fd, {
+            headers: { "Content-Type": "multipart/form-data" },
+          });
         } catch {
-          // non-blocking
+          setState((prev) => ({
+            ...prev,
+            isSubmitting: false,
+            submitError: "El archivo no pudo subirse. Intentá de nuevo.",
+          }));
+          return;
         }
       }
 

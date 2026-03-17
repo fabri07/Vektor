@@ -12,8 +12,10 @@ export async function loginRequest(data: LoginInput): Promise<TokenResponse> {
   return res.data;
 }
 
-export async function getMeRequest(): Promise<UserResponse> {
-  const res = await api.get<UserResponse>("/auth/me");
+export async function getMeRequest(config?: {
+  headers?: Record<string, string>;
+}): Promise<UserResponse> {
+  const res = await api.get<UserResponse>("/auth/me", config);
   return res.data;
 }
 

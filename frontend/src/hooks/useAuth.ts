@@ -9,8 +9,9 @@ export function useLogin() {
   return useMutation({
     mutationFn: async (data: LoginInput) => {
       const { access_token } = await loginRequest(data);
-      localStorage.setItem("vektor_token", access_token);
-      const user = await getMeRequest();
+      const user = await getMeRequest({
+        headers: { Authorization: `Bearer ${access_token}` },
+      });
       return { access_token, user };
     },
     onSuccess: ({ access_token, user }) => {

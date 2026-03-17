@@ -1,4 +1,5 @@
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
+import { useAuthStore } from "@/stores/authStore";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -10,7 +11,7 @@ export const api = axios.create({
 
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   if (typeof window !== "undefined") {
-    const token = localStorage.getItem("vektor_token");
+    const token = useAuthStore.getState().token;
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -22,8 +23,7 @@ api.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
     if (error.response?.status === 401 && typeof window !== "undefined") {
-      localStorage.removeItem("vektor_token");
-      window.location.href = "/login";
+      useAuthStore.getState().logout();
     }
     return Promise.reject(error);
   },

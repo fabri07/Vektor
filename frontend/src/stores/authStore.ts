@@ -12,7 +12,9 @@ interface AuthUser {
 interface AuthState {
   token: string | null;
   user: AuthUser | null;
+  _hasHydrated: boolean;
   setAuth: (token: string, user: AuthUser) => void;
+  setHasHydrated: (state: boolean) => void;
   logout: () => void;
 }
 
@@ -21,7 +23,9 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       token: null,
       user: null,
+      _hasHydrated: false,
       setAuth: (token, user) => set({ token, user }),
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
       logout: () => {
         set({ token: null, user: null });
         if (typeof window !== "undefined") {
@@ -32,6 +36,9 @@ export const useAuthStore = create<AuthState>()(
     {
       name: "vektor_auth",
       partialize: (state) => ({ token: state.token, user: state.user }),
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      },
     },
   ),
 );
