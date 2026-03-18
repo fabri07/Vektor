@@ -6,8 +6,16 @@ export interface PaginatedResponse<T> {
   pages: number;
 }
 
+export interface PydanticError {
+  type: string;
+  loc: (string | number)[];
+  msg: string;
+  input: unknown;
+  ctx?: Record<string, unknown>;
+}
+
 export interface ApiError {
-  detail: string;
+  detail: string | PydanticError[];
 }
 
 export interface TokenResponse {
@@ -15,20 +23,37 @@ export interface TokenResponse {
   token_type: "bearer";
 }
 
-export interface UserResponse {
-  id: string;
+export interface AuthUserResponse {
+  user_id: string;
   email: string;
   full_name: string;
-  role: string;
+  role_code: string;
   tenant_id: string;
-  is_active: boolean;
-  created_at: string;
+}
+
+export interface MeResponse {
+  user_id: string;
+  email: string;
+  full_name: string;
+  role_code: string;
+  tenant_id: string;
+  subscription: {
+    plan_code: string;
+    status: string;
+  } | null;
+  onboarding_completed: boolean;
 }
 
 export interface AuthResponse {
   access_token: string;
   token_type: "bearer";
-  user: UserResponse;
+  user: AuthUserResponse;
+}
+
+export interface RegisterResponse {
+  message: string;
+  email: string;
+  requires_verification: boolean;
 }
 
 export interface HealthScoreV2Response {

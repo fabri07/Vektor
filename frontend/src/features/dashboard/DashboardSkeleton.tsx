@@ -1,22 +1,18 @@
-function SkeletonBlock({ className }: { className?: string }) {
+function ShimmerBlock({ className }: { className?: string }) {
   return (
-    <div className={`animate-pulse rounded bg-gray-100 ${className ?? ""}`} />
+    <div className={`animate-shimmer rounded ${className ?? ""}`} />
   );
 }
 
-function CardShell({
-  colSpan2,
+function SkeletonCard({
+  className,
   children,
 }: {
-  colSpan2?: boolean;
+  className?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div
-      className={`rounded-xl border border-gray-200 bg-white p-6 shadow-sm ${
-        colSpan2 ? "col-span-2" : ""
-      }`}
-    >
+    <div className={`rounded-lg border border-vk-border-w bg-vk-surface-w p-6 shadow-vk-sm ${className ?? ""}`}>
       {children}
     </div>
   );
@@ -24,52 +20,71 @@ function CardShell({
 
 export function DashboardSkeleton() {
   return (
-    <div className="grid grid-cols-4 gap-4">
-      {/* Health Score skeleton */}
-      <CardShell colSpan2>
-        <SkeletonBlock className="mb-2 h-3 w-24" />
-        <SkeletonBlock className="mb-4 h-20 w-36" />
-        <SkeletonBlock className="mb-2 h-3 w-32" />
-        <SkeletonBlock className="h-2 w-full" />
-        <p className="mt-5 text-xs text-gray-400">Calculando...</p>
-      </CardShell>
-
-      {/* Risk skeleton */}
-      <CardShell>
-        <SkeletonBlock className="mb-3 h-3 w-24" />
-        <div className="flex gap-3">
-          <SkeletonBlock className="h-9 w-9 rounded-lg" />
-          <div className="flex-1 space-y-2">
-            <SkeletonBlock className="h-4 w-3/4" />
-            <SkeletonBlock className="h-3 w-full" />
-            <SkeletonBlock className="h-3 w-2/3" />
+    <div className="space-y-4">
+      {/* Hero skeleton — ancho completo */}
+      <SkeletonCard>
+        <div className="mb-4 flex items-start justify-between">
+          <ShimmerBlock className="h-3 w-24" />
+          <ShimmerBlock className="h-5 w-28 rounded-full" />
+        </div>
+        <div className="flex items-end gap-4">
+          <ShimmerBlock className="h-16 w-32" />
+          <ShimmerBlock className="mb-1 h-5 w-40" />
+        </div>
+        <div className="mt-5">
+          <div className="mb-1.5 flex justify-between">
+            <ShimmerBlock className="h-3 w-28" />
+            <ShimmerBlock className="h-3 w-8" />
           </div>
+          <ShimmerBlock className="h-1 w-full rounded-full" />
         </div>
-      </CardShell>
+        <ShimmerBlock className="mt-4 h-3 w-40" />
+      </SkeletonCard>
 
-      {/* Action skeleton */}
-      <CardShell>
-        <SkeletonBlock className="mb-3 h-3 w-28" />
-        <div className="space-y-2">
-          <SkeletonBlock className="h-4 w-full" />
-          <SkeletonBlock className="h-4 w-4/5" />
-        </div>
-        <SkeletonBlock className="mt-5 h-8 w-32 rounded-lg" />
-      </CardShell>
-
-      {/* Subscores skeleton */}
-      <CardShell colSpan2>
-        <SkeletonBlock className="mb-5 h-3 w-24" />
-        {["Caja", "Margen", "Stock", "Proveedores"].map((label) => (
-          <div key={label} className="mb-4">
-            <div className="mb-1.5 flex justify-between">
-              <SkeletonBlock className="h-3 w-20" />
-              <SkeletonBlock className="h-3 w-6" />
+      {/* Grid 2 columnas: Risk + Action */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {/* Risk skeleton */}
+        <SkeletonCard>
+          <ShimmerBlock className="mb-3 h-3 w-24" />
+          <div className="flex gap-3">
+            <ShimmerBlock className="h-9 w-9 flex-shrink-0 rounded-lg" />
+            <div className="flex-1 space-y-2">
+              <ShimmerBlock className="h-4 w-3/4" />
+              <ShimmerBlock className="h-3 w-full" />
+              <ShimmerBlock className="h-3 w-2/3" />
             </div>
-            <SkeletonBlock className="h-2 w-full rounded-full" />
           </div>
-        ))}
-      </CardShell>
+        </SkeletonCard>
+
+        {/* Action skeleton */}
+        <SkeletonCard>
+          <ShimmerBlock className="mb-3 h-3 w-28" />
+          <div className="space-y-2">
+            <ShimmerBlock className="h-4 w-full" />
+            <ShimmerBlock className="h-4 w-4/5" />
+            <ShimmerBlock className="h-4 w-3/5" />
+          </div>
+          <ShimmerBlock className="mt-5 h-8 w-32 rounded-lg" />
+        </SkeletonCard>
+
+        {/* Subscores skeleton — ancho completo */}
+        <SkeletonCard className="md:col-span-2">
+          <ShimmerBlock className="mb-5 h-3 w-24" />
+          <div className="space-y-4">
+            {["Caja", "Margen", "Stock", "Proveedores"].map((label) => (
+              <div key={label}>
+                <div className="mb-1.5 flex justify-between">
+                  <ShimmerBlock className="h-3 w-20" />
+                  <ShimmerBlock className="h-3 w-6" />
+                </div>
+                <ShimmerBlock className="h-2 w-full rounded-full" />
+              </div>
+            ))}
+          </div>
+        </SkeletonCard>
+      </div>
+
+      <p className="text-center text-sm text-vk-text-muted">Analizando tu negocio...</p>
     </div>
   );
 }

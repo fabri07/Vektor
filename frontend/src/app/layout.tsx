@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "@/styles/globals.css";
 import { Providers } from "./providers";
+import { ToastContainer } from "@/components/ui/Toast";
 
 export const metadata: Metadata = {
   title: "Véktor — Salud financiera para PYMEs argentinas",
@@ -34,6 +35,7 @@ export default function RootLayout({
     <html lang="es">
       <body>
         <Providers>{children}</Providers>
+        <ToastContainer />
       </body>
     </html>
   );

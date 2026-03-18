@@ -29,9 +29,9 @@ const VERTICALS = [
 ] as const;
 
 const inputClass =
-  "w-full rounded-lg border border-[#E5E9F0] px-4 py-3 text-[15px] text-gray-900 placeholder:text-gray-400 focus:border-[#2B7FD4] focus:outline-none focus:ring-[3px] focus:ring-[#2B7FD4]/15 transition-colors";
+  "w-full rounded-lg border border-vk-border-w px-4 py-3 text-[15px] text-vk-text-primary placeholder:text-vk-text-placeholder focus:border-vk-blue/40 focus:outline-none focus:ring-[3px] focus:ring-vk-blue/15 transition-colors bg-vk-surface-w";
 const inputErrorClass =
-  "w-full rounded-lg border border-red-400 px-4 py-3 text-[15px] text-gray-900 placeholder:text-gray-400 focus:border-red-500 focus:outline-none focus:ring-[3px] focus:ring-red-400/15 transition-colors";
+  "w-full rounded-lg border border-vk-danger/60 px-4 py-3 text-[15px] text-vk-text-primary placeholder:text-vk-text-placeholder focus:border-vk-danger/60 focus:outline-none focus:ring-[3px] focus:ring-vk-danger/20 transition-colors bg-vk-surface-w";
 
 type TouchedFields = Record<keyof RegisterInput, boolean>;
 
@@ -66,8 +66,12 @@ export function RegisterForm() {
   }, [values]);
 
   const serverError = register.error
-    ? ((register.error as AxiosError<ApiError>).response?.data?.detail ??
-        "No se pudo crear la cuenta. Intentá de nuevo.")
+    ? (() => {
+        const detail = (register.error as AxiosError<ApiError>).response?.data?.detail;
+        if (!detail) return "No se pudo crear la cuenta. Intentá de nuevo.";
+        if (typeof detail === "string") return detail;
+        return detail.map((e) => e.msg).join(" · ");
+      })()
     : null;
 
   function handleChange(field: keyof RegisterInput, value: string) {
@@ -92,7 +96,13 @@ export function RegisterForm() {
     if (!result.success) return;
 
     register.mutate(result.data, {
-      onSuccess: () => router.replace("/onboarding"),
+      onSuccess: (data) => {
+        if (data.requires_verification) {
+          router.replace(`/verify-email-sent?email=${encodeURIComponent(data.email)}`);
+        } else {
+          router.replace(`/login?registered=1`);
+        }
+      },
     });
   }
 
@@ -102,7 +112,7 @@ export function RegisterForm() {
     <form onSubmit={handleSubmit} noValidate className="space-y-4">
       {/* Full name */}
       <div>
-        <label htmlFor="reg-fullname" className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label htmlFor="reg-fullname" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
           Nombre completo
         </label>
         <input
@@ -118,7 +128,7 @@ export function RegisterForm() {
           aria-invalid={touched.full_name && !!fieldErrors.full_name}
         />
         {touched.full_name && fieldErrors.full_name && (
-          <p id="reg-fullname-error" role="alert" className="mt-1 text-sm text-red-600">
+          <p id="reg-fullname-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.full_name}
           </p>
         )}
@@ -126,7 +136,7 @@ export function RegisterForm() {
 
       {/* Business name */}
       <div>
-        <label htmlFor="reg-business" className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label htmlFor="reg-business" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
           Nombre del negocio
         </label>
         <input
@@ -142,7 +152,7 @@ export function RegisterForm() {
           aria-invalid={touched.business_name && !!fieldErrors.business_name}
         />
         {touched.business_name && fieldErrors.business_name && (
-          <p id="reg-business-error" role="alert" className="mt-1 text-sm text-red-600">
+          <p id="reg-business-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.business_name}
           </p>
         )}
@@ -150,7 +160,7 @@ export function RegisterForm() {
 
       {/* Vertical */}
       <div>
-        <label htmlFor="reg-vertical" className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label htmlFor="reg-vertical" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
           Rubro del negocio
         </label>
         <select
@@ -169,7 +179,7 @@ export function RegisterForm() {
           ))}
         </select>
         {touched.vertical_code && fieldErrors.vertical_code && (
-          <p id="reg-vertical-error" role="alert" className="mt-1 text-sm text-red-600">
+          <p id="reg-vertical-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.vertical_code}
           </p>
         )}
@@ -177,7 +187,7 @@ export function RegisterForm() {
 
       {/* Email */}
       <div>
-        <label htmlFor="reg-email" className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label htmlFor="reg-email" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
           Email
         </label>
         <input
@@ -193,7 +203,7 @@ export function RegisterForm() {
           aria-invalid={touched.email && !!fieldErrors.email}
         />
         {touched.email && fieldErrors.email && (
-          <p id="reg-email-error" role="alert" className="mt-1 text-sm text-red-600">
+          <p id="reg-email-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.email}
           </p>
         )}
@@ -201,7 +211,7 @@ export function RegisterForm() {
 
       {/* Password */}
       <div>
-        <label htmlFor="reg-password" className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label htmlFor="reg-password" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
           Contraseña
         </label>
         <div className="relative">
@@ -220,14 +230,14 @@ export function RegisterForm() {
           <button
             type="button"
             onClick={() => setShowPassword((v) => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-[#2B7FD4]/30 rounded"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-vk-text-muted hover:text-vk-text-secondary focus:outline-none focus:ring-2 focus:ring-vk-blue/30 rounded"
             aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
           >
             {showPassword ? <EyeOff /> : <EyeOpen />}
           </button>
         </div>
         {touched.password && fieldErrors.password && (
-          <p id="reg-password-error" role="alert" className="mt-1 text-sm text-red-600">
+          <p id="reg-password-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.password}
           </p>
         )}
@@ -235,7 +245,7 @@ export function RegisterForm() {
 
       {/* Server error */}
       {serverError && (
-        <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+        <p role="alert" className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
           {serverError}
         </p>
       )}
@@ -244,7 +254,7 @@ export function RegisterForm() {
       <button
         type="submit"
         disabled={register.isPending || !isValid}
-        className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#2B7FD4] px-4 py-3 text-[15px] font-semibold text-white transition-colors hover:bg-[#1E6BB8] focus:outline-none focus:ring-2 focus:ring-[#2B7FD4]/40 disabled:cursor-not-allowed disabled:opacity-60"
+        className="flex w-full items-center justify-center gap-2 rounded-lg bg-vk-blue px-4 py-3 text-[15px] font-semibold text-white transition-colors hover:bg-vk-blue-hover focus:outline-none focus:ring-2 focus:ring-vk-blue/40 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {register.isPending && (
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
@@ -252,9 +262,9 @@ export function RegisterForm() {
         {register.isPending ? "Creando cuenta..." : "Empezar gratis"}
       </button>
 
-      <p className="text-center text-sm text-gray-500">
+      <p className="text-center text-sm text-vk-text-secondary">
         ¿Ya tenés cuenta?{" "}
-        <a href="/login" className="font-medium text-[#2B7FD4] hover:text-[#1E6BB8] focus:outline-none focus:underline">
+        <a href="/login" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
           Iniciá sesión
         </a>
       </p>

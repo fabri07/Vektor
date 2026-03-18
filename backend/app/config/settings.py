@@ -3,13 +3,22 @@ Application settings loaded from environment variables.
 All fields are documented with their purpose and defaults.
 """
 
+import json
 from functools import lru_cache
+from typing import ClassVar
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    DEV_CORS_ORIGINS: ClassVar[list[str]] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+    ]
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -43,13 +52,29 @@ class Settings(BaseSettings):
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str] = DEV_CORS_ORIGINS.copy()
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug(cls, v: bool | str) -> bool | str:
+        if isinstance(v, str):
+            normalized = v.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+                return False
+        return v
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
+            stripped = v.strip()
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(origin).strip() for origin in parsed]
+            return [origin.strip() for origin in stripped.split(",")]
         return v
 
     # ── S3 Compatible Storage ─────────────────────────────────────────────────
@@ -70,7 +95,11 @@ class Settings(BaseSettings):
     # ── Feature flags ─────────────────────────────────────────────────────────
     ENABLE_SCORE_RECALCULATION: bool = True
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
+    ENABLE_EMAIL_VERIFICATION: bool = True
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
+
+    # ── Frontend ──────────────────────────────────────────────────────────────
+    FRONTEND_URL: str = "http://localhost:3000"
 
     # ── OCR ───────────────────────────────────────────────────────────────────
     OCR_BACKEND: str = "tesseract"  # "tesseract" | "api" (future: external OCR API)
@@ -78,6 +107,14 @@ class Settings(BaseSettings):
     # ── Production secret validation ──────────────────────────────────────────
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
+        if self.is_development:
+            merged_origins = list(dict.fromkeys([*self.CORS_ORIGINS, *self.DEV_CORS_ORIGINS]))
+            self.CORS_ORIGINS = merged_origins
+
+        if self.DEBUG:
+            # In debug mode, skip email verification so local testing isn't blocked.
+            self.ENABLE_EMAIL_VERIFICATION = False
+
         if self.ENVIRONMENT == "production":
             insecure_defaults = {"insecure-change-me", "insecure-jwt-change-me", ""}
             if self.SECRET_KEY in insecure_defaults or len(self.SECRET_KEY) < 32:

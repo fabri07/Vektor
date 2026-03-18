@@ -30,9 +30,9 @@ export function ActionCard({ action }: Props) {
         Acción Sugerida
       </p>
       <div className="flex items-start gap-2">
-        <div className="mt-0.5 flex-shrink-0 rounded-full bg-[#1A1A2E]/8 p-1.5">
+        <div className="mt-0.5 flex-shrink-0 rounded-full bg-vk-navy/8 p-1.5">
           <svg
-            className="h-4 w-4 text-[#1A1A2E]"
+            className="h-4 w-4 text-vk-navy"
             fill="none"
             stroke="currentColor"
             strokeWidth={2}

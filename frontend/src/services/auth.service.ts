@@ -1,5 +1,5 @@
 import { api } from "@/lib/api";
-import type { AuthResponse, UserResponse } from "@/types/api";
+import type { AuthResponse, MeResponse, RegisterResponse } from "@/types/api";
 import type { LoginInput, RegisterInput } from "@/validation/auth";
 
 export async function loginRequest(data: LoginInput): Promise<AuthResponse> {
@@ -10,8 +10,8 @@ export async function loginRequest(data: LoginInput): Promise<AuthResponse> {
   return res.data;
 }
 
-export async function registerRequest(data: RegisterInput): Promise<AuthResponse> {
-  const res = await api.post<AuthResponse>("/auth/register", {
+export async function registerRequest(data: RegisterInput): Promise<RegisterResponse> {
+  const res = await api.post<RegisterResponse>("/auth/register", {
     email: data.email,
     password: data.password,
     full_name: data.full_name,
@@ -21,10 +21,19 @@ export async function registerRequest(data: RegisterInput): Promise<AuthResponse
   return res.data;
 }
 
+export async function verifyEmailRequest(token: string): Promise<AuthResponse> {
+  const res = await api.post<AuthResponse>("/auth/verify-email", { token });
+  return res.data;
+}
+
+export async function resendVerificationRequest(email: string): Promise<void> {
+  await api.post("/auth/resend-verification", { email });
+}
+
 export async function getMeRequest(config?: {
   headers?: Record<string, string>;
-}): Promise<UserResponse> {
-  const res = await api.get<UserResponse>("/auth/me", config);
+}): Promise<MeResponse> {
+  const res = await api.get<MeResponse>("/auth/me", config);
   return res.data;
 }
 

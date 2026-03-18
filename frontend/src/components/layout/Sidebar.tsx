@@ -1,113 +1,243 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
+import {
+  LayoutDashboard,
+  ShoppingCart,
+  Receipt,
+  Package,
+  Upload,
+  Settings,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
+import { useAuthStore } from "@/stores/authStore";
+import { api } from "@/lib/api";
 
-interface NavItem {
-  label: string;
-  href: string;
-  icon: React.ReactNode;
+interface SidebarProps {
+  mobileOpen: boolean;
+  onClose: () => void;
 }
 
-const navItems: NavItem[] = [
-  {
-    label: "Dashboard",
-    href: "/dashboard",
-    icon: (
-      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-        <rect x="3" y="3" width="7" height="7" rx="1" />
-        <rect x="14" y="3" width="7" height="7" rx="1" />
-        <rect x="3" y="14" width="7" height="7" rx="1" />
-        <rect x="14" y="14" width="7" height="7" rx="1" />
-      </svg>
-    ),
-  },
-  {
-    label: "Ventas",
-    href: "/sales",
-    icon: (
-      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-        <path d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13l-1.5 7h13M7 13l-1.5-7" />
-        <circle cx="9" cy="21" r="1" />
-        <circle cx="20" cy="21" r="1" />
-      </svg>
-    ),
-  },
-  {
-    label: "Gastos",
-    href: "/expenses",
-    icon: (
-      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
-        <path d="M12 8v4l3 3" />
-      </svg>
-    ),
-  },
-  {
-    label: "Productos",
-    href: "/products",
-    icon: (
-      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-        <path d="M20 7H4a2 2 0 00-2 2v10a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z" />
-        <path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2" />
-      </svg>
-    ),
-  },
-  {
-    label: "Carga de datos",
-    href: "/ingestion",
-    icon: (
-      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-        <polyline points="17 8 12 3 7 8" />
-        <line x1="12" y1="3" x2="12" y2="15" />
-      </svg>
-    ),
-  },
-  {
-    label: "Configuración",
-    href: "/settings",
-    icon: (
-      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
-      </svg>
-    ),
-  },
+const NAV_ITEMS = [
+  { label: "Dashboard",     href: "/dashboard", icon: LayoutDashboard },
+  { label: "Ventas",        href: "/sales",      icon: ShoppingCart },
+  { label: "Gastos",        href: "/expenses",   icon: Receipt },
+  { label: "Productos",     href: "/products",   icon: Package },
+  { label: "Cargar datos",  href: "/ingestion",  icon: Upload },
 ];
 
-export function Sidebar() {
+function getInitials(name: string): string {
+  return name
+    .split(" ")
+    .map((n) => n[0] ?? "")
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
+
+export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
+  const user = useAuthStore((s) => s.user);
+  const [collapsed, setCollapsed] = useState(false);
+
+  const { data: profileData } = useQuery({
+    queryKey: ["business-profile"],
+    queryFn: async () => {
+      const res = await api.get<{ business_name: string }[]>("/business_profiles/");
+      return res.data[0] ?? null;
+    },
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+
+  const businessName = profileData?.business_name ?? "Mi negocio";
+  const initials = getInitials(user?.full_name ?? user?.email ?? "U");
 
   return (
-    <aside className="flex w-56 flex-col border-r border-white/10 bg-primary-600/30">
-      <div className="flex h-14 items-center border-b border-white/10 px-5">
-        <span className="text-base font-bold tracking-tight text-white">Véktor</span>
+    <aside
+      className={clsx(
+        "flex h-full flex-col bg-vk-bg-dark",
+        "transition-all duration-200 ease-in-out",
+        // Mobile: fixed drawer
+        "fixed inset-y-0 left-0 z-50 w-[260px]",
+        mobileOpen ? "translate-x-0 shadow-vk-lg" : "-translate-x-full",
+        // md+: static, visible
+        "md:relative md:inset-auto md:z-auto md:translate-x-0 md:shadow-none",
+        // Width: tablet colapsable, desktop always 260
+        collapsed ? "md:w-[60px] lg:w-[260px]" : "md:w-[260px]",
+      )}
+    >
+      {/* ── Logo + business name ── */}
+      <div
+        className={clsx(
+          "flex h-14 items-center border-b border-vk-border-dark px-4",
+          collapsed ? "md:justify-center lg:justify-start lg:px-4" : "justify-start",
+        )}
+      >
+        <Link
+          href="/dashboard"
+          onClick={onClose}
+          className={clsx(
+            "flex items-center gap-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60 rounded",
+            collapsed && "md:justify-center lg:justify-start",
+          )}
+        >
+          <span className="text-[18px] font-bold tracking-tight text-white">
+            {collapsed ? (
+              <span className="md:block lg:hidden">V</span>
+            ) : null}
+            <span className={collapsed ? "md:hidden lg:inline" : "inline"}>VÉKTOR</span>
+          </span>
+        </Link>
       </div>
-      <nav className="flex-1 overflow-y-auto scrollbar-thin px-3 py-4">
+
+      {/* ── Business name ── */}
+      {!collapsed && (
+        <div className="px-4 py-2.5 border-b border-vk-border-dark">
+          <p className="text-xs font-medium text-vk-text-muted truncate">{businessName}</p>
+        </div>
+      )}
+
+      {/* ── Nav items ── */}
+      <nav className="flex-1 overflow-y-auto scrollbar-thin px-2 py-3">
         <ul className="space-y-0.5">
-          {navItems.map((item) => {
-            const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
+          {NAV_ITEMS.map((item) => {
+            const isActive =
+              pathname === item.href || pathname.startsWith(item.href + "/");
+            const Icon = item.icon;
+
             return (
               <li key={item.href}>
-                <Link
-                  href={item.href}
-                  className={clsx(
-                    "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                    isActive
-                      ? "bg-accent/20 text-accent"
-                      : "text-white/60 hover:bg-white/5 hover:text-white",
+                <div className="group relative">
+                  <Link
+                    href={item.href}
+                    onClick={onClose}
+                    className={clsx(
+                      "flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium",
+                      "transition-colors duration-[150ms]",
+                      "focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60",
+                      isActive
+                        ? "bg-vk-surface-1 border-l-[3px] border-l-vk-blue text-vk-text-light pl-[9px]"
+                        : "border-l-[3px] border-l-transparent text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light pl-[9px]",
+                      collapsed && "md:justify-center md:px-0 md:pl-0 lg:justify-start lg:px-3 lg:pl-[9px]",
+                    )}
+                  >
+                    <Icon className="h-[18px] w-[18px] shrink-0" />
+                    <span
+                      className={clsx(
+                        "truncate",
+                        collapsed && "md:hidden lg:block",
+                      )}
+                    >
+                      {item.label}
+                    </span>
+                  </Link>
+                  {/* Tooltip — visible only when collapsed on tablet */}
+                  {collapsed && (
+                    <span
+                      className={clsx(
+                        "pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2",
+                        "whitespace-nowrap rounded-md bg-vk-surface-2 px-2.5 py-1.5",
+                        "text-xs font-medium text-vk-text-light shadow-vk-md",
+                        "opacity-0 transition-opacity duration-150 group-hover:opacity-100",
+                        "hidden md:block lg:hidden",
+                      )}
+                    >
+                      {item.label}
+                    </span>
                   )}
-                >
-                  {item.icon}
-                  {item.label}
-                </Link>
+                </div>
               </li>
             );
           })}
         </ul>
       </nav>
+
+      {/* ── Tablet collapse toggle ── */}
+      <div className="hidden md:flex lg:hidden items-center justify-center border-t border-vk-border-dark py-2">
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          className="flex h-8 w-8 items-center justify-center rounded-md text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60"
+          aria-label={collapsed ? "Expandir sidebar" : "Colapsar sidebar"}
+        >
+          {collapsed ? (
+            <ChevronRight className="h-4 w-4" />
+          ) : (
+            <ChevronLeft className="h-4 w-4" />
+          )}
+        </button>
+      </div>
+
+      {/* ── Bottom section: user + settings ── */}
+      <div className="border-t border-vk-border-dark p-3">
+        {/* Settings link */}
+        <div className="group relative mb-2">
+          <Link
+            href="/settings"
+            onClick={onClose}
+            className={clsx(
+              "flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium",
+              "border-l-[3px] transition-colors duration-[150ms]",
+              "focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60",
+              pathname === "/settings"
+                ? "bg-vk-surface-1 border-l-vk-blue text-vk-text-light pl-[9px]"
+                : "border-l-transparent text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light pl-[9px]",
+              collapsed && "md:justify-center md:px-0 md:pl-0 lg:justify-start lg:px-3 lg:pl-[9px]",
+            )}
+          >
+            <Settings className="h-[18px] w-[18px] shrink-0" />
+            <span className={clsx("truncate", collapsed && "md:hidden lg:block")}>
+              Configuración
+            </span>
+          </Link>
+          {collapsed && (
+            <span
+              className={clsx(
+                "pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2",
+                "whitespace-nowrap rounded-md bg-vk-surface-2 px-2.5 py-1.5",
+                "text-xs font-medium text-vk-text-light shadow-vk-md",
+                "opacity-0 transition-opacity duration-150 group-hover:opacity-100",
+                "hidden md:block lg:hidden",
+              )}
+            >
+              Configuración
+            </span>
+          )}
+        </div>
+
+        {/* User info */}
+        <div
+          className={clsx(
+            "flex items-center gap-2.5 rounded-md px-2 py-2",
+            collapsed && "md:justify-center lg:justify-start",
+          )}
+        >
+          {/* Avatar */}
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-vk-blue/20 text-xs font-bold text-vk-blue-light">
+            {initials}
+          </div>
+
+          {/* Email + plan badge */}
+          <div
+            className={clsx(
+              "min-w-0 flex-1",
+              collapsed && "md:hidden lg:block",
+            )}
+          >
+            <p className="truncate text-xs font-medium text-vk-text-light">
+              {user?.email ?? ""}
+            </p>
+            <span className="inline-flex items-center rounded-full bg-vk-blue/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-vk-blue-light">
+              {user?.role ?? "user"}
+            </span>
+          </div>
+        </div>
+      </div>
     </aside>
   );
 }

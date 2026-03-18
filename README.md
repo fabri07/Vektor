@@ -70,11 +70,13 @@ Los workflows de GitHub Actions corren automáticamente en push y PR a `main` y 
 ```bash
 cd backend
 cp .env.example .env          # completar variables
-python -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
+
+Si no tenés `python3.12` disponible localmente, usá Docker Compose para el backend.
 
 ### Frontend
 
@@ -88,7 +90,7 @@ npm run dev
 ### Docker Compose (stack completo)
 
 ```bash
-docker compose up --build
+docker compose -f backend/docker-compose.yml up --build
 ```
 
 ---

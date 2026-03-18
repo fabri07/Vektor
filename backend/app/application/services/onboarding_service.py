@@ -78,7 +78,8 @@ class OnboardingService:
         # Step 2-3: calculate monthly sales estimate
         monthly_sales = body.weekly_sales_estimate_ars * Decimal("4.3")
 
-        # Step 4: persist financial estimates to business_profile
+        # Step 4: persist vertical and financial estimates to business_profile
+        bp.vertical_code = body.vertical_code
         bp.monthly_sales_estimate_ars = monthly_sales
         bp.monthly_inventory_spend_estimate_ars = body.monthly_inventory_cost_ars
         bp.monthly_fixed_expenses_estimate_ars = body.monthly_fixed_expenses_ars

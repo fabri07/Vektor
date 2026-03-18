@@ -86,10 +86,10 @@ function ScoreChart({ history }: { history: WeeklyHistoryItem[] }) {
           <Line
             type="monotone"
             dataKey="score"
-            stroke="#1A1A2E"
+            stroke="#2B7FD4"
             strokeWidth={2}
-            dot={{ r: 3, fill: "#1A1A2E" }}
-            activeDot={{ r: 5, fill: "#E63946", stroke: "#E63946" }}
+            dot={{ r: 3, fill: "#2B7FD4" }}
+            activeDot={{ r: 5, fill: "#2B7FD4", stroke: "#2B7FD4" }}
           />
         </LineChart>
       </ResponsiveContainer>
@@ -110,7 +110,7 @@ function Block1Score({ data }: { data: MomentumProfileResponse }) {
   return (
     <div>
       <div className="flex items-end gap-3">
-        <span className="font-bold leading-none text-[#1A1A2E]" style={{ fontSize: 64 }}>
+        <span className="font-bold leading-none text-vk-text-primary" style={{ fontSize: 64 }}>
           {currentScore != null ? Math.round(currentScore) : "—"}
         </span>
         <span className="mb-2 text-2xl font-light text-gray-400">/ 100</span>
@@ -177,7 +177,7 @@ function Block4Value({ data }: { data: MomentumProfileResponse }) {
       <p className="mb-1 text-sm text-gray-600">
         Desde que usás Véktor estimamos que protegiste:
       </p>
-      <p className="font-bold text-[#1A1A2E]" style={{ fontSize: 28 }}>
+      <p className="font-bold text-vk-text-primary" style={{ fontSize: 28 }}>
         {formatARS(value)}
       </p>
       <p className="mt-1 text-xs text-gray-400">

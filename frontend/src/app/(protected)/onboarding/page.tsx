@@ -27,8 +27,8 @@ export default function OnboardingPage() {
 
   if (checking) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#F4F4F8]">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#1A1A2E]" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-vk-bg-light">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-vk-navy" />
       </div>
     );
   }

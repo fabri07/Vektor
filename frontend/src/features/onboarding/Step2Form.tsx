@@ -37,7 +37,7 @@ function FieldHint({ text }: { text: string }) {
 }
 
 function FieldError({ text }: { text: string }) {
-  return <p className="mt-1.5 text-xs text-[#E63946]">{text}</p>;
+  return <p className="mt-1.5 text-xs text-vk-danger">{text}</p>;
 }
 
 function NumberInput({
@@ -84,7 +84,7 @@ function NumberInput({
             "focus:outline-none focus:ring-2",
             prefix ? "pl-9 pr-4" : "px-4",
             error
-              ? "border-[#E63946]/60 focus:ring-[#E63946]/20"
+              ? "border-vk-danger/60 focus:ring-vk-danger/20"
               : "border-gray-300 focus:border-gray-400 focus:ring-gray-200",
           ].join(" ")}
         />
@@ -246,7 +246,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
                   className={[
                     "flex-1 rounded-xl border-2 py-3 px-4 text-sm font-medium transition-all duration-150",
                     isSelected
-                      ? "border-[#E63946] bg-red-50 text-[#E63946]"
+                      ? "border-vk-danger bg-vk-danger-bg text-vk-danger"
                       : "border-gray-200 bg-white text-gray-600 hover:border-gray-300",
                   ].join(" ")}
                 >
@@ -266,7 +266,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
         <button
           type="button"
           onClick={handleNext}
-          className="h-11 rounded-xl bg-[#1A1A2E] px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[#1A1A2E]/30"
+          className="h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
         >
           Siguiente
         </button>

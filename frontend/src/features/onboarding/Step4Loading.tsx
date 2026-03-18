@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   healthScoreService,
-  type HealthScoreCurrent,
+  type HealthScoreLatest,
 } from "@/services/health_score.service";
 
 const LEVEL_LABELS: Record<string, string> = {
@@ -24,7 +24,7 @@ const LEVEL_COLORS: Record<string, string> = {
 
 const MAX_POLLS = 20; // 40 seconds max
 
-function ScorePreview({ score }: { score: HealthScoreCurrent }) {
+function ScorePreview({ score }: { score: HealthScoreLatest }) {
   const levelLabel = LEVEL_LABELS[score.level] ?? score.level;
   const levelColor =
     LEVEL_COLORS[score.level] ?? "text-gray-600 bg-gray-50 border-gray-200";
@@ -35,7 +35,7 @@ function ScorePreview({ score }: { score: HealthScoreCurrent }) {
         Tu puntaje de salud financiera
       </p>
       <p className="mt-2 text-5xl font-bold text-gray-900">
-        {Math.round(Number(score.total_score))}
+        {Math.round(Number(score.score_total))}
         <span className="text-2xl text-gray-400">/100</span>
       </p>
       <span
@@ -57,9 +57,9 @@ export function Step4Loading() {
   const router = useRouter();
   const pollCount = useRef(0);
 
-  const { data: score } = useQuery<HealthScoreCurrent | null>({
-    queryKey: ["health-score-current-onboarding"],
-    queryFn: healthScoreService.getCurrent,
+  const { data: score } = useQuery<HealthScoreLatest | null>({
+    queryKey: ["health-score-latest-onboarding"],
+    queryFn: healthScoreService.getLatest,
     refetchInterval: (query) => {
       if (query.state.data != null) return false;
       if (pollCount.current >= MAX_POLLS) return false;

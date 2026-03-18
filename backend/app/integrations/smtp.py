@@ -43,3 +43,10 @@ class SMTPClient:
             logger.info("smtp.sent", to=to_email, subject=subject)
         except smtplib.SMTPException as exc:
             logger.error("smtp.send_failed", to=to_email, error=str(exc))
+            if s.is_development:
+                logger.warning(
+                    "smtp.dev_fallback — SMTP failed, copy the link below to verify manually",
+                    to=to_email,
+                    subject=subject,
+                    plain_text=body_text if body_text else "(no plain text)",
+                )

@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -6,29 +6,103 @@
 
 @layer base {
   :root {
-    --color-primary: #1a1a2e;
-    --color-accent: #e63946;
-    --color-mid: #4a4e69;
+    /* Marca — derivados del logo */
+    --vk-navy:          #1A2744;
+    --vk-blue:          #2B7FD4;
+    --vk-blue-light:    #5BA3E8;
+    --vk-blue-hover:    #1E6BB8;
+    --vk-blue-subtle:   rgba(43, 127, 212, 0.08);
+
+    /* Fondos oscuros (sidebar, header, landing) */
+    --vk-bg-dark:       #0F1623;
+    --vk-surface-1:     #1A2438;
+    --vk-surface-2:     #243050;
+    --vk-border-dark:   #2D3A4F;
+
+    /* Fondos claros (dashboard, cards) */
+    --vk-bg-light:      #F7F8FA;
+    --vk-surface-w:     #FFFFFF;
+    --vk-border-w:      #E5E9F0;
+    --vk-border-w-hover: #CBD5E1;
+
+    /* Tipografía */
+    --vk-text-primary:   #0F1623;
+    --vk-text-secondary: #4A5568;
+    --vk-text-muted:     #8A9BB0;
+    --vk-text-light:     #E8EDF4;
+    --vk-text-placeholder: #A0AEC0;
+
+    /* Semánticos */
+    --vk-success:        #16A34A;
+    --vk-success-bg:     #F0FDF4;
+    --vk-warning:        #D97706;
+    --vk-warning-bg:     #FFFBEB;
+    --vk-danger:         #DC2626;
+    --vk-danger-bg:      #FEF2F2;
+    --vk-info:           #2B7FD4;
+    --vk-info-bg:        #EBF5FB;
+
+    /* Tipografía */
+    --vk-font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+    --vk-font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+    /* Escala de texto */
+    --vk-text-metric:  3rem;
+    --vk-text-h1:      1.875rem;
+    --vk-text-h2:      1.5rem;
+    --vk-text-h3:      1.25rem;
+    --vk-text-body:    0.9375rem;
+    --vk-text-small:   0.8125rem;
+    --vk-text-caption: 0.75rem;
+
+    /* Forma */
+    --vk-radius-sm:    6px;
+    --vk-radius-md:    10px;
+    --vk-radius-lg:    14px;
+    --vk-radius-full:  9999px;
+    --vk-shadow-sm:    0 1px 3px rgba(0, 0, 0, 0.08);
+    --vk-shadow-md:    0 4px 12px rgba(0, 0, 0, 0.10);
+    --vk-shadow-lg:    0 8px 24px rgba(0, 0, 0, 0.12);
+
+    /* Transiciones */
+    --vk-transition-fast: 150ms ease;
+    --vk-transition-mid:  200ms ease;
   }
 
   html {
-    @apply text-sm antialiased;
-    font-family: "Inter", system-ui, sans-serif;
+    @apply antialiased;
+    font-family: var(--vk-font-sans);
+    font-size: 15px;
   }
 
   body {
-    @apply bg-primary text-white;
+    background-color: var(--vk-bg-light);
+    color: var(--vk-text-primary);
   }
+}
 
-  * {
-    @apply border-white/10;
+@layer utilities {
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      var(--vk-border-w) 25%,
+      #ffffff 50%,
+      var(--vk-border-w) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite linear;
   }
+}
+
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 @layer components {
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: #4a4e69 transparent;
+    scrollbar-color: var(--vk-border-dark) transparent;
   }
 
   .scrollbar-thin::-webkit-scrollbar {
@@ -40,7 +114,7 @@
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: #4a4e69;
+    background-color: var(--vk-border-dark);
     border-radius: 2px;
   }
 }

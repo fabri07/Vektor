@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { fetchLatestScore, fetchCurrentInsight } from "@/services/dashboard.service";
+import { fetchMomentumProfile } from "@/services/momentum.service";
 import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
 import { RiskCard } from "@/features/dashboard/RiskCard";
 import { ActionCard } from "@/features/dashboard/ActionCard";
@@ -33,32 +34,37 @@ export default function DashboardPage() {
     retry: 1,
   });
 
-  const {
-    data: insightData,
-    isLoading: insightLoading,
-  } = useQuery({
+  const { data: insightData, isLoading: insightLoading } = useQuery({
     queryKey: ["insights", "current"],
     queryFn: fetchCurrentInsight,
     retry: 1,
   });
 
+  // Mismo query key que MomentumWidget — React Query usa caché compartida
+  const { data: momentumData } = useQuery({
+    queryKey: ["momentum", "profile"],
+    queryFn: fetchMomentumProfile,
+    retry: 1,
+  });
+
   const loading = scoreLoading || insightLoading;
   const calculating = !scoreLoading && scoreData != null && isCalculating(scoreData);
-  const noScore = !scoreLoading && (scoreError || scoreData == null || calculating);
 
   if (loading || calculating) {
     return (
       <div className="space-y-4">
-        <h1 className="text-lg font-semibold text-white">Dashboard</h1>
+        <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
         <DashboardSkeleton />
       </div>
     );
   }
 
+  const noScore = scoreError || scoreData == null;
+
   if (noScore) {
     return (
       <div className="flex h-full flex-col gap-4">
-        <h1 className="text-lg font-semibold text-white">Dashboard</h1>
+        <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
         <EmptyState />
       </div>
     );
@@ -66,23 +72,40 @@ export default function DashboardPage() {
 
   const score = scoreData as HealthScoreV2Response;
 
+  // Datos de momentum para el hero card
+  const lastWeek = momentumData?.weekly_history?.at(-1);
+  const delta = lastWeek?.delta ?? null;
+  const isBestScore =
+    momentumData?.best_score_ever != null &&
+    score.score_total >= momentumData.best_score_ever;
+
   return (
     <div className="space-y-4">
-      <h1 className="text-lg font-semibold text-white">Dashboard</h1>
-      <div className="grid grid-cols-4 gap-4">
-        <HealthScoreCard score={score} />
+      <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
+
+      {/* Hero — ancho completo */}
+      <HealthScoreCard score={score} delta={delta} isBestScore={isBestScore} />
+
+      {/* Grid 2 columnas: Risk + Action en primera fila, Subscores full en segunda */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {insightData ? (
           <RiskCard insight={insightData.insight} />
         ) : (
           <NoInsightCard label="Riesgo Principal" />
         )}
+
         {insightData?.action_suggestion ? (
           <ActionCard action={insightData.action_suggestion} />
         ) : (
           <NoInsightCard label="Acción Sugerida" />
         )}
-        <SubscoresCard score={score} />
+
+        {/* Subscores — ancho completo en la segunda fila */}
+        <div className="md:col-span-2">
+          <SubscoresCard score={score} />
+        </div>
       </div>
+
       <MomentumWidget />
     </div>
   );
@@ -90,11 +113,11 @@ export default function DashboardPage() {
 
 function NoInsightCard({ label }: { label: string }) {
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-      <p className="mb-3 text-xs font-medium uppercase tracking-widest text-gray-400">
+    <div className="rounded-lg border border-vk-border-w bg-vk-surface-w p-6 shadow-vk-sm">
+      <p className="mb-3 text-xs font-medium uppercase tracking-widest text-vk-text-muted">
         {label}
       </p>
-      <p className="text-sm text-gray-400">Sin datos todavía.</p>
+      <p className="text-sm text-vk-text-muted">Sin datos todavía.</p>
     </div>
   );
 }

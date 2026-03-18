@@ -4,7 +4,7 @@ export default function ExpensesPage() {
   return (
     <PageWrapper title="Gastos">
       {/* TODO: ExpensesFeature component */}
-      <p className="text-sm text-white/40">Registro de gastos — próximamente</p>
+      <p className="text-sm text-vk-text-muted">Registro de gastos — próximamente</p>
     </PageWrapper>
   );
 }

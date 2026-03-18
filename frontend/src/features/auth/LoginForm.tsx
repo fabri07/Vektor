@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useLogin } from "@/hooks/useAuth";
+import { resendVerificationRequest } from "@/services/auth.service";
 import { loginSchema } from "@/validation/auth";
 import type { LoginInput } from "@/validation/auth";
 import type { AxiosError } from "axios";
@@ -23,17 +24,20 @@ const EyeOff = () => (
 );
 
 const inputClass =
-  "w-full rounded-lg border border-[#E5E9F0] px-4 py-3 text-[15px] text-gray-900 placeholder:text-gray-400 focus:border-[#2B7FD4] focus:outline-none focus:ring-[3px] focus:ring-[#2B7FD4]/15 transition-colors";
+  "w-full rounded-lg border border-vk-border-w px-4 py-3 text-[15px] text-vk-text-primary placeholder:text-vk-text-placeholder focus:border-vk-blue/40 focus:outline-none focus:ring-[3px] focus:ring-vk-blue/15 transition-colors bg-vk-surface-w";
 const inputErrorClass =
-  "w-full rounded-lg border border-red-400 px-4 py-3 text-[15px] text-gray-900 placeholder:text-gray-400 focus:border-red-500 focus:outline-none focus:ring-[3px] focus:ring-red-400/15 transition-colors";
+  "w-full rounded-lg border border-vk-danger/60 px-4 py-3 text-[15px] text-vk-text-primary placeholder:text-vk-text-placeholder focus:border-vk-danger/60 focus:outline-none focus:ring-[3px] focus:ring-vk-danger/20 transition-colors bg-vk-surface-w";
 
 export function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const justRegistered = searchParams.get("registered") === "1";
   const login = useLogin();
 
   const [values, setValues] = useState<LoginInput>({ email: "", password: "" });
   const [touched, setTouched] = useState({ email: false, password: false });
   const [showPassword, setShowPassword] = useState(false);
+  const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
 
   const fieldErrors = useMemo(() => {
     const result = loginSchema.safeParse(values);
@@ -43,10 +47,20 @@ export function LoginForm() {
     ) as Partial<Record<keyof LoginInput, string>>;
   }, [values]);
 
-  const serverError = login.error
-    ? ((login.error as AxiosError<ApiError>).response?.data?.detail ??
-        "Credenciales incorrectas. Intentá de nuevo.")
-    : null;
+  const loginError = login.error as AxiosError<ApiError> | null;
+  const isEmailNotVerified =
+    loginError?.response?.status === 403 &&
+    loginError?.response?.data?.detail === "email_not_verified";
+
+  const serverError =
+    !isEmailNotVerified && login.error
+      ? (() => {
+          const detail = loginError?.response?.data?.detail;
+          if (!detail) return "Credenciales incorrectas. Intentá de nuevo.";
+          if (typeof detail === "string") return detail;
+          return detail.map((e) => e.msg).join(" · ");
+        })()
+      : null;
 
   function handleChange(field: keyof LoginInput, value: string) {
     setValues((prev) => ({ ...prev, [field]: value }));
@@ -59,6 +73,7 @@ export function LoginForm() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setTouched({ email: true, password: true });
+    setResendState("idle");
 
     const result = loginSchema.safeParse(values);
     if (!result.success) return;
@@ -68,13 +83,24 @@ export function LoginForm() {
     });
   }
 
+  async function handleResend() {
+    if (!values.email) return;
+    setResendState("sending");
+    try {
+      await resendVerificationRequest(values.email);
+      setResendState("sent");
+    } catch {
+      setResendState("idle");
+    }
+  }
+
   const isValid = loginSchema.safeParse(values).success;
 
   return (
     <form onSubmit={handleSubmit} noValidate className="space-y-5">
       {/* Email */}
       <div>
-        <label htmlFor="login-email" className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label htmlFor="login-email" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
           Email
         </label>
         <input
@@ -90,7 +116,7 @@ export function LoginForm() {
           aria-invalid={touched.email && !!fieldErrors.email}
         />
         {touched.email && fieldErrors.email && (
-          <p id="login-email-error" role="alert" className="mt-1 text-sm text-red-600">
+          <p id="login-email-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.email}
           </p>
         )}
@@ -98,7 +124,7 @@ export function LoginForm() {
 
       {/* Password */}
       <div>
-        <label htmlFor="login-password" className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label htmlFor="login-password" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
           Contraseña
         </label>
         <div className="relative">
@@ -117,22 +143,51 @@ export function LoginForm() {
           <button
             type="button"
             onClick={() => setShowPassword((v) => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-[#2B7FD4]/30 rounded"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-vk-text-muted hover:text-vk-text-secondary focus:outline-none focus:ring-2 focus:ring-vk-blue/30 rounded"
             aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
           >
             {showPassword ? <EyeOff /> : <EyeOpen />}
           </button>
         </div>
         {touched.password && fieldErrors.password && (
-          <p id="login-password-error" role="alert" className="mt-1 text-sm text-red-600">
+          <p id="login-password-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.password}
           </p>
         )}
       </div>
 
-      {/* Server error */}
+      {/* Email not verified banner */}
+      {isEmailNotVerified && (
+        <div role="alert" className="rounded-lg border border-vk-warning/30 bg-vk-warning-bg px-4 py-3 text-sm text-vk-warning">
+          <p className="font-medium">Verificá tu email para poder ingresar.</p>
+          <p className="mt-0.5 text-vk-warning/80">
+            Revisá tu bandeja de entrada o reenviá el link de verificación.
+          </p>
+          {resendState === "sent" ? (
+            <p className="mt-2 font-medium text-vk-success">Email enviado. Revisá tu bandeja.</p>
+          ) : (
+            <button
+              type="button"
+              onClick={handleResend}
+              disabled={resendState === "sending" || !values.email}
+              className="mt-2 text-vk-blue font-medium hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {resendState === "sending" ? "Enviando..." : "Reenviar verificación"}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Account just created (no email verification required) */}
+      {justRegistered && (
+        <p role="status" className="rounded-lg border border-vk-success/20 bg-vk-success-bg px-4 py-3 text-sm text-vk-success">
+          ¡Cuenta creada! Ingresá con tu email y contraseña.
+        </p>
+      )}
+
+      {/* Generic server error */}
       {serverError && (
-        <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+        <p role="alert" className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
           {serverError}
         </p>
       )}
@@ -141,7 +196,7 @@ export function LoginForm() {
       <button
         type="submit"
         disabled={login.isPending || !isValid}
-        className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#2B7FD4] px-4 py-3 text-[15px] font-semibold text-white transition-colors hover:bg-[#1E6BB8] focus:outline-none focus:ring-2 focus:ring-[#2B7FD4]/40 disabled:cursor-not-allowed disabled:opacity-60"
+        className="flex w-full items-center justify-center gap-2 rounded-lg bg-vk-blue px-4 py-3 text-[15px] font-semibold text-white transition-colors hover:bg-vk-blue-hover focus:outline-none focus:ring-2 focus:ring-vk-blue/40 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {login.isPending && (
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
@@ -149,9 +204,9 @@ export function LoginForm() {
         {login.isPending ? "Ingresando..." : "Iniciar sesión"}
       </button>
 
-      <p className="text-center text-sm text-gray-500">
+      <p className="text-center text-sm text-vk-text-secondary">
         ¿No tenés cuenta?{" "}
-        <a href="/register" className="font-medium text-[#2B7FD4] hover:text-[#1E6BB8] focus:outline-none focus:underline">
+        <a href="/register" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
           Creá una gratis
         </a>
       </p>

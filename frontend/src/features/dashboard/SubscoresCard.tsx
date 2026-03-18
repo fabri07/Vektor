@@ -4,41 +4,35 @@ interface Props {
   score: HealthScoreV2Response;
 }
 
-interface SubScore {
-  label: string;
-  value: number;
-  color: string;
-}
-
-function scoreColor(value: number): string {
-  if (value >= 70) return "bg-emerald-500";
-  if (value >= 45) return "bg-amber-400";
-  return "bg-red-500";
+function scoreColorClass(value: number): string {
+  if (value > 70) return "bg-vk-success";
+  if (value >= 40) return "bg-vk-warning";
+  return "bg-vk-danger";
 }
 
 export function SubscoresCard({ score }: Props) {
-  const subscores: SubScore[] = [
-    { label: "Caja", value: score.score_cash, color: scoreColor(score.score_cash) },
-    { label: "Margen", value: score.score_margin, color: scoreColor(score.score_margin) },
-    { label: "Stock", value: score.score_stock, color: scoreColor(score.score_stock) },
-    { label: "Proveedores", value: score.score_supplier, color: scoreColor(score.score_supplier) },
+  const subscores = [
+    { label: "Caja", value: score.score_cash },
+    { label: "Margen", value: score.score_margin },
+    { label: "Stock", value: score.score_stock },
+    { label: "Proveedores", value: score.score_supplier },
   ];
 
   return (
-    <div className="col-span-2 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-      <p className="mb-5 text-xs font-medium uppercase tracking-widest text-gray-400">
+    <div className="rounded-lg border border-vk-border-w bg-vk-surface-w p-6 shadow-vk-sm transition-[box-shadow,transform] duration-200 hover:shadow-vk-md hover:-translate-y-0.5">
+      <p className="mb-5 text-xs font-medium uppercase tracking-widest text-vk-text-muted">
         Dimensiones
       </p>
       <div className="space-y-4">
         {subscores.map((sub) => (
           <div key={sub.label}>
             <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-sm font-medium text-gray-700">{sub.label}</span>
-              <span className="text-sm font-semibold text-gray-800">{sub.value}</span>
+              <span className="text-sm font-medium text-vk-text-secondary">{sub.label}</span>
+              <span className="text-sm font-semibold text-vk-text-primary">{sub.value}</span>
             </div>
-            <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+            <div className="h-2 w-full overflow-hidden rounded-full bg-vk-border-w">
               <div
-                className={`h-full rounded-full transition-all ${sub.color}`}
+                className={`h-full rounded-full transition-all ${scoreColorClass(sub.value)}`}
                 style={{ width: `${sub.value}%` }}
               />
             </div>

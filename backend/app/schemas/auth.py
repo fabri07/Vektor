@@ -32,6 +32,7 @@ class UserInAuthResponse(BaseModel):
 
     user_id: UUID
     email: str
+    full_name: str
     role_code: str
     tenant_id: UUID
 
@@ -77,3 +78,22 @@ class RefreshRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class RegisterResponse(BaseModel):
+    """Response for POST /register.
+    requires_verification=True means the user must click the email link before logging in.
+    requires_verification=False means the account is active immediately (e.g. DEBUG mode).
+    """
+
+    message: str
+    email: str
+    requires_verification: bool = True
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr

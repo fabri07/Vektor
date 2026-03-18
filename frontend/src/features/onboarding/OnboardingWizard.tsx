@@ -91,7 +91,7 @@ export function OnboardingWizard() {
   const { step, vertical, formData, submitError, isSubmitting } = state;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-[#F4F4F8]">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-vk-bg-light">
       <div className="flex min-h-full items-start justify-center px-4 py-10 sm:items-center sm:py-16">
         <div className="w-full max-w-2xl">
           {/* Progress bar — hidden on step 4 */}
@@ -114,7 +114,7 @@ export function OnboardingWizard() {
                     type="button"
                     disabled={!vertical}
                     onClick={handleStep1Next}
-                    className="h-11 rounded-xl bg-[#1A1A2E] px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[#1A1A2E]/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Siguiente
                   </button>

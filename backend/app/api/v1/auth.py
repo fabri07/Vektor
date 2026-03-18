@@ -1,4 +1,5 @@
-"""Auth endpoints: register, login, me, refresh, logout, change-password."""
+"""Auth endpoints: register, login, me, refresh, logout, change-password,
+verify-email, resend-verification."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -18,8 +19,11 @@ from app.schemas.auth import (
     MeResponse,
     RefreshRequest,
     RegisterRequest,
+    RegisterResponse,
+    ResendVerificationRequest,
     SubscriptionInMeResponse,
     TokenResponse,
+    VerifyEmailRequest,
 )
 from app.schemas.common import MessageResponse
 
@@ -28,7 +32,7 @@ router = APIRouter()
 
 @router.post(
     "/register",
-    response_model=AuthResponse,
+    response_model=RegisterResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Register a new tenant and owner user",
 )
@@ -37,7 +41,7 @@ async def register(
     request: Request,
     body: RegisterRequest,
     session: AsyncSession = Depends(get_db_session),
-) -> AuthResponse:
+) -> RegisterResponse:
     service = AuthService(session)
     return await service.register(body)
 
@@ -61,6 +65,38 @@ async def login(
             detail="Invalid email or password.",
         )
     return result
+
+
+@router.post(
+    "/verify-email",
+    response_model=AuthResponse,
+    summary="Verify email address and receive a JWT access token",
+)
+@limiter.limit("10/5minutes")
+async def verify_email(
+    request: Request,
+    body: VerifyEmailRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> AuthResponse:
+    service = AuthService(session)
+    return await service.verify_email(body.token)
+
+
+@router.post(
+    "/resend-verification",
+    response_model=MessageResponse,
+    summary="Resend the email verification link",
+)
+@limiter.limit("3/15minutes")
+async def resend_verification(
+    request: Request,
+    body: ResendVerificationRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> MessageResponse:
+    service = AuthService(session)
+    await service.resend_verification(body.email)
+    # Always return 200 regardless of whether the email exists (avoid enumeration)
+    return MessageResponse(message="Si el email está registrado y pendiente de verificación, recibirás un nuevo link.")
 
 
 @router.get(

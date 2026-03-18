@@ -56,7 +56,7 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
         className={[
           "flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors cursor-pointer",
           dragOver
-            ? "border-[#1A1A2E] bg-gray-100"
+            ? "border-vk-navy bg-vk-bg-light"
             : file
               ? "border-green-400 bg-green-50"
               : "border-gray-300 bg-white hover:border-gray-400",
@@ -89,7 +89,7 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
           <div>
             <p className="text-sm font-medium text-gray-700">
               Arrastrá tu archivo aquí o{" "}
-              <span className="text-[#1A1A2E] underline underline-offset-2">
+              <span className="text-vk-navy underline underline-offset-2">
                 elegí uno
               </span>
             </p>
@@ -118,7 +118,7 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
         <button
           type="button"
           onClick={() => onNext(file)}
-          className="h-11 rounded-xl bg-[#1A1A2E] px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[#1A1A2E]/30"
+          className="h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
         >
           {file ? "Continuar con archivo" : "Continuar"}
         </button>

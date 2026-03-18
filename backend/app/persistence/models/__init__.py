@@ -1,5 +1,6 @@
 # Re-export all models so Alembic autogenerate can discover them.
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.auth_token import EmailVerificationToken
 from app.persistence.models.business import (
     ActionSuggestion,
     BusinessProfile,
@@ -37,4 +38,5 @@ __all__ = [
     "DecisionAuditLog",
     "UploadedFile",
     "Notification",
+    "EmailVerificationToken",
 ]

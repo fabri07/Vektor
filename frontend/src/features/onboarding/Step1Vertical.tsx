@@ -123,8 +123,8 @@ export function Step1Vertical({ selected, onSelect }: Step1VerticalProps) {
                 className={[
                   "inline-flex h-11 w-11 items-center justify-center rounded-xl transition-colors",
                   isSelected
-                    ? "bg-[#E63946] text-white"
-                    : "bg-gray-100 text-gray-500",
+                    ? "bg-vk-blue text-white"
+                    : "bg-vk-border-w text-vk-text-secondary",
                 ].join(" ")}
               >
                 {v.icon}

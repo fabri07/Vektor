@@ -3,10 +3,10 @@ import Link from "next/link";
 export function EmptyState() {
   return (
     <div className="flex flex-1 items-center justify-center">
-      <div className="max-w-sm rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
-        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-gray-50">
+      <div className="max-w-sm rounded-lg border border-vk-border-w bg-vk-surface-w p-10 text-center shadow-vk-sm">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-vk-bg-light">
           <svg
-            className="h-7 w-7 text-gray-400"
+            className="h-7 w-7 text-vk-text-muted"
             fill="none"
             stroke="currentColor"
             strokeWidth={1.5}
@@ -19,19 +19,20 @@ export function EmptyState() {
             />
           </svg>
         </div>
-        <h2 className="mb-2 text-base font-semibold text-gray-800">
+        <h2 className="mb-2 text-base font-semibold text-vk-text-primary">
           Completá el onboarding para ver tu score
         </h2>
-        <p className="mb-6 text-sm text-gray-500">
+        <p className="mb-6 text-sm text-vk-text-muted">
           Agregá tus primeras ventas o gastos para que Véktor pueda calcular la
           salud financiera de tu negocio.
         </p>
         <Link
-          href="/ingestion"
-          className="inline-flex h-9 items-center justify-center rounded-lg bg-accent px-4 text-sm font-medium text-white transition-colors hover:bg-accent-600"
+          href="/onboarding"
+          className="inline-flex h-9 items-center justify-center rounded-lg bg-vk-blue px-4 text-sm font-medium text-white transition-colors hover:bg-vk-blue-hover"
         >
           Ir al onboarding
         </Link>
+        <p className="mt-2 text-xs text-vk-text-muted">Lleva solo 3 minutos</p>
       </div>
     </div>
   );
