@@ -36,6 +36,10 @@ function FieldHint({ text }: { text: string }) {
   return <p className="mt-1.5 text-xs text-gray-400">{text}</p>;
 }
 
+function FieldHelper({ text }: { text: string }) {
+  return <p className="mt-1 text-xs italic text-vk-text-muted">{text}</p>;
+}
+
 function FieldError({ text }: { text: string }) {
   return <p className="mt-1.5 text-xs text-vk-danger">{text}</p>;
 }
@@ -46,6 +50,7 @@ function NumberInput({
   value,
   onChange,
   hint,
+  helper,
   error,
   prefix,
   isInteger,
@@ -55,6 +60,7 @@ function NumberInput({
   value: string;
   onChange: (v: string) => void;
   hint: string;
+  helper?: string;
   error?: string;
   prefix?: string;
   isInteger?: boolean;
@@ -90,6 +96,7 @@ function NumberInput({
         />
       </div>
       {error ? <FieldError text={error} /> : <FieldHint text={hint} />}
+      {helper && <FieldHelper text={helper} />}
     </div>
   );
 }
@@ -175,6 +182,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           value={fields.weekly_sales_estimate_ars}
           onChange={set("weekly_sales_estimate_ars")}
           hint="Suma total de ventas en una semana típica, en pesos."
+          helper="Usamos esto para calcular tu margen estimado. No hace falta que sea exacto."
           error={errors.weekly_sales_estimate_ars}
           prefix="$"
         />
@@ -185,6 +193,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           value={fields.monthly_inventory_cost_ars}
           onChange={set("monthly_inventory_cost_ars")}
           hint="Todo lo que comprás para reponer stock en un mes."
+          helper="Junto con tus ventas, determina si estás ganando o perdiendo en cada producto."
           prefix="$"
         />
 
@@ -194,6 +203,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           value={fields.monthly_fixed_expenses_ars}
           onChange={set("monthly_fixed_expenses_ars")}
           hint="Alquiler, luz, internet, teléfono y otros gastos fijos."
+          helper="Necesitamos saber tu punto de equilibrio: cuánto tenés que vender para no perder."
           prefix="$"
         />
 
@@ -203,6 +213,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           value={fields.cash_on_hand_ars}
           onChange={set("cash_on_hand_ars")}
           hint="Efectivo en caja o en cuenta bancaria, lo que tenés para operar."
+          helper="Este dato tiene 7 días de vigencia. Podés actualizarlo cuando quieras desde el dashboard."
           prefix="$"
         />
 
@@ -212,6 +223,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           value={fields.product_count_estimate}
           onChange={set("product_count_estimate")}
           hint="Una cantidad aproximada está bien, no necesitás ser exacto."
+          helper="Con 5 o más productos podemos darte recomendaciones específicas por categoría."
           error={errors.product_count_estimate}
           isInteger
         />

@@ -7,6 +7,7 @@ import {
   healthScoreService,
   type HealthScoreLatest,
 } from "@/services/health_score.service";
+import { Badge } from "@/components/ui/Badge";
 
 const LEVEL_LABELS: Record<string, string> = {
   HEALTHY: "Saludable",
@@ -15,38 +16,37 @@ const LEVEL_LABELS: Record<string, string> = {
   CRITICAL: "Crítico",
 };
 
-const LEVEL_COLORS: Record<string, string> = {
-  HEALTHY: "text-green-600 bg-green-50 border-green-200",
-  MODERATE: "text-yellow-600 bg-yellow-50 border-yellow-200",
-  AT_RISK: "text-orange-600 bg-orange-50 border-orange-200",
-  CRITICAL: "text-red-600 bg-red-50 border-red-200",
+const LEVEL_BADGE_VARIANT: Record<string, "success" | "warning" | "danger" | "default"> = {
+  HEALTHY: "success",
+  MODERATE: "warning",
+  AT_RISK: "danger",
+  CRITICAL: "danger",
 };
 
-const MAX_POLLS = 20; // 40 seconds max
+const MAX_POLLS = 20; // 40 segundos máx
 
 function ScorePreview({ score }: { score: HealthScoreLatest }) {
   const levelLabel = LEVEL_LABELS[score.level] ?? score.level;
-  const levelColor =
-    LEVEL_COLORS[score.level] ?? "text-gray-600 bg-gray-50 border-gray-200";
+  const badgeVariant = LEVEL_BADGE_VARIANT[score.level] ?? "default";
 
   return (
-    <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-6 text-center shadow-sm">
-      <p className="text-sm font-medium text-gray-500">
+    <div className="mt-8 w-full rounded-2xl border border-vk-border-w bg-vk-surface-w p-6 text-center shadow-vk-sm">
+      <p className="text-sm font-medium text-vk-text-muted">
         Tu puntaje de salud financiera
       </p>
-      <p className="mt-2 text-5xl font-bold text-gray-900">
-        {Math.round(Number(score.score_total))}
-        <span className="text-2xl text-gray-400">/100</span>
+      <p className="mt-2 leading-none">
+        <span
+          className="font-bold text-vk-navy"
+          style={{ fontSize: "var(--vk-text-metric)" }}
+        >
+          {Math.round(Number(score.score_total))}
+        </span>
+        <span className="text-2xl font-light text-vk-text-muted">/100</span>
       </p>
-      <span
-        className={[
-          "mt-3 inline-block rounded-full border px-3 py-1 text-xs font-semibold",
-          levelColor,
-        ].join(" ")}
-      >
-        {levelLabel}
-      </span>
-      <p className="mt-4 text-sm text-gray-500">
+      <div className="mt-3 flex justify-center">
+        <Badge variant={badgeVariant}>{levelLabel}</Badge>
+      </div>
+      <p className="mt-4 text-sm text-vk-text-muted">
         Redirigiendo a tu panel...
       </p>
     </div>
@@ -77,7 +77,7 @@ export function Step4Loading() {
     return () => clearTimeout(t);
   }, [score, router]);
 
-  // Timeout fallback: redirect after MAX_POLLS * 2s + 2s buffer
+  // Fallback: redirigir después de MAX_POLLS * 2s + 2s de buffer
   useEffect(() => {
     const t = setTimeout(
       () => {
@@ -93,13 +93,13 @@ export function Step4Loading() {
       {!score ? (
         <>
           <div className="relative flex h-20 w-20 items-center justify-center">
-            <div className="absolute inset-0 animate-spin rounded-full border-4 border-gray-200 border-t-[#1A1A2E]" />
+            <div className="absolute inset-0 animate-spin rounded-full border-4 border-vk-border-w border-t-vk-navy" />
           </div>
-          <h2 className="mt-6 text-xl font-semibold text-gray-900">
-            Analizando tu negocio...
+          <h2 className="mt-6 text-xl font-semibold text-vk-text-primary">
+            Perfecto. Analizando tu negocio...
           </h2>
-          <p className="mt-2 text-sm text-gray-500">
-            Esto puede tardar unos segundos. No cerrés esta ventana.
+          <p className="mt-2 text-sm text-vk-text-muted">
+            Esto tarda menos de 10 segundos.
           </p>
         </>
       ) : (

@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
+import { VektorLogo } from "@/components/ui/VektorLogo";
 
 // ── Data ─────────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,7 @@ function Navbar() {
   return (
     <nav className="fixed inset-x-0 top-0 z-50 border-b border-vk-border-dark/60 bg-vk-bg-dark/90 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-        <span className="text-lg font-bold tracking-tight text-white">VÉKTOR</span>
+        <VektorLogo variant="full" size="md" theme="dark" />
         <div className="flex items-center gap-3">
           <a
             href="/login"
@@ -88,14 +89,13 @@ function Hero() {
           className="font-bold text-vk-text-light"
           style={{ fontSize: "clamp(2rem, 5vw, 3.5rem)", lineHeight: 1.15 }}
         >
-          Tu negocio claro,
+          La IA que cuida la salud
           <br />
-          todos los días.
+          de tu negocio
         </h1>
         <p className="mx-auto mt-6 max-w-xl text-[18px] leading-relaxed text-vk-text-muted">
-          Véktor analiza tu caja, margen y stock en tiempo real.
-          <br className="hidden sm:block" />
-          Sin contabilidad. Sin hojas de cálculo. Sin sorpresas.
+          Véktor es tu asistente de IA que analiza tus ventas, gastos, stock y
+          muchas cosas más en tiempo real.
         </p>
         <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
           <a
@@ -105,10 +105,10 @@ function Hero() {
             Empezar gratis
           </a>
           <a
-            href="/demo"
+            href="/pricing"
             className="w-full rounded-xl border border-vk-border-dark px-8 py-4 text-base font-medium text-vk-text-light transition-colors hover:border-vk-text-muted hover:bg-vk-surface-1 focus:outline-none focus:ring-2 focus:ring-vk-blue/20 sm:w-auto"
           >
-            Ver demo
+            Vektorizate
           </a>
         </div>
       </div>
@@ -191,8 +191,8 @@ function Footer() {
       <div className="mx-auto max-w-5xl px-6">
         <div className="flex flex-col items-center gap-6 sm:flex-row sm:justify-between">
           <div>
-            <span className="text-lg font-bold tracking-tight text-white">VÉKTOR</span>
-            <p className="mt-1 text-xs text-vk-text-muted">No trabajes más. Decidí mejor.</p>
+            <VektorLogo variant="wordmark" size="md" theme="dark" />
+            <p className="mt-1 text-xs text-vk-text-muted">Trabaja menos y toma las mejores decisiones.</p>
           </div>
           <nav className="flex flex-wrap justify-center gap-5" aria-label="Footer">
             {[

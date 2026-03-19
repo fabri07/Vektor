@@ -1,7 +1,16 @@
 export { Button } from "./Button";
+export { VektorLogo } from "./VektorLogo";
+export type { LogoVariant, LogoSize, LogoTheme } from "./VektorLogo";
 export { Card, CardHeader, CardTitle } from "./Card";
 export { Badge } from "./Badge";
 export { Input } from "./Input";
+export { Select } from "./Select";
+export type { SelectOption } from "./Select";
+export { Tabs } from "./Tabs";
+export type { TabItem } from "./Tabs";
+export { Table } from "./Table";
+export type { TableColumn } from "./Table";
+export { Tooltip } from "./Tooltip";
 export { EmptyState } from "./EmptyState";
 export { StatCard } from "./StatCard";
 export { Modal } from "./Modal";

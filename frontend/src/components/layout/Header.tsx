@@ -86,7 +86,12 @@ export function Header({ onMenuToggle }: HeaderProps) {
         >
           <Bell className="h-[18px] w-[18px]" />
           {unreadCount > 0 && (
-            <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-vk-danger text-[10px] font-bold text-white leading-none">
+            <span
+              className={[
+                "absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-vk-danger text-[10px] font-bold text-white leading-none",
+                !panelOpen ? "animate-vk-pulse" : "",
+              ].join(" ")}
+            >
               {unreadCount > 9 ? "9+" : unreadCount}
             </span>
           )}

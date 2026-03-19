@@ -19,7 +19,6 @@ interface WizardState {
   isSubmitting: boolean;
 }
 
-const TOTAL_STEPS = 4;
 
 export function OnboardingWizard() {
   const [state, setState] = useState<WizardState>({
@@ -94,13 +93,11 @@ export function OnboardingWizard() {
     <div className="fixed inset-0 z-50 overflow-y-auto bg-vk-bg-light">
       <div className="flex min-h-full items-start justify-center px-4 py-10 sm:items-center sm:py-16">
         <div className="w-full max-w-2xl">
-          {/* Progress bar — hidden on step 4 */}
-          {step < 4 && (
-            <ProgressBar currentStep={step} totalSteps={TOTAL_STEPS} />
-          )}
+          {/* Progress bar — visible en todos los pasos, step 4 muestra "Tu score" como actual */}
+          <ProgressBar currentStep={step} />
 
           {/* Card */}
-          <div className="rounded-2xl border border-gray-200 bg-white px-8 py-8 shadow-sm sm:px-10">
+          <div className="rounded-2xl border border-gray-200 bg-white px-4 py-6 shadow-sm sm:px-8 sm:py-8 md:px-10">
             {step === 1 && (
               <>
                 <Step1Vertical

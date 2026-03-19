@@ -1,9 +1,10 @@
 import { RegisterForm } from "@/features/auth/RegisterForm";
+import { VektorLogo } from "@/components/ui/VektorLogo";
 
 const CHECK_ITEMS = [
   "Salud financiera en tiempo real",
-  "Diseñado para PYMEs argentinas",
-  "Sin contabilidad, sin complejidad",
+  "Diseño personalizado para tu negocio",
+  "Automatiza todas esas tareas aburridas, simple y claro",
 ];
 
 const TRUST_ITEMS = [
@@ -18,11 +19,9 @@ export default function RegisterPage() {
       {/* Left panel — desktop only */}
       <div className="hidden md:flex flex-col bg-vk-bg-dark px-12 py-12">
         <div className="flex-1">
-          <span className="text-[28px] font-bold tracking-tight text-white">
-            VÉKTOR
-          </span>
+          <VektorLogo variant="full" size="lg" theme="dark" />
           <p className="mt-3 text-base text-vk-text-muted">
-            No trabajes más. Decidí mejor.
+            Trabaja menos y toma las mejores decisiones.
           </p>
 
           <ul className="mt-10 space-y-4">
@@ -55,7 +54,7 @@ export default function RegisterPage() {
         <div className="w-full max-w-[400px]">
           {/* Mobile logo */}
           <div className="mb-8 md:hidden">
-            <span className="text-2xl font-bold tracking-tight text-vk-navy">VÉKTOR</span>
+            <VektorLogo variant="full" size="md" theme="light" />
           </div>
 
           <h1 className="mb-2 text-2xl font-semibold text-vk-navy">

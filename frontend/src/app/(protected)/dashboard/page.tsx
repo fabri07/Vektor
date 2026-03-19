@@ -12,6 +12,10 @@ import { EmptyState } from "@/features/dashboard/EmptyState";
 import { MomentumWidget } from "@/features/dashboard/MomentumWidget";
 import type { HealthScoreV2Response } from "@/types/api";
 
+// Clase base para hover lift en cards del dashboard
+const CARD_HOVER =
+  "transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-vk-md";
+
 function isCalculating(data: unknown): boolean {
   return (
     typeof data === "object" &&
@@ -84,29 +88,38 @@ export default function DashboardPage() {
       <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
 
       {/* Hero — ancho completo */}
-      <HealthScoreCard score={score} delta={delta} isBestScore={isBestScore} />
+      <div className={CARD_HOVER}>
+        <HealthScoreCard score={score} delta={delta} isBestScore={isBestScore} />
+      </div>
 
       {/* Grid 2 columnas: Risk + Action en primera fila, Subscores full en segunda */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {insightData ? (
-          <RiskCard insight={insightData.insight} />
-        ) : (
-          <NoInsightCard label="Riesgo Principal" />
-        )}
+        <div className={CARD_HOVER}>
+          {insightData ? (
+            <RiskCard insight={insightData.insight} />
+          ) : (
+            <NoInsightCard label="Riesgo Principal" />
+          )}
+        </div>
 
-        {insightData?.action_suggestion ? (
-          <ActionCard action={insightData.action_suggestion} />
-        ) : (
-          <NoInsightCard label="Acción Sugerida" />
-        )}
+        <div className={CARD_HOVER}>
+          {insightData?.action_suggestion ? (
+            <ActionCard action={insightData.action_suggestion} />
+          ) : (
+            <NoInsightCard label="Acción Sugerida" />
+          )}
+        </div>
 
         {/* Subscores — ancho completo en la segunda fila */}
-        <div className="md:col-span-2">
+        <div className={`md:col-span-2 ${CARD_HOVER}`}>
           <SubscoresCard score={score} />
         </div>
       </div>
 
-      <MomentumWidget />
+      {/* Momentum widget */}
+      <div className={CARD_HOVER}>
+        <MomentumWidget />
+      </div>
     </div>
   );
 }

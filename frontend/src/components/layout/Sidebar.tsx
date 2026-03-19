@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { api } from "@/lib/api";
+import { VektorLogo } from "@/components/ui/VektorLogo";
 
 interface SidebarProps {
   mobileOpen: boolean;
@@ -43,7 +44,14 @@ function getInitials(name: string): string {
 export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
   const user = useAuthStore((s) => s.user);
+  // Default false; useEffect sets true on tablet (md < lg) after hydration
   const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    if (window.innerWidth >= 768 && window.innerWidth < 1024) {
+      setCollapsed(true);
+    }
+  }, []);
 
   const { data: profileData } = useQuery({
     queryKey: ["business-profile"],
@@ -83,15 +91,17 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           href="/dashboard"
           onClick={onClose}
           className={clsx(
-            "flex items-center gap-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60 rounded",
+            "flex items-center focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60 rounded",
             collapsed && "md:justify-center lg:justify-start",
           )}
         >
-          <span className="text-[18px] font-bold tracking-tight text-white">
-            {collapsed ? (
-              <span className="md:block lg:hidden">V</span>
-            ) : null}
-            <span className={collapsed ? "md:hidden lg:inline" : "inline"}>VÉKTOR</span>
+          {/* Collapsed (tablet only): icon only */}
+          <span className={clsx(collapsed ? "md:block lg:hidden" : "hidden")}>
+            <VektorLogo variant="icon" size="md" theme="dark" />
+          </span>
+          {/* Expanded: full logo */}
+          <span className={collapsed ? "md:hidden lg:flex" : "flex"}>
+            <VektorLogo variant="full" size="md" theme="dark" />
           </span>
         </Link>
       </div>
@@ -119,12 +129,12 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
                     onClick={onClose}
                     className={clsx(
                       "flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium",
-                      "transition-colors duration-[150ms]",
+                      "transition-[colors,padding-left] duration-[150ms]",
                       "focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60",
                       isActive
                         ? "bg-vk-surface-1 border-l-[3px] border-l-vk-blue text-vk-text-light pl-[9px]"
-                        : "border-l-[3px] border-l-transparent text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light pl-[9px]",
-                      collapsed && "md:justify-center md:px-0 md:pl-0 lg:justify-start lg:px-3 lg:pl-[9px]",
+                        : "border-l-[3px] border-l-transparent text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light hover:pl-[13px] pl-[9px]",
+                      collapsed && "md:justify-center md:px-0 md:pl-0 md:hover:pl-0 lg:justify-start lg:px-3 lg:pl-[9px] lg:hover:pl-[13px]",
                     )}
                   >
                     <Icon className="h-[18px] w-[18px] shrink-0" />
@@ -182,12 +192,12 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
             onClick={onClose}
             className={clsx(
               "flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium",
-              "border-l-[3px] transition-colors duration-[150ms]",
+              "border-l-[3px] transition-[colors,padding-left] duration-[150ms]",
               "focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60",
               pathname === "/settings"
                 ? "bg-vk-surface-1 border-l-vk-blue text-vk-text-light pl-[9px]"
-                : "border-l-transparent text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light pl-[9px]",
-              collapsed && "md:justify-center md:px-0 md:pl-0 lg:justify-start lg:px-3 lg:pl-[9px]",
+                : "border-l-transparent text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light hover:pl-[13px] pl-[9px]",
+              collapsed && "md:justify-center md:px-0 md:pl-0 md:hover:pl-0 lg:justify-start lg:px-3 lg:pl-[9px] lg:hover:pl-[13px]",
             )}
           >
             <Settings className="h-[18px] w-[18px] shrink-0" />

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import type { HealthScoreV2Response } from "@/types/api";
 
@@ -62,6 +63,40 @@ export function HealthScoreCard({ score, delta, isBestScore }: Props) {
   const badgeVariant: BadgeVariant = CONFIDENCE_VARIANT[confidenceKey] ?? "default";
   const confidenceLabel = CONFIDENCE_LABEL[confidenceKey] ?? score.confidence_level;
   const completeness = Math.round(score.data_completeness_score);
+  const target = Math.round(Number(score.score_total));
+
+  // Counter animation — solo al primer render, no en cada refetch
+  const hasAnimated = useRef(false);
+  const [animatedScore, setAnimatedScore] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (hasAnimated.current) return;
+    hasAnimated.current = true;
+
+    const duration = 600;
+    const start = performance.now();
+    let rafId: number;
+
+    function tick(now: number) {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / duration, 1);
+      // cubic ease-out
+      const eased = 1 - Math.pow(1 - progress, 3);
+      if (progress < 1) {
+        setAnimatedScore(Math.round(eased * target));
+        rafId = requestAnimationFrame(tick);
+      } else {
+        // Animation done — let prop value take over
+        setAnimatedScore(null);
+      }
+    }
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const displayScore = animatedScore !== null ? animatedScore : target;
 
   return (
     <div className="rounded-lg border border-vk-border-w border-l-4 border-l-vk-blue bg-vk-surface-w p-6 shadow-vk-sm">
@@ -78,18 +113,18 @@ export function HealthScoreCard({ score, delta, isBestScore }: Props) {
         </div>
       </div>
 
-      {/* Score + delta */}
-      <div className="flex items-end gap-4">
+      {/* Score + delta — stacked on mobile, side by side on sm+ */}
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:gap-4">
         <div className="flex items-end gap-2">
           <span
             className="font-bold leading-none text-vk-navy"
             style={{ fontSize: "var(--vk-text-metric)" }}
           >
-            {score.score_total}
+            {displayScore}
           </span>
           <span className="mb-1 text-2xl font-light text-vk-text-muted">/ 100</span>
         </div>
-        <div className="mb-1">
+        <div className="sm:mb-1">
           <DeltaIndicator delta={delta} />
         </div>
       </div>

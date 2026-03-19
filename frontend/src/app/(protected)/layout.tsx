@@ -42,7 +42,7 @@ export default function ProtectedLayout({
 
       <div className="flex flex-1 flex-col overflow-hidden">
         <Header onMenuToggle={() => setMobileOpen((v) => !v)} />
-        <main className="flex-1 overflow-y-auto scrollbar-thin bg-vk-bg-light p-6">
+        <main className="flex-1 overflow-y-auto scrollbar-thin bg-vk-bg-light p-4 sm:p-6">
           <div className="mx-auto max-w-[1200px]">
             {children}
           </div>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 110 90" fill="none">
+  <!-- Brazo izquierdo de la V (navy) -->
+  <polygon points="6,8 30,8 46,80" fill="#1A2744"/>
+  <!-- Escalón 1 (azul) -->
+  <polygon points="52,83 42,76 54,59 64,66" fill="#2B7FD4"/>
+  <!-- Escalón 2 (azul) -->
+  <polygon points="65,65 54,58 67,41 77,48" fill="#2B7FD4"/>
+  <!-- Escalón 3 (azul) -->
+  <polygon points="79,47 69,40 82,23 91,30" fill="#2B7FD4"/>
+  <!-- Cabeza de flecha (azul) -->
+  <polygon points="97,12 75,18 98,35" fill="#2B7FD4"/>
+</svg>

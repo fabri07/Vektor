@@ -13,7 +13,7 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantClasses: Record<Variant, string> = {
   primary:
-    "bg-vk-blue text-white hover:bg-vk-blue-hover focus-visible:ring-vk-blue/40",
+    "bg-vk-blue text-white hover:bg-vk-blue-hover focus-visible:ring-vk-blue/40 active:scale-[0.98]",
   secondary:
     "bg-vk-border-w text-vk-text-primary hover:bg-vk-border-w-hover focus-visible:ring-vk-border-w-hover/40",
   ghost:
@@ -47,7 +47,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         disabled={disabled || loading}
         className={twMerge(
           clsx(
-            "inline-flex items-center justify-center rounded-lg font-medium transition-colors",
+            "inline-flex items-center justify-center rounded-lg font-medium transition-[colors,transform] duration-[150ms]",
             "focus-visible:outline-none focus-visible:ring-2",
             "disabled:pointer-events-none disabled:opacity-40",
             variantClasses[variant],
