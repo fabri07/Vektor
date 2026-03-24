@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     ENABLE_EMAIL_VERIFICATION: bool = True
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
 
+    # ── Demo mode ─────────────────────────────────────────────────────────────
+    # Set DEMO_MODE=true to pre-load a kiosco tenant with realistic sample data.
+    # In demo mode email verification is always skipped.
+    DEMO_MODE: bool = False
+    DEMO_EMAIL: str = "demo@vektor.app"
+    DEMO_PASSWORD: str = "demo1234!"
+
     # ── Frontend ──────────────────────────────────────────────────────────────
     FRONTEND_URL: str = "http://localhost:3000"
 
@@ -111,8 +118,8 @@ class Settings(BaseSettings):
             merged_origins = list(dict.fromkeys([*self.CORS_ORIGINS, *self.DEV_CORS_ORIGINS]))
             self.CORS_ORIGINS = merged_origins
 
-        if self.DEBUG:
-            # In debug mode, skip email verification so local testing isn't blocked.
+        if self.DEBUG or self.DEMO_MODE:
+            # In debug/demo mode, skip email verification so local testing isn't blocked.
             self.ENABLE_EMAIL_VERIFICATION = False
 
         if self.ENVIRONMENT == "production":

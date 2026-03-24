@@ -12,11 +12,203 @@ Plataforma SaaS de salud financiera para PYMEs argentinas.
 | Infra | Docker + docker-compose |
 | Storage | S3-compatible (boto3) |
 
+---
+
+## Demo
+
+Levantá el stack completo con datos de demo precargados:
+
+```bash
+# 1. Levantar servicios
+cd backend
+docker compose -f docker-compose.yml up --build -d
+
+# 2. Correr migraciones
+make migrate
+
+# 3. Cargar datos de demo (kiosco saludable)
+make seed-demo
+
+# 4. Abrir el frontend
+open http://localhost:3000
+```
+
+**Credenciales de demo:**
+
+| Campo | Valor |
+|-------|-------|
+| Email | `demo@vektor.app` |
+| Password | `demo1234!` |
+
+**Estado del tenant demo:**
+
+| Campo | Valor |
+|-------|-------|
+| Score | 74 (+8 vs semana anterior) |
+| Riesgo principal | SUPPLIER_DEPENDENCY |
+| Momentum | 3 semanas de mejora |
+| Hitos | M1 y M2 desbloqueados |
+| Valor protegido | $85.000 ARS |
+| Confianza de datos | 85% (ALTA) |
+
+Para resetear y regenerar los datos de demo:
+
+```bash
+make reset-demo
+```
+
+---
+
+## Development
+
+### Prerrequisitos
+
+- Python 3.12
+- Node.js 20+
+- Docker + Docker Compose
+- PostgreSQL 15 (o usar docker-compose)
+- Redis 7 (o usar docker-compose)
+
+### Backend
+
+```bash
+cd backend
+cp .env.example .env          # completar variables
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+Si no tenés Python 3.12 localmente, usá Docker Compose.
+
+### Frontend
+
+```bash
+cd frontend
+cp .env.local.example .env.local   # ajustar NEXT_PUBLIC_API_URL
+npm install
+npm run dev
+```
+
+### Docker Compose (stack completo)
+
+```bash
+docker compose -f backend/docker-compose.yml up --build
+```
+
+### Variables de entorno clave
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `ENVIRONMENT` | `development` | `development` / `production` |
+| `DEBUG` | `false` | Activa logs verbose y deshabilita verificación de email |
+| `DEMO_MODE` | `false` | Activa modo demo (omite verificación de email) |
+| `DEMO_EMAIL` | `demo@vektor.app` | Email del usuario demo |
+| `DEMO_PASSWORD` | `demo1234!` | Contraseña del usuario demo |
+| `DATABASE_URL` | *(computed)* | Construida desde `POSTGRES_*` vars |
+
+### Comandos útiles
+
+```bash
+make dev          # Docker Compose con hot reload
+make test         # pytest con cobertura
+make lint         # ruff check
+make typecheck    # mypy
+make seed-demo    # Cargar datos de demo
+make reset-demo   # Resetear y recargar datos de demo
+make migrate      # Correr migraciones pendientes
+make migrate-create MSG="descripcion"  # Nueva migración
+```
+
+---
+
+## Architecture
+
+### Flujo principal
+
+```
+HTTP Request
+     │
+     ▼
+┌────────────────────────────────────────┐
+│           FastAPI (main.py)            │
+│  ┌─────────────────────────────────┐   │
+│  │  Middleware stack               │   │
+│  │  • SlowAPI (rate limiter)       │   │
+│  │  • CORS                         │   │
+│  │  • Security headers             │   │
+│  │  • Request logger (structlog)   │   │
+│  └─────────────────────────────────┘   │
+│               │                        │
+│  ┌────────────▼──────────────────────┐ │
+│  │  Router /api/v1/                  │ │
+│  │  auth · tenants · users           │ │
+│  │  sales · expenses · products      │ │
+│  │  health-scores · insights         │ │
+│  │  momentum · files · onboarding    │ │
+│  │  notifications · ingestion        │ │
+│  │  admin (SUPERADMIN only)          │ │
+│  └────────────┬──────────────────────┘ │
+└───────────────┼────────────────────────┘
+                │
+     ┌──────────▼──────────┐
+     │   deps.py (JWT +     │
+     │   RBAC + log ctx)    │
+     └──────────┬──────────┘
+                │
+     ┌──────────▼──────────────────────┐
+     │   Application Services          │
+     │  ┌───────────────────────────┐  │
+     │  │  Business State Layer     │  │
+     │  │  (30-day aggregation)     │  │
+     │  └───────────┬───────────────┘  │
+     │              │                  │
+     │  ┌───────────▼───────────────┐  │
+     │  │  Health Engine            │  │
+     │  │  Heuristics (kiosco /     │  │
+     │  │  decoracion / limpieza)   │  │
+     │  └───────────┬───────────────┘  │
+     └──────────────┼──────────────────┘
+                    │
+     ┌──────────────▼──────────────────┐
+     │   Persistence                   │
+     │  PostgreSQL (async SQLAlchemy)  │
+     │  + decision_audit_log (insert-  │
+     │    only, all decisions logged)  │
+     └──────────────┬──────────────────┘
+                    │
+          ┌─────────▼─────────┐
+          │  Celery Workers   │
+          │ (score recalc +   │
+          │  notifications +  │
+          │  weekly report)   │
+          └───────────────────┘
+
+Observability:
+  structlog → stdout (JSON in prod, pretty in dev)
+  Context per request: environment, method, endpoint, tenant_id, user_id
+  Context per job: job_name, tenant_id, duration_ms, success/error
+  user_activity_events table → onboarding funnel + job stats
+  GET /api/v1/admin/metrics → SUPERADMIN dashboard
+```
+
+### Principios de arquitectura
+
+- **Monolito modular** — sin microservicios en v1
+- **Fail-closed** — cualquier write sensible falla de forma segura
+- **tenant_id enforced** — en CADA query de negocio
+- **Business State Layer** — corre antes del Health Engine en todo cálculo
+- **Scores bajo demanda** — se recalculan solo ante cambios de datos (Celery async)
+- **Insert-only audit log** — toda decisión generada se registra en `decision_audit_log`
+
+---
+
 ## Estructura del repositorio
 
 ```
 Vektor/
-├── backend/          # FastAPI app
+├── backend/
 │   ├── app/
 │   │   ├── api/v1/       # Endpoints REST
 │   │   ├── domain/       # Lógica de negocio pura
@@ -24,11 +216,15 @@ Vektor/
 │   │   ├── persistence/  # Repositories, models, migrations
 │   │   ├── jobs/         # Workers Celery
 │   │   ├── heuristics/   # Reglas por vertical
-│   │   └── state/        # Business State Layer
+│   │   ├── state/        # Business State Layer
+│   │   └── observability/ # structlog + metrics
+│   ├── scripts/
+│   │   └── seed_demo_data.py
+│   ├── Makefile
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   └── requirements*.txt
-├── frontend/         # Next.js app
+├── frontend/
 │   ├── src/
 │   │   ├── app/          # Rutas (App Router)
 │   │   ├── components/   # Componentes compartidos
@@ -46,6 +242,8 @@ Vektor/
         └── ci-frontend.yml
 ```
 
+---
+
 ## CI/CD
 
 Los workflows de GitHub Actions corren automáticamente en push y PR a `main` y `develop`.
@@ -62,36 +260,6 @@ Los workflows de GitHub Actions corren automáticamente en push y PR a `main` y 
 1. `tsc --noEmit` — type checking
 2. `next lint` — ESLint
 3. `next build` — build de producción
-
-## Arranque local
-
-### Backend
-
-```bash
-cd backend
-cp .env.example .env          # completar variables
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt
-alembic upgrade head
-uvicorn app.main:app --reload
-```
-
-Si no tenés `python3.12` disponible localmente, usá Docker Compose para el backend.
-
-### Frontend
-
-```bash
-cd frontend
-cp .env.local.example .env.local   # ajustar NEXT_PUBLIC_API_URL
-npm install
-npm run dev
-```
-
-### Docker Compose (stack completo)
-
-```bash
-docker compose -f backend/docker-compose.yml up --build
-```
 
 ---
 

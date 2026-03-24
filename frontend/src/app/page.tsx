@@ -105,10 +105,10 @@ function Hero() {
             Empezar gratis
           </a>
           <a
-            href="/pricing"
-            className="w-full rounded-xl border border-vk-border-dark px-8 py-4 text-base font-medium text-vk-text-light transition-colors hover:border-vk-text-muted hover:bg-vk-surface-1 focus:outline-none focus:ring-2 focus:ring-vk-blue/20 sm:w-auto"
+            href="/demo"
+            className="w-full rounded-xl border border-vk-border-dark/60 px-8 py-4 text-base font-medium text-vk-text-light transition-colors hover:border-white/40 hover:bg-white/5 focus:outline-none focus:ring-2 focus:ring-white/20 sm:w-auto"
           >
-            Vektorizate
+            Ver demo
           </a>
         </div>
       </div>

@@ -1,4 +1,5 @@
 # Re-export all models so Alembic autogenerate can discover them.
+from app.persistence.models.activity import UserActivityEvent
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.auth_token import EmailVerificationToken
 from app.persistence.models.business import (
@@ -21,6 +22,7 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
 
 __all__ = [
+    "UserActivityEvent",
     "Tenant",
     "Subscription",
     "User",

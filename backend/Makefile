@@ -43,6 +43,12 @@ db-reset: ## Drop and recreate the database (DANGER: destroys all data)
 	$(DOCKER_COMPOSE) exec postgres psql -U vektor -c "CREATE DATABASE vektor;"
 	alembic upgrade head
 
+seed-demo: ## Seed demo tenant (demo@vektor.app) with sample kiosco data
+	$(PYTHON) scripts/seed_demo_data.py
+
+reset-demo: ## Drop and re-seed the demo tenant
+	$(PYTHON) scripts/seed_demo_data.py --reset
+
 # ── Testing ───────────────────────────────────────────────────────────────────
 test: ## Run all tests with coverage
 	pytest

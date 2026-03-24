@@ -14,6 +14,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.observability.logger import bind_request_context
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -47,6 +48,9 @@ async def get_current_user(
     user = await repo.get_by_id(UUID(user_id), UUID(tenant_id))
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found.")
+
+    # Bind tenant_id and user_id into structlog context for this request
+    bind_request_context(tenant_id=user.tenant_id, user_id=user.user_id)
 
     return user
 

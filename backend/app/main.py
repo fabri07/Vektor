@@ -85,13 +85,22 @@ def create_app() -> FastAPI:
     # ── Request logging ───────────────────────────────────────────────────────
     @app.middleware("http")
     async def request_logger(request: Request, call_next):  # type: ignore[no-untyped-def]
+        import structlog.contextvars  # noqa: PLC0415
+
+        # Reset per-request context and pre-bind known fields
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(
+            environment=settings.ENVIRONMENT,
+            method=request.method,
+            endpoint=request.url.path,
+        )
+
         t0 = time.monotonic()
         response = await call_next(request)
         duration_ms = int((time.monotonic() - t0) * 1000)
+
         logger.info(
             "http.request",
-            method=request.method,
-            path=request.url.path,
             status_code=response.status_code,
             duration_ms=duration_ms,
         )
