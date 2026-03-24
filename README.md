@@ -26,32 +26,30 @@ docker compose -f docker-compose.yml up --build -d
 # 2. Correr migraciones
 make migrate
 
-# 3. Cargar datos de demo (kiosco saludable)
+# 3. Cargar los 3 tenants demo
 make seed-demo
 
-# 4. Abrir el frontend
-open http://localhost:3000
+# 4. Abrir el selector de demo
+open http://localhost:3000/demo
 ```
 
-**Credenciales de demo:**
+**3 tenants demo — password: `Demo1234!`**
 
-| Campo | Valor |
-|-------|-------|
-| Email | `demo@vektor.app` |
-| Password | `demo1234!` |
+| Tenant | Email | Score | Estado | Riesgo principal |
+|--------|-------|-------|--------|-----------------|
+| Kiosco San Martín | `demo.kiosco@vektor.app` | 74 | Saludable | SUPPLIER_DEPENDENCY |
+| Distribuidora Clean | `demo.limpieza@vektor.app` | 51 | En riesgo | CASH_LOW |
+| Casa & Deco Palermo | `demo.deco@vektor.app` | 62 | Estable | MARGIN_LOW |
 
-**Estado del tenant demo:**
+**Datos incluidos por tenant:**
+- 8 semanas de historial de scores con tendencia realista
+- Momentum profile completo (hitos, streak, valor protegido)
+- Insights y acciones sugeridas calibradas por rubro
+- 8–15 productos con costo, precio y stock
+- 30 días de ventas y gastos
+- 3 notificaciones no leídas
 
-| Campo | Valor |
-|-------|-------|
-| Score | 74 (+8 vs semana anterior) |
-| Riesgo principal | SUPPLIER_DEPENDENCY |
-| Momentum | 3 semanas de mejora |
-| Hitos | M1 y M2 desbloqueados |
-| Valor protegido | $85.000 ARS |
-| Confianza de datos | 85% (ALTA) |
-
-Para resetear y regenerar los datos de demo:
+Para resetear y regenerar (útil entre demos a inversores):
 
 ```bash
 make reset-demo
