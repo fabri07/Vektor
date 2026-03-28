@@ -125,6 +125,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
             status="ACTIVE",
         )
     )
+    await session.flush()
     session.add(
         Subscription(
             subscription_id=uuid.uuid4(),
@@ -284,6 +285,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
             heuristic_version="v1",
         )
     )
+    await session.flush()
     session.add(
         ActionSuggestion(
             id=uuid.uuid4(),
@@ -438,6 +440,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
             status="ACTIVE",
         )
     )
+    await session.flush()
     session.add(
         Subscription(
             subscription_id=uuid.uuid4(),
@@ -584,6 +587,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
             heuristic_version="v1",
         )
     )
+    await session.flush()
     session.add(
         ActionSuggestion(
             id=uuid.uuid4(),
@@ -615,6 +619,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
             heuristic_version="v1",
         )
     )
+    await session.flush()
     session.add(
         ActionSuggestion(
             id=uuid.uuid4(),
@@ -760,6 +765,7 @@ async def _seed_deco(session: AsyncSession) -> None:
             status="ACTIVE",
         )
     )
+    await session.flush()
     session.add(
         Subscription(
             subscription_id=uuid.uuid4(),
@@ -921,6 +927,7 @@ async def _seed_deco(session: AsyncSession) -> None:
             heuristic_version="v1",
         )
     )
+    await session.flush()
     session.add(
         ActionSuggestion(
             id=uuid.uuid4(),
@@ -952,6 +959,7 @@ async def _seed_deco(session: AsyncSession) -> None:
             heuristic_version="v1",
         )
     )
+    await session.flush()
     session.add(
         ActionSuggestion(
             id=uuid.uuid4(),
