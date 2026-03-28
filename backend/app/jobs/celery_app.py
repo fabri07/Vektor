@@ -9,6 +9,8 @@ Queues:
   - ingestion    : file parsing jobs (spreadsheet, text, OCR)
 """
 
+import ssl
+
 from celery import Celery
 from celery.schedules import crontab as _crontab
 
@@ -32,6 +34,13 @@ celery_app = Celery(
         "app.application.services.score_trigger_service",
     ],
 )
+
+# ── SSL for rediss:// (Upstash / TLS-enabled Redis) ──────────────────────────
+_ssl_opts = {"ssl_cert_reqs": ssl.CERT_NONE}
+if settings.CELERY_BROKER_URL.startswith("rediss://"):
+    celery_app.conf.broker_use_ssl = _ssl_opts
+if settings.CELERY_RESULT_BACKEND.startswith("rediss://"):
+    celery_app.conf.redis_backend_use_ssl = _ssl_opts
 
 celery_app.conf.update(
     task_serializer="json",

@@ -24,25 +24,41 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    conn = op.get_bind()
+
+    def _col_exists(table: str, column: str) -> bool:
+        result = conn.execute(
+            sa.text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = :t AND column_name = :c"
+            ),
+            {"t": table, "c": column},
+        )
+        return result.fetchone() is not None
+
     # ── weekly_score_history ──────────────────────────────────────────────────
-    op.add_column(
-        "weekly_score_history",
-        sa.Column("delta", sa.Numeric(6, 2), nullable=True),
-    )
-    op.add_column(
-        "weekly_score_history",
-        sa.Column("trend_label", sa.String(20), nullable=True),
-    )
+    if not _col_exists("weekly_score_history", "delta"):
+        op.add_column(
+            "weekly_score_history",
+            sa.Column("delta", sa.Numeric(6, 2), nullable=True),
+        )
+    if not _col_exists("weekly_score_history", "trend_label"):
+        op.add_column(
+            "weekly_score_history",
+            sa.Column("trend_label", sa.String(20), nullable=True),
+        )
 
     # ── business_profiles ─────────────────────────────────────────────────────
-    op.add_column(
-        "business_profiles",
-        sa.Column("weekly_report_day", sa.Integer(), nullable=True),
-    )
-    op.add_column(
-        "business_profiles",
-        sa.Column("weekly_report_hour", sa.Integer(), nullable=True),
-    )
+    if not _col_exists("business_profiles", "weekly_report_day"):
+        op.add_column(
+            "business_profiles",
+            sa.Column("weekly_report_day", sa.Integer(), nullable=True),
+        )
+    if not _col_exists("business_profiles", "weekly_report_hour"):
+        op.add_column(
+            "business_profiles",
+            sa.Column("weekly_report_hour", sa.Integer(), nullable=True),
+        )
 
 
 def downgrade() -> None:

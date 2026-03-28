@@ -19,43 +19,72 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _table_exists(conn: sa.engine.Connection, table: str) -> bool:
+    result = conn.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ),
+        {"t": table},
+    )
+    return result.fetchone() is not None
+
+
+def _index_exists(conn: sa.engine.Connection, index: str) -> bool:
+    result = conn.execute(
+        sa.text(
+            "SELECT 1 FROM pg_indexes WHERE indexname = :i"
+        ),
+        {"i": index},
+    )
+    return result.fetchone() is not None
+
+
 def upgrade() -> None:
-    op.create_table(
-        "user_activity_events",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("event_type", sa.Text(), nullable=False),
-        sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"
-        ),
-        sa.ForeignKeyConstraint(
-            ["user_id"], ["users.user_id"], ondelete="SET NULL"
-        ),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index(
-        "ix_user_activity_events_tenant_id",
-        "user_activity_events",
-        ["tenant_id"],
-    )
-    op.create_index(
-        "ix_user_activity_events_user_id",
-        "user_activity_events",
-        ["user_id"],
-    )
-    op.create_index(
-        "ix_user_activity_events_event_type",
-        "user_activity_events",
-        ["event_type"],
-    )
-    op.create_index(
-        "ix_user_activity_events_created_at",
-        "user_activity_events",
-        ["created_at"],
-    )
+    conn = op.get_bind()
+
+    if not _table_exists(conn, "user_activity_events"):
+        op.create_table(
+            "user_activity_events",
+            sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=True),
+            sa.Column("event_type", sa.Text(), nullable=False),
+            sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.ForeignKeyConstraint(
+                ["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"
+            ),
+            sa.ForeignKeyConstraint(
+                ["user_id"], ["users.user_id"], ondelete="SET NULL"
+            ),
+            sa.PrimaryKeyConstraint("id"),
+        )
+
+    if not _index_exists(conn, "ix_user_activity_events_tenant_id"):
+        op.create_index(
+            "ix_user_activity_events_tenant_id",
+            "user_activity_events",
+            ["tenant_id"],
+        )
+    if not _index_exists(conn, "ix_user_activity_events_user_id"):
+        op.create_index(
+            "ix_user_activity_events_user_id",
+            "user_activity_events",
+            ["user_id"],
+        )
+    if not _index_exists(conn, "ix_user_activity_events_event_type"):
+        op.create_index(
+            "ix_user_activity_events_event_type",
+            "user_activity_events",
+            ["event_type"],
+        )
+    if not _index_exists(conn, "ix_user_activity_events_created_at"):
+        op.create_index(
+            "ix_user_activity_events_created_at",
+            "user_activity_events",
+            ["created_at"],
+        )
 
 
 def downgrade() -> None:
