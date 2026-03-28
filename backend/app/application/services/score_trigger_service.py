@@ -26,7 +26,7 @@ def trigger_score_recalculation(tenant_id: str, triggered_by: str) -> None:
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     async def _run() -> None:
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
+        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
         async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
         async with async_session() as session:
             from app.application.services.health_score_service import (

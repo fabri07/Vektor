@@ -86,7 +86,13 @@ def _build_async_session(database_url: str) -> Any:
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
-    engine = create_async_engine(database_url, pool_pre_ping=True)
+    from app.config.settings import get_settings  # noqa: PLC0415
+
+    engine = create_async_engine(
+        database_url,
+        pool_pre_ping=True,
+        connect_args=get_settings().pg_connect_args,
+    )
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
     return engine, factory
 

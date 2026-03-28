@@ -51,7 +51,7 @@ async def _run(tenant_id_str: str) -> None:
     tenant_id = uuid.UUID(tenant_id_str)
     t0 = time.monotonic()
 
-    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
+    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
     session_factory = sessionmaker(  # type: ignore[call-overload]
         engine, class_=AsyncSession, expire_on_commit=False
     )

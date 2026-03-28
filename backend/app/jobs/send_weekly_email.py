@@ -291,7 +291,7 @@ async def _async_send(tenant_id: str) -> None:
     from app.persistence.models.notification import Notification  # noqa: PLC0415
 
     s = get_settings()
-    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
+    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
     async with factory() as session:
@@ -381,7 +381,7 @@ async def _fan_out() -> None:
     from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
     s = get_settings()
-    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
+    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
     async with factory() as session:

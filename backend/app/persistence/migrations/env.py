@@ -13,12 +13,23 @@ from app.persistence.db.base import Base
 # Alembic Config object (access to alembic.ini values)
 config = context.config
 
-# Override sqlalchemy.url from DATABASE_URL_SYNC env var (set in docker-compose)
-sync_url = os.environ.get(
-    "DATABASE_URL_SYNC",
-    config.get_main_option("sqlalchemy.url"),
-)
-config.set_main_option("sqlalchemy.url", sync_url or "")
+# Resolve sync DB URL: prefer DATABASE_URL_SYNC, fall back to DATABASE_URL (converted),
+# then alembic.ini default.
+def _resolve_sync_url() -> str:
+    if url := os.environ.get("DATABASE_URL_SYNC"):
+        return url
+    if raw := os.environ.get("DATABASE_URL"):
+        # Convert postgresql:// → postgresql+psycopg2://, strip channel_binding
+        import re  # noqa: PLC0415
+        url = raw.replace("postgresql://", "postgresql+psycopg2://", 1)
+        url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+        url = re.sub(r"[?&]channel_binding=[^&]*", "", url)
+        url = re.sub(r"\?$", "", url)
+        url = re.sub(r"\?&", "?", url)
+        return url
+    return config.get_main_option("sqlalchemy.url") or ""
+
+config.set_main_option("sqlalchemy.url", _resolve_sync_url())
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

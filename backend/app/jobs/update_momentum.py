@@ -418,7 +418,7 @@ def update_momentum_profile(tenant_id: str) -> None:
         from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
+        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
@@ -455,7 +455,7 @@ def update_momentum_all_tenants() -> None:
 
         from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True)
+        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
