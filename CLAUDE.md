@@ -107,6 +107,13 @@ trigger_score_recalculation.delay(str(tenant_id), triggered_by="...")
 
 Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
+### Heuristics e Insights
+
+- Los insights son **template-based**, no generados por LLM. Templates en `app/heuristics/insight_templates.py`.
+- Risk codes disponibles: `CASH_LOW`, `MARGIN_LOW`, `STOCK_CRITICAL`, `SUPPLIER_DEPENDENCY`.
+- Para agregar un nuevo tipo: añadir entrada en `TEMPLATES`, agregar rama en `render_insight()`, y emitirlo desde el Health Engine.
+- Severidad del score total: ≥80 → `LOW`, ≥60 → `MEDIUM`, ≥30 → `HIGH`, <30 → `CRITICAL`.
+
 ### Observabilidad
 
 - Logging con `structlog`. Usar `get_logger(__name__)` en todos los módulos.
@@ -118,11 +125,22 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 ## Arquitectura del frontend
 
 - Next.js 15 App Router. Rutas protegidas bajo `src/app/(protected)/`, públicas bajo `src/app/(public)/`.
-- Estado global: Zustand (`src/stores/`). Server-state: TanStack Query.
+- Estado global: Zustand (`src/stores/`). Server-state: TanStack Query (`src/lib/queryClient.ts`).
 - HTTP client: axios wrapper en `src/lib/api.ts` con `NEXT_PUBLIC_API_URL`.
 - UI: Tailwind CSS + componentes en `src/components/ui/`. Sin librería de componentes externa.
-- Validación de forms: Zod.
+- Validación de forms: Zod (`src/validation/`).
 - Charts: Recharts.
+
+### Organización del frontend
+
+| Directorio | Responsabilidad |
+|------------|-----------------|
+| `src/features/` | Módulos por feature: `auth`, `dashboard`, `onboarding`, `ingestion`, `notifications` |
+| `src/services/` | Capa de llamadas HTTP por dominio: `auth`, `sales`, `expenses`, `products`, `health_score`, `dashboard`, `momentum`, `notifications`, `ingestion` |
+| `src/stores/` | Zustand: `authStore` (JWT + user), `toastStore` |
+| `src/hooks/` | Custom hooks: `useAuth` |
+| `src/types/api.ts` | Tipos TypeScript de respuestas de la API |
+| `src/components/auth/AuthHydrationBoundary.tsx` | Hidrata auth desde localStorage antes de renderizar rutas protegidas |
 
 ---
 
