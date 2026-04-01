@@ -1,0 +1,8 @@
+{
+  "business_type": "decoracion_hogar",
+  "cash_health": {"healthy_days_min": 30, "warning_days_min": 15, "critical_days_below": 10},
+  "margin": {"net_expected_min": 0.25, "net_expected_max": 0.45},
+  "inventory": {"rotation_days_min": 60, "rotation_days_max": 180, "overstock_tolerance": "media"},
+  "supplier": {"reorder_frequency": "mensual", "stockout_sensitivity": "media"},
+  "seasonality": "alta"
+}

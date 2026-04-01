@@ -1,0 +1,8 @@
+{
+  "business_type": "limpieza",
+  "cash_health": {"healthy_days_min": 20, "warning_days_min": 10, "critical_days_below": 7},
+  "margin": {"net_expected_min": 0.18, "net_expected_max": 0.28},
+  "inventory": {"rotation_days_min": 15, "rotation_days_max": 45, "overstock_tolerance": "media"},
+  "supplier": {"reorder_frequency": "quincenal", "stockout_sensitivity": "alta"},
+  "seasonality": "media"
+}
