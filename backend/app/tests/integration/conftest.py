@@ -62,6 +62,15 @@ class FakeRedis:
         self._store[key] = value
         return True
 
+    async def incr(self, key: str) -> int:
+        current = int(self._store.get(key, "0"))
+        current += 1
+        self._store[key] = str(current)
+        return current
+
+    async def expireat(self, key: str, when: object) -> bool:
+        return True  # no-op en tests
+
     async def aclose(self) -> None:
         pass
 

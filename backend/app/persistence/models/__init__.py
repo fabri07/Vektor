@@ -13,6 +13,7 @@ from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.notification import Notification
+from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.product import Product
 from app.persistence.models.score import (
     HealthScoreSnapshot,
@@ -45,4 +46,5 @@ __all__ = [
     "EmailVerificationToken",
     "BusinessHeuristicOverride",
     "AgentConversationContext",
+    "PendingAction",
 ]
