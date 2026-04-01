@@ -10,7 +10,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.persistence.db.base import Base, TimestampMixin
+from app.persistence.db.base import PGTEXTARRAY, Base, TimestampMixin
 from app.persistence.models.tenant import Tenant
 
 
@@ -32,6 +32,14 @@ class User(TimestampMixin, Base):
     role_code: Mapped[str] = mapped_column(Text, nullable=False, default="OWNER")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # ── Google OAuth tokens (cifrados con Fernet) ─────────────────────────────
+    google_access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_scopes: Mapped[list[str] | None] = mapped_column(PGTEXTARRAY, nullable=True)
+    google_connected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
