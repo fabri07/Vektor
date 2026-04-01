@@ -17,6 +17,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
+from app.application.middleware.tenant import TenantMiddleware
 from app.bootstrap import shutdown, startup
 from app.config.settings import get_settings
 from app.observability.logger import get_logger
@@ -55,6 +56,9 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     app.add_middleware(SlowAPIMiddleware)
+
+    # ── Tenant context (RLS) ──────────────────────────────────────────────────
+    app.add_middleware(TenantMiddleware)
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     app.add_middleware(
