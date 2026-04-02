@@ -1,14 +1,16 @@
 """AgentStock — gestión de inventario en tiempo real."""
 
 import json
+import uuid
 from decimal import Decimal
 from typing import Optional
 
 import anthropic
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
-from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -38,14 +40,56 @@ class AgentStock(BaseAgent):
         self,
         sale_id: str,
         tenant_id: str,
-        db: object = None,
+        db: Optional[AsyncSession] = None,
     ) -> None:
         """
         Reacciona al evento SALE_RECORDED.
-        Decrementa el stock de los productos vendidos y detecta quiebre.
-        La lógica de DB se delega a stock_service; aquí solo coordinamos.
+        Decrementa el stock del producto vendido llamando a stock_service directamente.
+        Si la venta no tiene product_id asociado, no hay movimiento de inventario.
         """
-        EventBus.emit("STOCK_DECREASED", {"sale_id": sale_id, "tenant_id": tenant_id})
+        from app.application.services import stock_service  # noqa: PLC0415
+        from app.observability.logger import get_logger  # noqa: PLC0415
+        from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+        logger = get_logger(__name__)
+
+        if db is None:
+            logger.warning("on_sale_recorded: no db session provided, skipping stock decrement",
+                           sale_id=sale_id)
+            return
+
+        try:
+            sale_uuid = uuid.UUID(sale_id)
+            tenant_uuid = uuid.UUID(tenant_id)
+        except ValueError:
+            logger.warning("on_sale_recorded: invalid sale_id or tenant_id",
+                           sale_id=sale_id, tenant_id=tenant_id)
+            return
+
+        result = await db.execute(
+            select(SaleEntry).where(
+                SaleEntry.id == sale_uuid,
+                SaleEntry.tenant_id == tenant_uuid,
+            )
+        )
+        sale = result.scalar_one_or_none()
+
+        if sale is None:
+            logger.warning("on_sale_recorded: sale not found", sale_id=sale_id)
+            return
+
+        if sale.product_id is None:
+            logger.info("on_sale_recorded: sale has no product_id, skipping stock decrement",
+                        sale_id=sale_id)
+            return
+
+        await stock_service.decrement_stock(
+            product_id=sale.product_id,
+            tenant_id=tenant_uuid,
+            qty=sale.quantity,
+            source_event_id=sale_id,
+            db=db,
+        )
 
     async def detect_stockout(
         self,

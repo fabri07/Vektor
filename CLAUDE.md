@@ -155,8 +155,8 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 |--------|---------------|--------|-----------------|
 | AgentCEO | 2.000 tokens | ✅ Implementado | Router/coordinador, nunca accede a datos de negocio directamente |
 | AgentCash | 3.000 tokens | 🔴 Stub (FASE-2) | Caja, ventas, cobros, pagos |
-| AgentStock | 3.000 tokens | 🔴 Stub (FASE-2) | Inventario, quiebres, rotación, merma |
-| AgentSupplier | 3.500 tokens | 🔴 Stub (FASE-2) | Proveedores, correo filtrado, borradores |
+| AgentStock | 3.000 tokens | ✅ FASE-3B | Inventario, quiebres, rotación, merma (incluye Celery task) |
+| AgentSupplier | 3.500 tokens | ✅ FASE-3C | Proveedores, filtrado de Gmail, generación de borradores |
 | AgentHealth | 4.000 tokens | 🔴 Stub (FASE-2) | Score de salud, narrativa ejecutiva |
 | AgentHelper | 2.500 tokens | 🔴 Stub (FASE-2) | FAQ, manual, guía funcional |
 
@@ -246,7 +246,7 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 
 - Framework: pytest + pytest-asyncio (`asyncio_mode = "auto"`).
 - DB de tests: SQLite + aiosqlite en memoria (`conftest.py`).
-- Cobertura mínima: **50%** (`--cov-fail-under=50`). CI falla por debajo de este umbral.
+- Cobertura mínima: **50%** en local (`--cov-fail-under=50`), **60%** en CI (`ci-backend.yml`).
 - Correr un test de dominio: `pytest app/tests/domain/test_health_score.py -v --no-cov`
 
 ---
@@ -257,3 +257,15 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 - Celery worker: Railway (servicio separado), `backend/worker/railway.toml`.
 - Frontend: Vercel, root directory `frontend/`.
 - `/health` — health check endpoint sin auth.
+
+## Demo
+
+Acceso: `http://localhost:3000/demo` (password `Demo1234!` para todos):
+
+| Email | Vertical | Score | Estado |
+|-------|----------|-------|--------|
+| demo.kiosco@vektor.app | Kiosco | 74 | Saludable |
+| demo.limpieza@vektor.app | Limpieza | 51 | En riesgo |
+| demo.deco@vektor.app | Decoración | 62 | Estable |
+
+Cada tenant incluye 8 semanas de historial, momentum profile, insights, 8–15 productos y 30 días de transacciones. Regenerar con `make reset-demo`.

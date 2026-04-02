@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
 
-from app.application.agents.shared.schemas import AgentRequest, AgentResponse
 from app.application.agents.shared.heuristic_engine import HeuristicConfig
+from app.application.agents.shared.schemas import AgentRequest, AgentResponse
+from app.application.security.prompt_defense import wrap_user_input as _defense_wrap
 
 
 class BaseAgent(ABC):
@@ -18,4 +19,4 @@ class BaseAgent(ABC):
         return heuristics.to_prompt_fragment()
 
     def wrap_user_input(self, message: str) -> str:
-        return f"<user_message>{message}</user_message>"
+        return _defense_wrap(message)
