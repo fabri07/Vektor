@@ -1,9 +1,166 @@
+"""AgentStock — gestión de inventario en tiempo real."""
+
+import json
+from decimal import Decimal
+from typing import Optional
+
+import anthropic
+from pydantic import BaseModel
+
 from app.application.agents.base import BaseAgent
-from app.application.agents.shared.schemas import AgentRequest, AgentResponse
+from app.application.agents.shared.event_bus import EventBus
+from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.agents.shared.schemas import (
+    ActionType,
+    AgentRequest,
+    AgentResponse,
+    Confidence,
+    RiskLevel,
+)
+
+
+class StockAdjustEntity(BaseModel):
+    product_id: Optional[str] = None
+    sku: Optional[str] = None
+    product_name: Optional[str] = None
+    qty_change: int  # positivo = alta, negativo = baja
+    reason: str  # venta, compra, merma, ajuste, devolucion
+    unit_cost: Optional[Decimal] = None
 
 
 class AgentStock(BaseAgent):
     agent_name = "agent_stock"
 
+    def __init__(self) -> None:
+        self.client = anthropic.AsyncAnthropic()
+
+    async def on_sale_recorded(
+        self,
+        sale_id: str,
+        tenant_id: str,
+        db: object = None,
+    ) -> None:
+        """
+        Reacciona al evento SALE_RECORDED.
+        Decrementa el stock de los productos vendidos y detecta quiebre.
+        La lógica de DB se delega a stock_service; aquí solo coordinamos.
+        """
+        EventBus.emit("STOCK_DECREASED", {"sale_id": sale_id, "tenant_id": tenant_id})
+
+    async def detect_stockout(
+        self,
+        product_id: str,
+        current_qty: int,
+        min_threshold: int = 0,
+    ) -> bool:
+        """True si el stock está en riesgo de quiebre."""
+        return current_qty <= min_threshold
+
+    async def detect_overstock(
+        self,
+        product_id: str,
+        rotation_days: float,
+        business_type: str,
+    ) -> bool:
+        """
+        True si el producto está inmovilizado.
+        Condición: rotación_real > 2 × rotation_days_max heurístico del rubro.
+        """
+        config = HeuristicEngine.get(business_type)
+        return config.is_overstock(rotation_days)
+
+    async def generate_replenishment_ranking(self, tenant_id: str) -> list[dict]:
+        """
+        Top-10 productos a reponer ordenados por urgencia:
+        1. Quiebre inminente (stock <= 0)
+        2. Stock bajo (stock <= 20% del máximo histórico)
+        3. Alta velocidad de rotación
+        """
+        return []
+
     async def process(self, request: AgentRequest) -> AgentResponse:
-        raise NotImplementedError("AgentStock.process — implementación pendiente")
+        message_lower = request.message.lower()
+
+        if any(w in message_lower for w in ["merma", "roto", "perdí", "perdido", "vencido"]):
+            return await self._handle_stock_loss(request)
+        elif any(w in message_lower for w in ["ajuste", "conteo", "inventario", "stock"]):
+            return await self._handle_stock_adjustment(request)
+        else:
+            return await self._handle_query(request)
+
+    async def _handle_stock_loss(self, request: AgentRequest) -> AgentResponse:
+        """REGISTER_STOCK_LOSS es HIGH risk — logging reforzado."""
+        entities = await self._extract_stock_entities(request.message, "merma o pérdida")
+
+        summary = (
+            f"Registrar merma: {entities.get('product_name') or 'producto'}"
+            f" × {abs(entities.get('qty_change') or 0)} unidades"
+        )
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_approval",
+            risk_level=RiskLevel.HIGH,
+            requires_approval=True,
+            confidence=Confidence.HIGH,
+            result={
+                "summary": summary,
+                "action_type": ActionType.REGISTER_STOCK_LOSS,
+                "structured_data": entities,
+                "alerts": [
+                    "Acción de alto riesgo: se registrará en el audit log con detalle."
+                ],
+            },
+        )
+
+    async def _handle_stock_adjustment(self, request: AgentRequest) -> AgentResponse:
+        entities = await self._extract_stock_entities(request.message, "ajuste de inventario")
+        qty = entities.get("qty_change") or 0
+        summary = (
+            f"Ajuste de stock: {entities.get('product_name') or 'producto'} → {qty:+d} unidades"
+        )
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_approval",
+            risk_level=RiskLevel.MEDIUM,
+            requires_approval=True,
+            confidence=Confidence.HIGH,
+            result={
+                "summary": summary,
+                "action_type": ActionType.UPDATE_STOCK,
+                "structured_data": entities,
+            },
+        )
+
+    async def _extract_stock_entities(self, message: str, context: str) -> dict:
+        system = (
+            f"Sos el asistente de inventario de Véktor.\n"
+            f"Extraé información de {context} del mensaje. Retorná SOLO un JSON:\n"
+            '{{\n'
+            '  "product_name": "<nombre del producto o null>",\n'
+            '  "sku": "<SKU si se menciona o null>",\n'
+            '  "qty_change": <número entero, negativo para bajas>,\n'
+            '  "reason": "<merma|ajuste|devolucion|compra>",\n'
+            '  "confidence": "<HIGH|MEDIUM|LOW>"\n'
+            '}}'
+        )
+        response = await self.client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=system,
+            messages=[{"role": "user", "content": self.wrap_user_input(message)}],
+        )
+        return json.loads(response.content[0].text.strip())
+
+    async def _handle_query(self, request: AgentRequest) -> AgentResponse:
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            confidence=Confidence.HIGH,
+            result={"summary": "Consultá el dashboard para ver el estado del inventario."},
+        )

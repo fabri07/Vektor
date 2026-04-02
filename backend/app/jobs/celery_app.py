@@ -32,6 +32,7 @@ celery_app = Celery(
         "app.jobs.update_momentum",
         "app.jobs.send_weekly_email",
         "app.application.services.score_trigger_service",
+        "app.jobs.stock_tasks",
     ],
 )
 
