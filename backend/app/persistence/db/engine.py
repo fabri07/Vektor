@@ -8,12 +8,20 @@ from app.config.settings import get_settings
 
 settings = get_settings()
 
-engine: AsyncEngine = create_async_engine(
-    settings.DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,          # detect stale connections
-    pool_recycle=3600,           # recycle connections every hour
-    echo=settings.DEBUG,
-    connect_args=settings.pg_connect_args,
-)
+_is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+
+if _is_sqlite:
+    engine: AsyncEngine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=settings.DEBUG,
+    )
+else:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,          # detect stale connections
+        pool_recycle=3600,           # recycle connections every hour
+        echo=settings.DEBUG,
+        connect_args=settings.pg_connect_args,
+    )
