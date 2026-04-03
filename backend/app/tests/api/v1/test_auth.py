@@ -34,14 +34,9 @@ class TestRegister:
 
         assert response.status_code == 201
         data = response.json()
-        assert "access_token" in data
-        assert data["token_type"] == "bearer"
-        assert "user" in data
-        user = data["user"]
-        assert user["email"] == _REGISTER_PAYLOAD["email"]
-        assert user["role_code"] == "OWNER"
-        assert "user_id" in user
-        assert "tenant_id" in user
+        assert data["email"] == _REGISTER_PAYLOAD["email"]
+        assert "requires_verification" in data
+        assert "message" in data
 
     async def test_register_duplicate_email(self, client: AsyncClient) -> None:
         """Second register with the same email must return 409."""
@@ -105,8 +100,13 @@ class TestLogin:
 class TestMe:
     async def test_me_with_valid_token(self, client: AsyncClient) -> None:
         """GET /auth/me with a valid token returns user + subscription + onboarding_completed."""
-        reg = await client.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)
-        token = reg.json()["access_token"]
+        await client.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={"email": _REGISTER_PAYLOAD["email"], "password": _REGISTER_PAYLOAD["password"]},
+        )
+        assert login.status_code == 200
+        token = login.json()["access_token"]
 
         response = await client.get(
             "/api/v1/auth/me",

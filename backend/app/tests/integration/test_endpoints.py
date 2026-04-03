@@ -17,6 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.schemas import AgentResponse, RiskLevel
 from app.main import create_app
 from app.persistence.db.redis_client import get_redis
@@ -200,7 +201,8 @@ async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSe
     session.add(action)
     await session.commit()
 
-    resp = await ac.post(f"/api/v1/agent/confirm/{action.id}", headers=headers)
+    with patch.object(EventBus, "emit"):
+        resp = await ac.post(f"/api/v1/agent/confirm/{action.id}", headers=headers)
 
     assert resp.status_code == 200
     data = resp.json()
