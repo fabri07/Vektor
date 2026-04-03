@@ -146,10 +146,14 @@ async def test_medium_action_creates_pending_not_persists(auth_client, session: 
     """Un REGISTER_SALE (MEDIUM) debe crear pending_action en DB, NO SaleEntry."""
     ac, headers, tenant, user, _ = auth_client
 
+    sub_mock = AsyncMock()
+    sub_mock.process = AsyncMock(
+        side_effect=lambda req: _mock_requires_approval_response(req.request_id)
+    )
     with patch(
         "app.api.v1.agent.AgentCEO.process",
         new=AsyncMock(side_effect=lambda req: _mock_requires_approval_response(req.request_id)),
-    ):
+    ), patch("app.api.v1.agent._get_sub_agent", return_value=sub_mock):
         resp = await ac.post(
             "/api/v1/agent/chat",
             json={"message": "vendí 500 pesos"},

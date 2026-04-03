@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
+from app.application.agents.base import BaseAgent
 from app.application.agents.ceo.agent import AgentCEO
 from app.application.agents.shared.schemas import AgentRequest, AgentResponse
 from app.application.services.pending_action_service import (
@@ -32,6 +33,26 @@ from app.persistence.models.user import User
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+def _get_sub_agent(name: str) -> Optional[BaseAgent]:
+    """Devuelve el subagente correspondiente al nombre; None si no hay mapeo."""
+    if name == "agent_cash":
+        from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
+        return AgentCash()
+    if name == "agent_stock":
+        from app.application.agents.stock.agent import AgentStock  # noqa: PLC0415
+        return AgentStock()
+    if name == "agent_supplier":
+        from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
+        return AgentSupplier()
+    if name == "agent_health":
+        from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415
+        return AgentHealth()
+    if name == "agent_helper":
+        from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
+        return AgentHelper()
+    return None
 
 
 class ChatRequest(BaseModel):
@@ -77,6 +98,12 @@ async def chat(
     )
     agent_response = await ceo.process(request)
 
+    # ── Despacho al subagente que corresponde al intent ───────────────────────
+    target_agent_name: str = agent_response.result.get("target_agent", "")
+    sub_agent = _get_sub_agent(target_agent_name)
+    if sub_agent is not None:
+        agent_response = await sub_agent.process(request)
+
     # ── Si requiere aprobación: crear pending_action ──────────────────────────
     if agent_response.requires_approval:
         action_type = agent_response.result.get("action_type", "ANSWER_HELP_REQUEST")
@@ -85,7 +112,7 @@ async def chat(
             tenant_id=tenant_id,
             user_id=user_id,
             action_type=action_type,
-            payload=agent_response.result.get("entities", {}),
+            payload=agent_response.result.get("structured_data", agent_response.result.get("entities", {})),
             risk_level=str(agent_response.risk_level),
         )
         agent_response.pending_action_id = str(pending.id)
