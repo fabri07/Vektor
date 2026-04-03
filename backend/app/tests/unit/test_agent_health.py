@@ -6,7 +6,7 @@ Reglas del agente:
 - FÓRMULA CANÓNICA: cash×0.35 + stock×0.30 + supplier×0.15 + discipline×0.20
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -45,13 +45,13 @@ def _make_request(message: str = "generar informe de salud") -> AgentRequest:
 
 
 def _mock_anthropic_client(narrative_text: str = "Narrativa de prueba.") -> MagicMock:
-    """Crea un mock del cliente Anthropic que retorna narrative_text."""
+    """Crea un mock del cliente AsyncAnthropic que retorna narrative_text."""
     content_block = MagicMock()
     content_block.text = narrative_text
     response = MagicMock()
     response.content = [content_block]
     mock_client = MagicMock()
-    mock_client.messages.create.return_value = response
+    mock_client.messages.create = AsyncMock(return_value=response)
     return mock_client
 
 
@@ -264,7 +264,7 @@ def test_alerts_cash_warning():
 async def test_narrative_uses_computed_numbers():
     """La narrativa contiene el score calculado (LLM recibe el número, no lo inventa)."""
     # El test verifica que generate_narrative llama al LLM con el score en el prompt
-    with patch("app.application.agents.health.agent.anthropic.Anthropic") as mock_cls:
+    with patch("app.application.agents.health.agent.anthropic.AsyncAnthropic") as mock_cls:
         from app.application.agents.health.agent import AgentHealth
 
         mock_client = _mock_anthropic_client("El negocio tiene un score de 78.5 sobre 100.")
@@ -336,7 +336,7 @@ def test_llm_not_called_for_score():
 @pytest.mark.asyncio
 async def test_process_returns_success_with_score():
     """process() retorna status=success con health_score en result."""
-    with patch("app.application.agents.health.agent.anthropic.Anthropic") as mock_cls:
+    with patch("app.application.agents.health.agent.anthropic.AsyncAnthropic") as mock_cls:
         with patch("app.application.agents.health.agent.EventBus.emit"):
             from app.application.agents.health.agent import AgentHealth
 
@@ -359,7 +359,7 @@ async def test_process_returns_success_with_score():
 @pytest.mark.asyncio
 async def test_process_emits_health_score_updated_event():
     """process() emite HEALTH_SCORE_UPDATED vía EventBus."""
-    with patch("app.application.agents.health.agent.anthropic.Anthropic") as mock_cls:
+    with patch("app.application.agents.health.agent.anthropic.AsyncAnthropic") as mock_cls:
         with patch("app.application.agents.health.agent.EventBus.emit") as mock_emit:
             from app.application.agents.health.agent import AgentHealth
 

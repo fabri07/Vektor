@@ -3,13 +3,16 @@
 import json
 from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
 import anthropic
 from pydantic import BaseModel, Field
+from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.event_bus import EventBus
+from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -45,14 +48,22 @@ class ExpenseEntity(BaseModel):
 class AgentCash(BaseAgent):
     agent_name = "agent_cash"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        db: Optional[AsyncSession] = None,
+        redis: Optional[Redis] = None,
+    ) -> None:
         self.client = anthropic.AsyncAnthropic()
+        self._db = db
+        self._redis = redis
 
-    async def _extract_sale_entities(self, message: str, business_context: dict) -> dict:
+    async def _extract_sale_entities(self, message: str, business_context: dict[str, Any]) -> dict[str, Any]:
+        heuristics = HeuristicEngine.get(business_context.get("type", "kiosco_almacen"))
         system = (
             f"Sos el asistente de carga de ventas de Véktor.\n"
             f"Negocio: {business_context.get('name', 'el negocio')} "
             f"({business_context.get('type', 'kiosco_almacen')})\n\n"
+            f"{heuristics.to_prompt_fragment()}\n\n"
             "<instruccion>\n"
             "Extraé del mensaje la información de la venta. Retorná SOLO un JSON con:\n"
             "{\n"
@@ -73,10 +84,19 @@ class AgentCash(BaseAgent):
             system=system,
             messages=[{"role": "user", "content": self.wrap_user_input(message)}],
         )
-        return json.loads(response.content[0].text.strip())
+        result: dict[str, Any] = json.loads(response.content[0].text.strip())
+        return result
 
     async def process(self, request: AgentRequest) -> AgentResponse:
-        business_context = {"name": "el negocio", "type": "kiosco_almacen"}
+        # Cargar contexto de conversación si está disponible
+        conversation_turns: list[dict[str, Any]] = []
+        if request.conversation_id and self._db is not None and self._redis is not None:
+            from app.application.services.conversation_service import ConversationService  # noqa: PLC0415
+            svc = ConversationService(self._redis, self._db)
+            ctx = await svc.get_context(request.conversation_id)
+            conversation_turns = ctx.get("turns", [])
+
+        business_context: dict[str, Any] = {"name": "el negocio", "type": "kiosco_almacen"}
         entities = await self._extract_sale_entities(request.message, business_context)
 
         if "error" in entities:
@@ -90,12 +110,16 @@ class AgentCash(BaseAgent):
 
         # REGLA CRÍTICA 2: payment_status unknown → pedir aclaración ANTES de crear pending_action
         if entities.get("payment_status") == "unknown":
+            # Incluir historial previo en la pregunta de aclaración si hay turnos
+            prior_context = ""
+            if conversation_turns:
+                prior_context = " (basado en tu mensaje anterior)"
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
                 status="requires_clarification",
                 risk_level=RiskLevel.LOW,
-                question="¿La venta fue al contado o en cuenta corriente?",
+                question=f"¿La venta fue al contado o en cuenta corriente?{prior_context}",
             )
 
         amount = entities.get("amount", 0)

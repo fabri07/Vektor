@@ -35,11 +35,15 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
-def _get_sub_agent(name: str) -> Optional[BaseAgent]:
+def _get_sub_agent(
+    name: str,
+    db: Optional[AsyncSession] = None,
+    redis: Optional[Redis] = None,
+) -> Optional[BaseAgent]:
     """Devuelve el subagente correspondiente al nombre; None si no hay mapeo."""
     if name == "agent_cash":
         from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
-        return AgentCash()
+        return AgentCash(db=db, redis=redis)
     if name == "agent_stock":
         from app.application.agents.stock.agent import AgentStock  # noqa: PLC0415
         return AgentStock()
@@ -48,7 +52,7 @@ def _get_sub_agent(name: str) -> Optional[BaseAgent]:
         return AgentSupplier()
     if name == "agent_health":
         from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415
-        return AgentHealth()
+        return AgentHealth(db=db)
     if name == "agent_helper":
         from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
         return AgentHelper()
@@ -100,7 +104,7 @@ async def chat(
 
     # ── Despacho al subagente que corresponde al intent ───────────────────────
     target_agent_name: str = agent_response.result.get("target_agent", "")
-    sub_agent = _get_sub_agent(target_agent_name)
+    sub_agent = _get_sub_agent(target_agent_name, db=db, redis=redis)
     if sub_agent is not None:
         agent_response = await sub_agent.process(request)
 

@@ -13,7 +13,11 @@ GUARDRAILS:
 - El score se calcula en Python, NUNCA con LLM.
 """
 
+import uuid
+from typing import Optional
+
 import anthropic
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.event_bus import EventBus
@@ -37,8 +41,9 @@ from app.application.agents.health.scorer import (
 class AgentHealth(BaseAgent):
     agent_name = "agent_health"
 
-    def __init__(self) -> None:
-        self.client = anthropic.Anthropic()
+    def __init__(self, db: Optional[AsyncSession] = None) -> None:
+        self.client = anthropic.AsyncAnthropic()
+        self._db = db
         self._heuristics: HeuristicConfig | None = None
 
     def get_heuristics(self, business_type: str = "kiosco_almacen") -> HeuristicConfig:
@@ -51,24 +56,42 @@ class AgentHealth(BaseAgent):
         self,
         business_id: str,
         business_type: str = "kiosco_almacen",
-        db=None,
+        db: Optional[AsyncSession] = None,
     ) -> HealthScore:
         """
         Paso 1: calcular todos los componentes (DETERMINÍSTICO, sin LLM).
-        En producción: obtener datos reales de la BD.
-        Para MVP: usar valores de los snapshots más recientes.
+        Prioriza el snapshot más reciente de la BD si está disponible.
         """
-        heuristics = self.get_heuristics(business_type)
+        effective_db = db or self._db
 
+        if effective_db is not None:
+            from app.persistence.repositories.health_score_repository import HealthScoreRepository  # noqa: PLC0415
+            repo = HealthScoreRepository(effective_db)
+            snapshot = await repo.get_latest(uuid.UUID(business_id))
+            if snapshot is not None:
+                components = ComponentScores(
+                    cash_score=float(snapshot.score_cash or 70),
+                    stock_score=float(snapshot.score_stock or 70),
+                    supplier_score=float(snapshot.score_supplier or 70),
+                    discipline_score=float(snapshot.score_margin or 70),
+                )
+                return HealthScore(
+                    business_id=business_id,
+                    health_score=float(snapshot.total_score),
+                    components=components,
+                    alerts=self._generate_alerts(components),
+                    period=snapshot.snapshot_date.strftime("%Y-%m-%d"),
+                )
+
+        # Fallback: scorer.py con valores de muestra
+        heuristics = self.get_heuristics(business_type)
         components = ComponentScores(
             cash_score=compute_cash_score(15.0, heuristics),     # 15 días de cobertura
             stock_score=compute_stock_score(0, 2, 50),            # 0 quiebres, 2 slow, 50 productos
             supplier_score=compute_supplier_score(3, 0),          # 3 activos, 0 vencidos
             discipline_score=compute_discipline_score(6, 7),      # 6 de 7 días con datos
         )
-
         final_score = compute_health_score(components)
-
         return HealthScore(
             business_id=business_id,
             health_score=round(final_score, 1),
@@ -77,9 +100,9 @@ class AgentHealth(BaseAgent):
             period="current",
         )
 
-    def _generate_alerts(self, components: ComponentScores) -> list:
+    def _generate_alerts(self, components: ComponentScores) -> list[dict[str, str]]:
         """Generar top-3 alertas más urgentes (DETERMINÍSTICO)."""
-        alerts: list[dict] = []
+        alerts: list[dict[str, str]] = []
         if components.cash_score < 30:
             alerts.append(
                 {"type": "CRITICAL", "message": "Cobertura de caja crítica", "component": "cash"}
@@ -122,7 +145,7 @@ class AgentHealth(BaseAgent):
             "- Idioma: español argentino, tono directo y profesional."
         )
         data = (
-            f"Negocio: {business_name}\n"
+            f"Negocio: {self.wrap_user_input(business_name)}\n"
             f"Score de salud: {health.health_score}/100\n"
             f"- Caja: {health.components.cash_score:.0f}/100\n"
             f"- Inventario: {health.components.stock_score:.0f}/100\n"
@@ -130,7 +153,7 @@ class AgentHealth(BaseAgent):
             f"- Disciplina operativa: {health.components.discipline_score:.0f}/100\n"
             f"Alertas: {health.alerts}"
         )
-        response = self.client.messages.create(
+        response = await self.client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=600,
             system=system,
@@ -162,7 +185,7 @@ class AgentHealth(BaseAgent):
             },
         )
 
-    def _suggest_actions(self, health: HealthScore) -> list:
+    def _suggest_actions(self, health: HealthScore) -> list[str]:
         suggestions: list[str] = []
         if health.components.cash_score < 60:
             suggestions.append(
