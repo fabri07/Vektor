@@ -1,0 +1,8 @@
+{
+  "business_type": "kiosco_almacen",
+  "cash_health": {"healthy_days_min": 10, "warning_days_min": 7, "critical_days_below": 5},
+  "margin": {"net_expected_min": 0.12, "net_expected_max": 0.18},
+  "inventory": {"rotation_days_min": 7, "rotation_days_max": 21, "overstock_tolerance": "baja"},
+  "supplier": {"reorder_frequency": "semanal", "stockout_sensitivity": "muy_alta"},
+  "seasonality": "baja"
+}

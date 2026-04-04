@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
 import { useAuthStore } from "@/stores/authStore";
+import { ChatPanel } from "@/features/chat/ChatPanel";
 
 export default function ProtectedLayout({
   children,
@@ -48,6 +49,7 @@ export default function ProtectedLayout({
           </div>
         </main>
       </div>
+      <ChatPanel />
     </div>
   );
 }

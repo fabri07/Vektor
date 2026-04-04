@@ -4,7 +4,6 @@ Pytest fixtures for Véktor backend tests.
 Structure mirrors app/ directory.
 """
 
-import asyncio
 import unittest.mock
 import uuid
 from collections.abc import AsyncGenerator
@@ -31,13 +30,6 @@ settings = get_settings()
 
 # ── Test database (SQLite in-memory for speed) ────────────────────────────────
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -157,6 +149,9 @@ def mock_score_trigger():
 
 @pytest_asyncio.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    from app.main import limiter  # noqa: PLC0415
+    limiter._storage.reset()
+
     app = create_app()
 
     async def override_session() -> AsyncGenerator[AsyncSession, None]:

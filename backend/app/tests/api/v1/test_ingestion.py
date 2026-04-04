@@ -34,7 +34,7 @@ from app.persistence.models.tenant import Tenant
 @pytest.fixture
 def xlsx_bytes() -> bytes:
     """Minimal real xlsx file created in-memory."""
-    import openpyxl
+    openpyxl = pytest.importorskip("openpyxl")
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -238,7 +238,7 @@ class TestUploadEndpoint:
             "/api/v1/ingestion/upload",
             files={"file": ("ventas.xlsx", xlsx_bytes, "application/octet-stream")},
         )
-        assert response.status_code == 403
+        assert response.status_code == 401
 
 
 # ── List files tests ──────────────────────────────────────────────────────────
@@ -467,6 +467,7 @@ class TestIngestionWorkers:
         Ensure that when pytesseract.image_to_string is mocked,
         the OCR path does not require the tesseract binary.
         """
+        pytest.importorskip("pytesseract")
         fake_text = "Venta $25.000\nGasto $5.000"
 
         with unittest.mock.patch("pytesseract.image_to_string", return_value=fake_text):

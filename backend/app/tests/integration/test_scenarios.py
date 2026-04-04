@@ -375,10 +375,6 @@ async def test_s6_end_to_end(
         },
     )
     assert r.status_code == 201, r.text
-    reg_data = r.json()
-    tenant_id = uuid.UUID(reg_data["user"]["tenant_id"])
-    access_token = reg_data["access_token"]
-    headers = {"Authorization": f"Bearer {access_token}"}
 
     # ── 2. Login ──────────────────────────────────────────────────────────────
     r = await client.post(
@@ -386,7 +382,9 @@ async def test_s6_end_to_end(
         json={"email": "e2e@kiosco.com", "password": "Secure123"},
     )
     assert r.status_code == 200, r.text
-    headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    login_data = r.json()
+    tenant_id = uuid.UUID(login_data["user"]["tenant_id"])
+    headers = {"Authorization": f"Bearer {login_data['access_token']}"}
 
     # ── 3. Onboarding (mock Celery trigger — no Redis needed) ─────────────────
     with patch("app.jobs.score_worker.trigger_score_recalculation") as mock_task:

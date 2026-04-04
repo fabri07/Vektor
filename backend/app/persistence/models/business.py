@@ -57,6 +57,7 @@ class BusinessProfile(TimestampMixin, Base):
 
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     heuristic_profile_version: Mapped[str] = mapped_column(Text, nullable=False, default="v1")
+    heuristics_version: Mapped[str] = mapped_column(Text, nullable=False, default="v1")
 
     # ── Weekly report scheduling (schema F3-04) ───────────────────────────────
     # 0=Monday … 6=Sunday. v1: Celery Beat runs for all tenants with these defaults.

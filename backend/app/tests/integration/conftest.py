@@ -7,7 +7,6 @@ Cada test obtiene un engine y sesión frescos (scope=function).
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -62,18 +61,20 @@ class FakeRedis:
         self._store[key] = value
         return True
 
+    async def incr(self, key: str) -> int:
+        current = int(self._store.get(key, "0"))
+        current += 1
+        self._store[key] = str(current)
+        return current
+
+    async def expireat(self, key: str, when: object) -> bool:
+        return True  # no-op en tests
+
     async def aclose(self) -> None:
         pass
 
 
 # ── DB fixtures ───────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(scope="session")
-def event_loop():  # type: ignore[override]
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture
@@ -101,6 +102,9 @@ def fake_redis() -> FakeRedis:
 
 @pytest_asyncio.fixture
 async def client(session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    from app.main import limiter  # noqa: PLC0415
+    limiter._storage.reset()
+
     app = create_app()
 
     async def _override_session() -> AsyncGenerator[AsyncSession, None]:

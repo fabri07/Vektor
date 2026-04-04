@@ -6,13 +6,17 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, func
+from sqlalchemy import JSON, Text, DateTime, func
+from sqlalchemy.dialects.postgresql import ARRAY as _ARRAY
 from sqlalchemy.dialects.postgresql import JSONB as _JSONB
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # JSONB on PostgreSQL, JSON on other backends (SQLite in tests)
 PGJSONB = JSON().with_variant(_JSONB(), "postgresql")
+
+# TEXT[] on PostgreSQL, JSON on other backends (SQLite in tests)
+PGTEXTARRAY = JSON().with_variant(_ARRAY(Text()), "postgresql")
 
 
 class Base(DeclarativeBase):
