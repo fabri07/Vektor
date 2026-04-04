@@ -1,6 +1,6 @@
 """fase1b_heuristic_overrides_conversation_context_google_tokens
 
-Revision ID: 20260401_0002
+Revision ID: 20260401_0003
 Revises: 20260401_0001
 Create Date: 2026-04-01 00:00:00.000000
 
@@ -23,7 +23,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "20260401_0002"
+revision: str = "20260401_0003"
 down_revision: Union[str, None] = "20260401_0001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
