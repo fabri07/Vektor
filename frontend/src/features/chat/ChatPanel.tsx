@@ -66,12 +66,12 @@ export function ChatPanel() {
       {/* Floating button */}
       <button
         onClick={handleOpen}
-        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-white shadow-lg hover:bg-blue-700 transition-colors md:bottom-8 md:right-8"
+        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-vk-blue text-white shadow-vk-md hover:bg-vk-blue-hover transition-colors md:bottom-8 md:right-8"
         aria-label="Abrir asistente"
       >
         <MessageSquare className="h-6 w-6" />
         {hasUnread && (
-          <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-red-500" />
+          <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-vk-danger" />
         )}
       </button>
 
@@ -85,21 +85,21 @@ export function ChatPanel() {
 
       {/* Panel */}
       <div
-        className={`fixed z-50 flex flex-col bg-white shadow-2xl transition-transform duration-300
+        className={`fixed z-50 flex flex-col bg-vk-surface-w shadow-vk-lg transition-transform duration-300
           inset-0 md:inset-auto md:right-0 md:top-0 md:h-screen md:w-[380px]
           ${isOpen ? "translate-x-0" : "translate-x-full"}`}
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b px-4 py-3">
+        <div className="flex items-center justify-between border-b border-vk-border-w px-4 py-3">
           <div>
-            <h2 className="font-semibold text-gray-800">Asistente Véktor</h2>
-            <p className="text-xs text-gray-400">
+            <h2 className="font-semibold text-vk-text-primary">Asistente Véktor</h2>
+            <p className="text-xs text-vk-text-muted">
               {messagesUsedToday}/50 mensajes disponibles hoy
             </p>
           </div>
           <button
             onClick={() => setIsOpen(false)}
-            className="rounded-md p-1 text-gray-400 hover:text-gray-600"
+            className="rounded-md p-1 text-vk-text-muted hover:text-vk-text-secondary transition-colors"
             aria-label="Cerrar"
           >
             <X className="h-5 w-5" />
@@ -107,11 +107,11 @@ export function ChatPanel() {
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-3">
           {messages.length === 0 ? (
             <div className="space-y-1">
               {INITIAL_EXAMPLES.map((line, i) => (
-                <p key={i} className="text-sm text-gray-500">
+                <p key={i} className="text-sm text-vk-text-muted">
                   {line}
                 </p>
               ))}
@@ -135,10 +135,12 @@ export function ChatPanel() {
                   <div
                     className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap
                       ${msg.role === "user"
-                        ? "bg-blue-600 text-white rounded-br-sm"
+                        ? "bg-vk-blue text-white rounded-br-sm"
                         : msg.role === "system"
-                        ? "bg-red-50 text-red-700 text-xs"
-                        : "bg-gray-100 text-gray-800 rounded-bl-sm"
+                        ? "bg-vk-danger/10 text-vk-danger text-xs"
+                        : msg.status === "requires_clarification"
+                        ? "bg-vk-bg-light text-vk-text-primary rounded-bl-sm ring-1 ring-vk-blue/20"
+                        : "bg-vk-bg-light text-vk-text-primary rounded-bl-sm"
                       }`}
                   >
                     {msg.content}
@@ -150,8 +152,8 @@ export function ChatPanel() {
 
           {isLoading && (
             <div className="flex justify-start">
-              <div className="bg-gray-100 rounded-2xl rounded-bl-sm px-3 py-2">
-                <span className="flex gap-1 items-center text-gray-400 text-xs">
+              <div className="bg-vk-bg-light rounded-2xl rounded-bl-sm px-3 py-2">
+                <span className="flex gap-1 items-center text-vk-text-muted text-xs">
                   <span className="animate-bounce">•</span>
                   <span className="animate-bounce [animation-delay:0.15s]">•</span>
                   <span className="animate-bounce [animation-delay:0.3s]">•</span>
@@ -164,9 +166,9 @@ export function ChatPanel() {
         </div>
 
         {/* Input */}
-        <div className="border-t p-3">
+        <div className="border-t border-vk-border-w p-3">
           {isRateLimited ? (
-            <p className="text-center text-xs text-gray-400 py-2">
+            <p className="text-center text-xs text-vk-text-muted py-2">
               Límite diario alcanzado. Disponible mañana.
             </p>
           ) : (
@@ -179,13 +181,13 @@ export function ChatPanel() {
                 placeholder="Escribí tu mensaje..."
                 rows={1}
                 disabled={isLoading}
-                className="flex-1 resize-none rounded-xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                className="flex-1 resize-none rounded-xl border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm text-vk-text-primary placeholder:text-vk-text-placeholder focus:outline-none focus:ring-2 focus:ring-vk-blue disabled:opacity-50"
                 style={{ minHeight: "40px", maxHeight: "72px" }}
               />
               <button
                 onClick={() => void handleSend()}
                 disabled={isLoading || !input.trim()}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-vk-blue text-white hover:bg-vk-blue-hover disabled:opacity-40 transition-colors"
                 aria-label="Enviar"
               >
                 <Send className="h-4 w-4" />
