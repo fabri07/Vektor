@@ -142,7 +142,7 @@ def create_app() -> FastAPI:
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "Internal server error"},
+            content={"detail": f"[DEBUG] {type(exc).__name__}: {exc}"},
         )
 
     # ── Health check ──────────────────────────────────────────────────────────
