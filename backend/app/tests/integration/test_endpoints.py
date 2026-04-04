@@ -329,3 +329,68 @@ async def test_cross_tenant_pending_action_invisible(
             f"/api/v1/agent/confirm/{action.id}", headers=headers_b
         )
         assert resp.status_code == 404
+
+
+# ── WF-02 + Cancel ────────────────────────────────────────────────────────────
+
+
+def _mock_clarification_response(request_id: str) -> AgentResponse:
+    return AgentResponse(
+        request_id=request_id,
+        agent_name="agent_ceo",
+        status="requires_clarification",
+        risk_level=RiskLevel.LOW,
+        requires_approval=False,
+        result={"question": "¿Fue al contado o en cuenta corriente?", "target_agent": "agent_cash"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_wf02_requires_clarification_no_pending(auth_client, session: AsyncSession):
+    """WF-02: requires_clarification no crea PendingAction en DB."""
+    ac, headers, tenant, user, _ = auth_client
+
+    with patch(
+        "app.api.v1.agent.AgentCEO.process",
+        new=AsyncMock(side_effect=lambda req: _mock_clarification_response(req.request_id)),
+    ), patch("app.api.v1.agent._get_sub_agent", return_value=None):
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "vendí 50 mil hoy"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "requires_clarification"
+    assert data.get("pending_action_id") is None
+
+    result = await session.execute(
+        select(PendingAction).where(PendingAction.tenant_id == tenant.tenant_id)
+    )
+    assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_succeeds(auth_client, session: AsyncSession):
+    """Cancelar una pending_action → status=REJECTED."""
+    ac, headers, tenant, user, _ = auth_client
+
+    action = PendingAction(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        action_type="REGISTER_SALE",
+        payload={"amount": 300},
+        risk_level="MEDIUM",
+        status="PENDING",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    session.add(action)
+    await session.commit()
+
+    resp = await ac.post(f"/api/v1/agent/cancel/{action.id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+
+    await session.refresh(action)
+    assert action.status == "REJECTED"

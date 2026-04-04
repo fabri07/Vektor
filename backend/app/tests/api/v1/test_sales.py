@@ -69,7 +69,7 @@ class TestSalesBulk:
 
     async def test_bulk_requires_auth(self, client: AsyncClient) -> None:
         resp = await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD)
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
 
 @pytest.mark.asyncio

@@ -131,6 +131,6 @@ class TestMe:
         assert response.status_code == 401
 
     async def test_me_without_token(self, client: AsyncClient) -> None:
-        """GET /auth/me without any Authorization header must return 403."""
+        """GET /auth/me without any Authorization header must return 401."""
         response = await client.get("/api/v1/auth/me")
-        assert response.status_code == 403
+        assert response.status_code == 401

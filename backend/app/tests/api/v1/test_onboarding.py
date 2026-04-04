@@ -34,7 +34,11 @@ _ONBOARDING_PAYLOAD = {
 
 
 async def _register_and_token(client: AsyncClient) -> str:
-    resp = await client.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)
+    await client.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)
+    resp = await client.post(
+        "/api/v1/auth/login",
+        json={"email": _REGISTER_PAYLOAD["email"], "password": _REGISTER_PAYLOAD["password"]},
+    )
     return resp.json()["access_token"]
 
 
