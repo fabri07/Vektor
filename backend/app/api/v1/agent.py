@@ -100,13 +100,21 @@ async def chat(
         attachments=body.attachments,
         conversation_id=body.conversation_id,
     )
-    agent_response = await ceo.process(request)
+    try:
+        agent_response = await ceo.process(request)
+    except Exception as exc:
+        logger.error("agent_ceo_process_failed", error=str(exc), error_type=type(exc).__name__, tenant_id=str(tenant_id))
+        raise HTTPException(status_code=500, detail=f"Agent error: {type(exc).__name__}: {exc}") from exc
 
     # ── Despacho al subagente que corresponde al intent ───────────────────────
     target_agent_name: str = agent_response.result.get("target_agent", "")
     sub_agent = _get_sub_agent(target_agent_name, db=db, redis=redis)
     if sub_agent is not None:
-        agent_response = await sub_agent.process(request)
+        try:
+            agent_response = await sub_agent.process(request)
+        except Exception as exc:
+            logger.error("sub_agent_process_failed", agent=target_agent_name, error=str(exc), error_type=type(exc).__name__, tenant_id=str(tenant_id))
+            raise HTTPException(status_code=500, detail=f"Sub-agent error ({target_agent_name}): {type(exc).__name__}: {exc}") from exc
 
     # ── Si requiere aprobación: crear pending_action ──────────────────────────
     if agent_response.requires_approval:
