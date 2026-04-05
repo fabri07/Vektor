@@ -8,8 +8,8 @@ export function useLogin() {
 
   return useMutation({
     mutationFn: (data: LoginInput) => loginRequest(data),
-    onSuccess: ({ access_token, user }) => {
-      setAuth(access_token, {
+    onSuccess: ({ access_token, refresh_token, user }) => {
+      setAuth(access_token, refresh_token, {
         id: user.user_id,
         email: user.email,
         full_name: user.full_name,
@@ -33,8 +33,8 @@ export function useVerifyEmail() {
 
   return useMutation({
     mutationFn: (token: string) => verifyEmailRequest(token),
-    onSuccess: ({ access_token, user }) => {
-      setAuth(access_token, {
+    onSuccess: ({ access_token, refresh_token, user }) => {
+      setAuth(access_token, refresh_token, {
         id: user.user_id,
         email: user.email,
         full_name: user.full_name,

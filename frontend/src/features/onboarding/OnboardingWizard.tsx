@@ -7,7 +7,7 @@ import { Step2Form, type Step2Data } from "./Step2Form";
 import { Step3Upload } from "./Step3Upload";
 import { Step4Loading } from "./Step4Loading";
 import { onboardingService } from "@/services/onboarding.service";
-import { api } from "@/lib/api";
+import { ingestionService } from "@/services/ingestion.service";
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -60,12 +60,8 @@ export function OnboardingWizard() {
       });
 
       if (file) {
-        const fd = new FormData();
-        fd.append("file", file);
         try {
-          await api.post("/files/upload", fd, {
-            headers: { "Content-Type": "multipart/form-data" },
-          });
+          await ingestionService.upload(file);
         } catch {
           setState((prev) => ({
             ...prev,

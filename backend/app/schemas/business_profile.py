@@ -15,10 +15,10 @@ class BusinessProfileResponse(BaseModel):
     vertical_code: str
     data_mode: str
     data_confidence: str
-    monthly_sales_estimate_ars: Decimal | None
-    monthly_inventory_spend_estimate_ars: Decimal | None
-    monthly_fixed_expenses_estimate_ars: Decimal | None
-    cash_on_hand_estimate_ars: Decimal | None
+    monthly_sales_estimate_ars: float | None
+    monthly_inventory_spend_estimate_ars: float | None
+    monthly_fixed_expenses_estimate_ars: float | None
+    cash_on_hand_estimate_ars: float | None
     supplier_count_estimate: int | None
     product_count_estimate: int | None
     onboarding_completed: bool

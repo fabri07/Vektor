@@ -56,14 +56,14 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const { data: profileData } = useQuery({
     queryKey: ["business-profile"],
     queryFn: async () => {
-      const res = await api.get<{ business_name: string }[]>("/business_profiles/");
-      return res.data[0] ?? null;
+      const res = await api.get<{ display_name: string }>("/tenants/me");
+      return res.data;
     },
     staleTime: 5 * 60 * 1000,
     retry: false,
   });
 
-  const businessName = profileData?.business_name ?? "Mi negocio";
+  const businessName = profileData?.display_name ?? "Mi negocio";
   const initials = getInitials(user?.full_name ?? user?.email ?? "U");
 
   return (

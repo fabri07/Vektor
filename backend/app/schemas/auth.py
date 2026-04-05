@@ -41,7 +41,9 @@ class AuthResponse(BaseModel):
     """Response for POST /register and POST /login."""
 
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
+    expires_in: int  # seconds
     user: UserInAuthResponse
 
 

@@ -84,12 +84,12 @@ async def upload_file(
         content=content,
         filename=filename,
         content_type=detected_mime,
-        tenant_id=str(tenant.id),
+        tenant_id=str(tenant.tenant_id),
     )
 
     record = UploadedFile(
-        tenant_id=tenant.id,
-        uploaded_by=current_user.id,
+        tenant_id=tenant.tenant_id,
+        uploaded_by=current_user.user_id,
         original_filename=filename,
         s3_key=s3_key,
         content_type=detected_mime,
@@ -109,7 +109,7 @@ async def list_files(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[UploadedFile]:
-    q = select(UploadedFile).where(UploadedFile.tenant_id == tenant.id)
+    q = select(UploadedFile).where(UploadedFile.tenant_id == tenant.tenant_id)
     if purpose:
         q = q.where(UploadedFile.purpose == purpose)
     q = q.order_by(UploadedFile.created_at.desc()).limit(limit)
@@ -128,7 +128,7 @@ async def get_download_url(
 ) -> dict[str, str]:
     result = await session.execute(
         select(UploadedFile).where(
-            UploadedFile.id == file_id, UploadedFile.tenant_id == tenant.id
+            UploadedFile.id == file_id, UploadedFile.tenant_id == tenant.tenant_id
         )
     )
     record = result.scalar_one_or_none()

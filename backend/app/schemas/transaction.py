@@ -19,7 +19,7 @@ class SaleEntryResponse(BaseModel):
     id: UUID
     tenant_id: UUID
     product_id: UUID | None
-    amount: Decimal
+    amount: float
     quantity: int
     transaction_date: date
     payment_method: str
@@ -84,7 +84,7 @@ class BulkSaleRequest(BaseModel):
 
 
 class SaleSummaryResponse(BaseModel):
-    total_ars: Decimal
+    total_ars: float
     entry_count: int
     period_covered: str
 
@@ -99,7 +99,7 @@ class ExpenseEntryResponse(BaseModel):
 
     id: UUID
     tenant_id: UUID
-    amount: Decimal
+    amount: float
     category: str
     transaction_date: date
     description: str
@@ -149,6 +149,6 @@ class UpdateExpenseRequest(BaseModel):
 
 
 class ExpenseSummaryResponse(BaseModel):
-    total_ars: Decimal
+    total_ars: float
     entry_count: int
     period_covered: str

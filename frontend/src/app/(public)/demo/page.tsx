@@ -207,7 +207,7 @@ export default function DemoPage() {
     setLoadingEmail(tenant.email);
     try {
       const data = await loginRequest({ email: tenant.email, password: tenant.password });
-      setAuth(data.access_token, {
+      setAuth(data.access_token, data.refresh_token, {
         id: data.user.user_id,
         email: data.user.email,
         full_name: data.user.full_name,

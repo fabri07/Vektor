@@ -28,10 +28,12 @@ async def get_my_tenant(
 async def update_my_tenant(
     body: TenantUpdateRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(require_role("owner", "admin")),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> Tenant:
     repo = TenantRepository(session)
-    if body.name is not None:
-        tenant.name = body.name
+    if body.legal_name is not None:
+        tenant.legal_name = body.legal_name
+    if body.display_name is not None:
+        tenant.display_name = body.display_name
     return await repo.save(tenant)

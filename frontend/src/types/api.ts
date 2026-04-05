@@ -20,7 +20,9 @@ export interface ApiError {
 
 export interface TokenResponse {
   access_token: string;
+  refresh_token: string;
   token_type: "bearer";
+  expires_in: number;
 }
 
 export interface AuthUserResponse {
@@ -46,7 +48,9 @@ export interface MeResponse {
 
 export interface AuthResponse {
   access_token: string;
+  refresh_token: string;
   token_type: "bearer";
+  expires_in: number;
   user: AuthUserResponse;
 }
 

@@ -320,9 +320,12 @@ class AuthService:
             "role_code": user.role_code,
         }
         access_token = create_access_token(jwt_payload)
+        refresh_token = create_refresh_token(jwt_payload)
         return AuthResponse(
             access_token=access_token,
+            refresh_token=refresh_token,
             token_type="bearer",
+            expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
             user=UserInAuthResponse(
                 user_id=user.user_id,
                 email=user.email,

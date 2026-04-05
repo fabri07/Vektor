@@ -1,7 +1,6 @@
 """Pydantic schemas for health score endpoints."""
 
 from datetime import date, datetime
-from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -9,9 +8,9 @@ from pydantic import BaseModel
 
 class DimensionScoreResponse(BaseModel):
     dimension: str
-    value: Decimal
-    weight: Decimal
-    weighted_value: Decimal
+    value: float
+    weight: float
+    weighted_value: float
     explanation: str
 
 
@@ -20,7 +19,7 @@ class HealthScoreResponse(BaseModel):
 
     id: UUID
     tenant_id: UUID
-    total_score: Decimal
+    total_score: float
     level: str
     dimensions: list[DimensionScoreResponse]
     triggered_by: str
@@ -34,19 +33,19 @@ class WeeklyScoreHistoryResponse(BaseModel):
     id: UUID
     week_start: date
     week_end: date
-    avg_score: Decimal
-    min_score: Decimal
-    max_score: Decimal
+    avg_score: float
+    min_score: float
+    max_score: float
     level: str
 
 
 class ScoreSummaryResponse(BaseModel):
     """Lightweight summary for dashboard cards."""
 
-    current_score: Decimal
+    current_score: float
     level: str
-    previous_score: Decimal | None
-    delta: Decimal | None
+    previous_score: float | None
+    delta: float | None
     snapshot_date: datetime
     needs_attention: bool
 
