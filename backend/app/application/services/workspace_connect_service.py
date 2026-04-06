@@ -281,7 +281,10 @@ class WorkspaceConnectService:
                 tenant_id=current_tenant_id,
                 user_id=current_user_id,
                 access_token_encrypted=access_token_encrypted,
-                refresh_token_encrypted=refresh_token_encrypted or "",
+                # None cuando Google no entrega refresh_token (re-consentimiento sin revoke).
+                # La columna es nullable desde la migración sprint3.
+                # token_manager detecta None/"" y fuerza reconnect si necesita refrescar.
+                refresh_token_encrypted=refresh_token_encrypted,
                 scopes_granted=scopes,
                 expires_at=expires_at,
                 google_account_email=data.get("google_account_email"),

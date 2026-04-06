@@ -205,7 +205,8 @@ class AgentSupplier(BaseAgent):
         except WorkspaceTokenError as exc:
             if exc.reason == "insufficient_scope":
                 return self._insufficient_scope(request)
-            return self._workspace_error(request, exc.reason)
+            # refresh_failed, not_connected, token_corrupted → el usuario debe reconectar
+            return self._workspace_not_connected(request)
 
         if not messages:
             return AgentResponse(

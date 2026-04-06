@@ -138,10 +138,11 @@ class TokenManager:
             conn.expires_at = locked.expires_at
             return
 
-        if locked.refresh_token_encrypted is None:
+        if not locked.refresh_token_encrypted:
+            # None (nunca estuvo) o "" (bug de insert previo) → reconnect obligatorio
             raise WorkspaceTokenError(
                 reason="refresh_failed",
-                detail="refresh_token is null — user must reconnect",
+                detail="refresh_token is null or empty — user must reconnect",
             )
 
         try:

@@ -11,13 +11,14 @@ que ejecuta la acción de negocio. Usa SELECT FOR UPDATE en el endpoint.
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Optional
 
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.schemas import ActionType
 import app.application.services.cash_service as cash_service
 import app.application.services.stock_service as stock_service
-import app.application.services.supplier_service as supplier_service
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.pending_action import PendingAction
@@ -58,6 +59,7 @@ async def create_pending_action(
 async def execute_pending_action(
     action: PendingAction,
     db: AsyncSession,
+    redis: Optional[Redis] = None,
 ) -> None:
     """
     Ejecuta la acción de negocio y registra en audit_log.
@@ -135,22 +137,49 @@ async def execute_pending_action(
             )
 
     elif action.action_type == ActionType.CREATE_SUPPLIER_DRAFT:
-        draft_content = payload.get("draft_content") or payload.get("content", "")
-        supplier_id = payload.get("supplier_id", "")
-        business_id = str(action.tenant_id)
-        if draft_content and supplier_id:
-            await supplier_service.save_supplier_draft(
-                draft_content=draft_content,
-                supplier_id=supplier_id,
-                business_id=business_id,
-                db=db,
-            )
-        else:
+        draft_text = payload.get("draft_text", "")
+        draft_to = payload.get("draft_to", "")
+        draft_subject = payload.get("draft_subject", "")
+
+        if not draft_text or not draft_to:
             logger.warning(
-                "execute_pending_action: CREATE_SUPPLIER_DRAFT missing draft_content or supplier_id",
+                "execute_pending_action: CREATE_SUPPLIER_DRAFT missing draft_text or draft_to",
                 action_id=str(action.id),
                 payload=payload,
             )
+        elif redis is None:
+            logger.warning(
+                "execute_pending_action: CREATE_SUPPLIER_DRAFT no redis injected — draft not pushed to Gmail",
+                action_id=str(action.id),
+            )
+        else:
+            # Pushear el borrador a Gmail via gateway
+            from app.integrations.google_workspace.exceptions import WorkspaceTokenError  # noqa: PLC0415
+            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
+
+            gateway = GoogleWorkspaceGateway(
+                session=db,
+                redis=redis,
+                user_id=action.user_id,
+                tenant_id=action.tenant_id,
+            )
+            try:
+                gmail = await gateway.gmail()
+                draft_id = await gateway.run_gmail(
+                    gmail.create_draft(to=draft_to, subject=draft_subject, body=draft_text)
+                )
+                logger.info(
+                    "execute_pending_action: CREATE_SUPPLIER_DRAFT pushed to Gmail",
+                    action_id=str(action.id),
+                    draft_id=draft_id,
+                )
+            except WorkspaceTokenError as exc:
+                logger.warning(
+                    "execute_pending_action: CREATE_SUPPLIER_DRAFT workspace error",
+                    action_id=str(action.id),
+                    reason=exc.reason,
+                )
+                raise  # fail-closed — no continuar si no se pudo crear el draft
 
     else:
         logger.warning(

@@ -21,14 +21,14 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-from app.persistence.models.user import User
 from app.persistence.models.user_google_workspace import UserGoogleWorkspaceConnection
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_user(user_id: uuid.UUID | None = None, tenant_id: uuid.UUID | None = None) -> User:
-    user = User.__new__(User)
+def _make_user(user_id: uuid.UUID | None = None, tenant_id: uuid.UUID | None = None) -> MagicMock:
+    """Crea un mock de User sin instanciar SQLAlchemy (evita problemas de instrumentación)."""
+    user = MagicMock()
     user.user_id = user_id or uuid.uuid4()
     user.tenant_id = tenant_id or uuid.uuid4()
     user.email = "owner@test.com"
@@ -358,11 +358,12 @@ class TestWorkspaceDisconnect:
     async def test_disconnect_returns_200(self, client_with_workspace, user):
         from app.persistence.db.session import get_db_session
 
-        conn = UserGoogleWorkspaceConnection.__new__(UserGoogleWorkspaceConnection)
+        conn = MagicMock()
         conn.id = uuid.uuid4()
         conn.user_id = user.user_id
         conn.tenant_id = user.tenant_id
         conn.revoked_at = None
+        conn.is_active = True
         conn.access_token_encrypted = "enc"
         conn.refresh_token_encrypted = "enc"
         conn.last_error_code = None
@@ -411,10 +412,11 @@ class TestWorkspaceStatus:
         from app.api.v1.deps import get_current_user
         from app.persistence.db.session import get_db_session
 
-        conn = UserGoogleWorkspaceConnection.__new__(UserGoogleWorkspaceConnection)
+        conn = MagicMock()
         conn.user_id = user.user_id
         conn.tenant_id = user.tenant_id
         conn.revoked_at = None
+        conn.is_active = True
         conn.google_account_email = "workspace@empresa.com"
         conn.scopes_granted = ["gmail.readonly", "gmail.compose"]
         conn.connected_at = datetime.now(UTC)
