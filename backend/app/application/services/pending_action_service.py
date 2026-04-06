@@ -4,9 +4,14 @@ Flujo de aprobación (dos fases):
   Fase 1 — POST /agent/chat: si riesgo MEDIUM/HIGH → create_pending_action()
   Fase 2 — POST /agent/confirm/{id}: execute_pending_action() + marcar APPROVED
             POST /agent/cancel/{id}: cancel_pending_action() + marcar REJECTED
+            POST /agent/retry/{id}:  re-ejecutar cuando execution_status=FAILED|REQUIRES_RECONNECT
 
-Regla crítica: execute_pending_action() actualiza status en la MISMA transacción
-que ejecuta la acción de negocio. Usa SELECT FOR UPDATE en el endpoint.
+Regla crítica: execute_pending_action() no toca execution_status.
+El endpoint (confirm / retry) es responsable del ciclo de vida completo:
+  IN_PROGRESS → SUCCEEDED | FAILED | REQUIRES_RECONNECT.
+
+Acciones externas (CREATE_SUPPLIER_DRAFT, SYNC_TO_GOOGLE) reciben
+external_system + idempotency_key al ser creadas.
 """
 
 import uuid
@@ -25,6 +30,13 @@ from app.persistence.models.pending_action import PendingAction
 
 logger = get_logger(__name__)
 
+# Acciones que involucran un sistema externo.
+# Al crearse, reciben external_system + idempotency_key (UUID único).
+EXTERNAL_SYSTEMS: dict[str, str] = {
+    ActionType.CREATE_SUPPLIER_DRAFT: "GOOGLE_GMAIL",
+    ActionType.SYNC_TO_GOOGLE: "GOOGLE_SHEETS",
+}
+
 
 async def create_pending_action(
     db: AsyncSession,
@@ -34,7 +46,15 @@ async def create_pending_action(
     payload: dict,
     risk_level: str,
 ) -> PendingAction:
-    """Crea un PendingAction con TTL de 10 minutos. Hace flush para obtener el id."""
+    """Crea un PendingAction con TTL de 10 minutos. Hace flush para obtener el id.
+
+    Para acciones externas (CREATE_SUPPLIER_DRAFT, SYNC_TO_GOOGLE):
+    - external_system: nombre del sistema destino ("GOOGLE_GMAIL", "GOOGLE_SHEETS")
+    - idempotency_key: UUID generado una sola vez; nunca cambia en retry.
+
+    Para acciones locales: external_system=None, idempotency_key=None.
+    """
+    ext_system = EXTERNAL_SYSTEMS.get(action_type)
     action = PendingAction(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -42,6 +62,8 @@ async def create_pending_action(
         payload=payload,
         risk_level=risk_level,
         status="PENDING",
+        external_system=ext_system,
+        idempotency_key=str(uuid.uuid4()) if ext_system is not None else None,
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     db.add(action)
@@ -51,6 +73,7 @@ async def create_pending_action(
         action_id=str(action.id),
         action_type=action_type,
         risk_level=risk_level,
+        external_system=ext_system,
         tenant_id=str(tenant_id),
     )
     return action
