@@ -1,2 +1,0 @@
-# Vektor
-new project
