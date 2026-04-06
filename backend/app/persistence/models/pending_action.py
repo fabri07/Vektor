@@ -5,17 +5,26 @@ TTL de 10 minutos.
 
 Dos ejes de estado independientes:
   - `status`           → estado de aprobación del usuario (PENDING|APPROVED|REJECTED|EXPIRED)
-  - `execution_status` → estado de ejecución externa     (NOT_STARTED|IN_PROGRESS|SUCCEEDED|FAILED|REQUIRES_RECONNECT)
+  - `execution_status` → estado de ejecución              (NOT_STARTED|IN_PROGRESS|SUCCEEDED|FAILED|REQUIRES_RECONNECT)
 
-Para acciones locales (sin sistema externo), execution_status siempre es NOT_STARTED
-y la ejecución ocurre en la misma transacción que el APPROVED.
+Ciclo de vida para acciones LOCALES (external_system=None):
+  - create_pending_action() → status=PENDING, execution_status=NOT_STARTED
+  - confirm() → status=APPROVED, execution_status=SUCCEEDED (mismo commit)
+  - No tienen idempotency_key ni retry.
 
-Para SYNC_TO_GOOGLE y otras acciones externas:
-  - chat() crea la acción con execution_status=NOT_STARTED
-  - confirm() aprueba (status=APPROVED) y arranca ejecución (execution_status=IN_PROGRESS)
-  - El gateway actualiza a SUCCEEDED|FAILED|REQUIRES_RECONNECT según resultado remoto
-  - retry() solo es válido para acciones APPROVED con execution_status FAILED|REQUIRES_RECONNECT
-  - idempotency_key garantiza que una misma operación externa nunca se ejecute dos veces
+Ciclo de vida para acciones EXTERNAS (CREATE_SUPPLIER_DRAFT, SYNC_TO_GOOGLE):
+  - create_pending_action() → status=PENDING, execution_status=NOT_STARTED,
+                               external_system="GOOGLE_GMAIL|GOOGLE_SHEETS",
+                               idempotency_key=<uuid único>
+  - confirm() → status=APPROVED, execution_status=IN_PROGRESS (flush)
+              → éxito:            execution_status=SUCCEEDED
+              → WorkspaceTokenError: execution_status=REQUIRES_RECONNECT, failure_code=exc.reason
+              → excepción genérica: execution_status=FAILED, failure_message=str(exc)[:500]
+  - retry() → solo válido cuando is_retryable (APPROVED + FAILED|REQUIRES_RECONNECT)
+               y no existe aún un registro AGENT_ACTION_RETRIED en DecisionAuditLog
+               (límite de 1 retry por acción)
+  - idempotency_key: se genera al crear y NUNCA cambia; el UNIQUE INDEX evita
+    que se creen dos acciones externas con la misma clave.
 """
 
 import uuid

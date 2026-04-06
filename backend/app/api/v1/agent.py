@@ -12,10 +12,11 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
+from app.integrations.google_workspace.exceptions import WorkspaceTokenError
 from app.application.agents.base import BaseAgent
 from app.application.agents.ceo.agent import AgentCEO
 from app.application.agents.shared.schemas import AgentRequest, AgentResponse
@@ -203,9 +204,31 @@ async def confirm_action(
             detail="Esta acción venció. Volvé a enviar el mensaje.",
         )
 
-    # Ejecutar la acción + audit log (MISMA transacción)
-    await execute_pending_action(action, db, redis=redis)
+    # ── Aprobación ────────────────────────────────────────────────────────────
+    action.approved_at = datetime.now(UTC)
     action.status = "APPROVED"
+
+    if action.is_external:
+        # Para acciones externas: lifecycle completo IN_PROGRESS → SUCCEEDED|FAILED|REQUIRES_RECONNECT.
+        # Nunca se re-lanza la excepción — el fallo se persiste y el endpoint responde con estado.
+        action.execution_status = "IN_PROGRESS"
+        await db.flush()  # visible antes de la llamada externa
+        try:
+            await execute_pending_action(action, db, redis=redis)
+            action.execution_status = "SUCCEEDED"
+        except WorkspaceTokenError as exc:
+            action.execution_status = "REQUIRES_RECONNECT"
+            action.failure_code = exc.reason
+            action.failure_message = None
+        except Exception as exc:
+            action.execution_status = "FAILED"
+            action.failure_code = None
+            action.failure_message = str(exc)[:500]
+    else:
+        # Para acciones locales: ejecución en la misma transacción; excepción se propaga (fail-closed).
+        await execute_pending_action(action, db, redis=redis)
+        action.execution_status = "SUCCEEDED"
+
     action.executed_at = datetime.now(UTC)
     await db.commit()
 
@@ -213,9 +236,17 @@ async def confirm_action(
         "pending_action_confirmed",
         action_id=str(pending_id),
         action_type=action.action_type,
+        execution_status=action.execution_status,
         tenant_id=str(current_user.tenant_id),
     )
-    return {"status": "confirmed", "action_type": action.action_type}
+    response: dict[str, Any] = {
+        "status": "confirmed",
+        "action_type": action.action_type,
+        "execution_status": action.execution_status,
+    }
+    if action.execution_status == "REQUIRES_RECONNECT":
+        response["reconnect_required"] = True
+    return response
 
 
 # ── POST /cancel/{pending_id} ─────────────────────────────────────────────────
@@ -251,3 +282,130 @@ async def cancel_action(
     await db.commit()
 
     return {"status": "cancelled", "action_type": action.action_type}
+
+
+# ── POST /retry/{pending_id} ──────────────────────────────────────────────────
+
+
+@router.post("/retry/{pending_id}", summary="Reintentar acción fallida")
+async def retry_action(
+    pending_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    """Re-ejecuta una acción APPROVED cuya ejecución externa falló.
+
+    Condiciones de elegibilidad:
+    - status = "APPROVED"
+    - execution_status in ("FAILED", "REQUIRES_RECONNECT")
+    - No existe aún un registro AGENT_ACTION_RETRIED en DecisionAuditLog (límite: 1 retry).
+
+    El idempotency_key original no se regenera.
+    """
+    # SELECT FOR UPDATE — solo acciones APPROVED con fallo de ejecución
+    stmt = (
+        select(PendingAction)
+        .where(
+            PendingAction.id == pending_id,
+            PendingAction.tenant_id == current_user.tenant_id,
+            PendingAction.status == "APPROVED",
+            PendingAction.execution_status.in_(["FAILED", "REQUIRES_RECONNECT"]),
+        )
+        .with_for_update()
+    )
+    result = await db.execute(stmt)
+    action = result.scalar_one_or_none()
+
+    if action is None:
+        # Distinguir: ¿ya fue ejecutada exitosamente?
+        succeeded_stmt = select(PendingAction).where(
+            PendingAction.id == pending_id,
+            PendingAction.tenant_id == current_user.tenant_id,
+            PendingAction.status == "APPROVED",
+            PendingAction.execution_status == "SUCCEEDED",
+        )
+        succeeded = (await db.execute(succeeded_stmt)).scalar_one_or_none()
+        if succeeded is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="La acción ya fue ejecutada exitosamente.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Acción no encontrada o no reintentable.",
+        )
+
+    # ── Verificar límite de 1 retry via DecisionAuditLog ─────────────────────
+    # Carga solo los registros del tenant con decision_type=AGENT_ACTION_RETRIED;
+    # el volumen por tenant es bajo. Filtramos pending_action_id en Python para
+    # evitar queries JSON que difieren entre SQLite (tests) y PostgreSQL (prod).
+    retry_logs_stmt = select(DecisionAuditLog).where(
+        DecisionAuditLog.tenant_id == action.tenant_id,
+        DecisionAuditLog.decision_type == "AGENT_ACTION_RETRIED",
+    )
+    retry_logs = (await db.execute(retry_logs_stmt)).scalars().all()
+    retry_count = sum(
+        1 for row in retry_logs
+        if row.decision_data.get("pending_action_id") == str(action.id)
+    )
+    if retry_count >= 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Límite de reintentos alcanzado (máximo 1).",
+        )
+
+    # ── Limpiar estado previo e iniciar retry ─────────────────────────────────
+    action.failure_code = None
+    action.failure_message = None
+    action.execution_status = "IN_PROGRESS"
+    await db.flush()
+
+    try:
+        await execute_pending_action(action, db, redis=redis)
+        action.execution_status = "SUCCEEDED"
+    except WorkspaceTokenError as exc:
+        action.execution_status = "REQUIRES_RECONNECT"
+        action.failure_code = exc.reason
+        action.failure_message = None
+    except Exception as exc:
+        action.execution_status = "FAILED"
+        action.failure_code = None
+        action.failure_message = str(exc)[:500]
+
+    action.executed_at = datetime.now(UTC)
+
+    # Audit log del retry — sirve como registro del límite de 1 intento
+    audit = DecisionAuditLog(
+        id=uuid.uuid4(),
+        tenant_id=action.tenant_id,
+        decision_type="AGENT_ACTION_RETRIED",
+        decision_data={
+            "pending_action_id": str(action.id),
+            "action_type": action.action_type,
+            "execution_status": action.execution_status,
+            "failure_code": action.failure_code,
+        },
+        triggered_by="agent:retry",
+        actor_user_id=current_user.user_id,
+        context={"execution_status_after": action.execution_status},
+        created_at=datetime.now(UTC),
+    )
+    db.add(audit)
+    await db.commit()
+
+    logger.info(
+        "pending_action_retried",
+        action_id=str(pending_id),
+        action_type=action.action_type,
+        execution_status=action.execution_status,
+        tenant_id=str(current_user.tenant_id),
+    )
+    response: dict[str, Any] = {
+        "status": "retried",
+        "action_type": action.action_type,
+        "execution_status": action.execution_status,
+    }
+    if action.execution_status == "REQUIRES_RECONNECT":
+        response["reconnect_required"] = True
+    return response
