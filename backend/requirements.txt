@@ -14,6 +14,7 @@ celery[redis]==5.4.0
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0
+cryptography==42.0.8              # Fernet para cifrado de tokens OAuth (token_cipher.py)
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1                    # pin: passlib 1.7.4 incompatible with bcrypt≥5.0
 
