@@ -54,6 +54,7 @@ npm run dev          # dev server en :3000
 npm run build        # build de producción
 npm run lint         # ESLint (next lint)
 npm run type-check   # tsc --noEmit
+npm run test         # Jest (unit tests)
 ```
 
 ### Variables de entorno
@@ -97,9 +98,14 @@ HTTP Request
 | Jobs | `app/jobs/` | Celery workers: scores, notifications, reports, ingestion (OCR, xlsx) |
 | Security | `app/application/security/prompt_defense.py` | `wrap_user_input()` — sanitiza input LLM contra prompt injection |
 
+### API Routers (`app/api/v1/`)
+
+Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat), `workspace` (Google Workspace), `admin`.
+
 ### Autenticación y multi-tenancy
 
 - JWT (HS256, python-jose). Payload: `sub` (user_id), `tenant_id`, `role_code`.
+- OAuth social login via `oauth.py` — identity tables: `user_auth_identity`, `user_google_workspace`.
 - `get_current_tenant_id` es la dependencia que se inyecta en TODOS los endpoints de negocio.
 - El `tenant_id` del JWT se usa en cada query — nunca se acepta del body/path del request.
 - Roles: `OWNER`, `ADMIN`, `VIEWER`. Se aplica con `require_role("OWNER", "ADMIN")`.
@@ -250,6 +256,11 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 - Correr un test de dominio: `pytest app/tests/domain/test_health_score.py -v --no-cov`
 
 ---
+
+## CI
+
+- `.github/workflows/ci-backend.yml` — ruff + mypy + pytest (cov ≥ 60%) + Docker build. Triggers on `backend/**` changes to `main`/`develop`.
+- `.github/workflows/ci-frontend.yml` — tsc + ESLint + `next build`. Triggers on `frontend/**` changes to `main`/`develop`.
 
 ## Deploy
 
