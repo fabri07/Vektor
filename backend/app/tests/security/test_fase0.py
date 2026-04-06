@@ -6,6 +6,7 @@ Si DATABASE_URL no está disponible, se saltan con un mensaje claro.
 """
 
 import os
+from types import SimpleNamespace
 
 import psycopg2
 import pytest
@@ -102,6 +103,25 @@ def test_token_cipher_fails_without_key(monkeypatch):
 
     with pytest.raises(EnvironmentError, match="GOOGLE_TOKEN_CIPHER_KEY"):
         encrypt_token("cualquier_token")
+
+
+def test_token_cipher_falls_back_to_settings(monkeypatch):
+    """Si la env var no está exportada, debe usar Settings como fallback."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.delenv("GOOGLE_TOKEN_CIPHER_KEY", raising=False)
+    key = Fernet.generate_key().decode()
+
+    def _fake_settings():
+        return SimpleNamespace(GOOGLE_TOKEN_CIPHER_KEY=key)
+
+    monkeypatch.setattr("app.config.settings.get_settings", _fake_settings)
+
+    original = "ya29.A0_google_access_token_example"
+    encrypted = encrypt_token(original)
+
+    assert encrypted != original
+    assert decrypt_token(encrypted) == original
 
 
 # ── Tests de Prompt Defense ───────────────────────────────────────────────────

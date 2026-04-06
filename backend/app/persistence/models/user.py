@@ -50,6 +50,7 @@ class User(TimestampMixin, Base):
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
     __table_args__ = (
+        UniqueConstraint("user_id", "tenant_id", name="uq_users_user_tenant"),
         UniqueConstraint("tenant_id", "email", name="uq_users_tenant_email"),
     )
 
