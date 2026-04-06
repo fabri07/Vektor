@@ -39,6 +39,8 @@ def _get_sub_agent(
     name: str,
     db: Optional[AsyncSession] = None,
     redis: Optional[Redis] = None,
+    user_id: Optional[uuid.UUID] = None,
+    tenant_id: Optional[uuid.UUID] = None,
 ) -> Optional[BaseAgent]:
     """Devuelve el subagente correspondiente al nombre; None si no hay mapeo."""
     if name == "agent_cash":
@@ -49,7 +51,11 @@ def _get_sub_agent(
         return AgentStock()
     if name == "agent_supplier":
         from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
-        return AgentSupplier()
+        gateway = None
+        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
+            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
+            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
+        return AgentSupplier(session=db, gateway=gateway)
     if name == "agent_health":
         from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415
         return AgentHealth(db=db)
@@ -108,7 +114,13 @@ async def chat(
 
     # ── Despacho al subagente que corresponde al intent ───────────────────────
     target_agent_name: str = agent_response.result.get("target_agent", "")
-    sub_agent = _get_sub_agent(target_agent_name, db=db, redis=redis)
+    sub_agent = _get_sub_agent(
+        target_agent_name,
+        db=db,
+        redis=redis,
+        user_id=current_user.user_id,
+        tenant_id=current_user.tenant_id,
+    )
     if sub_agent is not None:
         try:
             agent_response = await sub_agent.process(request)
@@ -162,6 +174,7 @@ async def confirm_action(
     pending_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
 ) -> dict:
     # SELECT FOR UPDATE — previene race conditions
     stmt = (
@@ -191,7 +204,7 @@ async def confirm_action(
         )
 
     # Ejecutar la acción + audit log (MISMA transacción)
-    await execute_pending_action(action, db)
+    await execute_pending_action(action, db, redis=redis)
     action.status = "APPROVED"
     action.executed_at = datetime.now(UTC)
     await db.commit()

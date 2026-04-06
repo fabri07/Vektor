@@ -14,11 +14,13 @@ from app.api.v1 import (
     insights,
     momentum,
     notifications,
+    oauth,
     onboarding,
     products,
     sales,
     tenants,
     users,
+    workspace,
 )
 
 api_router = APIRouter()
@@ -26,6 +28,7 @@ api_router = APIRouter()
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
 api_router.include_router(agent.router, prefix="/agent", tags=["Agent"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Auth"])
+api_router.include_router(oauth.router, prefix="/auth/oauth", tags=["Auth — OAuth"])
 api_router.include_router(tenants.router, prefix="/tenants", tags=["Tenants"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(
@@ -45,3 +48,4 @@ api_router.include_router(files.router, prefix="/files", tags=["Files"])
 api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
 api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])
 api_router.include_router(momentum.router, prefix="/momentum", tags=["Momentum"])
+api_router.include_router(workspace.router, prefix="/workspace", tags=["Workspace"])
