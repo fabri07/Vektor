@@ -12,9 +12,9 @@ from app.persistence.models.business import (
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
+from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.notification import Notification
 from app.persistence.models.pending_action import PendingAction
-from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.score import (
     HealthScoreSnapshot,
@@ -24,12 +24,16 @@ from app.persistence.models.score import (
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
+from app.persistence.models.user_auth_identity import UserAuthIdentity
+from app.persistence.models.user_google_workspace import UserGoogleWorkspaceConnection
 
 __all__ = [
     "UserActivityEvent",
     "Tenant",
     "Subscription",
     "User",
+    "UserAuthIdentity",
+    "UserGoogleWorkspaceConnection",
     "BusinessProfile",
     "BusinessSnapshot",
     "HeuristicRuleSet",

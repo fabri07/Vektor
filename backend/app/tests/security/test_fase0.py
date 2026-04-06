@@ -36,6 +36,9 @@ TENANT_TABLES = [
     "notifications",
     "user_activity_events",
     "pending_actions",
+    # Sprint 1: identidades sociales y tokens Workspace tienen tenant_id + RLS
+    "user_auth_identities",
+    "user_google_workspace_connections",
 ]
 
 

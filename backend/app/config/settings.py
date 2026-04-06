@@ -144,6 +144,23 @@ class Settings(BaseSettings):
     ENABLE_EMAIL_VERIFICATION: bool = True
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
 
+    # Auth social
+    ENABLE_GOOGLE_LOGIN: bool = False
+    ENABLE_FACEBOOK_LOGIN: bool = False  # Diferido — solo abstracción en fase 1
+
+    # Google Workspace MCP gateway (herramientas locales Python)
+    ENABLE_GOOGLE_WORKSPACE_MCP: bool = False
+
+    # ── Google OAuth ──────────────────────────────────────────────────────────
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_OAUTH_CLIENT_SECRET: str = ""
+    # Redirect URI registrada en Google Cloud Console
+    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/oauth/google/callback"
+
+    # Clave Fernet (URL-safe base64, 32 bytes) para cifrar tokens de Workspace.
+    # Generar con: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    GOOGLE_TOKEN_CIPHER_KEY: str = ""
+
     # ── Demo mode ─────────────────────────────────────────────────────────────
     # Set DEMO_MODE=true to pre-load a kiosco tenant with realistic sample data.
     # In demo mode email verification is always skipped.
@@ -178,6 +195,35 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "JWT_SECRET_KEY must be at least 32 characters and not a default value in production."
                 )
+
+        # ── Fail-fast: credenciales OAuth requeridas cuando los flags están activos ──
+        # Se valida en cualquier entorno (no solo producción) para detectar
+        # configuraciones rotas antes del primer request OAuth.
+        if self.ENABLE_GOOGLE_LOGIN or self.ENABLE_GOOGLE_WORKSPACE_MCP:
+            missing: list[str] = []
+            if not self.GOOGLE_OAUTH_CLIENT_ID:
+                missing.append("GOOGLE_OAUTH_CLIENT_ID")
+            if not self.GOOGLE_OAUTH_CLIENT_SECRET:
+                missing.append("GOOGLE_OAUTH_CLIENT_SECRET")
+            if not self.GOOGLE_OAUTH_REDIRECT_URI:
+                missing.append("GOOGLE_OAUTH_REDIRECT_URI")
+            if missing:
+                flags = ", ".join(
+                    f for f in ("ENABLE_GOOGLE_LOGIN", "ENABLE_GOOGLE_WORKSPACE_MCP")
+                    if getattr(self, f)
+                )
+                raise ValueError(
+                    f"Los flags [{flags}] están activos pero faltan las credenciales: "
+                    f"{', '.join(missing)}"
+                )
+
+        if self.ENABLE_GOOGLE_WORKSPACE_MCP and not self.GOOGLE_TOKEN_CIPHER_KEY:
+            raise ValueError(
+                "ENABLE_GOOGLE_WORKSPACE_MCP está activo pero falta GOOGLE_TOKEN_CIPHER_KEY. "
+                "Generá una con: "
+                "python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+
         return self
 
     # ── Computed properties ───────────────────────────────────────────────────
