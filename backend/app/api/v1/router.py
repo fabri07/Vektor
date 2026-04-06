@@ -20,6 +20,7 @@ from app.api.v1 import (
     sales,
     tenants,
     users,
+    workspace,
 )
 
 api_router = APIRouter()
@@ -47,3 +48,4 @@ api_router.include_router(files.router, prefix="/files", tags=["Files"])
 api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
 api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])
 api_router.include_router(momentum.router, prefix="/momentum", tags=["Momentum"])
+api_router.include_router(workspace.router, prefix="/workspace", tags=["Workspace"])

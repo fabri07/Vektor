@@ -17,7 +17,7 @@ via app.application.security.token_cipher.
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKeyConstraint, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKeyConstraint, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,8 +38,11 @@ class UserGoogleWorkspaceConnection(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, unique=True)
 
     # ── Tokens cifrados con Fernet ────────────────────────────────────────────
-    access_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
-    refresh_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # nullable=True: se anulan en soft revoke (disconnect) para minimizar retención.
+    # refresh_token_encrypted también puede ser None cuando Google omite el refresh_token
+    # en re-consentimientos sin revoke previo.
+    access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Scopes otorgados en el último consentimiento
     scopes_granted: Mapped[list[str]] = mapped_column(
@@ -68,6 +71,10 @@ class UserGoogleWorkspaceConnection(Base):
     last_error_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Email de la cuenta Google conectada (puede diferir del email de login).
+    # Poblado desde el userinfo endpoint durante connect/exchange.
+    google_account_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

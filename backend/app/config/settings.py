@@ -154,8 +154,10 @@ class Settings(BaseSettings):
     # ── Google OAuth ──────────────────────────────────────────────────────────
     GOOGLE_OAUTH_CLIENT_ID: str = ""
     GOOGLE_OAUTH_CLIENT_SECRET: str = ""
-    # Redirect URI registrada en Google Cloud Console
+    # Redirect URI para login social (Google Cloud Console)
     GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/oauth/google/callback"
+    # Redirect URI para Workspace connect (debe registrarse por separado en Google Cloud Console)
+    GOOGLE_WORKSPACE_REDIRECT_URI: str = "http://localhost:8000/api/v1/workspace/google/connect/callback"
 
     # Clave Fernet (URL-safe base64, 32 bytes) para cifrar tokens de Workspace.
     # Generar con: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -205,8 +207,10 @@ class Settings(BaseSettings):
                 missing.append("GOOGLE_OAUTH_CLIENT_ID")
             if not self.GOOGLE_OAUTH_CLIENT_SECRET:
                 missing.append("GOOGLE_OAUTH_CLIENT_SECRET")
-            if not self.GOOGLE_OAUTH_REDIRECT_URI:
+            if self.ENABLE_GOOGLE_LOGIN and not self.GOOGLE_OAUTH_REDIRECT_URI:
                 missing.append("GOOGLE_OAUTH_REDIRECT_URI")
+            if self.ENABLE_GOOGLE_WORKSPACE_MCP and not self.GOOGLE_WORKSPACE_REDIRECT_URI:
+                missing.append("GOOGLE_WORKSPACE_REDIRECT_URI")
             if missing:
                 flags = ", ".join(
                     f for f in ("ENABLE_GOOGLE_LOGIN", "ENABLE_GOOGLE_WORKSPACE_MCP")
