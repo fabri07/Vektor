@@ -5,6 +5,8 @@ Cubre:
   - TestConfirmConcurrency        : doble confirm y vencimiento
   - TestRetryEndpoint             : retry, límite, fallos y edge cases
   - TestIdempotency               : idempotency_key y external_system en create
+  - TestConfirmIntegration        : end-to-end sin mock de execute_pending_action
+  - TestRetryGuard                : guard explícito is_external en retry
 """
 
 from __future__ import annotations
@@ -671,3 +673,143 @@ class TestIdempotency:
 
         await db_session.refresh(action)
         assert action.idempotency_key == key_after_confirm == "original-key-abc"
+
+
+# ── TestConfirmIntegration ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestConfirmIntegration:
+    """End-to-end: execute_pending_action corre real (sin mock).
+
+    Solo se mockea EventBus.emit para evitar la conexión a Celery/Redis broker.
+    """
+
+    _EVENT_BUS = "app.application.agents.shared.event_bus.EventBus.emit"
+
+    async def test_register_sale_writes_sale_entry_to_db(
+        self,
+        agent_client: AsyncClient,
+        auth_headers: dict,
+        db_session: AsyncSession,
+        sample_tenant,
+        sample_user,
+    ) -> None:
+        """REGISTER_SALE real: executor escribe SaleEntry en DB y retorna SUCCEEDED."""
+        from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+        action = _make_pending_action(
+            sample_tenant.tenant_id,
+            sample_user.user_id,
+            action_type=ActionType.REGISTER_SALE,
+            # payload compatible con cash_service.save_sale
+        )
+        # override payload con campos reales que espera save_sale
+        action.payload = {"amount": "1500.00", "payment_method": "cash"}
+        db_session.add(action)
+        await db_session.commit()
+
+        with patch(self._EVENT_BUS):  # solo mockea Celery; executor corre real
+            resp = await agent_client.post(
+                f"/api/v1/agent/confirm/{action.id}", headers=auth_headers
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["execution_status"] == "SUCCEEDED"
+
+        # Verificar que la SaleEntry fue persistida en DB
+        await db_session.refresh(action)
+        assert action.execution_status == "SUCCEEDED"
+        assert action.status == "APPROVED"
+
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all()
+        assert len(sales) == 1
+        assert str(sales[0].amount) == "1500.00"
+
+    async def test_create_supplier_draft_no_google_connection_sets_requires_reconnect(
+        self,
+        agent_client: AsyncClient,
+        auth_headers: dict,
+        db_session: AsyncSession,
+        sample_tenant,
+        sample_user,
+    ) -> None:
+        """CREATE_SUPPLIER_DRAFT real, sin conexión Google: executor lanza
+        WorkspaceTokenError('not_connected') y confirm persiste REQUIRES_RECONNECT.
+
+        No se necesitan mocks externos porque el token_manager devuelve
+        WorkspaceTokenError al no encontrar fila en user_google_workspace_connections.
+        """
+        action = _make_pending_action(
+            sample_tenant.tenant_id,
+            sample_user.user_id,
+            action_type=ActionType.CREATE_SUPPLIER_DRAFT,
+            external_system="GOOGLE_GMAIL",
+            idempotency_key=str(uuid.uuid4()),
+        )
+        action.payload = {
+            "draft_text": "Estimado proveedor, gracias por su oferta.",
+            "draft_to": "proveedor@ejemplo.com",
+            "draft_subject": "Re: Lista de precios",
+        }
+        db_session.add(action)
+        await db_session.commit()
+
+        # Sin ningún mock: el executor real va a Google, falla por falta de conexión
+        resp = await agent_client.post(
+            f"/api/v1/agent/confirm/{action.id}", headers=auth_headers
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["execution_status"] == "REQUIRES_RECONNECT"
+        assert data.get("reconnect_required") is True
+
+        await db_session.refresh(action)
+        assert action.execution_status == "REQUIRES_RECONNECT"
+        assert action.failure_code == "not_connected"
+        assert action.status == "APPROVED"
+
+
+# ── TestRetryGuard ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestRetryGuard:
+    """Guard explícito is_external en /retry."""
+
+    async def test_retry_local_action_in_failed_state_returns_409(
+        self,
+        agent_client: AsyncClient,
+        auth_headers: dict,
+        db_session: AsyncSession,
+        sample_tenant,
+        sample_user,
+    ) -> None:
+        """Acción local (external_system=None) que por algún motivo acabó en FAILED
+        no debe ser reintentable → 409 con mensaje 'acción local'.
+
+        Esto nunca debería ocurrir en producción, pero el guard lo hace explícito.
+        """
+        action = _make_pending_action(
+            sample_tenant.tenant_id,
+            sample_user.user_id,
+            action_type=ActionType.REGISTER_SALE,
+            status="APPROVED",
+            execution_status="FAILED",
+            external_system=None,  # local — sin sistema externo
+        )
+        db_session.add(action)
+        await db_session.commit()
+
+        resp = await agent_client.post(
+            f"/api/v1/agent/retry/{action.id}", headers=auth_headers
+        )
+
+        assert resp.status_code == 409
+        assert "local" in resp.json()["detail"]

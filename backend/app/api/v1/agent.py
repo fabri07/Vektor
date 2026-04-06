@@ -336,6 +336,16 @@ async def retry_action(
             detail="Acción no encontrada o no reintentable.",
         )
 
+    # ── Guard explícito: solo acciones externas son reintentables ─────────────
+    # Por diseño, solo las acciones con external_system pueden terminar en
+    # FAILED|REQUIRES_RECONNECT. Este guard hace el contrato explícito en lugar
+    # de depender del invariante implícito.
+    if not action.is_external:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"La acción '{action.action_type}' no es reintentable (acción local sin sistema externo).",
+        )
+
     # ── Verificar límite de 1 retry via DecisionAuditLog ─────────────────────
     # Carga solo los registros del tenant con decision_type=AGENT_ACTION_RETRIED;
     # el volumen por tenant es bajo. Filtramos pending_action_id en Python para
