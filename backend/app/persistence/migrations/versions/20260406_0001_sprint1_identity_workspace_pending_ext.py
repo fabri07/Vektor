@@ -44,6 +44,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Requerido para FKs compuestas (tenant_id, user_id) desde las tablas nuevas.
+    op.create_unique_constraint(
+        "uq_users_user_tenant",
+        "users",
+        ["user_id", "tenant_id"],
+    )
+
     # ── 1. CREATE TABLE user_auth_identities ──────────────────────────────────
     # Identidad OIDC por proveedor social (login/registro).
     # tenant_id incluido para RLS uniforme con el resto del proyecto.
@@ -58,13 +65,11 @@ def upgrade() -> None:
         sa.Column(
             "tenant_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column(
             "user_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("users.user_id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column("provider", sa.Text(), nullable=False),
@@ -80,6 +85,12 @@ def upgrade() -> None:
         sa.UniqueConstraint(
             "provider", "provider_subject",
             name="uq_auth_identity_provider_subject",
+        ),
+        sa.ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["users.tenant_id", "users.user_id"],
+            ondelete="CASCADE",
+            name="fk_auth_identities_user_tenant",
         ),
     )
     op.create_index("idx_auth_identities_tenant", "user_auth_identities", ["tenant_id"])
@@ -100,13 +111,11 @@ def upgrade() -> None:
         sa.Column(
             "tenant_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column(
             "user_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("users.user_id", ondelete="CASCADE"),
             nullable=False,
             unique=True,
         ),
@@ -136,6 +145,12 @@ def upgrade() -> None:
             server_default=sa.text("NOW()"),
         ),
         sa.UniqueConstraint("user_id", name="uq_workspace_connection_user"),
+        sa.ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["users.tenant_id", "users.user_id"],
+            ondelete="CASCADE",
+            name="fk_workspace_connections_user_tenant",
+        ),
     )
     op.create_index(
         "idx_workspace_connections_tenant",
@@ -231,3 +246,4 @@ def downgrade() -> None:
     op.drop_index("idx_auth_identities_tenant", table_name="user_auth_identities")
     op.drop_table("user_google_workspace_connections")
     op.drop_table("user_auth_identities")
+    op.drop_constraint("uq_users_user_tenant", "users", type_="unique")

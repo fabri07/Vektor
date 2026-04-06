@@ -25,15 +25,21 @@ class TokenCipherError(Exception):
 
 
 def _get_fernet() -> Fernet:
-    """Lee GOOGLE_TOKEN_CIPHER_KEY del entorno y construye un Fernet.
+    """Lee GOOGLE_TOKEN_CIPHER_KEY y construye un Fernet.
 
-    No se cachea intencionalmente: garantiza que monkeypatch funcione en tests
-    y que cualquier rotación de clave se refleje sin reiniciar el proceso.
+    Prioridad:
+      1. variable de entorno del proceso
+      2. Settings cargado desde .env / entorno
 
-    Raises EnvironmentError si la clave no está definida.
-    Raises TokenCipherError si la clave tiene formato inválido.
+    No se cachea intencionalmente: garantiza que monkeypatch funcione en tests.
+    En runtime, si la variable no está exportada al proceso pero sí configurada
+    en `.env`, se hace fallback a Settings.
     """
     key = os.environ.get("GOOGLE_TOKEN_CIPHER_KEY", "")
+    if not key:
+        from app.config.settings import get_settings  # import tardío para evitar ciclos
+
+        key = get_settings().GOOGLE_TOKEN_CIPHER_KEY
     if not key:
         raise EnvironmentError(
             "GOOGLE_TOKEN_CIPHER_KEY no está definida. "

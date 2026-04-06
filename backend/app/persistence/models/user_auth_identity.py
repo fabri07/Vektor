@@ -14,7 +14,7 @@ y la política RLS protege contra lecturas cross-tenant si app.current_tenant_id
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKeyConstraint, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,18 +30,8 @@ class UserAuthIdentity(Base):
         default=uuid.uuid4,
     )
     # tenant_id requerido para RLS (mismo patrón que el resto del proyecto)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.user_id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     # "google" | "facebook" — texto libre para no migrar al agregar proveedor
     provider: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     # Sub claim de Google OIDC (identificador único del proveedor)
@@ -58,6 +48,12 @@ class UserAuthIdentity(Base):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["users.tenant_id", "users.user_id"],
+            ondelete="CASCADE",
+            name="fk_auth_identities_user_tenant",
+        ),
         UniqueConstraint(
             "provider",
             "provider_subject",
