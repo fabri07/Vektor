@@ -150,13 +150,13 @@ async def upload_file(
     s3_key = f"uploads/{tenant.tenant_id}/{file_uuid}/{filename}"
 
     s3 = S3Client()
-    await s3.upload_to_key(content=content, key=s3_key, content_type=detected_mime)
+    stored_key = await s3.upload_to_key(content=content, key=s3_key, content_type=detected_mime)
 
     record = UploadedFile(
         tenant_id=tenant.tenant_id,
         uploaded_by=current_user.user_id,
         original_filename=filename,
-        s3_key=s3_key,
+        s3_key=stored_key,
         content_type=detected_mime,
         size_bytes=len(content),
         purpose=file_hint,
