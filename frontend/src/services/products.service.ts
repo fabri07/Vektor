@@ -27,9 +27,20 @@ export interface ProductResponse {
   is_low_stock: boolean;
 }
 
+export interface ProductsListParams {
+  is_active?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
 export const productsService = {
   async createProduct(payload: CreateProductPayload): Promise<ProductResponse> {
     const res = await api.post<ProductResponse>("/products/", payload);
+    return res.data;
+  },
+
+  async getProducts(params?: ProductsListParams): Promise<ProductResponse[]> {
+    const res = await api.get<ProductResponse[]>("/products/", { params });
     return res.data;
   },
 };

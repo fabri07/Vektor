@@ -1,4 +1,7 @@
 import { api } from "@/lib/api";
+import type { ExpenseSummaryResponse } from "@/types/api";
+
+export type { ExpenseSummaryResponse };
 
 export interface CreateExpensePayload {
   amount: number;
@@ -25,11 +28,29 @@ export interface ExpenseEntryResponse {
   created_at: string;
 }
 
+export interface ExpensesListParams {
+  from_date?: string;
+  to_date?: string;
+  category?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export const expensesService = {
   async createExpense(
     payload: CreateExpensePayload,
   ): Promise<ExpenseEntryResponse> {
     const res = await api.post<ExpenseEntryResponse>("/expenses/", payload);
+    return res.data;
+  },
+
+  async getSummary(): Promise<ExpenseSummaryResponse> {
+    const res = await api.get<ExpenseSummaryResponse>("/expenses/summary");
+    return res.data;
+  },
+
+  async getEntries(params?: ExpensesListParams): Promise<ExpenseEntryResponse[]> {
+    const res = await api.get<ExpenseEntryResponse[]>("/expenses/", { params });
     return res.data;
   },
 };

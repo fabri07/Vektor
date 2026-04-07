@@ -225,12 +225,67 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 
 | Directorio | Responsabilidad |
 |------------|-----------------|
-| `src/features/` | Módulos por feature: `auth`, `dashboard`, `onboarding`, `ingestion`, `notifications` |
-| `src/services/` | Capa de llamadas HTTP por dominio: `auth`, `sales`, `expenses`, `products`, `health_score`, `dashboard`, `momentum`, `notifications`, `ingestion`, `onboarding` |
+| `src/features/` | Módulos por feature: `auth`, `chat`, `dashboard`, `onboarding`, `ingestion`, `notifications` |
+| `src/services/` | Capa de llamadas HTTP por dominio: `auth`, `sales`, `expenses`, `products`, `health_score`, `dashboard`, `momentum`, `notifications`, `ingestion`, `onboarding`, `workspace`, `files` |
 | `src/stores/` | Zustand: `authStore` (JWT + user), `toastStore` |
 | `src/hooks/` | Custom hooks: `useAuth` |
 | `src/types/api.ts` | Tipos TypeScript de respuestas de la API |
 | `src/components/auth/AuthHydrationBoundary.tsx` | Hidrata auth desde localStorage antes de renderizar rutas protegidas |
+
+### Rutas protegidas (`src/app/(protected)/`)
+
+| Ruta | Componente | Descripción |
+|------|-----------|-------------|
+| `/chat` | `features/chat/ChatPage.tsx` | **Home principal** — chat de página completa, sin panel flotante |
+| `/dashboard` | `features/dashboard/` | KPIs generales y health score |
+| `/sales` | `(protected)/sales/page.tsx` | Analytics + lista de ventas con KPIs y filtros |
+| `/expenses` | `(protected)/expenses/page.tsx` | Analytics + lista de gastos con KPIs y filtros |
+| `/products` | `(protected)/products/page.tsx` | Catálogo con KPIs de stock e inventario |
+| `/settings` | `(protected)/settings/page.tsx` | Cuenta + tab Google Workspace |
+
+### Rutas públicas (`src/app/(public)/`)
+
+| Ruta | Descripción |
+|------|-------------|
+| `/oauth/callback?session_id=` | Callback de Google OAuth login — llama `POST /auth/oauth/google/exchange` |
+| `/workspace/connect/callback?exchange_session_id=` | Callback de Google Workspace — llama `POST /workspace/google/connect/exchange` |
+
+### Chat (Sprint 5)
+
+- `/chat` es la home post-login. Todos los redirects post-auth apuntan a `/chat`, no `/dashboard`.
+- `ChatPanel.tsx` se mantiene en el repo pero **no** está registrado en el layout global.
+- `conversation_id`: UUID generado client-side con `useRef<string>(crypto.randomUUID()).current` al montar `useChat`. No se espera del servidor.
+- Adjuntos: `AttachmentPicker.tsx` — hasta 3 archivos (PDF/XLSX/CSV/PNG/JPG), se suben inmediatamente a `POST /files/upload?purpose=chat` antes de enviar el mensaje. Los `file_id` se pasan en el body del agente.
+- Layout condicional en `(protected)/layout.tsx`: chat usa `flex flex-col overflow-hidden`, otras páginas usan el wrapper con padding y scroll normal.
+
+### Google OAuth (Sprint 5)
+
+Flujo login federado:
+1. `LoginForm` → `POST /auth/oauth/google/start` → `window.location.href = authorization_url`
+2. Google → `/oauth/callback?session_id=...`
+3. `POST /auth/oauth/google/exchange` → `AuthResponse` (nuevo usuario) **o** `OAuthLinkRequiredResponse` (email ya existente)
+4. Si `link_required`: formulario de contraseña para vincular → `POST /auth/oauth/google/link-pending`
+
+### Google Workspace (Sprint 5)
+
+Flujo conexión (separado del login federado):
+1. Settings tab "Google Workspace" → `POST /workspace/google/connect/start` → `window.location.href`
+2. Google → `/workspace/connect/callback?exchange_session_id=...`
+3. `POST /workspace/google/connect/exchange { exchange_session_id }` (requiere JWT)
+4. `GET /workspace/google/status` — muestra email, scopes, fecha de conexión
+5. `DELETE /workspace/google/disconnect` — desconecta
+
+---
+
+## Historial de sprints
+
+| Sprint | Estado | Descripción |
+|--------|--------|-------------|
+| 1 | ✅ Completo | Auth social (Google OAuth), modelo `user_auth_identity` |
+| 2 | ✅ Completo | Google OAuth login frontend, callback `/oauth/callback` |
+| 3 | ✅ Completo | Workspace Gateway + AgentSupplier Gmail |
+| 4 | ✅ Completo | Pending Actions externas — lifecycle (`/pending-actions/{id}/execute`), retry con guard `is_external`, idempotency_key, integración `EXTERNAL_SYSTEMS` |
+| 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, Settings con tab Google Workspace, adjuntos en chat, analytics Ventas/Gastos/Productos |
 
 ---
 
