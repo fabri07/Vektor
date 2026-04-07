@@ -32,7 +32,7 @@ export default function ErrorPage({ reset }: ErrorPageProps) {
           Algo salió mal
         </h1>
         <p className="mb-8 text-sm text-vk-text-muted">
-          Ocurrió un error inesperado. Podés intentar de nuevo o volver al dashboard.
+          Ocurrió un error inesperado. Podés intentar de nuevo o volver al chat.
         </p>
 
         <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
@@ -44,10 +44,10 @@ export default function ErrorPage({ reset }: ErrorPageProps) {
             Reintentar
           </button>
           <Link
-            href="/dashboard"
+            href="/chat"
             className="inline-flex items-center justify-center rounded-lg border border-vk-border-w bg-vk-surface-w px-5 py-2.5 text-sm font-medium text-vk-text-secondary transition-colors hover:border-vk-border-w-hover hover:text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
           >
-            Volver al dashboard
+            Volver al chat
           </Link>
         </div>
       </div>

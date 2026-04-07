@@ -31,6 +31,9 @@ export interface SalesListParams {
   offset?: number;
 }
 
+const PAGE_SIZE = 200;
+const MAX_PAGES = 25;
+
 export const salesService = {
   async createSale(payload: CreateSalePayload): Promise<SaleEntryResponse> {
     const res = await api.post<SaleEntryResponse>("/sales/", payload);
@@ -45,5 +48,24 @@ export const salesService = {
   async getEntries(params?: SalesListParams): Promise<SaleEntryResponse[]> {
     const res = await api.get<SaleEntryResponse[]>("/sales/", { params });
     return res.data;
+  },
+
+  async getAllEntries(params?: Omit<SalesListParams, "limit" | "offset">): Promise<SaleEntryResponse[]> {
+    const items: SaleEntryResponse[] = [];
+
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const batch = await salesService.getEntries({
+        ...params,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
+      });
+      items.push(...batch);
+
+      if (batch.length < PAGE_SIZE) {
+        break;
+      }
+    }
+
+    return items;
   },
 };

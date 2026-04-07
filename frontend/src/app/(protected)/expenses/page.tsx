@@ -113,17 +113,16 @@ export default function ExpensesPage() {
 
   const { data: entries = [], isLoading, isError } = useQuery({
     queryKey: ["expenses-entries", from, to],
-    queryFn: () => expensesService.getEntries({ from_date: from, to_date: to, limit: 200 }),
+    queryFn: () => expensesService.getAllEntries({ from_date: from, to_date: to }),
     staleTime: 60 * 1000,
   });
 
   const { data: prevEntries = [] } = useQuery({
     queryKey: ["expenses-entries-prev", prevDates.from, prevDates.to],
     queryFn: () =>
-      expensesService.getEntries({
+      expensesService.getAllEntries({
         from_date: prevDates.from,
         to_date: prevDates.to,
-        limit: 200,
       }),
     staleTime: 5 * 60 * 1000,
     enabled: period === "month",
@@ -238,7 +237,7 @@ export default function ExpensesPage() {
           action={{ label: "Ir al chat", href: "/chat" }}
         />
       ) : (
-        <Table columns={COLUMNS} data={sorted as Record<string, unknown>[]} />
+        <Table columns={COLUMNS} data={sorted} />
       )}
     </PageWrapper>
   );

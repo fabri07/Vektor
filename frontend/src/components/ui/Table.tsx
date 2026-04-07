@@ -12,7 +12,7 @@ interface TableProps<T = Record<string, unknown>> {
   emptyMessage?: string;
 }
 
-export function Table<T extends Record<string, unknown>>({
+export function Table<T extends object>({
   columns,
   data,
   emptyMessage = "No hay datos para mostrar.",
@@ -69,8 +69,8 @@ export function Table<T extends Record<string, unknown>>({
                       className="whitespace-nowrap px-4 py-3 text-vk-text-primary"
                     >
                       {col.render
-                        ? col.render(row[col.key], row)
-                        : String(row[col.key] ?? "")}
+                        ? col.render((row as Record<string, unknown>)[col.key], row)
+                        : String((row as Record<string, unknown>)[col.key] ?? "")}
                     </td>
                   ))}
                 </tr>

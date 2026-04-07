@@ -50,6 +50,7 @@ export function Select({
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputId = id ?? label?.toLowerCase().replace(/\s+/g, "-");
+  const listboxId = inputId ? `${inputId}-listbox` : undefined;
 
   const selectedLabel = options.find((o) => o.value === value)?.label;
 
@@ -102,6 +103,7 @@ export function Select({
       <div
         id={inputId}
         role="combobox"
+        aria-controls={listboxId}
         aria-expanded={isOpen}
         aria-haspopup="listbox"
         aria-disabled={disabled}
@@ -128,6 +130,7 @@ export function Select({
       {/* Dropdown */}
       {isOpen && (
         <div
+          id={listboxId}
           role="listbox"
           className={[
             "absolute z-[200] mt-1 w-full overflow-hidden rounded-lg border border-vk-border-w bg-vk-surface-w shadow-vk-md",

@@ -30,6 +30,9 @@ function WorkspaceTab() {
     onSuccess: ({ authorization_url }) => {
       window.location.href = authorization_url;
     },
+    onError: () => {
+      addToast("No se pudo iniciar la conexión con Google Workspace.", "error");
+    },
   });
 
   const disconnectMutation = useMutation({
@@ -37,6 +40,9 @@ function WorkspaceTab() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["workspace-status"] });
       addToast("Google Workspace desconectado.", "success");
+    },
+    onError: () => {
+      addToast("No se pudo desconectar Google Workspace.", "error");
     },
   });
 
@@ -59,7 +65,9 @@ function WorkspaceTab() {
             Conectá tu cuenta de Google para acceder a Gmail y Sheets.
           </p>
         </div>
-        {status?.connected ? (
+        {status?.last_error_code ? (
+          <Badge variant="warning">Reconectar</Badge>
+        ) : status?.connected ? (
           <Badge variant="success">Conectado</Badge>
         ) : (
           <Badge variant="default">No conectado</Badge>

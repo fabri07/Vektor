@@ -35,10 +35,16 @@ export function useChat() {
   }, []);
 
   const send = useCallback(
-    async (text: string, attachments?: ChatAttachment[]) => {
-      if (!text.trim() || isLoading || isRateLimited) return;
+    async (
+      text: string,
+      attachments?: ChatAttachment[],
+      displayText?: string,
+    ) => {
+      const hasText = text.trim().length > 0;
+      const hasAttachments = (attachments?.length ?? 0) > 0;
+      if ((!hasText && !hasAttachments) || isLoading || isRateLimited) return;
 
-      addMessage({ role: "user", content: text });
+      addMessage({ role: "user", content: displayText ?? text });
       setIsLoading(true);
 
       try {

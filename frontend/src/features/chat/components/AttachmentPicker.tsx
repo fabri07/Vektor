@@ -14,6 +14,7 @@ const ALLOWED_TYPES = [
 const ALLOWED_EXTENSIONS = ".pdf,.xlsx,.csv,.png,.jpg,.jpeg";
 const MAX_FILES = 3;
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const ALLOWED_EXT_SET = new Set(["pdf", "xlsx", "csv", "png", "jpg", "jpeg"]);
 
 export interface AttachmentFile {
   id: string;
@@ -40,15 +41,23 @@ export function AttachmentPicker({
 }: AttachmentPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
+  function isAllowedFile(file: File): boolean {
+    if (ALLOWED_TYPES.includes(file.type)) {
+      return true;
+    }
+
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    return extension != null && ALLOWED_EXT_SET.has(extension);
+  }
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
+    const availableSlots = Math.max(MAX_FILES - attachments.length, 0);
+    const files = Array.from(e.target.files ?? []).slice(0, availableSlots);
     // Reset input so same file can be re-selected if needed
     e.target.value = "";
 
     for (const file of files) {
-      if (attachments.length >= MAX_FILES) break;
-
-      if (!ALLOWED_TYPES.includes(file.type)) {
+      if (!isAllowedFile(file)) {
         continue;
       }
       if (file.size > MAX_BYTES) {

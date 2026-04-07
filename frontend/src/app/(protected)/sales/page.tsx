@@ -97,17 +97,16 @@ export default function SalesPage() {
 
   const { data: entries = [], isLoading, isError } = useQuery({
     queryKey: ["sales-entries", from, to],
-    queryFn: () => salesService.getEntries({ from_date: from, to_date: to, limit: 200 }),
+    queryFn: () => salesService.getAllEntries({ from_date: from, to_date: to }),
     staleTime: 60 * 1000,
   });
 
   const { data: prevEntries = [] } = useQuery({
     queryKey: ["sales-entries-prev", prevDates.from, prevDates.to],
     queryFn: () =>
-      salesService.getEntries({
+      salesService.getAllEntries({
         from_date: prevDates.from,
         to_date: prevDates.to,
-        limit: 200,
       }),
     staleTime: 5 * 60 * 1000,
     enabled: period === "month",
@@ -191,7 +190,7 @@ export default function SalesPage() {
           action={{ label: "Ir al chat", href: "/chat" }}
         />
       ) : (
-        <Table columns={COLUMNS} data={sorted as Record<string, unknown>[]} />
+        <Table columns={COLUMNS} data={sorted} />
       )}
     </PageWrapper>
   );

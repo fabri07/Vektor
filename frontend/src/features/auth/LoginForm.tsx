@@ -48,6 +48,7 @@ export function LoginForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [googleError, setGoogleError] = useState<string | null>(null);
 
   const fieldErrors = useMemo(() => {
     const result = loginSchema.safeParse(values);
@@ -95,11 +96,12 @@ export function LoginForm() {
 
   async function handleGoogleLogin() {
     setGoogleLoading(true);
+    setGoogleError(null);
     try {
       const { authorization_url } = await getGoogleOAuthUrl();
       window.location.href = authorization_url;
     } catch {
-      // If endpoint returns 404 (feature disabled) or any error, silently fail
+      setGoogleError("No se pudo iniciar el acceso con Google. Intentá de nuevo.");
       setGoogleLoading(false);
     }
   }
@@ -210,6 +212,12 @@ export function LoginForm() {
       {serverError && (
         <p role="alert" className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
           {serverError}
+        </p>
+      )}
+
+      {googleError && (
+        <p role="alert" className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
+          {googleError}
         </p>
       )}
 

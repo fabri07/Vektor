@@ -91,7 +91,7 @@ export default function ProductsPage() {
 
   const { data: products = [], isLoading, isError } = useQuery({
     queryKey: ["products-list"],
-    queryFn: () => productsService.getProducts({ is_active: true, limit: 200 }),
+    queryFn: () => productsService.getAllProducts({ is_active: true }),
     staleTime: 2 * 60 * 1000,
   });
 

@@ -36,6 +36,9 @@ export interface ExpensesListParams {
   offset?: number;
 }
 
+const PAGE_SIZE = 200;
+const MAX_PAGES = 25;
+
 export const expensesService = {
   async createExpense(
     payload: CreateExpensePayload,
@@ -52,5 +55,26 @@ export const expensesService = {
   async getEntries(params?: ExpensesListParams): Promise<ExpenseEntryResponse[]> {
     const res = await api.get<ExpenseEntryResponse[]>("/expenses/", { params });
     return res.data;
+  },
+
+  async getAllEntries(
+    params?: Omit<ExpensesListParams, "limit" | "offset">,
+  ): Promise<ExpenseEntryResponse[]> {
+    const items: ExpenseEntryResponse[] = [];
+
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const batch = await expensesService.getEntries({
+        ...params,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
+      });
+      items.push(...batch);
+
+      if (batch.length < PAGE_SIZE) {
+        break;
+      }
+    }
+
+    return items;
   },
 };

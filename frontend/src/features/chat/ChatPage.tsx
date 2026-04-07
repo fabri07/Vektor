@@ -17,6 +17,13 @@ const INITIAL_EXAMPLES = [
   "• Llegó mail de mi proveedor",
 ];
 
+function buildAttachmentMessage(attachments: AttachmentFile[]): string {
+  if (attachments.length === 1) {
+    return `Adjunté 1 archivo: ${attachments[0]?.file.name ?? "archivo"}`;
+  }
+  return `Adjunté ${attachments.length} archivos.`;
+}
+
 export function ChatPage() {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentFile[]>([]);
@@ -34,18 +41,26 @@ export function ChatPage() {
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || isLoading || isRateLimited || isUploading) return;
-
     const readyAttachments = attachments
       .filter((a) => a.uploadedFileId)
       .map((a) => ({ file_id: a.uploadedFileId!, filename: a.file.name }));
+    const hasText = text.length > 0;
+    const hasAttachments = readyAttachments.length > 0;
+    if ((!hasText && !hasAttachments) || isLoading || isRateLimited || isUploading) {
+      return;
+    }
+
+    const payloadMessage = hasText
+      ? text
+      : `Analizá los archivos adjuntos: ${readyAttachments.map((a) => a.filename).join(", ")}`;
+    const displayMessage = hasText ? text : buildAttachmentMessage(attachments);
 
     setInput("");
     setAttachments([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-    await send(text, readyAttachments);
+    await send(payloadMessage, readyAttachments, displayMessage);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -191,7 +206,11 @@ export function ChatPage() {
                 />
                 <button
                   onClick={() => void handleSend()}
-                  disabled={isLoading || isUploading || !input.trim()}
+                  disabled={
+                    isLoading ||
+                    isUploading ||
+                    (!input.trim() && attachments.length === 0)
+                  }
                   className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-vk-blue text-white hover:bg-vk-blue-hover disabled:opacity-40 transition-colors"
                   aria-label="Enviar"
                 >
