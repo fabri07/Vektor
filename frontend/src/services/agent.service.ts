@@ -16,13 +16,20 @@ export interface AgentResponse {
   question?: string;
 }
 
+export interface ChatAttachment {
+  file_id: string;
+  filename: string;
+}
+
 export async function sendMessage(
   message: string,
-  conversationId?: string
+  conversationId?: string,
+  attachments?: ChatAttachment[],
 ): Promise<AgentResponse> {
   const res = await api.post<AgentResponse>("/agent/chat", {
     message,
     conversation_id: conversationId,
+    attachments: attachments ?? [],
   });
   return res.data;
 }

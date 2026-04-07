@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
+  MessageSquare,
   LayoutDashboard,
   ShoppingCart,
   Receipt,
@@ -25,7 +26,8 @@ interface SidebarProps {
 }
 
 const NAV_ITEMS = [
-  { label: "Dashboard",     href: "/dashboard", icon: LayoutDashboard },
+  { label: "Chat",          href: "/chat",       icon: MessageSquare },
+  { label: "Dashboard",     href: "/dashboard",  icon: LayoutDashboard },
   { label: "Ventas",        href: "/sales",      icon: ShoppingCart },
   { label: "Gastos",        href: "/expenses",   icon: Receipt },
   { label: "Productos",     href: "/products",   icon: Package },
@@ -88,7 +90,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         )}
       >
         <Link
-          href="/dashboard"
+          href="/chat"
           onClick={onClose}
           className={clsx(
             "flex items-center focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60 rounded",

@@ -156,3 +156,57 @@ export interface MomentumProfileResponse {
   improving_streak_weeks: number;
   weekly_history: WeeklyHistoryItem[];
 }
+
+// ── Sales ─────────────────────────────────────────────────────────────────────
+
+export interface SaleSummaryResponse {
+  total_ars: number;
+  entry_count: number;
+  period_covered: string;
+}
+
+// ── Expenses ──────────────────────────────────────────────────────────────────
+
+export interface ExpenseSummaryResponse {
+  total_ars: number;
+  entry_count: number;
+  period_covered: string;
+}
+
+// ── Files ─────────────────────────────────────────────────────────────────────
+
+export interface UploadedFileResponse {
+  id: string;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+  purpose: string;
+  status: string;
+}
+
+// ── OAuth / Google Login ──────────────────────────────────────────────────────
+
+export interface OAuthStartResponse {
+  authorization_url: string;
+}
+
+export interface OAuthLinkRequiredResponse {
+  status: "link_required";
+  pending_oauth_session_id: string;
+  email: string;
+  provider: "google";
+}
+
+// ── Google Workspace ─────────────────────────────────────────────────────────
+
+export interface WorkspaceConnectStartResponse {
+  authorization_url: string;
+}
+
+export interface WorkspaceStatusResponse {
+  connected: boolean;
+  google_account_email: string | null;
+  scopes_granted: string[];
+  connected_at: string | null;
+  last_error_code: string | null;
+}

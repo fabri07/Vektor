@@ -1,5 +1,11 @@
 import { api } from "@/lib/api";
-import type { AuthResponse, MeResponse, RegisterResponse } from "@/types/api";
+import type {
+  AuthResponse,
+  MeResponse,
+  RegisterResponse,
+  OAuthStartResponse,
+  OAuthLinkRequiredResponse,
+} from "@/types/api";
 import type { LoginInput, RegisterInput } from "@/validation/auth";
 
 export async function loginRequest(data: LoginInput): Promise<AuthResponse> {
@@ -39,4 +45,28 @@ export async function getMeRequest(config?: {
 
 export async function logoutRequest(): Promise<void> {
   await api.post("/auth/logout");
+}
+
+export async function getGoogleOAuthUrl(): Promise<OAuthStartResponse> {
+  const res = await api.post<OAuthStartResponse>("/auth/oauth/google/start");
+  return res.data;
+}
+
+export async function exchangeGoogleSession(
+  session_id: string,
+): Promise<AuthResponse | OAuthLinkRequiredResponse> {
+  const res = await api.post<AuthResponse | OAuthLinkRequiredResponse>(
+    "/auth/oauth/google/exchange",
+    { session_id },
+  );
+  return res.data;
+}
+
+export async function linkPendingOAuth(data: {
+  pending_oauth_session_id: string;
+  email: string;
+  password: string;
+}): Promise<AuthResponse> {
+  const res = await api.post<AuthResponse>("/auth/oauth/google/link-pending", data);
+  return res.data;
 }

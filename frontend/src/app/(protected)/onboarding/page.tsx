@@ -14,7 +14,7 @@ export default function OnboardingPage() {
       .getStatus()
       .then((status) => {
         if (status.completed) {
-          router.replace("/dashboard");
+          router.replace("/chat");
         } else {
           setChecking(false);
         }

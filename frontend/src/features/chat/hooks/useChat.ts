@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import {
   sendMessage,
   confirmAction,
   cancelAction,
   type AgentResponse,
+  type ChatAttachment,
 } from "@/services/agent.service";
 import { type AxiosError } from "axios";
 
@@ -21,7 +22,8 @@ export interface Message {
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  // Stable UUID generated once per hook mount — never replaced by server response
+  const conversationId = useRef<string>(crypto.randomUUID()).current;
   const [messagesUsedToday, setMessagesUsedToday] = useState(0);
   const [isRateLimited, setIsRateLimited] = useState(false);
 
@@ -33,14 +35,20 @@ export function useChat() {
   }, []);
 
   const send = useCallback(
-    async (text: string) => {
-      if (!text.trim() || isLoading || isRateLimited) return;
+    async (
+      text: string,
+      attachments?: ChatAttachment[],
+      displayText?: string,
+    ) => {
+      const hasText = text.trim().length > 0;
+      const hasAttachments = (attachments?.length ?? 0) > 0;
+      if ((!hasText && !hasAttachments) || isLoading || isRateLimited) return;
 
-      addMessage({ role: "user", content: text });
+      addMessage({ role: "user", content: displayText ?? text });
       setIsLoading(true);
 
       try {
-        const response = await sendMessage(text, conversationId ?? undefined);
+        const response = await sendMessage(text, conversationId, attachments);
         setMessagesUsedToday((prev) => prev + 1);
 
         if (response.status === "requires_approval") {
@@ -64,9 +72,6 @@ export function useChat() {
           });
         }
 
-        if (!conversationId && response.request_id) {
-          setConversationId(response.request_id);
-        }
       } catch (err) {
         const error = err as AxiosError;
         if (error?.response?.status === 429) {
@@ -88,7 +93,7 @@ export function useChat() {
         setIsLoading(false);
       }
     },
-    [isLoading, isRateLimited, conversationId, addMessage]
+    [isLoading, isRateLimited, conversationId, addMessage] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const confirm = useCallback(

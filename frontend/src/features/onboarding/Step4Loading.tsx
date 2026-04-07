@@ -72,7 +72,7 @@ export function Step4Loading() {
   useEffect(() => {
     if (!score) return;
     const t = setTimeout(() => {
-      router.replace("/dashboard");
+      router.replace("/chat");
     }, 2_500);
     return () => clearTimeout(t);
   }, [score, router]);
@@ -81,7 +81,7 @@ export function Step4Loading() {
   useEffect(() => {
     const t = setTimeout(
       () => {
-        router.replace("/dashboard");
+        router.replace("/chat");
       },
       (MAX_POLLS + 1) * 2_000,
     );

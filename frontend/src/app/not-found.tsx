@@ -20,10 +20,10 @@ export default function NotFoundPage() {
         </p>
 
         <Link
-          href="/dashboard"
+          href="/chat"
           className="inline-flex items-center justify-center rounded-lg bg-vk-blue px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-vk-blue-hover focus:outline-none focus:ring-2 focus:ring-vk-blue/40"
         >
-          Ir al dashboard
+          Ir al chat
         </Link>
       </div>
     </div>

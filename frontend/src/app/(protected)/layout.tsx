@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
 import { useAuthStore } from "@/stores/authStore";
-import { ChatPanel } from "@/features/chat/ChatPanel";
 
 export default function ProtectedLayout({
   children,
@@ -13,8 +12,10 @@ export default function ProtectedLayout({
   children: React.ReactNode;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const token = useAuthStore((s) => s.token);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const isChatPage = pathname === "/chat";
 
   useEffect(() => {
     if (!token) {
@@ -43,13 +44,18 @@ export default function ProtectedLayout({
 
       <div className="flex flex-1 flex-col overflow-hidden">
         <Header onMenuToggle={() => setMobileOpen((v) => !v)} />
-        <main className="flex-1 overflow-y-auto scrollbar-thin bg-vk-bg-light p-4 sm:p-6">
-          <div className="mx-auto max-w-[1200px]">
+        {isChatPage ? (
+          <main className="flex flex-1 flex-col overflow-hidden bg-vk-surface-w">
             {children}
-          </div>
-        </main>
+          </main>
+        ) : (
+          <main className="flex-1 overflow-y-auto scrollbar-thin bg-vk-bg-light p-4 sm:p-6">
+            <div className="mx-auto max-w-[1200px]">
+              {children}
+            </div>
+          </main>
+        )}
       </div>
-      <ChatPanel />
     </div>
   );
 }

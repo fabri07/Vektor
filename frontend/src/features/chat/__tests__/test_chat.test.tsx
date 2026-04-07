@@ -72,7 +72,8 @@ describe("ChatPanel", () => {
     });
     expect(mockSendMessage).toHaveBeenCalledWith(
       "Hoy vendí 50 mil",
-      undefined
+      expect.any(String),
+      undefined,
     );
   });
 
