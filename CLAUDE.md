@@ -319,9 +319,18 @@ Flujo conexión (separado del login federado):
 
 ## Deploy
 
-- Backend API: Railway, `backend/railway.toml` — `uvicorn ... --port $PORT`.
-- Celery worker: Railway (servicio separado), `backend/worker/railway.toml`.
-- Frontend: Vercel, root directory `frontend/`.
+### Topología de producción (Railway + Vercel)
+
+| Servicio | Manifiesto | Start command |
+|----------|-----------|---------------|
+| `vektor-api` | `backend/railway.toml` | `alembic upgrade head && uvicorn ... --port $PORT` |
+| `vektor-worker` | `backend/worker/railway.toml` | `celery -A app.jobs.celery_app worker ...` |
+| `vektor-beat` | `backend/beat/railway.toml` | `celery -A app.jobs.celery_app beat ...` |
+| `Redis` | Railway managed | — |
+| Frontend | Vercel, root `frontend/` | `next start` |
+
+**Regla de migraciones:** solo `vektor-api` ejecuta `alembic upgrade head` al arrancar. Worker y beat NUNCA corren Alembic.
+
 - `/health` — health check endpoint sin auth.
 
 ## Demo

@@ -1,7 +1,7 @@
 """fase1b_heuristic_overrides_conversation_context_google_tokens
 
 Revision ID: 20260401_0003
-Revises: 20260401_0001
+Revises: 20260401_0002
 Create Date: 2026-04-01 00:00:00.000000
 
 Tablas nuevas:
