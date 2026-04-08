@@ -331,7 +331,7 @@ Flujo conexión (separado del login federado):
 
 **Regla de migraciones:** solo `vektor-api` ejecuta `alembic upgrade head` al arrancar. Worker y beat NUNCA corren Alembic.
 
-#- `/health` — health check endpoint sin auth.
+- `/health` — health check endpoint sin auth.
 
 ## Demo
 

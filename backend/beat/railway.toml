@@ -1,6 +1,6 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "../Dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "celery -A app.jobs.celery_app beat --loglevel=info"
