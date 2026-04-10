@@ -3,7 +3,16 @@ import "@/styles/globals.css";
 import { Providers } from "./providers";
 import { ToastContainer } from "@/components/ui/Toast";
 
+const appUrl =
+  process.env.NEXT_PUBLIC_APP_URL ??
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL
+    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+    : process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : "http://localhost:3000");
+
 export const metadata: Metadata = {
+  metadataBase: new URL(appUrl),
   title: "Véktor — Salud financiera para PYMEs argentinas",
   description:
     "Controlá caja, margen y stock en tiempo real. Sin contabilidad, sin hojas de cálculo.",

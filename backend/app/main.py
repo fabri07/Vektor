@@ -7,6 +7,7 @@ Entry point: uvicorn app.main:app
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -150,7 +151,54 @@ def create_app() -> FastAPI:
     async def health_check() -> dict[str, str]:
         return {"status": "ok", "version": "1.0.0", "environment": settings.ENVIRONMENT}
 
+    @app.get("/ready", tags=["Infra"], summary="Readiness check")
+    async def readiness_check() -> JSONResponse:
+        checks = {
+            "database": await _check_database_ready(),
+            "redis": await _check_redis_ready(),
+        }
+        ready = all(check["ok"] for check in checks.values())
+        return JSONResponse(
+            status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "ready" if ready else "degraded",
+                "version": "1.0.0",
+                "environment": settings.ENVIRONMENT,
+                "checks": checks,
+            },
+        )
+
     return app
+
+
+async def _check_database_ready() -> dict[str, Any]:
+    try:
+        from sqlalchemy import text  # noqa: PLC0415
+
+        from app.persistence.db.engine import engine  # noqa: PLC0415
+
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+async def _check_redis_ready() -> dict[str, Any]:
+    try:
+        from app.persistence.db.redis import get_redis_pool  # noqa: PLC0415
+
+        redis = await get_redis_pool()
+        await redis.ping()
+        return {"ok": True}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 app = create_app()

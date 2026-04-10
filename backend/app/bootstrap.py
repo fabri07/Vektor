@@ -10,9 +10,10 @@ logger = get_logger(__name__)
 
 
 async def startup() -> None:
-    """Initialize all application dependencies."""
+    """Initialize all application dependencies (fail-closed)."""
     await _init_database()
     await _init_redis()
+
     logger.info("bootstrap.startup.complete")
 
 
