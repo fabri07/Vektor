@@ -34,8 +34,10 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and shutdown lifecycle."""
+    print(f"[lifespan] entering — env={settings.ENVIRONMENT}", flush=True)
     logger.info("vektor.startup", environment=settings.ENVIRONMENT)
     await startup()
+    print("[lifespan] startup done, yielding to app", flush=True)
     yield
     await shutdown()
     logger.info("vektor.shutdown")

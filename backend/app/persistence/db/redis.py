@@ -19,6 +19,8 @@ async def get_redis_pool() -> Redis:
             settings.REDIS_URL,
             max_connections=20,
             decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
         )
     return Redis(connection_pool=_pool)
 

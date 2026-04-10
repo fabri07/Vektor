@@ -11,10 +11,14 @@ logger = get_logger(__name__)
 
 async def startup() -> None:
     """Initialize all application dependencies (fail-closed)."""
+    print("[bootstrap] startup begin", flush=True)
     await _init_database()
+    print("[bootstrap] database ready", flush=True)
     await _init_redis()
+    print("[bootstrap] redis ready", flush=True)
 
     logger.info("bootstrap.startup.complete")
+    print("[bootstrap] startup complete", flush=True)
 
 
 async def shutdown() -> None:
@@ -47,10 +51,25 @@ async def _close_database() -> None:
 # ── Redis ─────────────────────────────────────────────────────────────────────
 
 async def _init_redis() -> None:
+    import asyncio  # noqa: PLC0415
+
+    from app.config.settings import get_settings  # noqa: PLC0415
     from app.persistence.db.redis import get_redis_pool  # noqa: PLC0415
 
+    s = get_settings()
+    # Log the resolved URL host (without password) so we can see what Railway injected
+    safe_url = s.REDIS_URL.split("@")[-1] if "@" in s.REDIS_URL else s.REDIS_URL
+    print(f"[bootstrap] connecting to redis: {safe_url}", flush=True)
+
     pool = await get_redis_pool()
-    await pool.ping()
+    try:
+        await asyncio.wait_for(pool.ping(), timeout=5.0)
+    except TimeoutError as exc:
+        print(f"[bootstrap] redis ping TIMEOUT after 5s — URL={safe_url}", flush=True)
+        raise RuntimeError(f"Redis unreachable: {safe_url}") from exc
+    except Exception as exc:
+        print(f"[bootstrap] redis ping FAILED: {type(exc).__name__}: {exc}", flush=True)
+        raise
     logger.info("bootstrap.redis.connected")
 
 
