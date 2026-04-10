@@ -55,13 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
-# Copy application source
-COPY . .
-
 # Non-root user for security
 RUN addgroup --gid 1001 appgroup && \
-    adduser --uid 1001 --gid 1001 --disabled-password --gecos "" appuser && \
-    chown -R appuser:appgroup /app
+    adduser --uid 1001 --gid 1001 --disabled-password --gecos "" appuser
+
+# Copy application source
+COPY --chown=appuser:appgroup . .
 
 USER appuser
 
