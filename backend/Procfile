@@ -1,0 +1,3 @@
+web: exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2
+worker: exec celery -A app.jobs.celery_app worker --loglevel=info --queues=default,scores,notifications,reports,ingestion --concurrency=2
+beat: exec celery -A app.jobs.celery_app beat --loglevel=info

@@ -49,3 +49,6 @@ tenacity==9.0.0
 
 # ── LLM SDK ───────────────────────────────────────────────────────────────────
 anthropic==0.49.0
+
+# ── Process manager (Railway single-service consolidation) ───────────────────
+honcho==1.1.0

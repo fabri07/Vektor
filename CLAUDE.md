@@ -10,6 +10,20 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 
 ---
 
+## Quick start (fresh clone)
+
+```bash
+# Backend
+cd backend && cp .env.example .env && make dev && make seed-demo
+
+# Frontend (otra terminal)
+cd frontend && cp .env.local.example .env.local && npm install && npm run dev
+```
+
+Abrir `http://localhost:3000/demo` para entrar con un tenant demo.
+
+---
+
 ## Comandos de desarrollo
 
 ### Backend (correr desde `backend/`)
@@ -136,6 +150,8 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
 `HealthScore.needs_attention` → `True` si `level in (CRITICAL, WARNING)`.
 
+> Los dos sistemas (`ScoreLevel` y `severity_from_score`) son **intencionalmente distintos** y no deben unificarse: uno clasifica el estado del negocio, el otro decide la severidad de una notificación. Tienen cutoffs distintos por diseño.
+
 **`severity_from_score()` (insights — `app/heuristics/insight_templates.py`)** — severidad de notificación del score total entero:
 
 | Rango | Severidad |
@@ -157,14 +173,16 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
 6 agentes especializados coordinados por AgentCEO. El cliente NUNCA elige el agente destino.
 
-| Agente | Context Budget | Estado | Responsabilidad |
-|--------|---------------|--------|-----------------|
-| AgentCEO | 2.000 tokens | ✅ Implementado | Router/coordinador, nunca accede a datos de negocio directamente |
-| AgentCash | 3.000 tokens | 🔴 Stub (FASE-2) | Caja, ventas, cobros, pagos |
-| AgentStock | 3.000 tokens | ✅ FASE-3B | Inventario, quiebres, rotación, merma (incluye Celery task) |
-| AgentSupplier | 3.500 tokens | ✅ FASE-3C | Proveedores, filtrado de Gmail, generación de borradores |
-| AgentHealth | 4.000 tokens | 🔴 Stub (FASE-2) | Score de salud, narrativa ejecutiva |
-| AgentHelper | 2.500 tokens | 🔴 Stub (FASE-2) | FAQ, manual, guía funcional |
+| Agente | Context Budget | Responsabilidad |
+|--------|---------------|-----------------|
+| AgentCEO | 2.000 tokens | Router/coordinador, nunca accede a datos de negocio directamente |
+| AgentCash | 3.000 tokens | Caja, ventas, cobros, pagos |
+| AgentStock | 3.000 tokens | Inventario, quiebres, rotación, merma (incluye Celery task) |
+| AgentSupplier | 3.500 tokens | Proveedores, filtrado de Gmail, generación de borradores |
+| AgentHealth | 4.000 tokens | Score de salud, narrativa ejecutiva |
+| AgentHelper | 2.500 tokens | FAQ, manual, guía funcional |
+
+> El estado real de cada agente cambia rápido — verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir que está stub o implementado. La tabla ya no trackea fases.
 
 **Modelos LLM:**
 - Clasificación / routing / extracción: `claude-haiku-4-5-20251001`
@@ -287,6 +305,8 @@ Flujo conexión (separado del login federado):
 | 4 | ✅ Completo | Pending Actions externas — lifecycle (`/pending-actions/{id}/execute`), retry con guard `is_external`, idempotency_key, integración `EXTERNAL_SYSTEMS` |
 | 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, Settings con tab Google Workspace, adjuntos en chat, analytics Ventas/Gastos/Productos |
 
+Post-Sprint 5: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes).
+
 ---
 
 ## Reglas de trabajo
@@ -331,7 +351,10 @@ Flujo conexión (separado del login federado):
 
 **Regla de migraciones:** solo `vektor-api` ejecuta `alembic upgrade head` al arrancar. Worker y beat NUNCA corren Alembic.
 
-- `/health` — health check endpoint sin auth.
+**Health vs readiness** (definidos en `app/main.py`):
+- `/health` — liveness, siempre 200 si el proceso responde. Sin auth.
+- `/ready` — readiness, chequea DB + Redis, devuelve 503 si alguno falla. Usado por Railway healthcheck del API.
+- `vektor-worker` y `vektor-beat` **no** tienen healthcheck HTTP (`healthcheckPath` removido del `railway.toml`) — son procesos worker puros.
 
 ## Demo
 
