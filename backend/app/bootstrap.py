@@ -10,15 +10,26 @@ logger = get_logger(__name__)
 
 
 async def startup() -> None:
-    """Initialize all application dependencies (fail-closed)."""
-    print("[bootstrap] startup begin", flush=True)
-    await _init_database()
-    print("[bootstrap] database ready", flush=True)
-    await _init_redis()
-    print("[bootstrap] redis ready", flush=True)
+    """Initialize application dependencies without blocking liveness."""
+    try:
+        await _init_database()
+    except Exception as exc:
+        logger.warning(
+            "bootstrap.database.unavailable",
+            exc_type=type(exc).__name__,
+            exc_msg=str(exc),
+        )
+
+    try:
+        await _init_redis()
+    except Exception as exc:
+        logger.warning(
+            "bootstrap.redis.unavailable",
+            exc_type=type(exc).__name__,
+            exc_msg=str(exc),
+        )
 
     logger.info("bootstrap.startup.complete")
-    print("[bootstrap] startup complete", flush=True)
 
 
 async def shutdown() -> None:
