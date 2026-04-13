@@ -185,8 +185,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 > El estado real de cada agente cambia rápido — verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir que está stub o implementado. La tabla ya no trackea fases.
 
 **Modelos LLM:**
-- Clasificación / routing / extracción: `claude-haiku-4-5-20251001`
-- Narrativa ejecutiva (AgentHealth, cuando se implemente): `claude-sonnet-4-6`
+- Todos los agentes: `claude-3-5-sonnet-20241022` (unificado)
 
 **Dependencia:** `anthropic` SDK — debe estar en `requirements.txt` con versión pinneada.
 
