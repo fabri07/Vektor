@@ -135,7 +135,14 @@ class AuthService:
             )
             self._session.add(token)
             await self._session.flush()
-            self._send_verification_email(user.email, str(token.token_id))
+            try:
+                self._send_verification_email(user.email, str(token.token_id))
+            except Exception:
+                logger.warning(
+                    "auth.register.verification_email_failed",
+                    user_id=str(user.user_id),
+                    email=user.email,
+                )
 
         logger.info(
             "auth.register",
