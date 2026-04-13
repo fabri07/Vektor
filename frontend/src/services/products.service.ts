@@ -38,12 +38,12 @@ const MAX_PAGES = 25;
 
 export const productsService = {
   async createProduct(payload: CreateProductPayload): Promise<ProductResponse> {
-    const res = await api.post<ProductResponse>("/products/", payload);
+    const res = await api.post<ProductResponse>("/products", payload);
     return res.data;
   },
 
   async getProducts(params?: ProductsListParams): Promise<ProductResponse[]> {
-    const res = await api.get<ProductResponse[]>("/products/", { params });
+    const res = await api.get<ProductResponse[]>("/products", { params });
     return res.data;
   },
 

@@ -36,7 +36,7 @@ const MAX_PAGES = 25;
 
 export const salesService = {
   async createSale(payload: CreateSalePayload): Promise<SaleEntryResponse> {
-    const res = await api.post<SaleEntryResponse>("/sales/", payload);
+    const res = await api.post<SaleEntryResponse>("/sales", payload);
     return res.data;
   },
 
@@ -46,7 +46,7 @@ export const salesService = {
   },
 
   async getEntries(params?: SalesListParams): Promise<SaleEntryResponse[]> {
-    const res = await api.get<SaleEntryResponse[]>("/sales/", { params });
+    const res = await api.get<SaleEntryResponse[]>("/sales", { params });
     return res.data;
   },
 

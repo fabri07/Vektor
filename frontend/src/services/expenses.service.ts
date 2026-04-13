@@ -43,7 +43,7 @@ export const expensesService = {
   async createExpense(
     payload: CreateExpensePayload,
   ): Promise<ExpenseEntryResponse> {
-    const res = await api.post<ExpenseEntryResponse>("/expenses/", payload);
+    const res = await api.post<ExpenseEntryResponse>("/expenses", payload);
     return res.data;
   },
 
@@ -53,7 +53,7 @@ export const expensesService = {
   },
 
   async getEntries(params?: ExpensesListParams): Promise<ExpenseEntryResponse[]> {
-    const res = await api.get<ExpenseEntryResponse[]>("/expenses/", { params });
+    const res = await api.get<ExpenseEntryResponse[]>("/expenses", { params });
     return res.data;
   },
 
