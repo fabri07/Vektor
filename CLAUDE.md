@@ -339,22 +339,26 @@ Post-Sprint 5: hardening de infra en Railway (Alembic chain, manifests de worker
 
 ## Deploy
 
-### Topología de producción (Railway + Vercel)
+### Topología de producción (Railway + Vercel) — beta
+
+Durante la beta Véktor corre en un **único servicio Railway** (sin worker/beat separados). Los jobs de Celery están pausados — el front funciona, los scores async no.
 
 | Servicio | Manifiesto | Start command |
 |----------|-----------|---------------|
-| `vektor-api` | `backend/railway.toml` | `alembic upgrade head && uvicorn ... --port $PORT` |
-| `vektor-worker` | `backend/worker/railway.toml` | `celery -A app.jobs.celery_app worker ...` |
-| `vektor-beat` | `backend/beat/railway.toml` | `celery -A app.jobs.celery_app beat ...` |
-| `Redis` | Railway managed | — |
+| `vektor-api` | `backend/railway.toml` | `sh scripts/start_web.sh` → uvicorn solo |
+| Postgres | Neon (externo, no Railway) | — |
+| Redis | Railway managed (opcional en beta) | — |
 | Frontend | Vercel, root `frontend/` | `next start` |
 
-**Regla de migraciones:** solo `vektor-api` ejecuta `alembic upgrade head` al arrancar. Worker y beat NUNCA corren Alembic.
+`backend/scripts/start_web.sh` lanza uvicorn con `$PORT` y `$UVICORN_WORKERS` (default 1). **No** corre Alembic — migrations tienen que aplicarse a mano contra la DB de Neon (ver `make migrate` con `DATABASE_URL` apuntando a Neon).
+
+**Graceful bootstrap:** `app/bootstrap.py` captura excepciones de DB/Redis y loguea `bootstrap.*.unavailable` en vez de crashear el lifespan. Esto significa que uvicorn arranca y `/health` responde incluso si Postgres o Redis están caídos — los endpoints que los necesitan van a fallar en runtime, pero Railway healthcheck queda verde.
 
 **Health vs readiness** (definidos en `app/main.py`):
-- `/health` — liveness, siempre 200 si el proceso responde. Sin auth.
-- `/ready` — readiness, chequea DB + Redis, devuelve 503 si alguno falla. Usado por Railway healthcheck del API.
-- `vektor-worker` y `vektor-beat` **no** tienen healthcheck HTTP (`healthcheckPath` removido del `railway.toml`) — son procesos worker puros.
+- `/health` — liveness, siempre 200 si el proceso Python responde. Sin auth. Usado por `healthcheckPath` en `railway.toml` (timeout 120s).
+- `/ready` — readiness real: chequea DB + Redis, devuelve 503 si alguno falla. No usado por Railway actualmente.
+
+**Volver a separar worker/beat** cuando haya tráfico real: restaurar `backend/worker/` y `backend/beat/` con sus `railway.toml` (siguen en el repo como referencia) y quitar el `/health` healthcheck de esos servicios.
 
 ## Demo
 
