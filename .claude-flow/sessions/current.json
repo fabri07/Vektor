@@ -1,17 +1,11 @@
 {
-  "id": "session-1776084415518",
-  "startedAt": "2026-04-13T12:46:55.518Z",
+  "id": "session-1776091356177",
+  "startedAt": "2026-04-13T14:42:36.177Z",
   "platform": "darwin",
   "cwd": "/Users/fabriziosola/Desktop/vektor/Vektor",
-  "context": {
-    "lastMatchedPatterns": [
-      "mem-4",
-      "mem-3",
-      "mem-0"
-    ]
-  },
+  "context": {},
   "metrics": {
-    "edits": 1,
+    "edits": 6,
     "commands": 0,
     "tasks": 0,
     "errors": 0

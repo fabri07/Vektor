@@ -79,7 +79,7 @@ class AgentCash(BaseAgent):
             "</instruccion>"
         )
         response = await self.client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=300,
             system=system,
             messages=[{"role": "user", "content": self.wrap_user_input(message)}],

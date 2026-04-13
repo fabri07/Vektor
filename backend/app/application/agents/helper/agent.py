@@ -91,7 +91,7 @@ Retorná SOLO un JSON:
 }}
 """
         response = await self.client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=400,
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(question)}],

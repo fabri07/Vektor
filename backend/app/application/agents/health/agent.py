@@ -154,7 +154,7 @@ class AgentHealth(BaseAgent):
             f"Alertas: {health.alerts}"
         )
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=600,
             system=system,
             messages=[{"role": "user", "content": data}],
