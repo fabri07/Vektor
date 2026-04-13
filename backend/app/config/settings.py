@@ -95,6 +95,10 @@ class Settings(BaseSettings):
         ],
         validation_alias=AliasChoices("CORS_ORIGINS", "ALLOWED_ORIGINS"),
     )
+    CORS_ORIGIN_REGEX: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CORS_ORIGIN_REGEX", "ALLOWED_ORIGIN_REGEX"),
+    )
 
     @field_validator("DEBUG", mode="before")
     @classmethod
