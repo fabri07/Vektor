@@ -100,14 +100,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ORIGIN_REGEX", "ALLOWED_ORIGIN_REGEX"),
     )
 
-    @field_validator("DEBUG", mode="before")
+    @field_validator(
+        "DEBUG",
+        "ENABLE_EMAIL_VERIFICATION",
+        "ENABLE_EMAIL_NOTIFICATIONS",
+        "ENABLE_SCORE_RECALCULATION",
+        "ENABLE_GOOGLE_LOGIN",
+        "ENABLE_FACEBOOK_LOGIN",
+        "DEMO_MODE",
+        mode="before",
+    )
     @classmethod
-    def parse_debug(cls, v: bool | str) -> bool | str:
+    def parse_bool_flags(cls, v: bool | str) -> bool | str:
         if isinstance(v, str):
             normalized = v.strip().lower()
-            if normalized in {"1", "true", "yes", "on", "debug"}:
+            if normalized in {"1", "true", "yes", "on"}:
                 return True
-            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+            if normalized in {"0", "false", "no", "off"}:
                 return False
         return v
 
