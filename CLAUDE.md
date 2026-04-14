@@ -103,14 +103,18 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: llama BSL → Engine → Repo → Audit |
+| Application | `app/application/services/` | Orquestación: `auth_service`, `cash_service`, `conversation_service`, `google_oauth_service`, `health_score_service`, `onboarding_service`, `pending_action_service`, `score_trigger_service`, `stock_service`, `supplier_service`, `workspace_connect_service` |
+| Commands | `app/application/commands/` | Writes CQRS (ej. `create_tenant.py`) |
+| Queries | `app/application/queries/` | Reads CQRS (ej. `get_health_score.py`) |
+| DTOs | `app/application/dto/` | Objetos de transferencia entre capas (ej. `auth_dto.py`) |
+| DB middleware | `app/application/db/tenant_context.py` | Inyecta tenant_id en el contexto de SQLAlchemy |
 | **Agents** | `app/application/agents/` | Capa multiagente LLM (ver sección Agentes) |
 | Domain | `app/domain/` | Entidades puras Python: `HealthScore`, `BusinessProfile`, etc. |
 | BSL | `app/state/business_state_layer.py` | Agrega revenue/expenses 30 días → 5 dimension scores |
 | Heuristics | `app/heuristics/` | Reglas específicas por vertical (kiosco/decoracion/limpieza) |
 | Persistence | `app/persistence/` | SQLAlchemy async, repositories, modelos, Alembic |
 | Jobs | `app/jobs/` | Celery workers: scores, notifications, reports, ingestion (OCR, xlsx) |
-| Security | `app/application/security/prompt_defense.py` | `wrap_user_input()` — sanitiza input LLM contra prompt injection |
+| Security | `app/application/security/` | `prompt_defense.py` (`wrap_user_input()`), `token_cipher.py` (cifrado de tokens OAuth) |
 
 ### API Routers (`app/api/v1/`)
 
@@ -218,6 +222,12 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 6. `intent_and_entities` (200 tokens) — SIEMPRE incluido
 
 **HeuristicEngine** (`shared/heuristic_engine.py`) — stub en FASE-1A, implementación completa en FASE-2B. Al inyectar heurísticas en el system prompt, usar valores **numéricos** (`{h.margin.min*100}%`), nunca texto narrativo.
+
+**EventBus** (`shared/event_bus.py`) — bus interno para comunicación entre agentes sin acoplamiento directo. Los agentes publican eventos; el CEO los suscribe para coordinar.
+
+**Extras por agente:**
+- `agents/health/scorer.py` — lógica de scoring especializada usada por AgentHealth
+- `agents/supplier/preflight.py` — validaciones previas al envío de borradores a Gmail
 
 **Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt.
 
