@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -120,6 +121,27 @@ def create_app() -> FastAPI:
     app.include_router(api_router, prefix="/api/v1")
 
     # ── Exception handlers ────────────────────────────────────────────────────
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        body = None
+        try:
+            body = await request.body()
+            body = body.decode("utf-8")[:500]
+        except Exception:
+            pass
+        logger.warning(
+            "request.body_validation_error",
+            path=str(request.url.path),
+            errors=exc.errors(),
+            raw_body=body,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"detail": exc.errors()},
+        )
+
     @app.exception_handler(ValidationError)
     async def pydantic_validation_handler(
         request: Request, exc: ValidationError
