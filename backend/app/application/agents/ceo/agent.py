@@ -120,7 +120,7 @@ class AgentCEO(BaseAgent):
             "NO retornes nada más que el JSON. Sin texto adicional."
         )
         response = await self.client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-haiku-4-5",
             max_tokens=300,
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(message)}],

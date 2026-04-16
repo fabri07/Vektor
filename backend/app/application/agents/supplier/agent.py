@@ -120,7 +120,7 @@ class AgentSupplier(BaseAgent):
             f"Snippet: {metadata.get('snippet', '')}"
         )
         response = await self._llm.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-haiku-4-5",
             max_tokens=150,
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(snippet)}],
@@ -154,7 +154,7 @@ class AgentSupplier(BaseAgent):
         )
         context = json.dumps(email_data, ensure_ascii=False)
         response = await self._llm.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-haiku-4-5",
             max_tokens=500,
             system=system,
             messages=[

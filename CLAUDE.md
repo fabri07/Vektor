@@ -189,7 +189,9 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 > El estado real de cada agente cambia rápido — verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir que está stub o implementado. La tabla ya no trackea fases.
 
 **Modelos LLM:**
-- Todos los agentes: `claude-3-5-sonnet-20241022` (unificado)
+- Todos los agentes: `claude-haiku-4-5` (unificado — reemplazó a `claude-3-5-sonnet-20241022` que fue retirado oct 2025)
+
+**Cliente Anthropic** (`app/integrations/anthropic_client.py`) — todos los agentes deben obtener el cliente via `get_anthropic_async_client()`. Centraliza el manejo de `ANTHROPIC_API_KEY` y permite inyección de mocks en tests sin key real. No instanciar `anthropic.AsyncAnthropic` directamente en agentes.
 
 **Dependencia:** `anthropic` SDK — debe estar en `requirements.txt` con versión pinneada.
 
@@ -221,7 +223,11 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 5. `business_heuristics` (300 tokens) — SIEMPRE incluido
 6. `intent_and_entities` (200 tokens) — SIEMPRE incluido
 
-**HeuristicEngine** (`shared/heuristic_engine.py`) — stub en FASE-1A, implementación completa en FASE-2B. Al inyectar heurísticas en el system prompt, usar valores **numéricos** (`{h.margin.min*100}%`), nunca texto narrativo.
+**HeuristicEngine** (`shared/heuristic_engine.py`) — implementado. Carga JSON de defaults por rubro desde `app/application/data/heuristics/`. `get(business_type)` es síncrono (solo defaults); `get_async(business_type, business_id, db)` aplica `BusinessHeuristicOverride` de la DB para customización por tenant. `HeuristicConfig.to_prompt_fragment()` genera el fragmento listo para inyectar en system prompts como valores numéricos — nunca texto narrativo. Rubro desconocido hace fallback a `kiosco_almacen`.
+
+**AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 15 intents del `INTENT_CATALOG`. El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se cargan con lazy imports en `api/v1/agent.py → _get_sub_agent()` para evitar imports circulares.
+
+**ConversationService** (`app/application/services/conversation_service.py`) — historial de chat: Redis como caché caliente (TTL 24h) con fallback a PostgreSQL. Ventana deslizante de los últimos 10 turnos; los más viejos se descartan. El `conversation_id` es UUID generado en el cliente (ver `useChat` en el frontend).
 
 **EventBus** (`shared/event_bus.py`) — bus interno para comunicación entre agentes sin acoplamiento directo. Los agentes publican eventos; el CEO los suscribe para coordinar.
 
@@ -229,7 +235,7 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 - `agents/health/scorer.py` — lógica de scoring especializada usada por AgentHealth
 - `agents/supplier/preflight.py` — validaciones previas al envío de borradores a Gmail
 
-**Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt.
+**Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt. El mismo módulo expone `is_valid_action_type(action_type)` para validar que el output de un LLM sea un ActionType del catálogo cerrado — usar al parsear cualquier respuesta LLM que deba devolver un action_type.
 
 ### Observabilidad
 
