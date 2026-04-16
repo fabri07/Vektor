@@ -106,7 +106,11 @@ Retorná SOLO un JSON:
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(question)}],
         )
-        return json.loads(response.content[0].text.strip())
+        raw = response.content[0].text.strip() if response.content else ""
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {"answer": None, "confidence": "LOW", "related_module": None, "is_platform_question": False}
 
     async def process(self, request: AgentRequest) -> AgentResponse:
         result = await self.find_answer(request.message)

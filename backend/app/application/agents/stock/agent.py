@@ -208,7 +208,11 @@ class AgentStock(BaseAgent):
             system=system,
             messages=[{"role": "user", "content": self.wrap_user_input(message)}],
         )
-        return json.loads(response.content[0].text.strip())
+        raw = response.content[0].text.strip() if response.content else ""
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {"product_name": None, "sku": None, "qty_change": 0, "reason": "ajuste", "confidence": "LOW"}
 
     async def _handle_query(self, request: AgentRequest) -> AgentResponse:
         return AgentResponse(

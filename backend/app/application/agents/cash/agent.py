@@ -103,7 +103,11 @@ class AgentCash(BaseAgent):
             system=system,
             messages=[{"role": "user", "content": self.wrap_user_input(message)}],
         )
-        result: dict[str, Any] = json.loads(response.content[0].text.strip())
+        raw = response.content[0].text.strip() if response.content else ""
+        try:
+            result: dict[str, Any] = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            result = {"error": "No pude interpretar la respuesta. Intentá reformular el mensaje."}
         return result
 
     async def process(self, request: AgentRequest) -> AgentResponse:
