@@ -120,15 +120,15 @@ class AgentCEO(BaseAgent):
             "NO retornes nada más que el JSON. Sin texto adicional."
         )
         response = await self.client.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-sonnet-4-5",
             max_tokens=300,
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(message)}],
         )
-        text = response.content[0].text.strip()
+        text = (response.content[0].text if response.content else "").strip()
         try:
             parsed = json.loads(text)
-        except (json.JSONDecodeError, IndexError):
+        except (json.JSONDecodeError, IndexError, ValueError):
             return {"intent": "ask_platform_help", "entities": {}}
 
         if parsed.get("intent") not in INTENT_CATALOG:

@@ -17,6 +17,9 @@ Seguridad:
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from app.observability.logger import get_logger
+
+_log = get_logger(__name__)
 from fastapi.responses import RedirectResponse
 from redis.asyncio import Redis
 from sqlalchemy import select
