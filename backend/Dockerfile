@@ -1,5 +1,5 @@
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM mirror.gcr.io/library/python:3.12-slim AS builder
 
 WORKDIR /build
 
@@ -15,7 +15,7 @@ COPY requirements.txt .
 RUN pip install --prefix=/install -r requirements.txt
 
 # ── Stage 2: dev / test (includes requirements-dev.txt) ──────────────────────
-FROM python:3.12-slim AS dev
+FROM mirror.gcr.io/library/python:3.12-slim AS dev
 
 WORKDIR /app
 
@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY . .
 
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM mirror.gcr.io/library/python:3.12-slim AS runtime
 
 WORKDIR /app
 
