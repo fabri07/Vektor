@@ -1,13 +1,15 @@
 {
-  "id": "session-1776091356177",
-  "startedAt": "2026-04-13T14:42:36.177Z",
+  "id": "session-1776183792111",
+  "startedAt": "2026-04-14T16:23:12.111Z",
   "platform": "darwin",
   "cwd": "/Users/fabriziosola/Desktop/vektor/Vektor",
   "context": {},
   "metrics": {
-    "edits": 6,
+    "edits": 3,
     "commands": 0,
     "tasks": 0,
     "errors": 0
-  }
+  },
+  "endedAt": "2026-04-15T23:39:08.601Z",
+  "duration": 112556492
 }
