@@ -9,7 +9,7 @@ POST   /ingestion/files/{file_id}/confirm  — confirm import (NEEDS_CONFIRMATIO
 
 import re
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
 import filetype
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -17,13 +17,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
 from app.integrations.s3 import S3Client
-from app.jobs.ingestion_worker import process_image_ocr, process_spreadsheet, process_text_document
+from app.jobs.ingestion_worker import (
+    _extract_amounts_from_text,
+    _analyze_headers,
+    _rows_to_dicts,
+    process_image_ocr,
+    process_spreadsheet,
+    process_text_document,
+)
 from app.main import limiter
+from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
+    PROCESSING_STATUS_FAILED,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     PROCESSING_STATUS_PENDING,
+    PROCESSING_STATUS_PROCESSING,
     UploadedFile,
 )
 from app.persistence.models.tenant import Tenant
@@ -38,6 +48,8 @@ from app.schemas.ingestion import (
 )
 
 router = APIRouter()
+
+logger = get_logger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -117,6 +129,135 @@ def _pick_job(mime: str) -> object:
     return process_text_document
 
 
+# ── Sync fallback (beta: Celery/Redis unavailable) ───────────────────────────
+
+
+async def _process_file_sync(
+    record: UploadedFile,
+    session: AsyncSession,
+) -> None:
+    """Process a file synchronously when Celery is unavailable.
+
+    Reuses the parsing helpers from ingestion_worker but runs inside the
+    existing request session instead of creating a separate Celery-owned
+    engine.  On failure the file is marked FAILED so the user sees a clear
+    status instead of being stuck in PENDING forever.
+    """
+    import csv as _csv  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    repo = FileRepository(session)
+    try:
+        record.processing_status = PROCESSING_STATUS_PROCESSING
+        await repo.save(record)
+        await session.flush()
+
+        s3 = S3Client()
+        content = await s3.download(record.s3_key)
+        mime = record.content_type
+
+        summary: dict[str, Any] = {"warnings": []}
+
+        if mime in _IMAGE_MIMES:
+            summary["file_type"] = "image"
+            summary["confidence"] = "LOW"
+            try:
+                import pytesseract  # noqa: PLC0415
+                from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
+
+                try:
+                    img = Image.open(io.BytesIO(content))
+                    raw_text = pytesseract.image_to_string(img, lang="spa+eng")
+                except UnidentifiedImageError:
+                    raw_text = ""
+                    summary["warnings"].append(
+                        "No se pudo abrir la imagen (formato no soportado por Pillow)."
+                    )
+
+                amounts = _extract_amounts_from_text(raw_text)
+                summary.update({"raw_text_preview": raw_text[:500], **amounts})
+            except ImportError:
+                summary["error"] = "OCR no disponible en este entorno"
+                summary["ventas_detectadas"] = []
+                summary["gastos_detectados"] = []
+                summary["stock_detectado"] = []
+
+        elif mime in _SPREADSHEET_MIMES or mime in ("text/csv",):
+            summary["file_type"] = "spreadsheet"
+            is_csv = mime == "text/csv" or record.original_filename.endswith(".csv")
+            if is_csv:
+                text = content.decode("utf-8", errors="replace")
+                reader = _csv.reader(io.StringIO(text))
+                rows = list(reader)
+                if not rows:
+                    summary.update({"confidence": "MEDIUM", "ventas_detectadas": [], "rows_processed": 0})
+                else:
+                    headers = rows[0]
+                    data_rows = rows[1:]
+                    analysis = _analyze_headers(headers)
+                    summary.update(analysis)
+                    summary["headers"] = headers
+                    summary["rows_processed"] = len(data_rows)
+                    summary["ventas_detectadas"] = _rows_to_dicts(headers, data_rows[:50])
+            else:
+                import openpyxl  # noqa: PLC0415
+
+                wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+                ws = wb.active
+                all_rows = list(ws.iter_rows(values_only=True))  # type: ignore[union-attr]
+                if not all_rows:
+                    summary.update({"confidence": "MEDIUM", "ventas_detectadas": [], "rows_processed": 0})
+                else:
+                    headers = [str(c) if c is not None else f"col_{i}" for i, c in enumerate(all_rows[0])]
+                    data_rows_raw = [list(r) for r in all_rows[1:]]
+                    analysis = _analyze_headers(headers)
+                    summary.update(analysis)
+                    summary["headers"] = headers
+                    summary["rows_processed"] = len(data_rows_raw)
+                    summary["ventas_detectadas"] = _rows_to_dicts(headers, data_rows_raw[:50])
+                wb.close()
+
+        else:
+            # text / docx
+            summary["file_type"] = "text"
+            summary["confidence"] = "MEDIUM"
+            is_docx = (
+                mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                or record.original_filename.endswith(".docx")
+            )
+            if is_docx:
+                import docx  # noqa: PLC0415
+
+                doc = docx.Document(io.BytesIO(content))
+                raw_text = "\n".join(p.text for p in doc.paragraphs)
+            else:
+                raw_text = content.decode("utf-8", errors="replace")
+
+            amounts = _extract_amounts_from_text(raw_text)
+            summary.update({"raw_text_preview": raw_text[:500], **amounts})
+
+        record.parsed_summary_json = summary
+        record.processing_status = PROCESSING_STATUS_NEEDS_CONFIRMATION
+        await repo.save(record)
+
+        logger.info(
+            "ingestion.sync_fallback.done",
+            file_id=str(record.id),
+            file_type=summary.get("file_type"),
+            confidence=summary.get("confidence"),
+        )
+
+    except Exception as exc:
+        logger.error(
+            "ingestion.sync_fallback.failed",
+            file_id=str(record.id),
+            error=str(exc),
+        )
+        record.parsed_summary_json = {"error": str(exc)}
+        record.processing_status = PROCESSING_STATUS_FAILED
+        await repo.save(record)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -166,9 +307,19 @@ async def upload_file(
     repo = FileRepository(session)
     saved = await repo.save(record)
 
-    # Enqueue parsing job
+    # Enqueue parsing job — fall back to sync processing if Celery/Redis
+    # is unavailable (beta: single Railway service without workers).
     job = _pick_job(detected_mime)
-    job.delay(str(saved.id), str(tenant.tenant_id))  # type: ignore[attr-defined]
+    try:
+        job.delay(str(saved.id), str(tenant.tenant_id))  # type: ignore[attr-defined]
+    except Exception:
+        logger.warning(
+            "ingestion.celery_unavailable",
+            file_id=str(saved.id),
+            msg="Celery/Redis no disponible, procesando archivo de forma síncrona.",
+        )
+        await _process_file_sync(saved, session)
+        return UploadResponse(file_id=saved.id, status="PROCESSING")
 
     return UploadResponse(file_id=saved.id, status="PROCESSING")
 

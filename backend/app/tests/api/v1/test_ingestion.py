@@ -240,6 +240,35 @@ class TestUploadEndpoint:
         )
         assert response.status_code == 401
 
+    async def test_upload_csv_sync_fallback_when_celery_unavailable(
+        self,
+        client: AsyncClient,
+        auth_headers: dict,
+        csv_bytes: bytes,
+        mock_s3_upload: unittest.mock.AsyncMock,
+    ) -> None:
+        """When Celery/Redis is unavailable, the file is processed synchronously."""
+        # Mock .delay() to raise (simulating Redis down)
+        with unittest.mock.patch(
+            "app.api.v1.ingestion.process_spreadsheet"
+        ) as mock_task:
+            mock_task.delay.side_effect = ConnectionError("Redis unavailable")
+            # Mock S3 download for sync fallback
+            with unittest.mock.patch(
+                "app.api.v1.ingestion.S3Client.download",
+                new_callable=unittest.mock.AsyncMock,
+                return_value=csv_bytes,
+            ):
+                response = await client.post(
+                    "/api/v1/ingestion/upload",
+                    headers=auth_headers,
+                    files={"file": ("datos.csv", csv_bytes, "application/octet-stream")},
+                )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "PROCESSING"
+        assert "file_id" in data
+
 
 # ── List files tests ──────────────────────────────────────────────────────────
 
