@@ -8,7 +8,7 @@ import re
 from functools import lru_cache
 from typing import ClassVar
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,7 +56,10 @@ class Settings(BaseSettings):
 
     # ── Application ───────────────────────────────────────────────────────────
     ENVIRONMENT: str = "development"
-    DEBUG: bool = False
+    DEBUG: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("APP_DEBUG", "VEKTOR_DEBUG"),
+    )
     SECRET_KEY: str = "insecure-change-me"
 
     # ── PostgreSQL ────────────────────────────────────────────────────────────
@@ -111,12 +114,14 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def parse_bool_flags(cls, v: bool | str) -> bool | str:
+    def parse_bool_flags(cls, v: bool | str, info: ValidationInfo) -> bool | str:
         if isinstance(v, str):
             normalized = v.strip().lower()
             if normalized in {"1", "true", "yes", "on"}:
                 return True
             if normalized in {"0", "false", "no", "off"}:
+                return False
+            if info.field_name == "DEBUG" and normalized in {"release", "prod", "production"}:
                 return False
         return v
 
