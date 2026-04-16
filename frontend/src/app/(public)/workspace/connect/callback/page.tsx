@@ -24,13 +24,13 @@ export default function WorkspaceConnectCallbackPage() {
     const exchangeSessionId = searchParams.get("exchange_session_id");
 
     if (error) {
-      setErrorMsg("Google rechazó el acceso. Intentá conectar de nuevo desde Configuración.");
+      setErrorMsg("Google rechazó el acceso. Intentá conectar de nuevo desde Aplicaciones.");
       setDone(true);
       return;
     }
 
     if (!exchangeSessionId) {
-      setErrorMsg("Sesión inválida. Intentá conectar de nuevo desde Configuración.");
+      setErrorMsg("Sesión inválida. Intentá conectar de nuevo desde Aplicaciones.");
       setDone(true);
       return;
     }
@@ -39,10 +39,10 @@ export default function WorkspaceConnectCallbackPage() {
       try {
         await workspaceService.exchangeSession(exchangeSessionId);
         addToast("Google Workspace conectado correctamente.", "success");
-        router.replace("/settings");
+        router.replace("/apps");
       } catch {
         setErrorMsg(
-          "No se pudo conectar Google Workspace. Intentá de nuevo desde Configuración.",
+          "No se pudo conectar Google Workspace. Intentá de nuevo desde Aplicaciones.",
         );
         setDone(true);
       }
@@ -66,10 +66,10 @@ export default function WorkspaceConnectCallbackPage() {
         <p className="mb-2 text-base font-semibold text-vk-text-primary">Error de conexión</p>
         <p className="mb-6 text-sm text-vk-text-muted">{errorMsg}</p>
         <a
-          href="/settings"
+          href="/apps"
           className="inline-flex items-center justify-center rounded-lg bg-vk-blue px-4 py-2.5 text-sm font-medium text-white hover:bg-vk-blue-hover transition-colors"
         >
-          Ir a Configuración
+          Ir a Aplicaciones
         </a>
       </div>
     </div>

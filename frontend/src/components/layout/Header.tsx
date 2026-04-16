@@ -19,6 +19,7 @@ const PAGE_LABELS: Record<string, string> = {
   "/expenses":   "Gastos",
   "/products":   "Productos",
   "/ingestion":  "Cargar datos",
+  "/apps":       "Aplicaciones",
   "/settings":   "Configuración",
   "/onboarding": "Onboarding",
 };

@@ -1,6 +1,7 @@
 """AgentCash — registra y analiza movimientos monetarios."""
 
 import json
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
@@ -20,6 +21,12 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
+from app.integrations.anthropic_client import get_anthropic_async_client
+from app.integrations.google_workspace.exceptions import WorkspaceTokenError
+from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway
+
+
+_SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)|(?:[?&]id=)([a-zA-Z0-9-_]+)")
 
 
 class SaleEntity(BaseModel):
@@ -52,10 +59,22 @@ class AgentCash(BaseAgent):
         self,
         db: Optional[AsyncSession] = None,
         redis: Optional[Redis] = None,
+        gateway: GoogleWorkspaceGateway | None = None,
     ) -> None:
-        self.client = anthropic.AsyncAnthropic()
+        self._client: Any | None = None
         self._db = db
         self._redis = redis
+        self._gateway = gateway
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     async def _extract_sale_entities(self, message: str, business_context: dict[str, Any]) -> dict[str, Any]:
         heuristics = HeuristicEngine.get(business_context.get("type", "kiosco_almacen"))
@@ -88,6 +107,9 @@ class AgentCash(BaseAgent):
         return result
 
     async def process(self, request: AgentRequest) -> AgentResponse:
+        if self._looks_like_google_sheet_request(request.message):
+            return await self._handle_google_sheet_import(request)
+
         # Cargar contexto de conversación si está disponible
         conversation_turns: list[dict[str, Any]] = []
         if request.conversation_id and self._db is not None and self._redis is not None:
@@ -153,3 +175,161 @@ class AgentCash(BaseAgent):
     async def recalculate_cash_health(self, business_id: str) -> None:
         """Recalcular cobertura de caja y emitir alerta si corresponde."""
         EventBus.emit("CASH_HEALTH_UPDATED", {"business_id": business_id})
+
+    # ── Google Sheets import ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _looks_like_google_sheet_request(message: str) -> bool:
+        text = message.lower()
+        return (
+            ("google" in text or "sheet" in text or "hoja" in text)
+            and any(word in text for word in ("import", "cargar", "registr", "analiz"))
+        )
+
+    @staticmethod
+    def _extract_sheet_id(message: str) -> str | None:
+        match = _SHEET_ID_RE.search(message)
+        if not match:
+            return None
+        return match.group(1) or match.group(2)
+
+    @staticmethod
+    def _infer_record_type(message: str) -> str:
+        text = message.lower()
+        if any(word in text for word in ("gasto", "gastos", "egreso", "expense")):
+            return "expenses"
+        return "sales"
+
+    @staticmethod
+    def _normalize_header(value: str) -> str:
+        return (
+            value.lower()
+            .strip()
+            .replace(" ", "_")
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ú", "u")
+        )
+
+    @classmethod
+    def _parse_sheet_records(
+        cls,
+        values: list[list[str]],
+        record_type: str,
+    ) -> list[dict[str, Any]]:
+        if len(values) < 2:
+            return []
+
+        headers = [cls._normalize_header(cell) for cell in values[0]]
+        records: list[dict[str, Any]] = []
+        amount_keys = {"monto", "amount", "total", "importe", "valor"}
+        description_keys = {"descripcion", "description", "detalle", "producto", "concepto"}
+        category_keys = {"categoria", "category", "rubro"}
+        payment_keys = {"metodo_pago", "medio_pago", "payment_method", "pago"}
+
+        for row in values[1:51]:
+            mapped = {
+                headers[idx]: cell.strip()
+                for idx, cell in enumerate(row)
+                if idx < len(headers) and cell.strip()
+            }
+            amount_raw = next((mapped[key] for key in amount_keys if key in mapped), "")
+            amount_text = amount_raw.replace("$", "").replace(".", "").replace(",", ".").strip()
+            try:
+                amount = float(amount_text)
+            except ValueError:
+                continue
+            if amount <= 0:
+                continue
+
+            description = next((mapped[key] for key in description_keys if key in mapped), None)
+            if record_type == "expenses":
+                category = next((mapped[key] for key in category_keys if key in mapped), "otros")
+                records.append(
+                    {
+                        "amount": amount,
+                        "category": category,
+                        "description": description or category,
+                    }
+                )
+            else:
+                payment_method = next((mapped[key] for key in payment_keys if key in mapped), None)
+                records.append(
+                    {
+                        "amount": amount,
+                        "payment_status": "paid",
+                        "payment_method": payment_method,
+                        "product_description": description,
+                    }
+                )
+        return records
+
+    async def _handle_google_sheet_import(self, request: AgentRequest) -> AgentResponse:
+        spreadsheet_id = self._extract_sheet_id(request.message)
+        if not spreadsheet_id:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                question="Pasame el link de Google Sheets o el ID de la hoja que querés importar.",
+            )
+
+        if self._gateway is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                result={"reconnect_required": True, "reason": "not_connected", "app_id": "sheets"},
+                question="Google Sheets no está conectado. Conectalo desde Aplicaciones y volvé a intentar.",
+            )
+
+        record_type = self._infer_record_type(request.message)
+        try:
+            sheets = await self._gateway.sheets()
+            values = await self._gateway.run_google(
+                sheets.read_values(spreadsheet_id=spreadsheet_id, range_name="A1:Z100")
+            )
+        except WorkspaceTokenError as exc:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                result={"reconnect_required": True, "reason": exc.reason, "app_id": "sheets"},
+                question="Necesitás reconectar Google Sheets desde Aplicaciones para leer esa hoja.",
+            )
+
+        records = self._parse_sheet_records(values.values, record_type)
+        if not records:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                question="No encontré filas con una columna de monto válida. Revisá que la hoja tenga encabezados como monto, total o importe.",
+            )
+
+        label = "gastos" if record_type == "expenses" else "ventas"
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_approval",
+            risk_level=RiskLevel.MEDIUM,
+            requires_approval=True,
+            confidence=Confidence.MEDIUM,
+            result={
+                "summary": f"Encontré {len(records)} {label} para importar desde Google Sheets.",
+                "action_type": ActionType.IMPORT_TABULAR_FILE,
+                "structured_data": {
+                    "source": "google_sheets",
+                    "record_type": record_type,
+                    "spreadsheet_id": spreadsheet_id,
+                    "range": values.range,
+                    "parsed_records": records,
+                },
+            },
+        )

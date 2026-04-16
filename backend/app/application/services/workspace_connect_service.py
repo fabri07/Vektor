@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.security.token_cipher import encrypt_token
 from app.config.settings import get_settings
+from app.integrations.google_workspace.apps import merge_scopes, scopes_for_apps
 from app.observability.logger import get_logger
 from app.persistence.models.user_google_workspace import UserGoogleWorkspaceConnection
 
@@ -52,15 +53,6 @@ _WS_STATE_PREFIX = "ws:state:"
 _WS_EXCHANGE_PREFIX = "ws:exchange:"
 _STATE_TTL_SECONDS = 600   # 10 min para completar el consentimiento
 _EXCHANGE_TTL_SECONDS = 60  # 60 seg para que el frontend haga el exchange
-
-_WORKSPACE_SCOPES = [
-    "openid",
-    "email",
-    "profile",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.compose",
-]
-
 
 def _generate_code_verifier() -> str:
     return secrets.token_urlsafe(48)
@@ -88,6 +80,7 @@ class WorkspaceConnectService:
         self,
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
+        app_ids: list[str] | None = None,
     ) -> str:
         """Genera state/PKCE, los guarda en Redis con binding user_id/tenant_id.
 
@@ -106,6 +99,7 @@ class WorkspaceConnectService:
             "flow_id": flow_id,
             "code_verifier": code_verifier,
             "nonce": nonce,
+            "app_ids": app_ids or [],
         }
         await self._redis.set(
             f"{_WS_STATE_PREFIX}{state}",
@@ -117,13 +111,14 @@ class WorkspaceConnectService:
             "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
             "redirect_uri": settings.GOOGLE_WORKSPACE_REDIRECT_URI,
             "response_type": "code",
-            "scope": " ".join(_WORKSPACE_SCOPES),
+            "scope": " ".join(scopes_for_apps(app_ids)),
             "state": state,
             "nonce": nonce,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
             "access_type": "offline",
             "prompt": "consent",  # forzar consent para obtener refresh_token siempre
+            "include_granted_scopes": "true",
         }
         url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
         logger.info(
@@ -257,7 +252,7 @@ class WorkspaceConnectService:
             )
             raise HTTPException(status.HTTP_403_FORBIDDEN, "state_user_mismatch")
 
-        scopes: list[str] = [s for s in data["scope"].split() if s]
+        incoming_scopes: list[str] = [s for s in data["scope"].split() if s]
         access_token_encrypted = encrypt_token(data["access_token"])
 
         # refresh_token puede faltar en re-consentimiento (Google no lo reenvía siempre)
@@ -277,6 +272,7 @@ class WorkspaceConnectService:
         conn = result.scalar_one_or_none()
 
         if conn is None:
+            scopes = merge_scopes(None, incoming_scopes)
             conn = UserGoogleWorkspaceConnection(
                 tenant_id=current_tenant_id,
                 user_id=current_user_id,
@@ -291,6 +287,7 @@ class WorkspaceConnectService:
             )
             self._session.add(conn)
         else:
+            scopes = merge_scopes(conn.scopes_granted, incoming_scopes)
             conn.access_token_encrypted = access_token_encrypted
             if refresh_token_encrypted:
                 conn.refresh_token_encrypted = refresh_token_encrypted

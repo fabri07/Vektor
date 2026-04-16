@@ -162,3 +162,43 @@ async def test_sale_emits_event_after_confirm():
     mock_emit.assert_any_call(
         "SALE_RECORDED", {"sale_id": "sale-001", "business_id": "tenant-001"}
     )
+
+
+@pytest.mark.asyncio
+async def test_google_sheet_import_returns_pending_action_without_llm():
+    """Google Sheets import → lee filas, parsea ventas y requiere aprobación."""
+    from app.application.agents.cash.agent import AgentCash
+    from app.application.agents.shared.schemas import ActionType
+
+    class FakeGateway:
+        async def sheets(self):
+            return self
+
+        async def run_google(self, coro):
+            return await coro
+
+        async def read_values(self, spreadsheet_id: str, range_name: str):
+            values = [
+                ["monto", "producto", "metodo_pago"],
+                ["1200", "yerba", "efectivo"],
+                ["2500", "azucar", "tarjeta"],
+            ]
+            result = MagicMock()
+            result.spreadsheet_id = spreadsheet_id
+            result.range = range_name
+            result.values = values
+            return result
+
+    agent = AgentCash(gateway=FakeGateway())  # type: ignore[arg-type]
+    result = await agent.process(
+        _make_request(
+            "Importa ventas desde https://docs.google.com/spreadsheets/d/sheet123/edit"
+        )
+    )
+
+    assert result.status == "requires_approval"
+    assert result.result["action_type"] == ActionType.IMPORT_TABULAR_FILE
+    payload = result.result["structured_data"]
+    assert payload["source"] == "google_sheets"
+    assert payload["record_type"] == "sales"
+    assert len(payload["parsed_records"]) == 2

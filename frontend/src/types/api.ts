@@ -203,10 +203,21 @@ export interface WorkspaceConnectStartResponse {
   authorization_url: string;
 }
 
+export interface WorkspaceAppStatus {
+  id: string;
+  label: string;
+  description: string;
+  available: boolean;
+  connected: boolean;
+  needs_reconnect: boolean;
+  required_scopes: string[];
+}
+
 export interface WorkspaceStatusResponse {
   connected: boolean;
   google_account_email: string | null;
   scopes_granted: string[];
+  apps: WorkspaceAppStatus[];
   connected_at: string | null;
   last_error_code: string | null;
 }

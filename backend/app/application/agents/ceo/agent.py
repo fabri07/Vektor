@@ -12,19 +12,20 @@ RESTRICCIÓN: AgentCEO NUNCA accede directamente a:
 
 import json
 import sys
+from typing import Any
 
 import anthropic
 
 from app.application.agents.base import BaseAgent
+from app.application.agents.shared.risk_engine import RiskEngine
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
     AgentResponse,
     Confidence,
-    RiskLevel,
 )
-from app.application.agents.shared.risk_engine import RiskEngine
 from app.application.security.prompt_defense import wrap_user_input
+from app.integrations.anthropic_client import get_anthropic_async_client
 
 # ── Guardia de importación ────────────────────────────────────────────────────
 _FORBIDDEN = ["db.sales", "db.inventory", "db.cash_movements", "db.purchase_orders"]
@@ -45,6 +46,9 @@ INTENT_CATALOG = [
     "manage_supplier",
     "ask_platform_help",
     "review_inbox_item",
+    "connect_google_app",
+    "import_google_sheet",
+    "analyze_google_data",
 ]
 
 # ── Intent → agente especializado ────────────────────────────────────────────
@@ -61,6 +65,9 @@ INTENT_TO_AGENT: dict[str, str] = {
     "ask_business_status": "agent_health",
     "ask_dashboard_report": "agent_health",
     "ask_platform_help": "agent_helper",
+    "connect_google_app": "agent_helper",
+    "import_google_sheet": "agent_cash",
+    "analyze_google_data": "agent_health",
 }
 
 # ── Intent → ActionType (catálogo cerrado) ────────────────────────────────────
@@ -77,18 +84,36 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "manage_supplier": ActionType.CREATE_SUPPLIER_DRAFT,
     "ask_platform_help": ActionType.ANSWER_HELP_REQUEST,
     "review_inbox_item": ActionType.CLASSIFY_GMAIL_MESSAGE,
+    "connect_google_app": ActionType.ANSWER_HELP_REQUEST,
+    "import_google_sheet": ActionType.IMPORT_TABULAR_FILE,
+    "analyze_google_data": ActionType.GENERATE_HEALTH_REPORT,
 }
 
 
 class AgentCEO(BaseAgent):
     agent_name = "agent_ceo"
-    client = anthropic.AsyncAnthropic()
+
+    def __init__(self) -> None:
+        self._client: Any | None = None
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     async def classify_intent(self, message: str) -> dict:
         """Clasifica el intent vía LLM Haiku. Retorna {intent, entities}."""
         system = (
             "Sos el clasificador de intenciones de Véktor, un sistema de gestión para PyMEs.\n"
             f"Intenciones válidas: {', '.join(INTENT_CATALOG)}\n\n"
+            "Usá connect_google_app cuando pidan conectar Gmail, Sheets, Drive o Google.\n"
+            "Usá import_google_sheet cuando pidan cargar o registrar datos desde una hoja de Google.\n"
+            "Usá analyze_google_data cuando pidan analizar datos ya conectados o importados desde Google.\n\n"
             "Analizá el mensaje del usuario y retorná SOLO un JSON con:\n"
             '{"intent": "<una de las intenciones válidas>", "entities": {...campos relevantes...}}\n\n'
             f"Si no podés clasificar → {{\"intent\": \"ask_platform_help\", \"entities\": {{}}}}\n"

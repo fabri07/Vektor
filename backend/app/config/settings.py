@@ -109,6 +109,7 @@ class Settings(BaseSettings):
         "ENABLE_EMAIL_NOTIFICATIONS",
         "ENABLE_SCORE_RECALCULATION",
         "ENABLE_GOOGLE_LOGIN",
+        "ENABLE_GOOGLE_WORKSPACE_MCP",
         "ENABLE_FACEBOOK_LOGIN",
         "DEMO_MODE",
         mode="before",
@@ -193,6 +194,9 @@ class Settings(BaseSettings):
 
     # ── OCR ───────────────────────────────────────────────────────────────────
     OCR_BACKEND: str = "tesseract"  # "tesseract" | "api" (future: external OCR API)
+
+    # ── LLM Providers ─────────────────────────────────────────────────────────
+    ANTHROPIC_API_KEY: str = ""
 
     # ── Production secret validation ──────────────────────────────────────────
     @model_validator(mode="after")

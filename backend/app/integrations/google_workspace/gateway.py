@@ -6,10 +6,9 @@ directamente a TokenManager o GmailClient.
 Responsabilidades:
   - is_connected()  → chequea si el usuario tiene una conexión Workspace activa
   - gmail()         → obtiene GmailClient con token vigente
+  - sheets()        → obtiene GoogleSheetsClient con token vigente
+  - drive()         → obtiene GoogleDriveClient con token vigente
   - disconnect()    → soft revoke (local siempre; remoto best-effort)
-
-Fase futura (no implementada aquí):
-  - drive() / sheets() / calendar()
 
 Invariantes de seguridad:
   - tenant_id enforced en todas las queries
@@ -32,7 +31,9 @@ from app.integrations.google_workspace.exceptions import (
     InsufficientScopeError,
     WorkspaceTokenError,
 )
+from app.integrations.google_workspace.drive_client import GoogleDriveClient
 from app.integrations.google_workspace.gmail_client import GmailClient
+from app.integrations.google_workspace.sheets_client import GoogleSheetsClient
 from app.integrations.google_workspace.token_manager import TokenManager
 from app.application.security.token_cipher import TokenCipherError, decrypt_token
 from app.observability.logger import get_logger
@@ -91,6 +92,22 @@ class GoogleWorkspaceGateway:
             raise
         return GmailClient(access_token=token, http_client=self._http)
 
+    async def sheets(self) -> GoogleSheetsClient:
+        """Retorna un GoogleSheetsClient con token vigente."""
+        try:
+            token = await self._token_manager.get_valid_access_token()
+        except WorkspaceTokenError:
+            raise
+        return GoogleSheetsClient(access_token=token, http_client=self._http)
+
+    async def drive(self) -> GoogleDriveClient:
+        """Retorna un GoogleDriveClient con token vigente."""
+        try:
+            token = await self._token_manager.get_valid_access_token()
+        except WorkspaceTokenError:
+            raise
+        return GoogleDriveClient(access_token=token, http_client=self._http)
+
     async def run_gmail(self, coro):  # type: ignore[no-untyped-def]
         """Helper: ejecuta una coroutine de GmailClient capturando InsufficientScopeError.
 
@@ -102,6 +119,14 @@ class GoogleWorkspaceGateway:
         Convierte InsufficientScopeError en WorkspaceTokenError(reason="insufficient_scope")
         y actualiza last_error_code en DB antes de propagar.
         """
+        try:
+            return await coro
+        except InsufficientScopeError as exc:
+            await self._mark_insufficient_scope()
+            raise WorkspaceTokenError(reason="insufficient_scope", detail=str(exc)) from exc
+
+    async def run_google(self, coro):  # type: ignore[no-untyped-def]
+        """Ejecuta una coroutine de un cliente Google y normaliza errores de scope."""
         try:
             return await coro
         except InsufficientScopeError as exc:

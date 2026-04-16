@@ -14,19 +14,12 @@ GUARDRAILS:
 """
 
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
-from app.application.agents.shared.event_bus import EventBus
-from app.application.agents.shared.heuristic_engine import HeuristicConfig, HeuristicEngine
-from app.application.agents.shared.schemas import (
-    AgentRequest,
-    AgentResponse,
-    RiskLevel,
-)
 from app.application.agents.health.scorer import (
     ComponentScores,
     HealthScore,
@@ -36,15 +29,33 @@ from app.application.agents.health.scorer import (
     compute_stock_score,
     compute_supplier_score,
 )
+from app.application.agents.shared.event_bus import EventBus
+from app.application.agents.shared.heuristic_engine import HeuristicConfig, HeuristicEngine
+from app.application.agents.shared.schemas import (
+    AgentRequest,
+    AgentResponse,
+    RiskLevel,
+)
+from app.integrations.anthropic_client import get_anthropic_async_client
 
 
 class AgentHealth(BaseAgent):
     agent_name = "agent_health"
 
     def __init__(self, db: Optional[AsyncSession] = None) -> None:
-        self.client = anthropic.AsyncAnthropic()
+        self._client: Any | None = None
         self._db = db
         self._heuristics: HeuristicConfig | None = None
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     def get_heuristics(self, business_type: str = "kiosco_almacen") -> HeuristicConfig:
         """Carga la heurística del rubro. Usa caché en instancia."""

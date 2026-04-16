@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import anthropic
 
@@ -11,8 +12,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
 )
 from app.application.security.prompt_defense import wrap_user_input
-
-client = anthropic.AsyncAnthropic()
+from app.integrations.anthropic_client import get_anthropic_async_client
 
 FALLBACK_RESPONSE = (
     "Todavía no tengo información específica sobre eso en mi base de conocimiento. "
@@ -61,7 +61,17 @@ class AgentHelper(BaseAgent):
     agent_name = "agent_helper"
 
     def __init__(self) -> None:
-        self.client = client
+        self._client: Any | None = None
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     async def find_answer(self, question: str) -> dict:
         """

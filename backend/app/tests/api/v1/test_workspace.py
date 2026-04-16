@@ -177,6 +177,22 @@ class TestWorkspaceConnectStart:
         assert "flow_id" in state_data
         assert "code_verifier" in state_data
 
+    @pytest.mark.asyncio
+    async def test_start_accepts_app_ids_and_requests_incremental_scopes(self, client_with_workspace):
+        client, _, _ = client_with_workspace
+        async with client:
+            resp = await client.post(
+                "/api/v1/workspace/google/connect/start",
+                json={"app_ids": ["sheets", "drive"]},
+            )
+        assert resp.status_code == 200
+        from urllib.parse import parse_qs, urlparse
+        params = parse_qs(urlparse(resp.json()["authorization_url"]).query)
+        scope = params["scope"][0]
+        assert "https://www.googleapis.com/auth/spreadsheets.readonly" in scope
+        assert "https://www.googleapis.com/auth/drive.readonly" in scope
+        assert params["include_granted_scopes"][0] == "true"
+
 
 # ── TestWorkspaceConnectCallback ──────────────────────────────────────────────
 
@@ -440,4 +456,5 @@ class TestWorkspaceStatus:
         assert data["connected"] is True
         assert data["google_account_email"] == "workspace@empresa.com"
         assert "gmail.readonly" in data["scopes_granted"]
+        assert len(data["apps"]) >= 3
         app.dependency_overrides.clear()

@@ -13,6 +13,7 @@ import {
   Package,
   Upload,
   Settings,
+  Plug,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -32,6 +33,7 @@ const NAV_ITEMS = [
   { label: "Gastos",        href: "/expenses",   icon: Receipt },
   { label: "Productos",     href: "/products",   icon: Package },
   { label: "Cargar datos",  href: "/ingestion",  icon: Upload },
+  { label: "Aplicaciones",  href: "/apps",       icon: Plug },
 ];
 
 function getInitials(name: string): string {

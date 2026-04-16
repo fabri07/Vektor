@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_current_user
 from app.application.services.workspace_connect_service import WorkspaceConnectService
 from app.config.settings import get_settings
+from app.integrations.google_workspace.apps import GOOGLE_WORKSPACE_APPS
 from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway
 from app.main import limiter
 from app.persistence.db.redis import get_redis
@@ -32,7 +33,9 @@ from app.persistence.db.session import get_db_session
 from app.persistence.models.user import User
 from app.persistence.models.user_google_workspace import UserGoogleWorkspaceConnection
 from app.schemas.workspace import (
+    WorkspaceAppStatus,
     WorkspaceConnectExchangeRequest,
+    WorkspaceConnectStartRequest,
     WorkspaceConnectStartResponse,
     WorkspaceDisconnectResponse,
     WorkspaceStatusResponse,
@@ -51,6 +54,31 @@ def _require_workspace_mcp() -> None:
         )
 
 
+def _build_app_statuses(
+    scopes_granted: list[str],
+    connected: bool,
+    last_error_code: str | None = None,
+) -> list[WorkspaceAppStatus]:
+    granted = set(scopes_granted)
+    statuses: list[WorkspaceAppStatus] = []
+    for app in GOOGLE_WORKSPACE_APPS.values():
+        required = list(app.required_scopes)
+        has_scopes = all(scope in granted for scope in required)
+        app_connected = connected and app.available and has_scopes
+        statuses.append(
+            WorkspaceAppStatus(
+                id=app.id,
+                label=app.label,
+                description=app.description,
+                available=app.available,
+                connected=app_connected,
+                needs_reconnect=connected and app.available and (not has_scopes or bool(last_error_code)),
+                required_scopes=required,
+            )
+        )
+    return statuses
+
+
 # ── 1. Start ──────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -62,6 +90,7 @@ def _require_workspace_mcp() -> None:
 @limiter.limit("10/5minutes")
 async def workspace_connect_start(
     request: Request,
+    body: WorkspaceConnectStartRequest | None = None,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
@@ -72,7 +101,11 @@ async def workspace_connect_start(
     usuario que inició el flujo sea quien lo complete.
     """
     svc = WorkspaceConnectService(session, redis)
-    url = await svc.generate_start(current_user.user_id, current_user.tenant_id)
+    url = await svc.generate_start(
+        current_user.user_id,
+        current_user.tenant_id,
+        app_ids=body.app_ids if body else None,
+    )
     return WorkspaceConnectStartResponse(authorization_url=url)
 
 
@@ -209,12 +242,16 @@ async def workspace_status(
     conn = result.scalar_one_or_none()
 
     if conn is None or not conn.is_active:
-        return WorkspaceStatusResponse(connected=False)
+        return WorkspaceStatusResponse(
+            connected=False,
+            apps=_build_app_statuses([], connected=False),
+        )
 
     return WorkspaceStatusResponse(
         connected=True,
         google_account_email=conn.google_account_email,
         scopes_granted=conn.scopes_granted,
+        apps=_build_app_statuses(conn.scopes_granted, connected=True, last_error_code=conn.last_error_code),
         connected_at=conn.connected_at,
         last_error_code=conn.last_error_code,
     )

@@ -7,16 +7,15 @@ POST /api/v1/agent/cancel/{pending_id}  — rechaza una acción pendiente
 
 import uuid
 from datetime import UTC, date, datetime, time
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
-from app.integrations.google_workspace.exceptions import WorkspaceTokenError
 from app.application.agents.base import BaseAgent
 from app.application.agents.ceo.agent import AgentCEO
 from app.application.agents.shared.schemas import AgentRequest, AgentResponse
@@ -25,6 +24,8 @@ from app.application.services.pending_action_service import (
     create_pending_action,
     execute_pending_action,
 )
+from app.integrations.anthropic_client import AnthropicConfigurationError
+from app.integrations.google_workspace.exceptions import WorkspaceTokenError
 from app.observability.logger import get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -38,15 +39,19 @@ logger = get_logger(__name__)
 
 def _get_sub_agent(
     name: str,
-    db: Optional[AsyncSession] = None,
-    redis: Optional[Redis] = None,
-    user_id: Optional[uuid.UUID] = None,
-    tenant_id: Optional[uuid.UUID] = None,
-) -> Optional[BaseAgent]:
+    db: AsyncSession | None = None,
+    redis: Redis | None = None,
+    user_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID | None = None,
+) -> BaseAgent | None:
     """Devuelve el subagente correspondiente al nombre; None si no hay mapeo."""
     if name == "agent_cash":
         from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
-        return AgentCash(db=db, redis=redis)
+        gateway = None
+        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
+            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
+            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
+        return AgentCash(db=db, redis=redis, gateway=gateway)
     if name == "agent_stock":
         from app.application.agents.stock.agent import AgentStock  # noqa: PLC0415
         return AgentStock()
@@ -69,7 +74,7 @@ def _get_sub_agent(
 class ChatRequest(BaseModel):
     message: str
     attachments: list[Any] = []
-    conversation_id: Optional[str] = None
+    conversation_id: str | None = None
 
 
 # ── POST /chat ────────────────────────────────────────────────────────────────
@@ -109,6 +114,15 @@ async def chat(
     )
     try:
         agent_response = await ceo.process(request)
+    except AnthropicConfigurationError as exc:
+        logger.error(
+            "agent_anthropic_not_configured",
+            tenant_id=str(tenant_id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
+        ) from exc
     except Exception as exc:
         logger.error("agent_ceo_process_failed", error=str(exc), error_type=type(exc).__name__, tenant_id=str(tenant_id))
         raise HTTPException(status_code=500, detail=f"Agent error: {type(exc).__name__}: {exc}") from exc
@@ -125,6 +139,16 @@ async def chat(
     if sub_agent is not None:
         try:
             agent_response = await sub_agent.process(request)
+        except AnthropicConfigurationError as exc:
+            logger.error(
+                "sub_agent_anthropic_not_configured",
+                agent=target_agent_name,
+                tenant_id=str(tenant_id),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
+            ) from exc
         except Exception as exc:
             logger.error("sub_agent_process_failed", agent=target_agent_name, error=str(exc), error_type=type(exc).__name__, tenant_id=str(tenant_id))
             raise HTTPException(status_code=500, detail=f"Sub-agent error ({target_agent_name}): {type(exc).__name__}: {exc}") from exc

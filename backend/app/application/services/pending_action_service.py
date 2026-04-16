@@ -55,6 +55,8 @@ async def create_pending_action(
     Para acciones locales: external_system=None, idempotency_key=None.
     """
     ext_system = EXTERNAL_SYSTEMS.get(action_type)
+    if action_type == ActionType.IMPORT_TABULAR_FILE and payload.get("source") == "google_sheets":
+        ext_system = "GOOGLE_SHEETS"
     action = PendingAction(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -158,6 +160,29 @@ async def execute_pending_action(
                 action_id=str(action.id),
                 payload=payload,
             )
+
+    elif action.action_type == ActionType.IMPORT_TABULAR_FILE and payload.get("source") == "google_sheets":
+        record_type = payload.get("record_type", "sales")
+        records = payload.get("parsed_records") or []
+        if not isinstance(records, list):
+            records = []
+
+        imported_count = 0
+        for record in records[:50]:
+            if not isinstance(record, dict) or not record.get("amount"):
+                continue
+            if record_type == "expenses":
+                await cash_service.save_expense(record, action.tenant_id, db)
+            else:
+                await cash_service.save_sale(record, action.tenant_id, action.user_id, db)
+            imported_count += 1
+
+        logger.info(
+            "execute_pending_action: IMPORT_TABULAR_FILE google_sheets imported",
+            action_id=str(action.id),
+            record_type=record_type,
+            imported_count=imported_count,
+        )
 
     elif action.action_type == ActionType.CREATE_SUPPLIER_DRAFT:
         draft_text = payload.get("draft_text", "")

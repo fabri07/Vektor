@@ -3,7 +3,7 @@
 import json
 import uuid
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
 import anthropic
 from pydantic import BaseModel
@@ -19,6 +19,7 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
+from app.integrations.anthropic_client import get_anthropic_async_client
 
 
 class StockAdjustEntity(BaseModel):
@@ -34,7 +35,17 @@ class AgentStock(BaseAgent):
     agent_name = "agent_stock"
 
     def __init__(self) -> None:
-        self.client = anthropic.AsyncAnthropic()
+        self._client: Any | None = None
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     async def on_sale_recorded(
         self,

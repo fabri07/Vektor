@@ -40,6 +40,7 @@ from app.application.agents.shared.schemas import (
 )
 from app.application.agents.supplier.preflight import gmail_preflight_check
 from app.application.security.prompt_defense import wrap_user_input
+from app.integrations.anthropic_client import get_anthropic_async_client
 from app.integrations.google_workspace.exceptions import WorkspaceTokenError
 from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway
 from app.observability.logger import get_logger
@@ -85,7 +86,17 @@ class AgentSupplier(BaseAgent):
         """
         self._session = session
         self._gateway = gateway
-        self._llm = anthropic.AsyncAnthropic()
+        self._llm_client: Any | None = None
+
+    @property
+    def _llm(self) -> Any:
+        if self._llm_client is None:
+            self._llm_client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._llm_client
+
+    @_llm.setter
+    def _llm(self, value: Any) -> None:
+        self._llm_client = value
 
     # ── LLM helpers ───────────────────────────────────────────────────────────
 
