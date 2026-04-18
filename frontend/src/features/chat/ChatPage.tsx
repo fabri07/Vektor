@@ -1,13 +1,15 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback, type KeyboardEvent } from "react";
-import { Send } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Send, Plus } from "lucide-react";
 import { useChat } from "./hooks/useChat";
 import { ApprovalCard } from "./components/ApprovalCard";
 import {
   AttachmentPicker,
   type AttachmentFile,
 } from "./components/AttachmentPicker";
+import { onboardingService } from "@/services/onboarding.service";
 
 const INITIAL_EXAMPLES = [
   "¡Hola! Soy tu asistente de Véktor. Podés decirme cosas como:",
@@ -25,13 +27,26 @@ function buildAttachmentMessage(attachments: AttachmentFile[]): string {
 }
 
 export function ChatPage() {
+  const router = useRouter();
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentFile[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const onboardingChecked = useRef(false);
 
-  const { messages, isLoading, send, confirm, cancel, messagesUsedToday, isRateLimited } =
+  const { messages, isLoading, send, confirm, cancel, messagesUsedToday, isRateLimited, newConversation } =
     useChat();
+
+  // Redirigir a onboarding si el negocio aún no fue configurado
+  useEffect(() => {
+    if (onboardingChecked.current) return;
+    onboardingChecked.current = true;
+    onboardingService.getStatus().then((status) => {
+      if (!status.completed) {
+        router.replace("/onboarding");
+      }
+    }).catch(() => { /* no bloquear el chat si el check falla */ });
+  }, [router]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -110,6 +125,14 @@ export function ChatPage() {
                 {messagesUsedToday}/50 mensajes disponibles hoy
               </p>
             </div>
+            <button
+              onClick={newConversation}
+              className="flex items-center gap-1.5 rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-xs font-medium text-vk-text-secondary hover:bg-vk-bg-light transition-colors"
+              title="Nueva conversación"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Nueva
+            </button>
           </div>
         </div>
       </div>

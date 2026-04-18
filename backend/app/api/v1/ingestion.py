@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
+from app.config.settings import get_settings
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
     _extract_amounts_from_text,
@@ -306,6 +307,13 @@ async def upload_file(
     )
     repo = FileRepository(session)
     saved = await repo.save(record)
+
+    # En modo USE_LOCAL_FALLBACK (beta sin workers Celery), procesar síncronamente.
+    # Evita que el archivo quede en PENDING para siempre porque Redis acepta el
+    # mensaje pero ningún worker lo consume.
+    if get_settings().USE_LOCAL_FALLBACK:
+        await _process_file_sync(saved, session)
+        return UploadResponse(file_id=saved.id, status="PROCESSING")
 
     # Enqueue parsing job — fall back to sync processing if Celery/Redis
     # is unavailable (beta: single Railway service without workers).

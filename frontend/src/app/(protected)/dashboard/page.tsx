@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { useRef } from "react";
 import { fetchLatestScore, fetchCurrentInsight } from "@/services/dashboard.service";
 import { fetchMomentumProfile } from "@/services/momentum.service";
 import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
@@ -26,6 +27,8 @@ function isCalculating(data: unknown): boolean {
 }
 
 export default function DashboardPage() {
+  const calcRetries = useRef(0);
+
   const {
     data: scoreData,
     isLoading: scoreLoading,
@@ -33,8 +36,14 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["health-scores", "latest"],
     queryFn: fetchLatestScore,
-    refetchInterval: (query) =>
-      isCalculating(query.state.data) ? 30_000 : false,
+    refetchInterval: (query) => {
+      if (!isCalculating(query.state.data)) {
+        calcRetries.current = 0;
+        return false;
+      }
+      calcRetries.current += 1;
+      return calcRetries.current <= 3 ? 30_000 : false;
+    },
     retry: 1,
   });
 
@@ -53,8 +62,9 @@ export default function DashboardPage() {
 
   const loading = scoreLoading || insightLoading;
   const calculating = !scoreLoading && scoreData != null && isCalculating(scoreData);
+  const calculatingTimeout = calculating && calcRetries.current > 3;
 
-  if (loading || calculating) {
+  if (loading || (calculating && !calculatingTimeout)) {
     return (
       <div className="space-y-4">
         <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
@@ -63,7 +73,7 @@ export default function DashboardPage() {
     );
   }
 
-  const noScore = scoreError || scoreData == null;
+  const noScore = scoreError || scoreData == null || calculatingTimeout;
 
   if (noScore) {
     return (
