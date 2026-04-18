@@ -42,7 +42,8 @@ export default function DashboardPage() {
         return false;
       }
       calcRetries.current += 1;
-      return calcRetries.current <= 3 ? 30_000 : false;
+      // 1 retry máximo (15s) — evita que el skeleton quede infinito sin datos
+      return calcRetries.current <= 1 ? 15_000 : false;
     },
     retry: 1,
   });
@@ -62,7 +63,7 @@ export default function DashboardPage() {
 
   const loading = scoreLoading || insightLoading;
   const calculating = !scoreLoading && scoreData != null && isCalculating(scoreData);
-  const calculatingTimeout = calculating && calcRetries.current > 3;
+  const calculatingTimeout = calculating && calcRetries.current > 1;
 
   if (loading || (calculating && !calculatingTimeout)) {
     return (

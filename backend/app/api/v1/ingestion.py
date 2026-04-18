@@ -381,6 +381,68 @@ async def get_file_preview(
     )
 
 
+@router.delete(
+    "/files/{file_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an uploaded file",
+)
+async def delete_file(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    try:
+        s3 = S3Client()
+        await s3.delete(record.s3_key)
+    except Exception as exc:
+        logger.warning("ingestion.delete.s3_failed", file_id=str(file_id), error=str(exc))
+
+    await repo.delete(record)
+    await session.commit()
+
+
+@router.post(
+    "/files/{file_id}/reprocess",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-enqueue a PENDING or FAILED file for processing",
+)
+async def reprocess_file(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    if record.processing_status not in (PROCESSING_STATUS_PENDING, PROCESSING_STATUS_FAILED):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"El archivo no puede reprocesarse (estado actual: {record.processing_status}).",
+        )
+
+    record.processing_status = PROCESSING_STATUS_PENDING
+    record.parsed_summary_json = None
+    await repo.save(record)
+
+    if get_settings().USE_LOCAL_FALLBACK:
+        await _process_file_sync(record, session)
+    else:
+        job = _pick_job(record.content_type)
+        try:
+            job.delay(str(record.id), str(tenant.tenant_id))
+        except Exception:
+            await _process_file_sync(record, session)
+
+    return {"file_id": str(file_id), "status": "requeued"}
+
+
 @router.post(
     "/files/{file_id}/confirm",
     response_model=ConfirmIngestionResponse,

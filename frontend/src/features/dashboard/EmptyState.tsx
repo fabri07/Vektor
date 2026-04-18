@@ -3,7 +3,7 @@ import Link from "next/link";
 export function EmptyState() {
   return (
     <div className="flex flex-1 items-center justify-center">
-      <div className="max-w-sm rounded-lg border border-vk-border-w bg-vk-surface-w p-10 text-center shadow-vk-sm">
+      <div className="max-w-md rounded-lg border border-vk-border-w bg-vk-surface-w p-10 text-center shadow-vk-sm">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-vk-bg-light">
           <svg
             className="h-7 w-7 text-vk-text-muted"
@@ -20,19 +20,56 @@ export function EmptyState() {
           </svg>
         </div>
         <h2 className="mb-2 text-base font-semibold text-vk-text-primary">
-          Completá el onboarding para ver tu score
+          Tu dashboard está vacío
         </h2>
-        <p className="mb-6 text-sm text-vk-text-muted">
-          Agregá tus primeras ventas o gastos para que Véktor pueda calcular la
-          salud financiera de tu negocio.
+        <p className="mb-5 text-sm text-vk-text-muted">
+          Aún no hay datos suficientes para calcular el score. Podés agregar
+          información de tres formas:
         </p>
-        <Link
-          href="/onboarding"
-          className="inline-flex h-9 items-center justify-center rounded-lg bg-vk-blue px-4 text-sm font-medium text-white transition-colors hover:bg-vk-blue-hover"
-        >
-          Ir al onboarding
-        </Link>
-        <p className="mt-2 text-xs text-vk-text-muted">Lleva solo 3 minutos</p>
+        <div className="mb-6 space-y-2 text-left">
+          <div className="flex items-start gap-2.5 rounded-lg bg-vk-bg-light px-4 py-2.5">
+            <span className="mt-0.5 text-base">💬</span>
+            <div>
+              <p className="text-xs font-medium text-vk-text-primary">Chat</p>
+              <p className="text-xs text-vk-text-muted">
+                Escribí &ldquo;vendí 80 mil&rdquo; o &ldquo;pagué alquiler 200
+                mil&rdquo;
+              </p>
+            </div>
+          </div>
+          <div className="flex items-start gap-2.5 rounded-lg bg-vk-bg-light px-4 py-2.5">
+            <span className="mt-0.5 text-base">📁</span>
+            <div>
+              <p className="text-xs font-medium text-vk-text-primary">Cargar archivo</p>
+              <p className="text-xs text-vk-text-muted">
+                Subí un Excel o CSV con ventas desde la sección de carga
+              </p>
+            </div>
+          </div>
+          <div className="flex items-start gap-2.5 rounded-lg bg-vk-bg-light px-4 py-2.5">
+            <span className="mt-0.5 text-base">🚀</span>
+            <div>
+              <p className="text-xs font-medium text-vk-text-primary">Onboarding</p>
+              <p className="text-xs text-vk-text-muted">
+                Completá el cuestionario inicial si todavía no lo hiciste
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-2 justify-center">
+          <Link
+            href="/chat"
+            className="inline-flex h-9 items-center justify-center rounded-lg bg-vk-blue px-4 text-sm font-medium text-white transition-colors hover:bg-vk-blue-hover"
+          >
+            Ir al chat
+          </Link>
+          <Link
+            href="/ingestion"
+            className="inline-flex h-9 items-center justify-center rounded-lg border border-vk-border-w bg-vk-surface-w px-4 text-sm font-medium text-vk-text-secondary transition-colors hover:bg-vk-bg-light"
+          >
+            Cargar archivo
+          </Link>
+        </div>
       </div>
     </div>
   );

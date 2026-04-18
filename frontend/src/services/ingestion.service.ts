@@ -70,4 +70,12 @@ export const ingestionService = {
     );
     return res.data;
   },
+
+  async deleteFile(fileId: string): Promise<void> {
+    await api.delete(`/ingestion/files/${fileId}`);
+  },
+
+  async reprocessFile(fileId: string): Promise<void> {
+    await api.post(`/ingestion/files/${fileId}/reprocess`);
+  },
 };
