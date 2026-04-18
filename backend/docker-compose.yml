@@ -65,7 +65,7 @@ services:
     command: >
       celery -A app.jobs.celery_app worker
       --loglevel=info
-      --queues=default,scores,notifications,reports
+      --queues=default,scores,notifications,reports,ingestion
       --concurrency=4
     env_file: .env
     volumes:
@@ -87,7 +87,7 @@ services:
       context: .
       target: runtime
     restart: unless-stopped
-    command: celery -A app.jobs.celery_app beat --loglevel=info
+    command: celery -A app.jobs.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     env_file: .env
     volumes:
       - .:/app
