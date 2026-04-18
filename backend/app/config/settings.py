@@ -112,6 +112,7 @@ class Settings(BaseSettings):
         "ENABLE_GOOGLE_WORKSPACE_MCP",
         "ENABLE_FACEBOOK_LOGIN",
         "DEMO_MODE",
+        "USE_LOCAL_FALLBACK",
         mode="before",
     )
     @classmethod
@@ -148,6 +149,7 @@ class Settings(BaseSettings):
     S3_SECRET_ACCESS_KEY: str = ""
     S3_BUCKET_NAME: str = "vektor-uploads"
     S3_REGION: str = "us-east-1"
+    USE_LOCAL_FALLBACK: bool = False
 
     # ── SMTP ──────────────────────────────────────────────────────────────────
     SMTP_HOST: str = "localhost"

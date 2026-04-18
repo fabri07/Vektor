@@ -110,6 +110,24 @@ class AgentCash(BaseAgent):
             result = {"error": "No pude interpretar la respuesta. Intentá reformular el mensaje."}
         return result
 
+    async def _load_business_context(self, business_id: str) -> dict[str, Any]:
+        if self._db is None:
+            return {"name": "el negocio", "type": "kiosco_almacen"}
+        import uuid as _uuid  # noqa: PLC0415
+        from sqlalchemy import select as _select  # noqa: PLC0415
+        from app.persistence.models.tenant import Tenant  # noqa: PLC0415
+        from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+        tid = _uuid.UUID(business_id)
+        result = await self._db.execute(
+            _select(Tenant.display_name, BusinessProfile.vertical_code)
+            .join(BusinessProfile, BusinessProfile.tenant_id == Tenant.tenant_id)
+            .where(Tenant.tenant_id == tid)
+        )
+        row = result.first()
+        if row:
+            return {"name": row.display_name, "type": row.vertical_code}
+        return {"name": "el negocio", "type": "kiosco_almacen"}
+
     async def process(self, request: AgentRequest) -> AgentResponse:
         if self._looks_like_google_sheet_request(request.message):
             return await self._handle_google_sheet_import(request)
@@ -122,7 +140,7 @@ class AgentCash(BaseAgent):
             ctx = await svc.get_context(request.conversation_id)
             conversation_turns = ctx.get("turns", [])
 
-        business_context: dict[str, Any] = {"name": "el negocio", "type": "kiosco_almacen"}
+        business_context = await self._load_business_context(request.business_id)
         entities = await self._extract_sale_entities(request.message, business_context)
 
         if "error" in entities:

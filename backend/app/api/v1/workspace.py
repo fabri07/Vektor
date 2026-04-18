@@ -108,6 +108,7 @@ async def workspace_connect_start(
         current_user.user_id,
         current_user.tenant_id,
         app_ids=body.app_ids if body else None,
+        login_hint=body.login_hint if body else None,
     )
     return WorkspaceConnectStartResponse(authorization_url=url)
 

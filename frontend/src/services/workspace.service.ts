@@ -10,10 +10,13 @@ export const workspaceService = {
     return res.data;
   },
 
-  async getConnectUrl(appIds?: string[]): Promise<WorkspaceConnectStartResponse> {
+  async getConnectUrl(appIds?: string[], loginHint?: string): Promise<WorkspaceConnectStartResponse> {
+    const body: Record<string, unknown> = {};
+    if (appIds?.length) body.app_ids = appIds;
+    if (loginHint) body.login_hint = loginHint;
     const res = await api.post<WorkspaceConnectStartResponse>(
       "/workspace/google/connect/start",
-      appIds ? { app_ids: appIds } : undefined,
+      Object.keys(body).length ? body : undefined,
     );
     return res.data;
   },

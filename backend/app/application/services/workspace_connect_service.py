@@ -51,8 +51,8 @@ _GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 _WS_STATE_PREFIX = "ws:state:"
 _WS_EXCHANGE_PREFIX = "ws:exchange:"
-_STATE_TTL_SECONDS = 600   # 10 min para completar el consentimiento
-_EXCHANGE_TTL_SECONDS = 60  # 60 seg para que el frontend haga el exchange
+_STATE_TTL_SECONDS = 600    # 10 min para completar el consentimiento
+_EXCHANGE_TTL_SECONDS = 300  # 5 min para que el frontend haga el exchange
 
 def _generate_code_verifier() -> str:
     return secrets.token_urlsafe(48)
@@ -81,6 +81,7 @@ class WorkspaceConnectService:
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
         app_ids: list[str] | None = None,
+        login_hint: str | None = None,
     ) -> str:
         """Genera state/PKCE, los guarda en Redis con binding user_id/tenant_id.
 
@@ -107,7 +108,7 @@ class WorkspaceConnectService:
             ex=_STATE_TTL_SECONDS,
         )
 
-        params = {
+        params: dict[str, str] = {
             "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
             "redirect_uri": settings.GOOGLE_WORKSPACE_REDIRECT_URI,
             "response_type": "code",
@@ -120,6 +121,8 @@ class WorkspaceConnectService:
             "prompt": "consent",  # forzar consent para obtener refresh_token siempre
             "include_granted_scopes": "true",
         }
+        if login_hint:
+            params["login_hint"] = login_hint
         url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
         logger.info(
             "workspace.connect.start",

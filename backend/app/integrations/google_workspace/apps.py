@@ -50,8 +50,15 @@ GOOGLE_WORKSPACE_APPS: dict[str, GoogleWorkspaceApp] = {
         id="docs",
         label="Google Docs",
         description="Reportes ejecutivos exportables a documentos.",
-        available=False,
-        required_scopes=(),
+        available=True,
+        required_scopes=("https://www.googleapis.com/auth/documents.readonly",),
+    ),
+    "photos": GoogleWorkspaceApp(
+        id="photos",
+        label="Google Fotos",
+        description="Fotos del negocio para contexto visual.",
+        available=True,
+        required_scopes=("https://www.googleapis.com/auth/photoslibrary.readonly",),
     ),
 }
 

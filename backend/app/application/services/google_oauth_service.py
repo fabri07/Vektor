@@ -247,13 +247,21 @@ class GoogleOAuthService:
             "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
             "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URI,
             "response_type": "code",
-            "scope": "openid email profile",
+            "scope": " ".join([
+                "openid", "email", "profile",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.compose",
+                "https://www.googleapis.com/auth/spreadsheets.readonly",
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/documents.readonly",
+                "https://www.googleapis.com/auth/photoslibrary.readonly",
+            ]),
             "state": state,
             "nonce": nonce,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
-            "access_type": "online",  # no refresh token — login solo
-            "prompt": "select_account",
+            "access_type": "offline",  # pedir refresh_token para servicios Google
+            "prompt": "consent",       # forzar pantalla de consentimiento para obtener refresh_token
         }
         authorization_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
 
@@ -314,6 +322,12 @@ class GoogleOAuthService:
             # 2c. Verificar id_token y extraer claims
             claims = await _verify_id_token(id_token_str, nonce, http)
 
+        # Tokens de workspace (opcionales — se persisten si están disponibles)
+        ws_refresh_token: str | None = token_data.get("refresh_token")
+        ws_access_token: str = token_data.get("access_token", "")
+        ws_scopes: list[str] = [s for s in token_data.get("scope", "").split() if s]
+        ws_expires_in: int = int(token_data.get("expires_in", 3600))
+
         # 2d. Fail-closed si email no verificado
         if not claims.get("email_verified"):
             logger.warning(
@@ -333,7 +347,25 @@ class GoogleOAuthService:
             full_name=full_name,
         )
 
-        # 2f. Guardar resultado en Redis (TTL corto) y devolver session_id
+        # 2f. Persistir tokens de workspace si obtuvimos refresh_token (non-fatal)
+        if result["type"] == "auth" and ws_refresh_token:
+            payload = result["payload"]
+            try:
+                ws_user_id = uuid.UUID(payload["user"]["user_id"])
+                ws_tenant_id = uuid.UUID(payload["user"]["tenant_id"])
+                await self._save_workspace_tokens(
+                    user_id=ws_user_id,
+                    tenant_id=ws_tenant_id,
+                    provider_email=provider_email,
+                    refresh_token=ws_refresh_token,
+                    access_token=ws_access_token,
+                    scopes=ws_scopes,
+                    expires_in=ws_expires_in,
+                )
+            except Exception as exc:
+                logger.warning("oauth.callback.workspace_save_failed", error=str(exc))
+
+        # 2h. Guardar resultado en Redis (TTL corto) y devolver session_id
         exchange_session_id = secrets.token_urlsafe(32)
         await self._redis.set(
             f"oauth:exchange:{exchange_session_id}",
@@ -454,6 +486,66 @@ class GoogleOAuthService:
         return self._build_auth_response(user, tenant)
 
     # ── Private helpers ───────────────────────────────────────────────────────
+
+    async def _save_workspace_tokens(
+        self,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        provider_email: str,
+        refresh_token: str,
+        access_token: str,
+        scopes: list[str],
+        expires_in: int = 3600,
+    ) -> None:
+        """Persiste tokens de Google en user_google_workspace_connections (upsert).
+
+        Solo se llama cuando GOOGLE_TOKEN_CIPHER_KEY está disponible.
+        Si el cifrado falla (clave no configurada), lanza excepción que el caller captura.
+        """
+        from datetime import timedelta  # noqa: PLC0415
+        from app.persistence.models.user_google_workspace import UserGoogleWorkspaceConnection  # noqa: PLC0415
+        from app.application.security.token_cipher import encrypt_token  # noqa: PLC0415
+
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            select(UserGoogleWorkspaceConnection).where(
+                UserGoogleWorkspaceConnection.user_id == user_id
+            )
+        )
+        existing = result.scalar_one_or_none()
+
+        access_token_encrypted = encrypt_token(access_token)
+        refresh_token_encrypted = encrypt_token(refresh_token)
+        expires_at = now + timedelta(seconds=expires_in)
+
+        if existing:
+            existing.access_token_encrypted = access_token_encrypted
+            existing.refresh_token_encrypted = refresh_token_encrypted
+            existing.scopes_granted = scopes
+            existing.revoked_at = None
+            existing.connected_at = now
+            existing.expires_at = expires_at
+            existing.last_error_code = None
+            existing.last_error_at = None
+            existing.google_account_email = provider_email
+            existing.updated_at = now
+        else:
+            conn = UserGoogleWorkspaceConnection(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                google_account_email=provider_email,
+                access_token_encrypted=access_token_encrypted,
+                refresh_token_encrypted=refresh_token_encrypted,
+                scopes_granted=scopes,
+                expires_at=expires_at,
+            )
+            self._session.add(conn)
+        await self._session.flush()
+        logger.info(
+            "oauth.callback.workspace_tokens_saved",
+            user_id=str(user_id),
+            scopes_count=len(scopes),
+        )
 
     async def _resolve_identity(
         self,

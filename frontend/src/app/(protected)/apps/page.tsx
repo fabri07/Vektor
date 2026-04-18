@@ -5,8 +5,11 @@ import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { workspaceService } from "@/services/workspace.service";
+import { useAuthStore } from "@/stores/authStore";
 import { useToastStore } from "@/stores/toastStore";
 import type { WorkspaceAppStatus } from "@/types/api";
+
+const ALL_APP_IDS = ["gmail", "sheets", "drive", "docs", "photos"];
 
 const DEFAULT_APPS: WorkspaceAppStatus[] = [
   {
@@ -40,7 +43,16 @@ const DEFAULT_APPS: WorkspaceAppStatus[] = [
     id: "docs",
     label: "Google Docs",
     description: "Reportes ejecutivos en documentos.",
-    available: false,
+    available: true,
+    connected: false,
+    needs_reconnect: false,
+    required_scopes: [],
+  },
+  {
+    id: "photos",
+    label: "Google Fotos",
+    description: "Fotos del negocio para contexto visual.",
+    available: true,
     connected: false,
     needs_reconnect: false,
     required_scopes: [],
@@ -52,6 +64,7 @@ const APP_ACCENT: Record<string, { letter: string; color: string }> = {
   sheets: { letter: "S", color: "bg-green-50 text-green-700 border-green-100" },
   drive: { letter: "D", color: "bg-blue-50 text-blue-700 border-blue-100" },
   docs: { letter: "D", color: "bg-sky-50 text-sky-700 border-sky-100" },
+  photos: { letter: "F", color: "bg-yellow-50 text-yellow-700 border-yellow-100" },
 };
 
 function AppIcon({ appId }: { appId: string }) {
@@ -77,7 +90,7 @@ function GoogleAppCard({
   connectedAt: string | null | undefined;
   connectPending: boolean;
   disconnectPending: boolean;
-  onConnect: (appId: string) => void;
+  onConnect: () => void;
   onDisconnect: () => void;
 }) {
   return (
@@ -131,7 +144,7 @@ function GoogleAppCard({
               variant="primary"
               size="sm"
               loading={connectPending}
-              onClick={() => onConnect(app.id)}
+              onClick={() => onConnect()}
             >
               {app.needs_reconnect ? "Reconectar" : "Conectar"}
             </Button>
@@ -145,6 +158,7 @@ function GoogleAppCard({
 export default function AppsPage() {
   const queryClient = useQueryClient();
   const addToast = useToastStore((s) => s.add);
+  const userEmail = useAuthStore((s) => s.user?.email);
 
   const { data: status, isLoading } = useQuery({
     queryKey: ["workspace-status"],
@@ -154,7 +168,7 @@ export default function AppsPage() {
   });
 
   const connectMutation = useMutation({
-    mutationFn: (appId: string) => workspaceService.getConnectUrl([appId]),
+    mutationFn: () => workspaceService.getConnectUrl(ALL_APP_IDS, userEmail),
     onSuccess: ({ authorization_url }) => {
       window.location.href = authorization_url;
     },
@@ -192,7 +206,7 @@ export default function AppsPage() {
               connectedAt={status?.connected_at}
               connectPending={connectMutation.isPending}
               disconnectPending={disconnectMutation.isPending}
-              onConnect={(appId) => connectMutation.mutate(appId)}
+              onConnect={() => connectMutation.mutate()}
               onDisconnect={() => disconnectMutation.mutate()}
             />
           ))

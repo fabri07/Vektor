@@ -15,6 +15,7 @@ class WorkspaceConnectStartResponse(BaseModel):
 class WorkspaceConnectStartRequest(BaseModel):
     """Request opcional de POST /workspace/google/connect/start."""
     app_ids: list[str] | None = None
+    login_hint: str | None = None
 
 
 class WorkspaceConnectExchangeRequest(BaseModel):

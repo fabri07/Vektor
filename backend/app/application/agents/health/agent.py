@@ -173,8 +173,26 @@ class AgentHealth(BaseAgent):
         return response.content[0].text.strip()
 
     async def process(self, request: AgentRequest) -> AgentResponse:
-        health = await self.calculate_health(request.business_id)
-        narrative = await self.generate_narrative(health, "el negocio")
+        business_name = "el negocio"
+        business_type = "kiosco_almacen"
+        if self._db is not None:
+            import uuid as _uuid  # noqa: PLC0415
+            from sqlalchemy import select as _select  # noqa: PLC0415
+            from app.persistence.models.tenant import Tenant  # noqa: PLC0415
+            from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+            tid = _uuid.UUID(request.business_id)
+            result = await self._db.execute(
+                _select(Tenant.display_name, BusinessProfile.vertical_code)
+                .join(BusinessProfile, BusinessProfile.tenant_id == Tenant.tenant_id)
+                .where(Tenant.tenant_id == tid)
+            )
+            row = result.first()
+            if row:
+                business_name = row.display_name
+                business_type = row.vertical_code
+
+        health = await self.calculate_health(request.business_id, business_type=business_type)
+        narrative = await self.generate_narrative(health, business_name)
 
         # Emitir evento de actualización
         EventBus.emit(
