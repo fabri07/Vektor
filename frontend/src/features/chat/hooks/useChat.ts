@@ -118,6 +118,7 @@ export function useChat() {
       await queryClient.invalidateQueries({ queryKey: ["sales-entries"] });
       await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
       await queryClient.invalidateQueries({ queryKey: ["products"] });
+      await queryClient.invalidateQueries({ queryKey: ["inventory"] });
       void queryClient.invalidateQueries({ queryKey: ["health-scores"] });
     },
     [messages, updateMessage, queryClient],
