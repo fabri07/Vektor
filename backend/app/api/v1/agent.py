@@ -16,9 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
-from app.application.agents.base import BaseAgent
-from app.application.agents.ceo.agent import AgentCEO
 from app.application.agents.shared.schemas import AgentRequest, AgentResponse
+from app.application.services.chat_orchestrator import ChatOrchestrator
 from app.application.services.pending_action_service import (
     cancel_pending_action,
     create_pending_action,
@@ -36,39 +35,6 @@ from app.persistence.models.user import User
 router = APIRouter()
 logger = get_logger(__name__)
 
-
-def _get_sub_agent(
-    name: str,
-    db: AsyncSession | None = None,
-    redis: Redis | None = None,
-    user_id: uuid.UUID | None = None,
-    tenant_id: uuid.UUID | None = None,
-) -> BaseAgent | None:
-    """Devuelve el subagente correspondiente al nombre; None si no hay mapeo."""
-    if name == "agent_cash":
-        from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
-        gateway = None
-        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
-            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
-            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
-        return AgentCash(db=db, redis=redis, gateway=gateway)
-    if name == "agent_stock":
-        from app.application.agents.stock.agent import AgentStock  # noqa: PLC0415
-        return AgentStock()
-    if name == "agent_supplier":
-        from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
-        gateway = None
-        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
-            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
-            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
-        return AgentSupplier(session=db, gateway=gateway)
-    if name == "agent_health":
-        from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415
-        return AgentHealth(db=db)
-    if name == "agent_helper":
-        from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
-        return AgentHelper()
-    return None
 
 
 class ChatRequest(BaseModel):
@@ -103,8 +69,7 @@ async def chat(
             detail="Límite diario de 50 mensajes alcanzado. Disponible mañana.",
         )
 
-    # ── AgentCEO: clasificar intent y evaluar riesgo ──────────────────────────
-    ceo = AgentCEO()
+    # ── ChatOrchestrator: CEO + sub-agente + LLM conversacional ─────────────
     request = AgentRequest(
         user_id=str(user_id),
         business_id=str(tenant_id),
@@ -113,45 +78,24 @@ async def chat(
         conversation_id=body.conversation_id,
     )
     try:
-        agent_response = await ceo.process(request)
+        orchestrator = ChatOrchestrator()
+        agent_response = await orchestrator.handle(request, db, redis, user_id, tenant_id)
     except AnthropicConfigurationError as exc:
-        logger.error(
-            "agent_anthropic_not_configured",
-            tenant_id=str(tenant_id),
-        )
+        logger.error("agent_anthropic_not_configured", tenant_id=str(tenant_id))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
         ) from exc
     except Exception as exc:
-        logger.error("agent_ceo_process_failed", error=str(exc), error_type=type(exc).__name__, tenant_id=str(tenant_id))
-        raise HTTPException(status_code=500, detail=f"Agent error: {type(exc).__name__}: {exc}") from exc
-
-    # ── Despacho al subagente que corresponde al intent ───────────────────────
-    target_agent_name: str = agent_response.result.get("target_agent", "")
-    sub_agent = _get_sub_agent(
-        target_agent_name,
-        db=db,
-        redis=redis,
-        user_id=current_user.user_id,
-        tenant_id=current_user.tenant_id,
-    )
-    if sub_agent is not None:
-        try:
-            agent_response = await sub_agent.process(request)
-        except AnthropicConfigurationError as exc:
-            logger.error(
-                "sub_agent_anthropic_not_configured",
-                agent=target_agent_name,
-                tenant_id=str(tenant_id),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
-            ) from exc
-        except Exception as exc:
-            logger.error("sub_agent_process_failed", agent=target_agent_name, error=str(exc), error_type=type(exc).__name__, tenant_id=str(tenant_id))
-            raise HTTPException(status_code=500, detail=f"Sub-agent error ({target_agent_name}): {type(exc).__name__}: {exc}") from exc
+        logger.error(
+            "chat_orchestrator_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant_id),
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Orchestrator error: {type(exc).__name__}: {exc}"
+        ) from exc
 
     # ── Si requiere aprobación: crear pending_action ──────────────────────────
     if agent_response.requires_approval:

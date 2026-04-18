@@ -54,3 +54,4 @@ class AgentResponse(BaseModel):
     result: dict = {}
     pending_action_id: Optional[str] = None
     question: Optional[str] = None  # usado cuando status=requires_clarification
+    message: Optional[str] = None   # respuesta conversacional rica generada por ChatOrchestrator

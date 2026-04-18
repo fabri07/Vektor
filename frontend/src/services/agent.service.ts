@@ -14,6 +14,7 @@ export interface AgentResponse {
   };
   pending_action_id?: string;
   question?: string;
+  message?: string;
 }
 
 export interface ChatAttachment {
