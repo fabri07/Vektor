@@ -1,8 +1,11 @@
 """Endpoints del sistema multiagente de Véktor.
 
+GET  /api/v1/agent/usage     — uso de mensajes del día actual (para el contador frontend)
 POST /api/v1/agent/chat      — procesa mensaje, crea pending_action si MEDIUM/HIGH
 POST /api/v1/agent/confirm/{pending_id} — confirma y ejecuta una acción pendiente
 POST /api/v1/agent/cancel/{pending_id}  — rechaza una acción pendiente
+GET  /api/v1/agent/conversations        — lista conversaciones del tenant (últimas 30)
+GET  /api/v1/agent/conversations/{id}   — turnos completos de una conversación
 """
 
 import uuid
@@ -29,6 +32,7 @@ from app.observability.logger import get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.user import User
 
@@ -41,6 +45,81 @@ class ChatRequest(BaseModel):
     message: str
     attachments: list[Any] = []
     conversation_id: str | None = None
+
+
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    title: str
+    updated_at: str
+
+
+class ConversationTurns(BaseModel):
+    conversation_id: str
+    turns: list[dict[str, Any]]
+
+
+def _derive_title(turns: list[Any]) -> str:
+    for turn in turns:
+        if isinstance(turn, dict) and turn.get("role") == "user":
+            content = str(turn.get("content", "")).strip()
+            return content[:60] if content else "Conversación"
+    return "Conversación"
+
+
+# ── GET /usage ────────────────────────────────────────────────────────────────
+
+
+@router.get("/usage", summary="Uso de mensajes del día actual")
+async def get_chat_usage(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    rate_key = f"rate:chat:{current_user.tenant_id}:{date.today()}"
+    count = await redis.get(rate_key)
+    return {"messages_today": int(count) if count else 0, "limit": 50}
+
+
+# ── GET /conversations ────────────────────────────────────────────────────────
+
+
+@router.get("/conversations", response_model=list[ConversationSummary], summary="Listar conversaciones")
+async def list_conversations(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[ConversationSummary]:
+    stmt = (
+        select(AgentConversationContext)
+        .where(AgentConversationContext.tenant_id == current_user.tenant_id)
+        .order_by(AgentConversationContext.updated_at.desc())
+        .limit(30)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        ConversationSummary(
+            conversation_id=str(row.conversation_id),
+            title=_derive_title(row.turns),
+            updated_at=row.updated_at.isoformat(),
+        )
+        for row in rows
+    ]
+
+
+# ── GET /conversations/{conversation_id} ──────────────────────────────────────
+
+
+@router.get("/conversations/{conversation_id}", response_model=ConversationTurns, summary="Detalle de conversación")
+async def get_conversation(
+    conversation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ConversationTurns:
+    row = await db.get(AgentConversationContext, conversation_id)
+    if row is None or row.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversación no encontrada.")
+    return ConversationTurns(
+        conversation_id=str(row.conversation_id),
+        turns=row.turns,
+    )
 
 
 # ── POST /chat ────────────────────────────────────────────────────────────────

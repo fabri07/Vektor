@@ -189,7 +189,8 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 > El estado real de cada agente cambia rápido — verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir que está stub o implementado. La tabla ya no trackea fases.
 
 **Modelos LLM:**
-- Todos los agentes: `claude-haiku-4-5` (unificado — reemplazó a `claude-3-5-sonnet-20241022` que fue retirado oct 2025)
+- AgentCEO: `claude-sonnet-4-5` (clasificación de intent — requiere mayor capacidad)
+- Resto de agentes (Cash, Stock, Supplier, Health, Helper): `claude-haiku-4-5`
 
 **Cliente Anthropic** (`app/integrations/anthropic_client.py`) — todos los agentes deben obtener el cliente via `get_anthropic_async_client()`. Centraliza el manejo de `ANTHROPIC_API_KEY` y permite inyección de mocks en tests sin key real. No instanciar `anthropic.AsyncAnthropic` directamente en agentes.
 
@@ -225,7 +226,9 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 
 **HeuristicEngine** (`shared/heuristic_engine.py`) — implementado. Carga JSON de defaults por rubro desde `app/application/data/heuristics/`. `get(business_type)` es síncrono (solo defaults); `get_async(business_type, business_id, db)` aplica `BusinessHeuristicOverride` de la DB para customización por tenant. `HeuristicConfig.to_prompt_fragment()` genera el fragmento listo para inyectar en system prompts como valores numéricos — nunca texto narrativo. Rubro desconocido hace fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 15 intents del `INTENT_CATALOG`. El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se cargan con lazy imports en `api/v1/agent.py → _get_sub_agent()` para evitar imports circulares.
+**AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 15 intents del `INTENT_CATALOG`. El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se resuelven por nombre en `app/application/agents/registry.py → get_sub_agent(name)`, llamado desde `ChatOrchestrator`.
+
+**ChatOrchestrator** (`app/application/services/chat_orchestrator.py`) — punto de entrada del endpoint `/agent/chat`. Orquesta: carga contexto del negocio + heurísticas → ConversationService carga historial → CEO clasifica intent → `registry.get_sub_agent()` despacha al sub-agente → LLM Haiku genera respuesta conversacional rica (salvo `requires_approval`, que devuelve un summary estructurado sin LLM adicional) → ConversationService guarda el turno (best-effort).
 
 **ConversationService** (`app/application/services/conversation_service.py`) — historial de chat: Redis como caché caliente (TTL 24h) con fallback a PostgreSQL. Ventana deslizante de los últimos 10 turnos; los más viejos se descartan. El `conversation_id` es UUID generado en el cliente (ver `useChat` en el frontend).
 
@@ -239,7 +242,7 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 
 ### Observabilidad
 
-- Logging con `structlog`. Usar `get_logger(__name__)` en todos los módulos.
+- Logging con `structlog`. Usar `from app.observability.logger import get_logger` → `get_logger(__name__)` en todos los módulos.
 - `bind_request_context(tenant_id=..., user_id=...)` se llama en `deps.py` para cada request.
 - Rate limiting con `slowapi` (200 req/min por defecto).
 

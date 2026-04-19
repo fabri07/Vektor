@@ -16,6 +16,7 @@ interface ChatState {
   addMessage: (msg: Omit<ChatMessage, "id" | "timestamp">) => void;
   updateMessage: (id: string, patch: Partial<ChatMessage>) => void;
   newConversation: () => void;
+  loadMessages: (conversationId: string, messages: ChatMessage[]) => void;
 }
 
 export const useChatStore = create<ChatState>()(
@@ -45,6 +46,9 @@ export const useChatStore = create<ChatState>()(
 
       newConversation: () =>
         set({ conversationId: crypto.randomUUID(), messages: [] }),
+
+      loadMessages: (conversationId, messages) =>
+        set({ conversationId, messages }),
     }),
     {
       name: "vektor_chat",

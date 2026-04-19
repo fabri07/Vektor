@@ -2,14 +2,19 @@
 
 import { useRef, useEffect, useState, useCallback, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
-import { Send, Plus } from "lucide-react";
+import { Send } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useChat } from "./hooks/useChat";
 import { ApprovalCard } from "./components/ApprovalCard";
 import {
   AttachmentPicker,
   type AttachmentFile,
 } from "./components/AttachmentPicker";
+import { ConversationList } from "./components/ConversationList";
 import { onboardingService } from "@/services/onboarding.service";
+import { filesService } from "@/services/files.service";
+import { getConversation } from "@/services/agent.service";
+import { useChatStore } from "@/stores/chatStore";
 
 const INITIAL_EXAMPLES = [
   "¡Hola! Soy tu asistente de Véktor. Podés decirme cosas como:",
@@ -28,6 +33,7 @@ function buildAttachmentMessage(attachments: AttachmentFile[]): string {
 
 export function ChatPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentFile[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -36,6 +42,7 @@ export function ChatPage() {
 
   const { messages, isLoading, send, confirm, cancel, messagesUsedToday, isRateLimited, newConversation } =
     useChat();
+  const { conversationId, loadMessages } = useChatStore();
 
   // Redirigir a onboarding si el negocio aún no fue configurado
   useEffect(() => {
@@ -111,8 +118,58 @@ export function ChatPage() {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
+  const handleRetry = useCallback(
+    async (id: string) => {
+      const attachment = attachments.find((a) => a.id === id);
+      if (!attachment) return;
+      updateAttachment(id, { uploading: true, error: undefined });
+      try {
+        const uploaded = await filesService.upload(attachment.file, "chat");
+        updateAttachment(id, { uploading: false, uploadedFileId: uploaded.id });
+      } catch {
+        updateAttachment(id, { uploading: false, error: "Error al subir" });
+      }
+    },
+    [attachments, updateAttachment],
+  );
+
+  const handleSelectConversation = useCallback(
+    async (selectedId: string) => {
+      try {
+        const data = await getConversation(selectedId);
+        const msgs = data.turns.map((turn) => ({
+          id: crypto.randomUUID(),
+          role: turn.role as "user" | "assistant" | "system",
+          content: turn.content,
+          timestamp: new Date().toISOString(),
+        }));
+        loadMessages(selectedId, msgs);
+        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      } catch {
+        // silencioso — la conversación puede no existir aún en PG
+      }
+    },
+    [loadMessages, queryClient],
+  );
+
+  const handleNewConversation = useCallback(() => {
+    newConversation();
+    void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+  }, [newConversation, queryClient]);
+
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full">
+      {/* Sidebar de conversaciones */}
+      <div className="w-[220px] shrink-0 border-r border-vk-border-w bg-vk-surface-w">
+        <ConversationList
+          activeConversationId={conversationId}
+          onSelect={(id) => void handleSelectConversation(id)}
+          onNew={handleNewConversation}
+        />
+      </div>
+
+      {/* Área principal */}
+      <div className="flex flex-1 flex-col min-w-0">
       {/* Header */}
       <div className="border-b border-vk-border-w px-6 py-3">
         <div className="mx-auto max-w-[780px]">
@@ -125,14 +182,6 @@ export function ChatPage() {
                 {messagesUsedToday}/50 mensajes disponibles hoy
               </p>
             </div>
-            <button
-              onClick={newConversation}
-              className="flex items-center gap-1.5 rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-xs font-medium text-vk-text-secondary hover:bg-vk-bg-light transition-colors"
-              title="Nueva conversación"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Nueva
-            </button>
           </div>
         </div>
       </div>
@@ -213,6 +262,7 @@ export function ChatPage() {
                 onAdd={addAttachment}
                 onUpdate={updateAttachment}
                 onRemove={removeAttachment}
+                onRetry={(id) => void handleRetry(id)}
                 disabled={isLoading}
               />
               <div className="flex items-end gap-2">
@@ -243,6 +293,7 @@ export function ChatPage() {
             </div>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef } from "react";
-import { Paperclip, X, Loader2 } from "lucide-react";
+import { Paperclip, X, Loader2, RefreshCw } from "lucide-react";
 import { filesService } from "@/services/files.service";
 
 const ALLOWED_TYPES = [
@@ -29,6 +29,7 @@ interface AttachmentPickerProps {
   onAdd: (attachment: AttachmentFile) => void;
   onUpdate: (id: string, patch: Partial<AttachmentFile>) => void;
   onRemove: (id: string) => void;
+  onRetry: (id: string) => void;
   disabled?: boolean;
 }
 
@@ -37,6 +38,7 @@ export function AttachmentPicker({
   onAdd,
   onUpdate,
   onRemove,
+  onRetry,
   disabled,
 }: AttachmentPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -90,6 +92,16 @@ export function AttachmentPicker({
             >
               {a.uploading ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
+              ) : a.error ? (
+                <button
+                  type="button"
+                  onClick={() => onRetry(a.id)}
+                  className="rounded text-current opacity-70 hover:opacity-100 focus:outline-none"
+                  aria-label={`Reintentar ${a.file.name}`}
+                  title="Reintentar subida"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                </button>
               ) : (
                 <Paperclip className="h-3 w-3" />
               )}

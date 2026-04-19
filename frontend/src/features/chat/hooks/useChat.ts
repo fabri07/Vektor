@@ -1,16 +1,16 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   sendMessage,
   confirmAction,
   cancelAction,
+  getChatUsage,
   type AgentResponse,
   type ChatAttachment,
 } from "@/services/agent.service";
 import { useChatStore, type ChatMessage } from "@/stores/chatStore";
 import { type AxiosError } from "axios";
-import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 // Re-exportar para compatibilidad con importadores existentes
@@ -29,6 +29,15 @@ export function useChat() {
   const [isLoading, setIsLoading] = useState(false);
   const [messagesUsedToday, setMessagesUsedToday] = useState(0);
   const [isRateLimited, setIsRateLimited] = useState(false);
+
+  useEffect(() => {
+    getChatUsage()
+      .then((data) => {
+        setMessagesUsedToday(data.messages_today);
+        if (data.messages_today >= data.limit) setIsRateLimited(true);
+      })
+      .catch(() => {});
+  }, []);
 
   const addMessage = useCallback(
     (msg: Omit<Message, "id" | "timestamp">) => {
