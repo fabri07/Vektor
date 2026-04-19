@@ -28,9 +28,11 @@ def _get_db_conn():
     except ImportError:
         pytest.skip("psycopg2 no disponible")
 
-    url = os.environ.get("DATABASE_URL")
+    url = os.environ.get("DATABASE_URL", "")
     if not url:
         pytest.skip("DATABASE_URL no definida — test requiere PostgreSQL real")
+    if not url.startswith("postgresql"):
+        pytest.skip("DATABASE_URL no es PostgreSQL — test requiere PostgreSQL real")
     url = url.replace("postgresql+asyncpg://", "postgresql://")
     url = url.replace("postgresql+psycopg2://", "postgresql://")
     return psycopg2.connect(url)

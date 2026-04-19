@@ -1,9 +1,10 @@
 """Tests for /api/v1/expenses endpoints."""
 
 import pytest
+from datetime import date
 from httpx import AsyncClient
 
-_TODAY = "2026-03-13"
+_TODAY = str(date.today())
 
 _EXPENSE_PAYLOAD = {
     "amount": "15000.00",

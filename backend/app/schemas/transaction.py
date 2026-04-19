@@ -19,7 +19,7 @@ class SaleEntryResponse(BaseModel):
     id: UUID
     tenant_id: UUID
     product_id: UUID | None
-    amount: float
+    amount: Decimal
     quantity: int
     transaction_date: date
     payment_method: str
@@ -99,7 +99,7 @@ class ExpenseEntryResponse(BaseModel):
 
     id: UUID
     tenant_id: UUID
-    amount: float
+    amount: Decimal
     category: str
     transaction_date: date
     description: str

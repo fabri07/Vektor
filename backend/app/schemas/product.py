@@ -15,8 +15,8 @@ class ProductResponse(BaseModel):
     sku: str | None
     description: str | None
     category: str | None
-    sale_price_ars: float
-    unit_cost_ars: float | None
+    sale_price_ars: Decimal
+    unit_cost_ars: Decimal | None
     stock_units: int
     low_stock_threshold_units: int
     is_active: bool

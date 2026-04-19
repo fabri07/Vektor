@@ -1,9 +1,10 @@
 """Tests for /api/v1/sales endpoints."""
 
 import pytest
+from datetime import date
 from httpx import AsyncClient
 
-_TODAY = "2026-03-13"
+_TODAY = str(date.today())
 
 _BULK_PAYLOAD = {
     "period_type": "weekly",

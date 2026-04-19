@@ -17,10 +17,12 @@ from app.application.security.token_cipher import decrypt_token, encrypt_token
 # ── Helpers de conexión a Neon ────────────────────────────────────────────────
 
 def _get_db_conn():
-    """Devuelve una conexión psycopg2 a la BD real. Skipea si no hay URL."""
-    url = os.environ.get("DATABASE_URL")
+    """Devuelve una conexión psycopg2 a la BD real. Skipea si no hay URL o es SQLite."""
+    url = os.environ.get("DATABASE_URL", "")
     if not url:
         pytest.skip("DATABASE_URL no definida — test requiere PostgreSQL real")
+    if not url.startswith("postgresql"):
+        pytest.skip("DATABASE_URL no es PostgreSQL — test requiere PostgreSQL real")
     # Convertir postgresql+asyncpg:// o postgresql+psycopg2:// → postgresql://
     url = url.replace("postgresql+asyncpg://", "postgresql://")
     url = url.replace("postgresql+psycopg2://", "postgresql://")
@@ -100,6 +102,10 @@ def test_token_cipher_encrypt_decrypt(monkeypatch):
 def test_token_cipher_fails_without_key(monkeypatch):
     """Sin GOOGLE_TOKEN_CIPHER_KEY debe lanzar EnvironmentError."""
     monkeypatch.delenv("GOOGLE_TOKEN_CIPHER_KEY", raising=False)
+    monkeypatch.setattr(
+        "app.config.settings.get_settings",
+        lambda: SimpleNamespace(GOOGLE_TOKEN_CIPHER_KEY=""),
+    )
 
     with pytest.raises(EnvironmentError, match="GOOGLE_TOKEN_CIPHER_KEY"):
         encrypt_token("cualquier_token")

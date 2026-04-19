@@ -22,14 +22,20 @@ from app.persistence.repositories.tenant_repository import TenantRepository
 from app.persistence.repositories.user_repository import UserRepository
 from app.utils.security import decode_access_token
 
-_bearer = HTTPBearer()
+_bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_db_session),
 ) -> User:
     """Decode JWT and return the authenticated user. Raises 401 if invalid."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
     payload = decode_access_token(token)
     if payload is None:

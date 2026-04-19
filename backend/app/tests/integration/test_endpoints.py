@@ -151,10 +151,20 @@ async def test_medium_action_creates_pending_not_persists(auth_client, session: 
     sub_mock.process = AsyncMock(
         side_effect=lambda req: _mock_requires_approval_response(req.request_id)
     )
-    with patch(
-        "app.api.v1.agent.AgentCEO.process",
-        new=AsyncMock(side_effect=lambda req: _mock_requires_approval_response(req.request_id)),
-    ), patch("app.api.v1.agent._get_sub_agent", return_value=sub_mock):
+    ORCHESTRATOR = "app.application.services.chat_orchestrator"
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
+        patch(f"{ORCHESTRATOR}.get_sub_agent", return_value=sub_mock),
+        patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
+    ):
+        MockCEO.return_value.process = AsyncMock(
+            side_effect=lambda req: _mock_requires_approval_response(req.request_id)
+        )
+        MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        MockConv.return_value.add_turn = AsyncMock()
+        MockConv.return_value.persist = AsyncMock()
+
         resp = await ac.post(
             "/api/v1/agent/chat",
             json={"message": "vendí 500 pesos"},
@@ -270,15 +280,11 @@ async def test_rate_limit_429(auth_client):
     rate_key = f"rate:chat:{tenant.tenant_id}:{__import__('datetime').date.today()}"
     fake_redis._counters[rate_key] = 50
 
-    with patch(
-        "app.api.v1.agent.AgentCEO.process",
-        new=AsyncMock(side_effect=lambda req: _mock_low_risk_response(req.request_id)),
-    ):
-        resp = await ac.post(
-            "/api/v1/agent/chat",
-            json={"message": "mensaje 51"},
-            headers=headers,
-        )
+    resp = await ac.post(
+        "/api/v1/agent/chat",
+        json={"message": "mensaje 51"},
+        headers=headers,
+    )
 
     assert resp.status_code == 429
     assert "50 mensajes" in resp.json()["detail"]
@@ -350,10 +356,29 @@ async def test_wf02_requires_clarification_no_pending(auth_client, session: Asyn
     """WF-02: requires_clarification no crea PendingAction en DB."""
     ac, headers, tenant, user, _ = auth_client
 
-    with patch(
-        "app.api.v1.agent.AgentCEO.process",
-        new=AsyncMock(side_effect=lambda req: _mock_clarification_response(req.request_id)),
-    ), patch("app.api.v1.agent._get_sub_agent", return_value=None):
+    ORCHESTRATOR = "app.application.services.chat_orchestrator"
+    sub_mock = AsyncMock()
+    sub_mock.process = AsyncMock(
+        side_effect=lambda req: _mock_clarification_response(req.request_id)
+    )
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
+        patch(f"{ORCHESTRATOR}.get_sub_agent", return_value=sub_mock),
+        patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as MockAnthropicFactory,
+    ):
+        MockCEO.return_value.process = AsyncMock(
+            side_effect=lambda req: _mock_clarification_response(req.request_id)
+        )
+        MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        MockConv.return_value.add_turn = AsyncMock()
+        MockConv.return_value.persist = AsyncMock()
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(
+            return_value=AsyncMock(content=[AsyncMock(text="¿Fue al contado o en cuenta corriente?")])
+        )
+        MockAnthropicFactory.return_value = mock_client
+
         resp = await ac.post(
             "/api/v1/agent/chat",
             json={"message": "vendí 50 mil hoy"},
