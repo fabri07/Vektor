@@ -27,13 +27,22 @@ export const ingestionService = {
   async upload(
     file: File,
     fileHint: string = "general",
+    onProgress?: (percent: number) => void,
   ): Promise<{ file_id: string; status: string }> {
     const fd = new FormData();
     fd.append("file", file);
     const res = await api.post<{ file_id: string; status: string }>(
       `/ingestion/upload?file_hint=${fileHint}`,
       fd,
-      { headers: { "Content-Type": "multipart/form-data" } },
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        onUploadProgress: onProgress
+          ? (e) => {
+              const total = e.total ?? 1;
+              onProgress(Math.round((e.loaded / total) * 100));
+            }
+          : undefined,
+      },
     );
     return res.data;
   },

@@ -57,6 +57,7 @@ export function FileUploadSection() {
     productos: true,
   });
   const [isConfirming, setIsConfirming] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const pollCount = useRef(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -120,8 +121,13 @@ export function FileUploadSection() {
     if (!selectedFile) return;
     setPhase("uploading");
     setError(null);
+    setUploadProgress(0);
     try {
-      const result = await ingestionService.upload(selectedFile);
+      const result = await ingestionService.upload(
+        selectedFile,
+        "general",
+        (pct) => setUploadProgress(pct),
+      );
       setFileId(result.file_id);
       setPhase("polling");
       startPolling(result.file_id);
@@ -131,6 +137,21 @@ export function FileUploadSection() {
         "No se pudo subir el archivo. Verificá el formato (xlsx, csv, txt, docx, jpg, png) e intentá de nuevo.",
       );
     }
+  }
+
+  async function handleRetryIngestion() {
+    if (!fileId) return;
+    setError(null);
+    pollCount.current = 0;
+    setPhase("polling");
+    try {
+      await ingestionService.reprocessFile(fileId);
+    } catch {
+      setPhase("failed");
+      setError("No se pudo reintentar el procesamiento. Intentá de nuevo.");
+      return;
+    }
+    startPolling(fileId);
   }
 
   async function handleConfirm() {
@@ -154,6 +175,7 @@ export function FileUploadSection() {
     setFileId(null);
     setPreview(null);
     setError(null);
+    setUploadProgress(0);
     pollCount.current = 0;
     setConfirmedFields({ ventas: true, gastos: true, productos: true });
   }
@@ -249,6 +271,19 @@ export function FileUploadSection() {
               </p>
             </>
           )}
+        </div>
+      )}
+
+      {/* Upload progress bar */}
+      {phase === "uploading" && (
+        <div className="mt-3 space-y-1">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-vk-border-w">
+            <div
+              className="h-full rounded-full bg-vk-blue transition-all duration-200"
+              style={{ width: `${uploadProgress}%` }}
+            />
+          </div>
+          <p className="text-right text-xs text-vk-text-muted">{uploadProgress}%</p>
         </div>
       )}
 
@@ -350,6 +385,11 @@ export function FileUploadSection() {
         {phase === "uploading" && (
           <Button size="sm" loading>
             Subiendo...
+          </Button>
+        )}
+        {phase === "failed" && fileId && (
+          <Button size="sm" onClick={() => void handleRetryIngestion()}>
+            Reintentar
           </Button>
         )}
         {(phase === "done" || phase === "failed") && (
