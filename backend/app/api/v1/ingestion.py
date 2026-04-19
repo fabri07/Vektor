@@ -308,9 +308,6 @@ async def upload_file(
     repo = FileRepository(session)
     saved = await repo.save(record)
 
-    # En modo USE_LOCAL_FALLBACK (beta sin workers Celery), procesar síncronamente.
-    # Evita que el archivo quede en PENDING para siempre porque Redis acepta el
-    # mensaje pero ningún worker lo consume.
     if get_settings().USE_LOCAL_FALLBACK:
         await _process_file_sync(saved, session)
         return UploadResponse(file_id=saved.id, status="PROCESSING")

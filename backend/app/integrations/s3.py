@@ -46,11 +46,10 @@ class S3Client:
         return local_key
 
     def _can_fallback_to_local(self) -> bool:
-        return (
-            self._settings.is_development
-            or self._settings.DEBUG
-            or self._settings.USE_LOCAL_FALLBACK
-        )
+        # Solo cae al filesystem local cuando se pide explícitamente.
+        # Eliminar is_development/DEBUG evita que errores de S3 se enmascaren
+        # con almacenamiento local que el worker Celery no puede acceder.
+        return self._settings.USE_LOCAL_FALLBACK
 
     async def _put_object(self, content: bytes, key: str, content_type: str) -> str:
         try:

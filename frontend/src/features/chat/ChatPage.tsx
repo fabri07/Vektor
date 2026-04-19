@@ -16,12 +16,12 @@ import { filesService } from "@/services/files.service";
 import { getConversation } from "@/services/agent.service";
 import { useChatStore } from "@/stores/chatStore";
 
-const INITIAL_EXAMPLES = [
-  "¡Hola! Soy tu asistente de Véktor. Podés decirme cosas como:",
-  "• Hoy vendí 85 mil",
-  "• Pagué alquiler 450 mil",
-  "• ¿Cómo está mi negocio?",
-  "• Llegó mail de mi proveedor",
+const SUGGESTIONS = [
+  "Hoy vendí $85.000",
+  "Pagué alquiler $450.000",
+  "¿Cómo está mi negocio?",
+  "¿Cuál es mi producto más vendido?",
+  "Llegó mail de mi proveedor",
 ];
 
 function buildAttachmentMessage(attachments: AttachmentFile[]): string {
@@ -157,6 +157,48 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: ["conversations"] });
   }, [newConversation, queryClient]);
 
+  const isEmpty = messages.length === 0;
+
+  const inputArea = (compact: boolean) => (
+    isRateLimited ? (
+      <p className="text-center text-xs text-vk-text-muted py-2">
+        Límite diario alcanzado. Disponible mañana.
+      </p>
+    ) : (
+      <div className={`flex flex-col gap-2 ${compact ? "rounded-2xl border border-vk-border-w bg-vk-surface-w shadow-sm px-4 pt-3 pb-3" : ""}`}>
+        <AttachmentPicker
+          attachments={attachments}
+          onAdd={addAttachment}
+          onUpdate={updateAttachment}
+          onRemove={removeAttachment}
+          onRetry={(id) => void handleRetry(id)}
+          disabled={isLoading}
+        />
+        <div className="flex items-end gap-2">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={handleTextareaChange}
+            onKeyDown={handleKeyDown}
+            placeholder="Escribí tu mensaje..."
+            rows={1}
+            disabled={isLoading || isUploading}
+            className="flex-1 resize-none bg-transparent px-0 py-1 text-sm text-vk-text-primary placeholder:text-vk-text-placeholder focus:outline-none disabled:opacity-50"
+            style={{ minHeight: "44px", maxHeight: "72px" }}
+          />
+          <button
+            onClick={() => void handleSend()}
+            disabled={isLoading || isUploading || (!input.trim() && attachments.length === 0)}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-vk-blue text-white hover:bg-vk-blue-hover disabled:opacity-40 transition-colors"
+            aria-label="Enviar"
+          >
+            <Send className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    )
+  );
+
   return (
     <div className="flex h-full">
       {/* Sidebar de conversaciones */}
@@ -170,130 +212,117 @@ export function ChatPage() {
 
       {/* Área principal */}
       <div className="flex flex-1 flex-col min-w-0">
-      {/* Header */}
-      <div className="border-b border-vk-border-w px-6 py-3">
-        <div className="mx-auto max-w-[780px]">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-base font-semibold text-vk-text-primary">
-                Asistente Véktor
-              </h1>
-              <p className="text-xs text-vk-text-muted">
-                {messagesUsedToday}/50 mensajes disponibles hoy
-              </p>
+
+        {isEmpty ? (
+          /* ── Estado vacío: hero centrado ── */
+          <div className="flex flex-1 flex-col items-center justify-center px-6 pb-10">
+            <div className="w-full max-w-[600px] space-y-8">
+              {/* Bienvenida */}
+              <div className="text-center space-y-2">
+                <h1 className="text-[2rem] font-bold leading-tight text-vk-text-primary">
+                  ¿En qué puedo ayudarte hoy?
+                </h1>
+                <p className="text-sm text-vk-text-muted">
+                  Asistente de salud financiera · {messagesUsedToday}/50 mensajes hoy
+                </p>
+              </div>
+
+              {/* Sugerencias */}
+              <div className="flex flex-wrap justify-center gap-2">
+                {SUGGESTIONS.map((s, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setInput(s)}
+                    className="rounded-xl border border-vk-border-w bg-vk-surface-w px-4 py-2 text-sm text-vk-text-secondary hover:bg-vk-bg-light transition-colors"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+
+              {/* Input centrado */}
+              {inputArea(true)}
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Messages area */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
-        <div className="mx-auto max-w-[780px] px-4 py-6 space-y-4">
-          {messages.length === 0 ? (
-            <div className="space-y-1 pt-4">
-              {INITIAL_EXAMPLES.map((line, i) => (
-                <p key={i} className="text-sm text-vk-text-muted">
-                  {line}
-                </p>
-              ))}
-            </div>
-          ) : (
-            messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                {msg.status === "requires_approval" && msg.pendingActionId ? (
-                  <div className="w-full max-w-[90%]">
-                    <ApprovalCard
-                      summary={msg.content}
-                      pendingActionId={msg.pendingActionId}
-                      onConfirm={confirm}
-                      onCancel={cancel}
-                    />
+        ) : (
+          /* ── Estado activo: mensajes + input abajo ── */
+          <>
+            {/* Header */}
+            <div className="border-b border-vk-border-w px-6 py-3">
+              <div className="mx-auto max-w-[780px]">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h1 className="text-base font-semibold text-vk-text-primary">
+                      Asistente Véktor
+                    </h1>
+                    <p className="text-xs text-vk-text-muted">
+                      {messagesUsedToday}/50 mensajes disponibles hoy
+                    </p>
                   </div>
-                ) : (
+                </div>
+              </div>
+            </div>
+
+            {/* Mensajes */}
+            <div className="flex-1 overflow-y-auto scrollbar-thin">
+              <div className="mx-auto max-w-[780px] px-4 py-6 space-y-4">
+                {messages.map((msg) => (
                   <div
-                    className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap
-                      ${
-                        msg.role === "user"
-                          ? "bg-vk-blue text-white rounded-br-sm"
-                          : msg.role === "system"
-                            ? "bg-vk-danger/10 text-vk-danger text-xs"
-                            : msg.status === "requires_clarification"
-                              ? "bg-vk-bg-light text-vk-text-primary rounded-bl-sm ring-1 ring-vk-blue/20"
-                              : "bg-vk-bg-light text-vk-text-primary rounded-bl-sm"
-                      }`}
+                    key={msg.id}
+                    className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                   >
-                    {msg.content}
+                    {msg.status === "requires_approval" && msg.pendingActionId ? (
+                      <div className="w-full max-w-[90%]">
+                        <ApprovalCard
+                          summary={msg.content}
+                          pendingActionId={msg.pendingActionId}
+                          onConfirm={confirm}
+                          onCancel={cancel}
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap
+                          ${
+                            msg.role === "user"
+                              ? "bg-vk-blue text-white rounded-br-sm"
+                              : msg.role === "system"
+                                ? "bg-vk-danger/10 text-vk-danger text-xs"
+                                : msg.status === "requires_clarification"
+                                  ? "bg-vk-bg-light text-vk-text-primary rounded-bl-sm ring-1 ring-vk-blue/20"
+                                  : "bg-vk-bg-light text-vk-text-primary rounded-bl-sm"
+                          }`}
+                      >
+                        {msg.content}
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                {isLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-vk-bg-light rounded-2xl rounded-bl-sm px-4 py-2.5">
+                      <span className="flex gap-1 items-center text-vk-text-muted text-xs">
+                        <span className="animate-bounce">•</span>
+                        <span className="animate-bounce [animation-delay:0.15s]">•</span>
+                        <span className="animate-bounce [animation-delay:0.3s]">•</span>
+                      </span>
+                    </div>
                   </div>
                 )}
-              </div>
-            ))
-          )}
 
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="bg-vk-bg-light rounded-2xl rounded-bl-sm px-4 py-2.5">
-                <span className="flex gap-1 items-center text-vk-text-muted text-xs">
-                  <span className="animate-bounce">•</span>
-                  <span className="animate-bounce [animation-delay:0.15s]">•</span>
-                  <span className="animate-bounce [animation-delay:0.3s]">•</span>
-                </span>
+                <div ref={messagesEndRef} />
               </div>
             </div>
-          )}
 
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
-
-      {/* Input — sticky bottom */}
-      <div className="border-t border-vk-border-w bg-vk-surface-w p-4">
-        <div className="mx-auto max-w-[780px]">
-          {isRateLimited ? (
-            <p className="text-center text-xs text-vk-text-muted py-2">
-              Límite diario alcanzado. Disponible mañana.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              <AttachmentPicker
-                attachments={attachments}
-                onAdd={addAttachment}
-                onUpdate={updateAttachment}
-                onRemove={removeAttachment}
-                onRetry={(id) => void handleRetry(id)}
-                disabled={isLoading}
-              />
-              <div className="flex items-end gap-2">
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={handleTextareaChange}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Escribí tu mensaje..."
-                  rows={1}
-                  disabled={isLoading || isUploading}
-                  className="flex-1 resize-none rounded-xl border border-vk-border-w bg-vk-surface-w px-4 py-2.5 text-sm text-vk-text-primary placeholder:text-vk-text-placeholder focus:outline-none focus:ring-2 focus:ring-vk-blue disabled:opacity-50"
-                  style={{ minHeight: "44px", maxHeight: "72px" }}
-                />
-                <button
-                  onClick={() => void handleSend()}
-                  disabled={
-                    isLoading ||
-                    isUploading ||
-                    (!input.trim() && attachments.length === 0)
-                  }
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-vk-blue text-white hover:bg-vk-blue-hover disabled:opacity-40 transition-colors"
-                  aria-label="Enviar"
-                >
-                  <Send className="h-4 w-4" />
-                </button>
+            {/* Input abajo */}
+            <div className="border-t border-vk-border-w bg-vk-surface-w p-4">
+              <div className="mx-auto max-w-[780px]">
+                {inputArea(false)}
               </div>
             </div>
-          )}
-        </div>
-      </div>
+          </>
+        )}
       </div>
     </div>
   );

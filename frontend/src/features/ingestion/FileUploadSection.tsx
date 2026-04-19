@@ -9,7 +9,7 @@ import {
 } from "@/services/ingestion.service";
 
 const ACCEPTED_EXTENSIONS = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
-const MAX_POLLS = 20;
+const MAX_POLLS = 30;
 const POLL_INTERVAL_MS = 2_000;
 
 type Phase =
