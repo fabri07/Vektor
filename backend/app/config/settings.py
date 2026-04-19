@@ -9,7 +9,24 @@ from functools import lru_cache
 from typing import ClassVar
 
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, EnvSettingsSource, SettingsConfigDict
+
+
+class _LenientEnvSource(EnvSettingsSource):
+    """EnvSettingsSource that falls back to the raw string when JSON decoding fails.
+
+    pydantic_settings 2.6 calls json.loads() on list/dict fields before our
+    field_validators run. This subclass returns the raw value on decode failure
+    so our validators (e.g. parse_cors_origins) can handle plain URLs and
+    comma-separated strings without crashing the application startup.
+    """
+
+    def decode_complex_value(self, field_name: str, field: FieldInfo, value: object) -> object:
+        try:
+            return super().decode_complex_value(field_name, field, value)
+        except ValueError:
+            return value
 
 
 def _to_asyncpg_url(raw: str) -> str:
@@ -52,6 +69,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
+        env_ignore_empty=True,
     )
 
     # ── Application ───────────────────────────────────────────────────────────
@@ -88,7 +106,9 @@ class Settings(BaseSettings):
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    # Accepts CORS_ORIGINS or ALLOWED_ORIGINS (Railway naming)
+    # Accepts plain URL, comma-separated list, or JSON array.
+    # _lenient_json_loads in model_config prevents pydantic_settings from crashing
+    # when the value is not a JSON array (e.g. "https://vek7or.com").
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:3000",
@@ -132,11 +152,13 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             stripped = v.strip()
+            if not stripped:
+                return []
             if stripped.startswith("["):
                 parsed = json.loads(stripped)
                 if isinstance(parsed, list):
-                    return [str(origin).strip() for origin in parsed]
-            return [origin.strip() for origin in stripped.split(",")]
+                    return [str(origin).strip() for origin in parsed if str(origin).strip()]
+            return [origin.strip() for origin in stripped.split(",") if origin.strip()]
         return v
 
     # ── S3 Compatible Storage ─────────────────────────────────────────────────
@@ -295,6 +317,22 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.ENVIRONMENT == "development"
+
+    @classmethod
+    def settings_customise_sources(  # type: ignore[override]
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: EnvSettingsSource,
+        env_settings: EnvSettingsSource,
+        dotenv_settings: EnvSettingsSource,
+        **kwargs: EnvSettingsSource,
+    ) -> tuple[EnvSettingsSource, ...]:
+        return (
+            init_settings,
+            _LenientEnvSource(settings_cls),
+            dotenv_settings,
+            *kwargs.values(),
+        )
 
 
 @lru_cache
