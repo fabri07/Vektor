@@ -3,7 +3,6 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "sh scripts/start_web.sh"
-healthcheckPath = "/health"
-healthcheckTimeout = 120
+startCommand = "celery -A app.jobs.celery_app worker --loglevel=info --queues=default,scores,notifications,reports,ingestion --concurrency=2"
+healthcheckPath = ""
 restartPolicyType = "on_failure"
