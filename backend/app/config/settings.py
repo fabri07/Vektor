@@ -225,6 +225,11 @@ class Settings(BaseSettings):
     # ── Production secret validation ──────────────────────────────────────────
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
+        # Always include FRONTEND_URL in CORS_ORIGINS so the app works even if
+        # CORS_ORIGINS is not explicitly set to include the production domain.
+        if self.FRONTEND_URL and self.FRONTEND_URL not in self.CORS_ORIGINS:
+            self.CORS_ORIGINS = [self.FRONTEND_URL, *self.CORS_ORIGINS]
+
         if self.is_development:
             merged_origins = list(dict.fromkeys([*self.CORS_ORIGINS, *self.__class__.DEV_CORS_ORIGINS]))
             self.CORS_ORIGINS = merged_origins
