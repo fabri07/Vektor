@@ -5,15 +5,18 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  status?: "success" | "requires_approval" | "requires_clarification" | "error";
+  status?: "success" | "requires_approval" | "requires_clarification" | "error" | "requires_google_auth";
   pendingActionId?: string;
   timestamp: string; // ISO string — Date no es serializable en localStorage
+  requiresGoogleAuth?: boolean;
+  authUrl?: string;
 }
 
 interface ChatState {
   conversationId: string;
   messages: ChatMessage[];
   addMessage: (msg: Omit<ChatMessage, "id" | "timestamp">) => void;
+  addMessageWithId: (msg: ChatMessage) => void;
   updateMessage: (id: string, patch: Partial<ChatMessage>) => void;
   newConversation: () => void;
   loadMessages: (conversationId: string, messages: ChatMessage[]) => void;
@@ -35,6 +38,11 @@ export const useChatStore = create<ChatState>()(
               timestamp: new Date().toISOString(),
             },
           ],
+        })),
+
+      addMessageWithId: (msg) =>
+        set((state) => ({
+          messages: [...state.messages, msg],
         })),
 
       updateMessage: (id, patch) =>

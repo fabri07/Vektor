@@ -9,11 +9,13 @@ GET  /api/v1/agent/conversations/{id}   — turnos completos de una conversació
 """
 
 import hashlib
+import json as json_module
 import uuid
 from datetime import UTC, date, datetime, time
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -213,6 +215,143 @@ async def chat(
     await db.commit()
 
     return agent_response
+
+
+# ── POST /chat/stream ────────────────────────────────────────────────────────
+
+
+@router.post("/chat/stream", summary="Chat con streaming SSE")
+async def chat_stream(
+    body: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> StreamingResponse:
+    """Endpoint SSE para chat con streaming.
+
+    Emite tres tipos de eventos:
+    - ``{"type": "thinking", "text": "..."}`` — inmediatamente al recibir el request
+    - ``{"type": "response", "data": {...}}`` — AgentResponse serializada
+    - ``{"type": "error", "message": "..."}`` — si hay excepción
+    Finaliza con ``data: [DONE]``.
+    """
+    tenant_id = current_user.tenant_id
+    user_id = current_user.user_id
+
+    # Rate limit compartido con /chat
+    rate_key = f"rate:chat:{tenant_id}:{date.today()}"
+    count = await redis.incr(rate_key)
+    if count == 1:
+        midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
+        await redis.expireat(rate_key, midnight)
+    if count > 50:
+        # Retornar error como SSE (el cliente ya está escuchando el stream)
+        async def _rate_limited() -> AsyncGenerator[str, None]:
+            err = {"type": "error", "message": "Límite diario de 50 mensajes alcanzado. Disponible mañana.", "code": 429}
+            yield f"data: {json_module.dumps(err, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _rate_limited(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    request_obj = AgentRequest(
+        user_id=str(user_id),
+        business_id=str(tenant_id),
+        message=body.message,
+        attachments=body.attachments,
+        conversation_id=body.conversation_id,
+    )
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        # 1. Emitir "thinking" inmediatamente
+        thinking_event = {"type": "thinking", "text": "Analizando tu mensaje..."}
+        yield f"data: {json_module.dumps(thinking_event, ensure_ascii=False)}\n\n"
+
+        try:
+            orchestrator = ChatOrchestrator()
+            agent_response = await orchestrator.handle(
+                request=request_obj,
+                db=db,
+                redis=redis,
+                user_id=user_id,
+                tenant_id=tenant_id,
+            )
+
+            # 2. Crear pending_action si es necesario
+            if agent_response.requires_approval:
+                action_type = agent_response.result.get("action_type", "ANSWER_HELP_REQUEST")
+                pending = await create_pending_action(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    action_type=action_type,
+                    payload=agent_response.result.get(
+                        "structured_data", agent_response.result.get("entities", {})
+                    ),
+                    risk_level=str(agent_response.risk_level),
+                )
+                agent_response.pending_action_id = str(pending.id)
+
+            # 3. Audit log (insert-only)
+            audit = DecisionAuditLog(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                decision_type="AGENT_CHAT_STREAM",
+                decision_data={
+                    "request_id": agent_response.request_id,
+                    "intent": agent_response.result.get("intent"),
+                    "action_type": agent_response.result.get("action_type"),
+                    "status": agent_response.status,
+                    "risk_level": str(agent_response.risk_level),
+                    "requires_approval": agent_response.requires_approval,
+                    "pending_action_id": agent_response.pending_action_id,
+                },
+                triggered_by="agent:chat:stream",
+                actor_user_id=user_id,
+                context={"message_length": len(body.message)},
+                created_at=datetime.now(UTC),
+            )
+            db.add(audit)
+            await db.commit()
+
+            # 4. Emitir respuesta final
+            response_event = {
+                "type": "response",
+                "data": agent_response.model_dump(),
+            }
+            yield f"data: {json_module.dumps(response_event, ensure_ascii=False)}\n\n"
+
+        except AnthropicConfigurationError:
+            error_event = {
+                "type": "error",
+                "message": "El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
+                "code": 503,
+            }
+            yield f"data: {json_module.dumps(error_event, ensure_ascii=False)}\n\n"
+
+        except Exception as exc:
+            logger.error(
+                "chat_stream_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                tenant_id=str(tenant_id),
+            )
+            error_event = {"type": "error", "message": str(exc)}
+            yield f"data: {json_module.dumps(error_event, ensure_ascii=False)}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── POST /confirm/{pending_id} ────────────────────────────────────────────────

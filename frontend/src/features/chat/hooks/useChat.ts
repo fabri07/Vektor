@@ -10,8 +10,11 @@ import {
   type ChatAttachment,
 } from "@/services/agent.service";
 import { useChatStore, type ChatMessage } from "@/stores/chatStore";
+import { useAuthStore } from "@/stores/authStore";
 import { type AxiosError } from "axios";
 import { useQueryClient } from "@tanstack/react-query";
+
+const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000") + "/api/v1";
 
 // Re-exportar para compatibilidad con importadores existentes
 export type Message = ChatMessage;
@@ -21,6 +24,7 @@ export function useChat() {
     conversationId,
     messages,
     addMessage: storeAdd,
+    addMessageWithId,
     updateMessage,
     newConversation,
   } = useChatStore();
@@ -63,7 +67,18 @@ export function useChat() {
         const response = await sendMessage(text, conversationId, attachments);
         setMessagesUsedToday((prev) => prev + 1);
 
-        if (response.status === "requires_approval") {
+        if (response.status === "requires_google_auth") {
+          addMessage({
+            role: "assistant",
+            content:
+              response.message ??
+              response.result?.message ??
+              "Para continuar necesito acceso a Google.",
+            status: "requires_google_auth",
+            requiresGoogleAuth: true,
+            authUrl: response.result?.auth_url as string | undefined,
+          });
+        } else if (response.status === "requires_approval") {
           addMessage({
             role: "assistant",
             content:
@@ -113,6 +128,159 @@ export function useChat() {
     [isLoading, isRateLimited, conversationId, addMessage],
   );
 
+  const sendStream = useCallback(
+    async (
+      text: string,
+      attachments?: ChatAttachment[],
+      displayText?: string,
+    ) => {
+      const hasText = text.trim().length > 0;
+      const hasAttachments = (attachments?.length ?? 0) > 0;
+      if ((!hasText && !hasAttachments) || isLoading || isRateLimited) return;
+
+      addMessage({ role: "user", content: displayText ?? text });
+      setIsLoading(true);
+
+      // Agregar mensaje de "pensando" que será reemplazado por la respuesta final
+      const thinkingId = crypto.randomUUID();
+      addMessageWithId({
+        id: thinkingId,
+        role: "assistant",
+        content: "...",
+        status: "success",
+        timestamp: new Date().toISOString(),
+      });
+
+      try {
+        const token = useAuthStore.getState().token;
+        const response = await fetch(`${API_URL}/agent/chat/stream`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            message: text,
+            conversation_id: conversationId,
+            attachments: attachments ?? [],
+          }),
+        });
+
+        if (!response.ok || !response.body) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let finalResponseAdded = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
+
+          for (const line of lines) {
+            const raw = line.slice(6).trim();
+            if (raw === "[DONE]") break;
+
+            try {
+              const event = JSON.parse(raw) as {
+                type: string;
+                text?: string;
+                data?: AgentResponse;
+                message?: string;
+                code?: number;
+              };
+
+              if (event.type === "thinking" && event.text) {
+                // Actualizar el mensaje de "pensando" con el texto real
+                updateMessage(thinkingId, { content: event.text });
+              } else if (event.type === "response" && event.data) {
+                const agentResp = event.data;
+                setMessagesUsedToday((prev) => prev + 1);
+                finalResponseAdded = true;
+
+                if (agentResp.status === "requires_google_auth") {
+                  updateMessage(thinkingId, {
+                    content:
+                      agentResp.message ??
+                      agentResp.result?.message ??
+                      "Para continuar necesito acceso a Google.",
+                    status: "requires_google_auth",
+                    requiresGoogleAuth: true,
+                    authUrl: agentResp.result?.auth_url as string | undefined,
+                  });
+                } else if (agentResp.requires_approval) {
+                  updateMessage(thinkingId, {
+                    content:
+                      agentResp.message ??
+                      agentResp.result?.summary ??
+                      "Requiere tu aprobación.",
+                    status: "requires_approval",
+                    pendingActionId: agentResp.pending_action_id,
+                  });
+                } else if (agentResp.status === "requires_clarification") {
+                  updateMessage(thinkingId, {
+                    content:
+                      agentResp.message ??
+                      agentResp.question ??
+                      "¿Podés darme más detalles?",
+                    status: "requires_clarification",
+                  });
+                } else {
+                  updateMessage(thinkingId, {
+                    content:
+                      agentResp.message ?? agentResp.result?.summary ?? "Listo.",
+                    status: "success",
+                  });
+                }
+              } else if (event.type === "error") {
+                finalResponseAdded = true;
+                if (event.code === 429) setIsRateLimited(true);
+                updateMessage(thinkingId, {
+                  role: "system",
+                  content: event.message ?? "Hubo un error. Intentá de nuevo.",
+                  status: "error",
+                });
+              }
+            } catch {
+              // línea malformada — ignorar
+            }
+          }
+        }
+
+        // Si el stream terminó sin respuesta final (ej. desconexión), limpiar placeholder
+        if (!finalResponseAdded) {
+          updateMessage(thinkingId, {
+            content: "Sin respuesta. Intentá de nuevo.",
+            status: "error",
+          });
+        }
+      } catch (err) {
+        const error = err as AxiosError;
+        if (error?.response?.status === 429 || (err as Error)?.message?.includes("429")) {
+          setIsRateLimited(true);
+          updateMessage(thinkingId, {
+            role: "system",
+            content: "Límite diario de 50 mensajes alcanzado. Disponible mañana.",
+            status: "error",
+          });
+        } else {
+          updateMessage(thinkingId, {
+            role: "system",
+            content: "Hubo un error. Intentá de nuevo.",
+            status: "error",
+          });
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [isLoading, isRateLimited, conversationId, addMessage, addMessageWithId, updateMessage],
+  );
+
   const confirm = useCallback(
     async (pendingActionId: string) => {
       await confirmAction(pendingActionId);
@@ -151,6 +319,7 @@ export function useChat() {
     messages,
     isLoading,
     send,
+    sendStream,
     confirm,
     cancel,
     messagesUsedToday,

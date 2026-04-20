@@ -3,13 +3,15 @@ import { api } from "@/lib/api";
 export interface AgentResponse {
   request_id: string;
   agent_name: string;
-  status: "success" | "requires_approval" | "requires_clarification" | "error";
+  status: "success" | "requires_approval" | "requires_clarification" | "error" | "requires_google_auth";
   risk_level: string;
   requires_approval: boolean;
   result: {
     summary?: string;
     health_score?: number;
     alerts?: unknown[];
+    message?: string;
+    auth_url?: string;
     [key: string]: unknown;
   };
   pending_action_id?: string;

@@ -23,6 +23,7 @@ from app.application.agents.registry import get_sub_agent
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.agents.shared.schemas import AgentRequest, AgentResponse
 from app.application.security.prompt_defense import wrap_user_input
+from app.application.services.business_memory_service import BusinessMemoryService
 from app.application.services.conversation_service import ConversationService
 from app.integrations.anthropic_client import AnthropicConfigurationError, get_anthropic_async_client
 from app.observability.logger import get_logger
@@ -48,6 +49,14 @@ class ChatOrchestrator:
         business_name, business_type = await self._load_business_context(tenant_id, db)
         heuristics = HeuristicEngine.get(business_type)
 
+        # 1b. BusinessMemory — contexto acumulado del negocio (fail-silencioso)
+        bm_data: dict = {}
+        try:
+            bm_svc = BusinessMemoryService(db=db, redis=redis)
+            bm_data = await bm_svc.get(tenant_id)
+        except Exception:
+            pass
+
         # 2. Historial conversacional
         conversation_ctx: dict = {}
         if request.conversation_id:
@@ -65,6 +74,14 @@ class ChatOrchestrator:
         )
         agent_response = await sub_agent.process(request) if sub_agent is not None else ceo_response
 
+        # 4b. requires_google_auth — propagar sin llamar LLM ni guardar turno
+        if agent_response.status == "requires_google_auth":
+            if not agent_response.message:
+                agent_response.message = agent_response.result.get(
+                    "message", "Necesito acceso a Google para continuar."
+                )
+            return agent_response
+
         # 5a. requires_approval → no llamar LLM (ahorra tokens; el summary es suficiente)
         if agent_response.requires_approval:
             agent_response.message = agent_response.result.get(
@@ -80,6 +97,7 @@ class ChatOrchestrator:
                     business_type,
                     heuristics,
                     conversation_ctx,
+                    bm_data,
                 )
             except AnthropicConfigurationError:
                 raise
@@ -118,6 +136,7 @@ class ChatOrchestrator:
         business_type: str,
         heuristics: object,
         conversation_ctx: dict,
+        bm_data: dict | None = None,
     ) -> str:
         turns = conversation_ctx.get("turns", [])
         history = (
@@ -132,9 +151,17 @@ class ChatOrchestrator:
             else ""
         )
 
+        # Fragmento de BusinessMemory: solo si hay summary generado
+        memory_fragment = ""
+        if bm_data:
+            summary = bm_data.get("llm_context_summary")
+            if summary:
+                memory_fragment = f"\n\nEstado actual del negocio: {summary}"
+
         system = (
             f"Sos el asistente financiero de Véktor para {business_name} ({business_type}).\n\n"
-            f"{heuristic_fragment}\n\n"
+            f"{heuristic_fragment}"
+            f"{memory_fragment}\n\n"
             "MISIÓN: Generá una respuesta conversacional, clara y accionable "
             "basada en los resultados del análisis.\n\n"
             "REGLAS:\n"

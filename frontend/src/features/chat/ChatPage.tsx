@@ -290,10 +290,20 @@ export function ChatPage() {
                                 ? "bg-vk-danger/10 text-vk-danger text-xs"
                                 : msg.status === "requires_clarification"
                                   ? "bg-vk-bg-light text-vk-text-primary rounded-bl-sm ring-1 ring-vk-blue/20"
-                                  : "bg-vk-bg-light text-vk-text-primary rounded-bl-sm"
+                                  : msg.status === "requires_google_auth"
+                                    ? "bg-vk-bg-light text-vk-text-primary rounded-bl-sm ring-1 ring-yellow-400/40"
+                                    : "bg-vk-bg-light text-vk-text-primary rounded-bl-sm"
                           }`}
                       >
                         {msg.content}
+                        {msg.requiresGoogleAuth && msg.authUrl && (
+                          <button
+                            onClick={() => window.open(msg.authUrl, "_blank")}
+                            className="mt-2 block w-full rounded-lg bg-blue-600 px-4 py-2 text-center text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+                          >
+                            Conectar Google
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
