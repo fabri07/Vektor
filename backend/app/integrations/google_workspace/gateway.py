@@ -31,6 +31,7 @@ from app.integrations.google_workspace.exceptions import (
     InsufficientScopeError,
     WorkspaceTokenError,
 )
+from app.integrations.google_workspace.calendar_client import GoogleCalendarClient
 from app.integrations.google_workspace.drive_client import GoogleDriveClient
 from app.integrations.google_workspace.gmail_client import GmailClient
 from app.integrations.google_workspace.sheets_client import GoogleSheetsClient
@@ -107,6 +108,170 @@ class GoogleWorkspaceGateway:
         except WorkspaceTokenError:
             raise
         return GoogleDriveClient(access_token=token, http_client=self._http)
+
+    async def calendar(self) -> GoogleCalendarClient:
+        """Retorna un GoogleCalendarClient con token vigente."""
+        try:
+            token = await self._token_manager.get_valid_access_token()
+        except WorkspaceTokenError:
+            raise
+        return GoogleCalendarClient(access_token=token, http_client=self._http)
+
+    async def get_oauth_url(self, scopes: list[str] | None = None) -> str:
+        """Genera una URL de autorización OAuth para los scopes dados.
+
+        Delega al workspace connect start; si la config no está disponible retorna "".
+        Útil para agentes que necesitan redirigir al usuario a conectar un scope específico.
+        """
+        try:
+            from app.core.config import settings  # noqa: PLC0415
+
+            base = f"{settings.FRONTEND_URL}/workspace/connect/callback"
+            client_id = getattr(settings, "GOOGLE_CLIENT_ID", "")
+            scope_str = "%20".join(scopes or [])
+            return (
+                f"https://accounts.google.com/o/oauth2/auth"
+                f"?redirect_uri={base}"
+                f"&scope={scope_str}"
+                f"&response_type=code"
+                f"&client_id={client_id}"
+                f"&access_type=offline"
+            )
+        except Exception:
+            return ""
+
+    async def sheets_append_row(
+        self,
+        spreadsheet_id: str,
+        range_name: str,
+        row_data: list,
+    ) -> dict:
+        """Append una fila a Google Sheets.
+
+        Returns:
+            dict con updatedRange, updatedRows, updatedCells.
+        """
+        sheets = await self.sheets()
+        result = await self.run_google(
+            sheets.append_values(
+                spreadsheet_id=spreadsheet_id,
+                range_name=range_name,
+                values=[row_data],
+            )
+        )
+        return result if isinstance(result, dict) else {"updatedRange": range_name}
+
+    async def drive_upload_file(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        folder_name: str = "Véktor",
+        mime_type: str = "application/octet-stream",
+    ) -> str:
+        """Sube archivo a Google Drive bajo la carpeta indicada.
+
+        Returns:
+            webViewLink del archivo subido, o "" si no está disponible.
+        """
+        drive = await self.drive()
+        result = await self.run_google(
+            drive.upload_file(
+                name=filename,
+                content=file_bytes,
+                mime_type=mime_type,
+                folder_name=folder_name,
+            )
+        )
+        if isinstance(result, dict):
+            return result.get("webViewLink", "")
+        return ""
+
+    async def gmail_create_draft(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Crea un draft en Gmail.
+
+        Returns:
+            draft_id del borrador creado.
+        """
+        gmail = await self.gmail()
+        draft_id = await self.run_gmail(
+            gmail.create_draft(
+                to=to,
+                subject=subject,
+                body=body,
+                reply_to_message_id=reply_to_message_id,
+            )
+        )
+        return str(draft_id) if draft_id else ""
+
+    async def calendar_create_event(
+        self,
+        title: str,
+        start_datetime: "datetime",
+        end_datetime: "datetime",
+        description: str = "",
+        attendees: list[str] | None = None,
+    ) -> str:
+        """Crea un evento en Google Calendar.
+
+        Returns:
+            event_id del evento creado.
+        """
+        cal = await self.calendar()
+        result = await self.run_google(
+            cal.create_event(
+                summary=title,
+                start=start_datetime.isoformat(),
+                end=end_datetime.isoformat(),
+                description=description,
+                attendees=[{"email": e} for e in (attendees or [])],
+            )
+        )
+        if isinstance(result, dict):
+            return result.get("id", "")
+        return str(result) if result else ""
+
+    async def calendar_get_agenda(self, days_ahead: int = 7) -> list[dict]:
+        """Lista los próximos N días de eventos del calendario primario.
+
+        Returns:
+            Lista de dicts con keys: title, start, end, description.
+        """
+        from datetime import timedelta  # noqa: PLC0415
+
+        cal = await self.calendar()
+        now = datetime.now(UTC)
+        time_max = now + timedelta(days=days_ahead)
+        result = await self.run_google(
+            cal.list_events(
+                time_min=now.isoformat(),
+                time_max=time_max.isoformat(),
+                max_results=20,
+            )
+        )
+        if not isinstance(result, list):
+            return []
+        events: list[dict] = []
+        for ev in result:
+            if isinstance(ev, dict):
+                events.append(
+                    {
+                        "title": ev.get("summary", "Sin título"),
+                        "start": ev.get("start", {}).get(
+                            "dateTime", ev.get("start", {}).get("date", "")
+                        ),
+                        "end": ev.get("end", {}).get(
+                            "dateTime", ev.get("end", {}).get("date", "")
+                        ),
+                        "description": ev.get("description", ""),
+                    }
+                )
+        return events
 
     async def run_gmail(self, coro):  # type: ignore[no-untyped-def]
         """Helper: ejecuta una coroutine de GmailClient capturando InsufficientScopeError.

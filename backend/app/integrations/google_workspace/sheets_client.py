@@ -80,6 +80,27 @@ class GoogleSheetsClient:
             values=values,
         )
 
+    async def append_values(
+        self,
+        spreadsheet_id: str,
+        range_name: str,
+        values: list[list[Any]],
+    ) -> dict[str, Any]:
+        """Append filas a Google Sheets (valueInputOption=USER_ENTERED).
+
+        Returns:
+            dict con updatedRange, updatedRows, updatedColumns, updatedCells.
+        """
+        async with self._http_context() as http:
+            resp = await http.post(
+                f"{_SHEETS_BASE}/{spreadsheet_id}/values/{range_name}:append",
+                headers=self._auth_headers(),
+                params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
+                json={"values": values},
+            )
+        self._raise_for_status(resp)
+        return resp.json()  # type: ignore[no-any-return]
+
     async def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         async with self._http_context() as http:
             resp = await http.get(

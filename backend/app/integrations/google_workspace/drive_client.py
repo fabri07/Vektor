@@ -75,6 +75,77 @@ class GoogleDriveClient:
         self._raise_for_status(resp)
         return resp.content
 
+    async def upload_file(
+        self,
+        name: str,
+        content: bytes,
+        mime_type: str = "application/octet-stream",
+        folder_name: str = "Véktor",
+    ) -> dict[str, Any]:
+        """Sube un archivo a Google Drive usando multipart upload.
+
+        Crea la carpeta ``folder_name`` si no existe, y sube el archivo dentro.
+        Retorna el dict de metadata del archivo (id, name, webViewLink, etc.).
+        """
+        folder_id = await self._get_or_create_folder(folder_name)
+
+        metadata = {"name": name, "parents": [folder_id]}
+
+        import json as _json  # noqa: PLC0415
+
+        boundary = "vektorbound"
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{_json.dumps(metadata)}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: {mime_type}\r\n\r\n"
+        ).encode() + content + f"\r\n--{boundary}--".encode()
+
+        async with self._http_context() as http:
+            resp = await http.post(
+                "https://www.googleapis.com/upload/drive/v3/files",
+                headers={
+                    **self._auth_headers(),
+                    "Content-Type": f"multipart/related; boundary={boundary}",
+                },
+                params={"uploadType": "multipart", "fields": "id,name,webViewLink,mimeType"},
+                content=body,
+            )
+        self._raise_for_status(resp)
+        return resp.json()  # type: ignore[no-any-return]
+
+    async def _get_or_create_folder(self, folder_name: str) -> str:
+        """Retorna el id de la carpeta, creándola si no existe."""
+        data = await self._get(
+            "/files",
+            params={
+                "q": (
+                    f"name='{folder_name}' and "
+                    "mimeType='application/vnd.google-apps.folder' and "
+                    "trashed=false"
+                ),
+                "fields": "files(id)",
+                "pageSize": "1",
+            },
+        )
+        files = data.get("files", [])
+        if files:
+            return str(files[0]["id"])
+
+        # Crear carpeta
+        async with self._http_context() as http:
+            resp = await http.post(
+                f"{_DRIVE_BASE}/files",
+                headers=self._auth_headers(),
+                json={
+                    "name": folder_name,
+                    "mimeType": "application/vnd.google-apps.folder",
+                },
+            )
+        self._raise_for_status(resp)
+        return str(resp.json()["id"])
+
     async def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         async with self._http_context() as http:
             resp = await http.get(

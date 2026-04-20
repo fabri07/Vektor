@@ -104,11 +104,28 @@ class GmailClient:
         data = await self._get(f"/messages/{message_id}", params={"format": "full"})
         return self._parse_full(data)
 
-    async def create_draft(self, to: str, subject: str, body: str) -> str:
-        """Crea un draft en Gmail. Retorna el draft_id (string)."""
+    async def create_draft(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Crea un draft en Gmail. Retorna el draft_id (string).
+
+        Args:
+            to:                  Dirección de destino.
+            subject:             Asunto del email.
+            body:                Cuerpo en texto plano.
+            reply_to_message_id: Message-ID del mensaje al que se responde (opcional).
+                                 Si se provee, se agrega el header In-Reply-To.
+        """
         mime = email.mime.text.MIMEText(body, "plain", "utf-8")
         mime["To"] = to
         mime["Subject"] = subject
+        if reply_to_message_id:
+            mime["In-Reply-To"] = reply_to_message_id
+            mime["References"] = reply_to_message_id
         raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
 
         async with self._http_context() as http:
