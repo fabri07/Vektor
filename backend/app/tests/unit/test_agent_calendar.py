@@ -210,7 +210,7 @@ async def test_ceo_routes_schedule_event_to_calendar():
     assert "schedule_event" in ceo_module.INTENT_CATALOG
     assert ceo_module.INTENT_TO_AGENT["schedule_event"] == "agent_calendar"
     assert ceo_module.INTENT_TO_AGENT["review_calendar"] == "agent_calendar"
-    assert ceo_module.INTENT_TO_AGENT["sync_to_google"] == "agent_calendar"
+    assert ceo_module.INTENT_TO_AGENT["sync_to_google"] == "agent_sync"
 
 
 @pytest.mark.asyncio

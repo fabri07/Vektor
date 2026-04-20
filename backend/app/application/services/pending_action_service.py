@@ -95,12 +95,31 @@ async def execute_pending_action(
         sale = await cash_service.save_sale(payload, action.tenant_id, action.user_id, db)
         from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
         await AgentCash().on_confirmed_sale(str(sale.id), str(action.tenant_id))
+        try:
+            if redis is not None:
+                from decimal import Decimal  # noqa: PLC0415
+                from app.application.services.business_memory_service import BusinessMemoryService  # noqa: PLC0415
+                amount = Decimal(str(payload.get("amount", 0)))
+                bm_svc = BusinessMemoryService(db=db, redis=redis)
+                await bm_svc.update_after_sale(action.tenant_id, amount)
+        except Exception:
+            logger.warning("execute_pending_action.biz_mem_sale_failed", action_id=str(action.id))
 
     elif action.action_type == ActionType.REGISTER_CASH_INFLOW:
         await cash_service.save_cash_inflow(payload, action.tenant_id, db)
 
     elif action.action_type == ActionType.REGISTER_EXPENSE:
         await cash_service.save_expense(payload, action.tenant_id, db)
+        try:
+            if redis is not None:
+                from decimal import Decimal  # noqa: PLC0415
+                from app.application.services.business_memory_service import BusinessMemoryService  # noqa: PLC0415
+                amount = Decimal(str(payload.get("amount", 0)))
+                category = payload.get("category", "")
+                bm_svc = BusinessMemoryService(db=db, redis=redis)
+                await bm_svc.update_after_expense(action.tenant_id, amount, category)
+        except Exception:
+            logger.warning("execute_pending_action.biz_mem_expense_failed", action_id=str(action.id))
 
     elif action.action_type == ActionType.REGISTER_PURCHASE:
         purchase_payload = {**payload, "category": "compra_proveedor"}

@@ -56,4 +56,13 @@ def get_sub_agent(
 
             gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
         return AgentCalendar(gateway=gateway)
+    if name == "agent_sync":
+        from app.application.agents.sync.agent import AgentSync  # noqa: PLC0415
+
+        gateway = None
+        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
+            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
+
+            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
+        return AgentSync(gateway=gateway)
     return None

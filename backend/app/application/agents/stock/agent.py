@@ -19,6 +19,7 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
+from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
 
 
@@ -133,12 +134,42 @@ class AgentStock(BaseAgent):
         """
         return []
 
-    async def process(self, request: AgentRequest) -> AgentResponse:
-        message_lower = request.message.lower()
+    async def _classify_stock_intent(self, message: str) -> str:
+        """Clasifica intent con Haiku: STOCK_LOSS | STOCK_ADJUSTMENT | STOCK_QUERY"""
+        system = (
+            "Clasificá el mensaje en exactamente uno de estos intents de inventario:\n"
+            "STOCK_LOSS: merma, pérdida, rotura, vencimiento, daño, desaparición de producto.\n"
+            "STOCK_ADJUSTMENT: ajuste de inventario, conteo, corrección de stock.\n"
+            "STOCK_QUERY: consulta sobre stock, disponibilidad, qué hay en inventario.\n\n"
+            'Retorná SOLO un JSON: {"intent": "<STOCK_LOSS|STOCK_ADJUSTMENT|STOCK_QUERY>"}'
+        )
+        try:
+            resp = await self.client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=50,
+                system=system,
+                messages=[{"role": "user", "content": wrap_user_input(message)}],
+            )
+            result = json.loads(resp.content[0].text.strip())
+            intent = result.get("intent", "STOCK_QUERY")
+            if intent not in ("STOCK_LOSS", "STOCK_ADJUSTMENT", "STOCK_QUERY"):
+                return "STOCK_QUERY"
+            return intent
+        except Exception:
+            # Fallback a keywords si LLM falla
+            msg = message.lower()
+            if any(w in msg for w in ["merma", "roto", "perdí", "vencido", "se rompió", "caducó", "dañado"]):
+                return "STOCK_LOSS"
+            if any(w in msg for w in ["ajuste", "conteo", "inventario", "corrección"]):
+                return "STOCK_ADJUSTMENT"
+            return "STOCK_QUERY"
 
-        if any(w in message_lower for w in ["merma", "roto", "perdí", "perdido", "vencido"]):
+    async def process(self, request: AgentRequest) -> AgentResponse:
+        intent = await self._classify_stock_intent(request.message)
+
+        if intent == "STOCK_LOSS":
             return await self._handle_stock_loss(request)
-        elif any(w in message_lower for w in ["ajuste", "conteo", "inventario", "stock"]):
+        elif intent == "STOCK_ADJUSTMENT":
             return await self._handle_stock_adjustment(request)
         else:
             return await self._handle_query(request)

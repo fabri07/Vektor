@@ -73,7 +73,7 @@ INTENT_TO_AGENT: dict[str, str] = {
     "analyze_google_data": "agent_health",
     "schedule_event": "agent_calendar",
     "review_calendar": "agent_calendar",
-    "sync_to_google": "agent_calendar",
+    "sync_to_google": "agent_sync",
 }
 
 # ── Intent → ActionType (catálogo cerrado) ────────────────────────────────────
