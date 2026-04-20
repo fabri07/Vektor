@@ -240,6 +240,16 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 
 **Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt. El mismo módulo expone `is_valid_action_type(action_type)` para validar que el output de un LLM sea un ActionType del catálogo cerrado — usar al parsear cualquier respuesta LLM que deba devolver un action_type.
 
+### Ingestion de archivos
+
+Pipeline de 3 pasos (router `ingestion.py` + jobs `ingestion_worker.py`):
+
+1. **Upload** — `POST /files/upload?purpose=chat|ingestion` → sube a R2, crea `UploadedFile` con `processing_status=PENDING`.
+2. **Parse** — Celery task por tipo: `process_spreadsheet` (xlsx/csv), `process_text_document`, `process_image_ocr`. Descarga de R2, extrae datos, guarda `parsed_summary_json`, transiciona a `NEEDS_CONFIRMATION`. Siempre requiere revisión humana antes de importar.
+3. **Confirm** — `POST /ingestion/{file_id}/confirm` → inserta ventas/gastos/productos según `parsed_summary_json`, dispara recálculo de score. On error: `processing_status=FAILED`.
+
+Columnas clave para detección de tipo: sets en `ingestion_worker.py` (`_VENTA_COLS`, `_GASTO_COLS`, `_PRODUCTO_COLS`). Storage: Cloudflare R2 vía boto3 (`S3_REGION=auto`).
+
 ### Observabilidad
 
 - Logging con `structlog`. Usar `from app.observability.logger import get_logger` → `get_logger(__name__)` en todos los módulos.
