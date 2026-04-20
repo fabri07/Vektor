@@ -16,7 +16,7 @@ Seguridad:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from app.observability.logger import get_logger
 
 _log = get_logger(__name__)
@@ -174,7 +174,7 @@ async def workspace_connect_callback(
 @limiter.limit("10/5minutes")
 async def workspace_connect_exchange(
     request: Request,
-    body: WorkspaceConnectExchangeRequest,
+    body: WorkspaceConnectExchangeRequest = Body(...),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),

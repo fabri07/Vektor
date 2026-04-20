@@ -52,6 +52,10 @@ class BusinessMemoryService:
             return data
         except Exception:
             logger.warning("biz_mem.db_miss", tenant_id=str(tenant_id))
+            try:
+                await self._db.rollback()
+            except Exception:
+                pass
             return self._empty()
 
     async def update_after_sale(self, tenant_id: uuid.UUID, amount: Decimal) -> None:
