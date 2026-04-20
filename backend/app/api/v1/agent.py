@@ -8,6 +8,7 @@ GET  /api/v1/agent/conversations        — lista conversaciones del tenant (úl
 GET  /api/v1/agent/conversations/{id}   — turnos completos de una conversación
 """
 
+import hashlib
 import uuid
 from datetime import UTC, date, datetime, time
 from typing import Any
@@ -272,6 +273,38 @@ async def confirm_action(
             action.failure_code = None
             action.failure_message = str(exc)[:500]
     else:
+        # Deduplicación por fingerprint SHA-256 antes de ejecutar acciones financieras.
+        _FP_TYPES = {"REGISTER_SALE", "REGISTER_EXPENSE", "REGISTER_PURCHASE"}
+        if str(action.action_type) in _FP_TYPES:
+            from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
+
+            _sd = (action.payload or {}).get("structured_data", {})
+            _raw = (
+                f"{current_user.tenant_id}:{action.action_type}"
+                f":{_sd.get('amount', '')}:{_sd.get('transaction_date', '')}"
+            )
+            _fp_hash = hashlib.sha256(_raw.encode()).hexdigest()
+            _dup = await db.execute(
+                select(OperationFingerprint).where(
+                    OperationFingerprint.tenant_id == current_user.tenant_id,
+                    OperationFingerprint.fingerprint == _fp_hash,
+                )
+            )
+            if _dup.scalar_one_or_none() is not None:
+                return {
+                    "status": "duplicate",
+                    "message": "Esta operación ya fue registrada.",
+                    "execution_status": "DUPLICATE",
+                }
+            db.add(
+                OperationFingerprint(
+                    tenant_id=current_user.tenant_id,
+                    fingerprint=_fp_hash,
+                    action_type=str(action.action_type),
+                )
+            )
+            await db.flush()
+
         # Para acciones locales: ejecución en la misma transacción; excepción se propaga (fail-closed).
         await execute_pending_action(action, db, redis=redis)
         action.execution_status = "SUCCEEDED"

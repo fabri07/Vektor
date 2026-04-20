@@ -55,6 +55,55 @@ class ConversationService:
         )
         return ctx
 
+    async def _summarize_turns(self, turns: list[dict]) -> str:
+        """Resume turnos viejos con Haiku. Fail-silencioso."""
+        try:
+            from app.integrations.anthropic_client import get_anthropic_async_client  # noqa: PLC0415
+
+            client = get_anthropic_async_client()
+            resp = await client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=80,
+                system="Resumí esta conversación en máximo 2 frases en español.",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps(turns, ensure_ascii=False),
+                    }
+                ],
+            )
+            return resp.content[0].text.strip()
+        except Exception:
+            return ""
+
+    async def add_turn_with_summary(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> dict:
+        """Agrega turno con summarización automática al superar MAX_TURNS."""
+        ctx = await self.get_context(conversation_id)
+        ctx["turns"].append({"role": role, "content": content})
+
+        if len(ctx["turns"]) > MAX_TURNS:
+            summary = await self._summarize_turns(ctx["turns"][:-5])
+            ctx["turns"] = ctx["turns"][-5:]
+            if summary:
+                ctx["summary"] = summary
+
+        try:
+            await self.redis.setex(
+                f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx)
+            )
+        except Exception:
+            pass
+        await self.persist(conversation_id, tenant_id, user_id)
+        await self.db.commit()
+        return ctx
+
     async def persist(
         self,
         conversation_id: str,
