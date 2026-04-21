@@ -22,8 +22,28 @@ def get_sub_agent(
         return AgentStock()
     if name == "agent_supplier":
         from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
+        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
+        from app.config.settings import get_settings  # noqa: PLC0415
 
-        return AgentSupplier(session=db)
+        settings = get_settings()
+        gateway = HttpMcpGateway(base_url=settings.MCP_SERVER_URL, timeout=settings.MCP_HTTP_TIMEOUT) if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL else None
+        return AgentSupplier(session=db, gateway=gateway)
+    if name == "agent_calendar":
+        from app.application.agents.calendar.agent import AgentCalendar  # noqa: PLC0415
+        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
+        from app.config.settings import get_settings  # noqa: PLC0415
+
+        settings = get_settings()
+        gateway = HttpMcpGateway(base_url=settings.MCP_SERVER_URL, timeout=settings.MCP_HTTP_TIMEOUT) if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL else None
+        return AgentCalendar(gateway=gateway)
+    if name == "agent_sync":
+        from app.application.agents.sync.agent import AgentSync  # noqa: PLC0415
+        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
+        from app.config.settings import get_settings  # noqa: PLC0415
+
+        settings = get_settings()
+        gateway = HttpMcpGateway(base_url=settings.MCP_SERVER_URL, timeout=settings.MCP_HTTP_TIMEOUT) if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL else None
+        return AgentSync(gateway=gateway)
     if name == "agent_health":
         from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415
 

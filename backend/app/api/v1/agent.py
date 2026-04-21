@@ -30,6 +30,7 @@ from app.application.services.pending_action_service import (
     execute_pending_action,
 )
 from app.integrations.anthropic_client import AnthropicConfigurationError
+from app.integrations.mcp.exceptions import McpToolAuthError
 from app.observability.logger import get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -586,7 +587,7 @@ async def retry_action(
     try:
         await execute_pending_action(action, db, redis=redis)
         action.execution_status = "SUCCEEDED"
-    except WorkspaceTokenError as exc:
+    except McpToolAuthError as exc:
         action.execution_status = "REQUIRES_RECONNECT"
         action.failure_code = exc.reason
         action.failure_message = None

@@ -13,6 +13,10 @@ ACTION_RISK_MAP = {
     ActionType.PARSE_DOCUMENT_FILE: RiskLevel.LOW,
     ActionType.GENERATE_HEALTH_REPORT: RiskLevel.LOW,
     ActionType.ANSWER_HELP_REQUEST: RiskLevel.LOW,
+    ActionType.CREATE_SUPPLIER_DRAFT:  RiskLevel.LOW,
+    ActionType.CLASSIFY_GMAIL_MESSAGE: RiskLevel.LOW,
+    ActionType.SYNC_TO_GOOGLE:         RiskLevel.MEDIUM,
+    ActionType.CREATE_CALENDAR_EVENT:  RiskLevel.MEDIUM,
 }
 
 

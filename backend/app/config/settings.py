@@ -130,6 +130,7 @@ class Settings(BaseSettings):
         "ENABLE_SCORE_RECALCULATION",
         "ENABLE_GOOGLE_LOGIN",
         "ENABLE_FACEBOOK_LOGIN",
+        "ENABLE_GOOGLE_MCP_TOOLS",
         "DEMO_MODE",
         "USE_LOCAL_FALLBACK",
         mode="before",
@@ -189,6 +190,13 @@ class Settings(BaseSettings):
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False
     ENABLE_FACEBOOK_LOGIN: bool = False  # Diferido — solo abstracción en fase 1
+
+    # ── Google MCP ────────────────────────────────────────────────────────────
+    # False (default): agentes informan pero no ejecutan ops Google
+    # True: el backend llama al MCP server en MCP_SERVER_URL
+    ENABLE_GOOGLE_MCP_TOOLS: bool = False
+    MCP_SERVER_URL: str = ""
+    MCP_HTTP_TIMEOUT: float = 15.0
 
     # ── Google OAuth ──────────────────────────────────────────────────────────
     GOOGLE_OAUTH_CLIENT_ID: str = ""
@@ -257,6 +265,11 @@ class Settings(BaseSettings):
                     f"Los flags [{flags}] están activos pero faltan las credenciales: "
                     f"{', '.join(missing)}"
                 )
+
+        if self.ENABLE_GOOGLE_MCP_TOOLS and not self.MCP_SERVER_URL:
+            raise ValueError(
+                "MCP_SERVER_URL es requerido cuando ENABLE_GOOGLE_MCP_TOOLS=true"
+            )
 
         return self
 

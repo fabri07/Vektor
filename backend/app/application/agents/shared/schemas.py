@@ -17,6 +17,11 @@ class ActionType(StrEnum):
     PARSE_DOCUMENT_FILE = "PARSE_DOCUMENT_FILE"
     GENERATE_HEALTH_REPORT = "GENERATE_HEALTH_REPORT"
     ANSWER_HELP_REQUEST = "ANSWER_HELP_REQUEST"
+    # Google MCP — operaciones externas via MCP server
+    CREATE_SUPPLIER_DRAFT = "CREATE_SUPPLIER_DRAFT"
+    CLASSIFY_GMAIL_MESSAGE = "CLASSIFY_GMAIL_MESSAGE"
+    SYNC_TO_GOOGLE = "SYNC_TO_GOOGLE"
+    CREATE_CALENDAR_EVENT = "CREATE_CALENDAR_EVENT"
 
 
 class RiskLevel(StrEnum):
@@ -44,7 +49,7 @@ class AgentRequest(BaseModel):
 class AgentResponse(BaseModel):
     request_id: str
     agent_name: str
-    status: str  # success | requires_approval | requires_clarification | error
+    status: str  # success | requires_approval | requires_clarification | error | requires_google_auth
     risk_level: RiskLevel
     requires_approval: bool = False
     confidence: Confidence = Confidence.HIGH

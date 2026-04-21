@@ -46,6 +46,9 @@ INTENT_CATALOG = [
     "manage_supplier",
     "ask_platform_help",
     "review_inbox_item",
+    "schedule_event",
+    "check_calendar",
+    "sync_google_data",
 ]
 
 # ── Intent → agente especializado ────────────────────────────────────────────
@@ -62,6 +65,9 @@ INTENT_TO_AGENT: dict[str, str] = {
     "ask_business_status": "agent_health",
     "ask_dashboard_report": "agent_health",
     "ask_platform_help": "agent_helper",
+    "schedule_event": "agent_calendar",
+    "check_calendar": "agent_calendar",
+    "sync_google_data": "agent_sync",
 }
 
 # ── Intent → ActionType (catálogo cerrado) ────────────────────────────────────
@@ -75,9 +81,12 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "upload_file": ActionType.IMPORT_TABULAR_FILE,
     "ask_business_status": ActionType.GENERATE_HEALTH_REPORT,
     "ask_dashboard_report": ActionType.GENERATE_HEALTH_REPORT,
-    "manage_supplier": ActionType.ANSWER_HELP_REQUEST,
+    "manage_supplier": ActionType.CREATE_SUPPLIER_DRAFT,
     "ask_platform_help": ActionType.ANSWER_HELP_REQUEST,
-    "review_inbox_item": ActionType.ANSWER_HELP_REQUEST,
+    "review_inbox_item": ActionType.CLASSIFY_GMAIL_MESSAGE,
+    "schedule_event": ActionType.CREATE_CALENDAR_EVENT,
+    "check_calendar": ActionType.GENERATE_HEALTH_REPORT,
+    "sync_google_data": ActionType.SYNC_TO_GOOGLE,
 }
 
 
