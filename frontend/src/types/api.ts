@@ -197,7 +197,6 @@ export interface OAuthLinkRequiredResponse {
   provider: "google";
 }
 
-// ── Google Workspace ─────────────────────────────────────────────────────────
 
 export interface WorkspaceConnectStartResponse {
   authorization_url: string;
@@ -215,7 +214,6 @@ export interface WorkspaceAppStatus {
 
 export interface WorkspaceStatusResponse {
   connected: boolean;
-  google_account_email: string | null;
   scopes_granted: string[];
   apps: WorkspaceAppStatus[];
   connected_at: string | null;

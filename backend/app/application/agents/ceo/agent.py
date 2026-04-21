@@ -46,12 +46,6 @@ INTENT_CATALOG = [
     "manage_supplier",
     "ask_platform_help",
     "review_inbox_item",
-    "connect_google_app",
-    "import_google_sheet",
-    "analyze_google_data",
-    "schedule_event",
-    "review_calendar",
-    "sync_to_google",
 ]
 
 # ── Intent → agente especializado ────────────────────────────────────────────
@@ -68,12 +62,6 @@ INTENT_TO_AGENT: dict[str, str] = {
     "ask_business_status": "agent_health",
     "ask_dashboard_report": "agent_health",
     "ask_platform_help": "agent_helper",
-    "connect_google_app": "agent_helper",
-    "import_google_sheet": "agent_cash",
-    "analyze_google_data": "agent_health",
-    "schedule_event": "agent_calendar",
-    "review_calendar": "agent_calendar",
-    "sync_to_google": "agent_sync",
 }
 
 # ── Intent → ActionType (catálogo cerrado) ────────────────────────────────────
@@ -87,15 +75,9 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "upload_file": ActionType.IMPORT_TABULAR_FILE,
     "ask_business_status": ActionType.GENERATE_HEALTH_REPORT,
     "ask_dashboard_report": ActionType.GENERATE_HEALTH_REPORT,
-    "manage_supplier": ActionType.CREATE_SUPPLIER_DRAFT,
+    "manage_supplier": ActionType.ANSWER_HELP_REQUEST,
     "ask_platform_help": ActionType.ANSWER_HELP_REQUEST,
-    "review_inbox_item": ActionType.CLASSIFY_GMAIL_MESSAGE,
-    "connect_google_app": ActionType.ANSWER_HELP_REQUEST,
-    "import_google_sheet": ActionType.IMPORT_TABULAR_FILE,
-    "analyze_google_data": ActionType.GENERATE_HEALTH_REPORT,
-    "schedule_event": ActionType.SYNC_TO_GOOGLE,
-    "review_calendar": ActionType.GENERATE_HEALTH_REPORT,
-    "sync_to_google": ActionType.SYNC_TO_GOOGLE,
+    "review_inbox_item": ActionType.ANSWER_HELP_REQUEST,
 }
 
 
@@ -120,12 +102,6 @@ class AgentCEO(BaseAgent):
         system = (
             "Sos el clasificador de intenciones de Véktor, un sistema de gestión para PyMEs.\n"
             f"Intenciones válidas: {', '.join(INTENT_CATALOG)}\n\n"
-            "Usá connect_google_app cuando pidan conectar Gmail, Sheets, Drive o Google.\n"
-            "Usá import_google_sheet cuando pidan cargar o registrar datos desde una hoja de Google.\n"
-            "Usá analyze_google_data cuando pidan analizar datos ya conectados o importados desde Google.\n"
-            "Usá schedule_event cuando pidan crear, agendar o programar un evento, reunión o recordatorio.\n"
-            "Usá review_calendar cuando pidan ver la agenda, los próximos eventos o qué hay pendiente.\n"
-            "Usá sync_to_google cuando pidan sincronizar o exportar datos del negocio a Google (Calendar, Sheets, Drive).\n\n"
             "Analizá el mensaje del usuario y retorná SOLO un JSON con:\n"
             '{"intent": "<una de las intenciones válidas>", "entities": {...campos relevantes...}}\n\n'
             f"Si no podés clasificar → {{\"intent\": \"ask_platform_help\", \"entities\": {{}}}}\n"

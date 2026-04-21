@@ -35,18 +35,6 @@ class User(TimestampMixin, Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # ── DEPRECATED: Google OAuth tokens ──────────────────────────────────────
-    # Estas columnas existían antes de Sprint 1 y quedan en la DB como nullable.
-    # Ya NO se usan: los tokens de Workspace migran a user_google_workspace_connections
-    # y la identidad de login social vive en user_auth_identities.
-    # Se mantienen para no romper datos existentes; no leer ni escribir en código nuevo.
-    google_access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    google_refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    google_scopes: Mapped[list[str] | None] = mapped_column(PGTEXTARRAY, nullable=True)
-    google_connected_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
     __table_args__ = (

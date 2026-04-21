@@ -103,7 +103,7 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: `auth_service`, `cash_service`, `conversation_service`, `google_oauth_service`, `health_score_service`, `onboarding_service`, `pending_action_service`, `score_trigger_service`, `stock_service`, `supplier_service`, `workspace_connect_service` |
+| Application | `app/application/services/` | Orquestación: `auth_service`, `cash_service`, `conversation_service`, `google_oauth_service`, `health_score_service`, `onboarding_service`, `pending_action_service`, `score_trigger_service`, `stock_service`, `supplier_service |
 | Commands | `app/application/commands/` | Writes CQRS (ej. `create_tenant.py`) |
 | Queries | `app/application/queries/` | Reads CQRS (ej. `get_health_score.py`) |
 | DTOs | `app/application/dto/` | Objetos de transferencia entre capas (ej. `auth_dto.py`) |
@@ -114,16 +114,16 @@ HTTP Request
 | Heuristics | `app/heuristics/` | Reglas específicas por vertical (kiosco/decoracion/limpieza) |
 | Persistence | `app/persistence/` | SQLAlchemy async, repositories, modelos, Alembic |
 | Jobs | `app/jobs/` | Celery workers: scores, notifications, reports, ingestion (OCR, xlsx) |
-| Security | `app/application/security/` | `prompt_defense.py` (`wrap_user_input()`), `token_cipher.py` (cifrado de tokens OAuth) |
+| Security | `app/application/security/` | `prompt_defense.py` (`wrap_user_input()`),  |
 
 ### API Routers (`app/api/v1/`)
 
-Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat), `workspace` (Google Workspace), `admin`.
+Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat), `admin`.
 
 ### Autenticación y multi-tenancy
 
 - JWT (HS256, python-jose). Payload: `sub` (user_id), `tenant_id`, `role_code`.
-- OAuth social login via `oauth.py` — identity tables: `user_auth_identity`, `user_google_workspace`.
+- OAuth social login via `oauth.py` — identity tables: `user_auth_identity`, `user_auth_identity`.
 - `get_current_tenant_id` es la dependencia que se inyecta en TODOS los endpoints de negocio.
 - El `tenant_id` del JWT se usa en cada query — nunca se acepta del body/path del request.
 - Roles: `OWNER`, `ADMIN`, `VIEWER`. Se aplica con `require_role("OWNER", "ADMIN")`.
@@ -207,9 +207,9 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
 REGISTER_PURCHASE      REGISTER_CASH_OUTFLOW   UPDATE_STOCK
-REGISTER_STOCK_LOSS    CREATE_SUPPLIER_DRAFT   CREATE_PURCHASE_SUGGESTION
+REGISTER_STOCK_LOSS       CREATE_PURCHASE_SUGGESTION
 IMPORT_TABULAR_FILE    PARSE_DOCUMENT_FILE     GENERATE_HEALTH_REPORT
-SYNC_TO_GOOGLE         CLASSIFY_GMAIL_MESSAGE  ANSWER_HELP_REQUEST
+           ANSWER_HELP_REQUEST
 ```
 
 Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualizar también `RiskEngine` y sus tests.
@@ -272,7 +272,7 @@ Columnas clave para detección de tipo: sets en `ingestion_worker.py` (`_VENTA_C
 | Directorio | Responsabilidad |
 |------------|-----------------|
 | `src/features/` | Módulos por feature: `auth`, `chat`, `dashboard`, `onboarding`, `ingestion`, `notifications` |
-| `src/services/` | Capa de llamadas HTTP por dominio: `auth`, `sales`, `expenses`, `products`, `health_score`, `dashboard`, `momentum`, `notifications`, `ingestion`, `onboarding`, `workspace`, `files` |
+| `src/services/` | Capa de llamadas HTTP por dominio: `auth`, `sales`, `expenses`, `products`, `health_score`, `dashboard`, `momentum`, `notifications`, `ingestion`, `onboarding`, `files` |
 | `src/stores/` | Zustand: `authStore` (JWT + user), `toastStore` |
 | `src/hooks/` | Custom hooks: `useAuth` |
 | `src/types/api.ts` | Tipos TypeScript de respuestas de la API |
@@ -287,14 +287,13 @@ Columnas clave para detección de tipo: sets en `ingestion_worker.py` (`_VENTA_C
 | `/sales` | `(protected)/sales/page.tsx` | Analytics + lista de ventas con KPIs y filtros |
 | `/expenses` | `(protected)/expenses/page.tsx` | Analytics + lista de gastos con KPIs y filtros |
 | `/products` | `(protected)/products/page.tsx` | Catálogo con KPIs de stock e inventario |
-| `/settings` | `(protected)/settings/page.tsx` | Cuenta + tab Google Workspace |
+| `/settings` | `(protected)/settings/page.tsx` | Cuenta y configuración |
 
 ### Rutas públicas (`src/app/(public)/`)
 
 | Ruta | Descripción |
 |------|-------------|
 | `/oauth/callback?session_id=` | Callback de Google OAuth login — llama `POST /auth/oauth/google/exchange` |
-| `/workspace/connect/callback?exchange_session_id=` | Callback de Google Workspace — llama `POST /workspace/google/connect/exchange` |
 
 ### Chat (Sprint 5)
 
@@ -312,14 +311,9 @@ Flujo login federado:
 3. `POST /auth/oauth/google/exchange` → `AuthResponse` (nuevo usuario) **o** `OAuthLinkRequiredResponse` (email ya existente)
 4. Si `link_required`: formulario de contraseña para vincular → `POST /auth/oauth/google/link-pending`
 
-### Google Workspace (Sprint 5)
+### Integraciones externas vía MCP (Sprint 5)
 
 Flujo conexión (separado del login federado):
-1. Settings tab "Google Workspace" → `POST /workspace/google/connect/start` → `window.location.href`
-2. Google → `/workspace/connect/callback?exchange_session_id=...`
-3. `POST /workspace/google/connect/exchange { exchange_session_id }` (requiere JWT)
-4. `GET /workspace/google/status` — muestra email, scopes, fecha de conexión
-5. `DELETE /workspace/google/disconnect` — desconecta
 
 ---
 
@@ -331,7 +325,7 @@ Flujo conexión (separado del login federado):
 | 2 | ✅ Completo | Google OAuth login frontend, callback `/oauth/callback` |
 | 3 | ✅ Completo | Workspace Gateway + AgentSupplier Gmail |
 | 4 | ✅ Completo | Pending Actions externas — lifecycle (`/pending-actions/{id}/execute`), retry con guard `is_external`, idempotency_key, integración `EXTERNAL_SYSTEMS` |
-| 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, Settings con tab Google Workspace, adjuntos en chat, analytics Ventas/Gastos/Productos |
+| 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, Settings de integraciones MCP, adjuntos en chat, analytics Ventas/Gastos/Productos |
 
 Post-Sprint 5: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes).
 
