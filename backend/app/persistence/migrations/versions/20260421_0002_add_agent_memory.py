@@ -1,20 +1,22 @@
 """add agent_memory table
 
-Revision ID: add_agent_memory
-Revises: None
+Revision ID: 20260421_0002
+Revises: 20260421_0001
 Create Date: 2026-04-21
-
 """
+
 from __future__ import annotations
 
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from typing import Sequence, Union
 
-revision = "add_agent_memory"
-down_revision = None
-branch_labels = None
-depends_on = None
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+revision: str = "20260421_0002"
+down_revision: Union[str, None] = "20260421_0001"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
