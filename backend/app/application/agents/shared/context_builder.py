@@ -12,6 +12,7 @@ CONTEXT_BUDGETS = {
 CONTEXT_PRIORITY = [
     ("intent_and_entities", 200),
     ("business_heuristics", 300),
+    ("agent_memory", 300),
     ("current_snapshot", 600),
     ("recent_events", 800),
     ("conversation_history", 1000),

@@ -23,6 +23,7 @@ from app.application.agents.registry import get_sub_agent
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.agents.shared.schemas import AgentRequest, AgentResponse
 from app.application.security.prompt_defense import wrap_user_input
+from app.application.services.agent_memory_service import AgentMemoryService
 from app.application.services.business_memory_service import BusinessMemoryService
 from app.application.services.conversation_service import ConversationService
 from app.integrations.anthropic_client import AnthropicConfigurationError, get_anthropic_async_client
@@ -54,6 +55,14 @@ class ChatOrchestrator:
         try:
             bm_svc = BusinessMemoryService(db=db, redis=redis)
             bm_data = await bm_svc.get(tenant_id)
+        except Exception:
+            pass
+
+        # 1c. AgentMemory — patrones aprendidos del negocio (fail-silencioso)
+        agent_memory_fragment = ""
+        try:
+            am_svc = AgentMemoryService(db=db, redis=redis)
+            agent_memory_fragment = await am_svc.get_context_fragment(tenant_id)
         except Exception:
             pass
 
@@ -98,6 +107,7 @@ class ChatOrchestrator:
                     heuristics,
                     conversation_ctx,
                     bm_data,
+                    agent_memory_fragment,
                 )
             except AnthropicConfigurationError:
                 raise
@@ -137,6 +147,7 @@ class ChatOrchestrator:
         heuristics: object,
         conversation_ctx: dict,
         bm_data: dict | None = None,
+        agent_memory_fragment: str = "",
     ) -> str:
         turns = conversation_ctx.get("turns", [])
         history = (
@@ -158,10 +169,14 @@ class ChatOrchestrator:
             if summary:
                 memory_fragment = f"\n\nEstado actual del negocio: {summary}"
 
+        # Fragmento de AgentMemory: patrones aprendidos del negocio
+        agent_mem_section = f"\n\n{agent_memory_fragment}" if agent_memory_fragment else ""
+
         system = (
             f"Sos el asistente financiero de Véktor para {business_name} ({business_type}).\n\n"
             f"{heuristic_fragment}"
-            f"{memory_fragment}\n\n"
+            f"{memory_fragment}"
+            f"{agent_mem_section}\n\n"
             "MISIÓN: Generá una respuesta conversacional, clara y accionable "
             "basada en los resultados del análisis.\n\n"
             "REGLAS:\n"

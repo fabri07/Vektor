@@ -252,6 +252,15 @@ async def execute_pending_action(
             action_id=str(action.id),
         )
 
+    # Registrar acción en AgentMemory (fail-silencioso)
+    try:
+        if redis is not None:
+            from app.application.services.agent_memory_service import AgentMemoryService  # noqa: PLC0415
+            am_svc = AgentMemoryService(db=db, redis=redis)
+            await am_svc.record_action(action.tenant_id, action.action_type, payload)
+    except Exception:
+        logger.warning("execute_pending_action.agent_mem_failed", action_id=str(action.id))
+
     audit = DecisionAuditLog(
         id=uuid.uuid4(),
         tenant_id=action.tenant_id,

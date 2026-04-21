@@ -87,3 +87,37 @@ class BusinessMemory(Base):
         nullable=False,
         onupdate=sa.text("CURRENT_TIMESTAMP"),
     )
+
+
+class AgentMemory(Base):
+    """Patrones aprendidos por los agentes LLM por tenant. Una fila por (tenant_id, key)."""
+
+    __tablename__ = "agent_memory"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    key: Mapped[str] = mapped_column(sa.String(120), nullable=False)
+    value: Mapped[dict] = mapped_column(PGJSONB, nullable=False, default=dict)
+    occurrence_count: Mapped[int] = mapped_column(sa.Integer(), nullable=False, default=1)
+    confidence: Mapped[float] = mapped_column(sa.Float(), nullable=False, default=1.0)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        sa.TIMESTAMP(timezone=True),
+        server_default=sa.text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.TIMESTAMP(timezone=True),
+        server_default=sa.text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint("tenant_id", "key", name="uq_agent_memory_tenant_key"),
+    )
