@@ -4,6 +4,7 @@ Pytest fixtures for Véktor backend tests.
 Structure mirrors app/ directory.
 """
 
+import io
 import unittest.mock
 import uuid
 from collections.abc import AsyncGenerator
@@ -164,3 +165,88 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
         base_url="http://test",
     ) as ac:
         yield ac
+
+
+# ── Reusable file fixtures ───────────────────────────────────────────────────
+
+@pytest.fixture
+def xlsx_bytes() -> bytes:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["fecha", "monto", "descripcion"])  # type: ignore[union-attr]
+    sheet.append(["2024-01-15", "50000", "Venta del día"])  # type: ignore[union-attr]
+    sheet.append(["2024-01-16", "35000", "Venta tarde"])  # type: ignore[union-attr]
+    buf = io.BytesIO()
+    workbook.save(buf)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def csv_bytes() -> bytes:
+    return (
+        b"fecha,monto,descripcion\n"
+        b"2024-01-15,50000,Venta del dia\n"
+        b"2024-01-16,35000,Venta tarde\n"
+    )
+
+
+@pytest.fixture
+def txt_bytes() -> bytes:
+    return b"Venta del dia $50.000\nGasto proveedor $12.000\nStock mercaderia $8.000\n"
+
+
+@pytest.fixture
+def docx_bytes() -> bytes:
+    docx = pytest.importorskip("docx")
+
+    document = docx.Document()
+    document.add_paragraph("Venta del dia $50.000")
+    document.add_paragraph("Gasto proveedor $12.000")
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def pptx_bytes() -> bytes:
+    pptx = pytest.importorskip("pptx")
+
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "Resumen financiero"
+    slide.placeholders[1].text = "Venta del dia $50.000\nGasto proveedor $12.000"
+    buf = io.BytesIO()
+    presentation.save(buf)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def pdf_bytes() -> bytes:
+    pypdf = pytest.importorskip("pypdf")
+
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def png_bytes() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+        b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+
+@pytest.fixture
+def jpg_bytes() -> bytes:
+    image_module = pytest.importorskip("PIL.Image")
+
+    image = image_module.new("RGB", (1, 1), color=(255, 255, 255))
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG")
+    return buf.getvalue()

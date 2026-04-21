@@ -13,9 +13,11 @@ Flujo:
 from __future__ import annotations
 
 import uuid
+from contextlib import suppress
+from typing import Any
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.ceo.agent import AgentCEO
@@ -26,9 +28,22 @@ from app.application.security.prompt_defense import wrap_user_input
 from app.application.services.agent_memory_service import AgentMemoryService
 from app.application.services.business_memory_service import BusinessMemoryService
 from app.application.services.conversation_service import ConversationService
-from app.integrations.anthropic_client import AnthropicConfigurationError, get_anthropic_async_client
+from app.application.services.file_parsing import (
+    preview_value_from_summary,
+    summary_columns,
+    summary_row_count,
+)
+from app.integrations.anthropic_client import (
+    AnthropicConfigurationError,
+    get_anthropic_async_client,
+)
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessProfile
+from app.persistence.models.file import (
+    PROCESSING_STATUS_DONE,
+    PROCESSING_STATUS_NEEDS_CONFIRMATION,
+    UploadedFile,
+)
 from app.persistence.models.tenant import Tenant
 
 logger = get_logger(__name__)
@@ -68,10 +83,8 @@ class ChatOrchestrator:
 
         # 1d. Archivos procesados — uploads confirmados del tenant (fail-silencioso)
         file_context = ""
-        try:
-            file_context = await self._load_file_context(tenant_id, db)
-        except Exception:
-            pass
+        with suppress(Exception):
+            file_context = await self._load_file_context(tenant_id, db, request.attachments)
 
         # 2. Historial conversacional
         conversation_ctx: dict = {}
@@ -160,7 +173,7 @@ class ChatOrchestrator:
     ) -> str:
         turns = conversation_ctx.get("turns", [])
         history = (
-            "\n".join(f"{t['role'].upper()}: {t['content']}" for t in turns[-4:])
+            "\n".join(self._format_history_turn(t) for t in turns[-4:])
             or "Sin historial previo."
         )
 
@@ -224,29 +237,51 @@ class ChatOrchestrator:
             lines.append(f"Resumen: {s}")
         if s := result.get("health_score"):
             lines.append(f"Score de salud: {s}/100")
-        if comps := result.get("components"):
-            if isinstance(comps, dict):
-                for k, v in comps.items():
-                    lines.append(
-                        f"  {k}: {v:.0f}/100" if isinstance(v, float) else f"  {k}: {v}"
-                    )
-        if alerts := result.get("alerts"):
-            if isinstance(alerts, list):
-                for a in alerts[:3]:
-                    if isinstance(a, dict):
-                        lines.append(f"Alerta: {a.get('message', '')}")
+        if (comps := result.get("components")) and isinstance(comps, dict):
+            for k, v in comps.items():
+                lines.append(
+                    f"  {k}: {v:.0f}/100" if isinstance(v, float) else f"  {k}: {v}"
+                )
+        if (alerts := result.get("alerts")) and isinstance(alerts, list):
+            for a in alerts[:3]:
+                if isinstance(a, dict):
+                    lines.append(f"Alerta: {a.get('message', '')}")
         if q := agent_response.question:
             lines.append(f"Pregunta pendiente: {q}")
         return "\n".join(lines) or str(result)[:300]
 
-    async def _load_file_context(self, tenant_id: uuid.UUID, db: AsyncSession) -> str:
-        """Carga los últimos archivos procesados del tenant e incluye su resumen."""
-        from sqlalchemy import desc, select  # noqa: PLC0415
-        from app.persistence.models.file import (  # noqa: PLC0415
-            PROCESSING_STATUS_DONE,
-            PROCESSING_STATUS_NEEDS_CONFIRMATION,
-            UploadedFile,
-        )
+    async def _load_file_context(
+        self,
+        tenant_id: uuid.UUID,
+        db: AsyncSession,
+        attachments: list[Any] | None = None,
+    ) -> str:
+        """Build contextual file fragments for current attachments and recent parsed files."""
+        sections: list[str] = []
+        attachment_files: list[UploadedFile] = []
+        attachment_ids = self._extract_attachment_ids(attachments or [])
+
+        if attachment_ids:
+            stmt = (
+                select(UploadedFile)
+                .where(
+                    UploadedFile.tenant_id == tenant_id,
+                    UploadedFile.id.in_(attachment_ids),
+                )
+                .order_by(desc(UploadedFile.created_at))
+            )
+            result = await db.execute(stmt)
+            loaded = list(result.scalars().all())
+            files_by_id = {str(file.id): file for file in loaded}
+            attachment_files = [
+                files_by_id[file_id] for file_id in attachment_ids if file_id in files_by_id
+            ]
+            current_lines = self._render_file_lines(
+                attachment_files,
+                heading="Adjuntos del mensaje actual:",
+            )
+            if current_lines:
+                sections.append(current_lines)
 
         stmt = (
             select(UploadedFile)
@@ -261,29 +296,19 @@ class ChatOrchestrator:
             .limit(5)
         )
         result = await db.execute(stmt)
-        files = result.scalars().all()
-        if not files:
-            return ""
+        recent_files = [
+            file
+            for file in result.scalars().all()
+            if str(file.id) not in set(attachment_ids)
+        ]
+        recent_lines = self._render_file_lines(
+            recent_files,
+            heading="Archivos recientes del usuario:",
+        )
+        if recent_lines:
+            sections.append(recent_lines)
 
-        lines: list[str] = ["Archivos cargados por el usuario:"]
-        for f in files:
-            summary = f.parsed_summary_json or {}
-            if not isinstance(summary, dict):
-                continue
-            file_type = summary.get("type", f.purpose)
-            row_count = summary.get("row_count", "?")
-            date_str = f.created_at.strftime("%d/%m/%Y") if f.created_at else "?"
-            line = f"- {f.original_filename} ({date_str}): {file_type}, {row_count} filas"
-            cols = summary.get("columns", [])
-            if cols:
-                line += f", columnas: {', '.join(str(c) for c in cols[:6])}"
-            lines.append(line)
-            for key in ("data", "rows", "products", "margins", "totals"):
-                if key in summary:
-                    preview = str(summary[key])[:300]
-                    lines.append(f"  datos: {preview}")
-                    break
-        return "\n".join(lines) if len(lines) > 1 else ""
+        return "\n\n".join(section for section in sections if section).strip()
 
     async def _save_turn(
         self,
@@ -299,8 +324,89 @@ class ChatOrchestrator:
             conversation_id = request.conversation_id
             if not conversation_id:
                 return
-            await svc.add_turn(conversation_id, "user", request.message)
+            user_metadata = self._build_turn_metadata(request.attachments)
+            await svc.add_turn(
+                conversation_id,
+                "user",
+                request.message,
+                metadata=user_metadata,
+            )
             await svc.add_turn(conversation_id, "assistant", assistant_message)
             await svc.persist(conversation_id, tenant_id, user_id)
         except Exception as exc:
             logger.warning("chat_orchestrator_save_turn_failed", error=str(exc))
+
+    @staticmethod
+    def _extract_attachment_ids(attachments: list[Any]) -> list[str]:
+        file_ids: list[str] = []
+        for attachment in attachments:
+            file_id = None
+            if isinstance(attachment, dict):
+                file_id = attachment.get("file_id")
+            else:
+                file_id = getattr(attachment, "file_id", None)
+            if isinstance(file_id, str) and file_id:
+                file_ids.append(file_id)
+        return file_ids
+
+    @staticmethod
+    def _build_turn_metadata(attachments: list[Any]) -> dict[str, Any] | None:
+        normalized: list[dict[str, str]] = []
+        for attachment in attachments:
+            if isinstance(attachment, dict):
+                file_id = attachment.get("file_id")
+                filename = attachment.get("filename")
+            else:
+                file_id = getattr(attachment, "file_id", None)
+                filename = getattr(attachment, "filename", None)
+            if isinstance(file_id, str) and isinstance(filename, str):
+                normalized.append({"file_id": file_id, "filename": filename})
+        return {"attachments": normalized} if normalized else None
+
+    @staticmethod
+    def _format_history_turn(turn: dict[str, Any]) -> str:
+        content = str(turn.get("content", ""))
+        attachments = turn.get("attachments")
+        if isinstance(attachments, list) and attachments:
+            names = [
+                str(item.get("filename"))
+                for item in attachments
+                if isinstance(item, dict) and item.get("filename")
+            ]
+            if names:
+                return f"{turn['role'].upper()}: {content} [adjuntos: {', '.join(names)}]"
+        return f"{turn['role'].upper()}: {content}"
+
+    def _render_file_lines(self, files: list[UploadedFile], heading: str) -> str:
+        lines: list[str] = []
+        for file in files:
+            summary = file.parsed_summary_json or {}
+            if not isinstance(summary, dict):
+                continue
+            file_type = str(summary.get("file_type") or summary.get("type") or file.purpose)
+            source_format = str(summary.get("source_format") or file.content_type)
+            row_count = summary_row_count(summary)
+            date_str = file.created_at.strftime("%d/%m/%Y") if file.created_at else "?"
+            line = (
+                f"- {file.original_filename} ({date_str}): {file_type}/{source_format}, "
+                f"{row_count} filas"
+            )
+            columns = summary_columns(summary)
+            if columns:
+                line += f", columnas: {', '.join(columns[:6])}"
+            lines.append(line)
+
+            preview = preview_value_from_summary(summary)
+            if preview:
+                lines.append(f"  datos: {preview}")
+
+            warnings = summary.get("warnings")
+            if isinstance(warnings, list) and warnings:
+                lines.append(f"  warning: {str(warnings[0])[:200]}")
+
+            if error := summary.get("error"):
+                lines.append(f"  error: {str(error)[:200]}")
+
+        if not lines:
+            return ""
+        return "\n".join([heading, *lines])

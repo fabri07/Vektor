@@ -1,41 +1,30 @@
 """File upload/download endpoints."""
 
-import re
 from uuid import UUID
 
-import filetype
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
+from app.application.services.file_parsing import (
+    MAX_FILE_SIZE_BYTES,
+    detect_supported_mime,
+    parse_uploaded_content,
+    sanitize_filename,
+)
 from app.integrations.s3 import S3Client
 from app.persistence.db.session import get_db_session
-from app.persistence.models.file import UploadedFile
+from app.persistence.models.file import (
+    PROCESSING_STATUS_DONE,
+    PROCESSING_STATUS_PENDING,
+    UploadedFile,
+)
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 
 router = APIRouter()
-
-ALLOWED_CONTENT_TYPES = {
-    "application/pdf",
-    "image/jpeg",
-    "image/png",
-    "text/csv",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-}
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
-
-_SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
-
-
-def _sanitize_filename(filename: str) -> str:
-    """Remove path traversal and unsafe characters from a filename."""
-    filename = filename.replace("\\", "/").split("/")[-1]
-    filename = _SAFE_FILENAME_RE.sub("_", filename)
-    return filename or "upload"
-
 
 class UploadedFileResponse(BaseModel):
     model_config = {"from_attributes": True}
@@ -52,7 +41,7 @@ class UploadedFileResponse(BaseModel):
     "/upload",
     response_model=UploadedFileResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload a file (PDF, image, CSV, XLSX)",
+    summary="Upload a file for chat or storage",
 )
 async def upload_file(
     file: UploadFile = File(...),
@@ -68,16 +57,26 @@ async def upload_file(
             detail="File exceeds maximum size of 10 MB.",
         )
 
-    # Validate via magic bytes (not just Content-Type header)
-    kind = filetype.guess(content[:2048])
-    detected_mime = kind.mime if kind else (file.content_type or "")
-    if detected_mime not in ALLOWED_CONTENT_TYPES:
+    filename = sanitize_filename(file.filename or "upload")
+    try:
+        detected_mime = detect_supported_mime(content, filename)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"File type '{detected_mime}' is not supported.",
-        )
+            detail=str(exc),
+        ) from exc
 
-    filename = _sanitize_filename(file.filename or "upload")
+    parsed_summary = None
+    processing_status = None
+    if purpose == "chat":
+        try:
+            parsed_summary = parse_uploaded_content(content, detected_mime, filename)
+            processing_status = PROCESSING_STATUS_DONE
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"No se pudo procesar el archivo para el chat: {exc}",
+            ) from exc
 
     s3 = S3Client()
     s3_key = await s3.upload(
@@ -96,6 +95,8 @@ async def upload_file(
         size_bytes=len(content),
         purpose=purpose,
         status="uploaded",
+        processing_status=processing_status or PROCESSING_STATUS_PENDING,
+        parsed_summary_json=parsed_summary,
     )
     session.add(record)
     await session.flush()

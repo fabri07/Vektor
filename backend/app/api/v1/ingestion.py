@@ -13,21 +13,33 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-import filetype
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
+from app.application.services.file_parsing import (
+    FECHA_COLS as _FECHA_COLS,
+)
+from app.application.services.file_parsing import (
+    GASTO_COLS as _GASTO_COLS,
+)
+from app.application.services.file_parsing import (
+    IMAGE_MIMES as _IMAGE_MIMES,
+)
+from app.application.services.file_parsing import (
+    SPREADSHEET_MIMES as _SPREADSHEET_MIMES,
+)
+from app.application.services.file_parsing import (
+    VENTA_COLS as _VENTA_COLS,
+)
+from app.application.services.file_parsing import (
+    detect_supported_mime,
+    parse_uploaded_content,
+    sanitize_filename,
+)
 from app.config.settings import get_settings
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
-    _FECHA_COLS,
-    _GASTO_COLS,
-    _PRODUCTO_COLS,
-    _VENTA_COLS,
-    _extract_amounts_from_text,
-    _analyze_headers,
-    _rows_to_dicts,
     process_image_ocr,
     process_spreadsheet,
     process_text_document,
@@ -62,76 +74,14 @@ logger = get_logger(__name__)
 
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
-# MIME types detected by filetype (magic bytes)
-_SPREADSHEET_MIMES = {
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
-}
-_TEXT_MIMES = {
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
-}
-_IMAGE_MIMES = {
-    "image/jpeg",
-    "image/png",
-    "image/heif",  # filetype returns image/heif for .heic
-    "image/heic",
-}
-
-# Extensions that filetype can't detect (plain text) — fallback
-_PLAIN_TEXT_EXTENSIONS = {".txt", ".csv"}
-
-ALLOWED_MIMES = _SPREADSHEET_MIMES | _TEXT_MIMES | _IMAGE_MIMES | {"text/plain", "text/csv"}
-
 FileHint = Literal["ventas", "gastos", "stock", "general"]
-
-# Filename sanitization: keep alphanumerics, dots, dashes, underscores only
-_SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _sanitize_filename(filename: str) -> str:
-    """Remove path traversal and unsafe characters from a filename."""
-    # Strip directory components
-    filename = filename.replace("\\", "/").split("/")[-1]
-    # Remove unsafe characters
-    filename = _SAFE_FILENAME_RE.sub("_", filename)
-    # Ensure non-empty
-    return filename or "upload"
-
-
-def _detect_mime(content: bytes, filename: str) -> str:
-    """
-    Detect real MIME type from magic bytes via filetype.
-    Falls back to extension-based detection for plain-text formats
-    (CSV, TXT) that filetype cannot identify from binary signatures.
-    Raises HTTPException 415 if the type is not allowed.
-    """
-    kind = filetype.guess(content[:2048])
-    if kind is not None:
-        detected = kind.mime
-    else:
-        ext = f".{filename.rsplit('.', 1)[-1].lower()}" if "." in filename else ""
-        if ext in _PLAIN_TEXT_EXTENSIONS:
-            detected = "text/csv" if ext == ".csv" else "text/plain"
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail="Tipo de archivo no reconocido. Tipos aceptados: xlsx, csv, txt, docx, jpg, png, heic.",
-            )
-
-    if detected not in ALLOWED_MIMES:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Tipo de archivo '{detected}' no soportado.",
-        )
-    return detected
 
 
 def _pick_job(mime: str) -> object:
     """Return the Celery task to enqueue for a given MIME type."""
     if mime in _IMAGE_MIMES:
         return process_image_ocr
-    if mime in _SPREADSHEET_MIMES or mime in ("text/csv",):
+    if mime in _SPREADSHEET_MIMES:
         return process_spreadsheet
     return process_text_document
 
@@ -180,7 +130,18 @@ def _find_col(headers: list[str], keywords: set[str]) -> str | None:
     return None
 
 
-_NOMBRE_COLS: set[str] = {"producto", "descripcion", "descripción", "nombre", "articulo", "artículo", "item", "name", "concepto", "detalle"}
+_NOMBRE_COLS: set[str] = {
+    "producto",
+    "descripcion",
+    "descripción",
+    "nombre",
+    "articulo",
+    "artículo",
+    "item",
+    "name",
+    "concepto",
+    "detalle",
+}
 _PRECIO_VENTA_COLS: set[str] = {"precio_venta", "precio", "price", "p_venta"}
 _COSTO_COLS: set[str] = {"costo", "cost", "precio_costo", "p_costo"}
 _STOCK_COLS: set[str] = {"stock", "cantidad", "inventario", "units", "qty", "existencia"}
@@ -194,9 +155,10 @@ async def _insert_confirmed_data(
     confirmed_fields: dict[str, bool],
 ) -> dict[str, int]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables."""
+    from sqlalchemy import select  # noqa: PLC0415
+
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
-    from sqlalchemy import select  # noqa: PLC0415
 
     today = date.today()
     counts: dict[str, int] = {"ventas": 0, "gastos": 0, "productos": 0}
@@ -218,9 +180,15 @@ async def _insert_confirmed_data(
         stock_col = _find_col(headers, _STOCK_COLS)
         sku_col = _find_col(headers, _SKU_COLS)
 
-        wants_ventas = bool(confirmed_fields.get("ventas") and summary.get("has_venta") and venta_col)
-        wants_gastos = bool(confirmed_fields.get("gastos") and summary.get("has_gasto") and gasto_col)
-        wants_productos = bool(confirmed_fields.get("productos") and summary.get("has_producto") and nombre_col)
+        wants_ventas = bool(
+            confirmed_fields.get("ventas") and summary.get("has_venta") and venta_col
+        )
+        wants_gastos = bool(
+            confirmed_fields.get("gastos") and summary.get("has_gasto") and gasto_col
+        )
+        wants_productos = bool(
+            confirmed_fields.get("productos") and summary.get("has_producto") and nombre_col
+        )
 
         for row in rows:
             tx_date = (_parse_date(row.get(fecha_col)) if fecha_col else None) or today
@@ -242,7 +210,11 @@ async def _insert_confirmed_data(
                 amount = _parse_amount(row.get(gasto_col))
                 if amount:
                     desc_raw = row.get(nombre_col) if nombre_col else None
-                    desc = str(desc_raw).strip()[:499] if desc_raw and str(desc_raw).strip() not in {"None", "nan", ""} else "Gasto importado"
+                    desc = (
+                        str(desc_raw).strip()[:499]
+                        if desc_raw and str(desc_raw).strip() not in {"None", "nan", ""}
+                        else "Gasto importado"
+                    )
                     session.add(ExpenseEntry(
                         tenant_id=tenant_id,
                         amount=amount,
@@ -262,11 +234,19 @@ async def _insert_confirmed_data(
                 cost = _parse_amount(row.get(costo_col)) if costo_col else None
                 try:
                     stock_raw = row.get(stock_col) if stock_col else None
-                    stock_val = int(float(str(stock_raw))) if stock_raw not in (None, "", "None", "nan") else 0
+                    stock_val = (
+                        int(float(str(stock_raw)))
+                        if stock_raw not in (None, "", "None", "nan")
+                        else 0
+                    )
                 except (ValueError, TypeError):
                     stock_val = 0
                 sku_raw = row.get(sku_col) if sku_col else None
-                sku = str(sku_raw).strip()[:99] if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"} else None
+                sku = (
+                    str(sku_raw).strip()[:99]
+                    if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"}
+                    else None
+                )
 
                 result = await session.execute(
                     select(Product).where(
@@ -345,9 +325,6 @@ async def _process_file_sync(
     engine.  On failure the file is marked FAILED so the user sees a clear
     status instead of being stuck in PENDING forever.
     """
-    import csv as _csv  # noqa: PLC0415
-    import io  # noqa: PLC0415
-
     repo = FileRepository(session)
     try:
         record.processing_status = PROCESSING_STATUS_PROCESSING
@@ -356,87 +333,7 @@ async def _process_file_sync(
 
         s3 = S3Client()
         content = await s3.download(record.s3_key)
-        mime = record.content_type
-
-        summary: dict[str, Any] = {"warnings": []}
-
-        if mime in _IMAGE_MIMES:
-            summary["file_type"] = "image"
-            summary["confidence"] = "LOW"
-            try:
-                import pytesseract  # noqa: PLC0415
-                from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
-
-                try:
-                    img = Image.open(io.BytesIO(content))
-                    raw_text = pytesseract.image_to_string(img, lang="spa+eng")
-                except UnidentifiedImageError:
-                    raw_text = ""
-                    summary["warnings"].append(
-                        "No se pudo abrir la imagen (formato no soportado por Pillow)."
-                    )
-
-                amounts = _extract_amounts_from_text(raw_text)
-                summary.update({"raw_text_preview": raw_text[:500], **amounts})
-            except ImportError:
-                summary["error"] = "OCR no disponible en este entorno"
-                summary["ventas_detectadas"] = []
-                summary["gastos_detectados"] = []
-                summary["stock_detectado"] = []
-
-        elif mime in _SPREADSHEET_MIMES or mime in ("text/csv",):
-            summary["file_type"] = "spreadsheet"
-            is_csv = mime == "text/csv" or record.original_filename.endswith(".csv")
-            if is_csv:
-                text = content.decode("utf-8", errors="replace")
-                reader = _csv.reader(io.StringIO(text))
-                rows = list(reader)
-                if not rows:
-                    summary.update({"confidence": "MEDIUM", "ventas_detectadas": [], "rows_processed": 0})
-                else:
-                    headers = rows[0]
-                    data_rows = rows[1:]
-                    analysis = _analyze_headers(headers)
-                    summary.update(analysis)
-                    summary["headers"] = headers
-                    summary["rows_processed"] = len(data_rows)
-                    summary["ventas_detectadas"] = _rows_to_dicts(headers, data_rows[:50])
-            else:
-                import openpyxl  # noqa: PLC0415
-
-                wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-                ws = wb.active
-                all_rows = list(ws.iter_rows(values_only=True))  # type: ignore[union-attr]
-                if not all_rows:
-                    summary.update({"confidence": "MEDIUM", "ventas_detectadas": [], "rows_processed": 0})
-                else:
-                    headers = [str(c) if c is not None else f"col_{i}" for i, c in enumerate(all_rows[0])]
-                    data_rows_raw = [list(r) for r in all_rows[1:]]
-                    analysis = _analyze_headers(headers)
-                    summary.update(analysis)
-                    summary["headers"] = headers
-                    summary["rows_processed"] = len(data_rows_raw)
-                    summary["ventas_detectadas"] = _rows_to_dicts(headers, data_rows_raw[:50])
-                wb.close()
-
-        else:
-            # text / docx
-            summary["file_type"] = "text"
-            summary["confidence"] = "MEDIUM"
-            is_docx = (
-                mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                or record.original_filename.endswith(".docx")
-            )
-            if is_docx:
-                import docx  # noqa: PLC0415
-
-                doc = docx.Document(io.BytesIO(content))
-                raw_text = "\n".join(p.text for p in doc.paragraphs)
-            else:
-                raw_text = content.decode("utf-8", errors="replace")
-
-            amounts = _extract_amounts_from_text(raw_text)
-            summary.update({"raw_text_preview": raw_text[:500], **amounts})
+        summary = parse_uploaded_content(content, record.content_type, record.original_filename)
 
         record.parsed_summary_json = summary
         record.processing_status = PROCESSING_STATUS_NEEDS_CONFIRMATION
@@ -485,8 +382,14 @@ async def upload_file(
             detail="El archivo supera el tamaño máximo de 10 MB.",
         )
 
-    filename = _sanitize_filename(file.filename or "upload")
-    detected_mime = _detect_mime(content, filename)
+    filename = sanitize_filename(file.filename or "upload")
+    try:
+        detected_mime = detect_supported_mime(content, filename)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
+        ) from exc
 
     # Build S3 key: uploads/{tenant_id}/{uuid}/{filename}
     file_uuid = uuid.uuid4()
@@ -670,7 +573,12 @@ async def confirm_file(
     updated_summary = dict(record.parsed_summary_json or {})
     updated_summary["confirmed_fields"] = body.confirmed_fields
 
-    counts = await _insert_confirmed_data(session, tenant.tenant_id, updated_summary, body.confirmed_fields)
+    counts = await _insert_confirmed_data(
+        session,
+        tenant.tenant_id,
+        updated_summary,
+        body.confirmed_fields,
+    )
     updated_summary["imported_counts"] = counts
 
     record.parsed_summary_json = updated_summary

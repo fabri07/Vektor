@@ -25,7 +25,7 @@ from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
 from app.persistence.models.user_auth_identity import UserAuthIdentity
-from app.persistence.models.memory import BusinessMemory, OperationFingerprint
+from app.persistence.models.memory import AgentMemory, BusinessMemory, OperationFingerprint
 
 __all__ = [
     "UserActivityEvent",
@@ -55,4 +55,5 @@ __all__ = [
     "PendingAction",
     "OperationFingerprint",
     "BusinessMemory",
+    "AgentMemory",
 ]

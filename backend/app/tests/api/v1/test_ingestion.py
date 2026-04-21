@@ -200,17 +200,47 @@ class TestUploadEndpoint:
         assert response.status_code == 201
         mock_image_delay.assert_called_once()
 
+    async def test_upload_pdf_enqueues_text_job(
+        self,
+        client: AsyncClient,
+        auth_headers: dict,
+        pdf_bytes: bytes,
+        mock_s3_upload: unittest.mock.AsyncMock,
+        mock_text_delay: unittest.mock.MagicMock,
+    ) -> None:
+        response = await client.post(
+            "/api/v1/ingestion/upload",
+            headers=auth_headers,
+            files={"file": ("doc.pdf", pdf_bytes, "application/pdf")},
+        )
+        assert response.status_code == 201
+        mock_text_delay.assert_called_once()
+
+    async def test_upload_pptx_enqueues_text_job(
+        self,
+        client: AsyncClient,
+        auth_headers: dict,
+        pptx_bytes: bytes,
+        mock_s3_upload: unittest.mock.AsyncMock,
+        mock_text_delay: unittest.mock.MagicMock,
+    ) -> None:
+        response = await client.post(
+            "/api/v1/ingestion/upload",
+            headers=auth_headers,
+            files={"file": ("slides.pptx", pptx_bytes, "application/octet-stream")},
+        )
+        assert response.status_code == 201
+        mock_text_delay.assert_called_once()
+
     async def test_upload_unsupported_type_returns_415(
         self,
         client: AsyncClient,
         auth_headers: dict,
     ) -> None:
-        # PDF magic bytes: %PDF
-        pdf_bytes = b"%PDF-1.4 fake pdf content"
         response = await client.post(
             "/api/v1/ingestion/upload",
             headers=auth_headers,
-            files={"file": ("doc.pdf", pdf_bytes, "application/pdf")},
+            files={"file": ("malware.exe", b"MZfake", "application/octet-stream")},
         )
         assert response.status_code == 415
 

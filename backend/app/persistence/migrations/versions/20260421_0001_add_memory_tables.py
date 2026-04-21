@@ -84,7 +84,7 @@ def upgrade() -> None:
             "recent_actions",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            server_default="'[]'::jsonb",
+            server_default=sa.text("'[]'::jsonb"),
         ),
         sa.Column("llm_context_summary", sa.Text(), nullable=True),
         sa.Column(

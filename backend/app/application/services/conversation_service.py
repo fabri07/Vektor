@@ -9,7 +9,10 @@ Estrategia:
 
 import json
 import uuid
+from contextlib import suppress
+from typing import Any
 
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.conversation_context import AgentConversationContext
@@ -20,7 +23,7 @@ MAX_TURNS = 10
 
 
 class ConversationService:
-    def __init__(self, redis_client, db_session: AsyncSession) -> None:
+    def __init__(self, redis_client: Redis, db_session: AsyncSession) -> None:
         self.redis = redis_client
         self.db = db_session
 
@@ -41,11 +44,19 @@ class ConversationService:
         return {"turns": [], "summary": None}
 
     async def add_turn(
-        self, conversation_id: str, role: str, content: str, tokens: int = 200
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        tokens: int = 200,
+        metadata: dict[str, Any] | None = None,
     ) -> dict:
         """Agregar un turno al historial. Mantiene los últimos MAX_TURNS turnos."""
         ctx = await self.get_context(conversation_id)
-        ctx["turns"].append({"role": role, "content": content})
+        turn: dict[str, Any] = {"role": role, "content": content}
+        if metadata:
+            turn.update(metadata)
+        ctx["turns"].append(turn)
 
         if len(ctx["turns"]) > MAX_TURNS:
             ctx["turns"] = ctx["turns"][-MAX_TURNS:]
@@ -58,7 +69,9 @@ class ConversationService:
     async def _summarize_turns(self, turns: list[dict]) -> str:
         """Resume turnos viejos con Haiku. Fail-silencioso."""
         try:
-            from app.integrations.anthropic_client import get_anthropic_async_client  # noqa: PLC0415
+            from app.integrations.anthropic_client import (
+                get_anthropic_async_client,  # noqa: PLC0415
+            )
 
             client = get_anthropic_async_client()
             resp = await client.messages.create(
@@ -83,10 +96,14 @@ class ConversationService:
         content: str,
         tenant_id: uuid.UUID,
         user_id: uuid.UUID,
+        metadata: dict[str, Any] | None = None,
     ) -> dict:
         """Agrega turno con summarización automática al superar MAX_TURNS."""
         ctx = await self.get_context(conversation_id)
-        ctx["turns"].append({"role": role, "content": content})
+        turn: dict[str, Any] = {"role": role, "content": content}
+        if metadata:
+            turn.update(metadata)
+        ctx["turns"].append(turn)
 
         if len(ctx["turns"]) > MAX_TURNS:
             summary = await self._summarize_turns(ctx["turns"][:-5])
@@ -94,12 +111,10 @@ class ConversationService:
             if summary:
                 ctx["summary"] = summary
 
-        try:
+        with suppress(Exception):
             await self.redis.setex(
                 f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx)
             )
-        except Exception:
-            pass
         await self.persist(conversation_id, tenant_id, user_id)
         await self.db.commit()
         return ctx

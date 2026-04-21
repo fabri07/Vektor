@@ -7,14 +7,27 @@ import { filesService } from "@/services/files.service";
 const ALLOWED_TYPES = [
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/plain",
   "text/csv",
   "image/png",
   "image/jpeg",
 ];
-const ALLOWED_EXTENSIONS = ".pdf,.xlsx,.csv,.png,.jpg,.jpeg";
+const ALLOWED_EXTENSIONS = ".pdf,.xlsx,.csv,.txt,.docx,.pptx,.png,.jpg,.jpeg";
 const MAX_FILES = 3;
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
-const ALLOWED_EXT_SET = new Set(["pdf", "xlsx", "csv", "png", "jpg", "jpeg"]);
+const ALLOWED_EXT_SET = new Set([
+  "pdf",
+  "xlsx",
+  "csv",
+  "txt",
+  "docx",
+  "pptx",
+  "png",
+  "jpg",
+  "jpeg",
+]);
 
 export interface AttachmentFile {
   id: string;
