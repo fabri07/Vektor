@@ -13,6 +13,7 @@ CONTEXT_PRIORITY = [
     ("intent_and_entities", 200),
     ("business_heuristics", 300),
     ("agent_memory", 300),
+    ("uploaded_files", 400),
     ("current_snapshot", 600),
     ("recent_events", 800),
     ("conversation_history", 1000),

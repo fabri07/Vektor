@@ -66,6 +66,13 @@ class ChatOrchestrator:
         except Exception:
             pass
 
+        # 1d. Archivos procesados — uploads confirmados del tenant (fail-silencioso)
+        file_context = ""
+        try:
+            file_context = await self._load_file_context(tenant_id, db)
+        except Exception:
+            pass
+
         # 2. Historial conversacional
         conversation_ctx: dict = {}
         if request.conversation_id:
@@ -108,6 +115,7 @@ class ChatOrchestrator:
                     conversation_ctx,
                     bm_data,
                     agent_memory_fragment,
+                    file_context,
                 )
             except AnthropicConfigurationError:
                 raise
@@ -148,6 +156,7 @@ class ChatOrchestrator:
         conversation_ctx: dict,
         bm_data: dict | None = None,
         agent_memory_fragment: str = "",
+        file_context: str = "",
     ) -> str:
         turns = conversation_ctx.get("turns", [])
         history = (
@@ -172,11 +181,19 @@ class ChatOrchestrator:
         # Fragmento de AgentMemory: patrones aprendidos del negocio
         agent_mem_section = f"\n\n{agent_memory_fragment}" if agent_memory_fragment else ""
 
+        # Archivos procesados: datos cargados por el usuario (márgenes, costos, etc.)
+        file_section = (
+            f"\n\nArchivos de referencia cargados por el usuario:\n{file_context}"
+            if file_context
+            else ""
+        )
+
         system = (
             f"Sos el asistente financiero de Véktor para {business_name} ({business_type}).\n\n"
             f"{heuristic_fragment}"
             f"{memory_fragment}"
-            f"{agent_mem_section}\n\n"
+            f"{agent_mem_section}"
+            f"{file_section}\n\n"
             "MISIÓN: Generá una respuesta conversacional, clara y accionable "
             "basada en los resultados del análisis.\n\n"
             "REGLAS:\n"
@@ -221,6 +238,52 @@ class ChatOrchestrator:
         if q := agent_response.question:
             lines.append(f"Pregunta pendiente: {q}")
         return "\n".join(lines) or str(result)[:300]
+
+    async def _load_file_context(self, tenant_id: uuid.UUID, db: AsyncSession) -> str:
+        """Carga los últimos archivos procesados del tenant e incluye su resumen."""
+        from sqlalchemy import desc, select  # noqa: PLC0415
+        from app.persistence.models.file import (  # noqa: PLC0415
+            PROCESSING_STATUS_DONE,
+            PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            UploadedFile,
+        )
+
+        stmt = (
+            select(UploadedFile)
+            .where(
+                UploadedFile.tenant_id == tenant_id,
+                UploadedFile.processing_status.in_(
+                    [PROCESSING_STATUS_DONE, PROCESSING_STATUS_NEEDS_CONFIRMATION]
+                ),
+                UploadedFile.parsed_summary_json.isnot(None),
+            )
+            .order_by(desc(UploadedFile.created_at))
+            .limit(5)
+        )
+        result = await db.execute(stmt)
+        files = result.scalars().all()
+        if not files:
+            return ""
+
+        lines: list[str] = ["Archivos cargados por el usuario:"]
+        for f in files:
+            summary = f.parsed_summary_json or {}
+            if not isinstance(summary, dict):
+                continue
+            file_type = summary.get("type", f.purpose)
+            row_count = summary.get("row_count", "?")
+            date_str = f.created_at.strftime("%d/%m/%Y") if f.created_at else "?"
+            line = f"- {f.original_filename} ({date_str}): {file_type}, {row_count} filas"
+            cols = summary.get("columns", [])
+            if cols:
+                line += f", columnas: {', '.join(str(c) for c in cols[:6])}"
+            lines.append(line)
+            for key in ("data", "rows", "products", "margins", "totals"):
+                if key in summary:
+                    preview = str(summary[key])[:300]
+                    lines.append(f"  datos: {preview}")
+                    break
+        return "\n".join(lines) if len(lines) > 1 else ""
 
     async def _save_turn(
         self,
