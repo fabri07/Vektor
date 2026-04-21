@@ -12,7 +12,7 @@ Ciclo de vida para acciones LOCALES (external_system=None):
   - confirm() → status=APPROVED, execution_status=SUCCEEDED (mismo commit)
   - No tienen idempotency_key ni retry.
 
-Ciclo de vida para acciones EXTERNAS (CREATE_SUPPLIER_DRAFT, SYNC_TO_GOOGLE):
+Ciclo de vida para acciones externas del agente:
   - create_pending_action() → status=PENDING, execution_status=NOT_STARTED,
                                external_system="GOOGLE_GMAIL|GOOGLE_SHEETS",
                                idempotency_key=<uuid único>

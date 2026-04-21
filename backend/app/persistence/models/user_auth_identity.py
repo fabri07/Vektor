@@ -4,7 +4,7 @@ Almacena la identidad OIDC de un usuario por proveedor social (Google, Facebook�
 Un usuario puede tener múltiples identidades (una por proveedor).
 
 Este modelo es SOLO para autenticación (login/registro social).
-Las credenciales API de Google Workspace viven en UserGoogleWorkspaceConnection.
+Las credenciales de proveedores externos viven fuera de este modelo.
 
 RLS: la tabla tiene tenant_id para mantener el aislamiento DB-level del resto del proyecto.
 Aunque conceptualmente la identidad es "por usuario", users pertenecen a un tenant

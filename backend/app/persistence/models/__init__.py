@@ -26,7 +26,6 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
 from app.persistence.models.user_auth_identity import UserAuthIdentity
 from app.persistence.models.memory import BusinessMemory, OperationFingerprint
-from app.persistence.models.user_google_workspace import UserGoogleWorkspaceConnection
 
 __all__ = [
     "UserActivityEvent",
@@ -34,7 +33,6 @@ __all__ = [
     "Subscription",
     "User",
     "UserAuthIdentity",
-    "UserGoogleWorkspaceConnection",
     "BusinessProfile",
     "BusinessSnapshot",
     "HeuristicRuleSet",

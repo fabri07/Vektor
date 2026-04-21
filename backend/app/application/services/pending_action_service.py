@@ -10,8 +10,6 @@ Regla crítica: execute_pending_action() no toca execution_status.
 El endpoint (confirm / retry) es responsable del ciclo de vida completo:
   IN_PROGRESS → SUCCEEDED | FAILED | REQUIRES_RECONNECT.
 
-Acciones externas (CREATE_SUPPLIER_DRAFT, SYNC_TO_GOOGLE) reciben
-external_system + idempotency_key al ser creadas.
 """
 
 import uuid
@@ -30,12 +28,6 @@ from app.persistence.models.pending_action import PendingAction
 
 logger = get_logger(__name__)
 
-# Acciones que involucran un sistema externo.
-# Al crearse, reciben external_system + idempotency_key (UUID único).
-EXTERNAL_SYSTEMS: dict[str, str] = {
-    ActionType.CREATE_SUPPLIER_DRAFT: "GOOGLE_GMAIL",
-    ActionType.SYNC_TO_GOOGLE: "GOOGLE_SHEETS",
-}
 
 
 async def create_pending_action(
@@ -48,15 +40,7 @@ async def create_pending_action(
 ) -> PendingAction:
     """Crea un PendingAction con TTL de 10 minutos. Hace flush para obtener el id.
 
-    Para acciones externas (CREATE_SUPPLIER_DRAFT, SYNC_TO_GOOGLE):
-    - external_system: nombre del sistema destino ("GOOGLE_GMAIL", "GOOGLE_SHEETS")
-    - idempotency_key: UUID generado una sola vez; nunca cambia en retry.
-
-    Para acciones locales: external_system=None, idempotency_key=None.
     """
-    ext_system = EXTERNAL_SYSTEMS.get(action_type)
-    if action_type == ActionType.IMPORT_TABULAR_FILE and payload.get("source") == "google_sheets":
-        ext_system = "GOOGLE_SHEETS"
     action = PendingAction(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -64,8 +48,8 @@ async def create_pending_action(
         payload=payload,
         risk_level=risk_level,
         status="PENDING",
-        external_system=ext_system,
-        idempotency_key=str(uuid.uuid4()) if ext_system is not None else None,
+        external_system=None,
+        idempotency_key=None,
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     db.add(action)
@@ -75,7 +59,6 @@ async def create_pending_action(
         action_id=str(action.id),
         action_type=action_type,
         risk_level=risk_level,
-        external_system=ext_system,
         tenant_id=str(tenant_id),
     )
     return action
@@ -180,73 +163,6 @@ async def execute_pending_action(
                 payload=payload,
             )
 
-    elif action.action_type == ActionType.IMPORT_TABULAR_FILE and payload.get("source") == "google_sheets":
-        record_type = payload.get("record_type", "sales")
-        records = payload.get("parsed_records") or []
-        if not isinstance(records, list):
-            records = []
-
-        imported_count = 0
-        for record in records[:50]:
-            if not isinstance(record, dict) or not record.get("amount"):
-                continue
-            if record_type == "expenses":
-                await cash_service.save_expense(record, action.tenant_id, db)
-            else:
-                await cash_service.save_sale(record, action.tenant_id, action.user_id, db)
-            imported_count += 1
-
-        logger.info(
-            "execute_pending_action: IMPORT_TABULAR_FILE google_sheets imported",
-            action_id=str(action.id),
-            record_type=record_type,
-            imported_count=imported_count,
-        )
-
-    elif action.action_type == ActionType.CREATE_SUPPLIER_DRAFT:
-        draft_text = payload.get("draft_text", "")
-        draft_to = payload.get("draft_to", "")
-        draft_subject = payload.get("draft_subject", "")
-
-        if not draft_text or not draft_to:
-            logger.warning(
-                "execute_pending_action: CREATE_SUPPLIER_DRAFT missing draft_text or draft_to",
-                action_id=str(action.id),
-                payload=payload,
-            )
-        elif redis is None:
-            logger.warning(
-                "execute_pending_action: CREATE_SUPPLIER_DRAFT no redis injected — draft not pushed to Gmail",
-                action_id=str(action.id),
-            )
-        else:
-            # Pushear el borrador a Gmail via gateway
-            from app.integrations.google_workspace.exceptions import WorkspaceTokenError  # noqa: PLC0415
-            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
-
-            gateway = GoogleWorkspaceGateway(
-                session=db,
-                redis=redis,
-                user_id=action.user_id,
-                tenant_id=action.tenant_id,
-            )
-            try:
-                gmail = await gateway.gmail()
-                draft_id = await gateway.run_gmail(
-                    gmail.create_draft(to=draft_to, subject=draft_subject, body=draft_text)
-                )
-                logger.info(
-                    "execute_pending_action: CREATE_SUPPLIER_DRAFT pushed to Gmail",
-                    action_id=str(action.id),
-                    draft_id=draft_id,
-                )
-            except WorkspaceTokenError as exc:
-                logger.warning(
-                    "execute_pending_action: CREATE_SUPPLIER_DRAFT workspace error",
-                    action_id=str(action.id),
-                    reason=exc.reason,
-                )
-                raise  # fail-closed — no continuar si no se pudo crear el draft
 
     else:
         logger.warning(

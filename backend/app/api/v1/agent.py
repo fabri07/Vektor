@@ -30,7 +30,6 @@ from app.application.services.pending_action_service import (
     execute_pending_action,
 )
 from app.integrations.anthropic_client import AnthropicConfigurationError
-from app.integrations.google_workspace.exceptions import WorkspaceTokenError
 from app.observability.logger import get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -403,10 +402,6 @@ async def confirm_action(
         try:
             await execute_pending_action(action, db, redis=redis)
             action.execution_status = "SUCCEEDED"
-        except WorkspaceTokenError as exc:
-            action.execution_status = "REQUIRES_RECONNECT"
-            action.failure_code = exc.reason
-            action.failure_message = None
         except Exception as exc:
             action.execution_status = "FAILED"
             action.failure_code = None
@@ -463,8 +458,6 @@ async def confirm_action(
         "action_type": action.action_type,
         "execution_status": action.execution_status,
     }
-    if action.execution_status == "REQUIRES_RECONNECT":
-        response["reconnect_required"] = True
     return response
 
 
@@ -635,6 +628,4 @@ async def retry_action(
         "action_type": action.action_type,
         "execution_status": action.execution_status,
     }
-    if action.execution_status == "REQUIRES_RECONNECT":
-        response["reconnect_required"] = True
     return response

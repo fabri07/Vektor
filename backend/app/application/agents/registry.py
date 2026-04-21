@@ -2,30 +2,20 @@
 
 from __future__ import annotations
 
-import uuid
-
-from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.application.agents.base import BaseAgent
 
 
 def get_sub_agent(
     name: str,
-    db: AsyncSession | None = None,
-    redis: Redis | None = None,
-    user_id: uuid.UUID | None = None,
-    tenant_id: uuid.UUID | None = None,
+    db=None,
+    redis=None,
+    user_id=None,
+    tenant_id=None,
 ) -> BaseAgent | None:
     if name == "agent_cash":
         from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
 
-        gateway = None
-        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
-            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
-
-            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
-        return AgentCash(db=db, redis=redis, gateway=gateway)
+        return AgentCash(db=db, redis=redis)
     if name == "agent_stock":
         from app.application.agents.stock.agent import AgentStock  # noqa: PLC0415
 
@@ -33,12 +23,7 @@ def get_sub_agent(
     if name == "agent_supplier":
         from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
 
-        gateway = None
-        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
-            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
-
-            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
-        return AgentSupplier(session=db, gateway=gateway)
+        return AgentSupplier(session=db)
     if name == "agent_health":
         from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415
 
@@ -47,22 +32,4 @@ def get_sub_agent(
         from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
 
         return AgentHelper()
-    if name == "agent_calendar":
-        from app.application.agents.calendar.agent import AgentCalendar  # noqa: PLC0415
-
-        gateway = None
-        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
-            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
-
-            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
-        return AgentCalendar(gateway=gateway)
-    if name == "agent_sync":
-        from app.application.agents.sync.agent import AgentSync  # noqa: PLC0415
-
-        gateway = None
-        if db is not None and redis is not None and user_id is not None and tenant_id is not None:
-            from app.integrations.google_workspace.gateway import GoogleWorkspaceGateway  # noqa: PLC0415
-
-            gateway = GoogleWorkspaceGateway(db, redis, user_id, tenant_id)
-        return AgentSync(gateway=gateway)
     return None
