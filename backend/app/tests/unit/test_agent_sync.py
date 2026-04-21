@@ -12,7 +12,7 @@ def _req(message: str) -> AgentRequest:
 
 @pytest.mark.asyncio
 async def test_export_sales_to_sheets():
-    agent = AgentSync()
+    agent = AgentSync(gateway=object())  # type: ignore[arg-type]
     resp = await agent.process(_req("exportar ventas a Google Sheets"))
     assert resp.status == "requires_approval"
     assert resp.result["action_type"] == ActionType.SYNC_TO_GOOGLE
@@ -22,7 +22,7 @@ async def test_export_sales_to_sheets():
 
 @pytest.mark.asyncio
 async def test_export_report_to_docs():
-    agent = AgentSync()
+    agent = AgentSync(gateway=object())  # type: ignore[arg-type]
     resp = await agent.process(_req("exportar reporte a Google Docs"))
     assert resp.result["sync_type"] == "export_report_to_docs"
     assert resp.result["mcp_tool"] == "google.docs.create_document"
@@ -30,7 +30,7 @@ async def test_export_report_to_docs():
 
 @pytest.mark.asyncio
 async def test_import_from_sheets():
-    agent = AgentSync()
+    agent = AgentSync(gateway=object())  # type: ignore[arg-type]
     resp = await agent.process(_req("importar desde sheets los productos"))
     assert resp.result["sync_type"] == "import_from_sheets"
     assert resp.result["mcp_tool"] == "google.sheets.read_range"
@@ -38,14 +38,14 @@ async def test_import_from_sheets():
 
 @pytest.mark.asyncio
 async def test_unknown_sync_type_returns_clarification():
-    agent = AgentSync()
+    agent = AgentSync(gateway=object())  # type: ignore[arg-type]
     resp = await agent.process(_req("sincronizar algo con google"))
     assert resp.status == "requires_clarification"
     assert resp.question is not None
 
 
 @pytest.mark.asyncio
-async def test_mode_informational_without_gateway():
+async def test_requires_google_auth_without_gateway():
     agent = AgentSync(gateway=None)
     resp = await agent.process(_req("exportar ventas a Google Sheets"))
-    assert resp.result.get("mode") == "informational"
+    assert resp.status == "requires_google_auth"

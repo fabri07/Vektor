@@ -23,7 +23,7 @@ from app.main import create_app
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.pending_action import PendingAction
-from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 from .conftest import FakeRedis, make_auth_headers, make_tenant, make_user
 
@@ -191,6 +191,81 @@ async def test_medium_action_creates_pending_not_persists(auth_client, session: 
         select(SaleEntry).where(SaleEntry.tenant_id == tenant.tenant_id)
     )
     assert sales.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSession):
+    """Un REGISTER_EXPENSE marcado para auto-ejecución debe persistirse sin pending visible."""
+    ac, headers, tenant, user, _ = auth_client
+
+    sub_mock = AsyncMock()
+    sub_mock.process = AsyncMock(
+        side_effect=lambda req: AgentResponse(
+            request_id=req.request_id,
+            agent_name="agent_cash",
+            status="success",
+            risk_level=RiskLevel.MEDIUM,
+            requires_approval=False,
+            result={
+                "intent": "record_expense",
+                "action_type": "REGISTER_EXPENSE",
+                "target_agent": "agent_cash",
+                "structured_data": {
+                    "amount": "450000",
+                    "category": "RENT",
+                    "transaction_date": "2026-04-21",
+                    "payment_method": "transfer",
+                    "description": "Alquiler",
+                },
+                "auto_execute": True,
+                "summary": "Gasto registrado: Alquiler por $450000",
+            },
+        )
+    )
+    ORCHESTRATOR = "app.application.services.chat_orchestrator"
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
+        patch(f"{ORCHESTRATOR}.get_sub_agent", return_value=sub_mock),
+        patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
+    ):
+        MockCEO.return_value.process = AsyncMock(
+            side_effect=lambda req: AgentResponse(
+                request_id=req.request_id,
+                agent_name="agent_ceo",
+                status="success",
+                risk_level=RiskLevel.MEDIUM,
+                requires_approval=False,
+                result={
+                    "intent": "record_expense",
+                    "action_type": "REGISTER_EXPENSE",
+                    "target_agent": "agent_cash",
+                    "entities": {},
+                },
+            )
+        )
+        MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        MockConv.return_value.add_turn = AsyncMock()
+        MockConv.return_value.persist = AsyncMock()
+
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "Pagué alquiler $450.000"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["pending_action_id"] is None
+
+    expense = await session.execute(
+        select(ExpenseEntry).where(ExpenseEntry.tenant_id == tenant.tenant_id)
+    )
+    saved = expense.scalar_one_or_none()
+    assert saved is not None
+    assert float(saved.amount) == 450000.0
+    assert saved.category == "RENT"
 
 
 @pytest.mark.asyncio

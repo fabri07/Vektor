@@ -11,6 +11,7 @@ from app.api.v1 import (
     files,
     health_scores,
     ingestion,
+    integrations,
     insights,
     momentum,
     notifications,
@@ -45,5 +46,6 @@ api_router.include_router(
 )
 api_router.include_router(files.router, prefix="/files", tags=["Files"])
 api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
+api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
 api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])
 api_router.include_router(momentum.router, prefix="/momentum", tags=["Momentum"])

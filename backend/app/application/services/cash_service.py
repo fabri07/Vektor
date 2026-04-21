@@ -12,6 +12,63 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 logger = get_logger(__name__)
 
+_EXPENSE_CATEGORY_MAP = {
+    "rent": "RENT",
+    "alquiler": "RENT",
+    "utilities": "UTILITIES",
+    "servicios": "UTILITIES",
+    "service": "UTILITIES",
+    "payroll": "PAYROLL",
+    "sueldos": "PAYROLL",
+    "inventario": "INVENTORY",
+    "inventory": "INVENTORY",
+    "mercaderia": "INVENTORY",
+    "mercadería": "INVENTORY",
+    "stock": "INVENTORY",
+    "marketing": "MARKETING",
+    "publicidad": "MARKETING",
+    "other": "OTHER",
+    "otros": "OTHER",
+}
+
+_PAYMENT_METHOD_MAP = {
+    "cash": "cash",
+    "efectivo": "cash",
+    "transfer": "transfer",
+    "transferencia": "transfer",
+    "debit_card": "debit_card",
+    "debito": "debit_card",
+    "débito": "debit_card",
+    "credit_card": "credit_card",
+    "credito": "credit_card",
+    "crédito": "credit_card",
+    "qr": "qr",
+}
+
+
+def _normalize_payment_method(value: str | None) -> str:
+    if not value:
+        return "cash"
+    return _PAYMENT_METHOD_MAP.get(str(value).strip().lower(), "other")
+
+
+def _normalize_expense_category(value: str | None) -> str:
+    if not value:
+        return "OTHER"
+    normalized = str(value).strip().lower()
+    return _EXPENSE_CATEGORY_MAP.get(normalized, str(value).strip().upper())
+
+
+def _coerce_transaction_date(value: object) -> date:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return date.today()
+    return date.today()
+
 
 async def save_sale(
     entities: dict,
@@ -27,7 +84,9 @@ async def save_sale(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
         quantity=1,
-        transaction_date=date.today(),
+        transaction_date=_coerce_transaction_date(
+            entities.get("transaction_date") or entities.get("date")
+        ),
         payment_method=payment_method,
         notes=entities.get("product_description"),
     )
@@ -84,11 +143,15 @@ async def save_expense(
     expense = ExpenseEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
-        category=entities.get("category", "otros"),
-        transaction_date=date.today(),
+        category=_normalize_expense_category(entities.get("category")),
+        transaction_date=_coerce_transaction_date(
+            entities.get("transaction_date") or entities.get("date")
+        ),
         description=entities.get("description") or entities.get("category", "gasto"),
-        is_recurring=False,
-        payment_method="cash",
+        is_recurring=bool(entities.get("is_recurring", False)),
+        payment_method=_normalize_payment_method(entities.get("payment_method")),
+        supplier_name=entities.get("supplier_name"),
+        notes=entities.get("notes"),
     )
     db.add(expense)
     await db.flush()

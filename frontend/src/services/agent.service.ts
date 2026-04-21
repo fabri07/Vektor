@@ -24,6 +24,12 @@ export interface ChatAttachment {
   filename: string;
 }
 
+export interface ConfirmActionResponse {
+  status: string;
+  action_type: string;
+  execution_status: string;
+}
+
 export async function sendMessage(
   message: string,
   conversationId?: string,
@@ -37,8 +43,9 @@ export async function sendMessage(
   return res.data;
 }
 
-export async function confirmAction(pendingActionId: string): Promise<void> {
-  await api.post(`/agent/confirm/${pendingActionId}`);
+export async function confirmAction(pendingActionId: string): Promise<ConfirmActionResponse> {
+  const res = await api.post<ConfirmActionResponse>(`/agent/confirm/${pendingActionId}`);
+  return res.data;
 }
 
 export async function cancelAction(pendingActionId: string): Promise<void> {

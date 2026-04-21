@@ -2,8 +2,10 @@ import "@testing-library/jest-dom";
 import React from "react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ChatPanel } from "../ChatPanel";
 import * as agentService from "@/services/agent.service";
+import { useChatStore } from "@/stores/chatStore";
 
 jest.mock("@/services/agent.service");
 jest.mock("@/lib/api", () => ({
@@ -25,18 +27,34 @@ const mockConfirmAction = agentService.confirmAction as jest.MockedFunction<
 const mockCancelAction = agentService.cancelAction as jest.MockedFunction<
   typeof agentService.cancelAction
 >;
+const mockGetChatUsage = agentService.getChatUsage as jest.MockedFunction<
+  typeof agentService.getChatUsage
+>;
 
 function openChat() {
   fireEvent.click(screen.getByLabelText("Abrir asistente"));
 }
 
 function renderChat() {
-  return render(<ChatPanel />);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <ChatPanel />
+    </QueryClientProvider>,
+  );
 }
 
 describe("ChatPanel", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGetChatUsage.mockResolvedValue({ messages_today: 0, limit: 50 });
+    useChatStore.setState({ conversationId: "test-conversation", messages: [] });
   });
 
   test("test_initial_messages_shown_when_empty", () => {
@@ -114,7 +132,11 @@ describe("ChatPanel", () => {
       pending_action_id: "pending-xyz",
       result: { summary: "¿Confirmás el registro?" },
     });
-    mockConfirmAction.mockResolvedValueOnce(undefined);
+    mockConfirmAction.mockResolvedValueOnce({
+      status: "confirmed",
+      action_type: "REGISTER_SALE",
+      execution_status: "SUCCEEDED",
+    });
 
     renderChat();
     openChat();

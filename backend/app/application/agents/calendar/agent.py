@@ -23,6 +23,20 @@ class AgentCalendar(BaseAgent):
     async def process(self, request: AgentRequest) -> AgentResponse:
         message = request.message.lower()
 
+        if self._gateway is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_google_auth",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.HIGH,
+                result={
+                    "action_type": ActionType.CREATE_CALENDAR_EVENT,
+                    "mode": "informational",
+                    "message": "Necesito que la integración de Google Calendar esté disponible para crear o consultar eventos.",
+                },
+            )
+
         if self._is_query(message):
             return AgentResponse(
                 request_id=request.request_id,

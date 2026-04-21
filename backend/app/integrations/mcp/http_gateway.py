@@ -53,9 +53,23 @@ _AUTH_ERROR_CODES = frozenset({
 
 class HttpMcpGateway(McpToolGateway):
 
-    def __init__(self, settings: Any) -> None:
-        self._base_url = settings.MCP_SERVER_URL.rstrip("/")
-        self._default_timeout = settings.MCP_HTTP_TIMEOUT
+    def __init__(
+        self,
+        settings: Any | None = None,
+        *,
+        base_url: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        if settings is not None:
+            self._base_url = settings.MCP_SERVER_URL.rstrip("/")
+            self._default_timeout = settings.MCP_HTTP_TIMEOUT
+            return
+
+        if base_url is None:
+            raise ValueError("HttpMcpGateway requiere settings o base_url.")
+
+        self._base_url = base_url.rstrip("/")
+        self._default_timeout = timeout or DEFAULT_TIMEOUT
 
     async def call_tool(
         self,

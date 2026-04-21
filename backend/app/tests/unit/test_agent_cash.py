@@ -112,6 +112,23 @@ async def test_paid_sale_returns_approval():
 
 
 @pytest.mark.asyncio
+async def test_expense_message_is_auto_executed_candidate():
+    from app.application.agents.cash.agent import AgentCash
+    from app.application.agents.shared.schemas import ActionType
+
+    agent = AgentCash()
+    result = await agent.process(_make_request("Pagué alquiler $450.000 por transferencia"))
+
+    assert result.status == "success"
+    assert result.requires_approval is False
+    assert result.risk_level == RiskLevel.MEDIUM
+    assert result.result["action_type"] == ActionType.REGISTER_EXPENSE
+    assert result.result["auto_execute"] is True
+    assert result.result["structured_data"]["category"] == "RENT"
+    assert result.result["structured_data"]["payment_method"] == "transfer"
+
+
+@pytest.mark.asyncio
 async def test_sale_and_inflow_are_separate_actions():
     """REGLA CRÍTICA 1: 'vendí y cobré 5000' → REGISTER_SALE y REGISTER_CASH_INFLOW son acciones distintas."""
     # AgentCash procesa el mensaje principal como venta

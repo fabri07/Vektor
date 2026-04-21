@@ -8,6 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kioscos, decoración hogar, limpieza). Multi-tenant, monolito modular en v1.
 
+### Estado actual importante
+
+- El chat productivo entra por `ChatOrchestrator` y no despacha directo desde el router al sub-agente.
+- Los clientes Anthropic se construyen vía `app/integrations/anthropic_client.py`; no instanciar `anthropic.AsyncAnthropic()` directo en agentes.
+- La integración Google activa hoy es **MCP-based** (`ENABLE_GOOGLE_MCP_TOOLS` + `MCP_SERVER_URL`). Las viejas rutas directas de `Google Workspace` ya no forman parte de la API pública.
+- En frontend existe `/apps`, pero hoy es una pantalla informativa/placeholder; no hay flujo directo de conexión Google Workspace desde ahí.
+- El pipeline de archivos fue recentralizado en `app/application/services/file_parsing.py`. Los uploads de chat se parsean sincrónicamente al subir; la ingestión sigue su pipeline propio con confirmación humana.
+- La cadena Alembic actual incluye una migración de compatibilidad `20260401_0003_restore_chat_context_and_heuristics.py` y stubs `20260406_0001_stub.py` / `20260406_0002_stub.py` para conservar continuidad después de retirar migraciones viejas de Google Workspace.
+
 ---
 
 ## Quick start (fresh clone)
@@ -118,7 +127,7 @@ HTTP Request
 
 ### API Routers (`app/api/v1/`)
 
-Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat), `admin`.
+Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat + conversaciones + streaming), `admin`.
 
 ### Autenticación y multi-tenancy
 
@@ -180,19 +189,21 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 | Agente | Context Budget | Responsabilidad |
 |--------|---------------|-----------------|
 | AgentCEO | 2.000 tokens | Router/coordinador, nunca accede a datos de negocio directamente |
-| AgentCash | 3.000 tokens | Caja, ventas, cobros, pagos |
-| AgentStock | 3.000 tokens | Inventario, quiebres, rotación, merma (incluye Celery task) |
-| AgentSupplier | 3.500 tokens | Proveedores, Gmail (borradores/clasificación) o registro manual |
+| AgentCash | 3.000 tokens | Caja, ventas, cobros, pagos e import básico desde Google Sheets |
+| AgentStock | 3.000 tokens | Inventario, quiebres, rotación, merma |
+| AgentSupplier | 3.500 tokens | Proveedores, Gmail vía MCP o modo informacional |
 | AgentHealth | 4.000 tokens | Score de salud, narrativa ejecutiva |
 | AgentHelper | 2.500 tokens | FAQ, manual, guía funcional |
-| AgentCalendar | 3.000 tokens | Eventos Google Calendar via MCP |
-| AgentSync | 4.000 tokens | Sincronización bidireccional Véktor ↔ Google Sheets/Docs via MCP |
+| AgentCalendar | 3.000 tokens | Eventos Google Calendar vía MCP |
+| AgentSync | 4.000 tokens | Operaciones Google Sheets / Docs vía MCP |
 
 > El estado real de cada agente cambia rápido — verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir que está stub o implementado. La tabla ya no trackea fases.
 
 **Modelos LLM:**
-- AgentCEO: `claude-sonnet-4-5` (clasificación de intent — requiere mayor capacidad)
-- Resto de agentes (Cash, Stock, Supplier, Health, Helper): `claude-haiku-4-5`
+- AgentCEO: `claude-sonnet-4-5`
+- ChatOrchestrator: `claude-haiku-4-5-20251001` para la respuesta conversacional final
+- Cash, Stock, Health, Helper: `claude-haiku-4-5`
+- Verificar cada agente antes de asumir el modelo exacto; no todos usan el mismo sufijo/versionado.
 
 **Cliente Anthropic** (`app/integrations/anthropic_client.py`) — todos los agentes deben obtener el cliente via `get_anthropic_async_client()`. Centraliza el manejo de `ANTHROPIC_API_KEY` y permite inyección de mocks en tests sin key real. No instanciar `anthropic.AsyncAnthropic` directamente en agentes.
 
@@ -204,7 +215,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 - `status`: `"success" | "requires_approval" | "requires_clarification" | "requires_google_auth" | "error"`
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca un float
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado de 19 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado actual de 16 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
@@ -215,7 +226,7 @@ ANSWER_HELP_REQUEST    CREATE_SUPPLIER_DRAFT   CLASSIFY_GMAIL_MESSAGE
 SYNC_TO_GOOGLE         CREATE_CALENDAR_EVENT
 ```
 
-Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualizar también `RiskEngine` y sus tests.
+Nada fuera de esta lista puede ejecutarse. Agregar o quitar una acción requiere actualizar también `RiskEngine` y sus tests.
 
 **RiskEngine** (`shared/risk_engine.py`) — función determinística pura, sin LLM. `HIGH` requiere aprobación; `MEDIUM` también; `LOW` no.
 
@@ -233,15 +244,15 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 
 **AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 18 intents del `INTENT_CATALOG` (incluye `schedule_event`, `check_calendar`, `sync_google_data` para los nuevos agentes). El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se resuelven por nombre en `app/application/agents/registry.py → get_sub_agent(name)`, llamado desde `ChatOrchestrator`.
 
-**ChatOrchestrator** (`app/application/services/chat_orchestrator.py`) — punto de entrada del endpoint `/agent/chat`. Carga 4 capas de contexto (fail-silencioso cada una):
+**ChatOrchestrator** (`app/application/services/chat_orchestrator.py`) — punto de entrada real de `/agent/chat` y `/agent/chat/stream`. Carga 4 capas de contexto (fail-silencioso cada una):
 1. Contexto del negocio + heurísticas (`_load_business_context`)
 2. BusinessMemory: resumen financiero acumulado (`BusinessMemoryService.get`)
 3. AgentMemory: patrones de comportamiento aprendidos (`AgentMemoryService.get_context_fragment`)
 4. Archivos procesados: últimos 5 `UploadedFile` con `parsed_summary_json` (`_load_file_context`)
 
-Luego: CEO clasifica intent → `registry.get_sub_agent()` despacha → si `requires_google_auth` retorna inmediato sin LLM → si `requires_approval` usa summary estructurado → si no, LLM Haiku genera respuesta rica → ConversationService guarda el turno (best-effort).
+Luego: CEO clasifica intent → `registry.get_sub_agent()` despacha → si `requires_google_auth` retorna inmediato sin LLM → si `requires_approval` usa summary estructurado → si no, el orquestador genera respuesta rica con Claude → `ConversationService` guarda el turno (best-effort).
 
-**ConversationService** (`app/application/services/conversation_service.py`) — historial de chat: Redis como caché caliente (TTL 24h) con fallback a PostgreSQL. Ventana deslizante de los últimos 10 turnos; los más viejos se descartan. El `conversation_id` es UUID generado en el cliente (ver `useChat` en el frontend).
+**ConversationService** (`app/application/services/conversation_service.py`) — historial de chat: Redis como caché caliente (TTL 24h) con fallback a PostgreSQL (`agent_conversation_context`). Ventana deslizante de los últimos 10 turnos; los más viejos se descartan. El `conversation_id` es UUID generado en el cliente.
 
 **EventBus** (`shared/event_bus.py`) — bus interno para comunicación entre agentes sin acoplamiento directo. Los agentes publican eventos; el CEO los suscribe para coordinar.
 
@@ -273,21 +284,37 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Solo activa llamadas re
 
 **Allowlists por agente:** cada agente solo puede llamar las herramientas MCP de su frozenset (`google.gmail.*`, `google.calendar.*`, `google.sheets.*`, `google.docs.*`).
 
-**Flujo `requires_google_auth`:** Si un agente detecta que el tenant no tiene credenciales Google, devuelve `status="requires_google_auth"`. El orquestador lo propaga sin LLM. El frontend redirige a `/workspace/google/connect/start`.
+**Flujo `requires_google_auth`:** Si un agente detecta que falta acceso Google, devuelve `status="requires_google_auth"`. El orquestador lo propaga sin LLM. El frontend hoy muestra el estado en el chat; no existe una ruta backend `/workspace/google/connect/start` activa en esta versión.
 
 **Gateway condicional en registry:** `AgentCalendar` y `AgentSync` reciben `gateway=HttpMcpGateway(...)` solo si `ENABLE_GOOGLE_MCP_TOOLS=true` y `MCP_SERVER_URL` está definido; de lo contrario `gateway=None` y operan en modo informacional.
 
+**Nota de compatibilidad:** El paquete `app/integrations/google_workspace/` puede seguir existiendo en el repo, pero ya no está cableado a los routers principales. La integración viva hoy es la del MCP server.
+
 **Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt. El mismo módulo expone `is_valid_action_type(action_type)` para validar que el output de un LLM sea un ActionType del catálogo cerrado — usar al parsear cualquier respuesta LLM que deba devolver un action_type.
 
-### Ingestion de archivos
+### Archivos e ingestión
 
-Pipeline de 3 pasos (router `ingestion.py` + jobs `ingestion_worker.py`):
+**Servicio compartido:** `app/application/services/file_parsing.py` centraliza:
+- sanitización de nombres
+- detección segura de MIME
+- generación canónica de `parsed_summary_json`
+- helpers para contexto de chat (`summary_columns`, `summary_row_count`, `preview_value_from_summary`)
 
-1. **Upload** — `POST /files/upload?purpose=chat|ingestion` → sube a R2, crea `UploadedFile` con `processing_status=PENDING`.
-2. **Parse** — Celery task por tipo: `process_spreadsheet` (xlsx/csv), `process_text_document`, `process_image_ocr`. Descarga de R2, extrae datos, guarda `parsed_summary_json`, transiciona a `NEEDS_CONFIRMATION`. Siempre requiere revisión humana antes de importar.
-3. **Confirm** — `POST /ingestion/{file_id}/confirm` → inserta ventas/gastos/productos según `parsed_summary_json`, dispara recálculo de score. On error: `processing_status=FAILED`.
+**Uploads para chat** (`api/v1/files.py`):
+1. `POST /files/upload?purpose=chat`
+2. Valida tamaño y tipo soportado
+3. Parsea el contenido **sincrónicamente**
+4. Guarda `UploadedFile` con `processing_status=DONE` y `parsed_summary_json`
 
-Columnas clave para detección de tipo: sets en `ingestion_worker.py` (`_VENTA_COLS`, `_GASTO_COLS`, `_PRODUCTO_COLS`). Storage: Cloudflare R2 vía boto3 (`S3_REGION=auto`).
+Si el parseo falla para chat, el endpoint devuelve `422` y no persiste un archivo roto.
+
+**Ingestión de datos** (`api/v1/ingestion.py` + `jobs/ingestion_worker.py`):
+1. **Upload** — `POST /ingestion/upload?file_hint=ventas|gastos|stock|general`
+2. **Parse async** — Celery task por tipo (`process_spreadsheet`, `process_text_document`, `process_image_ocr`)
+3. **Preview** — `GET /ingestion/files/{file_id}/preview`
+4. **Confirm** — `POST /ingestion/files/{file_id}/confirm`
+
+La confirmación humana sigue siendo obligatoria antes de insertar ventas/gastos/productos.
 
 ### Observabilidad
 
@@ -311,7 +338,7 @@ Columnas clave para detección de tipo: sets en `ingestion_worker.py` (`_VENTA_C
 | Directorio | Responsabilidad |
 |------------|-----------------|
 | `src/features/` | Módulos por feature: `auth`, `chat`, `dashboard`, `onboarding`, `ingestion`, `notifications` |
-| `src/services/` | Capa de llamadas HTTP por dominio: `auth`, `sales`, `expenses`, `products`, `health_score`, `dashboard`, `momentum`, `notifications`, `ingestion`, `onboarding`, `files` |
+| `src/services/` | Capa de llamadas HTTP por dominio: `auth`, `sales`, `expenses`, `products`, `health_score`, `dashboard`, `momentum`, `notifications`, `ingestion`, `onboarding`, `files`, `agent` |
 | `src/stores/` | Zustand: `authStore` (JWT + user), `toastStore` |
 | `src/hooks/` | Custom hooks: `useAuth` |
 | `src/types/api.ts` | Tipos TypeScript de respuestas de la API |
@@ -326,6 +353,7 @@ Columnas clave para detección de tipo: sets en `ingestion_worker.py` (`_VENTA_C
 | `/sales` | `(protected)/sales/page.tsx` | Analytics + lista de ventas con KPIs y filtros |
 | `/expenses` | `(protected)/expenses/page.tsx` | Analytics + lista de gastos con KPIs y filtros |
 | `/products` | `(protected)/products/page.tsx` | Catálogo con KPIs de stock e inventario |
+| `/apps` | `(protected)/apps/page.tsx` | Placeholder de Aplicaciones / integraciones |
 | `/settings` | `(protected)/settings/page.tsx` | Cuenta y configuración |
 
 ### Rutas públicas (`src/app/(public)/`)
@@ -339,7 +367,7 @@ Columnas clave para detección de tipo: sets en `ingestion_worker.py` (`_VENTA_C
 - `/chat` es la home post-login. Todos los redirects post-auth apuntan a `/chat`, no `/dashboard`.
 - `ChatPanel.tsx` se mantiene en el repo pero **no** está registrado en el layout global.
 - `conversation_id`: UUID generado client-side con `useRef<string>(crypto.randomUUID()).current` al montar `useChat`. No se espera del servidor.
-- Adjuntos: `AttachmentPicker.tsx` — hasta 3 archivos (PDF/XLSX/CSV/PNG/JPG), se suben inmediatamente a `POST /files/upload?purpose=chat` antes de enviar el mensaje. Los `file_id` se pasan en el body del agente.
+- Adjuntos: `AttachmentPicker.tsx` — hasta 3 archivos (PDF/XLSX/CSV/TXT/DOCX/PPTX/PNG/JPG), se suben inmediatamente a `POST /files/upload?purpose=chat` antes de enviar el mensaje. Los `file_id` se pasan en el body del agente.
 - Layout condicional en `(protected)/layout.tsx`: chat usa `flex flex-col overflow-hidden`, otras páginas usan el wrapper con padding y scroll normal.
 
 ### Google OAuth (Sprint 5)
@@ -350,12 +378,12 @@ Flujo login federado:
 3. `POST /auth/oauth/google/exchange` → `AuthResponse` (nuevo usuario) **o** `OAuthLinkRequiredResponse` (email ya existente)
 4. Si `link_required`: formulario de contraseña para vincular → `POST /auth/oauth/google/link-pending`
 
-### Integraciones externas vía MCP (Sprint 5 → Sprint 6)
+### Integraciones externas vía MCP
 
-Flujo conexión Google Workspace (separado del login federado):
-1. `/settings` → botón "Conectar Google" → `POST /workspace/google/connect/start`
-2. Google OAuth consent → callback → token guardado por tenant
-3. Agentes con `gateway` activo pueden llamar Gmail/Calendar/Sheets/Docs via MCP
+Estado actual:
+1. Las integraciones Google activas dependen de `ENABLE_GOOGLE_MCP_TOOLS=true`
+2. El backend llama al MCP server vía `HttpMcpGateway`
+3. El frontend tiene `/apps` como pantalla informativa, pero el flujo de conexión final todavía no está expuesto como una integración directa de producto
 
 ---
 
@@ -365,10 +393,21 @@ Flujo conexión Google Workspace (separado del login federado):
 |--------|--------|-------------|
 | 1 | ✅ Completo | Auth social (Google OAuth), modelo `user_auth_identity` |
 | 2 | ✅ Completo | Google OAuth login frontend, callback `/oauth/callback` |
-| 3 | ✅ Completo | Workspace Gateway + AgentSupplier Gmail |
+| 3 | ✅ Completo | Primeras integraciones Google / Gmail |
 | 4 | ✅ Completo | Pending Actions externas — lifecycle (`/pending-actions/{id}/execute`), retry con guard `is_external`, idempotency_key, integración `EXTERNAL_SYSTEMS` |
-| 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, Settings de integraciones MCP, adjuntos en chat, analytics Ventas/Gastos/Productos |
-| 6 | ✅ Completo | Integración MCP Google: AgentCalendar + AgentSync, BusinessMemoryService, AgentMemoryService, file context en chat, catálogo ActionType 19 acciones, migración `agent_memory` en Neon |
+| 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, adjuntos en chat, analytics Ventas/Gastos/Productos |
+| 6 | ✅ Completo | Integración MCP Google: AgentCalendar + AgentSync, BusinessMemoryService, AgentMemoryService, file context en chat |
+
+### Migraciones de compatibilidad recientes
+
+- `20260401_0003_restore_chat_context_and_heuristics.py`
+  - restaura `business_heuristic_overrides`
+  - restaura `agent_conversation_context`
+  - agrega `business_profiles.heuristics_version`
+- `20260406_0001_stub.py` y `20260406_0002_stub.py`
+  - no-op stubs para conservar continuidad Alembic después de retirar migraciones viejas de Google Workspace
+- `20260421_0001_add_memory_tables.py` y `20260421_0002_add_agent_memory.py`
+  - continúan la cadena actual de memoria
 
 Post-Sprint 5/6: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
 

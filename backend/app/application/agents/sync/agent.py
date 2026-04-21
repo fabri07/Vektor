@@ -41,6 +41,20 @@ class AgentSync(BaseAgent):
     async def process(self, request: AgentRequest) -> AgentResponse:
         message_lower = request.message.lower()
 
+        if self._gateway is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_google_auth",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.HIGH,
+                result={
+                    "action_type": ActionType.SYNC_TO_GOOGLE,
+                    "mode": "informational",
+                    "message": "Necesito que la integración de Google esté disponible para sincronizar datos.",
+                },
+            )
+
         sync_type = self._classify_sync_type(message_lower)
         if sync_type is None:
             return AgentResponse(

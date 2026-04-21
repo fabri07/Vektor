@@ -16,6 +16,16 @@ import { useQueryClient } from "@tanstack/react-query";
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000") + "/api/v1";
 
+const MUTATING_ACTIONS = new Set([
+  "REGISTER_SALE",
+  "REGISTER_EXPENSE",
+  "REGISTER_PURCHASE",
+  "REGISTER_CASH_INFLOW",
+  "REGISTER_CASH_OUTFLOW",
+  "UPDATE_STOCK",
+  "REGISTER_STOCK_LOSS",
+]);
+
 // Re-exportar para compatibilidad con importadores existentes
 export type Message = ChatMessage;
 
@@ -49,6 +59,18 @@ export function useChat() {
     },
     [storeAdd],
   );
+
+  const invalidateAffectedQueries = useCallback(async (actionType?: unknown) => {
+    if (typeof actionType !== "string" || !MUTATING_ACTIONS.has(actionType)) {
+      return;
+    }
+
+    await queryClient.invalidateQueries({ queryKey: ["sales-entries"] });
+    await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
+    await queryClient.invalidateQueries({ queryKey: ["products"] });
+    await queryClient.invalidateQueries({ queryKey: ["inventory"] });
+    void queryClient.invalidateQueries({ queryKey: ["health-scores"] });
+  }, [queryClient]);
 
   const send = useCallback(
     async (
@@ -103,6 +125,7 @@ export function useChat() {
             content: response.message ?? response.result?.summary ?? "Listo.",
             status: "success",
           });
+          await invalidateAffectedQueries(response.result?.action_type);
         }
       } catch (err) {
         const error = err as AxiosError;
@@ -125,7 +148,7 @@ export function useChat() {
         setIsLoading(false);
       }
     },
-    [isLoading, isRateLimited, conversationId, addMessage],
+    [isLoading, isRateLimited, conversationId, addMessage, invalidateAffectedQueries],
   );
 
   const sendStream = useCallback(
@@ -235,6 +258,7 @@ export function useChat() {
                       agentResp.message ?? agentResp.result?.summary ?? "Listo.",
                     status: "success",
                   });
+                  await invalidateAffectedQueries(agentResp.result?.action_type);
                 }
               } else if (event.type === "error") {
                 finalResponseAdded = true;
@@ -278,12 +302,12 @@ export function useChat() {
         setIsLoading(false);
       }
     },
-    [isLoading, isRateLimited, conversationId, addMessage, addMessageWithId, updateMessage],
+    [isLoading, isRateLimited, conversationId, addMessage, addMessageWithId, updateMessage, invalidateAffectedQueries],
   );
 
   const confirm = useCallback(
     async (pendingActionId: string) => {
-      await confirmAction(pendingActionId);
+      const response = await confirmAction(pendingActionId);
       const msg = messages.find((m) => m.pendingActionId === pendingActionId);
       if (msg) {
         updateMessage(msg.id, {
@@ -291,14 +315,9 @@ export function useChat() {
           content: msg.content + "\n✓ Confirmado y guardado.",
         });
       }
-      // Invalidar secciones afectadas para que muestren datos actualizados
-      await queryClient.invalidateQueries({ queryKey: ["sales-entries"] });
-      await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
-      await queryClient.invalidateQueries({ queryKey: ["products"] });
-      await queryClient.invalidateQueries({ queryKey: ["inventory"] });
-      void queryClient.invalidateQueries({ queryKey: ["health-scores"] });
+      await invalidateAffectedQueries(response.action_type);
     },
-    [messages, updateMessage, queryClient],
+    [messages, updateMessage, invalidateAffectedQueries],
   );
 
   const cancel = useCallback(

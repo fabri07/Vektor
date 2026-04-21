@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
-from app.application.agents.shared.schemas import AgentRequest, AgentResponse
+from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse
 from app.application.services.chat_orchestrator import ChatOrchestrator
 from app.application.services.pending_action_service import (
     cancel_pending_action,
@@ -41,6 +41,13 @@ from app.persistence.models.user import User
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+_AUTO_EXECUTE_ACTION_TYPES = {str(ActionType.REGISTER_EXPENSE)}
+_FINGERPRINT_ACTION_TYPES = {
+    str(ActionType.REGISTER_SALE),
+    str(ActionType.REGISTER_EXPENSE),
+    str(ActionType.REGISTER_PURCHASE),
+}
 
 
 
@@ -67,6 +74,151 @@ def _derive_title(turns: list[Any]) -> str:
             content = str(turn.get("content", "")).strip()
             return content[:60] if content else "Conversación"
     return "Conversación"
+
+
+def _extract_action_payload(agent_response: AgentResponse) -> dict[str, Any]:
+    result = agent_response.result or {}
+    payload = (
+        result.get("structured_data")
+        or result.get("payload")
+        or result.get("entities")
+        or {}
+    )
+    if not isinstance(payload, dict):
+        payload = {}
+
+    merged_payload = dict(payload)
+    for key in ("mode", "sync_type"):
+        if key in result and key not in merged_payload:
+            merged_payload[key] = result[key]
+    return merged_payload
+
+
+def _payload_for_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
+    structured = payload.get("structured_data")
+    if isinstance(structured, dict):
+        return structured
+    return payload
+
+
+async def _register_operation_fingerprint(
+    *,
+    action: PendingAction,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+) -> bool:
+    if str(action.action_type) not in _FINGERPRINT_ACTION_TYPES:
+        return False
+
+    from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
+
+    payload = _payload_for_fingerprint(action.payload or {})
+    raw = (
+        f"{tenant_id}:{action.action_type}"
+        f":{payload.get('amount', '')}:{payload.get('transaction_date', payload.get('date', ''))}"
+    )
+    fingerprint = hashlib.sha256(raw.encode()).hexdigest()
+    dup = await db.execute(
+        select(OperationFingerprint).where(
+            OperationFingerprint.tenant_id == tenant_id,
+            OperationFingerprint.fingerprint == fingerprint,
+        )
+    )
+    if dup.scalar_one_or_none() is not None:
+        return True
+
+    db.add(
+        OperationFingerprint(
+            tenant_id=tenant_id,
+            fingerprint=fingerprint,
+            action_type=str(action.action_type),
+        )
+    )
+    await db.flush()
+    return False
+
+
+async def _execute_local_action(
+    *,
+    action: PendingAction,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    redis: Redis,
+) -> dict[str, Any] | None:
+    if await _register_operation_fingerprint(action=action, tenant_id=tenant_id, db=db):
+        action.execution_status = "SUCCEEDED"
+        action.executed_at = datetime.now(UTC)
+        return {
+            "status": "duplicate",
+            "message": "Esta operación ya fue registrada.",
+            "execution_status": "DUPLICATE",
+        }
+
+    await execute_pending_action(action, db, redis=redis)
+    action.execution_status = "SUCCEEDED"
+    action.executed_at = datetime.now(UTC)
+    return None
+
+
+async def _process_agent_action(
+    *,
+    agent_response: AgentResponse,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession,
+    redis: Redis,
+) -> dict[str, Any] | None:
+    action_type = str(agent_response.result.get("action_type", ActionType.ANSWER_HELP_REQUEST))
+    payload = _extract_action_payload(agent_response)
+    auto_execute = bool(agent_response.result.get("auto_execute")) or action_type in _AUTO_EXECUTE_ACTION_TYPES
+
+    if auto_execute:
+        action = await create_pending_action(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action_type=action_type,
+            payload=payload,
+            risk_level=str(agent_response.risk_level),
+        )
+        action.status = "APPROVED"
+        action.approved_at = datetime.now(UTC)
+
+        duplicate = await _execute_local_action(
+            action=action,
+            tenant_id=tenant_id,
+            db=db,
+            redis=redis,
+        )
+        agent_response.status = "success"
+        agent_response.requires_approval = False
+        agent_response.pending_action_id = None
+        agent_response.result["auto_executed"] = True
+        agent_response.result["executed_action_id"] = str(action.id)
+        if duplicate is not None:
+            agent_response.message = duplicate["message"]
+            agent_response.result["summary"] = duplicate["message"]
+        elif action_type == str(ActionType.REGISTER_EXPENSE):
+            summary = agent_response.message or agent_response.result.get("summary") or "Gasto registrado."
+            if not str(summary).lower().startswith("gasto registrado"):
+                summary = f"Gasto registrado. {summary}"
+            agent_response.message = str(summary)
+            agent_response.result["summary"] = str(summary)
+        return {"action_id": str(action.id)}
+
+    if agent_response.requires_approval:
+        pending = await create_pending_action(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action_type=action_type,
+            payload=payload,
+            risk_level=str(agent_response.risk_level),
+        )
+        agent_response.pending_action_id = str(pending.id)
+        return {"action_id": str(pending.id)}
+
+    return None
 
 
 # ── GET /usage ────────────────────────────────────────────────────────────────
@@ -179,18 +331,13 @@ async def chat(
             status_code=500, detail=f"Orchestrator error: {type(exc).__name__}: {exc}"
         ) from exc
 
-    # ── Si requiere aprobación: crear pending_action ──────────────────────────
-    if agent_response.requires_approval:
-        action_type = agent_response.result.get("action_type", "ANSWER_HELP_REQUEST")
-        pending = await create_pending_action(
-            db=db,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            action_type=action_type,
-            payload=agent_response.result.get("structured_data", agent_response.result.get("entities", {})),
-            risk_level=str(agent_response.risk_level),
-        )
-        agent_response.pending_action_id = str(pending.id)
+    action_meta = await _process_agent_action(
+        agent_response=agent_response,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        db=db,
+        redis=redis,
+    )
 
     # ── Audit log (insert-only) ───────────────────────────────────────────────
     audit = DecisionAuditLog(
@@ -204,7 +351,7 @@ async def chat(
             "status": agent_response.status,
             "risk_level": str(agent_response.risk_level),
             "requires_approval": agent_response.requires_approval,
-            "pending_action_id": agent_response.pending_action_id,
+            "pending_action_id": agent_response.pending_action_id or (action_meta or {}).get("action_id"),
         },
         triggered_by="agent:chat",
         actor_user_id=user_id,
@@ -280,20 +427,13 @@ async def chat_stream(
                 tenant_id=tenant_id,
             )
 
-            # 2. Crear pending_action si es necesario
-            if agent_response.requires_approval:
-                action_type = agent_response.result.get("action_type", "ANSWER_HELP_REQUEST")
-                pending = await create_pending_action(
-                    db=db,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    action_type=action_type,
-                    payload=agent_response.result.get(
-                        "structured_data", agent_response.result.get("entities", {})
-                    ),
-                    risk_level=str(agent_response.risk_level),
-                )
-                agent_response.pending_action_id = str(pending.id)
+            action_meta = await _process_agent_action(
+                agent_response=agent_response,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                db=db,
+                redis=redis,
+            )
 
             # 3. Audit log (insert-only)
             audit = DecisionAuditLog(
@@ -307,7 +447,7 @@ async def chat_stream(
                     "status": agent_response.status,
                     "risk_level": str(agent_response.risk_level),
                     "requires_approval": agent_response.requires_approval,
-                    "pending_action_id": agent_response.pending_action_id,
+                    "pending_action_id": agent_response.pending_action_id or (action_meta or {}).get("action_id"),
                 },
                 triggered_by="agent:chat:stream",
                 actor_user_id=user_id,
@@ -409,40 +549,14 @@ async def confirm_action(
             action.failure_message = str(exc)[:500]
     else:
         # Deduplicación por fingerprint SHA-256 antes de ejecutar acciones financieras.
-        _FP_TYPES = {"REGISTER_SALE", "REGISTER_EXPENSE", "REGISTER_PURCHASE"}
-        if str(action.action_type) in _FP_TYPES:
-            from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
-
-            _sd = (action.payload or {}).get("structured_data", {})
-            _raw = (
-                f"{current_user.tenant_id}:{action.action_type}"
-                f":{_sd.get('amount', '')}:{_sd.get('transaction_date', '')}"
-            )
-            _fp_hash = hashlib.sha256(_raw.encode()).hexdigest()
-            _dup = await db.execute(
-                select(OperationFingerprint).where(
-                    OperationFingerprint.tenant_id == current_user.tenant_id,
-                    OperationFingerprint.fingerprint == _fp_hash,
-                )
-            )
-            if _dup.scalar_one_or_none() is not None:
-                return {
-                    "status": "duplicate",
-                    "message": "Esta operación ya fue registrada.",
-                    "execution_status": "DUPLICATE",
-                }
-            db.add(
-                OperationFingerprint(
-                    tenant_id=current_user.tenant_id,
-                    fingerprint=_fp_hash,
-                    action_type=str(action.action_type),
-                )
-            )
-            await db.flush()
-
-        # Para acciones locales: ejecución en la misma transacción; excepción se propaga (fail-closed).
-        await execute_pending_action(action, db, redis=redis)
-        action.execution_status = "SUCCEEDED"
+        duplicate = await _execute_local_action(
+            action=action,
+            tenant_id=current_user.tenant_id,
+            db=db,
+            redis=redis,
+        )
+        if duplicate is not None:
+            return duplicate
 
     action.executed_at = datetime.now(UTC)
     await db.commit()

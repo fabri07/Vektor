@@ -28,6 +28,13 @@ from app.persistence.models.pending_action import PendingAction
 
 logger = get_logger(__name__)
 
+_GOOGLE_EXTERNAL_SYSTEMS = {
+    ActionType.CREATE_SUPPLIER_DRAFT: "GOOGLE_GMAIL",
+    ActionType.CLASSIFY_GMAIL_MESSAGE: "GOOGLE_GMAIL",
+    ActionType.SYNC_TO_GOOGLE: "GOOGLE_SHEETS",
+    ActionType.CREATE_CALENDAR_EVENT: "GOOGLE_CALENDAR",
+}
+
 
 
 async def create_pending_action(
@@ -41,6 +48,11 @@ async def create_pending_action(
     """Crea un PendingAction con TTL de 10 minutos. Hace flush para obtener el id.
 
     """
+    action_type_enum = ActionType(action_type) if action_type in set(ActionType) else None
+    external_system = None
+    if payload.get("mode") == "mcp" and action_type_enum in _GOOGLE_EXTERNAL_SYSTEMS:
+        external_system = _GOOGLE_EXTERNAL_SYSTEMS[action_type_enum]
+
     action = PendingAction(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -48,7 +60,7 @@ async def create_pending_action(
         payload=payload,
         risk_level=risk_level,
         status="PENDING",
-        external_system=None,
+        external_system=external_system,
         idempotency_key=None,
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
@@ -171,10 +183,14 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(base_url=settings.MCP_SERVER_URL, timeout=settings.MCP_HTTP_TIMEOUT)
-            svc = GoogleMcpService(gateway=gateway, agent_name="agent_supplier")
+            gateway = HttpMcpGateway(settings=settings)
+            svc = GoogleMcpService(
+                gateway=gateway,
+                agent_name="agent_supplier",
+                tenant_id=str(action.tenant_id),
+                settings=settings,
+            )
             await svc.create_gmail_draft(
-                tenant_id=action.tenant_id,
                 to=[payload.get("to", "")],
                 subject=payload.get("subject", "Consulta de proveedor"),
                 body=payload.get("body", payload.get("message", "")),
@@ -188,10 +204,14 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(base_url=settings.MCP_SERVER_URL, timeout=settings.MCP_HTTP_TIMEOUT)
-            svc = GoogleMcpService(gateway=gateway, agent_name="agent_supplier")
+            gateway = HttpMcpGateway(settings=settings)
+            svc = GoogleMcpService(
+                gateway=gateway,
+                agent_name="agent_supplier",
+                tenant_id=str(action.tenant_id),
+                settings=settings,
+            )
             await svc.get_gmail_message(
-                tenant_id=action.tenant_id,
                 message_id=payload.get("message_id", ""),
             )
         action.external_system = "GOOGLE_GMAIL" if mcp_enabled else None
@@ -204,24 +224,29 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(base_url=settings.MCP_SERVER_URL, timeout=settings.MCP_HTTP_TIMEOUT)
-            svc = GoogleMcpService(gateway=gateway, agent_name="agent_sync")
+            gateway = HttpMcpGateway(settings=settings)
+            svc = GoogleMcpService(
+                gateway=gateway,
+                agent_name="agent_sync",
+                tenant_id=str(action.tenant_id),
+                settings=settings,
+            )
             if sync_type == "export_sales_to_sheets":
-                await svc.append_sheets_rows(
-                    tenant_id=action.tenant_id,
+                await svc.append_sheet_rows(
                     spreadsheet_id=payload.get("spreadsheet_id", ""),
                     range_name=payload.get("range_name", "Sheet1"),
-                    values=payload.get("values", []),
+                    rows=payload.get("values", []),
                 )
             elif sync_type == "export_report_to_docs":
-                await svc.create_docs_document(
-                    tenant_id=action.tenant_id,
+                doc = await svc.create_doc(
                     title=payload.get("title", "Reporte Véktor"),
-                    content=payload.get("content", ""),
                 )
+                content = payload.get("content", "")
+                document_id = doc.get("document_id") or doc.get("id")
+                if content and document_id:
+                    await svc.append_doc_content(document_id=document_id, content=content)
             elif sync_type == "import_from_sheets":
-                await svc.read_sheets_range(
-                    tenant_id=action.tenant_id,
+                await svc.read_sheet_range(
                     spreadsheet_id=payload.get("spreadsheet_id", ""),
                     range_name=payload.get("range_name", "Sheet1"),
                 )
@@ -234,13 +259,17 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(base_url=settings.MCP_SERVER_URL, timeout=settings.MCP_HTTP_TIMEOUT)
-            svc = GoogleMcpService(gateway=gateway, agent_name="agent_calendar")
+            gateway = HttpMcpGateway(settings=settings)
+            svc = GoogleMcpService(
+                gateway=gateway,
+                agent_name="agent_calendar",
+                tenant_id=str(action.tenant_id),
+                settings=settings,
+            )
             await svc.create_calendar_event(
-                tenant_id=action.tenant_id,
                 summary=payload.get("summary", "Evento"),
-                start_datetime=payload.get("start_datetime", ""),
-                end_datetime=payload.get("end_datetime", ""),
+                start=payload.get("start_datetime", payload.get("start", "")),
+                end=payload.get("end_datetime", payload.get("end", "")),
                 attendees=payload.get("attendees", []),
             )
         action.external_system = "GOOGLE_CALENDAR" if mcp_enabled else None

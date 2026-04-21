@@ -170,7 +170,7 @@ function GeneralTab() {
             />
             <FAQItem
               question="¿Como conecto Google?"
-              answer="Anda a Aplicaciones en el menu lateral y conecta Gmail, Google Sheets o Google Drive. Se te va a redirigir a Google para autorizar el acceso."
+              answer="Anda a Aplicaciones en el menu lateral para ver el estado real de Gmail, Calendar, Sheets y Docs en este entorno. Si la conexion no esta disponible, ahi mismo se indica."
             />
             <FAQItem
               question="¿Mis datos estan seguros?"
