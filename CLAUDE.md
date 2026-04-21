@@ -49,7 +49,7 @@ make format                 # ruff format app/ --fix
 make typecheck              # mypy app/ (strict=true)
 make check                  # lint + typecheck
 
-# Migraciones
+# Migraciones (directorio correcto: backend/app/persistence/migrations/versions/, NO backend/alembic/versions/)
 make migrate                # alembic upgrade head
 make migrate-down           # alembic downgrade -1
 make migrate-create MSG="descripcion"  # nueva migración con auto-detección
@@ -103,7 +103,7 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: `auth_service`, `cash_service`, `conversation_service`, `google_oauth_service`, `health_score_service`, `onboarding_service`, `pending_action_service`, `score_trigger_service`, `stock_service`, `supplier_service |
+| Application | `app/application/services/` | Orquestación: `auth_service`, `cash_service`, `conversation_service`, `google_oauth_service`, `health_score_service`, `onboarding_service`, `pending_action_service`, `score_trigger_service`, `stock_service`, `supplier_service`, `business_memory_service`, `agent_memory_service` |
 | Commands | `app/application/commands/` | Writes CQRS (ej. `create_tenant.py`) |
 | Queries | `app/application/queries/` | Reads CQRS (ej. `get_health_score.py`) |
 | DTOs | `app/application/dto/` | Objetos de transferencia entre capas (ej. `auth_dto.py`) |
@@ -175,16 +175,18 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
 ### Capa de Agentes LLM (`app/application/agents/`)
 
-6 agentes especializados coordinados por AgentCEO. El cliente NUNCA elige el agente destino.
+8 agentes especializados coordinados por AgentCEO. El cliente NUNCA elige el agente destino.
 
 | Agente | Context Budget | Responsabilidad |
 |--------|---------------|-----------------|
 | AgentCEO | 2.000 tokens | Router/coordinador, nunca accede a datos de negocio directamente |
 | AgentCash | 3.000 tokens | Caja, ventas, cobros, pagos |
 | AgentStock | 3.000 tokens | Inventario, quiebres, rotación, merma (incluye Celery task) |
-| AgentSupplier | 3.500 tokens | Proveedores, filtrado de Gmail, generación de borradores |
+| AgentSupplier | 3.500 tokens | Proveedores, Gmail (borradores/clasificación) o registro manual |
 | AgentHealth | 4.000 tokens | Score de salud, narrativa ejecutiva |
 | AgentHelper | 2.500 tokens | FAQ, manual, guía funcional |
+| AgentCalendar | 3.000 tokens | Eventos Google Calendar via MCP |
+| AgentSync | 4.000 tokens | Sincronización bidireccional Véktor ↔ Google Sheets/Docs via MCP |
 
 > El estado real de cada agente cambia rápido — verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir que está stub o implementado. La tabla ya no trackea fases.
 
@@ -199,17 +201,18 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 **Contratos fijos** (`app/application/agents/shared/schemas.py`):
 - `AgentRequest`: `{ request_id, user_id, business_id, message, attachments, conversation_id }` — sin `agent_target`
 - `AgentResponse`: `{ request_id, agent_name, status, risk_level, requires_approval, confidence, result, pending_action_id? }`
-- `status`: `"success" | "requires_approval" | "requires_clarification" | "error"`
+- `status`: `"success" | "requires_approval" | "requires_clarification" | "requires_google_auth" | "error"`
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca un float
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado de 15 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado de 19 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
 REGISTER_PURCHASE      REGISTER_CASH_OUTFLOW   UPDATE_STOCK
-REGISTER_STOCK_LOSS       CREATE_PURCHASE_SUGGESTION
+REGISTER_STOCK_LOSS    CREATE_PURCHASE_SUGGESTION
 IMPORT_TABULAR_FILE    PARSE_DOCUMENT_FILE     GENERATE_HEALTH_REPORT
-           ANSWER_HELP_REQUEST
+ANSWER_HELP_REQUEST    CREATE_SUPPLIER_DRAFT   CLASSIFY_GMAIL_MESSAGE
+SYNC_TO_GOOGLE         CREATE_CALENDAR_EVENT
 ```
 
 Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualizar también `RiskEngine` y sus tests.
@@ -221,14 +224,22 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 2. `conversation_history` (1.000 tokens)
 3. `recent_events` (800 tokens)
 4. `current_snapshot` (600 tokens) — SIEMPRE incluido hasta aquí
-5. `business_heuristics` (300 tokens) — SIEMPRE incluido
-6. `intent_and_entities` (200 tokens) — SIEMPRE incluido
+5. `uploaded_files` (400 tokens) — archivos procesados del tenant
+6. `agent_memory` (300 tokens) — patrones de comportamiento aprendidos
+7. `business_heuristics` (300 tokens) — SIEMPRE incluido
+8. `intent_and_entities` (200 tokens) — SIEMPRE incluido
 
 **HeuristicEngine** (`shared/heuristic_engine.py`) — implementado. Carga JSON de defaults por rubro desde `app/application/data/heuristics/`. `get(business_type)` es síncrono (solo defaults); `get_async(business_type, business_id, db)` aplica `BusinessHeuristicOverride` de la DB para customización por tenant. `HeuristicConfig.to_prompt_fragment()` genera el fragmento listo para inyectar en system prompts como valores numéricos — nunca texto narrativo. Rubro desconocido hace fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 15 intents del `INTENT_CATALOG`. El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se resuelven por nombre en `app/application/agents/registry.py → get_sub_agent(name)`, llamado desde `ChatOrchestrator`.
+**AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 18 intents del `INTENT_CATALOG` (incluye `schedule_event`, `check_calendar`, `sync_google_data` para los nuevos agentes). El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se resuelven por nombre en `app/application/agents/registry.py → get_sub_agent(name)`, llamado desde `ChatOrchestrator`.
 
-**ChatOrchestrator** (`app/application/services/chat_orchestrator.py`) — punto de entrada del endpoint `/agent/chat`. Orquesta: carga contexto del negocio + heurísticas → ConversationService carga historial → CEO clasifica intent → `registry.get_sub_agent()` despacha al sub-agente → LLM Haiku genera respuesta conversacional rica (salvo `requires_approval`, que devuelve un summary estructurado sin LLM adicional) → ConversationService guarda el turno (best-effort).
+**ChatOrchestrator** (`app/application/services/chat_orchestrator.py`) — punto de entrada del endpoint `/agent/chat`. Carga 4 capas de contexto (fail-silencioso cada una):
+1. Contexto del negocio + heurísticas (`_load_business_context`)
+2. BusinessMemory: resumen financiero acumulado (`BusinessMemoryService.get`)
+3. AgentMemory: patrones de comportamiento aprendidos (`AgentMemoryService.get_context_fragment`)
+4. Archivos procesados: últimos 5 `UploadedFile` con `parsed_summary_json` (`_load_file_context`)
+
+Luego: CEO clasifica intent → `registry.get_sub_agent()` despacha → si `requires_google_auth` retorna inmediato sin LLM → si `requires_approval` usa summary estructurado → si no, LLM Haiku genera respuesta rica → ConversationService guarda el turno (best-effort).
 
 **ConversationService** (`app/application/services/conversation_service.py`) — historial de chat: Redis como caché caliente (TTL 24h) con fallback a PostgreSQL. Ventana deslizante de los últimos 10 turnos; los más viejos se descartan. El `conversation_id` es UUID generado en el cliente (ver `useChat` en el frontend).
 
@@ -237,6 +248,34 @@ Nada fuera de esta lista puede ejecutarse. Agregar una acción requiere actualiz
 **Extras por agente:**
 - `agents/health/scorer.py` — lógica de scoring especializada usada por AgentHealth
 - `agents/supplier/preflight.py` — validaciones previas al envío de borradores a Gmail
+
+### Sistema de Memoria (tres capas)
+
+| Capa | Servicio | Backend | TTL cache | Qué almacena |
+|------|----------|---------|-----------|--------------|
+| Conversacional | `ConversationService` | Redis + PostgreSQL | 24h | Últimos 10 turnos del chat |
+| Negocio | `BusinessMemoryService` | Redis + PostgreSQL | 5min | Resumen financiero acumulado (ventas, gastos, alertas) |
+| Agente | `AgentMemoryService` | Redis + PostgreSQL | 5min | Patrones de comportamiento: método de pago, monto promedio de venta (Welford), categorías de gasto, top ActionTypes |
+
+`AgentMemoryService.record_action(tenant_id, action_type, payload)` se llama en `pending_action_service.py` después de cada acción confirmada (fail-silent). La confianza crece con ocurrencias: `confidence = min(1.0, 0.5 + occurrence_count/20)`. Los patrones se inyectan en el system prompt del orquestador como texto natural.
+
+**Tabla PostgreSQL:** `agent_memory` — columnas: `id`, `tenant_id`, `key`, `value` (JSONB), `occurrence_count`, `confidence`, `last_seen_at`, `created_at`. Unique constraint `(tenant_id, key)`.
+
+### Integración MCP Google
+
+Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Solo activa llamadas reales al MCP server cuando es `true` y `MCP_SERVER_URL` está configurado.
+
+**Arquitectura port/adapter:**
+- `app/application/ports/mcp_gateway.py` — interface abstracta `McpToolGateway`
+- `app/integrations/mcp/http_gateway.py` — implementación HTTP JSON-RPC 2.0 (`HttpMcpGateway`)
+- `app/integrations/mcp/google_mcp_service.py` — `GoogleMcpService` con allowlist por agente
+- `app/integrations/mcp/exceptions.py` — `McpToolAuthError` (reemplaza el eliminado `WorkspaceTokenError`)
+
+**Allowlists por agente:** cada agente solo puede llamar las herramientas MCP de su frozenset (`google.gmail.*`, `google.calendar.*`, `google.sheets.*`, `google.docs.*`).
+
+**Flujo `requires_google_auth`:** Si un agente detecta que el tenant no tiene credenciales Google, devuelve `status="requires_google_auth"`. El orquestador lo propaga sin LLM. El frontend redirige a `/workspace/google/connect/start`.
+
+**Gateway condicional en registry:** `AgentCalendar` y `AgentSync` reciben `gateway=HttpMcpGateway(...)` solo si `ENABLE_GOOGLE_MCP_TOOLS=true` y `MCP_SERVER_URL` está definido; de lo contrario `gateway=None` y operan en modo informacional.
 
 **Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt. El mismo módulo expone `is_valid_action_type(action_type)` para validar que el output de un LLM sea un ActionType del catálogo cerrado — usar al parsear cualquier respuesta LLM que deba devolver un action_type.
 
@@ -311,9 +350,12 @@ Flujo login federado:
 3. `POST /auth/oauth/google/exchange` → `AuthResponse` (nuevo usuario) **o** `OAuthLinkRequiredResponse` (email ya existente)
 4. Si `link_required`: formulario de contraseña para vincular → `POST /auth/oauth/google/link-pending`
 
-### Integraciones externas vía MCP (Sprint 5)
+### Integraciones externas vía MCP (Sprint 5 → Sprint 6)
 
-Flujo conexión (separado del login federado):
+Flujo conexión Google Workspace (separado del login federado):
+1. `/settings` → botón "Conectar Google" → `POST /workspace/google/connect/start`
+2. Google OAuth consent → callback → token guardado por tenant
+3. Agentes con `gateway` activo pueden llamar Gmail/Calendar/Sheets/Docs via MCP
 
 ---
 
@@ -326,8 +368,9 @@ Flujo conexión (separado del login federado):
 | 3 | ✅ Completo | Workspace Gateway + AgentSupplier Gmail |
 | 4 | ✅ Completo | Pending Actions externas — lifecycle (`/pending-actions/{id}/execute`), retry con guard `is_external`, idempotency_key, integración `EXTERNAL_SYSTEMS` |
 | 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, Settings de integraciones MCP, adjuntos en chat, analytics Ventas/Gastos/Productos |
+| 6 | ✅ Completo | Integración MCP Google: AgentCalendar + AgentSync, BusinessMemoryService, AgentMemoryService, file context en chat, catálogo ActionType 19 acciones, migración `agent_memory` en Neon |
 
-Post-Sprint 5: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes).
+Post-Sprint 5/6: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
 
 ---
 
@@ -339,7 +382,7 @@ Post-Sprint 5: hardening de infra en Railway (Alembic chain, manifests de worker
 - Los scores se recalculan solo ante cambios de datos (Celery async), no en cada request.
 - Todo decision generada se registra en `decision_audit_log` (insert-only, nunca update/delete).
 - Fail-closed en cualquier write sensible: ante error, no continuar.
-- En la capa de agentes: el catálogo de `ActionType` es cerrado — no agregar acciones fuera de los 15 definidos sin actualizar el `RiskEngine` y los tests.
+- En la capa de agentes: el catálogo de `ActionType` es cerrado — no agregar acciones fuera de los 19 definidos sin actualizar el `RiskEngine` y los tests.
 - System prompts de agentes: inyectar heurísticas como valores numéricos, nunca como texto narrativo ("margen del 12% al 18%", no "el margen es bueno si está en rango saludable").
 - Todo input de usuario a LLM debe pasar por `wrap_user_input()` antes de incluirse en un prompt.
 
