@@ -80,6 +80,16 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"from pathlib import Path; import sys; cmd = Path('/proc/1/cmdline').read_text(); sys.exit(0 if 'celery' in cmd and 'worker' in cmd else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ── Celery Beat (scheduler) ──────────────────────────────────────────────────
   celery-beat:
@@ -98,6 +108,16 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"from pathlib import Path; import sys; cmd = Path('/proc/1/cmdline').read_text(); sys.exit(0 if 'celery' in cmd and 'beat' in cmd else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ── Test runner (dev image, SQLite in-memory, no external deps needed) ────────
   test:
