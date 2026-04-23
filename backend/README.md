@@ -13,12 +13,16 @@ cp .env.example .env
 # 2. Levantar servicios
 make dev
 
-# 3. Aplicar migraciones
+# 3. Aplicar migraciones (comando local, no dentro del contenedor)
 make migrate
 
 # 4. Ver docs
 open http://localhost:8000/docs
 ```
+
+`make migrate`, `make test` y el resto de targets del `Makefile` corren en tu
+entorno local dentro de `backend/`. Si quieres ejecutar la migración desde el
+contenedor, usa `docker compose exec backend alembic upgrade head`.
 
 ## Comandos útiles
 
@@ -44,7 +48,7 @@ app/
 ├── jobs/            — Workers Celery
 ├── heuristics/      — Reglas por vertical (kiosco, decoracion, limpieza)
 ├── state/           — Business State Layer
-├── integrations/    — S3, SMTP
+├── integrations/    — S3, SMTP, OAuth y MCP
 ├── observability/   — structlog, métricas
 └── utils/           — JWT, paginación, helpers
 ```

@@ -1,7 +1,17 @@
 from enum import StrEnum
-from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
 import uuid
+
+from pydantic import BaseModel
+
+
+AgentStatus = Literal[
+    "success",
+    "requires_approval",
+    "requires_clarification",
+    "requires_google_auth",
+    "error",
+]
 
 
 class ActionType(StrEnum):
@@ -49,7 +59,7 @@ class AgentRequest(BaseModel):
 class AgentResponse(BaseModel):
     request_id: str
     agent_name: str
-    status: str  # success | requires_approval | requires_clarification | error | requires_google_auth
+    status: AgentStatus
     risk_level: RiskLevel
     requires_approval: bool = False
     confidence: Confidence = Confidence.HIGH

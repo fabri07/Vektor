@@ -1,5 +1,6 @@
 import pytest
 
+from app.application.agents.ceo.agent import INTENT_CATALOG
 from app.application.agents.shared.schemas import ActionType, AgentRequest
 from app.application.agents.shared.risk_engine import RiskEngine, RiskLevel
 from app.application.agents.shared.context_builder import ContextBuilder, CONTEXT_BUDGETS
@@ -56,7 +57,11 @@ def test_heuristic_to_prompt_fragment_is_numeric():
 
 
 def test_action_type_enum_complete():
-    assert len(ActionType) == 15
+    assert len(ActionType) == 16
+
+
+def test_intent_catalog_complete():
+    assert len(INTENT_CATALOG) == 15
 
 
 def test_wrap_user_input():

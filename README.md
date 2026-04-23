@@ -64,7 +64,7 @@ make reset-demo
 - Python 3.12
 - Node.js 20+
 - Docker + Docker Compose
-- PostgreSQL 15 (o usar docker-compose)
+- PostgreSQL 16 (o usar docker-compose)
 - Redis 7 (o usar docker-compose)
 
 ### Backend
@@ -78,7 +78,12 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Si no tenés Python 3.12 localmente, usá Docker Compose.
+Los comandos `make migrate`, `make test` y demás targets de `backend/Makefile`
+corren en tu entorno local dentro de `backend/`, no dentro del contenedor.
+
+Si no tenés Python 3.12 localmente, usá Docker Compose para la API y la infra,
+o ejecutá los comandos equivalentes dentro del contenedor con
+`docker compose -f backend/docker-compose.yml exec backend ...`.
 
 ### Frontend
 
@@ -89,22 +94,27 @@ npm install
 npm run dev
 ```
 
-### Docker Compose (stack completo)
+### Docker Compose (backend + infra)
 
 ```bash
 docker compose -f backend/docker-compose.yml up --build
 ```
+
+El frontend no se levanta con ese Compose; se ejecuta aparte desde `frontend/`.
 
 ### Variables de entorno clave
 
 | Variable | Default | Descripción |
 |----------|---------|-------------|
 | `ENVIRONMENT` | `development` | `development` / `production` |
-| `DEBUG` | `false` | Activa logs verbose y deshabilita verificación de email |
+| `APP_DEBUG` | `false` | Activa logs verbose y deshabilita verificación de email |
 | `DEMO_MODE` | `false` | Activa modo demo (omite verificación de email) |
 | `DEMO_EMAIL` | `demo@vektor.app` | Email del usuario demo |
 | `DEMO_PASSWORD` | `demo1234!` | Contraseña del usuario demo |
 | `DATABASE_URL` | *(computed)* | Construida desde `POSTGRES_*` vars |
+| `ENABLE_GOOGLE_LOGIN` | `false` | Login social con Google |
+| `ENABLE_GOOGLE_MCP_TOOLS` | `false` | Herramientas de producto Google vía MCP |
+| `MCP_SERVER_URL` | `""` | Base URL del MCP server cuando MCP está activo |
 
 ### Comandos útiles
 

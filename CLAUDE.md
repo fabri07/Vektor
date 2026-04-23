@@ -12,7 +12,7 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 
 - El chat productivo entra por `ChatOrchestrator` y no despacha directo desde el router al sub-agente.
 - Los clientes Anthropic se construyen vía `app/integrations/anthropic_client.py`; no instanciar `anthropic.AsyncAnthropic()` directo en agentes.
-- La integración Google activa hoy es **MCP-based** (`ENABLE_GOOGLE_MCP_TOOLS` + `MCP_SERVER_URL`). Las viejas rutas directas de `Google Workspace` ya no forman parte de la API pública.
+- Las integraciones de producto con Google hoy son **MCP-based** (`ENABLE_GOOGLE_MCP_TOOLS` + `MCP_SERVER_URL`). En paralelo sigue existiendo `Google Login` para autenticación social vía `/auth/oauth/google/*`; no confundir login social con herramientas MCP.
 - En frontend existe `/apps`, pero hoy es una pantalla informativa/placeholder; no hay flujo directo de conexión Google Workspace desde ahí.
 - El pipeline de archivos fue recentralizado en `app/application/services/file_parsing.py`. Los uploads de chat se parsean sincrónicamente al subir; la ingestión sigue su pipeline propio con confirmación humana.
 - La cadena Alembic actual incluye una migración de compatibilidad `20260401_0003_restore_chat_context_and_heuristics.py` y stubs `20260406_0001_stub.py` / `20260406_0002_stub.py` para conservar continuidad después de retirar migraciones viejas de Google Workspace.
@@ -230,7 +230,7 @@ Nada fuera de esta lista puede ejecutarse. Agregar o quitar una acción requiere
 
 **RiskEngine** (`shared/risk_engine.py`) — función determinística pura, sin LLM. `HIGH` requiere aprobación; `MEDIUM` también; `LOW` no.
 
-**ContextBuilder** (`shared/context_builder.py`) — respeta el budget por agente descartando secciones en este orden (primero en descartarse):
+**ContextBuilder** (`shared/context_builder.py`) — helper disponible y cubierto por tests para budgets de contexto. El `ChatOrchestrator` actual arma el prompt manualmente y no lo invoca directamente, pero el orden de prioridad esperado sigue siendo:
 1. `historical_data` (400 tokens)
 2. `conversation_history` (1.000 tokens)
 3. `recent_events` (800 tokens)
@@ -242,7 +242,7 @@ Nada fuera de esta lista puede ejecutarse. Agregar o quitar una acción requiere
 
 **HeuristicEngine** (`shared/heuristic_engine.py`) — implementado. Carga JSON de defaults por rubro desde `app/application/data/heuristics/`. `get(business_type)` es síncrono (solo defaults); `get_async(business_type, business_id, db)` aplica `BusinessHeuristicOverride` de la DB para customización por tenant. `HeuristicConfig.to_prompt_fragment()` genera el fragmento listo para inyectar en system prompts como valores numéricos — nunca texto narrativo. Rubro desconocido hace fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 18 intents del `INTENT_CATALOG` (incluye `schedule_event`, `check_calendar`, `sync_google_data` para los nuevos agentes). El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se resuelven por nombre en `app/application/agents/registry.py → get_sub_agent(name)`, llamado desde `ChatOrchestrator`.
+**AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 15 intents del `INTENT_CATALOG` (incluye `schedule_event`, `check_calendar`, `sync_google_data` para los agentes Google). El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se resuelven por nombre en `app/application/agents/registry.py → get_sub_agent(name)`, llamado desde `ChatOrchestrator`.
 
 **ChatOrchestrator** (`app/application/services/chat_orchestrator.py`) — punto de entrada real de `/agent/chat` y `/agent/chat/stream`. Carga 4 capas de contexto (fail-silencioso cada una):
 1. Contexto del negocio + heurísticas (`_load_business_context`)
@@ -254,7 +254,7 @@ Luego: CEO clasifica intent → `registry.get_sub_agent()` despacha → si `requ
 
 **ConversationService** (`app/application/services/conversation_service.py`) — historial de chat: Redis como caché caliente (TTL 24h) con fallback a PostgreSQL (`agent_conversation_context`). Ventana deslizante de los últimos 10 turnos; los más viejos se descartan. El `conversation_id` es UUID generado en el cliente.
 
-**EventBus** (`shared/event_bus.py`) — bus interno para comunicación entre agentes sin acoplamiento directo. Los agentes publican eventos; el CEO los suscribe para coordinar.
+**EventBus** (`shared/event_bus.py`) — wrapper fino sobre Celery (`send_task`) para emitir eventos internos desacoplados. Hoy no existe una capa de suscripción del CEO dentro del código; la coordinación downstream ocurre a través de tasks/event handlers.
 
 **Extras por agente:**
 - `agents/health/scorer.py` — lógica de scoring especializada usada por AgentHealth
