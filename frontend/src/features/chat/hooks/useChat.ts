@@ -310,12 +310,31 @@ export function useChat() {
       const response = await confirmAction(pendingActionId);
       const msg = messages.find((m) => m.pendingActionId === pendingActionId);
       if (msg) {
-        updateMessage(msg.id, {
-          status: "success",
-          content: msg.content + "\n✓ Confirmado y guardado.",
-        });
+        if (response.execution_status === "SUCCEEDED") {
+          updateMessage(msg.id, {
+            status: "success",
+            content: msg.content + "\n✓ Confirmado y guardado.",
+          });
+        } else if (response.execution_status === "REQUIRES_RECONNECT") {
+          updateMessage(msg.id, {
+            status: "requires_google_auth",
+            requiresGoogleAuth: true,
+            content:
+              msg.content +
+              "\nNecesito que conectes Google para completar esta acción desde Véktor.",
+          });
+        } else {
+          updateMessage(msg.id, {
+            status: "error",
+            content:
+              msg.content +
+              "\nNo se pudo completar la acción externa. Podés reintentarlo cuando el servicio esté disponible.",
+          });
+        }
       }
-      await invalidateAffectedQueries(response.action_type);
+      if (response.execution_status === "SUCCEEDED") {
+        await invalidateAffectedQueries(response.action_type);
+      }
     },
     [messages, updateMessage, invalidateAffectedQueries],
   );

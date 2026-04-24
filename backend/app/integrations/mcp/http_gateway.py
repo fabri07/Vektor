@@ -59,7 +59,10 @@ class HttpMcpGateway(McpToolGateway):
         *,
         base_url: str | None = None,
         timeout: float | None = None,
+        user_id: str | None = None,
     ) -> None:
+        self._user_id = user_id
+
         if settings is not None:
             self._base_url = settings.MCP_SERVER_URL.rstrip("/")
             self._default_timeout = settings.MCP_HTTP_TIMEOUT
@@ -77,6 +80,7 @@ class HttpMcpGateway(McpToolGateway):
         arguments: dict[str, Any],
         *,
         tenant_id: str,
+        user_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> McpToolResult:
         timeout = TOOL_TIMEOUTS.get(tool_name, self._default_timeout)
@@ -92,6 +96,11 @@ class HttpMcpGateway(McpToolGateway):
         if idempotency_key:
             payload["params"]["idempotency_key"] = idempotency_key
 
+        effective_user_id = user_id or self._user_id
+        headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
+        if effective_user_id:
+            headers["X-User-Id"] = effective_user_id
+
         t0 = time.monotonic()
         try:
             async with httpx.AsyncClient() as client:
@@ -99,7 +108,7 @@ class HttpMcpGateway(McpToolGateway):
                     f"{self._base_url}/tools/call",
                     json=payload,
                     timeout=timeout,
-                    headers={"X-Tenant-Id": tenant_id},
+                    headers=headers,
                 )
         except httpx.TimeoutException as exc:
             duration_ms = int((time.monotonic() - t0) * 1000)
@@ -193,3 +202,83 @@ class HttpMcpGateway(McpToolGateway):
             return {"status": "ok", "http_status": resp.status_code}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
+
+    async def start_auth(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        scopes: list[str],
+    ) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{self._base_url}/auth/start",
+                    json={"scopes": scopes},
+                    timeout=10.0,
+                    headers={"X-Tenant-Id": tenant_id, "X-User-Id": user_id},
+                )
+        except httpx.ConnectError as exc:
+            raise McpToolUnavailableError(
+                f"MCP server no disponible en {self._base_url}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise McpToolTimeoutError("Timeout iniciando auth Google") from exc
+
+        if resp.status_code >= 500:
+            raise McpToolUnavailableError(f"MCP server retornó {resp.status_code} en /auth/start")
+        if resp.status_code == 401:
+            raise McpToolAuthError("MCP server rechazó la solicitud de auth", reason="mcp_auth_required")
+
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise McpToolUnavailableError(
+                f"Respuesta inválida de /auth/start: {resp.text[:200]}"
+            ) from exc
+
+    async def get_auth_status(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{self._base_url}/auth/status",
+                    timeout=8.0,
+                    headers={"X-Tenant-Id": tenant_id, "X-User-Id": user_id},
+                )
+        except (httpx.ConnectError, httpx.TimeoutException):
+            return {"connected": False, "scopes_granted": [], "last_error": "mcp_unavailable"}
+
+        if resp.status_code >= 400:
+            return {"connected": False, "scopes_granted": [], "last_error": f"http_{resp.status_code}"}
+
+        try:
+            return resp.json()
+        except Exception:
+            return {"connected": False, "scopes_granted": [], "last_error": "invalid_response"}
+
+    async def revoke_auth(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.request(
+                    "DELETE",
+                    f"{self._base_url}/auth/revoke",
+                    timeout=8.0,
+                    headers={"X-Tenant-Id": tenant_id, "X-User-Id": user_id},
+                )
+        except Exception as exc:
+            logger.warning(
+                "mcp_gateway.revoke_auth_failed",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                error=str(exc),
+            )

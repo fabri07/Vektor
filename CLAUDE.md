@@ -215,7 +215,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 - `status`: `"success" | "requires_approval" | "requires_clarification" | "requires_google_auth" | "error"`
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca un float
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado actual de 16 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado de 16 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
@@ -228,7 +228,17 @@ SYNC_TO_GOOGLE         CREATE_CALENDAR_EVENT
 
 Nada fuera de esta lista puede ejecutarse. Agregar o quitar una acción requiere actualizar también `RiskEngine` y sus tests.
 
+**Auto-ejecución:** `REGISTER_EXPENSE` se ejecuta automáticamente sin pedir confirmación al usuario (`_AUTO_EXECUTE_ACTION_TYPES` en `api/v1/agent.py`). El mensaje de respuesta se prefija con "Gasto registrado.".
+
+**Deduplicación por fingerprint** (`operation_fingerprints`): antes de ejecutar `REGISTER_SALE`, `REGISTER_EXPENSE` o `REGISTER_PURCHASE`, se calcula SHA-256 de `{tenant_id}:{action_type}:{amount}:{date}` y se compara contra la tabla `operation_fingerprints`. Si ya existe, la acción devuelve `execution_status: "DUPLICATE"` sin volver a insertar.
+
+**Rate limit de chat:** 50 mensajes/día por tenant. Redis key: `rate:chat:{tenant_id}:{date}`. Se configura expiry a medianoche del día. Compartido entre `/chat` y `/chat/stream`.
+
 **RiskEngine** (`shared/risk_engine.py`) — función determinística pura, sin LLM. `HIGH` requiere aprobación; `MEDIUM` también; `LOW` no.
+
+**Endpoint de retry** (`POST /agent/retry/{pending_id}`): re-ejecuta acciones externas fallidas. Condiciones: `status=APPROVED`, `execution_status in (FAILED, REQUIRES_RECONNECT)`, solo `is_external=True`, y máximo 1 reintento total rastreado via `decision_audit_log` con `decision_type="AGENT_ACTION_RETRIED"`.
+
+**`execution_status` en acciones externas:** puede ser `IN_PROGRESS` → `SUCCEEDED` | `FAILED` | `REQUIRES_RECONNECT`. El valor `REQUIRES_RECONNECT` ocurre cuando `McpToolAuthError` es lanzado; el frontend muestra un prompt para reconectar Google.
 
 **ContextBuilder** (`shared/context_builder.py`) — helper disponible y cubierto por tests para budgets de contexto. El `ChatOrchestrator` actual arma el prompt manualmente y no lo invoca directamente, pero el orden de prioridad esperado sigue siendo:
 1. `historical_data` (400 tokens)
@@ -243,6 +253,12 @@ Nada fuera de esta lista puede ejecutarse. Agregar o quitar una acción requiere
 **HeuristicEngine** (`shared/heuristic_engine.py`) — implementado. Carga JSON de defaults por rubro desde `app/application/data/heuristics/`. `get(business_type)` es síncrono (solo defaults); `get_async(business_type, business_id, db)` aplica `BusinessHeuristicOverride` de la DB para customización por tenant. `HeuristicConfig.to_prompt_fragment()` genera el fragmento listo para inyectar en system prompts como valores numéricos — nunca texto narrativo. Rubro desconocido hace fallback a `kiosco_almacen`.
 
 **AgentCEO — flujo interno:** `classify_intent()` llama al LLM (max_tokens=300) para mapear el mensaje del usuario a uno de los 15 intents del `INTENT_CATALOG` (incluye `schedule_event`, `check_calendar`, `sync_google_data` para los agentes Google). El intent no reconocido cae a `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` y `INTENT_TO_AGENT` (ambos en `ceo/agent.py`) resuelven determinísticamente el `ActionType` y el agente destino sin más LLM. Los sub-agentes se resuelven por nombre en `app/application/agents/registry.py → get_sub_agent(name)`, llamado desde `ChatOrchestrator`.
+
+**Streaming SSE** (`POST /agent/chat/stream`): emite tres tipos de eventos:
+- `{"type": "thinking", "text": "..."}` — inmediatamente al recibir el request
+- `{"type": "response", "data": {...}}` — `AgentResponse` serializada
+- `{"type": "error", "message": "...", "code": N}` — si hay excepción (code 429 = rate limit)
+Finaliza con `data: [DONE]`. El frontend usa `sendStream()` en `useChat`, que mantiene un mensaje placeholder con `thinkingId` que se actualiza in-place.
 
 **ChatOrchestrator** (`app/application/services/chat_orchestrator.py`) — punto de entrada real de `/agent/chat` y `/agent/chat/stream`. Carga 4 capas de contexto (fail-silencioso cada una):
 1. Contexto del negocio + heurísticas (`_load_business_context`)
@@ -366,9 +382,11 @@ La confirmación humana sigue siendo obligatoria antes de insertar ventas/gastos
 
 - `/chat` es la home post-login. Todos los redirects post-auth apuntan a `/chat`, no `/dashboard`.
 - `ChatPanel.tsx` se mantiene en el repo pero **no** está registrado en el layout global.
-- `conversation_id`: UUID generado client-side con `useRef<string>(crypto.randomUUID()).current` al montar `useChat`. No se espera del servidor.
+- `conversation_id`: proviene de `useChatStore` (Zustand). `newConversation()` genera un nuevo UUID. No se espera del servidor.
 - Adjuntos: `AttachmentPicker.tsx` — hasta 3 archivos (PDF/XLSX/CSV/TXT/DOCX/PPTX/PNG/JPG), se suben inmediatamente a `POST /files/upload?purpose=chat` antes de enviar el mensaje. Los `file_id` se pasan en el body del agente.
 - Layout condicional en `(protected)/layout.tsx`: chat usa `flex flex-col overflow-hidden`, otras páginas usan el wrapper con padding y scroll normal.
+- `useChat` expone `send` (REST) y `sendStream` (SSE). Ambos leen/escriben en `useChatStore`. `sendStream` muestra un placeholder "pensando" y lo actualiza in-place con la respuesta.
+- `MUTATING_ACTIONS` en `useChat.ts`: 7 action types que triggerean `queryClient.invalidateQueries` en `sales-entries`, `expenses-entries`, `products`, `inventory` (síncronos) y `health-scores` (fire-and-forget).
 
 ### Google OAuth (Sprint 5)
 
@@ -421,7 +439,7 @@ Post-Sprint 5/6: hardening de infra en Railway (Alembic chain, manifests de work
 - Los scores se recalculan solo ante cambios de datos (Celery async), no en cada request.
 - Todo decision generada se registra en `decision_audit_log` (insert-only, nunca update/delete).
 - Fail-closed en cualquier write sensible: ante error, no continuar.
-- En la capa de agentes: el catálogo de `ActionType` es cerrado — no agregar acciones fuera de los 19 definidos sin actualizar el `RiskEngine` y los tests.
+- En la capa de agentes: el catálogo de `ActionType` es cerrado — no agregar acciones fuera de los 16 definidos sin actualizar el `RiskEngine` y los tests.
 - System prompts de agentes: inyectar heurísticas como valores numéricos, nunca como texto narrativo ("margen del 12% al 18%", no "el margen es bueno si está en rango saludable").
 - Todo input de usuario a LLM debe pasar por `wrap_user_input()` antes de incluirse en un prompt.
 

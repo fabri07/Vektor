@@ -11,6 +11,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import anthropic
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -19,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.schemas import AgentResponse, RiskLevel
+from app.integrations.mcp.exceptions import McpToolAuthError
 from app.main import create_app
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -136,6 +139,21 @@ def _mock_low_risk_response(request_id: str) -> AgentResponse:
             "target_agent": "agent_helper",
             "entities": {},
         },
+    )
+
+
+def _mock_anthropic_overload_error() -> anthropic.InternalServerError:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status_code=529, request=request)
+    body = {
+        "type": "error",
+        "error": {"type": "overloaded_error", "message": "Overloaded"},
+        "request_id": "req_test_overload",
+    }
+    return anthropic.InternalServerError(
+        "Error code: 529",
+        response=response,
+        body=body,
     )
 
 
@@ -347,6 +365,47 @@ async def test_confirm_expired_fails(auth_client, session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_confirm_external_action_requires_reconnect_on_mcp_auth_error(
+    auth_client, session: AsyncSession
+):
+    """Una acción externa debe quedar en REQUIRES_RECONNECT cuando el MCP pide auth."""
+    ac, headers, tenant, user, _ = auth_client
+
+    action = PendingAction(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        action_type="CREATE_CALENDAR_EVENT",
+        payload={"mode": "mcp", "summary": "Reunión"},
+        risk_level="MEDIUM",
+        status="PENDING",
+        external_system="GOOGLE_CALENDAR",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    session.add(action)
+    await session.commit()
+
+    with patch(
+        "app.api.v1.agent.execute_pending_action",
+        new=AsyncMock(
+            side_effect=McpToolAuthError(
+                "Error de autenticación Google: not_connected",
+                reason="not_connected",
+            )
+        ),
+    ):
+        resp = await ac.post(f"/api/v1/agent/confirm/{action.id}", headers=headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["execution_status"] == "REQUIRES_RECONNECT"
+    assert resp.json()["failure_code"] == "not_connected"
+
+    await session.refresh(action)
+    assert action.status == "APPROVED"
+    assert action.execution_status == "REQUIRES_RECONNECT"
+    assert action.failure_code == "not_connected"
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_429(auth_client):
     """51 requests al chat → el 51° retorna 429."""
     ac, headers, tenant, user, fake_redis = auth_client
@@ -363,6 +422,57 @@ async def test_rate_limit_429(auth_client):
 
     assert resp.status_code == 429
     assert "50 mensajes" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_chat_overloaded_provider_returns_safe_503(auth_client):
+    """Un 529 de Anthropic debe degradar a 503 sin filtrar el error crudo."""
+    ac, headers, tenant, user, _ = auth_client
+
+    with patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator:
+        MockOrchestrator.return_value.handle = AsyncMock(
+            side_effect=_mock_anthropic_overload_error()
+        )
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "¿Cómo viene mi flujo de caja?"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 503
+    assert (
+        resp.json()["detail"]
+        == "El servicio de IA está saturado temporalmente. Intenta de nuevo en unos segundos."
+    )
+    assert "529" not in resp.text
+    assert "Overloaded" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_overloaded_provider_returns_safe_sse_error(auth_client):
+    """El stream debe emitir un error seguro y finalizar cuando Anthropic devuelve 529."""
+    ac, headers, tenant, user, _ = auth_client
+
+    with patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator:
+        MockOrchestrator.return_value.handle = AsyncMock(
+            side_effect=_mock_anthropic_overload_error()
+        )
+        resp = await ac.post(
+            "/api/v1/agent/chat/stream",
+            json={"message": "Necesito ayuda con ventas"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    assert "Analizando tu mensaje..." in resp.text
+    assert (
+        "El servicio de IA está saturado temporalmente. Intenta de nuevo en unos segundos."
+        in resp.text
+    )
+    assert '"code": 503' in resp.text
+    assert "[DONE]" in resp.text
+    assert "529" not in resp.text
+    assert "Overloaded" not in resp.text
 
 
 @pytest.mark.asyncio

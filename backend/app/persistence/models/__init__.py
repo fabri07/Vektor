@@ -26,6 +26,7 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
 from app.persistence.models.user_auth_identity import UserAuthIdentity
 from app.persistence.models.memory import AgentMemory, BusinessMemory, OperationFingerprint
+from app.persistence.models.google_mcp_connection import GoogleMcpConnection
 
 __all__ = [
     "UserActivityEvent",
@@ -56,4 +57,5 @@ __all__ = [
     "OperationFingerprint",
     "BusinessMemory",
     "AgentMemory",
+    "GoogleMcpConnection",
 ]

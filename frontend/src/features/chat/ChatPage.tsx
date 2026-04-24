@@ -296,9 +296,13 @@ export function ChatPage() {
                           }`}
                       >
                         {msg.content}
-                        {msg.requiresGoogleAuth && msg.authUrl && (
+                        {msg.requiresGoogleAuth && (
                           <button
-                            onClick={() => window.open(msg.authUrl, "_blank")}
+                            onClick={() =>
+                              msg.authUrl
+                                ? window.open(msg.authUrl, "_blank", "noopener,noreferrer")
+                                : router.push("/apps")
+                            }
                             className="mt-2 block w-full rounded-lg bg-blue-600 px-4 py-2 text-center text-sm font-medium text-white hover:bg-blue-700 transition-colors"
                           >
                             Conectar Google

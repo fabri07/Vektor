@@ -28,6 +28,7 @@ export interface ConfirmActionResponse {
   status: string;
   action_type: string;
   execution_status: string;
+  failure_code?: string | null;
 }
 
 export async function sendMessage(

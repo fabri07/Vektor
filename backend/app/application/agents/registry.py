@@ -26,7 +26,11 @@ def get_sub_agent(
         from app.config.settings import get_settings  # noqa: PLC0415
 
         settings = get_settings()
-        gateway = HttpMcpGateway(settings=settings) if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL else None
+        gateway = (
+            HttpMcpGateway(settings=settings, user_id=str(user_id) if user_id else None)
+            if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL
+            else None
+        )
         return AgentSupplier(session=db, gateway=gateway)
     if name == "agent_calendar":
         from app.application.agents.calendar.agent import AgentCalendar  # noqa: PLC0415
@@ -34,7 +38,11 @@ def get_sub_agent(
         from app.config.settings import get_settings  # noqa: PLC0415
 
         settings = get_settings()
-        gateway = HttpMcpGateway(settings=settings) if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL else None
+        gateway = (
+            HttpMcpGateway(settings=settings, user_id=str(user_id) if user_id else None)
+            if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL
+            else None
+        )
         return AgentCalendar(gateway=gateway)
     if name == "agent_sync":
         from app.application.agents.sync.agent import AgentSync  # noqa: PLC0415
@@ -42,7 +50,11 @@ def get_sub_agent(
         from app.config.settings import get_settings  # noqa: PLC0415
 
         settings = get_settings()
-        gateway = HttpMcpGateway(settings=settings) if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL else None
+        gateway = (
+            HttpMcpGateway(settings=settings, user_id=str(user_id) if user_id else None)
+            if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL
+            else None
+        )
         return AgentSync(gateway=gateway)
     if name == "agent_health":
         from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415

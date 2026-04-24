@@ -14,6 +14,7 @@ import uuid
 from datetime import UTC, date, datetime, time
 from typing import Any, AsyncGenerator
 
+import anthropic
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -49,6 +50,13 @@ _FINGERPRINT_ACTION_TYPES = {
     str(ActionType.REGISTER_PURCHASE),
 }
 
+_ANTHROPIC_RATE_LIMIT_MESSAGE = (
+    "El servicio de IA alcanzó temporalmente su límite. Intenta de nuevo en unos segundos."
+)
+_ANTHROPIC_UNAVAILABLE_MESSAGE = (
+    "El servicio de IA está saturado temporalmente. Intenta de nuevo en unos segundos."
+)
+
 
 
 class ChatRequest(BaseModel):
@@ -66,6 +74,46 @@ class ConversationSummary(BaseModel):
 class ConversationTurns(BaseModel):
     conversation_id: str
     turns: list[dict[str, Any]]
+
+
+def _anthropic_error_response(exc: Exception) -> tuple[int, str] | None:
+    status_code = getattr(exc, "status_code", None)
+
+    if isinstance(exc, anthropic.RateLimitError) or status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+        return status.HTTP_429_TOO_MANY_REQUESTS, _ANTHROPIC_RATE_LIMIT_MESSAGE
+
+    if isinstance(
+        exc,
+        (
+            anthropic.InternalServerError,
+            anthropic.APIConnectionError,
+            anthropic.APITimeoutError,
+        ),
+    ) or status_code in {
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status.HTTP_502_BAD_GATEWAY,
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        status.HTTP_504_GATEWAY_TIMEOUT,
+        529,
+    }:
+        return status.HTTP_503_SERVICE_UNAVAILABLE, _ANTHROPIC_UNAVAILABLE_MESSAGE
+
+    return None
+
+
+def _log_provider_failure(*, event: str, exc: Exception, tenant_id: uuid.UUID) -> None:
+    error_body = getattr(exc, "body", None)
+    request_id = error_body.get("request_id") if isinstance(error_body, dict) else None
+    provider_status = getattr(exc, "status_code", None)
+
+    logger.warning(
+        event,
+        error=str(exc),
+        error_type=type(exc).__name__,
+        provider_status_code=provider_status,
+        provider_request_id=request_id,
+        tenant_id=str(tenant_id),
+    )
 
 
 def _derive_title(turns: list[Any]) -> str:
@@ -321,6 +369,16 @@ async def chat(
             detail="El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
         ) from exc
     except Exception as exc:
+        anthropic_error = _anthropic_error_response(exc)
+        if anthropic_error is not None:
+            http_status, message = anthropic_error
+            _log_provider_failure(
+                event="chat_orchestrator_provider_unavailable",
+                exc=exc,
+                tenant_id=tenant_id,
+            )
+            raise HTTPException(status_code=http_status, detail=message) from exc
+
         logger.error(
             "chat_orchestrator_failed",
             error=str(exc),
@@ -473,6 +531,23 @@ async def chat_stream(
             yield f"data: {json_module.dumps(error_event, ensure_ascii=False)}\n\n"
 
         except Exception as exc:
+            anthropic_error = _anthropic_error_response(exc)
+            if anthropic_error is not None:
+                http_status, message = anthropic_error
+                _log_provider_failure(
+                    event="chat_stream_provider_unavailable",
+                    exc=exc,
+                    tenant_id=tenant_id,
+                )
+                error_event = {
+                    "type": "error",
+                    "message": message,
+                    "code": http_status,
+                }
+                yield f"data: {json_module.dumps(error_event, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
             logger.error(
                 "chat_stream_failed",
                 error=str(exc),
@@ -543,6 +618,10 @@ async def confirm_action(
         try:
             await execute_pending_action(action, db, redis=redis)
             action.execution_status = "SUCCEEDED"
+        except McpToolAuthError as exc:
+            action.execution_status = "REQUIRES_RECONNECT"
+            action.failure_code = exc.reason
+            action.failure_message = None
         except Exception as exc:
             action.execution_status = "FAILED"
             action.failure_code = None
@@ -572,6 +651,7 @@ async def confirm_action(
         "status": "confirmed",
         "action_type": action.action_type,
         "execution_status": action.execution_status,
+        "failure_code": action.failure_code,
     }
     return response
 
@@ -742,5 +822,6 @@ async def retry_action(
         "status": "retried",
         "action_type": action.action_type,
         "execution_status": action.execution_status,
+        "failure_code": action.failure_code,
     }
     return response
