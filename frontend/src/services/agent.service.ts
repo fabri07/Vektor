@@ -36,11 +36,15 @@ export async function sendMessage(
   conversationId?: string,
   attachments?: ChatAttachment[],
 ): Promise<AgentResponse> {
-  const res = await api.post<AgentResponse>("/agent/chat", {
-    message,
-    conversation_id: conversationId,
-    attachments: attachments ?? [],
-  });
+  const res = await api.post<AgentResponse>(
+    "/agent/chat",
+    {
+      message,
+      conversation_id: conversationId,
+      attachments: attachments ?? [],
+    },
+    { timeout: 90_000 },
+  );
   return res.data;
 }
 

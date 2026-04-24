@@ -198,11 +198,13 @@ export interface OAuthLinkRequiredResponse {
 }
 
 
-export interface WorkspaceConnectStartResponse {
-  authorization_url: string;
+export interface GoogleConnectStartResponse {
+  auth_url: string;
+  required_scopes: string[];
+  state: string;
 }
 
-export interface WorkspaceAppStatus {
+export interface GoogleAppStatusLegacy {
   id: string;
   label: string;
   description: string;
@@ -212,10 +214,10 @@ export interface WorkspaceAppStatus {
   required_scopes: string[];
 }
 
-export interface WorkspaceStatusResponse {
+export interface GoogleStatusResponseLegacy {
   connected: boolean;
   scopes_granted: string[];
-  apps: WorkspaceAppStatus[];
+  apps: GoogleAppStatusLegacy[];
   connected_at: string | null;
   last_error_code: string | null;
 }

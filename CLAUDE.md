@@ -13,9 +13,9 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - El chat productivo entra por `ChatOrchestrator` y no despacha directo desde el router al sub-agente.
 - Los clientes Anthropic se construyen vía `app/integrations/anthropic_client.py`; no instanciar `anthropic.AsyncAnthropic()` directo en agentes.
 - Las integraciones de producto con Google hoy son **MCP-based** (`ENABLE_GOOGLE_MCP_TOOLS` + `MCP_SERVER_URL`). En paralelo sigue existiendo `Google Login` para autenticación social vía `/auth/oauth/google/*`; no confundir login social con herramientas MCP.
-- En frontend existe `/apps`, pero hoy es una pantalla informativa/placeholder; no hay flujo directo de conexión Google Workspace desde ahí.
+- En frontend existe `/apps` con flujo directo de conexión Google y estado de integraciones.
 - El pipeline de archivos fue recentralizado en `app/application/services/file_parsing.py`. Los uploads de chat se parsean sincrónicamente al subir; la ingestión sigue su pipeline propio con confirmación humana.
-- La cadena Alembic actual incluye una migración de compatibilidad `20260401_0003_restore_chat_context_and_heuristics.py` y stubs `20260406_0001_stub.py` / `20260406_0002_stub.py` para conservar continuidad después de retirar migraciones viejas de Google Workspace.
+- La cadena Alembic actual incluye una migración de compatibilidad `20260401_0003_restore_chat_context_and_heuristics.py` y stubs `20260406_0001_stub.py` / `20260406_0002_stub.py` para conservar continuidad después de retirar migraciones viejas de Google.
 
 ---
 
@@ -296,15 +296,15 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Solo activa llamadas re
 - `app/application/ports/mcp_gateway.py` — interface abstracta `McpToolGateway`
 - `app/integrations/mcp/http_gateway.py` — implementación HTTP JSON-RPC 2.0 (`HttpMcpGateway`)
 - `app/integrations/mcp/google_mcp_service.py` — `GoogleMcpService` con allowlist por agente
-- `app/integrations/mcp/exceptions.py` — `McpToolAuthError` (reemplaza el eliminado `WorkspaceTokenError`)
+- `app/integrations/mcp/exceptions.py` — `McpToolAuthError` para errores de autenticación Google vía MCP
 
 **Allowlists por agente:** cada agente solo puede llamar las herramientas MCP de su frozenset (`google.gmail.*`, `google.calendar.*`, `google.sheets.*`, `google.docs.*`).
 
-**Flujo `requires_google_auth`:** Si un agente detecta que falta acceso Google, devuelve `status="requires_google_auth"`. El orquestador lo propaga sin LLM. El frontend hoy muestra el estado en el chat; no existe una ruta backend `/workspace/google/connect/start` activa en esta versión.
+**Flujo `requires_google_auth`:** Si un agente detecta que falta acceso Google, devuelve `status="requires_google_auth"`. El orquestador lo propaga sin LLM. El frontend hoy muestra el estado en el chat y deriva a `/apps`.
 
 **Gateway condicional en registry:** `AgentCalendar` y `AgentSync` reciben `gateway=HttpMcpGateway(...)` solo si `ENABLE_GOOGLE_MCP_TOOLS=true` y `MCP_SERVER_URL` está definido; de lo contrario `gateway=None` y operan en modo informacional.
 
-**Nota de compatibilidad:** El paquete `app/integrations/google_workspace/` puede seguir existiendo en el repo, pero ya no está cableado a los routers principales. La integración viva hoy es la del MCP server.
+**Nota de compatibilidad:** Pueden existir rastros históricos de integraciones Google anteriores, pero la integración viva hoy es la del MCP server.
 
 **Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt. El mismo módulo expone `is_valid_action_type(action_type)` para validar que el output de un LLM sea un ActionType del catálogo cerrado — usar al parsear cualquier respuesta LLM que deba devolver un action_type.
 
@@ -423,7 +423,7 @@ Estado actual:
   - restaura `agent_conversation_context`
   - agrega `business_profiles.heuristics_version`
 - `20260406_0001_stub.py` y `20260406_0002_stub.py`
-  - no-op stubs para conservar continuidad Alembic después de retirar migraciones viejas de Google Workspace
+  - no-op stubs para conservar continuidad Alembic después de retirar migraciones viejas de Google
 - `20260421_0001_add_memory_tables.py` y `20260421_0002_add_agent_memory.py`
   - continúan la cadena actual de memoria
 

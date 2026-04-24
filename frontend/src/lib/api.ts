@@ -9,6 +9,9 @@ export const api = axios.create({
   timeout: 15_000,
 });
 
+// Single-flight: todos los 401 simultáneos comparten el mismo promise de refresh
+let _refreshPromise: Promise<string> | null = null;
+
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   if (typeof window !== "undefined") {
     const token = useAuthStore.getState().token;
@@ -43,20 +46,25 @@ api.interceptors.response.use(
       originalRequest._retry = true;
 
       try {
-        const refreshResponse = await axios.post<{
-          access_token: string;
-          refresh_token: string;
-          token_type: "bearer";
-          expires_in: number;
-        }>(`${BASE_URL}/api/v1/auth/refresh`, {
-          refresh_token: refreshToken,
-        });
+        if (!_refreshPromise) {
+          _refreshPromise = axios
+            .post<{
+              access_token: string;
+              refresh_token: string;
+              token_type: "bearer";
+              expires_in: number;
+            }>(`${BASE_URL}/api/v1/auth/refresh`, { refresh_token: refreshToken })
+            .then((r) => {
+              setTokens(r.data.access_token, r.data.refresh_token);
+              return r.data.access_token;
+            })
+            .finally(() => {
+              _refreshPromise = null;
+            });
+        }
 
-        setTokens(
-          refreshResponse.data.access_token,
-          refreshResponse.data.refresh_token,
-        );
-        originalRequest.headers.Authorization = `Bearer ${refreshResponse.data.access_token}`;
+        const newToken = await _refreshPromise;
+        originalRequest.headers.Authorization = `Bearer ${newToken}`;
         return api.request(originalRequest);
       } catch (refreshError) {
         logout();

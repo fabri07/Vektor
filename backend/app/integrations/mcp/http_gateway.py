@@ -36,6 +36,7 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "google.sheets.append_rows": 20.0,
     "google.drive.upload_file": 30.0,
     "google.drive.list_files": 8.0,
+    "google.drive.read_file": 20.0,
     "google.docs.create_document": 20.0,
     "google.docs.append_content": 20.0,
     "google.photos.list_media_items": 8.0,
@@ -62,10 +63,12 @@ class HttpMcpGateway(McpToolGateway):
         user_id: str | None = None,
     ) -> None:
         self._user_id = user_id
+        self._shared_secret = ""
 
         if settings is not None:
             self._base_url = settings.MCP_SERVER_URL.rstrip("/")
             self._default_timeout = settings.MCP_HTTP_TIMEOUT
+            self._shared_secret = getattr(settings, "MCP_SERVER_SHARED_SECRET", "")
             return
 
         if base_url is None:
@@ -73,6 +76,20 @@ class HttpMcpGateway(McpToolGateway):
 
         self._base_url = base_url.rstrip("/")
         self._default_timeout = timeout or DEFAULT_TIMEOUT
+
+    def _build_headers(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str | None = None,
+    ) -> dict[str, str]:
+        effective_user_id = user_id or self._user_id
+        headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
+        if effective_user_id:
+            headers["X-User-Id"] = effective_user_id
+        if self._shared_secret:
+            headers["X-MCP-Server-Secret"] = self._shared_secret
+        return headers
 
     async def call_tool(
         self,
@@ -96,10 +113,7 @@ class HttpMcpGateway(McpToolGateway):
         if idempotency_key:
             payload["params"]["idempotency_key"] = idempotency_key
 
-        effective_user_id = user_id or self._user_id
-        headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
-        if effective_user_id:
-            headers["X-User-Id"] = effective_user_id
+        headers = self._build_headers(tenant_id=tenant_id, user_id=user_id)
 
         t0 = time.monotonic()
         try:
@@ -216,7 +230,7 @@ class HttpMcpGateway(McpToolGateway):
                     f"{self._base_url}/auth/start",
                     json={"scopes": scopes},
                     timeout=10.0,
-                    headers={"X-Tenant-Id": tenant_id, "X-User-Id": user_id},
+                    headers=self._build_headers(tenant_id=tenant_id, user_id=user_id),
                 )
         except httpx.ConnectError as exc:
             raise McpToolUnavailableError(
@@ -248,7 +262,7 @@ class HttpMcpGateway(McpToolGateway):
                 resp = await client.get(
                     f"{self._base_url}/auth/status",
                     timeout=8.0,
-                    headers={"X-Tenant-Id": tenant_id, "X-User-Id": user_id},
+                    headers=self._build_headers(tenant_id=tenant_id, user_id=user_id),
                 )
         except (httpx.ConnectError, httpx.TimeoutException):
             return {"connected": False, "scopes_granted": [], "last_error": "mcp_unavailable"}
@@ -273,7 +287,7 @@ class HttpMcpGateway(McpToolGateway):
                     "DELETE",
                     f"{self._base_url}/auth/revoke",
                     timeout=8.0,
-                    headers={"X-Tenant-Id": tenant_id, "X-User-Id": user_id},
+                    headers=self._build_headers(tenant_id=tenant_id, user_id=user_id),
                 )
         except Exception as exc:
             logger.warning(

@@ -18,7 +18,7 @@ Ciclo de vida para acciones externas del agente:
                                idempotency_key=<uuid único>
   - confirm() → status=APPROVED, execution_status=IN_PROGRESS (flush)
               → éxito:            execution_status=SUCCEEDED
-              → WorkspaceTokenError: execution_status=REQUIRES_RECONNECT, failure_code=exc.reason
+              → error de auth Google: execution_status=REQUIRES_RECONNECT, failure_code=exc.reason
               → excepción genérica: execution_status=FAILED, failure_message=str(exc)[:500]
   - retry() → solo válido cuando is_retryable (APPROVED + FAILED|REQUIRES_RECONNECT)
                y no existe aún un registro AGENT_ACTION_RETRIED en DecisionAuditLog

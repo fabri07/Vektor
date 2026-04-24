@@ -55,7 +55,7 @@ def get_sub_agent(
             if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL
             else None
         )
-        return AgentSync(gateway=gateway)
+        return AgentSync(gateway=gateway, tenant_id=str(tenant_id) if tenant_id else None)
     if name == "agent_health":
         from app.application.agents.health.agent import AgentHealth  # noqa: PLC0415
 

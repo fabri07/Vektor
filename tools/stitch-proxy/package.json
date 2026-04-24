@@ -1,0 +1,17 @@
+{
+  "name": "vektor-stitch-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local stdio MCP proxy for Google Stitch, used by Codex.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node ./proxy.mjs"
+  },
+  "dependencies": {
+    "@google/stitch-sdk": "0.0.3",
+    "@modelcontextprotocol/sdk": "^1.23.0"
+  }
+}

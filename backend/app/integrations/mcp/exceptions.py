@@ -8,7 +8,7 @@ class McpError(Exception):
 
 
 class McpToolAuthError(McpError):
-    """Reemplaza WorkspaceTokenError en todo el sistema.
+    """Error estándar de autenticación Google para el subsistema MCP.
 
     Reasons: not_connected | insufficient_scope | refresh_failed | mcp_auth_required
     """

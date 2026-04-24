@@ -52,6 +52,8 @@ async def create_pending_action(
     external_system = None
     if payload.get("mode") == "mcp" and action_type_enum in _GOOGLE_EXTERNAL_SYSTEMS:
         external_system = _GOOGLE_EXTERNAL_SYSTEMS[action_type_enum]
+        if action_type_enum == ActionType.SYNC_TO_GOOGLE and payload.get("sync_type") == "import_from_drive":
+            external_system = "GOOGLE_DRIVE"
 
     action = PendingAction(
         tenant_id=tenant_id,
@@ -183,7 +185,7 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings)
+            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
                 gateway=gateway,
                 agent_name="agent_supplier",
@@ -204,7 +206,7 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings)
+            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
                 gateway=gateway,
                 agent_name="agent_supplier",
@@ -224,7 +226,7 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings)
+            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
                 gateway=gateway,
                 agent_name="agent_sync",
@@ -250,7 +252,16 @@ async def execute_pending_action(
                     spreadsheet_id=payload.get("spreadsheet_id", ""),
                     range_name=payload.get("range_name", "Sheet1"),
                 )
-        action.external_system = "GOOGLE_SHEETS" if mcp_enabled else None
+            elif sync_type == "import_from_drive":
+                files = await svc.list_drive_files(
+                    query=payload.get("query") or payload.get("raw_message", ""),
+                    max_results=int(payload.get("max_results", 5)),
+                )
+                if files:
+                    first_file_id = str(files[0].get("id", "")).strip()
+                    if first_file_id:
+                        await svc.read_drive_file(file_id=first_file_id)
+        action.external_system = "GOOGLE_DRIVE" if payload.get("sync_type") == "import_from_drive" else ("GOOGLE_SHEETS" if mcp_enabled else None)
 
     elif action.action_type == ActionType.CREATE_CALENDAR_EVENT:
         mcp_enabled = payload.get("mode") == "mcp"
@@ -259,7 +270,7 @@ async def execute_pending_action(
             from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings)
+            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
                 gateway=gateway,
                 agent_name="agent_calendar",

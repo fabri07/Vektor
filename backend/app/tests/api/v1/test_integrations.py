@@ -123,6 +123,7 @@ async def test_connect_start_creates_connection_record(
     assert data["auth_url"].startswith("https://")
     assert data["state"] == "abc123"
     assert len(data["required_scopes"]) > 0
+    assert "drive.readonly" in data["required_scopes"]
 
     # Verificar registro en DB
     row = (await db_session.execute(

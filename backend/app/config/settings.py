@@ -197,6 +197,7 @@ class Settings(BaseSettings):
     ENABLE_GOOGLE_MCP_TOOLS: bool = False
     MCP_SERVER_URL: str = ""
     MCP_HTTP_TIMEOUT: float = 15.0
+    MCP_SERVER_SHARED_SECRET: str = ""
 
     # ── Google OAuth ──────────────────────────────────────────────────────────
     GOOGLE_OAUTH_CLIENT_ID: str = ""

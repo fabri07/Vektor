@@ -53,6 +53,7 @@ AGENT_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
         "google.sheets.append_rows",
         "google.drive.upload_file",
         "google.drive.list_files",
+        "google.drive.read_file",
         "google.docs.create_document",
         "google.docs.append_content",
     }),
@@ -118,6 +119,10 @@ class _DriveListArgs(BaseModel):
     folder_id: str | None = None
     query: str | None = None
     max_results: int = Field(default=10, ge=1, le=50)
+
+
+class _DriveReadArgs(BaseModel):
+    file_id: str
 
 
 class _DocsCreateArgs(BaseModel):
@@ -268,6 +273,10 @@ class GoogleMcpService:
         ).model_dump()
         result = await self._call("google.drive.list_files", args)
         return result.get("files", [])  # type: ignore[return-value]
+
+    async def read_drive_file(self, file_id: str) -> dict[str, Any]:
+        args = _DriveReadArgs(file_id=file_id).model_dump()
+        return await self._call("google.drive.read_file", args)
 
     # ── Docs ──────────────────────────────────────────────────────────────────
 

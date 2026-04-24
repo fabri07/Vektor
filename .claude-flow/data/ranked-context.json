@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "computedAt": 1776803805668,
+  "computedAt": 1777062054228,
   "entries": [
     {
       "id": "mem-0",
@@ -29,7 +29,7 @@
     },
     {
       "id": "mem-1",
-      "content": "# Véktor — Memory Index\n\nLast consolidated: 2026-04-21 (dream run)\n\n> Full project architecture, commands, and work rules live in `CLAUDE.md` at the repo root — do not duplicate them here. This index holds only what CLAUDE.md doesn't cover.\n\n",
+      "content": "# Véktor — Memory Index\n\nLast consolidated: 2026-04-24 (dream run)\n\n> Full project architecture, commands, and work rules live in `CLAUDE.md` at the repo root — do not duplicate them here. This index holds only what CLAUDE.md doesn't cover.\n\n",
       "summary": "# Véktor — Memory Index",
       "category": "memory",
       "confidence": 0.5,
@@ -70,7 +70,7 @@
     },
     {
       "id": "mem-2",
-      "content": "Topic files\n\n- [user_language.md](user_language.md) — User writes and commits in Spanish (Argentina); reply and commit in Spanish by default.\n- [infra_production.md](infra_production.md) — Railway + Neon + Cloudflare R2: hostname `c727`, FRONTEND_URL=vek7or.com, Celery worker en Railway, CORS fixes, S3_REGION=auto para R2.\n- [project_chat_history.md](project_chat_history.md) — Plan Maestro completo (2026-04-20): 8 agentes (+ Calendar + Sync), BusinessMemoryService, migración pendiente en Neon.\n\n",
+      "content": "Topic files\n\n- [user_language.md](user_language.md) — User writes and commits in Spanish (Argentina); reply and commit in Spanish by default.\n- [infra_production.md](infra_production.md) — Railway + Neon + Cloudflare R2: hostname `c727`, FRONTEND_URL=vek7or.com, Celery worker en Railway, CORS fixes, S3_REGION=auto para R2.\n- [project_chat_history.md](project_chat_history.md) — Sprint 6 completo (2026-04-24): 8 agentes, MCP Google, BusinessMemoryService, AgentMemoryService, file context.\n\n",
       "summary": "Topic files",
       "category": "memory",
       "confidence": 0.5,
@@ -119,17 +119,16 @@
         "project",
         "chat",
         "history",
-        "plan",
-        "maestro",
+        "sprint",
         "completo",
         "2026",
         "agentes",
-        "calendar",
-        "sync",
+        "mcp",
+        "google",
         "businessmemoryservice",
-        "migraci",
-        "pendiente",
-        "neon"
+        "agentmemoryservice",
+        "file",
+        "context"
       ]
     },
     {

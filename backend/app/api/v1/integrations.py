@@ -36,6 +36,7 @@ _GOOGLE_SCOPES = [
     "calendar.events",
     "spreadsheets",
     "documents",
+    "drive.readonly",
 ]
 
 _GOOGLE_APPS = [
@@ -60,11 +61,20 @@ _GOOGLE_APPS = [
     GoogleAppStatus(
         id="sheets_docs",
         label="Sheets y Docs",
-        description="Exportar datos y reportes desde Véktor hacia Google Workspace.",
+        description="Exportar datos y reportes desde Véktor hacia Google.",
         available=False,
         connected=False,
         needs_reconnect=False,
         required_scopes=["spreadsheets", "documents"],
+    ),
+    GoogleAppStatus(
+        id="drive",
+        label="Google Drive",
+        description="Buscar, leer y analizar archivos del negocio sin descargarlos localmente.",
+        available=False,
+        connected=False,
+        needs_reconnect=False,
+        required_scopes=["drive.readonly"],
     ),
 ]
 
@@ -112,7 +122,7 @@ def _build_status_response(
             "el MCP server."
         )
     elif connected:
-        message = "Google conectado. Las herramientas de Gmail, Calendar y Sheets están disponibles."
+        message = "Google conectado. Drive y el resto de las herramientas disponibles ya pueden usarse desde Véktor."
     elif connection_state == "CONNECTING":
         message = "Esperando que completes la autorización en Google..."
     elif connection_state in ("RECONNECT_REQUIRED", "INSUFFICIENT_SCOPE"):
