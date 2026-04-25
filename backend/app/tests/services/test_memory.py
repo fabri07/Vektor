@@ -30,7 +30,10 @@ def mock_redis() -> AsyncMock:
 def mock_db() -> AsyncMock:
     db = AsyncMock()
     scalar_result = AsyncMock()
-    scalar_result.scalar_one_or_none = AsyncMock(return_value=None)
+    # scalar_one_or_none es síncrono en SQLAlchemy — usar MagicMock, no AsyncMock.
+    # Si se usa AsyncMock, al llamarlo sin await retorna un coroutine (truthy),
+    # rompiendo la rama `if mem is None`.
+    scalar_result.scalar_one_or_none = MagicMock(return_value=None)
     db.execute = AsyncMock(return_value=scalar_result)
     db.flush = AsyncMock()
     db.add = MagicMock()
@@ -95,7 +98,7 @@ async def test_memory_update_increments_existing_record(
         sales_this_month=Decimal("1000"),
     )
     scalar_result = AsyncMock()
-    scalar_result.scalar_one_or_none = AsyncMock(return_value=existing)
+    scalar_result.scalar_one_or_none = MagicMock(return_value=existing)
     mock_db.execute = AsyncMock(return_value=scalar_result)
 
     svc = BusinessMemoryService(db=mock_db, redis=mock_redis)
