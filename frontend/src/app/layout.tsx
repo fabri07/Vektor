@@ -1,7 +1,22 @@
 import type { Metadata } from "next";
+import { Playfair_Display, Poppins } from "next/font/google";
 import "@/styles/globals.css";
 import { Providers } from "./providers";
 import { ToastContainer } from "@/components/ui/Toast";
+
+const poppins = Poppins({
+  subsets: ["latin"],
+  variable: "--font-poppins",
+  weight: ["400", "500", "600", "700"],
+  display: "swap",
+});
+
+const playfair = Playfair_Display({
+  subsets: ["latin"],
+  variable: "--font-playfair",
+  weight: ["400", "500", "600", "700"],
+  display: "swap",
+});
 
 const appUrl =
   process.env.NEXT_PUBLIC_APP_URL ??
@@ -42,7 +57,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="es">
-      <body>
+      <body className={`${poppins.variable} ${playfair.variable}`}>
         <Providers>{children}</Providers>
         <ToastContainer />
       </body>

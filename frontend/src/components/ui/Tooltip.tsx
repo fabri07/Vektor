@@ -1,81 +1,111 @@
-// TODO: agregar fallback onClick para dispositivos touch
-// (Véktor es desktop-first en v1 — tooltip purely informativo)
+"use client";
 
-import type { ReactNode } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 
 type TooltipPosition = "top" | "bottom" | "left" | "right";
 
 interface TooltipProps {
-  content: string;
-  position?: TooltipPosition;
   children: ReactNode;
+  content: string | ReactNode;
+  position?: TooltipPosition;
 }
-
-// ── Estilos por posición ──────────────────────────────────────────────────────
-// Cada posición define:
-//   - offset del tooltip respecto al trigger
-//   - transform para centrarlo
-//   - clases de la flecha (triángulo CSS con border trick)
 
 const POSITION_STYLES: Record<
   TooltipPosition,
-  { tooltip: string; arrow: string }
+  {
+    container: string;
+    arrow: string;
+  }
 > = {
   top: {
-    tooltip: "bottom-full left-1/2 mb-2 -translate-x-1/2",
-    arrow: [
-      "absolute left-1/2 top-full -translate-x-1/2",
-      "border-4 border-transparent border-t-vk-navy",
-    ].join(" "),
+    container: "bottom-full left-1/2 mb-3 -translate-x-1/2",
+    arrow: "left-1/2 top-full -translate-x-1/2",
   },
   bottom: {
-    tooltip: "top-full left-1/2 mt-2 -translate-x-1/2",
-    arrow: [
-      "absolute bottom-full left-1/2 -translate-x-1/2",
-      "border-4 border-transparent border-b-vk-navy",
-    ].join(" "),
+    container: "left-1/2 top-full mt-3 -translate-x-1/2",
+    arrow: "bottom-full left-1/2 -translate-x-1/2",
   },
   left: {
-    tooltip: "right-full top-1/2 mr-2 -translate-y-1/2",
-    arrow: [
-      "absolute left-full top-1/2 -translate-y-1/2",
-      "border-4 border-transparent border-l-vk-navy",
-    ].join(" "),
+    container: "right-full top-1/2 mr-3 -translate-y-1/2",
+    arrow: "left-full top-1/2 -translate-y-1/2",
   },
   right: {
-    tooltip: "left-full top-1/2 ml-2 -translate-y-1/2",
-    arrow: [
-      "absolute right-full top-1/2 -translate-y-1/2",
-      "border-4 border-transparent border-r-vk-navy",
-    ].join(" "),
+    container: "left-full top-1/2 ml-3 -translate-y-1/2",
+    arrow: "right-full top-1/2 -translate-y-1/2",
   },
 };
 
-export function Tooltip({ content, position = "top", children }: TooltipProps) {
-  const { tooltip: tooltipPos, arrow: arrowPos } = POSITION_STYLES[position];
+export function Tooltip({
+  children,
+  content,
+  position = "top",
+}: TooltipProps) {
+  const [isVisible, setIsVisible] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tooltipId = useId();
+  const { container, arrow } = POSITION_STYLES[position];
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  function handleEnter() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+    timerRef.current = setTimeout(() => {
+      setIsVisible(true);
+    }, 300);
+  }
+
+  function handleLeave() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+    setIsVisible(false);
+  }
 
   return (
-    <span className="group relative inline-flex">
+    <span
+      className="relative inline-flex"
+      onMouseEnter={handleEnter}
+      onMouseLeave={handleLeave}
+      aria-describedby={isVisible ? tooltipId : undefined}
+    >
       {children}
 
-      {/* Tooltip — aparece en hover con delay 300ms, CSS puro */}
-      <span
-        role="tooltip"
-        className={[
-          "pointer-events-none absolute z-50 whitespace-nowrap",
-          "rounded px-2.5 py-1.5",
-          "bg-vk-navy text-xs font-medium text-white",
-          // Entrada con delay — opacity + scale desde 95%
-          "opacity-0 scale-95 transition-all duration-150",
-          "group-hover:opacity-100 group-hover:scale-100",
-          "[transition-delay:300ms] group-hover:[transition-delay:300ms]",
-          tooltipPos,
-        ].join(" ")}
-      >
-        {content}
-        {/* Flecha */}
-        <span aria-hidden="true" className={arrowPos} />
-      </span>
+      {isVisible ? (
+        <span
+          id={tooltipId}
+          role="tooltip"
+          className={[
+            "pointer-events-none absolute z-[250] max-w-[260px] whitespace-normal",
+            "rounded-xl border border-vektor-border bg-vektor-surface p-3 shadow-xl",
+            "text-[13px] font-normal leading-5 text-vektor-body",
+            "animate-fade-slide-up",
+            container,
+          ].join(" ")}
+        >
+          {content}
+          <span
+            aria-hidden="true"
+            className={[
+              "absolute h-3 w-3 rotate-45 border-r border-b border-vektor-border bg-vektor-surface",
+              arrow,
+            ].join(" ")}
+          />
+        </span>
+      ) : null}
     </span>
   );
 }

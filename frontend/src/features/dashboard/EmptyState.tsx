@@ -3,8 +3,8 @@ import Link from "next/link";
 export function EmptyState() {
   return (
     <div className="flex flex-1 items-center justify-center">
-      <div className="max-w-md rounded-lg border border-vk-border-w bg-vk-surface-w p-10 text-center shadow-vk-sm">
-        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-vk-bg-light">
+      <div className="max-w-md rounded-2xl border border-vk-border-w bg-vk-surface-w p-10 text-center shadow-lg">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-vektor-surface">
           <svg
             className="h-7 w-7 text-vk-text-muted"
             fill="none"
@@ -27,7 +27,7 @@ export function EmptyState() {
           información de tres formas:
         </p>
         <div className="mb-6 space-y-2 text-left">
-          <div className="flex items-start gap-2.5 rounded-lg bg-vk-bg-light px-4 py-2.5">
+          <div className="flex items-start gap-2.5 rounded-xl bg-vektor-surface px-4 py-2.5">
             <span className="mt-0.5 text-base">💬</span>
             <div>
               <p className="text-xs font-medium text-vk-text-primary">Chat</p>
@@ -37,7 +37,7 @@ export function EmptyState() {
               </p>
             </div>
           </div>
-          <div className="flex items-start gap-2.5 rounded-lg bg-vk-bg-light px-4 py-2.5">
+          <div className="flex items-start gap-2.5 rounded-xl bg-vektor-surface px-4 py-2.5">
             <span className="mt-0.5 text-base">📁</span>
             <div>
               <p className="text-xs font-medium text-vk-text-primary">Cargar archivo</p>
@@ -46,7 +46,7 @@ export function EmptyState() {
               </p>
             </div>
           </div>
-          <div className="flex items-start gap-2.5 rounded-lg bg-vk-bg-light px-4 py-2.5">
+          <div className="flex items-start gap-2.5 rounded-xl bg-vektor-surface px-4 py-2.5">
             <span className="mt-0.5 text-base">🚀</span>
             <div>
               <p className="text-xs font-medium text-vk-text-primary">Onboarding</p>
@@ -59,13 +59,13 @@ export function EmptyState() {
         <div className="flex gap-2 justify-center">
           <Link
             href="/chat"
-            className="inline-flex h-9 items-center justify-center rounded-lg bg-vk-blue px-4 text-sm font-medium text-white transition-colors hover:bg-vk-blue-hover"
+            className="inline-flex h-10 items-center justify-center rounded-xl bg-vk-blue px-4 text-sm font-medium text-white"
           >
             Ir al chat
           </Link>
           <Link
             href="/ingestion"
-            className="inline-flex h-9 items-center justify-center rounded-lg border border-vk-border-w bg-vk-surface-w px-4 text-sm font-medium text-vk-text-secondary transition-colors hover:bg-vk-bg-light"
+            className="inline-flex h-10 items-center justify-center rounded-xl border border-vk-border-w bg-vk-surface-w px-4 text-sm font-medium text-vk-text-secondary hover:bg-vektor-surface"
           >
             Cargar archivo
           </Link>

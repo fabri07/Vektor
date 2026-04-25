@@ -15,6 +15,7 @@ interface HeaderProps {
 const PAGE_LABELS: Record<string, string> = {
   "/chat":       "Chat",
   "/dashboard":  "Dashboard",
+  "/dashboard/analisis": "Análisis",
   "/sales":      "Ventas",
   "/expenses":   "Gastos",
   "/products":   "Productos",

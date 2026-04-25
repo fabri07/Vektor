@@ -13,9 +13,14 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - El chat productivo entra por `ChatOrchestrator` y no despacha directo desde el router al sub-agente.
 - Los clientes Anthropic se construyen vía `app/integrations/anthropic_client.py`; no instanciar `anthropic.AsyncAnthropic()` directo en agentes.
 - Las integraciones de producto con Google hoy son **MCP-based** (`ENABLE_GOOGLE_MCP_TOOLS` + `MCP_SERVER_URL`). En paralelo sigue existiendo `Google Login` para autenticación social vía `/auth/oauth/google/*`; no confundir login social con herramientas MCP.
-- En frontend existe `/apps` con flujo directo de conexión Google y estado de integraciones.
+- En frontend existe `/apps` con flujo directo de conexión Google, estado de integraciones y manejo de reconnect cuando una acción externa devuelve `REQUIRES_RECONNECT`.
 - El pipeline de archivos fue recentralizado en `app/application/services/file_parsing.py`. Los uploads de chat se parsean sincrónicamente al subir; la ingestión sigue su pipeline propio con confirmación humana.
 - La cadena Alembic actual incluye una migración de compatibilidad `20260401_0003_restore_chat_context_and_heuristics.py` y stubs `20260406_0001_stub.py` / `20260406_0002_stub.py` para conservar continuidad después de retirar migraciones viejas de Google.
+- El frontend fue rediseñado con tema dark unificado (`vektor-night`, `vektor-ink`, `vektor-surface`, `vektor-border`) y tipografías `Poppins` + `Playfair Display`.
+- La landing pública (`/`) ya no es un placeholder: tiene hero full-screen, social proof con carrusel, highlights y preview de dashboard.
+- El dashboard quedó dividido en dos pantallas: `/dashboard` (resumen con health score y KPIs) y `/dashboard/analisis` (charts + insights), con navegación compartida tipo launchpad.
+- Existe un ticker económico en la parte superior del dashboard alimentado por `GET /api/economia` y un endpoint stub `GET /api/analisis/insight` para los insights de charts.
+- Para trabajo visual con Codex está operativo el proxy local `tools/stitch-proxy/`; Stitch se usa como referencia de diseño, no como dependencia runtime de la app.
 
 ---
 
@@ -349,6 +354,15 @@ La confirmación humana sigue siendo obligatoria antes de insertar ventas/gastos
 - Validación de forms: Zod (`src/validation/`).
 - Charts: Recharts.
 
+### Estado visual actual
+
+- Tema base dark centralizado en `src/styles/globals.css` y `tailwind.config.ts` con tokens `vektor-*`.
+- Tipografías globales cargadas en `src/app/layout.tsx`: `Poppins` para UI y `Playfair Display` para titulares.
+- Componente reusable `Tooltip` en `src/components/ui/Tooltip.tsx`: hover-only, delay 300ms, dark surface, arrow y animación `fade-slide-up`.
+- `EconomicTicker` en `src/components/dashboard/EconomicTicker.tsx` se renderiza desde `src/app/(protected)/layout.tsx` solo en rutas de dashboard; en mobile se reemplaza por botón/modal.
+- La navegación del dashboard usa `DashboardLaunchpadNav` para tabs/dots compartidos entre `/dashboard` y `/dashboard/analisis`.
+- Los datos agregados/mocks del rediseño del dashboard viven en `src/features/dashboard/dashboardData.ts`; cuando falte backend real, dejar `// TODO:` explícito con el endpoint esperado.
+
 ### Organización del frontend
 
 | Directorio | Responsabilidad |
@@ -365,11 +379,12 @@ La confirmación humana sigue siendo obligatoria antes de insertar ventas/gastos
 | Ruta | Componente | Descripción |
 |------|-----------|-------------|
 | `/chat` | `features/chat/ChatPage.tsx` | **Home principal** — chat de página completa, sin panel flotante |
-| `/dashboard` | `features/dashboard/` | KPIs generales y health score |
+| `/dashboard` | `features/dashboard/` | Pantalla 1 del launchpad: health score hero + KPIs de caja, margen, stock y proveedores |
+| `/dashboard/analisis` | `features/dashboard/` | Pantalla 2 del launchpad: charts de línea, barras y donut con insights |
 | `/sales` | `(protected)/sales/page.tsx` | Analytics + lista de ventas con KPIs y filtros |
 | `/expenses` | `(protected)/expenses/page.tsx` | Analytics + lista de gastos con KPIs y filtros |
-| `/products` | `(protected)/products/page.tsx` | Catálogo con KPIs de stock e inventario |
-| `/apps` | `(protected)/apps/page.tsx` | Placeholder de Aplicaciones / integraciones |
+| `/products` | `(protected)/products/page.tsx` | Catálogo con KPIs de stock e inventario; acepta filtro por query param `?stock=ok|low|out` |
+| `/apps` | `(protected)/apps/page.tsx` | Integraciones Google con conexión directa, disconnect y estado de permisos |
 | `/settings` | `(protected)/settings/page.tsx` | Cuenta y configuración |
 
 ### Rutas públicas (`src/app/(public)/`)
@@ -401,7 +416,13 @@ Flujo login federado:
 Estado actual:
 1. Las integraciones Google activas dependen de `ENABLE_GOOGLE_MCP_TOOLS=true`
 2. El backend llama al MCP server vía `HttpMcpGateway`
-3. El frontend tiene `/apps` como pantalla informativa, pero el flujo de conexión final todavía no está expuesto como una integración directa de producto
+3. El frontend expone `/apps` como pantalla operativa de integraciones: iniciar conexión, reconectar y desconectar Google
+4. Si una acción externa falla con `REQUIRES_RECONNECT`, el frontend guía al usuario de vuelta a `/apps`
+
+### Endpoints frontend agregados recientemente
+
+- `GET /api/economia` — agrega dólar oficial/blue/MEP/CCL + inflación/REM/tasa BCRA con `revalidate = 1800`
+- `GET /api/analisis/insight?metric=<id>&period=<id>` — stub hardcodeado para insights de charts hasta cablear la capa LLM
 
 ---
 

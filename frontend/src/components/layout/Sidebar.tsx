@@ -8,6 +8,7 @@ import { clsx } from "clsx";
 import {
   MessageSquare,
   LayoutDashboard,
+  LineChart,
   ShoppingCart,
   Receipt,
   Package,
@@ -29,6 +30,7 @@ interface SidebarProps {
 const NAV_ITEMS = [
   { label: "Chat",          href: "/chat",       icon: MessageSquare },
   { label: "Dashboard",     href: "/dashboard",  icon: LayoutDashboard },
+  { label: "Análisis",      href: "/dashboard/analisis", icon: LineChart },
   { label: "Ventas",        href: "/sales",      icon: ShoppingCart },
   { label: "Gastos",        href: "/expenses",   icon: Receipt },
   { label: "Productos",     href: "/products",   icon: Package },

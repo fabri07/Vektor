@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "next/navigation";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { StatCard } from "@/components/ui/StatCard";
 import { Table } from "@/components/ui/Table";
@@ -87,7 +88,11 @@ const COLUMNS = [
 ];
 
 export default function ProductsPage() {
-  const [stockFilter, setStockFilter] = useState<StockFilter>("all");
+  const searchParams = useSearchParams();
+  const initialFilter = (searchParams.get("stock") as StockFilter | null) ?? "all";
+  const [stockFilter, setStockFilter] = useState<StockFilter>(
+    initialFilter === "ok" || initialFilter === "low" || initialFilter === "out" ? initialFilter : "all",
+  );
 
   const { data: products = [], isLoading, isError } = useQuery({
     queryKey: ["products-list"],

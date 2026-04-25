@@ -18,7 +18,7 @@ export const Card = forwardRef<HTMLDivElement, CardProps>(
       <div
         ref={ref}
         className={twMerge(
-          "rounded-xl border border-vk-border-w bg-vk-surface-w shadow-vk-sm",
+          "rounded-2xl border border-vektor-border bg-vektor-ink shadow-lg transition-all duration-200",
           paddingClasses[padding],
           className,
         )}
@@ -54,7 +54,7 @@ export function CardTitle({
 }: HTMLAttributes<HTMLHeadingElement>) {
   return (
     <h3
-      className={twMerge("text-base font-semibold text-vk-text-primary", className)}
+      className={twMerge("font-display text-base font-semibold text-vk-text-primary", className)}
       {...props}
     >
       {children}

@@ -450,8 +450,8 @@ function ProductTab({ onToast }: { onToast: (t: ToastState) => void }) {
         />
       </div>
 
-      <Button type="submit" size="sm" loading={mutation.isPending}>
-        Agregar producto
+      <Button type="submit" size="sm" loading={mutation.isPending} aria-label="Registrar compra">
+        Registrar compra
       </Button>
     </form>
   );
@@ -464,7 +464,7 @@ type ActiveTab = "sale" | "expense" | "product";
 const TABS: { key: ActiveTab; label: string }[] = [
   { key: "sale", label: "Registrar venta" },
   { key: "expense", label: "Registrar gasto" },
-  { key: "product", label: "Agregar producto" },
+  { key: "product", label: "Registrar compra" },
 ];
 
 export function ManualEntrySection() {

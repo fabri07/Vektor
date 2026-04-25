@@ -1,21 +1,19 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 import { useRef } from "react";
-import { fetchLatestScore, fetchCurrentInsight } from "@/services/dashboard.service";
+import { fetchCurrentInsight, fetchLatestScore } from "@/services/dashboard.service";
+import { expensesService } from "@/services/expenses.service";
 import { fetchMomentumProfile } from "@/services/momentum.service";
-import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
-import { RiskCard } from "@/features/dashboard/RiskCard";
-import { ActionCard } from "@/features/dashboard/ActionCard";
-import { SubscoresCard } from "@/features/dashboard/SubscoresCard";
+import { productsService } from "@/services/products.service";
+import { salesService } from "@/services/sales.service";
+import { DashboardLaunchpadNav } from "@/features/dashboard/DashboardLaunchpadNav";
 import { DashboardSkeleton } from "@/features/dashboard/DashboardSkeleton";
 import { EmptyState } from "@/features/dashboard/EmptyState";
-import { MomentumWidget } from "@/features/dashboard/MomentumWidget";
+import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
+import { DashboardSummaryCards } from "@/features/dashboard/DashboardSummaryCards";
 import type { HealthScoreV2Response } from "@/types/api";
-
-// Clase base para hover lift en cards del dashboard
-const CARD_HOVER =
-  "transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-vk-md";
 
 function isCalculating(data: unknown): boolean {
   return (
@@ -28,6 +26,8 @@ function isCalculating(data: unknown): boolean {
 
 export default function DashboardPage() {
   const calcRetries = useRef(0);
+  const touchStart = useRef<number | null>(null);
+  const router = useRouter();
 
   const {
     data: scoreData,
@@ -42,7 +42,6 @@ export default function DashboardPage() {
         return false;
       }
       calcRetries.current += 1;
-      // 1 retry máximo (15s) — evita que el skeleton quede infinito sin datos
       return calcRetries.current <= 1 ? 15_000 : false;
     },
     retry: 1,
@@ -54,11 +53,28 @@ export default function DashboardPage() {
     retry: 1,
   });
 
-  // Mismo query key que MomentumWidget — React Query usa caché compartida
   const { data: momentumData } = useQuery({
     queryKey: ["momentum", "profile"],
     queryFn: fetchMomentumProfile,
     retry: 1,
+  });
+
+  const { data: sales = [], isLoading: salesLoading } = useQuery({
+    queryKey: ["sales-all"],
+    queryFn: () => salesService.getAllEntries(),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: expenses = [], isLoading: expensesLoading } = useQuery({
+    queryKey: ["expenses-all"],
+    queryFn: () => expensesService.getAllEntries(),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: products = [], isLoading: productsLoading } = useQuery({
+    queryKey: ["products-all"],
+    queryFn: () => productsService.getAllProducts({ is_active: true }),
+    staleTime: 5 * 60 * 1000,
   });
 
   const loading = scoreLoading || insightLoading;
@@ -67,8 +83,8 @@ export default function DashboardPage() {
 
   if (loading || (calculating && !calculatingTimeout)) {
     return (
-      <div className="space-y-4">
-        <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
+      <div className="space-y-5">
+        <DashboardLaunchpadNav active="dashboard" />
         <DashboardSkeleton />
       </div>
     );
@@ -78,16 +94,14 @@ export default function DashboardPage() {
 
   if (noScore) {
     return (
-      <div className="flex h-full flex-col gap-4">
-        <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
+      <div className="space-y-5">
+        <DashboardLaunchpadNav active="dashboard" />
         <EmptyState />
       </div>
     );
   }
 
   const score = scoreData as HealthScoreV2Response;
-
-  // Datos de momentum para el hero card
   const lastWeek = momentumData?.weekly_history?.at(-1);
   const delta = lastWeek?.delta ?? null;
   const isBestScore =
@@ -95,53 +109,34 @@ export default function DashboardPage() {
     score.score_total >= momentumData.best_score_ever;
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-lg font-semibold text-vk-text-primary">Dashboard</h1>
+    <div
+      className="space-y-5 pb-24 sm:pb-8"
+      onTouchStart={(event) => {
+        touchStart.current = event.changedTouches[0]?.clientX ?? null;
+      }}
+      onTouchEnd={(event) => {
+        const start = touchStart.current;
+        const end = event.changedTouches[0]?.clientX ?? null;
+        if (start == null || end == null) return;
+        if (start - end > 70) router.push("/dashboard/analisis");
+      }}
+    >
+      <DashboardLaunchpadNav active="dashboard" />
 
-      {/* Hero — ancho completo */}
-      <div className={CARD_HOVER}>
-        <HealthScoreCard score={score} delta={delta} isBestScore={isBestScore} />
-      </div>
+      <HealthScoreCard
+        score={score}
+        insight={insightData?.insight}
+        action={insightData?.action_suggestion}
+        delta={delta}
+        isBestScore={isBestScore}
+      />
 
-      {/* Grid 2 columnas: Risk + Action en primera fila, Subscores full en segunda */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className={CARD_HOVER}>
-          {insightData ? (
-            <RiskCard insight={insightData.insight} />
-          ) : (
-            <NoInsightCard label="Riesgo Principal" />
-          )}
-        </div>
-
-        <div className={CARD_HOVER}>
-          {insightData?.action_suggestion ? (
-            <ActionCard action={insightData.action_suggestion} />
-          ) : (
-            <NoInsightCard label="Acción Sugerida" />
-          )}
-        </div>
-
-        {/* Subscores — ancho completo en la segunda fila */}
-        <div className={`md:col-span-2 ${CARD_HOVER}`}>
-          <SubscoresCard score={score} />
-        </div>
-      </div>
-
-      {/* Momentum widget */}
-      <div className={CARD_HOVER}>
-        <MomentumWidget />
-      </div>
-    </div>
-  );
-}
-
-function NoInsightCard({ label }: { label: string }) {
-  return (
-    <div className="rounded-lg border border-vk-border-w bg-vk-surface-w p-6 shadow-vk-sm">
-      <p className="mb-3 text-xs font-medium uppercase tracking-widest text-vk-text-muted">
-        {label}
-      </p>
-      <p className="text-sm text-vk-text-muted">Sin datos todavía.</p>
+      <DashboardSummaryCards
+        sales={sales}
+        expenses={expenses}
+        products={products}
+        loading={salesLoading || expensesLoading || productsLoading}
+      />
     </div>
   );
 }

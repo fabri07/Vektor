@@ -107,7 +107,7 @@ export default function AppsPage() {
 
   const connectionState = data?.connection_state ?? "DISCONNECTED";
   const connectionFlowAvailable = data?.connection_flow_available ?? false;
-  const apps = data?.apps ?? [];
+  const apps = useMemo(() => data?.apps ?? [], [data?.apps]);
 
   const driveCard = useMemo(() => apps.find((app) => app.id === "drive"), [apps]);
   const otherApps = useMemo(() => apps.filter((app) => app.id !== "drive"), [apps]);

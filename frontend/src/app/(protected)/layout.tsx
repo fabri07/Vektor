@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
+import { EconomicTicker } from "@/components/dashboard/EconomicTicker";
 import { useAuthStore } from "@/stores/authStore";
 
 export default function ProtectedLayout({
@@ -16,6 +17,7 @@ export default function ProtectedLayout({
   const token = useAuthStore((s) => s.token);
   const [mobileOpen, setMobileOpen] = useState(false);
   const isChatPage = pathname === "/chat";
+  const isDashboardRoute = pathname.startsWith("/dashboard");
 
   useEffect(() => {
     if (!token) {
@@ -44,6 +46,7 @@ export default function ProtectedLayout({
 
       <div className="flex flex-1 flex-col overflow-hidden">
         <Header onMenuToggle={() => setMobileOpen((v) => !v)} />
+        {isDashboardRoute ? <EconomicTicker /> : null}
         {isChatPage ? (
           <main className="flex flex-1 flex-col overflow-hidden bg-vk-surface-w">
             {children}

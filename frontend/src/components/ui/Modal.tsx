@@ -105,7 +105,7 @@ export function Modal({ isOpen, onClose, title, children, size = "md" }: ModalPr
         aria-modal="true"
         aria-labelledby={title ? "modal-title" : undefined}
         className={[
-          "relative w-full rounded-lg border border-vk-border-w bg-vk-surface-w shadow-vk-lg",
+          "relative w-full rounded-2xl border border-vektor-border bg-vektor-ink shadow-vk-lg",
           "transition-all duration-200",
           isOpen ? "scale-100 opacity-100" : "scale-95 opacity-0",
           SIZE_CLASS[size],
@@ -117,7 +117,7 @@ export function Modal({ isOpen, onClose, title, children, size = "md" }: ModalPr
           <div className="flex items-center justify-between border-b border-vk-border-w px-6 py-4">
             <h2
               id="modal-title"
-              className="text-base font-semibold text-vk-text-primary"
+              className="font-display text-base font-semibold text-vk-text-primary"
             >
               {title}
             </h2>

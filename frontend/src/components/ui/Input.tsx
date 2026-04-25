@@ -25,9 +25,9 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
           ref={ref}
           id={inputId}
           className={twMerge(
-            "h-9 w-full rounded-lg border bg-vk-surface-w px-3 text-sm text-vk-text-primary",
+            "h-10 w-full rounded-xl border bg-vektor-surface px-3 text-sm text-vk-text-primary",
             "placeholder:text-vk-text-placeholder",
-            "transition-colors focus:outline-none focus:ring-2",
+            "transition-all duration-200 focus:outline-none focus:ring-2",
             error
               ? "border-vk-danger/60 focus:ring-vk-danger/20"
               : "border-vk-border-w focus:border-vk-blue/40 focus:ring-vk-blue/15",

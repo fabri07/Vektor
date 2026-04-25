@@ -111,8 +111,8 @@ export function Select({
         onClick={() => { if (!disabled) setIsOpen((prev) => !prev); }}
         onKeyDown={handleKeyboardTrigger}
         className={twMerge(
-          "relative flex h-9 w-full cursor-pointer select-none items-center justify-between rounded-lg border bg-vk-surface-w px-3 text-sm",
-          "transition-colors focus:outline-none focus:ring-2",
+          "relative flex h-10 w-full cursor-pointer select-none items-center justify-between rounded-xl border bg-vektor-surface px-3 text-sm",
+          "transition-all duration-200 focus:outline-none focus:ring-2",
           error
             ? "border-vk-danger/60 focus:ring-vk-danger/20"
             : isOpen
@@ -133,7 +133,7 @@ export function Select({
           id={listboxId}
           role="listbox"
           className={[
-            "absolute z-[200] mt-1 w-full overflow-hidden rounded-lg border border-vk-border-w bg-vk-surface-w shadow-vk-md",
+            "absolute z-[200] mt-1 w-full overflow-hidden rounded-2xl border border-vk-border-w bg-vk-surface-w shadow-vk-md",
             // Posicionamiento relativo al contenedor
           ].join(" ")}
           style={{ top: "calc(100% + 4px)", left: 0 }}

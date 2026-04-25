@@ -13,13 +13,13 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantClasses: Record<Variant, string> = {
   primary:
-    "bg-vk-blue text-white hover:bg-vk-blue-hover focus-visible:ring-vk-blue/40 active:scale-[0.98]",
+    "bg-gradient-to-r from-vektor-blue to-vektor-teal text-vektor-white hover:shadow-glow focus-visible:ring-vektor-blue/40 active:scale-[0.98]",
   secondary:
-    "bg-vk-border-w text-vk-text-primary hover:bg-vk-border-w-hover focus-visible:ring-vk-border-w-hover/40",
+    "bg-vektor-surface text-vk-text-primary hover:border-vektor-blue/40 hover:bg-vektor-surface/90 focus-visible:ring-vektor-blue/30 border border-vektor-border",
   ghost:
-    "bg-transparent text-vk-text-secondary hover:text-vk-text-primary hover:bg-vk-border-w focus-visible:ring-vk-border-w/60",
+    "bg-transparent text-vk-text-secondary hover:text-vk-text-primary hover:bg-vektor-surface focus-visible:ring-vektor-blue/30",
   danger:
-    "bg-vk-danger text-white hover:bg-vk-danger/90 focus-visible:ring-vk-danger/40",
+    "bg-vektor-red text-vektor-white hover:bg-vektor-red/90 focus-visible:ring-vektor-red/40",
 };
 
 const sizeClasses: Record<Size, string> = {
@@ -47,7 +47,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         disabled={disabled || loading}
         className={twMerge(
           clsx(
-            "inline-flex items-center justify-center rounded-lg font-medium transition-[colors,transform] duration-[150ms]",
+            "inline-flex items-center justify-center rounded-xl font-medium transition-all duration-200",
             "focus-visible:outline-none focus-visible:ring-2",
             "disabled:pointer-events-none disabled:opacity-40",
             variantClasses[variant],
