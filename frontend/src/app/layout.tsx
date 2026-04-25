@@ -1,20 +1,20 @@
 import type { Metadata } from "next";
-import { Playfair_Display, Poppins } from "next/font/google";
+import { Barlow_Condensed, Inter } from "next/font/google";
 import "@/styles/globals.css";
 import { Providers } from "./providers";
 import { ToastContainer } from "@/components/ui/Toast";
 
-const poppins = Poppins({
+const inter = Inter({
   subsets: ["latin"],
-  variable: "--font-poppins",
-  weight: ["400", "500", "600", "700"],
+  variable: "--font-inter",
+  weight: ["300", "400", "500", "600"],
   display: "swap",
 });
 
-const playfair = Playfair_Display({
+const barlowCondensed = Barlow_Condensed({
   subsets: ["latin"],
-  variable: "--font-playfair",
-  weight: ["400", "500", "600", "700"],
+  variable: "--font-barlow",
+  weight: ["500", "600", "700"],
   display: "swap",
 });
 
@@ -57,7 +57,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="es">
-      <body className={`${poppins.variable} ${playfair.variable}`}>
+      <body className={`${inter.variable} ${barlowCondensed.variable}`}>
         <Providers>{children}</Providers>
         <ToastContainer />
       </body>

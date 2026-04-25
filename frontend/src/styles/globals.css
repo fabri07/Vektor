@@ -52,8 +52,8 @@
     --vk-info: var(--vektor-blue);
     --vk-info-bg: rgba(58, 134, 255, 0.12);
 
-    --vk-font-sans: var(--font-poppins), system-ui, -apple-system, sans-serif;
-    --vk-font-display: var(--font-playfair), Georgia, serif;
+    --vk-font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
+    --vk-font-display: var(--font-barlow), system-ui, sans-serif;
     --vk-font-mono: "JetBrains Mono", "Fira Code", monospace;
 
     /* Escala de texto */

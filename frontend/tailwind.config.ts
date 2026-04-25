@@ -58,8 +58,8 @@ const config: Config = {
     extend: {
       colors: vkColors,
       fontFamily: {
-        sans: ["var(--font-poppins)", "system-ui", "-apple-system", "sans-serif"],
-        display: ["var(--font-playfair)", "Georgia", "serif"],
+        sans: ["var(--font-inter)", "system-ui", "-apple-system", "sans-serif"],
+        display: ["var(--font-barlow)", "system-ui", "sans-serif"],
         mono: ["JetBrains Mono", "Fira Code", "monospace"],
       },
       borderRadius: {
