@@ -297,6 +297,8 @@ Luego: CEO clasifica intent → `registry.get_sub_agent()` despacha → si `requ
 
 Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Solo activa llamadas reales al MCP server cuando es `true` y `MCP_SERVER_URL` está configurado.
 
+**OAuth MCP separado del login social:** el MCP server debe usar variables propias `GOOGLE_MCP_OAUTH_CLIENT_ID`, `GOOGLE_MCP_OAUTH_CLIENT_SECRET` y `GOOGLE_MCP_OAUTH_REDIRECT_URI`. El redirect debe apuntar al MCP server (`https://<mcp-host>/auth/callback`), no al callback del backend de login social (`/api/v1/auth/...`). Google no requiere comprar tokens: emite `access_token`/`refresh_token` gratis al completar el consent flow y el token exchange.
+
 **Arquitectura port/adapter:**
 - `app/application/ports/mcp_gateway.py` — interface abstracta `McpToolGateway`
 - `app/integrations/mcp/http_gateway.py` — implementación HTTP JSON-RPC 2.0 (`HttpMcpGateway`)
@@ -311,12 +313,12 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Solo activa llamadas re
 
 **Router `integrations`** (`app/api/v1/integrations.py`) — expone el lifecycle de conexiones MCP Google:
 - `GET /integrations/google/status` — estado de la conexión (`CONNECTING` / `CONNECTED` / `DISCONNECTED` / etc.) del tenant actual
-- `POST /integrations/google/connect` — inicia el flujo OAuth hacia el MCP server; crea registro `GoogleMcpConnection(status=CONNECTING)` si no existe
+- `POST /integrations/google/connect/start` — inicia el flujo OAuth hacia el MCP server; crea registro `GoogleMcpConnection(status=CONNECTING)` si no existe
 - `POST /integrations/google/disconnect` — revoca tokens y pone `status=DISCONNECTED`
 
 **Modelo ORM:** `GoogleMcpConnection` (`app/persistence/models/google_mcp_connection.py`) — tabla `google_mcp_connections`, columnas clave: `tenant_id`, `user_id`, `status`, `scopes_granted` (JSONB), `connected_at`.
 
-**`google_oauth_tokens`** — tabla añadida en `20260424_0002` para que el MCP server persista tokens OAuth de Google (access + refresh cifrados). No tiene modelo ORM implementado aún; el MCP server la gestiona directamente.
+**`google_oauth_tokens`** — tabla añadida en `20260424_0002` para que el MCP server persista tokens OAuth de Google (access + refresh cifrados). No tiene modelo ORM en el backend; el MCP server la gestiona directamente. Si el callback falla, `mcp_server/app/auth/service.py` guarda `last_error_code` (`token_exchange_failed:*`, `missing_access_token`, etc.) y el backend promueve la conexión a `ERROR` en el siguiente status check, evitando quedar indefinidamente en `CONNECTING`.
 
 **Nota de compatibilidad:** Pueden existir rastros históricos de integraciones Google anteriores, pero la integración viva hoy es la del MCP server.
 
@@ -427,6 +429,7 @@ Estado actual:
 2. El backend llama al MCP server vía `HttpMcpGateway`
 3. El frontend expone `/apps` como pantalla operativa de integraciones: iniciar conexión, reconectar y desconectar Google
 4. Si una acción externa falla con `REQUIRES_RECONNECT`, el frontend guía al usuario de vuelta a `/apps`
+5. En producción, `GOOGLE_MCP_OAUTH_REDIRECT_URI` debe estar registrado exactamente igual en Google Cloud Console como Authorized redirect URI.
 
 ### Endpoints frontend agregados recientemente
 

@@ -100,8 +100,12 @@ def _build_status_response(
     backend_available = mcp_enabled and mcp_server_configured
     connection_state = connection.status if connection else "DISCONNECTED"
     connected = connection_state == "CONNECTED"
-    scopes_granted = list(connection.scopes_granted) if connection and connection.scopes_granted else []
-    connected_at = connection.connected_at.isoformat() if connection and connection.connected_at else None
+    scopes_granted = (
+        list(connection.scopes_granted) if connection and connection.scopes_granted else []
+    )
+    connected_at = (
+        connection.connected_at.isoformat() if connection and connection.connected_at else None
+    )
     last_error_code = connection.last_error_code if connection else None
 
     apps = [
@@ -122,7 +126,10 @@ def _build_status_response(
             "el MCP server."
         )
     elif connected:
-        message = "Google conectado. Drive y el resto de las herramientas disponibles ya pueden usarse desde Véktor."
+        message = (
+            "Google conectado. Drive y el resto de las herramientas disponibles "
+            "ya pueden usarse desde Véktor."
+        )
     elif connection_state == "CONNECTING":
         message = "Esperando que completes la autorización en Google..."
     elif connection_state in ("RECONNECT_REQUIRED", "INSUFFICIENT_SCOPE"):
@@ -174,6 +181,11 @@ async def google_status(
                 connection.scopes_granted = auth_status.get("scopes_granted", [])
                 connection.connected_at = datetime.now(UTC)
                 connection.last_error_code = None
+                connection.state_token = None
+                await db.commit()
+            elif auth_status.get("last_error") not in (None, "pending_callback", "not_connected"):
+                connection.status = "ERROR"
+                connection.last_error_code = auth_status.get("last_error")
                 connection.state_token = None
                 await db.commit()
         except Exception as exc:

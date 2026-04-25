@@ -34,6 +34,12 @@ SHORT_SCOPE_MAP = {
 BASE_IDENTITY_SCOPES = ["openid", "email", "profile"]
 
 
+def _error_code(value: object, *, fallback: str) -> str:
+    raw = str(value or fallback).strip().lower()
+    code = "".join(ch if ch.isalnum() or ch in {"_", "-", ":"} else "_" for ch in raw)
+    return code[:64] or fallback
+
+
 def expand_scopes(scopes: list[str]) -> list[str]:
     expanded: list[str] = []
     for scope in [*BASE_IDENTITY_SCOPES, *scopes]:
@@ -81,8 +87,8 @@ async def start_auth(
     await session.flush()
 
     params = {
-        "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
-        "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URI,
+        "client_id": settings.google_oauth_client_id,
+        "redirect_uri": settings.google_oauth_redirect_uri,
         "response_type": "code",
         "access_type": "offline",
         "include_granted_scopes": "true",
@@ -115,22 +121,42 @@ async def handle_callback(
             GOOGLE_TOKEN_URL,
             data={
                 "code": code,
-                "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
-                "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
-                "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URI,
+                "client_id": settings.google_oauth_client_id,
+                "client_secret": settings.google_oauth_client_secret,
+                "redirect_uri": settings.google_oauth_redirect_uri,
                 "grant_type": "authorization_code",
             },
         )
         if resp.status_code >= 400:
-            token.last_error_code = "token_exchange_failed"
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="token_exchange_failed")
+            try:
+                error_payload = resp.json()
+            except ValueError:
+                error_payload = {}
+            google_error = _error_code(
+                error_payload.get("error"),
+                fallback=f"http_{resp.status_code}",
+            )
+            token.last_error_code = f"token_exchange_failed:{google_error}"[:64]
+            token.state_token = None
+            token.state_expires_at = None
+            await session.flush()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=token.last_error_code,
+            )
         payload = resp.json()
 
         access_token = payload.get("access_token")
         refresh_token = payload.get("refresh_token")
         if not access_token:
             token.last_error_code = "missing_access_token"
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing_access_token")
+            token.state_token = None
+            token.state_expires_at = None
+            await session.flush()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="missing_access_token",
+            )
 
         token.access_token_encrypted = encrypt_secret(str(access_token))
         if refresh_token:
@@ -143,13 +169,12 @@ async def handle_callback(
         token.state_expires_at = None
         token.last_error_code = None
 
-        if "email" in token.scopes_granted or "openid" in token.scopes_granted:
-            userinfo = await client.get(
-                GOOGLE_USERINFO_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            if userinfo.status_code < 400:
-                token.email = userinfo.json().get("email")
+        userinfo = await client.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if userinfo.status_code < 400:
+            token.email = userinfo.json().get("email")
 
         await session.flush()
 
@@ -161,8 +186,18 @@ async def get_status(
     token = await _get_token_row(session, ctx.tenant_id, ctx.user_id)
     if token is None:
         return {"connected": False, "scopes_granted": [], "last_error": "not_connected"}
+    if token.last_error_code:
+        return {
+            "connected": False,
+            "scopes_granted": token.scopes_granted or [],
+            "last_error": token.last_error_code,
+        }
     if token.state_token:
-        return {"connected": False, "scopes_granted": token.scopes_granted or [], "last_error": "pending_callback"}
+        return {
+            "connected": False,
+            "scopes_granted": token.scopes_granted or [],
+            "last_error": "pending_callback",
+        }
     if token.refresh_token_encrypted or token.access_token_encrypted:
         return {
             "connected": True,
@@ -170,7 +205,11 @@ async def get_status(
             "last_error": token.last_error_code,
             "email": token.email,
         }
-    return {"connected": False, "scopes_granted": [], "last_error": token.last_error_code or "not_connected"}
+    return {
+        "connected": False,
+        "scopes_granted": [],
+        "last_error": token.last_error_code or "not_connected",
+    }
 
 
 async def revoke_auth(
@@ -181,7 +220,9 @@ async def revoke_auth(
     if token is None:
         return
 
-    secret = decrypt_secret(token.refresh_token_encrypted) or decrypt_secret(token.access_token_encrypted)
+    secret = decrypt_secret(token.refresh_token_encrypted) or decrypt_secret(
+        token.access_token_encrypted
+    )
     if secret:
         async with httpx.AsyncClient(timeout=settings.GOOGLE_OAUTH_TIMEOUT_SECONDS) as client:
             await client.post(
@@ -223,8 +264,8 @@ async def get_valid_access_token(
         resp = await client.post(
             GOOGLE_TOKEN_URL,
             data={
-                "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
-                "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+                "client_id": settings.google_oauth_client_id,
+                "client_secret": settings.google_oauth_client_secret,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
             },

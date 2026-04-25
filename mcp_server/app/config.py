@@ -4,6 +4,7 @@ import base64
 import hashlib
 import re
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,6 +35,14 @@ class Settings(BaseSettings):
 
     DATABASE_URL_RAW: str | None = Field(default=None, alias="DATABASE_URL")
 
+    # Prefer these MCP-specific variables in production. The plain
+    # GOOGLE_OAUTH_* names remain as a backwards-compatible fallback, but they
+    # are also used by the main backend for social login and can easily point to
+    # the wrong callback.
+    GOOGLE_MCP_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_MCP_OAUTH_CLIENT_SECRET: str = ""
+    GOOGLE_MCP_OAUTH_REDIRECT_URI: str = ""
+
     GOOGLE_OAUTH_CLIENT_ID: str = ""
     GOOGLE_OAUTH_CLIENT_SECRET: str = ""
     GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8080/auth/callback"
@@ -55,24 +64,47 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def validate_required(self) -> "Settings":
+    def validate_required(self) -> Settings:
         missing: list[str] = []
         if not self.DATABASE_URL_RAW:
             missing.append("DATABASE_URL")
-        if not self.GOOGLE_OAUTH_CLIENT_ID:
-            missing.append("GOOGLE_OAUTH_CLIENT_ID")
-        if not self.GOOGLE_OAUTH_CLIENT_SECRET:
-            missing.append("GOOGLE_OAUTH_CLIENT_SECRET")
-        if not self.GOOGLE_OAUTH_REDIRECT_URI:
-            missing.append("GOOGLE_OAUTH_REDIRECT_URI")
+        if not self.google_oauth_client_id:
+            missing.append("GOOGLE_MCP_OAUTH_CLIENT_ID or GOOGLE_OAUTH_CLIENT_ID")
+        if not self.google_oauth_client_secret:
+            missing.append("GOOGLE_MCP_OAUTH_CLIENT_SECRET or GOOGLE_OAUTH_CLIENT_SECRET")
+        if not self.google_oauth_redirect_uri:
+            missing.append("GOOGLE_MCP_OAUTH_REDIRECT_URI or GOOGLE_OAUTH_REDIRECT_URI")
         if missing:
             raise ValueError(f"Faltan variables requeridas: {', '.join(missing)}")
+
+        parsed_redirect = urlparse(self.google_oauth_redirect_uri)
+        if parsed_redirect.scheme not in {"http", "https"} or not parsed_redirect.netloc:
+            raise ValueError(
+                "GOOGLE_MCP_OAUTH_REDIRECT_URI debe ser una URL absoluta http(s)"
+            )
+        if "/api/v1/auth" in parsed_redirect.path:
+            raise ValueError(
+                "GOOGLE_MCP_OAUTH_REDIRECT_URI apunta al callback de login social del backend. "
+                "Debe apuntar al MCP server, normalmente https://<mcp-host>/auth/callback"
+            )
         return self
 
     @property
     def DATABASE_URL(self) -> str:  # noqa: N802
         assert self.DATABASE_URL_RAW
         return _to_asyncpg_url(self.DATABASE_URL_RAW)
+
+    @property
+    def google_oauth_client_id(self) -> str:
+        return self.GOOGLE_MCP_OAUTH_CLIENT_ID or self.GOOGLE_OAUTH_CLIENT_ID
+
+    @property
+    def google_oauth_client_secret(self) -> str:
+        return self.GOOGLE_MCP_OAUTH_CLIENT_SECRET or self.GOOGLE_OAUTH_CLIENT_SECRET
+
+    @property
+    def google_oauth_redirect_uri(self) -> str:
+        return self.GOOGLE_MCP_OAUTH_REDIRECT_URI or self.GOOGLE_OAUTH_REDIRECT_URI
 
     @property
     def token_cipher_key(self) -> bytes:

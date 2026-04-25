@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import escape
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -33,14 +35,30 @@ async def auth_callback(
     session: AsyncSession = Depends(get_db_session),
 ) -> HTMLResponse:
     if error:
+        escaped_error = escape(error)
         return HTMLResponse(
-            f"<html><body><h2>Conexión cancelada</h2><p>{error}</p></body></html>",
+            f"<html><body><h2>Conexión cancelada</h2><p>{escaped_error}</p></body></html>",
             status_code=400,
         )
     if not code or not state:
         raise HTTPException(status_code=400, detail="missing_code_or_state")
 
-    await handle_callback(session, state=state, code=code)
+    try:
+        await handle_callback(session, state=state, code=code)
+    except HTTPException as exc:
+        detail = escape(str(exc.detail))
+        return HTMLResponse(
+            f"""
+            <html>
+              <body style="font-family: ui-sans-serif, system-ui; padding: 32px; color: #0f172a;">
+                <h2 style="margin: 0 0 12px;">No se pudo conectar Google</h2>
+                <p style="margin: 0 0 16px;">Error: {detail}</p>
+                <p style="margin: 0;">Volvé a Véktor e intentá reconectar la cuenta.</p>
+              </body>
+            </html>
+            """.strip(),
+            status_code=exc.status_code,
+        )
     return HTMLResponse(
         """
         <html>

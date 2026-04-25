@@ -115,6 +115,7 @@ El frontend no se levanta con ese Compose; se ejecuta aparte desde `frontend/`.
 | `ENABLE_GOOGLE_LOGIN` | `false` | Login social con Google |
 | `ENABLE_GOOGLE_MCP_TOOLS` | `false` | Herramientas de producto Google vía MCP |
 | `MCP_SERVER_URL` | `""` | Base URL del MCP server cuando MCP está activo |
+| `GOOGLE_MCP_OAUTH_REDIRECT_URI` | `""` | Callback OAuth del MCP server, normalmente `https://<mcp-host>/auth/callback` |
 
 ### Comandos útiles
 

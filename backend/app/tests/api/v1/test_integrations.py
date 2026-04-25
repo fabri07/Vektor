@@ -10,7 +10,6 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.google_mcp_connection import GoogleMcpConnection
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
-
 
 # ── Tests: GET /integrations/google/status ────────────────────────────────────
 
@@ -62,6 +60,55 @@ async def test_status_returns_real_state_from_db(
     assert data["connection_state"] == "CONNECTED"
     assert data["connected"] is True
     assert "gmail.readonly" in data["scopes_granted"]
+
+
+@pytest.mark.asyncio
+async def test_status_promotes_mcp_callback_error_to_connection_error(
+    client: AsyncClient,
+    auth_headers: dict,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_user: User,
+):
+    """Si el MCP informa fallo del callback, el backend deja de quedar en CONNECTING."""
+    conn = GoogleMcpConnection(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_user.user_id,
+        status="CONNECTING",
+        state_token="abc123",
+        scopes_granted=[],
+    )
+    db_session.add(conn)
+    await db_session.commit()
+
+    mock_gateway = AsyncMock()
+    mock_gateway.get_auth_status.return_value = {
+        "connected": False,
+        "scopes_granted": [],
+        "last_error": "token_exchange_failed:redirect_uri_mismatch",
+    }
+
+    with (
+        patch("app.api.v1.integrations.get_settings", return_value=type("S", (), {
+            "ENABLE_GOOGLE_MCP_TOOLS": True,
+            "MCP_SERVER_URL": "http://mcp-server:8080",
+        })()),
+        patch(
+            "app.integrations.mcp.http_gateway.HttpMcpGateway",
+            return_value=mock_gateway,
+        ),
+    ):
+        resp = await client.get("/api/v1/integrations/google/status", headers=auth_headers)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["connection_state"] == "ERROR"
+    assert data["last_error_code"] == "token_exchange_failed:redirect_uri_mismatch"
+
+    await db_session.refresh(conn)
+    assert conn.status == "ERROR"
+    assert conn.state_token is None
 
 
 # ── Tests: POST /integrations/google/connect/start ────────────────────────────
