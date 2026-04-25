@@ -19,7 +19,7 @@ from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import PGJSONB, PGTEXTARRAY, Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 VALID_STATUSES = frozenset({
     "DISCONNECTED",
@@ -55,7 +55,7 @@ class GoogleMcpConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default="DISCONNECTED",
     )
     scopes_granted: Mapped[list] = mapped_column(
-        PGTEXTARRAY,
+        PGJSONB,
         nullable=False,
         default=list,
     )
