@@ -132,7 +132,7 @@ HTTP Request
 
 ### API Routers (`app/api/v1/`)
 
-Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat + conversaciones + streaming), `admin`.
+Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat + conversaciones + streaming), `integrations` (estado y lifecycle de conexiones MCP Google), `admin`.
 
 ### Autenticación y multi-tenancy
 
@@ -309,6 +309,15 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Solo activa llamadas re
 
 **Gateway condicional en registry:** `AgentCalendar` y `AgentSync` reciben `gateway=HttpMcpGateway(...)` solo si `ENABLE_GOOGLE_MCP_TOOLS=true` y `MCP_SERVER_URL` está definido; de lo contrario `gateway=None` y operan en modo informacional.
 
+**Router `integrations`** (`app/api/v1/integrations.py`) — expone el lifecycle de conexiones MCP Google:
+- `GET /integrations/google/status` — estado de la conexión (`CONNECTING` / `CONNECTED` / `DISCONNECTED` / etc.) del tenant actual
+- `POST /integrations/google/connect` — inicia el flujo OAuth hacia el MCP server; crea registro `GoogleMcpConnection(status=CONNECTING)` si no existe
+- `POST /integrations/google/disconnect` — revoca tokens y pone `status=DISCONNECTED`
+
+**Modelo ORM:** `GoogleMcpConnection` (`app/persistence/models/google_mcp_connection.py`) — tabla `google_mcp_connections`, columnas clave: `tenant_id`, `user_id`, `status`, `scopes_granted` (JSONB), `connected_at`.
+
+**`google_oauth_tokens`** — tabla añadida en `20260424_0002` para que el MCP server persista tokens OAuth de Google (access + refresh cifrados). No tiene modelo ORM implementado aún; el MCP server la gestiona directamente.
+
 **Nota de compatibilidad:** Pueden existir rastros históricos de integraciones Google anteriores, pero la integración viva hoy es la del MCP server.
 
 **Prompt defense:** Todo input de usuario que llegue a un LLM debe pasar por `wrap_user_input()` de `app/application/security/prompt_defense.py` antes de incluirse en un prompt. El mismo módulo expone `is_valid_action_type(action_type)` para validar que el output de un LLM sea un ActionType del catálogo cerrado — usar al parsear cualquier respuesta LLM que deba devolver un action_type.
@@ -447,6 +456,10 @@ Estado actual:
   - no-op stubs para conservar continuidad Alembic después de retirar migraciones viejas de Google
 - `20260421_0001_add_memory_tables.py` y `20260421_0002_add_agent_memory.py`
   - continúan la cadena actual de memoria
+- `20260424_0001_add_google_mcp_connections.py`
+  - agrega tabla `google_mcp_connections` (ORM: `GoogleMcpConnection`)
+- `20260424_0002_add_google_oauth_tokens.py`
+  - agrega tabla `google_oauth_tokens` para persistencia de tokens OAuth del MCP server (sin modelo ORM por ahora)
 
 Post-Sprint 5/6: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
 

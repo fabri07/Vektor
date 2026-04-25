@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Truck } from "lucide-react";
+import { Building2, ChevronDown, ChevronRight, Package, Tag, Truck, Wallet } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Select } from "@/components/ui/Select";
 import { Tooltip } from "@/components/ui/Tooltip";
 import type { ExpenseEntryResponse } from "@/services/expenses.service";
@@ -27,6 +28,36 @@ interface Props {
   expenses: ExpenseEntryResponse[];
   products: ProductResponse[];
   loading?: boolean;
+}
+
+function CardEmptyState({
+  icon: Icon,
+  title,
+  description,
+  cta,
+  ctaHref,
+}: {
+  icon: LucideIcon;
+  title: string;
+  description: string;
+  cta: string;
+  ctaHref: string;
+}) {
+  return (
+    <div className="mt-5 flex flex-col items-center gap-3 rounded-xl border border-dashed border-vektor-border bg-vektor-surface/40 py-8 text-center">
+      <Icon className="h-8 w-8 text-vektor-muted" />
+      <div>
+        <p className="text-sm font-medium text-vektor-body">{title}</p>
+        <p className="mt-1 text-xs text-vektor-muted">{description}</p>
+      </div>
+      <Link
+        href={ctaHref}
+        className="inline-flex items-center rounded-full border border-vektor-border bg-vektor-surface px-4 py-2 text-xs font-medium text-vektor-body transition-all duration-200 hover:border-vektor-blue hover:text-vektor-white"
+      >
+        {cta} →
+      </Link>
+    </div>
+  );
 }
 
 function SkeletonCard() {
@@ -89,7 +120,15 @@ export function DashboardSummaryCards({ sales, expenses, products, loading }: Pr
           </button>
         </div>
 
-        {cashOpen ? (
+        {sales.length === 0 ? (
+          <CardEmptyState
+            icon={Wallet}
+            title="Sin movimientos de caja"
+            description="Registrá una venta o ingreso para ver el estado de tu caja."
+            cta="Registrar venta"
+            ctaHref="/chat"
+          />
+        ) : cashOpen ? (
           <div className="mt-5 space-y-3">
             {cash.rows.map((row) => (
               <div key={row.method} className={`rounded-xl border border-vektor-border bg-vektor-surface p-3 border-l-4 ${row.colorClass}`}>
@@ -128,49 +167,71 @@ export function DashboardSummaryCards({ sales, expenses, products, loading }: Pr
         <Tooltip content={KPI_TOOLTIP_COPY.Margen}>
           <h2 className="text-lg font-semibold text-vektor-white">Margen</h2>
         </Tooltip>
-        <div className="mt-5 space-y-3">
-          {margins.map((row) => (
-            <Tooltip
-              key={row.category}
-              content={`Margen promedio de ${row.category}: cuánto ganás por cada peso vendido en esta categoría.`}
-            >
-              <div className="flex items-center justify-between rounded-xl border border-vektor-border bg-vektor-surface px-4 py-3">
-                <span className="text-sm font-medium text-vektor-body">{row.category}</span>
-                <span className={`text-base font-semibold ${getMarginToneClass(row.tone)}`}>
-                  {formatPercent(row.margin)}
-                </span>
-              </div>
-            </Tooltip>
-          ))}
-        </div>
+        {margins.length === 0 ? (
+          <CardEmptyState
+            icon={Tag}
+            title="Sin productos para calcular margen"
+            description="Agregá productos para ver los márgenes por categoría."
+            cta="Registrar compra"
+            ctaHref="/ingestion"
+          />
+        ) : (
+          <div className="mt-5 space-y-3">
+            {margins.map((row) => (
+              <Tooltip
+                key={row.category}
+                content={`Margen promedio de ${row.category}: cuánto ganás por cada peso vendido en esta categoría.`}
+              >
+                <div className="flex items-center justify-between rounded-xl border border-vektor-border bg-vektor-surface px-4 py-3">
+                  <span className="text-sm font-medium text-vektor-body">{row.category}</span>
+                  <span className={`text-base font-semibold ${getMarginToneClass(row.tone)}`}>
+                    {formatPercent(row.margin)}
+                  </span>
+                </div>
+              </Tooltip>
+            ))}
+          </div>
+        )}
       </article>
 
       <article className="vektor-card p-5">
         <Tooltip content={KPI_TOOLTIP_COPY.Stock}>
           <h2 className="text-lg font-semibold text-vektor-white">Stock</h2>
         </Tooltip>
-        <div className="mt-5 flex flex-wrap gap-3">
-          {stockStatuses.map((status) => (
-            <Tooltip key={status.id} content={status.description}>
-              <button
-                type="button"
-                onClick={() => {
-                  if (status.id === "incoming") return;
-                  router.push(`/products?stock=${status.id}`);
-                }}
-                aria-label={`Filtrar productos por ${status.label}`}
-                className="inline-flex items-center gap-2 rounded-full border border-vektor-border bg-vektor-surface px-4 py-2 text-sm font-medium text-vektor-body"
-              >
-                <span className={`h-2.5 w-2.5 rounded-full ${status.colorClass.split(" ")[0]}`} />
-                <span>{status.label}</span>
-                <span className="text-vektor-white">{status.count}</span>
-              </button>
-            </Tooltip>
-          ))}
-        </div>
-        <p className="mt-4 text-sm leading-6 text-vektor-muted">
-          Tocá un estado para abrir la vista de inventario ya filtrada cuando haya productos para revisar.
-        </p>
+        {products.length === 0 ? (
+          <CardEmptyState
+            icon={Package}
+            title="Todavía no cargaste productos"
+            description="Registrá una compra para ver el estado de tu inventario."
+            cta="Registrar compra"
+            ctaHref="/ingestion"
+          />
+        ) : (
+          <>
+            <div className="mt-5 flex flex-wrap gap-3">
+              {stockStatuses.map((status) => (
+                <Tooltip key={status.id} content={status.description}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (status.id === "incoming") return;
+                      router.push(`/products?stock=${status.id}`);
+                    }}
+                    aria-label={`Filtrar productos por ${status.label}`}
+                    className="inline-flex items-center gap-2 rounded-full border border-vektor-border bg-vektor-surface px-4 py-2 text-sm font-medium text-vektor-body"
+                  >
+                    <span className={`h-2.5 w-2.5 rounded-full ${status.colorClass.split(" ")[0]}`} />
+                    <span>{status.label}</span>
+                    <span className="text-vektor-white">{status.count}</span>
+                  </button>
+                </Tooltip>
+              ))}
+            </div>
+            <p className="mt-4 text-sm leading-6 text-vektor-muted">
+              Tocá un estado para abrir la vista de inventario ya filtrada cuando haya productos para revisar.
+            </p>
+          </>
+        )}
       </article>
 
       <article className="vektor-card p-5">
@@ -190,62 +251,69 @@ export function DashboardSummaryCards({ sales, expenses, products, loading }: Pr
           ) : null}
         </div>
 
-        <div className="mt-4">
-          <Select
-            options={supplierOptions}
-            value={selectedSupplierDetail?.name}
-            onChange={setSelectedSupplier}
-            placeholder="Elegí un proveedor"
+        {suppliers.length === 0 ? (
+          <CardEmptyState
+            icon={Building2}
+            title="Sin proveedores registrados"
+            description="Registrá una compra con proveedor para ver el detalle aquí."
+            cta="Registrar compra"
+            ctaHref="/ingestion"
           />
-        </div>
-
-        {selectedSupplierDetail ? (
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-              <Tooltip content="Total de dinero que le compraste a este proveedor en el período seleccionado.">
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                  Volumen de compra
-                </p>
-              </Tooltip>
-              <p className="mt-2 text-xl font-semibold text-vektor-white">
-                {formatARS(selectedSupplierDetail.totalPurchased)}
-              </p>
-            </div>
-            <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                Ultimo pedido
-              </p>
-              <p className="mt-2 text-xl font-semibold text-vektor-white">
-                {formatShortDate(selectedSupplierDetail.lastOrderDate)}
-              </p>
-            </div>
-            <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                Ticket promedio
-              </p>
-              <p className="mt-2 text-xl font-semibold text-vektor-white">
-                {formatARS(selectedSupplierDetail.averageOrderValue)}
-              </p>
-            </div>
-            <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                Condiciones / vencidas
-              </p>
-              <div className="mt-2 flex items-center justify-between gap-2">
-                <span className="text-base font-semibold text-vektor-white">
-                  {selectedSupplierDetail.paymentTerms}
-                </span>
-                <span className="inline-flex items-center gap-2 rounded-full bg-vektor-night px-3 py-1 text-xs font-medium text-vektor-body">
-                  <Truck className="h-3.5 w-3.5" />
-                  {selectedSupplierDetail.overdueInvoicesCount} vencidas
-                </span>
-              </div>
-            </div>
-          </div>
         ) : (
-          <div className="mt-5 rounded-xl border border-dashed border-vektor-border bg-vektor-surface/60 p-5 text-sm text-vektor-muted">
-            No hay proveedores cargados todavia.
-          </div>
+          <>
+            <div className="mt-4">
+              <Select
+                options={supplierOptions}
+                value={selectedSupplierDetail?.name}
+                onChange={setSelectedSupplier}
+                placeholder="Elegí un proveedor"
+              />
+            </div>
+            {selectedSupplierDetail ? (
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
+                  <Tooltip content="Total de dinero que le compraste a este proveedor en el período seleccionado.">
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
+                      Volumen de compra
+                    </p>
+                  </Tooltip>
+                  <p className="mt-2 text-xl font-semibold text-vektor-white">
+                    {formatARS(selectedSupplierDetail.totalPurchased)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
+                    Último pedido
+                  </p>
+                  <p className="mt-2 text-xl font-semibold text-vektor-white">
+                    {formatShortDate(selectedSupplierDetail.lastOrderDate)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
+                    Ticket promedio
+                  </p>
+                  <p className="mt-2 text-xl font-semibold text-vektor-white">
+                    {formatARS(selectedSupplierDetail.averageOrderValue)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
+                    Condiciones / vencidas
+                  </p>
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <span className="text-base font-semibold text-vektor-white">
+                      {selectedSupplierDetail.paymentTerms}
+                    </span>
+                    <span className="inline-flex items-center gap-2 rounded-full bg-vektor-night px-3 py-1 text-xs font-medium text-vektor-body">
+                      <Truck className="h-3.5 w-3.5" />
+                      {selectedSupplierDetail.overdueInvoicesCount} vencidas
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </>
         )}
       </article>
     </div>

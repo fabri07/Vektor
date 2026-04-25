@@ -182,9 +182,9 @@ export function HealthScoreCard({
             className="rounded-2xl border border-vektor-border bg-vektor-surface p-5"
             style={{ borderLeftColor: tone, borderLeftWidth: 4 }}
           >
-            <Tooltip content="La accion mas concreta para mover hoy la aguja del negocio sin perder tiempo en diagnosticos tecnicos.">
+            <Tooltip content="La acción más concreta para mover hoy la aguja del negocio sin perder tiempo en diagnósticos técnicos.">
               <p className="text-base font-semibold text-vektor-white">
-                Que hacer ahora
+                Qué hacer ahora
               </p>
             </Tooltip>
             <p className="mt-3 max-w-2xl text-sm leading-7 text-vektor-body">
