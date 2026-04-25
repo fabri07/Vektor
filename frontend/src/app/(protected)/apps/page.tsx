@@ -88,11 +88,6 @@ export default function AppsPage() {
 
   const connectMutation = useMutation({
     mutationFn: integrationsService.startGoogleConnect,
-    onSuccess: (result) => {
-      setConnectError(null);
-      window.open(result.auth_url, "_blank", "noopener,noreferrer");
-      void queryClient.invalidateQueries({ queryKey: ["google-integrations-status"] });
-    },
     onError: () => {
       setConnectError("No se pudo iniciar la conexión. Intentá de nuevo.");
     },
@@ -112,6 +107,25 @@ export default function AppsPage() {
   const driveCard = useMemo(() => apps.find((app) => app.id === "drive"), [apps]);
   const otherApps = useMemo(() => apps.filter((app) => app.id !== "drive"), [apps]);
 
+  const handleConnect = async () => {
+    if (connectMutation.isPending) return;
+
+    setConnectError(null);
+    const authWindow = window.open("about:blank", "vektor-google-oauth");
+
+    try {
+      const result = await connectMutation.mutateAsync();
+      if (authWindow) {
+        authWindow.location.href = result.auth_url;
+      } else {
+        window.location.assign(result.auth_url);
+      }
+      void queryClient.invalidateQueries({ queryKey: ["google-integrations-status"] });
+    } catch {
+      authWindow?.close();
+    }
+  };
+
   const renderActionButton = () => {
     if (!connectionFlowAvailable) return null;
 
@@ -127,27 +141,25 @@ export default function AppsPage() {
       );
     }
 
-    if (connectionState === "CONNECTING") {
-      return (
-        <button
-          disabled
-          className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm font-medium text-blue-700 opacity-70 cursor-not-allowed"
-        >
-          Esperando autorización...
-        </button>
-      );
-    }
-
     const label =
-      connectionState === "RECONNECT_REQUIRED" || connectionState === "INSUFFICIENT_SCOPE"
-        ? "Reconectar Google"
-        : "Conectar Google";
+      connectionState === "CONNECTING"
+        ? "Reintentar autorización"
+        : connectionState === "ERROR"
+          ? "Reintentar conexión"
+          : connectionState === "RECONNECT_REQUIRED" || connectionState === "INSUFFICIENT_SCOPE"
+            ? "Reconectar Google"
+            : "Conectar Google";
+
+    const buttonClass =
+      connectionState === "CONNECTING"
+        ? "rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:opacity-50"
+        : "rounded-xl bg-vk-blue px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-vk-blue-hover disabled:opacity-50";
 
     return (
       <button
-        onClick={() => connectMutation.mutate()}
+        onClick={handleConnect}
         disabled={connectMutation.isPending}
-        className="rounded-xl bg-vk-blue px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-vk-blue-hover disabled:opacity-50"
+        className={buttonClass}
       >
         {connectMutation.isPending ? "Iniciando..." : label}
       </button>

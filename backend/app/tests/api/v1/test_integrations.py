@@ -7,6 +7,7 @@ se mockean para no requerir infraestructura externa.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -105,6 +106,43 @@ async def test_status_promotes_mcp_callback_error_to_connection_error(
     data = resp.json()
     assert data["connection_state"] == "ERROR"
     assert data["last_error_code"] == "token_exchange_failed:redirect_uri_mismatch"
+
+    await db_session.refresh(conn)
+    assert conn.status == "ERROR"
+    assert conn.state_token is None
+
+
+@pytest.mark.asyncio
+async def test_status_expires_stale_connecting_connection(
+    client: AsyncClient,
+    auth_headers: dict,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_user: User,
+):
+    """Un flujo OAuth abandonado no queda bloqueado indefinidamente en CONNECTING."""
+    conn = GoogleMcpConnection(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_user.user_id,
+        status="CONNECTING",
+        state_token="stale-state",
+        scopes_granted=[],
+        updated_at=datetime.now(UTC) - timedelta(minutes=15),
+    )
+    db_session.add(conn)
+    await db_session.commit()
+
+    with patch("app.api.v1.integrations.get_settings", return_value=type("S", (), {
+        "ENABLE_GOOGLE_MCP_TOOLS": True,
+        "MCP_SERVER_URL": "http://mcp-server:8080",
+    })()):
+        resp = await client.get("/api/v1/integrations/google/status", headers=auth_headers)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["connection_state"] == "ERROR"
+    assert data["last_error_code"] == "oauth_callback_timeout"
 
     await db_session.refresh(conn)
     assert conn.status == "ERROR"

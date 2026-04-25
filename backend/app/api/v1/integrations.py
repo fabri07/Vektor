@@ -8,7 +8,7 @@ POST /integrations/google/disconnect      — revoca la conexión OAuth
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -29,6 +29,8 @@ from app.schemas.integrations import (
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+_CONNECTING_TIMEOUT = timedelta(minutes=10)
 
 _GOOGLE_SCOPES = [
     "gmail.readonly",
@@ -79,6 +81,16 @@ _GOOGLE_APPS = [
 ]
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 async def _get_connection(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -114,7 +126,8 @@ def _build_status_response(
                 **app.model_dump(),
                 "available": backend_available,
                 "connected": connected,
-                "needs_reconnect": connection_state in ("RECONNECT_REQUIRED", "INSUFFICIENT_SCOPE"),
+                "needs_reconnect": connection_state
+                in ("RECONNECT_REQUIRED", "INSUFFICIENT_SCOPE", "ERROR"),
             }
         )
         for app in _GOOGLE_APPS
@@ -132,6 +145,10 @@ def _build_status_response(
         )
     elif connection_state == "CONNECTING":
         message = "Esperando que completes la autorización en Google..."
+    elif connection_state == "ERROR" and last_error_code == "oauth_callback_timeout":
+        message = "La autorización de Google expiró. Volvé a iniciar la conexión."
+    elif connection_state == "ERROR":
+        message = "No se pudo completar la conexión con Google. Intentá conectar de nuevo."
     elif connection_state in ("RECONNECT_REQUIRED", "INSUFFICIENT_SCOPE"):
         message = "La conexión Google requiere reconexión. Hacé click en Reconectar."
     else:
@@ -168,6 +185,18 @@ async def google_status(
 
     # Si hay conexión CONNECTING, intentar confirmar estado real con el MCP server
     if connection and connection.status == "CONNECTING" and mcp_enabled and mcp_server_configured:
+        pending_since = _as_utc(connection.updated_at or connection.created_at)
+        if _utc_now() - pending_since > _CONNECTING_TIMEOUT:
+            connection.status = "ERROR"
+            connection.last_error_code = "oauth_callback_timeout"
+            connection.state_token = None
+            await db.commit()
+            return _build_status_response(
+                connection=connection,
+                mcp_enabled=mcp_enabled,
+                mcp_server_configured=mcp_server_configured,
+            )
+
         try:
             from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
 
@@ -179,7 +208,7 @@ async def google_status(
             if auth_status.get("connected"):
                 connection.status = "CONNECTED"
                 connection.scopes_granted = auth_status.get("scopes_granted", [])
-                connection.connected_at = datetime.now(UTC)
+                connection.connected_at = _utc_now()
                 connection.last_error_code = None
                 connection.state_token = None
                 await db.commit()

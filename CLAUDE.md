@@ -318,7 +318,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Solo activa llamadas re
 
 **Modelo ORM:** `GoogleMcpConnection` (`app/persistence/models/google_mcp_connection.py`) — tabla `google_mcp_connections`, columnas clave: `tenant_id`, `user_id`, `status`, `scopes_granted` (JSONB), `connected_at`.
 
-**`google_oauth_tokens`** — tabla añadida en `20260424_0002` para que el MCP server persista tokens OAuth de Google (access + refresh cifrados). No tiene modelo ORM en el backend; el MCP server la gestiona directamente. Si el callback falla, `mcp_server/app/auth/service.py` guarda `last_error_code` (`token_exchange_failed:*`, `missing_access_token`, etc.) y el backend promueve la conexión a `ERROR` en el siguiente status check, evitando quedar indefinidamente en `CONNECTING`.
+**`google_oauth_tokens`** — tabla añadida en `20260424_0002` para que el MCP server persista tokens OAuth de Google (access + refresh cifrados). No tiene modelo ORM en el backend; el MCP server la gestiona directamente. Si el callback falla, `mcp_server/app/auth/service.py` guarda `last_error_code` (`token_exchange_failed:*`, `missing_access_token`, etc.) y el backend promueve la conexión a `ERROR` en el siguiente status check. Además, un `GoogleMcpConnection(status=CONNECTING)` pendiente por más de 10 minutos expira como `oauth_callback_timeout`, evitando quedar indefinidamente en `CONNECTING`.
 
 **Nota de compatibilidad:** Pueden existir rastros históricos de integraciones Google anteriores, pero la integración viva hoy es la del MCP server.
 
@@ -430,6 +430,7 @@ Estado actual:
 3. El frontend expone `/apps` como pantalla operativa de integraciones: iniciar conexión, reconectar y desconectar Google
 4. Si una acción externa falla con `REQUIRES_RECONNECT`, el frontend guía al usuario de vuelta a `/apps`
 5. En producción, `GOOGLE_MCP_OAUTH_REDIRECT_URI` debe estar registrado exactamente igual en Google Cloud Console como Authorized redirect URI.
+6. En `/apps`, el botón de conexión abre una ventana en blanco durante el click y luego la redirige a Google cuando llega `auth_url`; esto evita bloqueo de popups en navegadores.
 
 ### Endpoints frontend agregados recientemente
 
