@@ -1,14 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import {
-  Activity,
-  Boxes,
-  Truck,
-  ShieldCheck,
-} from "lucide-react";
+import { Activity, Boxes, ChevronDown, Truck, ShieldCheck, Volume2, VolumeX } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { VektorLogo } from "@/components/ui/VektorLogo";
 
@@ -46,19 +41,19 @@ const FEATURE_HIGHLIGHTS = [
 
 function Navbar() {
   return (
-    <nav className="fixed inset-x-0 top-0 z-50 border-b border-vektor-border/80 bg-vektor-night/80 backdrop-blur-xl">
+    <nav className="fixed inset-x-0 top-0 z-50 border-b border-white/10 bg-transparent">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
         <VektorLogo variant="full" size="md" theme="dark" />
         <div className="flex items-center gap-3">
           <a
             href="/login"
-            className="hidden rounded-full border border-vektor-border px-4 py-2 text-sm font-medium text-vektor-body hover:border-vektor-blue/50 hover:bg-vektor-surface sm:inline-flex"
+            className="hidden rounded-full border border-white/20 px-4 py-2 text-sm font-medium text-white/80 backdrop-blur-sm hover:border-white/40 hover:text-white sm:inline-flex"
           >
             Iniciar sesión
           </a>
           <a
             href="/register"
-            className="inline-flex rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-5 py-2.5 text-sm font-semibold text-vektor-white shadow-glow"
+            className="inline-flex rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-vektor-night hover:bg-white/90"
           >
             Empezar gratis
           </a>
@@ -68,47 +63,92 @@ function Navbar() {
   );
 }
 
-function Hero() {
+function VideoHero() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [muted, setMuted] = useState(true);
+  const [videoError, setVideoError] = useState(false);
+
+  function toggleMute() {
+    if (!videoRef.current) return;
+    videoRef.current.muted = !videoRef.current.muted;
+    setMuted(videoRef.current.muted);
+  }
+
   return (
-    <section className="relative flex min-h-screen items-center overflow-hidden bg-vektor-night pt-16">
-      <div className="pointer-events-none absolute inset-0">
-        <div className="animate-mesh absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(58,134,255,0.25),transparent_28%),radial-gradient(circle_at_80%_18%,rgba(39,199,184,0.18),transparent_22%),radial-gradient(circle_at_50%_80%,rgba(241,182,72,0.08),transparent_18%)]" />
-        <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.03)_0%,transparent_30%,rgba(255,255,255,0.02)_100%)]" />
+    <section className="relative h-screen w-full overflow-hidden bg-vektor-night">
+      {/* ── Video background ────────────────────────────────────────────
+          Drop the production video at: public/videos/hero.mp4
+          Concept: dueño de kiosco argentino abriendo su local al amanecer,
+          pone el mostrador en orden, abre su notebook y accede a Véktor.
+          Resolución recomendada: 1920×1080, H.264, ≤ 12 MB.
+      ────────────────────────────────────────────────────────────────── */}
+      {!videoError && (
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          loop
+          playsInline
+          onError={() => setVideoError(true)}
+          className="absolute inset-0 h-full w-full object-cover"
+          poster="/videos/hero-poster.jpg"
+        >
+          <source src="/videos/hero.mp4" type="video/mp4" />
+        </video>
+      )}
+
+      {/* Gradient fallback (visible while no video or on error) */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_20%_30%,rgba(58,134,255,0.30),transparent_45%),radial-gradient(ellipse_at_80%_70%,rgba(39,199,184,0.18),transparent_40%),linear-gradient(170deg,#03070f_0%,#070f1e_40%,#04090e_100%)]" />
+
+      {/* Bottom fade to page background */}
+      <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-vektor-night to-transparent" />
+
+      {/* Cinematic top vignette */}
+      <div className="absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-vektor-night/60 to-transparent" />
+
+      {/* Content — bottom-left, SpaceX style */}
+      <div className="absolute bottom-28 left-0 right-0 px-6 sm:bottom-32 sm:px-12 lg:px-20">
+        <div className="max-w-2xl">
+          <p className="mb-4 text-xs font-semibold uppercase tracking-[0.22em] text-white/50">
+            <ShieldCheck className="mr-1.5 inline h-3.5 w-3.5 text-vektor-teal" />
+            Salud financiera para PYMEs argentinas
+          </p>
+          <h1 className="font-display text-[52px] font-bold uppercase leading-[0.92] tracking-tight text-white sm:text-[72px] lg:text-[88px]">
+            Tomá las<br />
+            mejores<br />
+            decisiones.
+          </h1>
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
+            <a
+              href="/register"
+              className="inline-flex items-center justify-center rounded-full bg-white px-8 py-3.5 text-sm font-semibold text-vektor-night hover:-translate-y-0.5 hover:bg-white/90"
+            >
+              Empezar gratis
+            </a>
+            <a
+              href="/demo"
+              className="inline-flex items-center justify-center rounded-full border border-white/25 px-8 py-3.5 text-sm font-semibold text-white/90 backdrop-blur-sm hover:border-white/50 hover:text-white"
+            >
+              Ver demo
+            </a>
+          </div>
+        </div>
       </div>
 
-      <div className="relative mx-auto flex max-w-7xl flex-col items-center px-6 py-24 text-center">
-        <div className="inline-flex items-center gap-2 rounded-full border border-vektor-border bg-vektor-ink/80 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-vektor-muted">
-          <ShieldCheck className="h-4 w-4 text-vektor-teal" />
-          Decisiones más claras para PYMEs argentinas
-        </div>
+      {/* Mute toggle — bottom right */}
+      <button
+        type="button"
+        onClick={toggleMute}
+        aria-label={muted ? "Activar sonido" : "Silenciar"}
+        className="absolute bottom-8 right-6 flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/30 text-white/70 backdrop-blur-sm hover:border-white/40 hover:text-white sm:right-12 lg:right-20"
+      >
+        {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+      </button>
 
-        <h1 className="mt-8 text-balance font-display text-[40px] font-bold leading-[0.95] text-vektor-white md:text-[72px]">
-          Tomá las mejores decisiones
-          <br />
-          para tu negocio.
-        </h1>
-
-        <p className="mt-6 max-w-3xl text-[18px] leading-8 text-vektor-muted md:text-[20px]">
-          Véktor analiza tu caja, inventario y proveedores — y te dice exactamente qué hacer.
-        </p>
-
-        <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row">
-          <a
-            href="/register"
-            className="inline-flex items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-8 py-4 text-base font-semibold text-vektor-white shadow-glow hover:-translate-y-0.5"
-          >
-            Empezar gratis
-          </a>
-          <a
-            href="/demo"
-            className="group inline-flex items-center gap-2 text-base font-medium text-vektor-body"
-          >
-            <span className="relative">
-              Ver demo →
-              <span className="absolute inset-x-0 bottom-[-4px] h-px origin-left scale-x-0 bg-vektor-body transition-transform duration-200 group-hover:scale-x-100" />
-            </span>
-          </a>
-        </div>
+      {/* Scroll indicator */}
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5">
+        <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-white/30">Scroll</span>
+        <ChevronDown className="h-4 w-4 animate-bounce text-white/30" />
       </div>
     </section>
   );
@@ -131,7 +171,7 @@ function SocialProofStrip() {
               alt={card.caption}
               fill
               sizes="300px"
-              className="object-cover transition-all duration-300 group-hover/card:scale-[1.03] group-hover/card:shadow-glow"
+              className="object-cover transition-all duration-300 group-hover/card:scale-[1.03]"
             />
             <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-vektor-night via-vektor-night/70 to-transparent px-4 pb-4 pt-10">
               <p className="text-sm font-medium text-white">{card.caption}</p>
@@ -148,10 +188,10 @@ function FeatureHighlights() {
     <section className="bg-vektor-night py-24">
       <div className="mx-auto max-w-7xl px-6">
         <div className="mb-12 max-w-3xl">
-          <p className="text-sm font-medium uppercase tracking-[0.16em] text-vektor-teal">
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-vektor-teal">
             Qué resuelve Véktor
           </p>
-          <h2 className="mt-4 font-display text-4xl font-semibold text-vektor-white">
+          <h2 className="mt-4 font-display text-4xl font-bold uppercase leading-tight tracking-tight text-vektor-white">
             Un tablero pensado para dueños de negocio, no para técnicos.
           </h2>
         </div>
@@ -159,16 +199,12 @@ function FeatureHighlights() {
         <div className="grid gap-6 md:grid-cols-3">
           {FEATURE_HIGHLIGHTS.map((feature) => {
             const Icon = feature.icon;
-
             return (
-              <article
-                key={feature.title}
-                className="vektor-card p-7"
-              >
+              <article key={feature.title} className="vektor-card p-7">
                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-vektor-surface text-vektor-teal">
                   <Icon className="h-6 w-6" />
                 </div>
-                <h3 className="mt-6 font-display text-2xl font-semibold text-vektor-white">
+                <h3 className="mt-6 font-display text-2xl font-bold uppercase tracking-tight text-vektor-white">
                   {feature.title}
                 </h3>
                 <p className="mt-3 text-base leading-7 text-vektor-muted">
@@ -190,10 +226,10 @@ function WorkflowPreview() {
         <div className="vektor-card overflow-hidden p-8">
           <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div>
-              <p className="text-sm font-medium uppercase tracking-[0.16em] text-vektor-blue">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-vektor-blue">
                 Vista previa
               </p>
-              <h2 className="mt-3 font-display text-4xl font-semibold text-vektor-white">
+              <h2 className="mt-3 font-display text-4xl font-bold uppercase tracking-tight text-vektor-white">
                 Todo lo importante en una sola pantalla.
               </h2>
             </div>
@@ -211,7 +247,7 @@ function WorkflowPreview() {
             </div>
             <div className="mt-10 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
               <div className="rounded-2xl border border-vektor-border bg-vektor-ink/80 p-6">
-                <p className="text-sm uppercase tracking-[0.16em] text-vektor-muted">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-vektor-muted">
                   Dashboard Preview
                 </p>
                 <div className="mt-6 h-56 rounded-2xl bg-[linear-gradient(135deg,rgba(58,134,255,0.15),rgba(39,199,184,0.08)),linear-gradient(180deg,rgba(255,255,255,0.02),transparent)]" />
@@ -262,7 +298,7 @@ export default function RootPage() {
   return (
     <>
       <Navbar />
-      <Hero />
+      <VideoHero />
       <SocialProofStrip />
       <FeatureHighlights />
       <WorkflowPreview />
