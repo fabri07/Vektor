@@ -205,6 +205,7 @@ class AgentHealth(BaseAgent):
             agent_name=self.agent_name,
             status="success",
             risk_level=RiskLevel.LOW,
+            message=narrative,  # evita segundo LLM call en el orquestador
             result={
                 "summary": narrative,
                 "health_score": health.health_score,

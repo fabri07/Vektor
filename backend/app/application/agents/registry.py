@@ -19,7 +19,7 @@ def get_sub_agent(
     if name == "agent_stock":
         from app.application.agents.stock.agent import AgentStock  # noqa: PLC0415
 
-        return AgentStock()
+        return AgentStock(db=db)
     if name == "agent_supplier":
         from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
         from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415

@@ -141,24 +141,28 @@ class ChatOrchestrator:
                 "summary", "Requiere tu confirmación para continuar."
             )
         else:
-            # 5b. success / requires_clarification → LLM Haiku genera texto rico
-            try:
-                agent_response.message = await self._generate_rich_response(
-                    request,
-                    agent_response,
-                    business_name,
-                    business_type,
-                    heuristics,
-                    conversation_ctx,
-                    bm_data,
-                    agent_memory_fragment,
-                    file_context,
-                )
-            except AnthropicConfigurationError:
-                raise
-            except Exception as exc:
-                logger.warning("chat_orchestrator_llm_failed", error=str(exc))
-                agent_response.message = agent_response.result.get("summary") or "Procesado."
+            # 5b. Si el agente ya generó su propia respuesta (ej. AgentHealth), usarla directo
+            if agent_response.message:
+                agent_response.message = self._strip_markdown(agent_response.message)
+            else:
+                # success / requires_clarification → LLM Haiku genera texto rico
+                try:
+                    agent_response.message = await self._generate_rich_response(
+                        request,
+                        agent_response,
+                        business_name,
+                        business_type,
+                        heuristics,
+                        conversation_ctx,
+                        bm_data,
+                        agent_memory_fragment,
+                        file_context,
+                    )
+                except AnthropicConfigurationError:
+                    raise
+                except Exception as exc:
+                    logger.warning("chat_orchestrator_llm_failed", error=str(exc))
+                    agent_response.message = agent_response.result.get("summary") or "Procesado."
 
         # 6. Guardar turno (best-effort)
         if request.conversation_id:

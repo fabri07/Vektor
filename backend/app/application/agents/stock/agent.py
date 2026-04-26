@@ -21,22 +21,24 @@ from app.application.agents.shared.schemas import (
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
+from app.persistence.models.product import Product
 
 
 class StockAdjustEntity(BaseModel):
     product_id: Optional[str] = None
     sku: Optional[str] = None
     product_name: Optional[str] = None
-    qty_change: int  # positivo = alta, negativo = baja
-    reason: str  # venta, compra, merma, ajuste, devolucion
+    qty_change: int
+    reason: str
     unit_cost: Optional[Decimal] = None
 
 
 class AgentStock(BaseAgent):
     agent_name = "agent_stock"
 
-    def __init__(self) -> None:
+    def __init__(self, db: Optional[AsyncSession] = None) -> None:
         self._client: Any | None = None
+        self._db = db
 
     @property
     def client(self) -> Any:
@@ -48,51 +50,78 @@ class AgentStock(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
+    async def _resolve_product_id(
+        self,
+        product_name: str | None,
+        sku: str | None,
+        tenant_id: str,
+    ) -> tuple[str | None, list[str]]:
+        """Busca el product_id en la DB. Devuelve (id, [nombres_alternativos])."""
+        if self._db is None:
+            return None, []
+
+        tid = uuid.UUID(tenant_id)
+
+        # 1. Búsqueda exacta por SKU
+        if sku:
+            result = await self._db.execute(
+                select(Product).where(
+                    Product.tenant_id == tid,
+                    Product.sku == sku,
+                )
+            )
+            product = result.scalar_one_or_none()
+            if product:
+                return str(product.id), []
+
+        # 2. Búsqueda por nombre (ILIKE)
+        if product_name:
+            result = await self._db.execute(
+                select(Product).where(
+                    Product.tenant_id == tid,
+                    Product.name.ilike(f"%{product_name}%"),
+                )
+            )
+            matches = list(result.scalars().all())
+            if len(matches) == 1:
+                return str(matches[0].id), []
+            if len(matches) > 1:
+                return None, [m.name for m in matches[:5]]
+
+        return None, []
+
     async def on_sale_recorded(
         self,
         sale_id: str,
         tenant_id: str,
         db: Optional[AsyncSession] = None,
     ) -> None:
-        """
-        Reacciona al evento SALE_RECORDED.
-        Decrementa el stock del producto vendido llamando a stock_service directamente.
-        Si la venta no tiene product_id asociado, no hay movimiento de inventario.
-        """
         from app.application.services import stock_service  # noqa: PLC0415
         from app.observability.logger import get_logger  # noqa: PLC0415
         from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
 
         logger = get_logger(__name__)
+        effective_db = db or self._db
 
-        if db is None:
-            logger.warning("on_sale_recorded: no db session provided, skipping stock decrement",
-                           sale_id=sale_id)
+        if effective_db is None:
+            logger.warning("on_sale_recorded: no db session", sale_id=sale_id)
             return
 
         try:
             sale_uuid = uuid.UUID(sale_id)
             tenant_uuid = uuid.UUID(tenant_id)
         except ValueError:
-            logger.warning("on_sale_recorded: invalid sale_id or tenant_id",
-                           sale_id=sale_id, tenant_id=tenant_id)
+            logger.warning("on_sale_recorded: invalid ids", sale_id=sale_id)
             return
 
-        result = await db.execute(
+        result = await effective_db.execute(
             select(SaleEntry).where(
                 SaleEntry.id == sale_uuid,
                 SaleEntry.tenant_id == tenant_uuid,
             )
         )
         sale = result.scalar_one_or_none()
-
-        if sale is None:
-            logger.warning("on_sale_recorded: sale not found", sale_id=sale_id)
-            return
-
-        if sale.product_id is None:
-            logger.info("on_sale_recorded: sale has no product_id, skipping stock decrement",
-                        sale_id=sale_id)
+        if sale is None or sale.product_id is None:
             return
 
         await stock_service.decrement_stock(
@@ -100,42 +129,20 @@ class AgentStock(BaseAgent):
             tenant_id=tenant_uuid,
             qty=sale.quantity,
             source_event_id=sale_id,
-            db=db,
+            db=effective_db,
         )
 
-    async def detect_stockout(
-        self,
-        product_id: str,
-        current_qty: int,
-        min_threshold: int = 0,
-    ) -> bool:
-        """True si el stock está en riesgo de quiebre."""
+    async def detect_stockout(self, product_id: str, current_qty: int, min_threshold: int = 0) -> bool:
         return current_qty <= min_threshold
 
-    async def detect_overstock(
-        self,
-        product_id: str,
-        rotation_days: float,
-        business_type: str,
-    ) -> bool:
-        """
-        True si el producto está inmovilizado.
-        Condición: rotación_real > 2 × rotation_days_max heurístico del rubro.
-        """
+    async def detect_overstock(self, product_id: str, rotation_days: float, business_type: str) -> bool:
         config = HeuristicEngine.get(business_type)
         return config.is_overstock(rotation_days)
 
     async def generate_replenishment_ranking(self, tenant_id: str) -> list[dict]:
-        """
-        Top-10 productos a reponer ordenados por urgencia:
-        1. Quiebre inminente (stock <= 0)
-        2. Stock bajo (stock <= 20% del máximo histórico)
-        3. Alta velocidad de rotación
-        """
         return []
 
     async def _classify_stock_intent(self, message: str) -> str:
-        """Clasifica intent con Haiku: STOCK_LOSS | STOCK_ADJUSTMENT | STOCK_QUERY"""
         system = (
             "Clasificá el mensaje en exactamente uno de estos intents de inventario:\n"
             "STOCK_LOSS: merma, pérdida, rotura, vencimiento, daño, desaparición de producto.\n"
@@ -156,7 +163,6 @@ class AgentStock(BaseAgent):
                 return "STOCK_QUERY"
             return intent
         except Exception:
-            # Fallback a keywords si LLM falla
             msg = message.lower()
             if any(w in msg for w in ["merma", "roto", "perdí", "vencido", "se rompió", "caducó", "dañado"]):
                 return "STOCK_LOSS"
@@ -175,14 +181,24 @@ class AgentStock(BaseAgent):
             return await self._handle_query(request)
 
     async def _handle_stock_loss(self, request: AgentRequest) -> AgentResponse:
-        """REGISTER_STOCK_LOSS es HIGH risk — logging reforzado."""
         entities = await self._extract_stock_entities(request.message, "merma o pérdida")
 
+        product_id, alternatives = await self._resolve_product_id(
+            entities.get("product_name"),
+            entities.get("sku"),
+            request.business_id,
+        )
+
+        if product_id is None:
+            return self._product_not_found_response(
+                request, entities.get("product_name"), alternatives, ActionType.REGISTER_STOCK_LOSS
+            )
+
+        entities["product_id"] = product_id
         summary = (
             f"Registrar merma: {entities.get('product_name') or 'producto'}"
             f" × {abs(entities.get('qty_change') or 0)} unidades"
         )
-
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,
@@ -194,19 +210,29 @@ class AgentStock(BaseAgent):
                 "summary": summary,
                 "action_type": ActionType.REGISTER_STOCK_LOSS,
                 "structured_data": entities,
-                "alerts": [
-                    "Acción de alto riesgo: se registrará en el audit log con detalle."
-                ],
+                "alerts": ["Acción de alto riesgo: se registrará en el audit log con detalle."],
             },
         )
 
     async def _handle_stock_adjustment(self, request: AgentRequest) -> AgentResponse:
         entities = await self._extract_stock_entities(request.message, "ajuste de inventario")
+
+        product_id, alternatives = await self._resolve_product_id(
+            entities.get("product_name"),
+            entities.get("sku"),
+            request.business_id,
+        )
+
+        if product_id is None:
+            return self._product_not_found_response(
+                request, entities.get("product_name"), alternatives, ActionType.UPDATE_STOCK
+            )
+
+        entities["product_id"] = product_id
         qty = entities.get("qty_change") or 0
         summary = (
             f"Ajuste de stock: {entities.get('product_name') or 'producto'} → {qty:+d} unidades"
         )
-
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,
@@ -218,6 +244,40 @@ class AgentStock(BaseAgent):
                 "summary": summary,
                 "action_type": ActionType.UPDATE_STOCK,
                 "structured_data": entities,
+            },
+        )
+
+    def _product_not_found_response(
+        self,
+        request: AgentRequest,
+        product_name: str | None,
+        alternatives: list[str],
+        action_type: ActionType,
+    ) -> AgentResponse:
+        if alternatives:
+            names = ", ".join(f'"{n}"' for n in alternatives)
+            question = (
+                f"Encontré varios productos que coinciden con '{product_name}': {names}. "
+                "¿Podés indicarme el nombre exacto o el SKU del producto?"
+            )
+        elif product_name:
+            question = (
+                f"No encontré el producto '{product_name}' en tu catálogo. "
+                "Revisá el nombre exacto o el SKU e intentalo de nuevo."
+            )
+        else:
+            question = "¿De qué producto se trata? Indicame el nombre exacto o el SKU."
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_clarification",
+            risk_level=RiskLevel.LOW,
+            confidence=Confidence.LOW,
+            question=question,
+            result={
+                "action_type": action_type,
+                "summary": "Producto no identificado en el catálogo.",
             },
         )
 
