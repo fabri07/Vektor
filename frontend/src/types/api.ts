@@ -60,6 +60,37 @@ export interface RegisterResponse {
   requires_verification: boolean;
 }
 
+export interface CategoryBreakdownItem {
+  category: string;
+  total: number;
+  pct: number;
+}
+
+export interface SupplierBreakdownItem {
+  supplier_name: string;
+  total: number;
+  pct: number;
+}
+
+export interface ProductStockItem {
+  product_id: string;
+  name: string;
+  stock_units: number;
+  low_stock_threshold_units: number;
+  sale_price_ars: number;
+}
+
+export interface BusinessBreakdownResponse {
+  period_days: number;
+  from_date: string;
+  to_date: string;
+  expenses_by_category: CategoryBreakdownItem[];
+  top_suppliers: SupplierBreakdownItem[];
+  low_stock_products: ProductStockItem[];
+  low_stock_count: number;
+  total_products: number;
+}
+
 export interface HealthScoreV2Response {
   id: string;
   tenant_id: string;

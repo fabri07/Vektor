@@ -2,6 +2,7 @@ import { api } from "@/lib/api";
 import type {
   LatestScoreResponse,
   CurrentInsightResponse,
+  BusinessBreakdownResponse,
 } from "@/types/api";
 
 export async function fetchLatestScore(): Promise<LatestScoreResponse> {
@@ -16,4 +17,9 @@ export async function fetchCurrentInsight(): Promise<CurrentInsightResponse> {
 
 export async function acknowledgeAction(id: string): Promise<void> {
   await api.patch(`/insights/actions/${id}/acknowledge`);
+}
+
+export async function fetchBusinessBreakdown(days = 30): Promise<BusinessBreakdownResponse> {
+  const { data } = await api.get<BusinessBreakdownResponse>(`/insights/breakdown?days=${days}`);
+  return data;
 }

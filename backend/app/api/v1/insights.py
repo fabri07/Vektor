@@ -1,17 +1,19 @@
 """Insights and action suggestions endpoints."""
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import ActionSuggestion, Insight
+from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.repositories.transaction_repository import ExpenseRepository
 from app.schemas.common import MessageResponse
 
 router = APIRouter()
@@ -157,3 +159,96 @@ async def list_actions(
     q = q.order_by(ActionSuggestion.created_at.desc()).limit(limit)
     result = await session.execute(q)
     return [ActionSuggestionResponse.model_validate(a) for a in result.scalars().all()]
+
+
+# ── Breakdown endpoint ────────────────────────────────────────────────────────
+
+
+class CategoryBreakdownItem(BaseModel):
+    category: str
+    total: float
+    pct: float
+
+
+class SupplierBreakdownItem(BaseModel):
+    supplier_name: str
+    total: float
+    pct: float
+
+
+class ProductStockItem(BaseModel):
+    product_id: str
+    name: str
+    stock_units: int
+    low_stock_threshold_units: int
+    sale_price_ars: float
+
+
+class BusinessBreakdownResponse(BaseModel):
+    period_days: int
+    from_date: str
+    to_date: str
+    expenses_by_category: list[CategoryBreakdownItem]
+    top_suppliers: list[SupplierBreakdownItem]
+    low_stock_products: list[ProductStockItem]
+    low_stock_count: int
+    total_products: int
+
+
+@router.get(
+    "/breakdown",
+    response_model=BusinessBreakdownResponse,
+    summary="Desglose de gastos, proveedores y stock del período",
+)
+async def get_business_breakdown(
+    days: int = Query(default=30, ge=7, le=365, description="Ventana en días hacia atrás"),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> BusinessBreakdownResponse:
+    today = date.today()
+    from_date = today - timedelta(days=days)
+
+    expense_repo = ExpenseRepository(session)
+
+    expenses_by_cat = await expense_repo.expenses_by_category(
+        tenant.tenant_id, from_date=from_date, to_date=today
+    )
+    top_suppliers = await expense_repo.top_suppliers(
+        tenant.tenant_id, from_date=from_date, to_date=today, limit=5
+    )
+
+    # Productos con stock bajo o crítico
+    products_result = await session.execute(
+        select(Product).where(
+            Product.tenant_id == tenant.tenant_id,
+            Product.is_active.is_(True),
+        )
+    )
+    all_products = list(products_result.scalars().all())
+    total_products = len(all_products)
+    low_stock = [
+        p for p in all_products
+        if p.stock_units is not None
+        and p.low_stock_threshold_units is not None
+        and p.stock_units <= p.low_stock_threshold_units
+    ]
+
+    return BusinessBreakdownResponse(
+        period_days=days,
+        from_date=from_date.isoformat(),
+        to_date=today.isoformat(),
+        expenses_by_category=[CategoryBreakdownItem(**item) for item in expenses_by_cat],
+        top_suppliers=[SupplierBreakdownItem(**item) for item in top_suppliers],
+        low_stock_products=[
+            ProductStockItem(
+                product_id=str(p.id),
+                name=p.name,
+                stock_units=p.stock_units or 0,
+                low_stock_threshold_units=p.low_stock_threshold_units or 0,
+                sale_price_ars=float(p.sale_price_ars or 0),
+            )
+            for p in low_stock[:10]
+        ],
+        low_stock_count=len(low_stock),
+        total_products=total_products,
+    )

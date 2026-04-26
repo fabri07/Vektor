@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { StatCard } from "@/components/ui/StatCard";
-import { Table } from "@/components/ui/Table";
+import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
@@ -61,16 +61,19 @@ const COLUMNS = [
   {
     key: "transaction_date",
     header: "Fecha",
+    hideable: true,
     render: (v: unknown) =>
       new Date(String(v) + "T00:00:00").toLocaleDateString("es-AR", {
         day: "2-digit",
         month: "short",
         year: "numeric",
       }),
+    csvValue: (v: unknown) => String(v),
   },
   {
     key: "category",
     header: "Categoría",
+    hideable: true,
     render: (v: unknown) => {
       const cat = String(v);
       return (
@@ -79,23 +82,39 @@ const COLUMNS = [
         </Badge>
       );
     },
+    csvValue: (v: unknown) => CATEGORY_LABELS[String(v)] ?? String(v),
   },
   {
     key: "description",
     header: "Descripción",
+    hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
     key: "supplier_name",
     header: "Proveedor",
+    hideable: true,
+    defaultVisible: false,
     render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
+    key: "is_recurring",
+    header: "Recurrente",
+    hideable: true,
+    defaultVisible: false,
+    render: (v: unknown) => (v ? "Sí" : "No"),
+    csvValue: (v: unknown) => (v ? "Sí" : "No"),
   },
   {
     key: "amount",
     header: "Monto",
+    hideable: true,
     render: (v: unknown) => (
       <span className="font-medium text-vk-text-primary">{formatARS(Number(v))}</span>
     ),
+    csvValue: (v: unknown) => String(Number(v)),
   },
 ];
 
@@ -237,7 +256,7 @@ export default function ExpensesPage() {
           action={{ label: "Ir al chat", href: "/chat" }}
         />
       ) : (
-        <Table columns={COLUMNS} data={sorted} />
+        <SmartTable columns={COLUMNS} data={sorted} exportFilename="vektor-gastos" />
       )}
     </PageWrapper>
   );

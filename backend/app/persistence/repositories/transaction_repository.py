@@ -141,6 +141,67 @@ class ExpenseRepository:
         result = await self._session.execute(q)
         return int(result.scalar_one() or 0)
 
+    async def expenses_by_category(
+        self,
+        tenant_id: UUID,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> list[dict]:
+        """Gastos agrupados por categoría con totales y porcentaje."""
+        q = (
+            select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total"))
+            .where(ExpenseEntry.tenant_id == tenant_id)
+        )
+        if from_date:
+            q = q.where(ExpenseEntry.transaction_date >= from_date)
+        if to_date:
+            q = q.where(ExpenseEntry.transaction_date <= to_date)
+        q = q.group_by(ExpenseEntry.category).order_by(func.sum(ExpenseEntry.amount).desc())
+        result = await self._session.execute(q)
+        rows = result.all()
+        grand_total = sum(float(r.total or 0) for r in rows)
+        return [
+            {
+                "category": r.category or "OTHER",
+                "total": float(r.total or 0),
+                "pct": round(float(r.total or 0) / grand_total * 100, 1) if grand_total > 0 else 0.0,
+            }
+            for r in rows
+        ]
+
+    async def top_suppliers(
+        self,
+        tenant_id: UUID,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Top proveedores por gasto total."""
+        q = (
+            select(ExpenseEntry.supplier_name, func.sum(ExpenseEntry.amount).label("total"))
+            .where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.supplier_name.isnot(None),
+                ExpenseEntry.supplier_name != "",
+            )
+        )
+        if from_date:
+            q = q.where(ExpenseEntry.transaction_date >= from_date)
+        if to_date:
+            q = q.where(ExpenseEntry.transaction_date <= to_date)
+        q = q.group_by(ExpenseEntry.supplier_name).order_by(func.sum(ExpenseEntry.amount).desc()).limit(limit)
+        result = await self._session.execute(q)
+        rows = result.all()
+        grand_total = sum(float(r.total or 0) for r in rows)
+        return [
+            {
+                "supplier_name": r.supplier_name,
+                "total": float(r.total or 0),
+                "pct": round(float(r.total or 0) / grand_total * 100, 1) if grand_total > 0 else 0.0,
+            }
+            for r in rows
+        ]
+
     async def save(self, entry: ExpenseEntry) -> ExpenseEntry:
         self._session.add(entry)
         await self._session.flush()

@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { fetchBusinessBreakdown } from "@/services/dashboard.service";
+import type { BusinessBreakdownResponse } from "@/types/api";
 import {
   Bar,
   BarChart,
@@ -300,6 +302,112 @@ export function DashboardAnalysisScreen({ sales, expenses, products, loading }: 
           </>
         )}
       </PanelFrame>
+
+      <BreakdownPanels />
     </div>
+  );
+}
+
+// ── Breakdown panels (gastos por categoría + stock crítico) ──────────────────
+
+const CATEGORY_LABELS: Record<string, string> = {
+  RENT: "Alquiler",
+  UTILITIES: "Servicios",
+  PAYROLL: "Sueldos",
+  INVENTORY: "Inventario",
+  MARKETING: "Marketing",
+  OTHER: "Otros",
+  compra_proveedor: "Compras",
+};
+
+function BreakdownPanels() {
+  const { data, isLoading } = useQuery<BusinessBreakdownResponse>({
+    queryKey: ["breakdown", 30],
+    queryFn: () => fetchBusinessBreakdown(30),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  if (isLoading) {
+    return (
+      <>
+        <div className="h-[260px] animate-pulse rounded-2xl bg-vektor-surface" />
+        <div className="h-[260px] animate-pulse rounded-2xl bg-vektor-surface" />
+      </>
+    );
+  }
+
+  if (!data) return null;
+
+  return (
+    <>
+      {/* Gastos por categoría */}
+      <PanelFrame
+        title="Gastos por categoría"
+        tooltip="Distribución de egresos del último mes por tipo de gasto."
+      >
+        {data.expenses_by_category.length === 0 ? (
+          <p className="py-8 text-center text-sm text-vk-text-muted">Sin datos de gastos.</p>
+        ) : (
+          <ul className="space-y-3">
+            {data.expenses_by_category.map((item) => (
+              <li key={item.category}>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-vk-text-primary">
+                    {CATEGORY_LABELS[item.category] ?? item.category}
+                  </span>
+                  <span className="font-medium text-vk-text-primary">
+                    {formatARS(item.total)}
+                  </span>
+                </div>
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-vk-border-w">
+                  <div
+                    className="h-full rounded-full bg-vk-blue transition-all"
+                    style={{ width: `${Math.min(item.pct, 100)}%` }}
+                  />
+                </div>
+                <p className="mt-0.5 text-right text-xs text-vk-text-muted">{item.pct.toFixed(1)}%</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </PanelFrame>
+
+      {/* Stock crítico */}
+      <PanelFrame
+        title={`Stock crítico (${data.low_stock_count} / ${data.total_products})`}
+        tooltip="Productos por debajo del umbral mínimo de stock."
+      >
+        {data.low_stock_products.length === 0 ? (
+          <p className="py-8 text-center text-sm text-vk-text-muted">
+            Todos los productos tienen stock suficiente.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {data.low_stock_products.map((p) => (
+              <li
+                key={p.product_id}
+                className="flex items-center justify-between rounded-lg border border-vk-border-w px-3 py-2"
+              >
+                <div>
+                  <p className="text-sm font-medium text-vk-text-primary">{p.name}</p>
+                  <p className="text-xs text-vk-text-muted">
+                    Stock: {p.stock_units} / mínimo {p.low_stock_threshold_units}
+                  </p>
+                </div>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                    p.stock_units === 0
+                      ? "bg-vk-danger/15 text-vk-danger"
+                      : "bg-amber-500/15 text-amber-400"
+                  }`}
+                >
+                  {p.stock_units === 0 ? "Sin stock" : "Bajo"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </PanelFrame>
+    </>
   );
 }

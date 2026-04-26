@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { StatCard } from "@/components/ui/StatCard";
-import { Table } from "@/components/ui/Table";
+import { SmartTable } from "@/components/ui/SmartTable";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { salesService, type SaleEntryResponse } from "@/services/sales.service";
 
@@ -58,29 +58,45 @@ const COLUMNS = [
   {
     key: "transaction_date",
     header: "Fecha",
+    hideable: true,
     render: (v: unknown) =>
       new Date(String(v) + "T00:00:00").toLocaleDateString("es-AR", {
         day: "2-digit",
         month: "short",
         year: "numeric",
       }),
+    csvValue: (v: unknown) => String(v),
   },
   {
     key: "notes",
     header: "Concepto",
+    hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
     key: "payment_method",
     header: "Medio de pago",
+    hideable: true,
     render: (v: unknown) => PAYMENT_LABELS[String(v)] ?? String(v),
+    csvValue: (v: unknown) => PAYMENT_LABELS[String(v)] ?? String(v),
+  },
+  {
+    key: "quantity",
+    header: "Cantidad",
+    hideable: true,
+    defaultVisible: false,
+    render: (v: unknown) => (v != null && Number(v) > 0 ? String(Number(v)) : "—"),
+    csvValue: (v: unknown) => String(v ?? ""),
   },
   {
     key: "amount",
     header: "Monto",
+    hideable: true,
     render: (v: unknown) => (
       <span className="font-medium text-vk-text-primary">{formatARS(Number(v))}</span>
     ),
+    csvValue: (v: unknown) => String(Number(v)),
   },
 ];
 
@@ -190,7 +206,7 @@ export default function SalesPage() {
           action={{ label: "Ir al chat", href: "/chat" }}
         />
       ) : (
-        <Table columns={COLUMNS} data={sorted} />
+        <SmartTable columns={COLUMNS} data={sorted} exportFilename="vektor-ventas" />
       )}
     </PageWrapper>
   );
