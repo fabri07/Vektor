@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from app.application.agents.base import BaseAgent
@@ -16,21 +17,33 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Regex para extraer IDs de URLs de Google
+_SHEETS_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
+_DOCS_ID_RE = re.compile(r"/document/d/([a-zA-Z0-9_-]+)")
+# ID solo (sin URL), largo típico ≥ 20 chars alfanuméricos + guiones/underscores
+_BARE_ID_RE = re.compile(r"(?<![/\w])([a-zA-Z0-9_-]{20,})(?![/\w])")
+
 _SYNC_TYPES = {
     "export_sales_to_sheets": {
         "keywords": ("exportar ventas", "ventas a sheets", "exportar a google sheets", "subir ventas"),
         "tool": "google.sheets.append_rows",
         "summary": "Exportar ventas a Google Sheets.",
+        "needs_sheet": True,
+        "needs_doc": False,
     },
     "export_report_to_docs": {
         "keywords": ("exportar reporte", "reporte a docs", "informe a google docs", "generar doc"),
         "tool": "google.docs.create_document",
         "summary": "Exportar reporte a Google Docs.",
+        "needs_sheet": False,
+        "needs_doc": False,  # crea un doc nuevo, no necesita ID previo
     },
     "import_from_sheets": {
         "keywords": ("importar desde sheets", "importar de google", "traer datos de sheets", "leer sheets"),
         "tool": "google.sheets.read_range",
         "summary": "Importar datos desde Google Sheets.",
+        "needs_sheet": True,
+        "needs_doc": False,
     },
     "import_from_drive": {
         "keywords": (
@@ -43,6 +56,8 @@ _SYNC_TYPES = {
         ),
         "tool": "google.drive.read_file",
         "summary": "Buscar y leer archivos desde Google Drive.",
+        "needs_sheet": False,
+        "needs_doc": False,
     },
 }
 
@@ -97,6 +112,61 @@ class AgentSync(BaseAgent):
             return await self._read_drive_content(request)
 
         cfg = _SYNC_TYPES[sync_type]
+
+        # Tipos que necesitan spreadsheet_id: pedirlo si no está en el mensaje
+        if cfg["needs_sheet"]:
+            spreadsheet_id = self._extract_spreadsheet_id(request.message)
+            if not spreadsheet_id:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=self.agent_name,
+                    status="requires_clarification",
+                    risk_level=RiskLevel.LOW,
+                    confidence=Confidence.HIGH,
+                    requires_approval=False,
+                    question=(
+                        "Necesito el link de tu archivo de Google Sheets.\n"
+                        "Pegá la URL completa, por ejemplo:\n"
+                        "https://docs.google.com/spreadsheets/d/tu-id-aqui/edit"
+                    ),
+                    result={
+                        "action_type": ActionType.SYNC_TO_GOOGLE,
+                        "sync_type": sync_type,
+                        "summary": "Falta el link del Google Sheets.",
+                    },
+                )
+
+            payload = {
+                "sync_type": sync_type,
+                "spreadsheet_id": spreadsheet_id,
+                "range_name": "Sheet1",
+                "mode": "mcp",
+                "raw_message": request.message,
+            }
+            summary = f"{cfg['summary']} Archivo: {spreadsheet_id[:20]}..."
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_approval",
+                risk_level=RiskLevel.MEDIUM,
+                confidence=Confidence.HIGH,
+                requires_approval=True,
+                result={
+                    "action_type": ActionType.SYNC_TO_GOOGLE,
+                    "sync_type": sync_type,
+                    "mcp_tool": cfg["tool"],
+                    "summary": summary,
+                    "mode": "mcp",
+                    "payload": payload,
+                },
+            )
+
+        # export_report_to_docs: crea un doc nuevo, no necesita ID previo
+        payload = {
+            "sync_type": sync_type,
+            "mode": "mcp",
+            "raw_message": request.message,
+        }
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,
@@ -109,10 +179,29 @@ class AgentSync(BaseAgent):
                 "sync_type": sync_type,
                 "mcp_tool": cfg["tool"],
                 "summary": cfg["summary"],
-                "mode": "mcp" if self._gateway else "informational",
-                "payload": {"sync_type": sync_type, "raw_message": request.message},
+                "mode": "mcp",
+                "payload": payload,
             },
         )
+
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _classify_sync_type(self, message: str) -> str | None:
+        for sync_type, cfg in _SYNC_TYPES.items():
+            if any(kw in message for kw in cfg["keywords"]):
+                return sync_type
+        return None
+
+    def _extract_spreadsheet_id(self, message: str) -> str | None:
+        """Extrae el spreadsheet_id de una URL de Google Sheets o de un ID suelto."""
+        m = _SHEETS_ID_RE.search(message)
+        if m:
+            return m.group(1)
+        # ID suelto largo que el usuario pegó directamente
+        m = _BARE_ID_RE.search(message)
+        if m:
+            return m.group(1)
+        return None
 
     async def _read_drive_content(self, request: AgentRequest) -> AgentResponse:
         if self._gateway is None or self._tenant_id is None:
@@ -162,9 +251,7 @@ class AgentSync(BaseAgent):
                     risk_level=RiskLevel.LOW,
                     confidence=Confidence.HIGH,
                     result={
-                        "summary": (
-                            f"No encontré archivos en Google Drive que coincidan con '{drive_query}'."
-                        ),
+                        "summary": f"No encontré archivos en Google Drive que coincidan con '{drive_query}'.",
                         "drive_query": drive_query,
                         "files_found": [],
                     },
@@ -178,7 +265,7 @@ class AgentSync(BaseAgent):
                     continue
                 try:
                     file_data = await svc.read_drive_file(file_id=file_id)
-                except Exception as exc:  # best-effort on the first readable files
+                except Exception as exc:
                     logger.warning("agent_sync.drive_read_failed", file_id=file_id, error=str(exc))
                     continue
 
@@ -225,40 +312,18 @@ class AgentSync(BaseAgent):
                 },
             )
 
-    def _classify_sync_type(self, message: str) -> str | None:
-        for sync_type, cfg in _SYNC_TYPES.items():
-            if any(kw in message for kw in cfg["keywords"]):
-                return sync_type
-        return None
-
     def _extract_drive_query(self, message: str) -> str:
         stop_words = {
-            "google",
-            "drive",
-            "buscar",
-            "busca",
-            "buscá",
-            "leer",
-            "lee",
-            "analizar",
-            "analiza",
-            "archivo",
-            "archivos",
-            "carpeta",
-            "carpetas",
-            "de",
-            "en",
-            "del",
-            "la",
-            "los",
-            "las",
-            "mis",
-            "mi",
+            "google", "drive", "buscar", "busca", "buscá", "leer", "lee",
+            "analizar", "analiza", "archivo", "archivos", "carpeta", "carpetas",
+            "de", "en", "del", "la", "los", "las", "mis", "mi",
         }
-        normalized = "".join(char.lower() if char.isalnum() or char in {" ", ".", "-", "_"} else " " for char in message)
-        tokens = [token for token in normalized.split() if len(token) > 2 and token not in stop_words]
-        query = " ".join(tokens)
-        return query[:120].strip()
+        normalized = "".join(
+            char.lower() if char.isalnum() or char in {" ", ".", "-", "_"} else " "
+            for char in message
+        )
+        tokens = [t for t in normalized.split() if len(t) > 2 and t not in stop_words]
+        return " ".join(tokens)[:120].strip()
 
     def _build_drive_summary(
         self,
@@ -266,7 +331,7 @@ class AgentSync(BaseAgent):
         files: list[dict[str, object]],
         readable_files: list[dict[str, str]],
     ) -> str:
-        top_names = ", ".join(str(file_item.get("name", "archivo")) for file_item in files[:3])
+        top_names = ", ".join(str(f.get("name", "archivo")) for f in files[:3])
         if readable_files:
             previews = " ".join(
                 f"{item['name']}: {item['preview']}"
