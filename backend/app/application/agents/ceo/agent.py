@@ -49,6 +49,7 @@ INTENT_CATALOG = [
     "schedule_event",
     "check_calendar",
     "sync_google_data",
+    "out_of_scope",
 ]
 
 # ── Intent → agente especializado ────────────────────────────────────────────
@@ -109,11 +110,20 @@ class AgentCEO(BaseAgent):
     async def classify_intent(self, message: str) -> dict:
         """Clasifica el intent vía LLM Haiku. Retorna {intent, entities}."""
         system = (
-            "Sos el clasificador de intenciones de Véktor, un sistema de gestión para PyMEs.\n"
+            "Sos el clasificador de intenciones de Véktor, un sistema de gestión financiera para PyMEs argentinas.\n"
             f"Intenciones válidas: {', '.join(INTENT_CATALOG)}\n\n"
+            "REGLA CRÍTICA — out_of_scope:\n"
+            "Usá 'out_of_scope' si el mensaje NO está relacionado con:\n"
+            "  - Operaciones del negocio: ventas, gastos, compras, caja, stock, proveedores\n"
+            "  - Salud financiera o análisis del negocio\n"
+            "  - Uso de la plataforma Véktor\n"
+            "  - Eventos de Google Calendar o emails de proveedores\n"
+            "Ejemplos de out_of_scope: programación, código, historia, ciencias, recetas, "
+            "medicina, entretenimiento, consultas sin relación con una PyME.\n\n"
             "Analizá el mensaje del usuario y retorná SOLO un JSON con:\n"
             '{"intent": "<una de las intenciones válidas>", "entities": {...campos relevantes...}}\n\n'
-            f"Si no podés clasificar → {{\"intent\": \"ask_platform_help\", \"entities\": {{}}}}\n"
+            "Si no podés clasificar en ninguna categoría de negocio → "
+            "{\"intent\": \"out_of_scope\", \"entities\": {}}\n"
             "NO retornes nada más que el JSON. Sin texto adicional."
         )
         response = await self.client.messages.create(

@@ -97,6 +97,29 @@ class ChatOrchestrator:
         ceo_response = await ceo.process(request)
         target_agent_name: str = ceo_response.result.get("target_agent", "agent_helper")
 
+        # 3b. out_of_scope — cortar sin sub-agente ni LLM adicional
+        if ceo_response.result.get("intent") == "out_of_scope":
+            out_of_scope_response = AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="success",
+                risk_level=ceo_response.risk_level,
+                confidence=ceo_response.confidence,
+                requires_approval=False,
+                message=(
+                    "Véktor está especializado en la salud financiera de tu negocio. "
+                    "Este tema queda fuera de mis competencias. "
+                    "Si tenés dudas sobre ventas, gastos, stock o cómo usar la plataforma, "
+                    "con gusto te ayudo."
+                ),
+                result={"summary": "Consulta fuera del scope de Véktor."},
+            )
+            if request.conversation_id:
+                await self._save_turn(
+                    request, out_of_scope_response.message or "", redis, db, tenant_id, user_id
+                )
+            return out_of_scope_response
+
         # 4. Sub-agente ejecuta lógica de negocio
         sub_agent = get_sub_agent(
             target_agent_name, db=db, redis=redis, user_id=user_id, tenant_id=tenant_id
@@ -201,8 +224,15 @@ class ChatOrchestrator:
             else ""
         )
 
+        action_type = agent_response.result.get("action_type", "")
+        action_ctx = f"Acción determinada: {action_type}\n\n" if action_type else ""
+
         system = (
             f"Sos el asistente financiero de Véktor para {business_name} ({business_type}).\n\n"
+            "CAPACIDADES DE VÉKTOR: registro de ventas, gastos, compras y movimientos de caja; "
+            "preparar borradores de email a proveedores (Gmail); clasificar mensajes recibidos de proveedores; "
+            "crear y consultar eventos en Google Calendar; sincronizar con Google Sheets y Docs.\n\n"
+            f"{action_ctx}"
             f"{heuristic_fragment}"
             f"{memory_fragment}"
             f"{agent_mem_section}"
@@ -211,10 +241,12 @@ class ChatOrchestrator:
             "basada en los resultados del análisis.\n\n"
             "REGLAS:\n"
             "- NUNCA respondas 'Listo.' ni frases genéricas vacías.\n"
+            "- NUNCA digas que no podés hacer algo que está dentro de las capacidades de Véktor.\n"
             "- Si hay datos numéricos, interpretálos en contexto del negocio.\n"
             "- Si hay alertas o sugerencias, destacalas con claridad.\n"
             "- Si el estado es 'requires_clarification', reformulá la pregunta amigablemente.\n"
             "- Máximo 3 párrafos cortos. Tono directo, español rioplatense.\n"
+            "- NO uses formato markdown (sin **, sin __, sin #, sin - listas). Solo texto plano.\n"
             f"\nHistorial reciente:\n{history}"
         )
         user_content = (

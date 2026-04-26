@@ -30,13 +30,14 @@ class AgentSupplier(BaseAgent):
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
-                status="requires_approval",
+                status="requires_clarification",
                 risk_level=RiskLevel.LOW,
                 confidence=Confidence.HIGH,
                 requires_approval=False,
+                question="¿A qué proveedor querés enviarle el email y qué necesitás pedirle?",
                 result={
                     "action_type": ActionType.CREATE_SUPPLIER_DRAFT,
-                    "summary": "Preparar borrador de email al proveedor.",
+                    "summary": "Listo para preparar el borrador de email al proveedor.",
                     "mode": "mcp" if self._gateway else "informational",
                     "payload": {"message": request.message},
                 },
@@ -46,13 +47,13 @@ class AgentSupplier(BaseAgent):
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
-                status="requires_approval",
+                status="success",
                 risk_level=RiskLevel.LOW,
                 confidence=Confidence.HIGH,
                 requires_approval=False,
                 result={
                     "action_type": ActionType.CLASSIFY_GMAIL_MESSAGE,
-                    "summary": "Clasificar mensaje de proveedor en Gmail.",
+                    "summary": "Revisando mensajes de proveedores en Gmail.",
                     "mode": "mcp" if self._gateway else "informational",
                     "payload": {"message": request.message},
                 },
@@ -90,14 +91,22 @@ class AgentSupplier(BaseAgent):
         )
 
     def _classify_intent(self, message: str) -> str:
-        draft_keywords = ("borrador", "redact", "email", "escribi", "enviá", "mandar correo")
-        inbox_keywords = ("clasificar", "revisar inbox", "revisar gmail", "mensajes recibidos", "bandeja")
+        inbox_keywords = (
+            "clasificar", "revisar inbox", "revisar gmail", "mensajes recibidos", "bandeja",
+            "llegó mail", "llegó email", "llegó un mail", "llegó correo",
+            "recibí mail", "recibí email", "recibí un correo", "recibí un mail",
+        )
+        draft_keywords = (
+            "borrador", "redact", "escribi", "enviá", "enviar mail", "enviar email",
+            "mandar correo", "mandar mail", "quiero enviar", "quiero mandar",
+            "escribir mail", "escribir email", "redactar", "email a ", "mail a ",
+        )
         purchase_keywords = ("compra", "compré", "compramos", "registrar compra", "factura", "proveedor cobró")
 
-        if any(kw in message for kw in draft_keywords):
-            return "create_draft"
         if any(kw in message for kw in inbox_keywords):
             return "classify_inbox"
+        if any(kw in message for kw in draft_keywords):
+            return "create_draft"
         if any(kw in message for kw in purchase_keywords):
             return "record_purchase"
         return "query"
