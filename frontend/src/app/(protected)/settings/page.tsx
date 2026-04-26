@@ -1,10 +1,25 @@
 "use client";
 
 import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
+import {
+  automationsService,
+  type AutomationRule,
+} from "@/services/automations.service";
 import { useAuthStore } from "@/stores/authStore";
 import { useToastStore } from "@/stores/toastStore";
+
+const AGENT_LABELS: Record<string, string> = {
+  agent_calendar: "Calendar",
+  agent_health: "Health",
+  agent_supplier: "Supplier",
+  agent_stock: "Stock",
+  agent_cash: "Cash",
+  agent_sync: "Sync",
+  agent_unknown: "Otros",
+};
 
 function FAQItem({ question, answer }: { question: string; answer: string }) {
   const [open, setOpen] = useState(false);
@@ -37,6 +52,176 @@ function FAQItem({ question, answer }: { question: string; answer: string }) {
   );
 }
 
+function AutomationToggle({
+  enabled,
+  onChange,
+  disabled,
+}: {
+  enabled: boolean;
+  onChange: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={enabled}
+      disabled={disabled}
+      onClick={onChange}
+      className={`relative h-7 w-12 rounded-full transition-colors disabled:opacity-60 ${
+        enabled ? "bg-vk-blue" : "bg-vk-border-w"
+      }`}
+    >
+      <span
+        className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${
+          enabled ? "translate-x-5" : "translate-x-1"
+        }`}
+      />
+    </button>
+  );
+}
+
+function AutomationRuleCard({
+  rule,
+  onToggle,
+  onDelete,
+  busy,
+}: {
+  rule: AutomationRule;
+  onToggle: (rule: AutomationRule) => void;
+  onDelete: (rule: AutomationRule) => void;
+  busy: boolean;
+}) {
+  const criteria = Object.entries(rule.criteria ?? {})
+    .filter(([key]) => !["agent_name", "action_type", "external_system"].includes(key))
+    .slice(0, 4);
+
+  return (
+    <div className="rounded-lg border border-vk-border-w bg-vk-bg-light p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold text-vk-text-primary">
+            {rule.action_type.replaceAll("_", " ")}
+          </p>
+          <p className="mt-1 text-xs text-vk-text-muted">
+            {rule.external_system ?? "Acción interna"} · Riesgo {rule.risk_level}
+          </p>
+        </div>
+        <AutomationToggle
+          enabled={rule.enabled}
+          disabled={busy}
+          onChange={() => onToggle(rule)}
+        />
+      </div>
+
+      {criteria.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {criteria.map(([key, value]) => (
+            <span
+              key={key}
+              className="rounded-full bg-vk-surface-w px-2.5 py-1 text-xs text-vk-text-secondary"
+            >
+              {key}: {String(value)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <p className="text-xs text-vk-text-muted">
+          {rule.last_executed_at
+            ? `Última ejecución ${new Date(rule.last_executed_at).toLocaleDateString("es-AR")}`
+            : "Todavía no se ejecutó automáticamente"}
+        </p>
+        <button
+          type="button"
+          onClick={() => onDelete(rule)}
+          disabled={busy}
+          className="text-xs font-medium text-vk-danger hover:underline disabled:opacity-60"
+        >
+          Eliminar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AutomationsSection() {
+  const queryClient = useQueryClient();
+  const addToast = useToastStore((s) => s.add);
+  const { data: rules = [], isLoading, isError } = useQuery({
+    queryKey: ["automations"],
+    queryFn: automationsService.list,
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: (rule: AutomationRule) =>
+      automationsService.setEnabled(rule.id, !rule.enabled),
+    onSuccess: () => {
+      addToast("Automatización actualizada.", "success");
+      void queryClient.invalidateQueries({ queryKey: ["automations"] });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (rule: AutomationRule) => automationsService.remove(rule.id),
+    onSuccess: () => {
+      addToast("Automatización eliminada.", "success");
+      void queryClient.invalidateQueries({ queryKey: ["automations"] });
+    },
+  });
+
+  const grouped = rules.reduce<Record<string, AutomationRule[]>>((acc, rule) => {
+    const label = AGENT_LABELS[rule.agent_name] ?? rule.agent_name;
+    acc[label] = [...(acc[label] ?? []), rule];
+    return acc;
+  }, {});
+
+  return (
+    <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
+      <div className="mb-5">
+        <h2 className="text-base font-semibold text-vk-text-primary">
+          Automatizaciones
+        </h2>
+        <p className="mt-1 text-sm text-vk-text-muted">
+          Activá o pausá acciones que aprobaste para repetirse automáticamente.
+        </p>
+      </div>
+
+      {isLoading && <p className="text-sm text-vk-text-muted">Cargando automatizaciones...</p>}
+      {isError && (
+        <p className="text-sm text-vk-danger">
+          No se pudieron cargar las automatizaciones. Puede que el feature flag no esté activo.
+        </p>
+      )}
+      {!isLoading && !isError && rules.length === 0 && (
+        <p className="text-sm text-vk-text-muted">
+          Todavía no hay tareas automatizadas. Cuando confirmes una acción en el chat,
+          Véktor te va a preguntar si querés automatizar casos similares.
+        </p>
+      )}
+
+      <div className="space-y-5">
+        {Object.entries(grouped).map(([agent, agentRules]) => (
+          <section key={agent}>
+            <h3 className="mb-2 text-sm font-semibold text-vk-text-primary">{agent}</h3>
+            <div className="space-y-3">
+              {agentRules.map((rule) => (
+                <AutomationRuleCard
+                  key={rule.id}
+                  rule={rule}
+                  busy={toggleMutation.isPending || deleteMutation.isPending}
+                  onToggle={(item) => toggleMutation.mutate(item)}
+                  onDelete={(item) => deleteMutation.mutate(item)}
+                />
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function GeneralTab() {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
@@ -64,6 +249,8 @@ function GeneralTab() {
 
   return (
     <div className="space-y-6">
+      <AutomationsSection />
+
       {/* ── Foto de perfil + Cuenta ──────────────────────────── */}
       <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
         <h2 className="mb-5 text-base font-semibold text-vk-text-primary">

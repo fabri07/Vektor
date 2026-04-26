@@ -40,7 +40,18 @@ export function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const onboardingChecked = useRef(false);
 
-  const { messages, isLoading, send, confirm, cancel, messagesUsedToday, isRateLimited, newConversation } =
+  const {
+    messages,
+    isLoading,
+    send,
+    confirm,
+    cancel,
+    automate,
+    dismissAutomation,
+    messagesUsedToday,
+    isRateLimited,
+    newConversation,
+  } =
     useChat();
   const { conversationId, loadMessages } = useChatStore();
 
@@ -276,8 +287,11 @@ export function ChatPage() {
                         <ApprovalCard
                           summary={msg.content}
                           pendingActionId={msg.pendingActionId}
+                          automationOffer={msg.automationOffer}
                           onConfirm={confirm}
                           onCancel={cancel}
+                          onAutomate={automate}
+                          onDismissAutomation={dismissAutomation}
                         />
                       </div>
                     ) : (

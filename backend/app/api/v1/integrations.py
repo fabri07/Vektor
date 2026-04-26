@@ -35,10 +35,12 @@ _CONNECTING_TIMEOUT = timedelta(minutes=10)
 _GOOGLE_SCOPES = [
     "gmail.readonly",
     "gmail.compose",
+    "gmail.send",
     "calendar.events",
     "spreadsheets",
     "documents",
     "drive.readonly",
+    "drive.file",
 ]
 
 _GOOGLE_APPS = [
@@ -49,7 +51,7 @@ _GOOGLE_APPS = [
         available=False,
         connected=False,
         needs_reconnect=False,
-        required_scopes=["gmail.readonly", "gmail.compose"],
+        required_scopes=["gmail.readonly", "gmail.compose", "gmail.send"],
     ),
     GoogleAppStatus(
         id="calendar",
@@ -76,9 +78,20 @@ _GOOGLE_APPS = [
         available=False,
         connected=False,
         needs_reconnect=False,
-        required_scopes=["drive.readonly"],
+        required_scopes=["drive.readonly", "drive.file"],
     ),
 ]
+
+_SHORT_SCOPE_TO_URL = {
+    "gmail.readonly": "https://www.googleapis.com/auth/gmail.readonly",
+    "gmail.compose": "https://www.googleapis.com/auth/gmail.compose",
+    "gmail.send": "https://www.googleapis.com/auth/gmail.send",
+    "calendar.events": "https://www.googleapis.com/auth/calendar.events",
+    "spreadsheets": "https://www.googleapis.com/auth/spreadsheets",
+    "documents": "https://www.googleapis.com/auth/documents",
+    "drive.readonly": "https://www.googleapis.com/auth/drive.readonly",
+    "drive.file": "https://www.googleapis.com/auth/drive.file",
+}
 
 
 def _utc_now() -> datetime:
@@ -89,6 +102,14 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _has_required_scopes(granted: list[str], required: list[str]) -> bool:
+    granted_set = set(granted)
+    return all(
+        scope in granted_set or _SHORT_SCOPE_TO_URL.get(scope) in granted_set
+        for scope in required
+    )
 
 
 async def _get_connection(
@@ -125,9 +146,12 @@ def _build_status_response(
             **{
                 **app.model_dump(),
                 "available": backend_available,
-                "connected": connected,
-                "needs_reconnect": connection_state
-                in ("RECONNECT_REQUIRED", "INSUFFICIENT_SCOPE", "ERROR"),
+                "connected": connected
+                and _has_required_scopes(scopes_granted, app.required_scopes),
+                "needs_reconnect": (
+                    connection_state in ("RECONNECT_REQUIRED", "INSUFFICIENT_SCOPE", "ERROR")
+                    or (connected and not _has_required_scopes(scopes_granted, app.required_scopes))
+                ),
             }
         )
         for app in _GOOGLE_APPS

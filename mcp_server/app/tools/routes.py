@@ -38,6 +38,12 @@ def _error(error_code: str, message: str, request_id: str | int | None) -> dict[
     }
 
 
+def _csv(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
 _ALL_TOOLS = [
     "google.drive.list_files",
     "google.drive.read_file",
@@ -45,6 +51,8 @@ _ALL_TOOLS = [
     "google.gmail.list_messages",
     "google.gmail.get_message",
     "google.gmail.create_draft",
+    "google.gmail.send_message",
+    "google.gmail.reply_message",
     "google.calendar.list_events",
     "google.calendar.create_event",
     "google.sheets.read_range",
@@ -94,7 +102,11 @@ async def call_tool(
             content_b64 = str(args.get("content_base64", "")).strip()
             mime_type = str(args.get("mime_type", "")).strip()
             if not name_ or not content_b64 or not mime_type:
-                return _error("validation_error", "name, content_base64 y mime_type son requeridos", body.id)
+                return _error(
+                    "validation_error",
+                    "name, content_base64 y mime_type son requeridos",
+                    body.id,
+                )
             result = await drive.upload_file(
                 session=session, ctx=ctx,
                 name=name_, content_base64=content_b64,
@@ -120,7 +132,7 @@ async def call_tool(
             return _ok(result, body.id)
 
         if name == "google.gmail.create_draft":
-            to = str(args.get("to", "")).strip()
+            to = _csv(args.get("to"))
             subject = str(args.get("subject", "")).strip()
             body_text = str(args.get("body", "")).strip()
             if not to or not subject or not body_text:
@@ -128,7 +140,32 @@ async def call_tool(
             result = await gmail.create_draft(
                 session=session, ctx=ctx,
                 to=to, subject=subject, body=body_text,
-                cc=args.get("cc"),
+                cc=_csv(args.get("cc")) or None,
+            )
+            return _ok(result, body.id)
+
+        if name == "google.gmail.send_message":
+            to = _csv(args.get("to"))
+            subject = str(args.get("subject", "")).strip()
+            body_text = str(args.get("body", "")).strip()
+            if not to or not subject or not body_text:
+                return _error("validation_error", "to, subject y body son requeridos", body.id)
+            result = await gmail.send_message(
+                session=session, ctx=ctx,
+                to=to, subject=subject, body=body_text,
+                cc=_csv(args.get("cc")) or None,
+            )
+            return _ok(result, body.id)
+
+        if name == "google.gmail.reply_message":
+            message_id = str(args.get("message_id", "")).strip()
+            body_text = str(args.get("body", "")).strip()
+            if not message_id or not body_text:
+                return _error("validation_error", "message_id y body son requeridos", body.id)
+            result = await gmail.reply_message(
+                session=session, ctx=ctx,
+                message_id=message_id, body=body_text,
+                cc=_csv(args.get("cc")) or None,
             )
             return _ok(result, body.id)
 
@@ -173,9 +210,13 @@ async def call_tool(
         if name == "google.sheets.append_rows":
             spreadsheet_id = str(args.get("spreadsheet_id", "")).strip()
             range_ = str(args.get("range", "")).strip()
-            values = args.get("values", [])
+            values = args.get("values") or args.get("rows") or []
             if not spreadsheet_id or not range_ or not values:
-                return _error("validation_error", "spreadsheet_id, range y values son requeridos", body.id)
+                return _error(
+                    "validation_error",
+                    "spreadsheet_id, range y values son requeridos",
+                    body.id,
+                )
             result = await sheets.append_rows(
                 session=session, ctx=ctx,
                 spreadsheet_id=spreadsheet_id, range_=range_, values=values,

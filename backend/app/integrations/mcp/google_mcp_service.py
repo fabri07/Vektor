@@ -27,26 +27,45 @@ AGENT_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
         "google.gmail.list_messages",
         "google.gmail.get_message",
         "google.gmail.create_draft",
+        "google.gmail.send_message",
+        "google.gmail.reply_message",
+        "google.drive.list_files",
+        "google.drive.read_file",
+        "google.drive.upload_file",
     }),
     "agent_calendar": frozenset({
+        "google.gmail.create_draft",
+        "google.gmail.send_message",
         "google.calendar.list_events",
         "google.calendar.create_event",
     }),
     "agent_cash": frozenset({
         "google.sheets.read_range",
         "google.sheets.append_rows",
+        "google.drive.list_files",
+        "google.drive.read_file",
+        "google.drive.upload_file",
     }),
     "agent_stock": frozenset({
         "google.sheets.read_range",
+        "google.sheets.append_rows",
+        "google.drive.list_files",
+        "google.drive.read_file",
+        "google.drive.upload_file",
     }),
     "agent_health": frozenset({
+        "google.drive.list_files",
+        "google.drive.read_file",
         "google.sheets.append_rows",
         "google.docs.create_document",
+        "google.docs.append_content",
     }),
     "agent_sync": frozenset({
         "google.gmail.list_messages",
         "google.gmail.get_message",
         "google.gmail.create_draft",
+        "google.gmail.send_message",
+        "google.gmail.reply_message",
         "google.calendar.list_events",
         "google.calendar.create_event",
         "google.sheets.read_range",
@@ -79,6 +98,19 @@ class _GmailGetArgs(BaseModel):
 class _GmailDraftArgs(BaseModel):
     to: list[str]
     subject: str = Field(max_length=500)
+    body: str = Field(max_length=10_000)
+    cc: list[str] = []
+
+
+class _GmailSendArgs(BaseModel):
+    to: list[str]
+    subject: str = Field(max_length=500)
+    body: str = Field(max_length=10_000)
+    cc: list[str] = []
+
+
+class _GmailReplyArgs(BaseModel):
+    message_id: str
     body: str = Field(max_length=10_000)
     cc: list[str] = []
 
@@ -201,6 +233,25 @@ class GoogleMcpService:
     ) -> dict[str, Any]:
         args = _GmailDraftArgs(to=to, subject=subject, body=body, cc=cc or []).model_dump()
         return await self._call("google.gmail.create_draft", args, idempotency=True)
+
+    async def send_gmail_message(
+        self,
+        to: list[str],
+        subject: str,
+        body: str,
+        cc: list[str] | None = None,
+    ) -> dict[str, Any]:
+        args = _GmailSendArgs(to=to, subject=subject, body=body, cc=cc or []).model_dump()
+        return await self._call("google.gmail.send_message", args, idempotency=True)
+
+    async def reply_gmail_message(
+        self,
+        message_id: str,
+        body: str,
+        cc: list[str] | None = None,
+    ) -> dict[str, Any]:
+        args = _GmailReplyArgs(message_id=message_id, body=body, cc=cc or []).model_dump()
+        return await self._call("google.gmail.reply_message", args, idempotency=True)
 
     # ── Calendar ──────────────────────────────────────────────────────────────
 

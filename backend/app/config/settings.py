@@ -131,6 +131,7 @@ class Settings(BaseSettings):
         "ENABLE_GOOGLE_LOGIN",
         "ENABLE_FACEBOOK_LOGIN",
         "ENABLE_GOOGLE_MCP_TOOLS",
+        "ENABLE_AGENT_AUTOMATIONS",
         "DEMO_MODE",
         "USE_LOCAL_FALLBACK",
         mode="before",
@@ -185,6 +186,7 @@ class Settings(BaseSettings):
     ENABLE_SCORE_RECALCULATION: bool = True
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
     ENABLE_EMAIL_VERIFICATION: bool = True
+    ENABLE_AGENT_AUTOMATIONS: bool = False
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
 
     # Auth social

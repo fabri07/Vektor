@@ -25,6 +25,7 @@ GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 SHORT_SCOPE_MAP = {
     "gmail.readonly": "https://www.googleapis.com/auth/gmail.readonly",
     "gmail.compose": "https://www.googleapis.com/auth/gmail.compose",
+    "gmail.send": "https://www.googleapis.com/auth/gmail.send",
     "calendar.events": "https://www.googleapis.com/auth/calendar.events",
     "spreadsheets": "https://www.googleapis.com/auth/spreadsheets",
     "documents": "https://www.googleapis.com/auth/documents",

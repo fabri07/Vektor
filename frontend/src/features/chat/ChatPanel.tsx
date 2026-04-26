@@ -20,7 +20,17 @@ export function ChatPanel() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { messages, isLoading, send, confirm, cancel, messagesUsedToday, isRateLimited } =
+  const {
+    messages,
+    isLoading,
+    send,
+    confirm,
+    cancel,
+    automate,
+    dismissAutomation,
+    messagesUsedToday,
+    isRateLimited,
+  } =
     useChat();
 
   useEffect(() => {
@@ -127,8 +137,11 @@ export function ChatPanel() {
                     <ApprovalCard
                       summary={msg.content}
                       pendingActionId={msg.pendingActionId}
+                      automationOffer={msg.automationOffer}
                       onConfirm={confirm}
                       onCancel={cancel}
+                      onAutomate={automate}
+                      onDismissAutomation={dismissAutomation}
                     />
                   </div>
                 ) : (

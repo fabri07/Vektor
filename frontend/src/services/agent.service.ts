@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import type { AutomationOffer } from "@/services/automations.service";
 
 export interface AgentResponse {
   request_id: string;
@@ -29,6 +30,7 @@ export interface ConfirmActionResponse {
   action_type: string;
   execution_status: string;
   failure_code?: string | null;
+  automation_offer?: AutomationOffer;
 }
 
 export async function sendMessage(

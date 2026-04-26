@@ -11,8 +11,9 @@ GET  /api/v1/agent/conversations/{id}   — turnos completos de una conversació
 import hashlib
 import json as json_module
 import uuid
+from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, time
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import anthropic
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -24,12 +25,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse
+from app.application.services.automation_service import (
+    AUTOMATION_PAYLOAD_AGENT_KEY,
+    automation_offer_for_action,
+    determine_external_system,
+    find_enabled_rule,
+)
 from app.application.services.chat_orchestrator import ChatOrchestrator
 from app.application.services.pending_action_service import (
     cancel_pending_action,
     create_pending_action,
     execute_pending_action,
 )
+from app.config.settings import get_settings
 from app.integrations.anthropic_client import AnthropicConfigurationError
 from app.integrations.mcp.exceptions import McpToolAuthError
 from app.observability.logger import get_logger
@@ -43,7 +51,7 @@ from app.persistence.models.user import User
 router = APIRouter()
 logger = get_logger(__name__)
 
-_AUTO_EXECUTE_ACTION_TYPES = {str(ActionType.REGISTER_EXPENSE)}
+_AUTO_EXECUTE_ACTION_TYPES: set[str] = {str(ActionType.REGISTER_EXPENSE)}
 _FINGERPRINT_ACTION_TYPES = {
     str(ActionType.REGISTER_SALE),
     str(ActionType.REGISTER_EXPENSE),
@@ -79,16 +87,17 @@ class ConversationTurns(BaseModel):
 def _anthropic_error_response(exc: Exception) -> tuple[int, str] | None:
     status_code = getattr(exc, "status_code", None)
 
-    if isinstance(exc, anthropic.RateLimitError) or status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+    if (
+        isinstance(exc, anthropic.RateLimitError)
+        or status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    ):
         return status.HTTP_429_TOO_MANY_REQUESTS, _ANTHROPIC_RATE_LIMIT_MESSAGE
 
     if isinstance(
         exc,
-        (
-            anthropic.InternalServerError,
-            anthropic.APIConnectionError,
-            anthropic.APITimeoutError,
-        ),
+        anthropic.InternalServerError
+        | anthropic.APIConnectionError
+        | anthropic.APITimeoutError,
     ) or status_code in {
         status.HTTP_500_INTERNAL_SERVER_ERROR,
         status.HTTP_502_BAD_GATEWAY,
@@ -218,7 +227,27 @@ async def _process_agent_action(
 ) -> dict[str, Any] | None:
     action_type = str(agent_response.result.get("action_type", ActionType.ANSWER_HELP_REQUEST))
     payload = _extract_action_payload(agent_response)
-    auto_execute = bool(agent_response.result.get("auto_execute")) or action_type in _AUTO_EXECUTE_ACTION_TYPES
+    payload.setdefault(AUTOMATION_PAYLOAD_AGENT_KEY, agent_response.agent_name)
+    external_system = (
+        determine_external_system(action_type, payload)
+        if payload.get("mode") == "mcp"
+        else None
+    )
+    auto_execute = action_type in _AUTO_EXECUTE_ACTION_TYPES
+
+    settings = get_settings()
+    automation_rule = None
+    if settings.ENABLE_AGENT_AUTOMATIONS and agent_response.requires_approval:
+        automation_rule = await find_enabled_rule(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            agent_name=agent_response.agent_name,
+            action_type=action_type,
+            payload=payload,
+            external_system=external_system,
+        )
+        auto_execute = automation_rule is not None
 
     if auto_execute:
         action = await create_pending_action(
@@ -232,22 +261,72 @@ async def _process_agent_action(
         action.status = "APPROVED"
         action.approved_at = datetime.now(UTC)
 
-        duplicate = await _execute_local_action(
-            action=action,
-            tenant_id=tenant_id,
-            db=db,
-            redis=redis,
-        )
+        duplicate: dict[str, Any] | None = None
+        if action.is_external:
+            action.execution_status = "IN_PROGRESS"
+            await db.flush()
+            try:
+                await execute_pending_action(action, db, redis=redis)
+                action.execution_status = "SUCCEEDED"
+            except McpToolAuthError as exc:
+                action.execution_status = "REQUIRES_RECONNECT"
+                action.failure_code = exc.reason
+                action.failure_message = None
+            except Exception as exc:
+                action.execution_status = "FAILED"
+                action.failure_code = None
+                action.failure_message = str(exc)[:500]
+            action.executed_at = datetime.now(UTC)
+        else:
+            duplicate = await _execute_local_action(
+                action=action,
+                tenant_id=tenant_id,
+                db=db,
+                redis=redis,
+            )
+
         agent_response.status = "success"
         agent_response.requires_approval = False
         agent_response.pending_action_id = None
         agent_response.result["auto_executed"] = True
         agent_response.result["executed_action_id"] = str(action.id)
+        if automation_rule is not None:
+            automation_rule.last_executed_at = datetime.now(UTC)
+            agent_response.result["automation_rule_id"] = str(automation_rule.id)
+            db.add(
+                DecisionAuditLog(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    decision_type="AUTOMATION_RULE_EXECUTED",
+                    decision_data={
+                        "rule_id": str(automation_rule.id),
+                        "rule_key": automation_rule.rule_key,
+                        "pending_action_id": str(action.id),
+                        "execution_status": action.execution_status,
+                    },
+                    triggered_by="agent:automation",
+                    actor_user_id=user_id,
+                    context={"agent_name": agent_response.agent_name},
+                    created_at=datetime.now(UTC),
+                )
+            )
         if duplicate is not None:
             agent_response.message = duplicate["message"]
             agent_response.result["summary"] = duplicate["message"]
+        elif action.execution_status == "REQUIRES_RECONNECT":
+            agent_response.status = "requires_google_auth"
+            agent_response.result["message"] = (
+                "Necesito que reconectes Google para completar esta automatización."
+            )
+        elif action.execution_status == "FAILED":
+            agent_response.status = "error"
+            agent_response.result["summary"] = "No se pudo completar la automatización."
         elif action_type == str(ActionType.REGISTER_EXPENSE):
-            summary = agent_response.message or agent_response.result.get("summary") or "Gasto registrado."
+            summary = (
+                agent_response.message
+                or agent_response.result.get("summary")
+                or "Gasto registrado."
+            )
             if not str(summary).lower().startswith("gasto registrado"):
                 summary = f"Gasto registrado. {summary}"
             agent_response.message = str(summary)
@@ -285,7 +364,11 @@ async def get_chat_usage(
 # ── GET /conversations ────────────────────────────────────────────────────────
 
 
-@router.get("/conversations", response_model=list[ConversationSummary], summary="Listar conversaciones")
+@router.get(
+    "/conversations",
+    response_model=list[ConversationSummary],
+    summary="Listar conversaciones",
+)
 async def list_conversations(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
@@ -310,7 +393,11 @@ async def list_conversations(
 # ── GET /conversations/{conversation_id} ──────────────────────────────────────
 
 
-@router.get("/conversations/{conversation_id}", response_model=ConversationTurns, summary="Detalle de conversación")
+@router.get(
+    "/conversations/{conversation_id}",
+    response_model=ConversationTurns,
+    summary="Detalle de conversación",
+)
 async def get_conversation(
     conversation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
@@ -318,7 +405,10 @@ async def get_conversation(
 ) -> ConversationTurns:
     row = await db.get(AgentConversationContext, conversation_id)
     if row is None or row.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversación no encontrada.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada.",
+        )
     return ConversationTurns(
         conversation_id=str(row.conversation_id),
         turns=row.turns,
@@ -409,7 +499,8 @@ async def chat(
             "status": agent_response.status,
             "risk_level": str(agent_response.risk_level),
             "requires_approval": agent_response.requires_approval,
-            "pending_action_id": agent_response.pending_action_id or (action_meta or {}).get("action_id"),
+            "pending_action_id": agent_response.pending_action_id
+            or (action_meta or {}).get("action_id"),
         },
         triggered_by="agent:chat",
         actor_user_id=user_id,
@@ -452,7 +543,11 @@ async def chat_stream(
     if count > 50:
         # Retornar error como SSE (el cliente ya está escuchando el stream)
         async def _rate_limited() -> AsyncGenerator[str, None]:
-            err = {"type": "error", "message": "Límite diario de 50 mensajes alcanzado. Disponible mañana.", "code": 429}
+            err = {
+                "type": "error",
+                "message": "Límite diario de 50 mensajes alcanzado. Disponible mañana.",
+                "code": 429,
+            }
             yield f"data: {json_module.dumps(err, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -505,7 +600,8 @@ async def chat_stream(
                     "status": agent_response.status,
                     "risk_level": str(agent_response.risk_level),
                     "requires_approval": agent_response.requires_approval,
-                    "pending_action_id": agent_response.pending_action_id or (action_meta or {}).get("action_id"),
+                    "pending_action_id": agent_response.pending_action_id
+                    or (action_meta or {}).get("action_id"),
                 },
                 triggered_by="agent:chat:stream",
                 actor_user_id=user_id,
@@ -611,7 +707,7 @@ async def confirm_action(
     action.status = "APPROVED"
 
     if action.is_external:
-        # Para acciones externas: lifecycle completo IN_PROGRESS → SUCCEEDED|FAILED|REQUIRES_RECONNECT.
+        # Acciones externas: lifecycle IN_PROGRESS → SUCCEEDED|FAILED|REQUIRES_RECONNECT.
         # Nunca se re-lanza la excepción — el fallo se persiste y el endpoint responde con estado.
         action.execution_status = "IN_PROGRESS"
         await db.flush()  # visible antes de la llamada externa
@@ -653,6 +749,11 @@ async def confirm_action(
         "execution_status": action.execution_status,
         "failure_code": action.failure_code,
     }
+    if (
+        get_settings().ENABLE_AGENT_AUTOMATIONS
+        and action.execution_status == "SUCCEEDED"
+    ):
+        response["automation_offer"] = automation_offer_for_action(action)
     return response
 
 
@@ -750,7 +851,10 @@ async def retry_action(
     if not action.is_external:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"La acción '{action.action_type}' no es reintentable (acción local sin sistema externo).",
+            detail=(
+                f"La acción '{action.action_type}' no es reintentable "
+                "(acción local sin sistema externo)."
+            ),
         )
 
     # ── Verificar límite de 1 retry via DecisionAuditLog ─────────────────────

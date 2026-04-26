@@ -9,6 +9,7 @@ import {
   type AgentResponse,
   type ChatAttachment,
 } from "@/services/agent.service";
+import { automationsService } from "@/services/automations.service";
 import { useChatStore, type ChatMessage } from "@/stores/chatStore";
 import { useAuthStore } from "@/stores/authStore";
 import { type AxiosError } from "axios";
@@ -312,8 +313,11 @@ export function useChat() {
       if (msg) {
         if (response.execution_status === "SUCCEEDED") {
           updateMessage(msg.id, {
-            status: "success",
-            content: msg.content + "\n✓ Confirmado y guardado.",
+            status: response.automation_offer ? "requires_approval" : "success",
+            content: response.automation_offer
+              ? msg.content + "\n✓ Confirmado y guardado.\n\n" + response.automation_offer.message
+              : msg.content + "\n✓ Confirmado y guardado.",
+            automationOffer: response.automation_offer,
           });
         } else if (response.execution_status === "REQUIRES_RECONNECT") {
           updateMessage(msg.id, {
@@ -353,6 +357,38 @@ export function useChat() {
     [messages, updateMessage],
   );
 
+  const automate = useCallback(
+    async (pendingActionId: string) => {
+      const rule = await automationsService.createFromPendingAction(pendingActionId);
+      const msg = messages.find((m) => m.pendingActionId === pendingActionId);
+      if (msg) {
+        updateMessage(msg.id, {
+          status: "success",
+          automationOffer: undefined,
+          content:
+            msg.content +
+            `\nAutomatización activada para ${rule.agent_name}. Podés cambiarla en Configuración.`,
+        });
+      }
+      void queryClient.invalidateQueries({ queryKey: ["automations"] });
+    },
+    [messages, updateMessage, queryClient],
+  );
+
+  const dismissAutomation = useCallback(
+    async (pendingActionId: string) => {
+      const msg = messages.find((m) => m.pendingActionId === pendingActionId);
+      if (msg) {
+        updateMessage(msg.id, {
+          status: "success",
+          automationOffer: undefined,
+          content: msg.content + "\nNo se automatizará esta acción.",
+        });
+      }
+    },
+    [messages, updateMessage],
+  );
+
   return {
     messages,
     isLoading,
@@ -360,6 +396,8 @@ export function useChat() {
     sendStream,
     confirm,
     cancel,
+    automate,
+    dismissAutomation,
     messagesUsedToday,
     isRateLimited,
     newConversation,

@@ -30,6 +30,8 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "google.gmail.list_messages": 8.0,
     "google.gmail.get_message": 8.0,
     "google.gmail.create_draft": 20.0,
+    "google.gmail.send_message": 20.0,
+    "google.gmail.reply_message": 20.0,
     "google.calendar.list_events": 8.0,
     "google.calendar.create_event": 20.0,
     "google.sheets.read_range": 10.0,
@@ -242,7 +244,10 @@ class HttpMcpGateway(McpToolGateway):
         if resp.status_code >= 500:
             raise McpToolUnavailableError(f"MCP server retornó {resp.status_code} en /auth/start")
         if resp.status_code == 401:
-            raise McpToolAuthError("MCP server rechazó la solicitud de auth", reason="mcp_auth_required")
+            raise McpToolAuthError(
+                "MCP server rechazó la solicitud de auth",
+                reason="mcp_auth_required",
+            )
 
         try:
             return resp.json()
@@ -268,7 +273,11 @@ class HttpMcpGateway(McpToolGateway):
             return {"connected": False, "scopes_granted": [], "last_error": "mcp_unavailable"}
 
         if resp.status_code >= 400:
-            return {"connected": False, "scopes_granted": [], "last_error": f"http_{resp.status_code}"}
+            return {
+                "connected": False,
+                "scopes_granted": [],
+                "last_error": f"http_{resp.status_code}",
+            }
 
         try:
             return resp.json()

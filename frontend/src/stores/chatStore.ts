@@ -1,3 +1,4 @@
+import type { AutomationOffer } from "@/services/automations.service";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
@@ -7,6 +8,7 @@ export interface ChatMessage {
   content: string;
   status?: "success" | "requires_approval" | "requires_clarification" | "error" | "requires_google_auth";
   pendingActionId?: string;
+  automationOffer?: AutomationOffer;
   timestamp: string; // ISO string — Date no es serializable en localStorage
   requiresGoogleAuth?: boolean;
   authUrl?: string;

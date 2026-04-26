@@ -12,30 +12,43 @@ El endpoint (confirm / retry) es responsable del ciclo de vida completo:
 
 """
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Optional
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.agents.shared.schemas import ActionType
 import app.application.services.cash_service as cash_service
 import app.application.services.stock_service as stock_service
+from app.application.agents.shared.schemas import ActionType
+from app.application.services.automation_service import determine_external_system
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.pending_action import PendingAction
 
 logger = get_logger(__name__)
 
-_GOOGLE_EXTERNAL_SYSTEMS = {
-    ActionType.CREATE_SUPPLIER_DRAFT: "GOOGLE_GMAIL",
-    ActionType.CLASSIFY_GMAIL_MESSAGE: "GOOGLE_GMAIL",
-    ActionType.SYNC_TO_GOOGLE: "GOOGLE_SHEETS",
-    ActionType.CREATE_CALENDAR_EVENT: "GOOGLE_CALENDAR",
-}
 
-
+def _external_idempotency_key(
+    *,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    action_type: str,
+    payload: dict,
+) -> str:
+    raw = json.dumps(
+        {
+            "tenant_id": str(tenant_id),
+            "user_id": str(user_id),
+            "action_type": action_type,
+            "payload": payload,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 async def create_pending_action(
     db: AsyncSession,
@@ -48,12 +61,21 @@ async def create_pending_action(
     """Crea un PendingAction con TTL de 10 minutos. Hace flush para obtener el id.
 
     """
-    action_type_enum = ActionType(action_type) if action_type in set(ActionType) else None
-    external_system = None
-    if payload.get("mode") == "mcp" and action_type_enum in _GOOGLE_EXTERNAL_SYSTEMS:
-        external_system = _GOOGLE_EXTERNAL_SYSTEMS[action_type_enum]
-        if action_type_enum == ActionType.SYNC_TO_GOOGLE and payload.get("sync_type") == "import_from_drive":
-            external_system = "GOOGLE_DRIVE"
+    external_system = (
+        determine_external_system(action_type, payload)
+        if payload.get("mode") == "mcp"
+        else None
+    )
+    idempotency_key = (
+        _external_idempotency_key(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action_type=action_type,
+            payload=payload,
+        )
+        if external_system
+        else None
+    )
 
     action = PendingAction(
         tenant_id=tenant_id,
@@ -63,7 +85,7 @@ async def create_pending_action(
         risk_level=risk_level,
         status="PENDING",
         external_system=external_system,
-        idempotency_key=None,
+        idempotency_key=idempotency_key,
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     db.add(action)
@@ -81,7 +103,7 @@ async def create_pending_action(
 async def execute_pending_action(
     action: PendingAction,
     db: AsyncSession,
-    redis: Optional[Redis] = None,
+    redis: Redis | None = None,
 ) -> None:
     """
     Ejecuta la acción de negocio y registra en audit_log.
@@ -95,7 +117,10 @@ async def execute_pending_action(
         try:
             if redis is not None:
                 from decimal import Decimal  # noqa: PLC0415
-                from app.application.services.business_memory_service import BusinessMemoryService  # noqa: PLC0415
+
+                from app.application.services.business_memory_service import (
+                    BusinessMemoryService,  # noqa: PLC0415
+                )
                 amount = Decimal(str(payload.get("amount", 0)))
                 bm_svc = BusinessMemoryService(db=db, redis=redis)
                 await bm_svc.update_after_sale(action.tenant_id, amount)
@@ -110,13 +135,19 @@ async def execute_pending_action(
         try:
             if redis is not None:
                 from decimal import Decimal  # noqa: PLC0415
-                from app.application.services.business_memory_service import BusinessMemoryService  # noqa: PLC0415
+
+                from app.application.services.business_memory_service import (
+                    BusinessMemoryService,  # noqa: PLC0415
+                )
                 amount = Decimal(str(payload.get("amount", 0)))
                 category = payload.get("category", "")
                 bm_svc = BusinessMemoryService(db=db, redis=redis)
                 await bm_svc.update_after_expense(action.tenant_id, amount, category)
         except Exception:
-            logger.warning("execute_pending_action.biz_mem_expense_failed", action_id=str(action.id))
+            logger.warning(
+                "execute_pending_action.biz_mem_expense_failed",
+                action_id=str(action.id),
+            )
 
     elif action.action_type == ActionType.REGISTER_PURCHASE:
         purchase_payload = {**payload, "category": "compra_proveedor"}
@@ -181,9 +212,9 @@ async def execute_pending_action(
     elif action.action_type == ActionType.CREATE_SUPPLIER_DRAFT:
         mcp_enabled = payload.get("mode") == "mcp"
         if mcp_enabled:
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
+            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
+            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
             settings = get_settings()
             gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
@@ -192,19 +223,35 @@ async def execute_pending_action(
                 tenant_id=str(action.tenant_id),
                 settings=settings,
             )
-            await svc.create_gmail_draft(
-                to=[payload.get("to", "")],
-                subject=payload.get("subject", "Consulta de proveedor"),
-                body=payload.get("body", payload.get("message", "")),
-            )
-        action.external_system = "GOOGLE_GMAIL" if mcp_enabled else None
+            email_mode = str(payload.get("email_mode") or "draft").lower()
+            if email_mode == "send":
+                await svc.send_gmail_message(
+                    to=[payload.get("to", "")],
+                    subject=payload.get("subject", "Consulta de proveedor"),
+                    body=payload.get("body", payload.get("message", "")),
+                    cc=payload.get("cc") or [],
+                )
+            elif email_mode == "reply":
+                await svc.reply_gmail_message(
+                    message_id=payload.get("message_id", ""),
+                    body=payload.get("body", payload.get("message", "")),
+                    cc=payload.get("cc") or [],
+                )
+            else:
+                await svc.create_gmail_draft(
+                    to=[payload.get("to", "")],
+                    subject=payload.get("subject", "Consulta de proveedor"),
+                    body=payload.get("body", payload.get("message", "")),
+                    cc=payload.get("cc") or [],
+                )
+        action.external_system = determine_external_system(action.action_type, payload)
 
     elif action.action_type == ActionType.CLASSIFY_GMAIL_MESSAGE:
         mcp_enabled = payload.get("mode") == "mcp"
         if mcp_enabled:
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
+            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
+            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
             settings = get_settings()
             gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
@@ -216,15 +263,15 @@ async def execute_pending_action(
             await svc.get_gmail_message(
                 message_id=payload.get("message_id", ""),
             )
-        action.external_system = "GOOGLE_GMAIL" if mcp_enabled else None
+        action.external_system = determine_external_system(action.action_type, payload)
 
     elif action.action_type == ActionType.SYNC_TO_GOOGLE:
         mcp_enabled = payload.get("mode") == "mcp"
         if mcp_enabled:
             sync_type = payload.get("sync_type", "")
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
+            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
+            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
             settings = get_settings()
             gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
@@ -261,14 +308,14 @@ async def execute_pending_action(
                     first_file_id = str(files[0].get("id", "")).strip()
                     if first_file_id:
                         await svc.read_drive_file(file_id=first_file_id)
-        action.external_system = "GOOGLE_DRIVE" if payload.get("sync_type") == "import_from_drive" else ("GOOGLE_SHEETS" if mcp_enabled else None)
+        action.external_system = determine_external_system(action.action_type, payload)
 
     elif action.action_type == ActionType.CREATE_CALENDAR_EVENT:
         mcp_enabled = payload.get("mode") == "mcp"
         if mcp_enabled:
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
             from app.config.settings import get_settings  # noqa: PLC0415
+            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
+            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
             settings = get_settings()
             gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
             svc = GoogleMcpService(
@@ -283,7 +330,21 @@ async def execute_pending_action(
                 end=payload.get("end_datetime", payload.get("end", "")),
                 attendees=payload.get("attendees", []),
             )
-        action.external_system = "GOOGLE_CALENDAR" if mcp_enabled else None
+            if payload.get("send_email") or payload.get("email_mode") == "send":
+                recipients = payload.get("email_recipients") or payload.get("attendees") or []
+                if recipients:
+                    await svc.send_gmail_message(
+                        to=recipients,
+                        subject=payload.get(
+                            "email_subject",
+                            payload.get("summary", "Recordatorio"),
+                        ),
+                        body=payload.get(
+                            "email_body",
+                            payload.get("description", "Recordatorio creado en Google Calendar."),
+                        ),
+                    )
+        action.external_system = determine_external_system(action.action_type, payload)
 
     else:
         logger.warning(
@@ -295,7 +356,9 @@ async def execute_pending_action(
     # Registrar acción en AgentMemory (fail-silencioso)
     try:
         if redis is not None:
-            from app.application.services.agent_memory_service import AgentMemoryService  # noqa: PLC0415
+            from app.application.services.agent_memory_service import (
+                AgentMemoryService,  # noqa: PLC0415
+            )
             am_svc = AgentMemoryService(db=db, redis=redis)
             await am_svc.record_action(action.tenant_id, action.action_type, payload)
     except Exception:
