@@ -165,7 +165,12 @@ async def _insert_confirmed_data(
     file_type = summary.get("file_type", "spreadsheet")
 
     if file_type == "spreadsheet":
-        rows: list[dict[str, Any]] = summary.get("ventas_detectadas", [])
+        inferred_type = summary.get("inferred_type", "general")
+        # Para archivos de stock/inventario las filas están en stock_detectado
+        if inferred_type == "stock":
+            rows: list[dict[str, Any]] = summary.get("stock_detectado", [])
+        else:
+            rows = summary.get("ventas_detectadas", [])
         if not rows:
             return counts
 
@@ -181,10 +186,16 @@ async def _insert_confirmed_data(
         sku_col = _find_col(headers, _SKU_COLS)
 
         wants_ventas = bool(
-            confirmed_fields.get("ventas") and summary.get("has_venta") and venta_col
+            inferred_type != "stock"
+            and confirmed_fields.get("ventas")
+            and summary.get("has_venta")
+            and venta_col
         )
         wants_gastos = bool(
-            confirmed_fields.get("gastos") and summary.get("has_gasto") and gasto_col
+            inferred_type != "stock"
+            and confirmed_fields.get("gastos")
+            and summary.get("has_gasto")
+            and gasto_col
         )
         wants_productos = bool(
             confirmed_fields.get("productos") and summary.get("has_producto") and nombre_col

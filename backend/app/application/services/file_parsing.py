@@ -58,16 +58,21 @@ EXTENSION_TO_MIME = {
 
 SUPPORTED_TYPES_LABEL = "xlsx, csv, txt, pdf, docx, pptx, jpg, png, heic"
 
+# Columnas que indican transacciones de venta (monto cobrado)
 VENTA_COLS = {
-    "precio",
     "precio_venta",
     "venta",
     "ventas",
     "ingreso",
     "monto",
     "importe",
-    "total",
+    "total_venta",
+    "total_cobrado",
+    "cobro",
 }
+# "precio" y "total" solos son ambiguos (también aparecen en inventarios)
+# — se pesan por separado en infer_spreadsheet_type
+
 GASTO_COLS = {"costo", "gasto", "gastos", "egreso", "compra", "deuda", "pago", "proveedor"}
 PRODUCTO_COLS = {
     "producto",
@@ -131,7 +136,7 @@ def infer_source_format(filename: str, mime: str) -> str:
 
 
 def analyze_headers(headers: list[str]) -> dict[str, Any]:
-    """Classify headers and determine confidence."""
+    """Classify headers and infer spreadsheet type."""
     normalized = [h.lower().strip().replace(" ", "_") for h in headers]
 
     has_fecha = any(any(k in col for k in FECHA_COLS) for col in normalized)
@@ -139,20 +144,74 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     has_gasto = any(any(k in col for k in GASTO_COLS) for col in normalized)
     has_producto = any(any(k in col for k in PRODUCTO_COLS) for col in normalized)
 
-    recognized = sum([has_fecha, has_venta, has_gasto, has_producto])
-    confidence = (
-        "HIGH"
-        if (has_fecha and has_venta)
-        else ("MEDIUM" if recognized >= 2 else "MEDIUM")
+    # Señales ambiguas: "precio" / "total" solos pueden ser precio de catálogo
+    has_precio_ambiguo = any(
+        col in ("precio", "total", "price", "valor") for col in normalized
     )
+
+    inferred_type = infer_spreadsheet_type(
+        has_fecha=has_fecha,
+        has_venta=has_venta,
+        has_gasto=has_gasto,
+        has_producto=has_producto,
+        has_precio_ambiguo=has_precio_ambiguo,
+    )
+
+    confidence = "HIGH" if (has_fecha and has_venta) else "MEDIUM"
 
     return {
         "has_fecha": has_fecha,
         "has_venta": has_venta,
         "has_gasto": has_gasto,
         "has_producto": has_producto,
+        "inferred_type": inferred_type,
         "confidence": confidence,
     }
+
+
+def infer_spreadsheet_type(
+    *,
+    has_fecha: bool,
+    has_venta: bool,
+    has_gasto: bool,
+    has_producto: bool,
+    has_precio_ambiguo: bool = False,
+) -> str:
+    """Determina el tipo más probable del archivo tabular.
+
+    Reglas (en orden de prioridad):
+    1. Tiene fecha + columna de venta explícita → ventas
+    2. Tiene fecha + columna de gasto → gastos
+    3. Tiene columna de producto (sin fecha o sin venta) → stock/inventario
+    4. Tiene solo precio ambiguo sin producto ni fecha → ventas (fallback)
+    5. General / desconocido
+    """
+    # Venta explícita con fecha = transacción de venta
+    if has_venta and has_fecha:
+        return "ventas"
+
+    # Gasto con fecha = transacción de egreso
+    if has_gasto and has_fecha:
+        return "gastos"
+
+    # Producto sin fecha fuerte → inventario
+    if has_producto and not has_fecha:
+        return "stock"
+
+    # Producto con fecha pero sin venta explícita → inventario (ej: lista de stock con fecha)
+    if has_producto and not has_venta:
+        return "stock"
+
+    # Solo precio ambiguo sin señales de producto → asumimos venta
+    if has_precio_ambiguo and not has_producto:
+        return "ventas"
+
+    # Mixto o sin señales claras
+    if has_venta:
+        return "ventas"
+    if has_gasto:
+        return "gastos"
+    return "general"
 
 
 def rows_to_dicts(headers: list[str], rows: list[list[Any]]) -> list[dict[str, Any]]:
@@ -201,6 +260,29 @@ def extract_amounts_from_text(text: str) -> dict[str, Any]:
     }
 
 
+def _store_rows_by_type(
+    summary: dict[str, Any],
+    rows: list[dict[str, Any]],
+    inferred_type: str,
+) -> None:
+    """Almacena las filas en la clave correcta según el tipo inferido.
+
+    El campo `ventas_detectadas` siempre se rellena para compatibilidad con
+    `_insert_confirmed_data`, que lo usa como fuente de filas independientemente
+    del tipo. La clave específica sirve para que el agente y la UI sepan qué son.
+    """
+    if inferred_type == "stock":
+        summary["stock_detectado"] = rows
+        summary["ventas_detectadas"] = []
+        summary["gastos_detectados"] = []
+    elif inferred_type == "gastos":
+        summary["gastos_detectados"] = rows
+        summary["ventas_detectadas"] = rows  # backward compat para _insert_confirmed_data
+    else:
+        summary["ventas_detectadas"] = rows
+        summary["gastos_detectados"] = []
+
+
 def parse_uploaded_content(content: bytes, mime: str, filename: str) -> dict[str, Any]:
     """Parse uploaded file bytes into a summary compatible with chat and ingestion."""
     if mime in SPREADSHEET_MIMES:
@@ -242,10 +324,10 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
         summary.update(analysis)
         summary["headers"] = headers
         summary["rows_processed"] = len(data_rows)
-        summary["ventas_detectadas"] = preview_rows
         summary["row_count"] = len(data_rows)
         summary["columns"] = headers
         summary["preview_rows"] = preview_rows[:10]
+        _store_rows_by_type(summary, preview_rows, analysis.get("inferred_type", "general"))
         return summary
 
     import openpyxl  # noqa: PLC0415
@@ -263,6 +345,7 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     "row_count": 0,
                     "columns": [],
                     "preview_rows": [],
+                    "inferred_type": "general",
                 }
             )
             return summary
@@ -277,10 +360,10 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
         summary.update(analysis)
         summary["headers"] = headers
         summary["rows_processed"] = len(data_rows)
-        summary["ventas_detectadas"] = preview_rows
         summary["row_count"] = len(data_rows)
         summary["columns"] = headers
         summary["preview_rows"] = preview_rows[:10]
+        _store_rows_by_type(summary, preview_rows, analysis.get("inferred_type", "general"))
         return summary
     finally:
         workbook.close()
