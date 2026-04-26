@@ -153,6 +153,22 @@ async def execute_pending_action(
         purchase_payload = {**payload, "category": "compra_proveedor"}
         await cash_service.save_expense(purchase_payload, action.tenant_id, db)
 
+        product_id_str = payload.get("product_id")
+        qty = int(payload.get("qty") or 0)
+        if product_id_str and qty > 0:
+            from decimal import Decimal  # noqa: PLC0415
+            product_uuid = uuid.UUID(product_id_str)
+            unit_cost_raw = payload.get("unit_cost")
+            unit_cost = Decimal(str(unit_cost_raw)) if unit_cost_raw is not None else None
+            await stock_service.increment_stock(
+                product_id=product_uuid,
+                tenant_id=action.tenant_id,
+                qty=qty,
+                unit_cost=unit_cost,
+                source_event_id=str(action.id),
+                db=db,
+            )
+
     elif action.action_type == ActionType.REGISTER_CASH_OUTFLOW:
         outflow_payload = {**payload, "category": payload.get("category", "salida_caja")}
         await cash_service.save_expense(outflow_payload, action.tenant_id, db)

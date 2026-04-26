@@ -7,11 +7,11 @@ from typing import Any, Optional
 
 import anthropic
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.agents.shared.product_resolver import resolve_product_id
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -21,7 +21,6 @@ from app.application.agents.shared.schemas import (
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
-from app.persistence.models.product import Product
 
 
 class StockAdjustEntity(BaseModel):
@@ -56,39 +55,9 @@ class AgentStock(BaseAgent):
         sku: str | None,
         tenant_id: str,
     ) -> tuple[str | None, list[str]]:
-        """Busca el product_id en la DB. Devuelve (id, [nombres_alternativos])."""
         if self._db is None:
             return None, []
-
-        tid = uuid.UUID(tenant_id)
-
-        # 1. Búsqueda exacta por SKU
-        if sku:
-            result = await self._db.execute(
-                select(Product).where(
-                    Product.tenant_id == tid,
-                    Product.sku == sku,
-                )
-            )
-            product = result.scalar_one_or_none()
-            if product:
-                return str(product.id), []
-
-        # 2. Búsqueda por nombre (ILIKE)
-        if product_name:
-            result = await self._db.execute(
-                select(Product).where(
-                    Product.tenant_id == tid,
-                    Product.name.ilike(f"%{product_name}%"),
-                )
-            )
-            matches = list(result.scalars().all())
-            if len(matches) == 1:
-                return str(matches[0].id), []
-            if len(matches) > 1:
-                return None, [m.name for m in matches[:5]]
-
-        return None, []
+        return await resolve_product_id(self._db, tenant_id, product_name, sku)
 
     async def on_sale_recorded(
         self,
