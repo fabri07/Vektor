@@ -10,6 +10,7 @@ from app.api.v1 import (
     business_profiles,
     expenses,
     files,
+    forecast,
     health_scores,
     ingestion,
     integrations,
@@ -51,3 +52,4 @@ api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestio
 api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
 api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])
 api_router.include_router(momentum.router, prefix="/momentum", tags=["Momentum"])
+api_router.include_router(forecast.router, prefix="/forecast", tags=["Forecast"])

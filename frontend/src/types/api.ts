@@ -60,6 +60,22 @@ export interface RegisterResponse {
   requires_verification: boolean;
 }
 
+export interface ForecastPoint {
+  date: string;
+  income: number;
+  expense: number;
+  net: number;
+}
+
+export interface CashForecastResponse {
+  tier: number;
+  confidence: string;
+  data_days: number;
+  horizon_days: number;
+  points: ForecastPoint[];
+  message: string | null;
+}
+
 export interface CategoryBreakdownItem {
   category: string;
   total: number;

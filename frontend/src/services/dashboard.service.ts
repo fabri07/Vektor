@@ -3,6 +3,7 @@ import type {
   LatestScoreResponse,
   CurrentInsightResponse,
   BusinessBreakdownResponse,
+  CashForecastResponse,
 } from "@/types/api";
 
 export async function fetchLatestScore(): Promise<LatestScoreResponse> {
@@ -21,5 +22,12 @@ export async function acknowledgeAction(id: string): Promise<void> {
 
 export async function fetchBusinessBreakdown(days = 30): Promise<BusinessBreakdownResponse> {
   const { data } = await api.get<BusinessBreakdownResponse>(`/insights/breakdown?days=${days}`);
+  return data;
+}
+
+export async function fetchCashForecast(refresh = false): Promise<CashForecastResponse> {
+  const { data } = await api.get<CashForecastResponse>(
+    `/forecast/cash${refresh ? "?refresh=true" : ""}`,
+  );
   return data;
 }
