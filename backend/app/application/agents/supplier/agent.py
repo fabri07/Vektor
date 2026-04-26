@@ -97,9 +97,13 @@ class AgentSupplier(BaseAgent):
             "recibí mail", "recibí email", "recibí un correo", "recibí un mail",
         )
         draft_keywords = (
-            "borrador", "redact", "escribi", "enviá", "enviar mail", "enviar email",
-            "mandar correo", "mandar mail", "quiero enviar", "quiero mandar",
-            "escribir mail", "escribir email", "redactar", "email a ", "mail a ",
+            "borrador", "redact", "escribi", "enviá",
+            "enviar mail", "enviar email", "enviar un mail", "enviar un email",
+            "mandar correo", "mandar mail", "mandar un mail", "mandar un email",
+            "quiero enviar", "quiero mandar",
+            "escribir mail", "escribir email", "redactar",
+            "email a ", "mail a ", "un mail a", "un email a",
+            "podés enviar", "puedes enviar", "podés mandar", "puedes mandar",
         )
         purchase_keywords = ("compra", "compré", "compramos", "registrar compra", "factura", "proveedor cobró")
 

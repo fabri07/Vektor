@@ -12,6 +12,7 @@ Flujo:
 
 from __future__ import annotations
 
+import re
 import uuid
 from contextlib import suppress
 from typing import Any
@@ -260,7 +261,17 @@ class ChatOrchestrator:
             system=system,
             messages=[{"role": "user", "content": user_content}],
         )
-        return response.content[0].text.strip() if response.content else "Procesado."
+        raw = response.content[0].text.strip() if response.content else "Procesado."
+        return self._strip_markdown(raw)
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
+        text = re.sub(r"\*(.+?)\*", r"\1", text, flags=re.DOTALL)
+        text = re.sub(r"__(.+?)__", r"\1", text, flags=re.DOTALL)
+        text = re.sub(r"_(.+?)_", r"\1", text, flags=re.DOTALL)
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        return text
 
     def _format_agent_result(self, agent_response: AgentResponse) -> str:
         result = agent_response.result
