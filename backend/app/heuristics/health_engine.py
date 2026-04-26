@@ -23,19 +23,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.heuristics.verticals import MarginBenchmark
-from app.heuristics.verticals.deco_hogar import BENCHMARK as DECO_BENCHMARK
-from app.heuristics.verticals.kiosco import BENCHMARK as KIOSCO_BENCHMARK
-from app.heuristics.verticals.limpieza import BENCHMARK as LIMPIEZA_BENCHMARK
+from app.heuristics.verticals.loader import load_margin_benchmark
 from app.state.business_state_service import BusinessState, ProductSummary
-
-# ── Vertical registry ─────────────────────────────────────────────────────────
-
-_MARGIN_BENCHMARKS: dict[str, MarginBenchmark] = {
-    "kiosco": KIOSCO_BENCHMARK,
-    "decoracion_hogar": DECO_BENCHMARK,
-    "limpieza": LIMPIEZA_BENCHMARK,
-}
-
 # ── Risk metadata ─────────────────────────────────────────────────────────────
 
 _RISK_DESCRIPTIONS: dict[str, str] = {
@@ -228,17 +217,12 @@ def _primary_risk(scores: dict[str, int]) -> str:
 
 
 def calculate_health_score(state: BusinessState) -> HealthScoreResult:
-    """
-    Compute HealthScoreResult from a BusinessState.
+    """Compute HealthScoreResult from a BusinessState.
 
-    Raises
-    ------
-    ValueError
-        If state.vertical_code is not registered.
+    MarginBenchmark se carga dinámicamente desde el JSON del vertical,
+    con fallback a hardcode. Nunca lanza ValueError por vertical desconocido.
     """
-    benchmark = _MARGIN_BENCHMARKS.get(state.vertical_code)
-    if benchmark is None:
-        raise ValueError(f"Unknown vertical_code: {state.vertical_code!r}")
+    benchmark = load_margin_benchmark(state.vertical_code)
 
     s_cash = _score_cash(state.cash_on_hand_est, state.monthly_fixed_expenses_est)
     s_margin = _score_margin(state, benchmark)

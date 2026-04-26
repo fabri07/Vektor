@@ -13,6 +13,7 @@ import { DashboardSkeleton } from "@/features/dashboard/DashboardSkeleton";
 import { EmptyState } from "@/features/dashboard/EmptyState";
 import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
 import { DashboardSummaryCards } from "@/features/dashboard/DashboardSummaryCards";
+import { HealthAlertBanner } from "@/components/dashboard/HealthAlertBanner";
 import type { HealthScoreV2Response } from "@/types/api";
 
 function isCalculating(data: unknown): boolean {
@@ -137,6 +138,8 @@ export default function DashboardPage() {
         products={products}
         loading={salesLoading || expensesLoading || productsLoading}
       />
+
+      <HealthAlertBanner score={score} />
     </div>
   );
 }
