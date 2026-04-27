@@ -103,7 +103,9 @@ export interface BusinessBreakdownResponse {
   expenses_by_category: CategoryBreakdownItem[];
   top_suppliers: SupplierBreakdownItem[];
   low_stock_products: ProductStockItem[];
+  no_rotation_products: ProductStockItem[];
   low_stock_count: number;
+  no_rotation_count: number;
   total_products: number;
 }
 
@@ -163,6 +165,7 @@ export interface NotificationItem {
   channel: string;
   is_read: boolean;
   created_at: string;
+  action_url: string | null;
 }
 
 export interface NotificationListResponse {

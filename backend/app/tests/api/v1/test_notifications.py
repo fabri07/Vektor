@@ -1,11 +1,14 @@
 """Tests for /api/v1/notifications endpoints."""
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.jobs.generate_insight import create_health_action_notifications
 from app.persistence.models.notification import Notification
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -63,7 +66,40 @@ class TestNotificationCreatedOnMilestone:
         assert len(notifs) == 1
         assert notifs[0]["notification_type"] == "milestone"
         assert notifs[0]["is_read"] is False
+        assert notifs[0]["action_url"] is None
         assert "created_at" in notifs[0]
+
+    async def test_health_action_notification_created_for_owner(
+        self,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        sample_user: User,
+        client: AsyncClient,
+        auth_headers: dict,
+    ) -> None:
+        count = await create_health_action_notifications(
+            session=db_session,
+            tenant_id=sample_tenant.tenant_id,
+            title="Revisá tu caja",
+            action_text="Tu cobertura de caja está baja.",
+            insight_id=uuid.uuid4(),
+            action_suggestion_id=uuid.uuid4(),
+            risk_code="CASH_LOW",
+            now=datetime.now(UTC),
+        )
+        await db_session.commit()
+
+        assert count == 1
+        result = await db_session.execute(select(Notification))
+        notification = result.scalar_one()
+        assert notification.user_id == sample_user.user_id
+        assert notification.notification_type == "health_action"
+        assert notification.metadata_["action_url"] == "/dashboard?focus=health"
+
+        resp = await client.get("/api/v1/notifications", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["notifications"][0]["action_url"] == "/dashboard?focus=health"
 
 
 @pytest.mark.asyncio

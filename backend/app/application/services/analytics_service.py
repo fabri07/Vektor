@@ -42,24 +42,29 @@ class AnalyticsService:
         low_stock_pct: float,
         data_completeness: float,
     ) -> None:
-        """Inserta evento anonimizado. Fail-silent — nunca bloquea el flujo principal."""
+        """Inserta evento anonimizado. Fail-silent — nunca bloquea el flujo principal.
+
+        Usa begin_nested() (SAVEPOINT) para que un fallo aquí no contamine
+        la transacción principal del health score.
+        """
         try:
-            event = AnalyticsEvent(
-                vertical_code=vertical_code,
-                score_total=score_total,
-                score_cash=score_cash,
-                score_margin=score_margin,
-                score_stock=score_stock,
-                score_supplier=score_supplier,
-                margin_ratio=margin_ratio,
-                cash_ratio=cash_ratio,
-                supplier_count=supplier_count,
-                product_count=product_count,
-                low_stock_pct=low_stock_pct,
-                data_completeness=data_completeness,
-                created_at=datetime.now(UTC),
-            )
-            self._session.add(event)
+            async with self._session.begin_nested():
+                event = AnalyticsEvent(
+                    vertical_code=vertical_code,
+                    score_total=score_total,
+                    score_cash=score_cash,
+                    score_margin=score_margin,
+                    score_stock=score_stock,
+                    score_supplier=score_supplier,
+                    margin_ratio=margin_ratio,
+                    cash_ratio=cash_ratio,
+                    supplier_count=supplier_count,
+                    product_count=product_count,
+                    low_stock_pct=low_stock_pct,
+                    data_completeness=data_completeness,
+                    created_at=datetime.now(UTC),
+                )
+                self._session.add(event)
         except Exception:
             logger.warning("analytics.record_event_failed", exc_info=True)
 

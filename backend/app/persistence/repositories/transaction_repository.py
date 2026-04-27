@@ -164,7 +164,11 @@ class ExpenseRepository:
             {
                 "category": r.category or "OTHER",
                 "total": float(r.total or 0),
-                "pct": round(float(r.total or 0) / grand_total * 100, 1) if grand_total > 0 else 0.0,
+                "pct": (
+                    round(float(r.total or 0) / grand_total * 100, 1)
+                    if grand_total > 0
+                    else 0.0
+                ),
             }
             for r in rows
         ]
@@ -189,15 +193,35 @@ class ExpenseRepository:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
         if to_date:
             q = q.where(ExpenseEntry.transaction_date <= to_date)
-        q = q.group_by(ExpenseEntry.supplier_name).order_by(func.sum(ExpenseEntry.amount).desc()).limit(limit)
+        q = (
+            q.group_by(ExpenseEntry.supplier_name)
+            .order_by(func.sum(ExpenseEntry.amount).desc())
+            .limit(limit)
+        )
         result = await self._session.execute(q)
         rows = result.all()
-        grand_total = sum(float(r.total or 0) for r in rows)
+
+        total_q = select(func.sum(ExpenseEntry.amount)).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.supplier_name.isnot(None),
+            ExpenseEntry.supplier_name != "",
+        )
+        if from_date:
+            total_q = total_q.where(ExpenseEntry.transaction_date >= from_date)
+        if to_date:
+            total_q = total_q.where(ExpenseEntry.transaction_date <= to_date)
+        total_result = await self._session.execute(total_q)
+        grand_total = float(total_result.scalar_one() or 0)
+
         return [
             {
                 "supplier_name": r.supplier_name,
                 "total": float(r.total or 0),
-                "pct": round(float(r.total or 0) / grand_total * 100, 1) if grand_total > 0 else 0.0,
+                "pct": (
+                    round(float(r.total or 0) / grand_total * 100, 1)
+                    if grand_total > 0
+                    else 0.0
+                ),
             }
             for r in rows
         ]

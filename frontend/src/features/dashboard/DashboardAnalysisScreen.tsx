@@ -309,7 +309,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, loading }: 
   );
 }
 
-// ── Breakdown panels (gastos por categoría + stock crítico) ──────────────────
+// ── Breakdown panels ─────────────────────────────────────────────────────────
 
 const CATEGORY_LABELS: Record<string, string> = {
   RENT: "Alquiler",
@@ -331,6 +331,8 @@ function BreakdownPanels() {
   if (isLoading) {
     return (
       <>
+        <div className="h-[260px] animate-pulse rounded-2xl bg-vektor-surface" />
+        <div className="h-[260px] animate-pulse rounded-2xl bg-vektor-surface" />
         <div className="h-[260px] animate-pulse rounded-2xl bg-vektor-surface" />
         <div className="h-[260px] animate-pulse rounded-2xl bg-vektor-surface" />
       </>
@@ -373,6 +375,34 @@ function BreakdownPanels() {
         )}
       </PanelFrame>
 
+      {/* Top proveedores */}
+      <PanelFrame
+        title="Top proveedores"
+        tooltip="Proveedores con mayor peso en los egresos del período."
+      >
+        {data.top_suppliers.length === 0 ? (
+          <p className="py-8 text-center text-sm text-vk-text-muted">Sin proveedores registrados.</p>
+        ) : (
+          <ul className="space-y-3">
+            {data.top_suppliers.map((item) => (
+              <li key={item.supplier_name}>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="truncate pr-3 text-vk-text-primary">{item.supplier_name}</span>
+                  <span className="font-medium text-vk-text-primary">{formatARS(item.total)}</span>
+                </div>
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-vk-border-w">
+                  <div
+                    className="h-full rounded-full bg-[#27c7b8] transition-all"
+                    style={{ width: `${Math.min(item.pct, 100)}%` }}
+                  />
+                </div>
+                <p className="mt-0.5 text-right text-xs text-vk-text-muted">{item.pct.toFixed(1)}%</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </PanelFrame>
+
       {/* Stock crítico */}
       <PanelFrame
         title={`Stock crítico (${data.low_stock_count} / ${data.total_products})`}
@@ -403,6 +433,37 @@ function BreakdownPanels() {
                   }`}
                 >
                   {p.stock_units === 0 ? "Sin stock" : "Bajo"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </PanelFrame>
+
+      {/* Sin rotación */}
+      <PanelFrame
+        title={`Sin rotación (${data.no_rotation_count} / ${data.total_products})`}
+        tooltip="Productos activos con stock pero sin ventas registradas en el período."
+      >
+        {data.no_rotation_products.length === 0 ? (
+          <p className="py-8 text-center text-sm text-vk-text-muted">
+            No hay productos detenidos en este período.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {data.no_rotation_products.map((p) => (
+              <li
+                key={p.product_id}
+                className="flex items-center justify-between rounded-lg border border-vk-border-w px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-vk-text-primary">{p.name}</p>
+                  <p className="text-xs text-vk-text-muted">
+                    Stock actual: {p.stock_units}
+                  </p>
+                </div>
+                <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-400">
+                  Revisar
                 </span>
               </li>
             ))}

@@ -404,7 +404,7 @@ def _parse_image(content: bytes, mime: str, filename: str) -> dict[str, Any]:
         try:
             image = Image.open(io.BytesIO(content))
             raw_text = pytesseract.image_to_string(image, lang="spa+eng")
-        except UnidentifiedImageError:
+        except (UnidentifiedImageError, OSError):
             raw_text = ""
             summary["warnings"].append(
                 "No se pudo abrir la imagen (formato no soportado por Pillow)."

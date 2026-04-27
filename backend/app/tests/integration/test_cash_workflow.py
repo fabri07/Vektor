@@ -1,7 +1,6 @@
 """Integration tests for cash workflows — SQLite in-memory, no Celery/Redis."""
 
 import unittest.mock
-import uuid
 from decimal import Decimal
 
 import pytest
@@ -9,7 +8,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.transaction import SaleEntry
 from app.tests.integration.conftest import make_tenant, make_user
 
 
@@ -65,19 +64,17 @@ async def test_sale_not_in_db_before_confirm(session: AsyncSession, tenant, user
 
 
 @pytest.mark.asyncio
-async def test_cash_coverage_alert_generated(session: AsyncSession, tenant):
-    """recalculate_cash_health emite CASH_HEALTH_UPDATED (alerta de cobertura)."""
-    with unittest.mock.patch(
-        "app.application.agents.cash.agent.anthropic.AsyncAnthropic"
+async def test_sale_confirmed_emits_event(session: AsyncSession, tenant):
+    """on_confirmed_sale emite SALE_RECORDED vía EventBus."""
+    with (
+        unittest.mock.patch("app.application.agents.cash.agent.anthropic.AsyncAnthropic"),
+        unittest.mock.patch("app.application.agents.cash.agent.EventBus.emit") as mock_emit,
     ):
-        with unittest.mock.patch(
-            "app.application.agents.cash.agent.EventBus.emit"
-        ) as mock_emit:
-            from app.application.agents.cash.agent import AgentCash
+        from app.application.agents.cash.agent import AgentCash
 
-            agent = AgentCash()
-            await agent.recalculate_cash_health(str(tenant.tenant_id))
+        agent = AgentCash()
+        await agent.on_confirmed_sale("sale-123", str(tenant.tenant_id))
 
     mock_emit.assert_called_once_with(
-        "CASH_HEALTH_UPDATED", {"business_id": str(tenant.tenant_id)}
+        "SALE_RECORDED", {"sale_id": "sale-123", "business_id": str(tenant.tenant_id)}
     )

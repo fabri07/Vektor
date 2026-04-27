@@ -21,6 +21,12 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - El dashboard quedó dividido en dos pantallas: `/dashboard` (resumen con health score y KPIs) y `/dashboard/analisis` (charts + insights), con navegación compartida tipo launchpad.
 - Existe un ticker económico en la parte superior del dashboard alimentado por `GET /api/economia` y un endpoint stub `GET /api/analisis/insight` para los insights de charts.
 - Para trabajo visual con Codex está operativo el proxy local `tools/stitch-proxy/`; Stitch se usa como referencia de diseño, no como dependencia runtime de la app.
+- Los benchmarks de margen se cargan desde JSON (`heuristics/verticals/loader.py → load_margin_benchmark()`), no desde un dict hardcodeado en Python. El health engine ya no importa `deco_hogar.py`, `kiosco.py` ni `limpieza.py`. Códigos alternativos (`kiosco` → `kiosco_almacen`) se normalizan en el loader.
+- `HealthAlertBanner.tsx` muestra alertas accionables fixed bottom-right cuando `score < 75` y hay `risk_code` activo (CASH_LOW, MARGIN_LOW, STOCK_CRITICAL, SUPPLIER_DEPENDENCY). Dismissable, 800ms de delay, navega a la sección relevante al hacer clic.
+- `SmartTable<T>` (`src/components/ui/SmartTable.tsx`) envuelve cualquier tabla con selector de columnas (dropdown checkboxes) y exportación CSV con BOM UTF-8. Las columnas tienen `defaultVisible` y `csvValue`. Ventas oculta "Cantidad"; Gastos oculta "Proveedor" y "Recurrente".
+- `GET /insights/breakdown?days=N` devuelve gastos por categoría (con %), top 5 proveedores por gasto y productos con stock crítico. Alimenta dos nuevos panels en `DashboardAnalysisScreen`.
+- `GET /forecast/cash` — forecast de caja en 3 tiers según historial disponible: Tier 1 (<30 días) promedio simple 14d LOW, Tier 2 (30–90d) EWMA+día de semana 30d MEDIUM, Tier 3 (90d+) patrón semanal+tendencia 60d HIGH. Caché Redis TTL 6h; `?refresh=true` fuerza recálculo. `ForecastPanel` en `DashboardAnalysisScreen` muestra LineChart de 3 series.
+- Tabla `analytics_events` — log insert-only de métricas anonimizadas por vertical (sin `tenant_id`, sin PII). `HealthScoreService` emite un evento en cada recálculo. `AnalyticsRepository.compute_margin_benchmark()` usa `percentile_cont(p10/p25/p50/p75)` de PostgreSQL con mínimo 5 muestras (90 días) para derivar benchmarks data-driven. Cuando hay suficientes datos, `HealthScoreService` los pasa al health engine reemplazando el benchmark estático del JSON. `GET /admin/analytics/benchmarks` (SUPERADMIN) expone benchmarks vigentes con `source=data_driven|static`.
 
 ---
 
@@ -117,7 +123,7 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: `auth_service`, `cash_service`, `conversation_service`, `google_oauth_service`, `health_score_service`, `onboarding_service`, `pending_action_service`, `score_trigger_service`, `stock_service`, `supplier_service`, `business_memory_service`, `agent_memory_service` |
+| Application | `app/application/services/` | Orquestación: `auth_service`, `cash_service`, `conversation_service`, `google_oauth_service`, `health_score_service`, `onboarding_service`, `pending_action_service`, `score_trigger_service`, `stock_service`, `supplier_service`, `business_memory_service`, `agent_memory_service`, `forecast_service`, `analytics_service` |
 | Commands | `app/application/commands/` | Writes CQRS (ej. `create_tenant.py`) |
 | Queries | `app/application/queries/` | Reads CQRS (ej. `get_health_score.py`) |
 | DTOs | `app/application/dto/` | Objetos de transferencia entre capas (ej. `auth_dto.py`) |
@@ -132,7 +138,7 @@ HTTP Request
 
 ### API Routers (`app/api/v1/`)
 
-Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat + conversaciones + streaming), `integrations` (estado y lifecycle de conexiones MCP Google), `admin`.
+Todos registrados en `router.py`. Dominios principales: `auth`, `oauth` (social login), `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent` (LLM chat + conversaciones + streaming), `integrations` (estado y lifecycle de conexiones MCP Google), `forecast`, `admin`.
 
 ### Autenticación y multi-tenancy
 
@@ -183,8 +189,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
 - Los insights son **template-based**, no generados por LLM. Templates en `app/heuristics/insight_templates.py`.
 - Risk codes disponibles: `CASH_LOW`, `MARGIN_LOW`, `STOCK_CRITICAL`, `SUPPLIER_DEPENDENCY`.
-- Benchmarks de margen por vertical (inyectar como valores numéricos): kiosco 18–28%, decoracion_hogar 30–45%, limpieza 20–35%.
-- JSONs de heurística por rubro: `app/application/data/heuristics/{kiosco_almacen,limpieza,decoracion_hogar}.json`
+- Benchmarks de margen por vertical — fuente canónica: JSONs en `app/application/data/heuristics/{kiosco_almacen,limpieza,decoracion_hogar}.json`, sección `margin` (campos: `critical_below`, `warning_below`, `healthy_min`, `healthy_max`). El loader `app/heuristics/verticals/loader.py → load_margin_benchmark()` los lee; si el JSON no existe o está malformado cae a hardcoded. Cuando `AnalyticsRepository` tiene ≥5 muestras de los últimos 90 días, `HealthScoreService` usa el benchmark data-driven en lugar del estático.
 - Para agregar un nuevo tipo: añadir entrada en `TEMPLATES`, agregar rama en `render_insight()`, y emitirlo desde el Health Engine.
 
 ### Capa de Agentes LLM (`app/application/agents/`)
@@ -391,7 +396,7 @@ La confirmación humana sigue siendo obligatoria antes de insertar ventas/gastos
 |------|-----------|-------------|
 | `/chat` | `features/chat/ChatPage.tsx` | **Home principal** — chat de página completa, sin panel flotante |
 | `/dashboard` | `features/dashboard/` | Pantalla 1 del launchpad: health score hero + KPIs de caja, margen, stock y proveedores |
-| `/dashboard/analisis` | `features/dashboard/` | Pantalla 2 del launchpad: charts de línea, barras y donut con insights |
+| `/dashboard/analisis` | `features/dashboard/` | Pantalla 2 del launchpad: charts + ForecastPanel (3 series: ingresos/egresos/neto) + panel gastos por categoría + panel stock crítico |
 | `/sales` | `(protected)/sales/page.tsx` | Analytics + lista de ventas con KPIs y filtros |
 | `/expenses` | `(protected)/expenses/page.tsx` | Analytics + lista de gastos con KPIs y filtros |
 | `/products` | `(protected)/products/page.tsx` | Catálogo con KPIs de stock e inventario; acepta filtro por query param `?stock=ok|low|out` |
@@ -436,6 +441,8 @@ Estado actual:
 
 - `GET /api/economia` — agrega dólar oficial/blue/MEP/CCL + inflación/REM/tasa BCRA con `revalidate = 1800`
 - `GET /api/analisis/insight?metric=<id>&period=<id>` — stub hardcodeado para insights de charts hasta cablear la capa LLM
+- `GET /forecast/cash` — forecast de caja desde `dashboard.service.ts → fetchCashForecast()`; tipos `CashForecastResponse` / `ForecastPoint` en `api.ts`
+- `GET /insights/breakdown?days=N` — desglose de gastos por categoría y top proveedores; tipos `BusinessBreakdownResponse`, `CategoryBreakdownItem`, `SupplierBreakdownItem`, `ProductStockItem` en `api.ts`
 
 ---
 
@@ -449,6 +456,7 @@ Estado actual:
 | 4 | ✅ Completo | Pending Actions externas — lifecycle (`/pending-actions/{id}/execute`), retry con guard `is_external`, idempotency_key, integración `EXTERNAL_SYSTEMS` |
 | 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, adjuntos en chat, analytics Ventas/Gastos/Productos |
 | 6 | ✅ Completo | Integración MCP Google: AgentCalendar + AgentSync, BusinessMemoryService, AgentMemoryService, file context en chat |
+| 7 | ✅ Completo | Data moat: heurísticas desde JSON, alertas accionables, SmartTable+CSV, BSL breakdown, forecast 3-tiers, analytics_events data-driven |
 
 ### Migraciones de compatibilidad recientes
 
@@ -464,8 +472,11 @@ Estado actual:
   - agrega tabla `google_mcp_connections` (ORM: `GoogleMcpConnection`)
 - `20260424_0002_add_google_oauth_tokens.py`
   - agrega tabla `google_oauth_tokens` para persistencia de tokens OAuth del MCP server (sin modelo ORM por ahora)
+- `20260427_0001_add_analytics_events.py`
+  - agrega tabla `analytics_events` (insert-only, sin tenant_id): `vertical_code`, `margin_ratio`, `cash_ratio`, `total_score`, `liquidity_score`, `profitability_score`, `cost_control_score`, `sales_momentum_score`, `debt_coverage_score`, `event_date`
+  - modelo ORM: `AnalyticsEvent` en `app/persistence/models/analytics_event.py`
 
-Post-Sprint 5/6: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
+Post-Sprint 5/6/7: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
 
 ---
 

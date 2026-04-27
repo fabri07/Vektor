@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
-from decimal import Decimal
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -105,8 +104,12 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
     )
     expense_rows = (await db.execute(expense_q)).all()
 
-    daily_income: dict[date, float] = {r.transaction_date: float(r.total or 0) for r in income_rows}
-    daily_expense: dict[date, float] = {r.transaction_date: float(r.total or 0) for r in expense_rows}
+    daily_income: dict[date, float] = {
+        r.transaction_date: float(r.total or 0) for r in income_rows
+    }
+    daily_expense: dict[date, float] = {
+        r.transaction_date: float(r.total or 0) for r in expense_rows
+    }
 
     all_dates = sorted(set(list(daily_income.keys()) + list(daily_expense.keys())))
 
@@ -117,6 +120,8 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
         )
 
     data_days = (all_dates[-1] - all_dates[0]).days + 1
+    latest_data_date = all_dates[-1]
+    is_stale = (today - latest_data_date).days > 7
 
     if data_days < 14:
         return ForecastResult(
@@ -160,6 +165,13 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
     tier = 1 if data_days < 30 else (2 if data_days < 90 else 3)
     horizon = 14 if tier == 1 else (30 if tier == 2 else 60)
     confidence = "LOW" if tier == 1 else ("MEDIUM" if tier == 2 else "HIGH")
+    message = None
+    if is_stale:
+        confidence = "LOW"
+        message = (
+            f"El último dato disponible es del {latest_data_date.isoformat()}; "
+            "la proyección puede no reflejar la actividad actual."
+        )
 
     points: list[ForecastPoint] = []
     for i in range(1, horizon + 1):
@@ -180,6 +192,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
         data_days=data_days,
         horizon_days=horizon,
         points=points,
+        message=message,
     )
 
 

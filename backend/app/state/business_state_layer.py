@@ -1,11 +1,16 @@
 """
-Business State Layer (BSL).
+Legacy Business State Layer (BSL).
 
 Computes a normalized financial state snapshot for a tenant over a given
 time window. This state is the ONLY input to the Health Engine — no raw
 transaction data ever reaches the health score computation directly.
 
 All calculations are pure aggregations; no scores are produced here.
+
+El pipeline activo de scoring usa `business_state_service.compute_business_state`,
+que persiste snapshots, calcula fingerprints/cache y alimenta al Health Engine.
+No agregar nueva lógica de salud acá: cualquier métrica nueva debe vivir en
+business_state_service para evitar dos fuentes de verdad.
 """
 
 from dataclasses import dataclass

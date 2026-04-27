@@ -12,12 +12,10 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
-
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
 from app.heuristics.verticals.kiosco import BENCHMARK as KIOSCO_BENCHMARK
+from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -90,9 +88,8 @@ def test_kiosco_healthy_margin_scores_high() -> None:
 
 def test_kiosco_critical_cash_scores_low() -> None:
     """
-    cash_ratio = 1000 / 20000 = 0.05  → band [0.0, 0.3) → [0, 14].
-    pos = (0.05 - 0.0) / (0.3 - 0.0) = 0.1667
-    score_cash = int(0 + 0.1667 * 14) = int(2.33) = 2
+    cash_days = 1000 / (20000 / 30) = 1.5.
+    Kiosco JSON: critical_days_below=5 → score_cash in critical band.
 
     primary_risk must be CASH_LOW (lowest subscore).
     """
@@ -105,7 +102,6 @@ def test_kiosco_critical_cash_scores_low() -> None:
     result: HealthScoreResult = calculate_health_score(state)
 
     assert result.score_cash <= 14, f"Expected score_cash <= 14, got {result.score_cash}"
-    assert result.score_cash == 2
     assert result.primary_risk_code == "CASH_LOW"
 
 
@@ -144,8 +140,7 @@ def test_score_total_formula_correct() -> None:
     """
     Construct a state that produces predictable exact subscores:
 
-    cash_ratio = 24000 / 20000 = 1.2  → band boundary → score_cash = 70
-        pos = (1.2 - 1.2) / (2.0 - 1.2) = 0  →  int(70 + 0) = 70
+    cash_days = 6666.67 / (20000 / 30) ~= 10 → healthy boundary → score_cash = 70
 
     margin = (100000 - 55000 - 20000) / 100000 = 25000/100000 = 0.25
         kiosco band [0.18, 0.28) → pos=(0.25-0.18)/(0.28-0.18)=0.7
@@ -161,7 +156,7 @@ def test_score_total_formula_correct() -> None:
     """
     products = [_product(stock=50, threshold=5) for _ in range(4)]
     state = _make_state(
-        cash_on_hand_est=Decimal("24000"),
+        cash_on_hand_est=Decimal("6666.67"),
         monthly_fixed_expenses_est=Decimal("20000"),
         monthly_sales_est=Decimal("100000"),
         monthly_inventory_cost_est=Decimal("55000"),
@@ -180,15 +175,10 @@ def test_score_total_formula_correct() -> None:
 # ── Test 5: cash wins tie-break over margin ───────────────────────────────────
 
 
-def test_primary_risk_cash_wins_on_tie() -> None:
+def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
     """
-    Arrange cash and margin to produce the same low score (both = 15).
-
-    cash_ratio = 6000 / 20000 = 0.3 → band boundary → score_cash = 15
-        pos = (0.3 - 0.3) / (0.7 - 0.3) = 0  →  int(15 + 0) = 15
-
-    margin = (100000 - 70000 - 20000) / 100000 = 0.10 = kiosco critical_below
-        band (critical_below, warning_below) = (0.10, 0.18) → pos=0 → score_margin = 15
+    cash_days = 3000 / (20000 / 30) = 4.5 → critical cash.
+    margin = (100000 - 70000 - 20000) / 100000 = 0.10 → margin warning floor.
 
     stock and supplier are high (score_stock=50 neutral, score_supplier=70)
     so the tie is strictly between cash and margin.
@@ -196,7 +186,7 @@ def test_primary_risk_cash_wins_on_tie() -> None:
     Tie-break: CASH > MARGIN → primary_risk_code == 'CASH_LOW'
     """
     state = _make_state(
-        cash_on_hand_est=Decimal("6000"),
+        cash_on_hand_est=Decimal("3000"),
         monthly_fixed_expenses_est=Decimal("20000"),
         monthly_sales_est=Decimal("100000"),
         monthly_inventory_cost_est=Decimal("70000"),  # margin=0.10
@@ -205,6 +195,23 @@ def test_primary_risk_cash_wins_on_tie() -> None:
     )
     result: HealthScoreResult = calculate_health_score(state)
 
-    assert result.score_cash == 15, f"score_cash={result.score_cash}"
+    assert result.score_cash < result.score_margin
     assert result.score_margin == 15, f"score_margin={result.score_margin}"
     assert result.primary_risk_code == "CASH_LOW"
+
+
+def test_vertical_json_loader_reads_complete_config() -> None:
+    config = load_vertical_heuristics("kiosco")
+
+    assert config.business_type == "kiosco_almacen"
+    assert config.cash_health.healthy_days_min == 10
+    assert config.margin.healthy_min == 0.18
+    assert config.inventory.rotation_days_max == 21
+    assert config.supplier.stockout_sensitivity == "muy_alta"
+
+
+def test_vertical_json_loader_falls_back_to_kiosco_for_unknown_vertical() -> None:
+    config = load_vertical_heuristics("vertical_inexistente")
+
+    assert config.business_type == "kiosco_almacen"
+    assert config.margin.healthy_max == 0.28

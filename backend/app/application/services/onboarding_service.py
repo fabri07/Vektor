@@ -19,6 +19,12 @@ from app.schemas.onboarding import (
 
 logger = get_logger(__name__)
 
+_HEURISTIC_PROFILE_BY_VERTICAL = {
+    "kiosco": "kiosco_almacen:v1",
+    "decoracion_hogar": "decoracion_hogar:v1",
+    "limpieza": "limpieza:v1",
+}
+
 
 class AlreadyOnboardedError(Exception):
     """Raised when a tenant tries to submit onboarding more than once."""
@@ -86,6 +92,8 @@ class OnboardingService:
         bp.cash_on_hand_estimate_ars = body.cash_on_hand_ars
         bp.product_count_estimate = body.product_count_estimate
         bp.supplier_count_estimate = body.supplier_count_estimate
+        bp.heuristic_profile_version = _HEURISTIC_PROFILE_BY_VERTICAL[body.vertical_code]
+        bp.heuristics_version = "v1"
         await self._repo.save(bp)
 
         # Step 5-6: calculate completeness and confidence

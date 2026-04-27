@@ -5,6 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
 import { EconomicTicker } from "@/components/dashboard/EconomicTicker";
+import { ActionNotificationToast } from "@/features/notifications/ActionNotificationToast";
 import { useAuthStore } from "@/stores/authStore";
 
 export default function ProtectedLayout({
@@ -59,6 +60,7 @@ export default function ProtectedLayout({
           </main>
         )}
       </div>
+      <ActionNotificationToast />
     </div>
   );
 }

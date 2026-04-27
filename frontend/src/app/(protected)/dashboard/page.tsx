@@ -1,8 +1,8 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
-import { useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useRef } from "react";
 import { fetchCurrentInsight, fetchLatestScore } from "@/services/dashboard.service";
 import { expensesService } from "@/services/expenses.service";
 import { fetchMomentumProfile } from "@/services/momentum.service";
@@ -28,7 +28,9 @@ function isCalculating(data: unknown): boolean {
 export default function DashboardPage() {
   const calcRetries = useRef(0);
   const touchStart = useRef<number | null>(null);
+  const healthRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const {
     data: scoreData,
@@ -78,6 +80,14 @@ export default function DashboardPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  useEffect(() => {
+    if (searchParams.get("focus") === "health") {
+      window.setTimeout(() => {
+        healthRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 150);
+    }
+  }, [searchParams]);
+
   const loading = scoreLoading || insightLoading;
   const calculating = !scoreLoading && scoreData != null && isCalculating(scoreData);
   const calculatingTimeout = calculating && calcRetries.current > 1;
@@ -124,13 +134,18 @@ export default function DashboardPage() {
     >
       <DashboardLaunchpadNav active="dashboard" />
 
-      <HealthScoreCard
-        score={score}
-        insight={insightData?.insight}
-        action={insightData?.action_suggestion}
-        delta={delta}
-        isBestScore={isBestScore}
-      />
+      <div
+        ref={healthRef}
+        className={searchParams.get("focus") === "health" ? "rounded-2xl ring-2 ring-vk-blue/40" : ""}
+      >
+        <HealthScoreCard
+          score={score}
+          insight={insightData?.insight}
+          action={insightData?.action_suggestion}
+          delta={delta}
+          isBestScore={isBestScore}
+        />
+      </div>
 
       <DashboardSummaryCards
         sales={sales}

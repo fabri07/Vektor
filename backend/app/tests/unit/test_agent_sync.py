@@ -12,10 +12,13 @@ def _req(message: str) -> AgentRequest:
     return AgentRequest(user_id="u1", business_id="t1", message=message)
 
 
+_FAKE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/edit"
+
+
 @pytest.mark.asyncio
 async def test_export_sales_to_sheets():
     agent = AgentSync(gateway=object())  # type: ignore[arg-type]
-    resp = await agent.process(_req("exportar ventas a Google Sheets"))
+    resp = await agent.process(_req(f"exportar ventas a Google Sheets {_FAKE_SHEETS_URL}"))
     assert resp.status == "requires_approval"
     assert resp.result["action_type"] == ActionType.SYNC_TO_GOOGLE
     assert resp.result["sync_type"] == "export_sales_to_sheets"
@@ -33,7 +36,7 @@ async def test_export_report_to_docs():
 @pytest.mark.asyncio
 async def test_import_from_sheets():
     agent = AgentSync(gateway=object())  # type: ignore[arg-type]
-    resp = await agent.process(_req("importar desde sheets los productos"))
+    resp = await agent.process(_req(f"importar desde sheets los productos {_FAKE_SHEETS_URL}"))
     assert resp.result["sync_type"] == "import_from_sheets"
     assert resp.result["mcp_tool"] == "google.sheets.read_range"
 
@@ -57,7 +60,13 @@ async def test_requires_google_auth_without_gateway():
 async def test_import_from_drive_reads_matching_files():
     mock_svc = AsyncMock()
     mock_svc.list_drive_files.return_value = [
-        {"id": "file-1", "name": "ventas-marzo.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+        {
+            "id": "file-1",
+            "name": "ventas-marzo.xlsx",
+            "mime_type": (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        },
     ]
     mock_svc.read_drive_file.return_value = {
         "content_preview": "Ventas totales marzo: 125000. Margen promedio: 28%.",

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   markNotificationRead,
@@ -27,6 +28,7 @@ function timeAgo(isoDate: string): string {
 export function NotificationPanel({ notifications, onClose }: NotificationPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
+  const router = useRouter();
 
   const markRead = useMutation({
     mutationFn: markNotificationRead,
@@ -50,6 +52,16 @@ export function NotificationPanel({ notifications, onClose }: NotificationPanelP
   }, [onClose]);
 
   const unread = notifications.filter((n) => !n.is_read);
+
+  function openNotification(notification: NotificationItem) {
+    if (!notification.is_read) {
+      markRead.mutate(notification.id);
+    }
+    if (notification.action_url) {
+      onClose();
+      router.push(notification.action_url);
+    }
+  }
 
   return (
     <div
@@ -80,9 +92,18 @@ export function NotificationPanel({ notifications, onClose }: NotificationPanelP
           notifications.map((n) => (
             <div
               key={n.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => openNotification(n)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  openNotification(n);
+                }
+              }}
               className={`flex gap-3 border-b border-vk-border-dark/60 px-4 py-3 transition-colors ${
                 n.is_read ? "opacity-50" : "hover:bg-vk-surface-2/50"
-              }`}
+              } w-full text-left`}
             >
               <div
                 className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
@@ -98,7 +119,10 @@ export function NotificationPanel({ notifications, onClose }: NotificationPanelP
               </div>
               {!n.is_read && (
                 <button
-                  onClick={() => markRead.mutate(n.id)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    markRead.mutate(n.id);
+                  }}
                   disabled={markRead.isPending}
                   className="shrink-0 self-start mt-1 text-xs text-vk-text-muted hover:text-vk-text-light transition-colors"
                   aria-label="Marcar como leída"

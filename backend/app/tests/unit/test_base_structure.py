@@ -1,19 +1,17 @@
-import pytest
-
 from app.application.agents.ceo.agent import INTENT_CATALOG
-from app.application.agents.shared.schemas import ActionType, AgentRequest
-from app.application.agents.shared.risk_engine import RiskEngine, RiskLevel
-from app.application.agents.shared.context_builder import ContextBuilder, CONTEXT_BUDGETS
+from app.application.agents.shared.context_builder import CONTEXT_BUDGETS, ContextBuilder
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.agents.shared.risk_engine import RiskEngine, RiskLevel
+from app.application.agents.shared.schemas import ActionType
 
 
 def test_all_agents_importable():
-    from app.application.agents.ceo.agent import AgentCEO
     from app.application.agents.cash.agent import AgentCash
-    from app.application.agents.stock.agent import AgentStock
-    from app.application.agents.supplier.agent import AgentSupplier
+    from app.application.agents.ceo.agent import AgentCEO
     from app.application.agents.health.agent import AgentHealth
     from app.application.agents.helper.agent import AgentHelper
+    from app.application.agents.stock.agent import AgentStock
+    from app.application.agents.supplier.agent import AgentSupplier
 
     for cls in (AgentCEO, AgentCash, AgentStock, AgentSupplier, AgentHealth, AgentHelper):
         assert cls.agent_name is not None
@@ -61,7 +59,7 @@ def test_action_type_enum_complete():
 
 
 def test_intent_catalog_complete():
-    assert len(INTENT_CATALOG) == 15
+    assert len(INTENT_CATALOG) == 16
 
 
 def test_wrap_user_input():

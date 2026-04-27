@@ -9,8 +9,7 @@ Uses:
 
 from __future__ import annotations
 
-import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -19,9 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
-from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.transaction import SaleEntry
 from app.state.business_state_service import compute_business_state
-
 
 # ── Fake Redis ────────────────────────────────────────────────────────────────
 
@@ -231,3 +229,41 @@ async def test_cache_invalidates_when_new_sale_added(
     assert state1.snapshot_id != state2.snapshot_id
     # Real sales now present → monthly_sales_est = 5000 (not the estimate)
     assert state2.monthly_sales_est == Decimal("5000.00")
+
+
+@pytest.mark.asyncio
+async def test_product_summaries_include_30_day_rotation_units(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    product = Product(
+        tenant_id=sample_tenant.tenant_id,
+        name="Yerba",
+        sale_price_ars=Decimal("1200.00"),
+        stock_units=12,
+        low_stock_threshold_units=3,
+        is_active=True,
+    )
+    db_session.add(product)
+    await db_session.flush()
+    db_session.add(
+        SaleEntry(
+            tenant_id=sample_tenant.tenant_id,
+            product_id=product.id,
+            amount=Decimal("2400.00"),
+            quantity=2,
+            transaction_date=datetime.now(UTC).date(),
+            payment_method="cash",
+        )
+    )
+    await db_session.commit()
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),
+    )
+
+    assert len(state.products) == 1
+    assert state.products[0].units_sold_30d == 2

@@ -112,14 +112,14 @@ async def test_s1_kiosco_saludable(session: AsyncSession, fake_redis: FakeRedis)
 # ventas:    200 000 ARS/semana → 800 000 ARS/mes
 # mercadería: 160 000 ARS/mes
 # gastos fijos: 90 000 ARS/mes
-# caja:       40 000 ARS          ← cash_ratio = 40k/90k = 0.444 → CRÍTICO
+# caja:       10 000 ARS          ��� cash_days = 10k/(90k/30) = 3.33 → CRÍTICO
 # proveedores: 3
 #
-# cash_ratio = 0.444 → band [0.3, 0.7) → score_cash = int(15 + 0.36*24) = 23
+# cash_days = 3.33 → band [0, 5) → score_cash = int(0 + 0.667*14) = 9
 # margin     = (800k - 160k - 90k) / 800k = 68.75% → 100
 # supplier   = 70   stock = 50
-# total      = round(23*0.30 + 100*0.30 + 50*0.25 + 70*0.15) = round(59.9) = 60
-# primary_risk = cash(23) → CASH_LOW ✓   score_cash = 23 < 30 ✓
+# total      = round(9*0.30 + 100*0.30 + 50*0.25 + 70*0.15) = round(55.7) = 56
+# primary_risk = cash(9) → CASH_LOW ✓   score_cash = 9 < 30 ✓
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -134,7 +134,7 @@ async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedi
         monthly_sales=Decimal("800000"),
         monthly_inventory=Decimal("160000"),
         monthly_fixed=Decimal("90000"),
-        cash_on_hand=Decimal("40000"),
+        cash_on_hand=Decimal("10000"),
         supplier_count=3,
     )
 

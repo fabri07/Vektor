@@ -69,6 +69,14 @@ async def test_overstock_decoracion():
     assert result is False
 
 
+def _mock_intent_response(intent: str) -> MagicMock:
+    content_block = MagicMock()
+    content_block.text = json.dumps({"intent": intent})
+    response = MagicMock()
+    response.content = [content_block]
+    return response
+
+
 @pytest.mark.asyncio
 async def test_stock_loss_is_high_risk():
     """Mensaje con 'merma' → risk_level=HIGH, requires_approval=True."""
@@ -84,7 +92,10 @@ async def test_stock_loss_is_high_risk():
     ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(
-            return_value=_mock_llm_response(mock_entities)
+            side_effect=[
+                _mock_intent_response("STOCK_LOSS"),
+                _mock_llm_response(mock_entities),
+            ]
         )
         mock_cls.return_value = mock_client
 
@@ -92,7 +103,10 @@ async def test_stock_loss_is_high_risk():
 
         agent = AgentStock()
         agent.client = mock_client
-        result = await agent.process(_make_request("merma de 3 unidades de leche"))
+        with unittest.mock.patch.object(
+            agent, "_resolve_product_id", return_value=("prod-1", [])
+        ):
+            result = await agent.process(_make_request("merma de 3 unidades de leche"))
 
     assert result.risk_level == RiskLevel.HIGH
     assert result.requires_approval is True
@@ -114,7 +128,10 @@ async def test_stock_adjustment_is_medium_risk():
     ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(
-            return_value=_mock_llm_response(mock_entities)
+            side_effect=[
+                _mock_intent_response("STOCK_ADJUSTMENT"),
+                _mock_llm_response(mock_entities),
+            ]
         )
         mock_cls.return_value = mock_client
 
@@ -122,7 +139,10 @@ async def test_stock_adjustment_is_medium_risk():
 
         agent = AgentStock()
         agent.client = mock_client
-        result = await agent.process(_make_request("ajuste de inventario gaseosa +10"))
+        with unittest.mock.patch.object(
+            agent, "_resolve_product_id", return_value=("prod-1", [])
+        ):
+            result = await agent.process(_make_request("ajuste de inventario gaseosa +10"))
 
     assert result.risk_level == RiskLevel.MEDIUM
     assert result.requires_approval is True
@@ -144,7 +164,10 @@ async def test_extraction_returns_negative_qty_for_loss():
     ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(
-            return_value=_mock_llm_response(mock_entities)
+            side_effect=[
+                _mock_intent_response("STOCK_LOSS"),
+                _mock_llm_response(mock_entities),
+            ]
         )
         mock_cls.return_value = mock_client
 
@@ -152,6 +175,9 @@ async def test_extraction_returns_negative_qty_for_loss():
 
         agent = AgentStock()
         agent.client = mock_client
-        result = await agent.process(_make_request("merma de 5 unidades de yogur"))
+        with unittest.mock.patch.object(
+            agent, "_resolve_product_id", return_value=("prod-1", [])
+        ):
+            result = await agent.process(_make_request("merma de 5 unidades de yogur"))
 
     assert result.result["structured_data"]["qty_change"] == -5

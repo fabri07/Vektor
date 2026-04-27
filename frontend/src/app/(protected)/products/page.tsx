@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { StatCard } from "@/components/ui/StatCard";
-import { Table } from "@/components/ui/Table";
+import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { productsService, type ProductResponse } from "@/services/products.service";
@@ -49,41 +49,62 @@ const COLUMNS = [
   {
     key: "name",
     header: "Producto",
+    hideable: true,
     render: (v: unknown) => (
       <span className="font-medium text-vk-text-primary">{String(v)}</span>
     ),
+    csvValue: (v: unknown) => String(v ?? ""),
   },
   {
     key: "sku",
     header: "SKU",
+    hideable: true,
+    defaultVisible: false,
     render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
     key: "category",
     header: "Categoría",
+    hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
     key: "stock_units",
     header: "Stock",
+    hideable: true,
     render: (v: unknown) => String(v),
+    csvValue: (v: unknown) => String(v ?? ""),
   },
   {
     key: "sale_price_ars",
     header: "Precio",
+    hideable: true,
     render: (v: unknown) => formatARS(Number(v)),
+    csvValue: (v: unknown) => String(Number(v ?? 0)),
   },
   {
     key: "margin_pct",
     header: "Margen",
+    hideable: true,
+    defaultVisible: false,
     render: (v: unknown) =>
       v != null ? `${Number(v).toFixed(1)}%` : "—",
+    csvValue: (v: unknown) => (v != null ? `${Number(v).toFixed(1)}%` : ""),
   },
   {
     key: "_status",
     header: "Estado",
+    hideable: true,
     render: (_: unknown, row: Record<string, unknown>) =>
       getStockBadge(row as unknown as ProductResponse),
+    csvValue: (_: unknown, row: Record<string, unknown>) => {
+      const product = row as unknown as ProductResponse;
+      if (product.stock_units === 0) return "Sin stock";
+      if (product.is_low_stock) return "Stock bajo";
+      return "OK";
+    },
   },
 ];
 
@@ -192,7 +213,11 @@ export default function ProductsPage() {
           }
         />
       ) : (
-        <Table columns={COLUMNS} data={tableData as Record<string, unknown>[]} />
+        <SmartTable
+          columns={COLUMNS}
+          data={tableData as Record<string, unknown>[]}
+          exportFilename="vektor-productos"
+        />
       )}
     </PageWrapper>
   );

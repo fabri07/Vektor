@@ -3,10 +3,11 @@
 import json
 import uuid
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 import anthropic
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
@@ -24,18 +25,18 @@ from app.integrations.anthropic_client import get_anthropic_async_client
 
 
 class StockAdjustEntity(BaseModel):
-    product_id: Optional[str] = None
-    sku: Optional[str] = None
-    product_name: Optional[str] = None
+    product_id: str | None = None
+    sku: str | None = None
+    product_name: str | None = None
     qty_change: int
     reason: str
-    unit_cost: Optional[Decimal] = None
+    unit_cost: Decimal | None = None
 
 
 class AgentStock(BaseAgent):
     agent_name = "agent_stock"
 
-    def __init__(self, db: Optional[AsyncSession] = None) -> None:
+    def __init__(self, db: AsyncSession | None = None) -> None:
         self._client: Any | None = None
         self._db = db
 
@@ -63,7 +64,7 @@ class AgentStock(BaseAgent):
         self,
         sale_id: str,
         tenant_id: str,
-        db: Optional[AsyncSession] = None,
+        db: AsyncSession | None = None,
     ) -> None:
         from app.application.services import stock_service  # noqa: PLC0415
         from app.observability.logger import get_logger  # noqa: PLC0415
@@ -101,10 +102,20 @@ class AgentStock(BaseAgent):
             db=effective_db,
         )
 
-    async def detect_stockout(self, product_id: str, current_qty: int, min_threshold: int = 0) -> bool:
+    async def detect_stockout(
+        self,
+        product_id: str,
+        current_qty: int,
+        min_threshold: int = 0,
+    ) -> bool:
         return current_qty <= min_threshold
 
-    async def detect_overstock(self, product_id: str, rotation_days: float, business_type: str) -> bool:
+    async def detect_overstock(
+        self,
+        product_id: str,
+        rotation_days: float,
+        business_type: str,
+    ) -> bool:
         config = HeuristicEngine.get(business_type)
         return config.is_overstock(rotation_days)
 
@@ -133,7 +144,10 @@ class AgentStock(BaseAgent):
             return intent
         except Exception:
             msg = message.lower()
-            if any(w in msg for w in ["merma", "roto", "perdí", "vencido", "se rompió", "caducó", "dañado"]):
+            if any(
+                w in msg
+                for w in ["merma", "roto", "perdí", "vencido", "se rompió", "caducó", "dañado"]
+            ):
                 return "STOCK_LOSS"
             if any(w in msg for w in ["ajuste", "conteo", "inventario", "corrección"]):
                 return "STOCK_ADJUSTMENT"
@@ -272,7 +286,13 @@ class AgentStock(BaseAgent):
         try:
             return json.loads(raw)
         except (json.JSONDecodeError, ValueError):
-            return {"product_name": None, "sku": None, "qty_change": 0, "reason": "ajuste", "confidence": "LOW"}
+            return {
+                "product_name": None,
+                "sku": None,
+                "qty_change": 0,
+                "reason": "ajuste",
+                "confidence": "LOW",
+            }
 
     async def _handle_query(self, request: AgentRequest) -> AgentResponse:
         return AgentResponse(

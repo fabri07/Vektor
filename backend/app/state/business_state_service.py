@@ -38,7 +38,7 @@ from app.heuristics.decoracion import DecoracionHogarHeuristicRuleSet
 from app.heuristics.kiosco import KioscoHeuristicRuleSet
 from app.heuristics.limpieza import LimpiezaHeuristicRuleSet
 from app.observability.logger import get_logger
-from app.persistence.models.business import BusinessProfile, BusinessSnapshot
+from app.persistence.models.business import BusinessSnapshot
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
@@ -47,7 +47,11 @@ logger = get_logger(__name__)
 
 # ── Heuristic registry ─────────────────────────────────────────────────────────
 
-_RULESET_INSTANCES: dict[str, KioscoHeuristicRuleSet | DecoracionHogarHeuristicRuleSet | LimpiezaHeuristicRuleSet] = {
+type RuleSetInstance = (
+    KioscoHeuristicRuleSet | DecoracionHogarHeuristicRuleSet | LimpiezaHeuristicRuleSet
+)
+
+_RULESET_INSTANCES: dict[str, RuleSetInstance] = {
     "kiosco": KioscoHeuristicRuleSet(),
     "decoracion_hogar": DecoracionHogarHeuristicRuleSet(),
     "limpieza": LimpiezaHeuristicRuleSet(),
@@ -66,6 +70,7 @@ class ProductSummary:
     stock_units: int
     low_stock_threshold_units: int
     sale_price_ars: Decimal
+    units_sold_30d: int | None = None
 
 
 @dataclass
@@ -131,6 +136,7 @@ def _serialize_state(state: BusinessState) -> str:
             "stock_units": p.stock_units,
             "low_stock_threshold_units": p.low_stock_threshold_units,
             "sale_price_ars": str(p.sale_price_ars),
+            "units_sold_30d": p.units_sold_30d,
         }
         for p in state.products
     ]
@@ -151,6 +157,7 @@ def _deserialize_state(raw: str) -> BusinessState:
             stock_units=p["stock_units"],
             low_stock_threshold_units=p.get("low_stock_threshold_units", 0),
             sale_price_ars=Decimal(p["sale_price_ars"]),
+            units_sold_30d=p.get("units_sold_30d"),
         )
         for p in d["products"]
     ]
@@ -320,6 +327,22 @@ async def compute_business_state(
     active_products: list[Product] = list(product_result.scalars().all())
     real_product_count = len(active_products)
 
+    sold_units_by_product: dict[UUID, int] = {}
+    if active_products:
+        sold_units_result = await session.execute(
+            select(SaleEntry.product_id, func.coalesce(func.sum(SaleEntry.quantity), 0)).where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.transaction_date >= window_start,
+                SaleEntry.transaction_date <= window_end,
+                SaleEntry.product_id.isnot(None),
+            ).group_by(SaleEntry.product_id)
+        )
+        sold_units_by_product = {
+            product_id: int(total or 0)
+            for product_id, total in sold_units_result.all()
+            if product_id is not None
+        }
+
     # ── 5. Cache fingerprint check ───────────────────────────────────────────
     fingerprint = _make_fingerprint(
         sale_count=sale_count,
@@ -419,6 +442,7 @@ async def compute_business_state(
             stock_units=p.stock_units,
             low_stock_threshold_units=p.low_stock_threshold_units,
             sale_price_ars=p.sale_price_ars,
+            units_sold_30d=sold_units_by_product.get(p.id, 0),
         )
         for p in active_products
     ]

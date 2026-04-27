@@ -1,6 +1,6 @@
 """Notification endpoints."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -28,6 +28,7 @@ class NotificationItem(BaseModel):
     channel: str
     is_read: bool
     created_at: datetime
+    action_url: str | None = None
 
 
 class NotificationListResponse(BaseModel):
@@ -41,6 +42,21 @@ class CreateNotificationRequest(BaseModel):
     body: str = Field(min_length=1, max_length=2000)
     notification_type: str = Field(pattern=r"^[a-zA-Z0-9_]{1,50}$")
     channel: str = Field(default="in_app", pattern=r"^(in_app|email|sms)$")
+    action_url: str | None = Field(default=None, max_length=500)
+
+
+def _to_response(notification: Notification) -> NotificationItem:
+    metadata = notification.metadata_ or {}
+    return NotificationItem(
+        id=notification.id,
+        title=notification.title,
+        body=notification.body,
+        notification_type=notification.notification_type,
+        channel=notification.channel,
+        is_read=notification.is_read,
+        created_at=notification.created_at,
+        action_url=metadata.get("action_url"),
+    )
 
 
 @router.post(
@@ -63,6 +79,7 @@ async def create_notification(
         notification_type=payload.notification_type,
         channel=payload.channel,
         is_read=False,
+        metadata_={"action_url": payload.action_url} if payload.action_url else None,
     )
     session.add(notification)
     await session.flush()
@@ -101,7 +118,7 @@ async def list_notifications(
     unread_count: int = unread_result.scalar_one()
 
     return NotificationListResponse(
-        notifications=[NotificationItem.model_validate(n) for n in notifications],
+        notifications=[_to_response(n) for n in notifications],
         unread_count=unread_count,
     )
 
@@ -130,6 +147,7 @@ async def mark_notification_read(
             status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found."
         )
     notification.is_read = True
+    notification.read_at = datetime.now(UTC)
     session.add(notification)
     await session.flush()
     return MessageResponse(message="Notification marked as read.")
@@ -151,5 +169,6 @@ async def mark_all_read(
             Notification.is_read.is_(False),
         )
         .values(is_read=True)
+        .values(read_at=datetime.now(UTC))
     )
     return MessageResponse(message="All notifications marked as read.")

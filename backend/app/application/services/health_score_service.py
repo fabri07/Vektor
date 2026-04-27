@@ -192,7 +192,7 @@ class HealthScoreService:
         result = calculate_health_score(state, benchmark=data_benchmark)
         dimensions = _build_dimensions(state, result)
 
-        # ── 3. Persist snapshot ───────────────────────────────────────────────
+        # ── 4. Persist snapshot ───────────────────────────────────────────────
         snapshot = HealthScoreSnapshot(
             tenant_id=tenant_id,
             total_score=Decimal(result.score_total),
@@ -214,7 +214,7 @@ class HealthScoreService:
         )
         await self._score_repo.save(snapshot)
 
-        # ── 4. Analytics event anonimizado (data moat) ───────────────────────
+        # ── 5. Analytics event anonimizado (data moat) ───────────────────────
         margin_ratio = 0.0
         if state.monthly_sales_est > 0:
             margin_ratio = float(
@@ -244,7 +244,7 @@ class HealthScoreService:
             data_completeness=state.data_completeness_score,
         )
 
-        # ── 5. Audit log ──────────────────────────────────────────────────────
+        # ── 6. Audit log ──────────────────────────────────────────────────────
         audit = DecisionAuditLog(
             tenant_id=tenant_id,
             decision_type="health_score_recalculated",

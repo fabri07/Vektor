@@ -18,7 +18,6 @@ import asyncio
 import time
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 from app.jobs.celery_app import celery_app
@@ -29,23 +28,71 @@ logger = get_logger(__name__)
 HEURISTIC_VERSION = "v1"
 
 
+async def create_health_action_notifications(
+    session: Any,
+    tenant_id: uuid.UUID,
+    title: str,
+    action_text: str,
+    insight_id: uuid.UUID,
+    action_suggestion_id: uuid.UUID,
+    risk_code: str,
+    now: datetime,
+) -> int:
+    """Create in-app health action notifications for active tenant owners."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.notification import Notification  # noqa: PLC0415
+    from app.persistence.models.user import User  # noqa: PLC0415
+
+    owner_result = await session.execute(
+        select(User).where(
+            User.tenant_id == tenant_id,
+            User.role_code == "OWNER",
+            User.is_active.is_(True),
+        )
+    )
+    owner_users = list(owner_result.scalars().all())
+    for user in owner_users:
+        session.add(
+            Notification(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                user_id=user.user_id,
+                title=title,
+                body=action_text,
+                notification_type="health_action",
+                channel="in_app",
+                is_read=False,
+                metadata_={
+                    "action_url": "/dashboard?focus=health",
+                    "insight_id": str(insight_id),
+                    "action_suggestion_id": str(action_suggestion_id),
+                    "risk_code": risk_code,
+                },
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return len(owner_users)
+
+
 # ── Main async implementation ─────────────────────────────────────────────────
 
 async def _run(tenant_id_str: str) -> None:
+    from redis.asyncio import Redis  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
-    from sqlalchemy import select  # noqa: PLC0415
-    from redis.asyncio import Redis  # noqa: PLC0415
 
     from app.config.settings import get_settings  # noqa: PLC0415
     from app.heuristics.insight_templates import (  # noqa: PLC0415
         render_insight,
         severity_from_score,
     )
-    from app.state.business_state_service import compute_business_state  # noqa: PLC0415
     from app.persistence.models.audit import DecisionAuditLog  # noqa: PLC0415
     from app.persistence.models.business import ActionSuggestion, Insight  # noqa: PLC0415
     from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
+    from app.state.business_state_service import compute_business_state  # noqa: PLC0415
 
     s = get_settings()
     tenant_id = uuid.UUID(tenant_id_str)
@@ -118,6 +165,17 @@ async def _run(tenant_id_str: str) -> None:
             session.add(action)
             await session.flush()
 
+            notification_count = await create_health_action_notifications(
+                session=session,
+                tenant_id=tenant_id,
+                title=title,
+                action_text=action_text,
+                insight_id=insight.id,
+                action_suggestion_id=action.id,
+                risk_code=risk_code,
+                now=now,
+            )
+
             # ── 6. Persist DecisionAuditLog ───────────────────────────────────
             audit = DecisionAuditLog(
                 id=uuid.uuid4(),
@@ -134,6 +192,7 @@ async def _run(tenant_id_str: str) -> None:
                     "action_text": action_text,
                     "heuristic_version": HEURISTIC_VERSION,
                     "source_snapshot_id": str(snapshot.id),
+                    "notification_count": notification_count,
                 },
                 triggered_by="celery:generate_insight",
                 actor_user_id=None,
@@ -188,4 +247,4 @@ def generate_insight(self: Any, tenant_id: str) -> None:
             attempt=self.request.retries,
             error=str(exc),
         )
-        raise self.retry(exc=exc)
+        raise self.retry(exc=exc) from exc

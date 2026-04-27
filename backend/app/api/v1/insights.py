@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant
@@ -13,8 +13,8 @@ from app.persistence.db.session import get_db_session
 from app.persistence.models.business import ActionSuggestion, Insight
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.models.transaction import SaleEntry
 from app.persistence.repositories.transaction_repository import ExpenseRepository
-from app.schemas.common import MessageResponse
 
 router = APIRouter()
 
@@ -191,7 +191,9 @@ class BusinessBreakdownResponse(BaseModel):
     expenses_by_category: list[CategoryBreakdownItem]
     top_suppliers: list[SupplierBreakdownItem]
     low_stock_products: list[ProductStockItem]
+    no_rotation_products: list[ProductStockItem]
     low_stock_count: int
+    no_rotation_count: int
     total_products: int
 
 
@@ -232,6 +234,21 @@ async def get_business_breakdown(
         and p.low_stock_threshold_units is not None
         and p.stock_units <= p.low_stock_threshold_units
     ]
+    sold_products_result = await session.execute(
+        select(SaleEntry.product_id).where(
+            SaleEntry.tenant_id == tenant.tenant_id,
+            SaleEntry.transaction_date >= from_date,
+            SaleEntry.transaction_date <= today,
+            SaleEntry.product_id.isnot(None),
+        ).distinct()
+    )
+    sold_product_ids = set(sold_products_result.scalars().all())
+    no_rotation = [
+        p
+        for p in all_products
+        if p.id not in sold_product_ids
+        and (p.stock_units or 0) > (p.low_stock_threshold_units or 0)
+    ]
 
     return BusinessBreakdownResponse(
         period_days=days,
@@ -249,6 +266,17 @@ async def get_business_breakdown(
             )
             for p in low_stock[:10]
         ],
+        no_rotation_products=[
+            ProductStockItem(
+                product_id=str(p.id),
+                name=p.name,
+                stock_units=p.stock_units or 0,
+                low_stock_threshold_units=p.low_stock_threshold_units or 0,
+                sale_price_ars=float(p.sale_price_ars or 0),
+            )
+            for p in no_rotation[:10]
+        ],
         low_stock_count=len(low_stock),
+        no_rotation_count=len(no_rotation),
         total_products=total_products,
     )

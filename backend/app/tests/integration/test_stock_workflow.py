@@ -107,6 +107,9 @@ async def test_stock_loss_creates_audit_entry(session: AsyncSession, tenant, pro
 @pytest.mark.asyncio
 async def test_bulk_adjustment_requires_confirmation(tenant, product):
     """AgentStock.process con 'ajuste' → status=requires_approval."""
+    import json
+    from unittest.mock import AsyncMock
+
     mock_entities = {
         "product_name": "Gaseosa",
         "sku": None,
@@ -115,18 +118,23 @@ async def test_bulk_adjustment_requires_confirmation(tenant, product):
         "confidence": "HIGH",
     }
 
-    content_block = MagicMock()
-    content_block.text = __import__("json").dumps(mock_entities)
-    mock_response = MagicMock()
-    mock_response.content = [content_block]
+    def _mock_response(text: str) -> MagicMock:
+        block = MagicMock()
+        block.text = text
+        resp = MagicMock()
+        resp.content = [block]
+        return resp
 
     with unittest.mock.patch(
         "app.application.agents.stock.agent.anthropic.AsyncAnthropic"
     ) as mock_cls:
-        from unittest.mock import AsyncMock
-
         mock_client = MagicMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        mock_client.messages.create = AsyncMock(
+            side_effect=[
+                _mock_response(json.dumps({"intent": "STOCK_ADJUSTMENT"})),
+                _mock_response(json.dumps(mock_entities)),
+            ]
+        )
         mock_cls.return_value = mock_client
 
         from app.application.agents.stock.agent import AgentStock
@@ -139,7 +147,10 @@ async def test_bulk_adjustment_requires_confirmation(tenant, product):
             business_id=str(tenant.tenant_id),
             message="ajuste de 100 unidades de gaseosa",
         )
-        result = await agent.process(request)
+        with unittest.mock.patch.object(
+            agent, "_resolve_product_id", return_value=(str(product.id), [])
+        ):
+            result = await agent.process(request)
 
     assert result.status == "requires_approval"
     assert result.result["action_type"] == "UPDATE_STOCK"

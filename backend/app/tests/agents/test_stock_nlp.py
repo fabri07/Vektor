@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -60,7 +60,8 @@ async def test_stock_loss_intent_classified_correctly():
     agent = AgentStock()
     agent.client = mock_client
 
-    result = await agent.process(_make_request("se cayó una caja de vino"))
+    with patch.object(agent, "_resolve_product_id", return_value=("prod-1", [])):
+        result = await agent.process(_make_request("se cayó una caja de vino"))
 
     assert result.risk_level == RiskLevel.HIGH
     assert result.requires_approval is True
@@ -92,7 +93,8 @@ async def test_stock_adjustment_intent_classified_correctly():
     agent = AgentStock()
     agent.client = mock_client
 
-    result = await agent.process(_make_request("hice un conteo y hay 5 gaseosas más"))
+    with patch.object(agent, "_resolve_product_id", return_value=("prod-1", [])):
+        result = await agent.process(_make_request("hice un conteo y hay 5 gaseosas más"))
 
     assert result.risk_level == RiskLevel.MEDIUM
     assert result.requires_approval is True
@@ -151,7 +153,8 @@ async def test_stock_loss_fallback_keywords():
     agent = AgentStock()
     agent.client = mock_client
 
-    result = await agent.process(_make_request("tengo merma de 3 unidades de leche"))
+    with patch.object(agent, "_resolve_product_id", return_value=("prod-1", [])):
+        result = await agent.process(_make_request("tengo merma de 3 unidades de leche"))
 
     assert result.risk_level == RiskLevel.HIGH
     assert result.requires_approval is True
