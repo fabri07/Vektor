@@ -216,13 +216,17 @@ def _primary_risk(scores: dict[str, int]) -> str:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
-def calculate_health_score(state: BusinessState) -> HealthScoreResult:
+def calculate_health_score(
+    state: BusinessState,
+    benchmark: MarginBenchmark | None = None,
+) -> HealthScoreResult:
     """Compute HealthScoreResult from a BusinessState.
 
-    MarginBenchmark se carga dinámicamente desde el JSON del vertical,
-    con fallback a hardcode. Nunca lanza ValueError por vertical desconocido.
+    Si se pasa `benchmark` explícitamente (ej. data-driven desde analytics_events),
+    se usa ese. De lo contrario carga desde el JSON del vertical con fallback a hardcode.
     """
-    benchmark = load_margin_benchmark(state.vertical_code)
+    if benchmark is None:
+        benchmark = load_margin_benchmark(state.vertical_code)
 
     s_cash = _score_cash(state.cash_on_hand_est, state.monthly_fixed_expenses_est)
     s_margin = _score_margin(state, benchmark)

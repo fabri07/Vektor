@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.analytics_service import AnalyticsService
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -183,8 +184,12 @@ class HealthScoreService:
         # ── 1. Business State Layer ───────────────────────────────────────────
         state = await compute_business_state(tenant_id, self._session, redis)
 
-        # ── 2. Heuristic Engine (F1-01) ───────────────────────────────────────
-        result = calculate_health_score(state)
+        # ── 2. Benchmark data-driven (si hay suficientes muestras en analytics_events)
+        analytics_svc = AnalyticsService(self._session)
+        data_benchmark = await analytics_svc.get_data_driven_benchmark(state.vertical_code)
+
+        # ── 3. Heuristic Engine ───────────────────────────────────────────────
+        result = calculate_health_score(state, benchmark=data_benchmark)
         dimensions = _build_dimensions(state, result)
 
         # ── 3. Persist snapshot ───────────────────────────────────────────────
@@ -209,7 +214,37 @@ class HealthScoreService:
         )
         await self._score_repo.save(snapshot)
 
-        # ── 4. Audit log ──────────────────────────────────────────────────────
+        # ── 4. Analytics event anonimizado (data moat) ───────────────────────
+        margin_ratio = 0.0
+        if state.monthly_sales_est > 0:
+            margin_ratio = float(
+                (state.monthly_sales_est - state.monthly_inventory_cost_est - state.monthly_fixed_expenses_est)
+                / state.monthly_sales_est
+            )
+        cash_ratio = 0.0
+        if state.monthly_fixed_expenses_est > 0:
+            cash_ratio = float(state.cash_on_hand_est / state.monthly_fixed_expenses_est)
+        low_stock_pct = 0.0
+        if state.products:
+            below = sum(1 for p in state.products if p.stock_units <= p.low_stock_threshold_units)
+            low_stock_pct = below / len(state.products)
+
+        await analytics_svc.record_score_event(
+            vertical_code=state.vertical_code,
+            score_total=result.score_total,
+            score_cash=result.score_cash,
+            score_margin=result.score_margin,
+            score_stock=result.score_stock,
+            score_supplier=result.score_supplier,
+            margin_ratio=margin_ratio,
+            cash_ratio=cash_ratio,
+            supplier_count=state.supplier_count,
+            product_count=state.product_count,
+            low_stock_pct=low_stock_pct,
+            data_completeness=state.data_completeness_score,
+        )
+
+        # ── 5. Audit log ──────────────────────────────────────────────────────
         audit = DecisionAuditLog(
             tenant_id=tenant_id,
             decision_type="health_score_recalculated",

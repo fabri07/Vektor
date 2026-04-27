@@ -1,8 +1,8 @@
 """
-SUPERADMIN metrics endpoint.
+SUPERADMIN metrics y analytics endpoints.
 
-GET /api/v1/admin/metrics
-  Returns platform-wide aggregate stats. Requires role SUPERADMIN.
+GET /api/v1/admin/metrics           — estadísticas de la plataforma
+GET /api/v1/admin/analytics/benchmarks — benchmarks por vertical (data moat)
 """
 
 from datetime import datetime, timedelta, timezone
@@ -12,12 +12,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import require_role
+from app.application.services.analytics_service import AnalyticsService
 from app.persistence.db.session import get_db_session
 from app.persistence.models.activity import UserActivityEvent
 from app.persistence.models.business import BusinessProfile, BusinessSnapshot
 from app.persistence.models.score import HealthScoreSnapshot
 from app.persistence.models.tenant import Tenant
-from app.schemas.admin import AdminMetricsResponse, JobStats
+from app.schemas.admin import (
+    AdminMetricsResponse,
+    AnalyticsBenchmarksResponse,
+    BenchmarkThresholds,
+    JobStats,
+    VerticalBenchmarkItem,
+)
 
 router = APIRouter()
 
@@ -117,3 +124,46 @@ async def get_admin_metrics(
         jobs_last_24h=JobStats(success=job_success, failed=job_failed),
         tenants_by_vertical=tenants_by_vertical,
     )
+
+
+@router.get(
+    "/analytics/benchmarks",
+    response_model=AnalyticsBenchmarksResponse,
+    summary="Benchmarks por vertical calculados desde datos reales (SUPERADMIN)",
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+)
+async def get_analytics_benchmarks(
+    session: AsyncSession = Depends(get_db_session),
+) -> AnalyticsBenchmarksResponse:
+    """
+    Devuelve los benchmarks de margen vigentes por vertical.
+
+    - Si hay >= 5 muestras en analytics_events (últimos 90 días): benchmark data-driven
+      calculado con percentiles p10/p25/p50/p75 del margin_ratio real.
+    - Si no hay suficientes datos: benchmark estático del JSON del vertical.
+
+    Permite a Véktor monitorear cuándo los benchmarks estáticos quedan desactualizados.
+    """
+    svc = AnalyticsService(session)
+    overview = await svc.get_benchmarks_overview()
+
+    items = [
+        VerticalBenchmarkItem(
+            vertical_code=item["vertical_code"],
+            sample_count=item["sample_count"],  # type: ignore[arg-type]
+            avg_score=item.get("avg_score"),  # type: ignore[arg-type]
+            avg_margin_ratio=item.get("avg_margin_ratio"),  # type: ignore[arg-type]
+            p50_margin_ratio=item.get("p50_margin_ratio"),  # type: ignore[arg-type]
+            avg_data_completeness=item.get("avg_data_completeness"),  # type: ignore[arg-type]
+            benchmark_source=item["benchmark_source"],  # type: ignore[arg-type]
+            benchmark=BenchmarkThresholds(
+                critical_below=item["benchmark"]["critical_below"],  # type: ignore[index]
+                warning_below=item["benchmark"]["warning_below"],  # type: ignore[index]
+                healthy_min=item["benchmark"]["healthy_min"],  # type: ignore[index]
+                healthy_max=item["benchmark"]["healthy_max"],  # type: ignore[index]
+                source=item["benchmark_source"],  # type: ignore[arg-type]
+            ),
+        )
+        for item in overview
+    ]
+    return AnalyticsBenchmarksResponse(verticals=items)
