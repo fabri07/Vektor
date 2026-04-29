@@ -488,6 +488,7 @@ async def chat(
     )
 
     # ── Audit log (insert-only) ───────────────────────────────────────────────
+    _usage = agent_response.usage
     audit = DecisionAuditLog(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -501,10 +502,16 @@ async def chat(
             "requires_approval": agent_response.requires_approval,
             "pending_action_id": agent_response.pending_action_id
             or (action_meta or {}).get("action_id"),
+            "ceo_target_agent": agent_response.result.get("target_agent"),
+            "sub_agent_name": agent_response.agent_name,
+            "token_calls": [c.model_dump() for c in _usage.calls] if _usage else [],
         },
         triggered_by="agent:chat",
         actor_user_id=user_id,
         context={"message_length": len(body.message)},
+        tokens_input=_usage.total_input if _usage else 0,
+        tokens_output=_usage.total_output if _usage else 0,
+        tokens_total=_usage.total if _usage else 0,
         created_at=datetime.now(UTC),
     )
     db.add(audit)
@@ -589,6 +596,7 @@ async def chat_stream(
             )
 
             # 3. Audit log (insert-only)
+            _usage_s = agent_response.usage
             audit = DecisionAuditLog(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
@@ -602,10 +610,16 @@ async def chat_stream(
                     "requires_approval": agent_response.requires_approval,
                     "pending_action_id": agent_response.pending_action_id
                     or (action_meta or {}).get("action_id"),
+                    "ceo_target_agent": agent_response.result.get("target_agent"),
+                    "sub_agent_name": agent_response.agent_name,
+                    "token_calls": [c.model_dump() for c in _usage_s.calls] if _usage_s else [],
                 },
                 triggered_by="agent:chat:stream",
                 actor_user_id=user_id,
                 context={"message_length": len(body.message)},
+                tokens_input=_usage_s.total_input if _usage_s else 0,
+                tokens_output=_usage_s.total_output if _usage_s else 0,
+                tokens_total=_usage_s.total if _usage_s else 0,
                 created_at=datetime.now(UTC),
             )
             db.add(audit)

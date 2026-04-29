@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,9 @@ class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
         nullable=True,
     )
     context: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
+    tokens_input: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    tokens_output: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    tokens_total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     def __repr__(self) -> str:

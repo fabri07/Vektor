@@ -23,6 +23,8 @@ from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
     Confidence,
+    LLMCall,
+    UsageSummary,
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
@@ -107,8 +109,8 @@ class AgentCEO(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
-    async def classify_intent(self, message: str) -> dict:
-        """Clasifica el intent vía LLM Haiku. Retorna {intent, entities}."""
+    async def classify_intent(self, message: str) -> tuple[dict, LLMCall]:
+        """Clasifica el intent vía LLM Sonnet. Retorna ({intent, entities}, LLMCall)."""
         system = (
             "Sos el clasificador de intenciones de Véktor, un sistema de gestión financiera para PyMEs argentinas.\n"
             f"Intenciones válidas: {', '.join(INTENT_CATALOG)}\n\n"
@@ -132,19 +134,25 @@ class AgentCEO(BaseAgent):
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(message)}],
         )
+        llm_call = LLMCall(
+            source="ceo",
+            model="claude-sonnet-4-5",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
         text = (response.content[0].text if response.content else "").strip()
         try:
             parsed = json.loads(text)
         except (json.JSONDecodeError, IndexError, ValueError):
-            return {"intent": "ask_platform_help", "entities": {}}
+            return {"intent": "ask_platform_help", "entities": {}}, llm_call
 
         if parsed.get("intent") not in INTENT_CATALOG:
             parsed["intent"] = "ask_platform_help"
-        return parsed
+        return parsed, llm_call
 
     async def process(self, request: AgentRequest) -> AgentResponse:
         # 1. Clasificar intent vía LLM
-        classified = await self.classify_intent(request.message)
+        classified, ceo_call = await self.classify_intent(request.message)
         intent: str = classified.get("intent", "ask_platform_help")
         entities: dict = classified.get("entities", {})
 
@@ -171,4 +179,5 @@ class AgentCEO(BaseAgent):
                 "entities": entities,
                 "action_type": str(action_type),
             },
+            usage=UsageSummary(calls=[ceo_call]),
         )

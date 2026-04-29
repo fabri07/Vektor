@@ -4,6 +4,7 @@ import type {
   CurrentInsightResponse,
   BusinessBreakdownResponse,
   CashForecastResponse,
+  HealthScoreV2Response,
 } from "@/types/api";
 
 export async function fetchLatestScore(): Promise<LatestScoreResponse> {
@@ -29,5 +30,10 @@ export async function fetchCashForecast(refresh = false): Promise<CashForecastRe
   const { data } = await api.get<CashForecastResponse>(
     `/forecast/cash${refresh ? "?refresh=true" : ""}`,
   );
+  return data;
+}
+
+export async function fetchHealthScoreHistory(): Promise<HealthScoreV2Response[]> {
+  const { data } = await api.get<HealthScoreV2Response[]>("/health-scores/history/v2");
   return data;
 }

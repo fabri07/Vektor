@@ -56,6 +56,29 @@ class AgentRequest(BaseModel):
     # NOTA: NO hay agent_target — AgentCEO lo asigna internamente
 
 
+class LLMCall(BaseModel):
+    source: str        # "ceo" | "agent_cash" | "agent_health" | "orchestrator" | etc.
+    model: str         # "claude-sonnet-4-5" | "claude-haiku-4-5-20251001" | etc.
+    input_tokens: int
+    output_tokens: int
+
+
+class UsageSummary(BaseModel):
+    calls: list[LLMCall] = []
+
+    @property
+    def total_input(self) -> int:
+        return sum(c.input_tokens for c in self.calls)
+
+    @property
+    def total_output(self) -> int:
+        return sum(c.output_tokens for c in self.calls)
+
+    @property
+    def total(self) -> int:
+        return self.total_input + self.total_output
+
+
 class AgentResponse(BaseModel):
     request_id: str
     agent_name: str
@@ -67,3 +90,4 @@ class AgentResponse(BaseModel):
     pending_action_id: Optional[str] = None
     question: Optional[str] = None  # usado cuando status=requires_clarification
     message: Optional[str] = None   # respuesta conversacional rica generada por ChatOrchestrator
+    usage: Optional[UsageSummary] = None  # tokens consumidos en este turno

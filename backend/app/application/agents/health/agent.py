@@ -34,7 +34,9 @@ from app.application.agents.shared.heuristic_engine import HeuristicConfig, Heur
 from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
+    LLMCall,
     RiskLevel,
+    UsageSummary,
 )
 from app.integrations.anthropic_client import get_anthropic_async_client
 
@@ -170,7 +172,13 @@ class AgentHealth(BaseAgent):
             system=system,
             messages=[{"role": "user", "content": data}],
         )
-        return response.content[0].text.strip()
+        llm_call = LLMCall(
+            source="agent_health",
+            model="claude-haiku-4-5",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
+        return response.content[0].text.strip(), llm_call
 
     async def process(self, request: AgentRequest) -> AgentResponse:
         business_name = "el negocio"
@@ -192,7 +200,7 @@ class AgentHealth(BaseAgent):
                 business_type = row.vertical_code
 
         health = await self.calculate_health(request.business_id, business_type=business_type)
-        narrative = await self.generate_narrative(health, business_name)
+        narrative, health_call = await self.generate_narrative(health, business_name)
 
         # Emitir evento de actualización
         EventBus.emit(
@@ -213,6 +221,7 @@ class AgentHealth(BaseAgent):
                 "alerts": health.alerts,
                 "suggested_next_actions": self._suggest_actions(health),
             },
+            usage=UsageSummary(calls=[health_call]),
         )
 
     def _suggest_actions(self, health: HealthScore) -> list[str]:

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.product_resolver import resolve_product_id
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, RiskLevel
+from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, LLMCall, RiskLevel, UsageSummary
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
@@ -70,7 +70,8 @@ class AgentSupplier(BaseAgent):
 
     async def _handle_create_draft(self, request: AgentRequest) -> AgentResponse:
         mode = "mcp" if self._gateway else "informational"
-        draft = await self._generate_email_draft(request.message)
+        draft, draft_call = await self._generate_email_draft(request.message)
+        usage = UsageSummary(calls=[draft_call]) if draft_call else None
 
         if not draft.get("has_enough_info"):
             return AgentResponse(
@@ -87,6 +88,7 @@ class AgentSupplier(BaseAgent):
                     "mode": mode,
                     "payload": {"message": request.message},
                 },
+                usage=usage,
             )
 
         to_name = draft.get("to_name") or "proveedor"
@@ -116,6 +118,7 @@ class AgentSupplier(BaseAgent):
                     "mode": mode,
                 },
             },
+            usage=usage,
         )
 
     def _handle_classify_inbox(self, request: AgentRequest) -> AgentResponse:
@@ -139,7 +142,7 @@ class AgentSupplier(BaseAgent):
             },
         )
 
-    async def _generate_email_draft(self, message: str) -> dict:
+    async def _generate_email_draft(self, message: str) -> tuple[dict, LLMCall | None]:
         system = (
             "Sos el asistente de Véktor. Analizá el mensaje del usuario y generá un email "
             "formal en español rioplatense para un proveedor.\n\n"
@@ -163,14 +166,21 @@ class AgentSupplier(BaseAgent):
                 system=system,
                 messages=[{"role": "user", "content": wrap_user_input(message)}],
             )
+            llm_call = LLMCall(
+                source="agent_supplier",
+                model="claude-haiku-4-5-20251001",
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+            )
             raw = response.content[0].text.strip() if response.content else ""
-            return json.loads(raw)
+            return json.loads(raw), llm_call
         except Exception as exc:
             logger.warning("agent_supplier.draft_generation_failed", error=str(exc))
-            return {"has_enough_info": False}
+            return {"has_enough_info": False}, None
 
     async def _handle_record_purchase(self, request: AgentRequest) -> AgentResponse:
-        entities = await self._extract_purchase_entities(request.message)
+        entities, purchase_call = await self._extract_purchase_entities(request.message)
+        usage = UsageSummary(calls=[purchase_call]) if purchase_call else None
 
         if "error" in entities:
             return AgentResponse(
@@ -181,6 +191,7 @@ class AgentSupplier(BaseAgent):
                 confidence=Confidence.LOW,
                 question=entities["error"],
                 result={"summary": "Faltan datos para registrar la compra."},
+                usage=usage,
             )
 
         product_id: str | None = None
@@ -213,6 +224,7 @@ class AgentSupplier(BaseAgent):
                 confidence=Confidence.LOW,
                 question=question,
                 result={"summary": "Producto no identificado en el catálogo."},
+                usage=usage,
             )
 
         amount = entities.get("amount", "0")
@@ -253,9 +265,10 @@ class AgentSupplier(BaseAgent):
                 "summary": summary,
                 "payload": payload,
             },
+            usage=usage,
         )
 
-    async def _extract_purchase_entities(self, message: str) -> dict:
+    async def _extract_purchase_entities(self, message: str) -> tuple[dict, LLMCall | None]:
         from datetime import date  # noqa: PLC0415
         today = date.today().isoformat()
         system = (
@@ -280,11 +293,17 @@ class AgentSupplier(BaseAgent):
                 system=system,
                 messages=[{"role": "user", "content": wrap_user_input(message)}],
             )
+            llm_call = LLMCall(
+                source="agent_supplier",
+                model="claude-haiku-4-5-20251001",
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+            )
             raw = response.content[0].text.strip() if response.content else ""
-            return json.loads(raw)
+            return json.loads(raw), llm_call
         except Exception as exc:
             logger.warning("agent_supplier.purchase_extraction_failed", error=str(exc))
-            return {"error": "No pude interpretar la compra. Indicame el monto y el producto."}
+            return {"error": "No pude interpretar la compra. Indicame el monto y el producto."}, None
 
     def _classify_intent(self, message: str) -> str:
         inbox_keywords = (

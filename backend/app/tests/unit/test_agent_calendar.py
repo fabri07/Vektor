@@ -23,14 +23,17 @@ async def test_query_returns_requires_approval():
 @pytest.mark.asyncio
 async def test_create_event_with_title_requires_approval():
     agent = AgentCalendar(gateway=object())  # type: ignore[arg-type]
-    with patch.object(agent, "_extract_event_data", return_value={
-        "has_enough_info": True,
-        "summary": "Reunión con el contador",
-        "start_datetime": "2026-04-28T10:00:00",
-        "end_datetime": "2026-04-28T11:00:00",
-        "attendees": [],
-        "description": "",
-    }):
+    with patch.object(agent, "_extract_event_data", return_value=(
+        {
+            "has_enough_info": True,
+            "summary": "Reunión con el contador",
+            "start_datetime": "2026-04-28T10:00:00",
+            "end_datetime": "2026-04-28T11:00:00",
+            "attendees": [],
+            "description": "",
+        },
+        None,
+    )):
         resp = await agent.process(_req("crear reunión con el contador el lunes"))
     assert resp.status == "requires_approval"
     assert resp.result["action_type"] == ActionType.CREATE_CALENDAR_EVENT
@@ -41,7 +44,7 @@ async def test_create_event_with_title_requires_approval():
 @pytest.mark.asyncio
 async def test_missing_event_data_returns_clarification():
     agent = AgentCalendar(gateway=object())  # type: ignore[arg-type]
-    with patch.object(agent, "_extract_event_data", return_value={"has_enough_info": False}):
+    with patch.object(agent, "_extract_event_data", return_value=({"has_enough_info": False}, None)):
         resp = await agent.process(_req("necesito agendar algo para mañana"))
     assert resp.status == "requires_clarification"
     assert resp.question is not None

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 
 from app.application.agents.base import BaseAgent
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, RiskLevel
+from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, LLMCall, RiskLevel, UsageSummary
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
@@ -69,7 +69,8 @@ class AgentCalendar(BaseAgent):
                 },
             )
 
-        extracted = await self._extract_event_data(request.message)
+        extracted, cal_call = await self._extract_event_data(request.message)
+        usage = UsageSummary(calls=[cal_call]) if cal_call else None
 
         if not extracted.get("has_enough_info"):
             return AgentResponse(
@@ -86,6 +87,7 @@ class AgentCalendar(BaseAgent):
                     "¿Podés darme esos datos?"
                 ),
                 result={"summary": "Faltan datos del evento de calendario."},
+                usage=usage,
             )
 
         summary_text = extracted.get("summary", "Evento")
@@ -116,6 +118,7 @@ class AgentCalendar(BaseAgent):
                     "raw_message": request.message,
                 },
             },
+            usage=usage,
         )
 
     def _is_query(self, message: str) -> bool:
@@ -125,7 +128,7 @@ class AgentCalendar(BaseAgent):
         )
         return any(kw in message for kw in query_keywords)
 
-    async def _extract_event_data(self, message: str) -> dict:
+    async def _extract_event_data(self, message: str) -> tuple[dict, LLMCall | None]:
         """Usa LLM para extraer datos del evento desde lenguaje natural."""
         from datetime import date  # noqa: PLC0415
         today = date.today().isoformat()
@@ -153,8 +156,14 @@ class AgentCalendar(BaseAgent):
                 system=system,
                 messages=[{"role": "user", "content": wrap_user_input(message)}],
             )
+            llm_call = LLMCall(
+                source="agent_calendar",
+                model="claude-haiku-4-5-20251001",
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+            )
             raw = response.content[0].text.strip() if response.content else ""
-            return json.loads(raw)
+            return json.loads(raw), llm_call
         except Exception as exc:
             logger.warning("agent_calendar.extract_failed", error=str(exc))
-            return {"has_enough_info": False}
+            return {"has_enough_info": False}, None

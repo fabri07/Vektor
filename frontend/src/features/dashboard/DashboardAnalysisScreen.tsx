@@ -2,8 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchBusinessBreakdown, fetchCashForecast } from "@/services/dashboard.service";
-import type { BusinessBreakdownResponse, CashForecastResponse } from "@/types/api";
+import { fetchBusinessBreakdown, fetchCashForecast, fetchCurrentInsight } from "@/services/dashboard.service";
+import type { BusinessBreakdownResponse, CashForecastResponse, HealthScoreV2Response } from "@/types/api";
 import {
   Bar,
   BarChart,
@@ -40,6 +40,7 @@ interface Props {
   sales: SaleEntryResponse[];
   expenses: ExpenseEntryResponse[];
   products: ProductResponse[];
+  scoreHistory?: HealthScoreV2Response[];
   loading?: boolean;
 }
 
@@ -52,24 +53,24 @@ const CHART_COLORS = [
   "#8be1d8",
 ];
 
-function InsightBlock({ metric, period }: { metric: string; period: string }) {
-  const { data, isLoading } = useQuery<{ insight: string }>({
-    queryKey: ["analysis-insight", metric, period],
-    queryFn: async () => {
-      const response = await fetch(`/api/analisis/insight?metric=${metric}&period=${period}`);
-      if (!response.ok) throw new Error("No se pudo cargar el insight.");
-      return (await response.json()) as { insight: string };
-    },
-    staleTime: 60 * 60 * 1000,
+function InsightBlock() {
+  const { data, isLoading } = useQuery({
+    queryKey: ["current-insight"],
+    queryFn: fetchCurrentInsight,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
   });
 
   if (isLoading) {
     return <div className="mt-4 h-16 animate-pulse rounded-xl bg-vektor-surface" />;
   }
 
+  const text = data?.insight?.description;
+  if (!text) return null;
+
   return (
     <div className="mt-4 rounded-xl border border-vektor-border bg-vektor-surface p-4">
-      <p className="text-sm leading-7 text-vektor-body">{data?.insight}</p>
+      <p className="text-sm leading-7 text-vektor-body">{text}</p>
     </div>
   );
 }
@@ -112,15 +113,15 @@ function ChartSkeleton() {
   return <div className="h-[320px] animate-pulse rounded-2xl bg-vektor-surface" />;
 }
 
-export function DashboardAnalysisScreen({ sales, expenses, products, loading }: Props) {
+export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistory, loading }: Props) {
   const [lineMetric, setLineMetric] = useState("caja");
   const [granularity, setGranularity] = useState<"daily" | "weekly" | "monthly">("daily");
   const [compareBy, setCompareBy] = useState("categoria");
   const [distribution, setDistribution] = useState("ventasCategoria");
 
   const lineData = useMemo(
-    () => buildLineSeries(lineMetric as "caja" | "ventas" | "margen" | "stock", sales, expenses, products, granularity),
-    [lineMetric, sales, expenses, products, granularity],
+    () => buildLineSeries(lineMetric as "caja" | "ventas" | "margen" | "stock", sales, expenses, products, granularity, scoreHistory),
+    [lineMetric, sales, expenses, products, granularity, scoreHistory],
   );
   const comparisonData = useMemo(
     () => buildComparisonSeries(compareBy as "categoria" | "proveedor" | "metodo" | "dia", sales, expenses, products),
@@ -182,19 +183,37 @@ export function DashboardAnalysisScreen({ sales, expenses, products, loading }: 
                 <LineChart data={lineData}>
                   <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                   <XAxis dataKey="label" stroke="#90a2bc" tickLine={false} axisLine={false} />
-                  <YAxis stroke="#90a2bc" tickLine={false} axisLine={false} tickFormatter={(value) => formatARSCompact(Number(value))} />
+                  <YAxis
+                    stroke="#90a2bc"
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={(value) => {
+                      if (lineMetric === "margen") return `${Number(value).toFixed(1)}%`;
+                      if (lineMetric === "stock") return `${Math.round(Number(value))}`;
+                      return formatARSCompact(Number(value));
+                    }}
+                  />
                   <RechartsTooltip
                     contentStyle={{ background: "#162236", border: "1px solid #243246", borderRadius: 16 }}
-                    formatter={(value, _name, item) => [
-                      `${formatARS(Number(value ?? 0))} (${formatSignedPercent(Number((item as { payload?: { change?: number } })?.payload?.change ?? 0))})`,
-                      "Valor",
-                    ]}
+                    formatter={(value, _name, item) => {
+                      if (lineMetric === "margen") return [`${Number(value ?? 0).toFixed(1)}%`, "Margen"];
+                      if (lineMetric === "stock") return [`${Math.round(Number(value ?? 0))} pts`, "Score de stock"];
+                      return [
+                        `${formatARS(Number(value ?? 0))} (${formatSignedPercent(Number((item as { payload?: { change?: number } })?.payload?.change ?? 0))})`,
+                        "Valor",
+                      ];
+                    }}
                   />
-                  <Line type="monotone" dataKey="value" stroke="#3a86ff" strokeWidth={3} dot={{ r: 3 }} />
+                  <Line type="monotone" dataKey="value" stroke="#3a86ff" strokeWidth={3} dot={{ r: 3 }} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
-            <InsightBlock metric={lineMetric} period={granularity} />
+            {lineMetric === "stock" && (
+              <p className="mt-2 text-xs text-vektor-muted">
+                Escala 0–100 · score de salud del inventario calculado por el motor financiero.
+              </p>
+            )}
+            <InsightBlock />
           </>
         )}
       </PanelFrame>
@@ -232,7 +251,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, loading }: 
                 </BarChart>
               </ResponsiveContainer>
             </div>
-            <InsightBlock metric={compareBy} period="comparacion" />
+            <InsightBlock />
           </>
         )}
       </PanelFrame>
@@ -298,7 +317,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, loading }: 
                 })}
               </div>
             </div>
-            <InsightBlock metric={distribution} period="distribucion" />
+            <InsightBlock />
           </>
         )}
       </PanelFrame>

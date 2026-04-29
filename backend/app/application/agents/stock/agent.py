@@ -18,7 +18,9 @@ from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
     Confidence,
+    LLMCall,
     RiskLevel,
+    UsageSummary,
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
@@ -122,7 +124,7 @@ class AgentStock(BaseAgent):
     async def generate_replenishment_ranking(self, tenant_id: str) -> list[dict]:
         return []
 
-    async def _classify_stock_intent(self, message: str) -> str:
+    async def _classify_stock_intent(self, message: str) -> tuple[str, LLMCall | None]:
         system = (
             "Clasificá el mensaje en exactamente uno de estos intents de inventario:\n"
             "STOCK_LOSS: merma, pérdida, rotura, vencimiento, daño, desaparición de producto.\n"
@@ -137,34 +139,48 @@ class AgentStock(BaseAgent):
                 system=system,
                 messages=[{"role": "user", "content": wrap_user_input(message)}],
             )
+            classify_call = LLMCall(
+                source="agent_stock",
+                model="claude-haiku-4-5",
+                input_tokens=resp.usage.input_tokens,
+                output_tokens=resp.usage.output_tokens,
+            )
             result = json.loads(resp.content[0].text.strip())
             intent = result.get("intent", "STOCK_QUERY")
             if intent not in ("STOCK_LOSS", "STOCK_ADJUSTMENT", "STOCK_QUERY"):
-                return "STOCK_QUERY"
-            return intent
+                return "STOCK_QUERY", classify_call
+            return intent, classify_call
         except Exception:
             msg = message.lower()
             if any(
                 w in msg
                 for w in ["merma", "roto", "perdí", "vencido", "se rompió", "caducó", "dañado"]
             ):
-                return "STOCK_LOSS"
+                return "STOCK_LOSS", None
             if any(w in msg for w in ["ajuste", "conteo", "inventario", "corrección"]):
-                return "STOCK_ADJUSTMENT"
-            return "STOCK_QUERY"
+                return "STOCK_ADJUSTMENT", None
+            return "STOCK_QUERY", None
 
     async def process(self, request: AgentRequest) -> AgentResponse:
-        intent = await self._classify_stock_intent(request.message)
+        intent, classify_call = await self._classify_stock_intent(request.message)
+        all_calls: list[LLMCall] = [classify_call] if classify_call else []
 
         if intent == "STOCK_LOSS":
-            return await self._handle_stock_loss(request)
+            response, extract_call = await self._handle_stock_loss(request)
+            if extract_call:
+                all_calls.append(extract_call)
         elif intent == "STOCK_ADJUSTMENT":
-            return await self._handle_stock_adjustment(request)
+            response, extract_call = await self._handle_stock_adjustment(request)
+            if extract_call:
+                all_calls.append(extract_call)
         else:
-            return await self._handle_query(request)
+            response = await self._handle_query(request)
 
-    async def _handle_stock_loss(self, request: AgentRequest) -> AgentResponse:
-        entities = await self._extract_stock_entities(request.message, "merma o pérdida")
+        response.usage = UsageSummary(calls=all_calls) if all_calls else None
+        return response
+
+    async def _handle_stock_loss(self, request: AgentRequest) -> tuple[AgentResponse, LLMCall | None]:
+        entities, extract_call = await self._extract_stock_entities(request.message, "merma o pérdida")
 
         product_id, alternatives = await self._resolve_product_id(
             entities.get("product_name"),
@@ -175,7 +191,7 @@ class AgentStock(BaseAgent):
         if product_id is None:
             return self._product_not_found_response(
                 request, entities.get("product_name"), alternatives, ActionType.REGISTER_STOCK_LOSS
-            )
+            ), extract_call
 
         entities["product_id"] = product_id
         summary = (
@@ -195,10 +211,10 @@ class AgentStock(BaseAgent):
                 "structured_data": entities,
                 "alerts": ["Acción de alto riesgo: se registrará en el audit log con detalle."],
             },
-        )
+        ), extract_call
 
-    async def _handle_stock_adjustment(self, request: AgentRequest) -> AgentResponse:
-        entities = await self._extract_stock_entities(request.message, "ajuste de inventario")
+    async def _handle_stock_adjustment(self, request: AgentRequest) -> tuple[AgentResponse, LLMCall | None]:
+        entities, extract_call = await self._extract_stock_entities(request.message, "ajuste de inventario")
 
         product_id, alternatives = await self._resolve_product_id(
             entities.get("product_name"),
@@ -209,7 +225,7 @@ class AgentStock(BaseAgent):
         if product_id is None:
             return self._product_not_found_response(
                 request, entities.get("product_name"), alternatives, ActionType.UPDATE_STOCK
-            )
+            ), extract_call
 
         entities["product_id"] = product_id
         qty = entities.get("qty_change") or 0
@@ -228,7 +244,7 @@ class AgentStock(BaseAgent):
                 "action_type": ActionType.UPDATE_STOCK,
                 "structured_data": entities,
             },
-        )
+        ), extract_call
 
     def _product_not_found_response(
         self,
@@ -264,7 +280,7 @@ class AgentStock(BaseAgent):
             },
         )
 
-    async def _extract_stock_entities(self, message: str, context: str) -> dict:
+    async def _extract_stock_entities(self, message: str, context: str) -> tuple[dict, LLMCall]:
         system = (
             f"Sos el asistente de inventario de Véktor.\n"
             f"Extraé información de {context} del mensaje. Retorná SOLO un JSON:\n"
@@ -282,9 +298,15 @@ class AgentStock(BaseAgent):
             system=system,
             messages=[{"role": "user", "content": self.wrap_user_input(message)}],
         )
+        extract_call = LLMCall(
+            source="agent_stock",
+            model="claude-haiku-4-5",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
         raw = response.content[0].text.strip() if response.content else ""
         try:
-            return json.loads(raw)
+            return json.loads(raw), extract_call
         except (json.JSONDecodeError, ValueError):
             return {
                 "product_name": None,
@@ -292,7 +314,7 @@ class AgentStock(BaseAgent):
                 "qty_change": 0,
                 "reason": "ajuste",
                 "confidence": "LOW",
-            }
+            }, extract_call
 
     async def _handle_query(self, request: AgentRequest) -> AgentResponse:
         return AgentResponse(

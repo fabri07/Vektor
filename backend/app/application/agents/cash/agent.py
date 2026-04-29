@@ -20,7 +20,9 @@ from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
     Confidence,
+    LLMCall,
     RiskLevel,
+    UsageSummary,
 )
 from app.integrations.anthropic_client import get_anthropic_async_client
 
@@ -58,7 +60,7 @@ class AgentCash(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
-    async def _extract_sale_entities(self, message: str, business_context: dict[str, Any]) -> dict[str, Any]:
+    async def _extract_sale_entities(self, message: str, business_context: dict[str, Any]) -> tuple[dict[str, Any], LLMCall]:
         heuristics = HeuristicEngine.get(business_context.get("type", "kiosco_almacen"))
         system = (
             "Extraé del mensaje los datos de una venta y devolvé SOLO JSON con amount, date, "
@@ -70,11 +72,17 @@ class AgentCash(BaseAgent):
             system=f"{system}\n\n{heuristics.to_prompt_fragment()}",
             messages=[{"role": "user", "content": self.wrap_user_input(message)}],
         )
+        llm_call = LLMCall(
+            source="agent_cash",
+            model="claude-haiku-4-5",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
         raw = response.content[0].text.strip() if response.content else ""
         try:
-            return json.loads(raw)
+            return json.loads(raw), llm_call
         except Exception:
-            return {"error": "No pude interpretar la venta. Intentá con monto y forma de pago."}
+            return {"error": "No pude interpretar la venta. Intentá con monto y forma de pago."}, llm_call
 
     async def _load_business_context(self, business_id: str) -> dict[str, Any]:
         return {"name": "el negocio", "type": "kiosco_almacen"}
@@ -288,7 +296,8 @@ class AgentCash(BaseAgent):
             )
 
         business_context = await self._load_business_context(request.business_id)
-        entities = await self._extract_sale_entities(request.message, business_context)
+        entities, sale_call = await self._extract_sale_entities(request.message, business_context)
+        usage = UsageSummary(calls=[sale_call])
 
         if "error" in entities:
             return AgentResponse(
@@ -297,6 +306,7 @@ class AgentCash(BaseAgent):
                 status="requires_clarification",
                 risk_level=RiskLevel.LOW,
                 question=entities["error"],
+                usage=usage,
             )
 
         if entities.get("payment_status") == "unknown":
@@ -306,6 +316,7 @@ class AgentCash(BaseAgent):
                 status="requires_clarification",
                 risk_level=RiskLevel.LOW,
                 question="¿La venta fue al contado o en cuenta corriente?",
+                usage=usage,
             )
 
         amount = entities.get("amount", 0)
@@ -322,6 +333,7 @@ class AgentCash(BaseAgent):
                 "structured_data": entities,
                 "alerts": [],
             },
+            usage=usage,
         )
 
     async def on_confirmed_sale(self, sale_id: str, business_id: str) -> None:

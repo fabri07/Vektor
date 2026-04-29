@@ -15,13 +15,16 @@ def _req(message: str) -> AgentRequest:
 @pytest.mark.asyncio
 async def test_draft_intent_returns_create_draft():
     agent = AgentSupplier()
-    with patch.object(agent, "_generate_email_draft", return_value={
-        "has_enough_info": True,
-        "to_name": "proveedor de verduras",
-        "to_email": None,
-        "subject": "Consulta de precios",
-        "body": "Estimado proveedor, necesito cotización actualizada de verduras.",
-    }):
+    with patch.object(agent, "_generate_email_draft", return_value=(
+        {
+            "has_enough_info": True,
+            "to_name": "proveedor de verduras",
+            "to_email": None,
+            "subject": "Consulta de precios",
+            "body": "Estimado proveedor, necesito cotización actualizada de verduras.",
+        },
+        None,
+    )):
         resp = await agent.process(_req("redactar email al proveedor de verduras"))
     assert resp.result["action_type"] == ActionType.CREATE_SUPPLIER_DRAFT
     assert resp.status == "requires_approval"
@@ -39,15 +42,18 @@ async def test_inbox_intent_returns_classify():
 @pytest.mark.asyncio
 async def test_purchase_intent_returns_register():
     agent = AgentSupplier()
-    with patch.object(agent, "_extract_purchase_entities", return_value={
-        "amount": "15000",
-        "supplier_name": "proveedor",
-        "product_name": None,
-        "sku": None,
-        "qty": None,
-        "unit_cost": None,
-        "transaction_date": "2026-04-27",
-    }):
+    with patch.object(agent, "_extract_purchase_entities", return_value=(
+        {
+            "amount": "15000",
+            "supplier_name": "proveedor",
+            "product_name": None,
+            "sku": None,
+            "qty": None,
+            "unit_cost": None,
+            "transaction_date": "2026-04-27",
+        },
+        None,
+    )):
         resp = await agent.process(_req("registrar compra al proveedor de $15000"))
     assert resp.result["action_type"] == ActionType.REGISTER_PURCHASE
     assert resp.risk_level == RiskLevel.MEDIUM
@@ -65,12 +71,15 @@ async def test_unknown_returns_clarification():
 @pytest.mark.asyncio
 async def test_mode_informational_without_gateway():
     agent = AgentSupplier(gateway=None)
-    with patch.object(agent, "_generate_email_draft", return_value={
-        "has_enough_info": True,
-        "to_name": "proveedor",
-        "to_email": None,
-        "subject": "Borrador",
-        "body": "Mensaje de prueba.",
-    }):
+    with patch.object(agent, "_generate_email_draft", return_value=(
+        {
+            "has_enough_info": True,
+            "to_name": "proveedor",
+            "to_email": None,
+            "subject": "Borrador",
+            "body": "Mensaje de prueba.",
+        },
+        None,
+    )):
         resp = await agent.process(_req("borrador para proveedor"))
     assert resp.result.get("mode") == "informational"

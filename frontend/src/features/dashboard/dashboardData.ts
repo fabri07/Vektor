@@ -1,6 +1,7 @@
 import type { ExpenseEntryResponse } from "@/services/expenses.service";
 import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
+import type { HealthScoreV2Response } from "@/types/api";
 
 export const KPI_TOOLTIP_COPY: Record<string, string> = {
   Caja:
@@ -67,7 +68,7 @@ export const LINE_METRIC_OPTIONS: LineMetricOption[] = [
   { value: "caja", label: "Evolución de caja", title: "¿Cómo evolucionó tu caja este mes?" },
   { value: "ventas", label: "Ventas totales", title: "¿Cómo evolucionaron tus ventas?" },
   { value: "margen", label: "Margen promedio", title: "¿Cómo se movió tu margen promedio?" },
-  { value: "stock", label: "Stock total", title: "¿Cómo cambió tu stock disponible?" },
+  { value: "stock", label: "Score de stock", title: "¿Cómo evolucionó tu score de stock?" },
 ];
 
 export const COMPARE_OPTIONS: CompareOption[] = [
@@ -348,18 +349,16 @@ export function buildLineSeries(
   expenses: ExpenseEntryResponse[],
   products: ProductResponse[],
   granularity: "daily" | "weekly" | "monthly",
-): Array<{ label: string; value: number; change: number }> {
+  scoreHistory?: HealthScoreV2Response[],
+): Array<{ label: string; value: number | null; change: number }> {
   const points = granularity === "daily" ? 14 : granularity === "weekly" ? 10 : 6;
   const dates = dateRange(points);
-  const averageMargin =
-    products.filter((product) => product.margin_pct != null).reduce((sum, product) => sum + (product.margin_pct ?? 0), 0) /
-      Math.max(products.filter((product) => product.margin_pct != null).length, 1);
   const totalStock = products.reduce((sum, product) => sum + product.stock_units, 0);
 
   let previous = 0;
 
   return dates.map((date, index) => {
-    let value = 0;
+    let value: number | null = null;
 
     if (metric === "ventas") {
       value = sales
@@ -374,15 +373,32 @@ export function buildLineSeries(
         .reduce((sum, entry) => sum + entry.amount, 0);
       value = previous + salesTotal - expensesTotal;
     } else if (metric === "margen") {
-      // TODO: wire to historical margin API when category snapshots are available.
-      value = averageMargin + Math.sin(index / 1.8) * 4.2;
+      const dayRevenue = sales
+        .filter((entry) => sameDay(entry.transaction_date, date))
+        .reduce((sum, entry) => sum + entry.amount, 0);
+      const dayCost = expenses
+        .filter((entry) => sameDay(entry.transaction_date, date))
+        .reduce((sum, entry) => sum + entry.amount, 0);
+      // null cuando no hay ventas: el chart muestra un gap real en vez de interpolar
+      value = dayRevenue > 0 ? ((dayRevenue - dayCost) / dayRevenue) * 100 : null;
     } else {
-      // TODO: wire to historical stock snapshots when available.
-      value = totalStock + Math.cos(index / 2.3) * 18;
+      // stock: usa score_stock del historial real; fallback a coseno si aún no hay historial
+      if (scoreHistory && scoreHistory.length > 0) {
+        const nearest = scoreHistory.reduce((best, s) => {
+          const d = Math.abs(new Date(s.created_at).getTime() - date.getTime());
+          const bd = Math.abs(new Date(best.created_at).getTime() - date.getTime());
+          return d < bd ? s : best;
+        });
+        value = nearest.score_stock;
+      } else {
+        value = totalStock + Math.cos(index / 2.3) * 18;
+      }
     }
 
-    const change = previous === 0 ? 0 : ((value - previous) / Math.abs(previous || 1)) * 100;
-    previous = value;
+    const change = value !== null && previous !== 0
+      ? ((value - previous) / Math.abs(previous)) * 100
+      : 0;
+    previous = value ?? previous;
 
     return {
       label:

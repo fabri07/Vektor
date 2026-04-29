@@ -9,7 +9,9 @@ from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
     Confidence,
+    LLMCall,
     RiskLevel,
+    UsageSummary,
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
@@ -73,7 +75,7 @@ class AgentHelper(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
-    async def find_answer(self, question: str) -> dict:
+    async def find_answer(self, question: str) -> tuple[dict, LLMCall]:
         """
         Busca respuesta en el FAQ y la documentación.
         Si confidence < MEDIUM: retornar fallback, NUNCA inventar.
@@ -106,14 +108,21 @@ Retorná SOLO un JSON:
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(question)}],
         )
+        llm_call = LLMCall(
+            source="agent_helper",
+            model="claude-haiku-4-5",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
         raw = response.content[0].text.strip() if response.content else ""
         try:
-            return json.loads(raw)
+            return json.loads(raw), llm_call
         except (json.JSONDecodeError, ValueError):
-            return {"answer": None, "confidence": "LOW", "related_module": None, "is_platform_question": False}
+            return {"answer": None, "confidence": "LOW", "related_module": None, "is_platform_question": False}, llm_call
 
     async def process(self, request: AgentRequest) -> AgentResponse:
-        result = await self.find_answer(request.message)
+        result, helper_call = await self.find_answer(request.message)
+        usage = UsageSummary(calls=[helper_call])
 
         # Si no es pregunta sobre la plataforma
         if not result.get("is_platform_question"):
@@ -129,6 +138,7 @@ Retorná SOLO un JSON:
                         "'vendí X pesos', 'pagué X de alquiler', etc."
                     )
                 },
+                usage=usage,
             )
 
         # Si confidence es LOW: usar fallback, NUNCA inventar
@@ -140,6 +150,7 @@ Retorná SOLO un JSON:
                 risk_level=RiskLevel.LOW,
                 confidence=Confidence.LOW,
                 result={"summary": FALLBACK_RESPONSE},
+                usage=usage,
             )
 
         # Respuesta encontrada
@@ -158,4 +169,5 @@ Retorná SOLO un JSON:
                 "action_type": ActionType.ANSWER_HELP_REQUEST,
                 "related_module": result.get("related_module"),
             },
+            usage=usage,
         )

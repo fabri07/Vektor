@@ -6,6 +6,7 @@ import { useRef } from "react";
 import { expensesService } from "@/services/expenses.service";
 import { productsService } from "@/services/products.service";
 import { salesService } from "@/services/sales.service";
+import { fetchHealthScoreHistory } from "@/services/dashboard.service";
 import { DashboardAnalysisScreen } from "@/features/dashboard/DashboardAnalysisScreen";
 import { DashboardLaunchpadNav } from "@/features/dashboard/DashboardLaunchpadNav";
 
@@ -31,6 +32,12 @@ export default function DashboardAnalysisPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const { data: scoreHistory = [] } = useQuery({
+    queryKey: ["health-score-history"],
+    queryFn: fetchHealthScoreHistory,
+    staleTime: 5 * 60 * 1000,
+  });
+
   return (
     <div
       className="space-y-5 pb-24 sm:pb-8"
@@ -49,6 +56,7 @@ export default function DashboardAnalysisPage() {
         sales={sales}
         expenses={expenses}
         products={products}
+        scoreHistory={scoreHistory}
         loading={salesLoading || expensesLoading || productsLoading}
       />
     </div>

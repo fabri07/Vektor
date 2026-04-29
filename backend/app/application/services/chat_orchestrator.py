@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.agents.ceo.agent import AgentCEO
 from app.application.agents.registry import get_sub_agent
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
-from app.application.agents.shared.schemas import AgentRequest, AgentResponse
+from app.application.agents.shared.schemas import AgentRequest, AgentResponse, LLMCall, UsageSummary
 from app.application.security.prompt_defense import wrap_user_input
 from app.application.services.agent_memory_service import AgentMemoryService
 from app.application.services.business_memory_service import BusinessMemoryService
@@ -97,6 +97,9 @@ class ChatOrchestrator:
         ceo = AgentCEO()
         ceo_response = await ceo.process(request)
         target_agent_name: str = ceo_response.result.get("target_agent", "agent_helper")
+        all_llm_calls: list[LLMCall] = list(ceo_response.usage.calls) if ceo_response.usage else []
+        ceo_intent: str | None = ceo_response.result.get("intent")
+        ceo_target: str | None = ceo_response.result.get("target_agent")
 
         # 3b. out_of_scope — cortar sin sub-agente ni LLM adicional
         if ceo_response.result.get("intent") == "out_of_scope":
@@ -113,7 +116,8 @@ class ChatOrchestrator:
                     "Si tenés dudas sobre ventas, gastos, stock o cómo usar la plataforma, "
                     "con gusto te ayudo."
                 ),
-                result={"summary": "Consulta fuera del scope de Véktor."},
+                result={"summary": "Consulta fuera del scope de Véktor.", "intent": "out_of_scope"},
+                usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
             )
             if request.conversation_id:
                 await self._save_turn(
@@ -126,6 +130,8 @@ class ChatOrchestrator:
             target_agent_name, db=db, redis=redis, user_id=user_id, tenant_id=tenant_id
         )
         agent_response = await sub_agent.process(request) if sub_agent is not None else ceo_response
+        if agent_response.usage:
+            all_llm_calls.extend(agent_response.usage.calls)
 
         # 4b. requires_google_auth — propagar sin llamar LLM ni guardar turno
         if agent_response.status == "requires_google_auth":
@@ -133,6 +139,9 @@ class ChatOrchestrator:
                 agent_response.message = agent_response.result.get(
                     "message", "Necesito acceso a Google para continuar."
                 )
+            agent_response.result.setdefault("intent", ceo_intent)
+            agent_response.result.setdefault("target_agent", ceo_target)
+            agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
             return agent_response
 
         # 5a. requires_approval → no llamar LLM (ahorra tokens; el summary es suficiente)
@@ -147,7 +156,7 @@ class ChatOrchestrator:
             else:
                 # success / requires_clarification → LLM Haiku genera texto rico
                 try:
-                    agent_response.message = await self._generate_rich_response(
+                    agent_response.message, orch_call = await self._generate_rich_response(
                         request,
                         agent_response,
                         business_name,
@@ -158,6 +167,7 @@ class ChatOrchestrator:
                         agent_memory_fragment,
                         file_context,
                     )
+                    all_llm_calls.append(orch_call)
                 except AnthropicConfigurationError:
                     raise
                 except Exception as exc:
@@ -169,6 +179,13 @@ class ChatOrchestrator:
             await self._save_turn(
                 request, agent_response.message or "", redis, db, tenant_id, user_id
             )
+
+        # 7. Preservar metadata del CEO en result para audit log (intent + agente destino)
+        agent_response.result.setdefault("intent", ceo_intent)
+        agent_response.result.setdefault("target_agent", ceo_target)
+
+        # 8. Adjuntar usage acumulado de todas las llamadas LLM del turno
+        agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
 
         return agent_response
 
@@ -198,7 +215,7 @@ class ChatOrchestrator:
         bm_data: dict | None = None,
         agent_memory_fragment: str = "",
         file_context: str = "",
-    ) -> str:
+    ) -> tuple[str, LLMCall]:
         turns = conversation_ctx.get("turns", [])
         history = (
             "\n".join(self._format_history_turn(t) for t in turns[-4:])
@@ -265,8 +282,14 @@ class ChatOrchestrator:
             system=system,
             messages=[{"role": "user", "content": user_content}],
         )
+        orch_call = LLMCall(
+            source="orchestrator",
+            model="claude-haiku-4-5-20251001",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
         raw = response.content[0].text.strip() if response.content else "Procesado."
-        return self._strip_markdown(raw)
+        return self._strip_markdown(raw), orch_call
 
     @staticmethod
     def _strip_markdown(text: str) -> str:
