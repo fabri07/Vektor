@@ -25,12 +25,30 @@ function isCalculating(data: unknown): boolean {
   );
 }
 
+function formatDateParam(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function last30DayRange(): { from_date: string; to_date: string } {
+  const to = new Date();
+  const from = new Date(to);
+  from.setDate(to.getDate() - 30);
+  return {
+    from_date: formatDateParam(from),
+    to_date: formatDateParam(to),
+  };
+}
+
 export default function DashboardPage() {
   const calcRetries = useRef(0);
   const touchStart = useRef<number | null>(null);
   const healthRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
   const searchParams = useSearchParams();
+  const dateRange = last30DayRange();
 
   const {
     data: scoreData,
@@ -44,8 +62,10 @@ export default function DashboardPage() {
         calcRetries.current = 0;
         return false;
       }
+      const delays = [5_000, 10_000, 20_000, 40_000, 60_000];
+      const delay = delays[calcRetries.current] ?? false;
       calcRetries.current += 1;
-      return calcRetries.current <= 1 ? 15_000 : false;
+      return delay;
     },
     retry: 1,
   });
@@ -63,14 +83,14 @@ export default function DashboardPage() {
   });
 
   const { data: sales = [], isLoading: salesLoading } = useQuery({
-    queryKey: ["sales-all"],
-    queryFn: () => salesService.getAllEntries(),
+    queryKey: ["sales-all", dateRange.from_date, dateRange.to_date],
+    queryFn: () => salesService.getAllEntries(dateRange),
     staleTime: 5 * 60 * 1000,
   });
 
   const { data: expenses = [], isLoading: expensesLoading } = useQuery({
-    queryKey: ["expenses-all"],
-    queryFn: () => expensesService.getAllEntries(),
+    queryKey: ["expenses-all", dateRange.from_date, dateRange.to_date],
+    queryFn: () => expensesService.getAllEntries(dateRange),
     staleTime: 5 * 60 * 1000,
   });
 
@@ -90,7 +110,7 @@ export default function DashboardPage() {
 
   const loading = scoreLoading || insightLoading;
   const calculating = !scoreLoading && scoreData != null && isCalculating(scoreData);
-  const calculatingTimeout = calculating && calcRetries.current > 1;
+  const calculatingTimeout = calculating && calcRetries.current >= 6;
 
   if (loading || (calculating && !calculatingTimeout)) {
     return (

@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant
@@ -14,7 +14,7 @@ from app.persistence.models.business import ActionSuggestion, Insight
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
-from app.persistence.repositories.transaction_repository import ExpenseRepository
+from app.persistence.repositories.transaction_repository import ExpenseRepository, SaleRepository
 
 router = APIRouter()
 
@@ -219,36 +219,58 @@ async def get_business_breakdown(
         tenant.tenant_id, from_date=from_date, to_date=today, limit=5
     )
 
-    # Productos con stock bajo o crítico
-    products_result = await session.execute(
-        select(Product).where(
+    # Total de productos activos (COUNT, sin cargar registros)
+    total_result = await session.execute(
+        select(func.count(Product.id)).where(
             Product.tenant_id == tenant.tenant_id,
             Product.is_active.is_(True),
         )
     )
-    all_products = list(products_result.scalars().all())
-    total_products = len(all_products)
-    low_stock = [
-        p for p in all_products
-        if p.stock_units is not None
-        and p.low_stock_threshold_units is not None
-        and p.stock_units <= p.low_stock_threshold_units
+    total_products = total_result.scalar_one()
+
+    # Stock bajo: COUNT + LIMIT 10 separados para evitar cargar todos
+    _low_stock_where = [
+        Product.tenant_id == tenant.tenant_id,
+        Product.is_active.is_(True),
+        Product.stock_units.isnot(None),
+        Product.low_stock_threshold_units.isnot(None),
+        Product.stock_units <= Product.low_stock_threshold_units,
     ]
-    sold_products_result = await session.execute(
-        select(SaleEntry.product_id).where(
+    low_stock_count_result = await session.execute(
+        select(func.count(Product.id)).where(*_low_stock_where)
+    )
+    low_stock_count_val = low_stock_count_result.scalar_one()
+    low_stock_items_result = await session.execute(
+        select(Product).where(*_low_stock_where).limit(10)
+    )
+    low_stock = list(low_stock_items_result.scalars().all())
+
+    # Sin rotación: NOT EXISTS correlacionado (sin traer IDs a Python)
+    _sold_subq = (
+        select(SaleEntry.product_id)
+        .where(
             SaleEntry.tenant_id == tenant.tenant_id,
             SaleEntry.transaction_date >= from_date,
             SaleEntry.transaction_date <= today,
-            SaleEntry.product_id.isnot(None),
-        ).distinct()
+            SaleEntry.product_id == Product.id,
+        )
+        .correlate(Product)
+        .exists()
     )
-    sold_product_ids = set(sold_products_result.scalars().all())
-    no_rotation = [
-        p
-        for p in all_products
-        if p.id not in sold_product_ids
-        and (p.stock_units or 0) > (p.low_stock_threshold_units or 0)
+    _no_rotation_where = [
+        Product.tenant_id == tenant.tenant_id,
+        Product.is_active.is_(True),
+        func.coalesce(Product.stock_units, 0) > func.coalesce(Product.low_stock_threshold_units, 0),
+        ~_sold_subq,
     ]
+    no_rotation_count_result = await session.execute(
+        select(func.count(Product.id)).where(*_no_rotation_where)
+    )
+    no_rotation_count_val = no_rotation_count_result.scalar_one()
+    no_rotation_items_result = await session.execute(
+        select(Product).where(*_no_rotation_where).limit(10)
+    )
+    no_rotation = list(no_rotation_items_result.scalars().all())
 
     return BusinessBreakdownResponse(
         period_days=days,
@@ -276,7 +298,89 @@ async def get_business_breakdown(
             )
             for p in no_rotation[:10]
         ],
-        low_stock_count=len(low_stock),
-        no_rotation_count=len(no_rotation),
+        low_stock_count=low_stock_count_val,
+        no_rotation_count=no_rotation_count_val,
         total_products=total_products,
+    )
+
+
+# ── Cash breakdown by payment method ─────────────────────────────────────────
+
+
+class CashBreakdownResponse(BaseModel):
+    days: int
+    granularity: str
+    from_date: str
+    to_date: str
+    dates: list[str]
+    income_series: dict[str, list[float]]
+    expense_series: dict[str, list[float]]
+
+
+def _aggregate_to_series(
+    rows: list[dict], sorted_dates: list[str]
+) -> dict[str, list[float]]:
+    """Transforma filas (date, payment_method, total) en series alineadas con sorted_dates."""
+    method_set = sorted({r["payment_method"] for r in rows})
+    lookup: dict[tuple[str, str], float] = {
+        (r["date"], r["payment_method"]): r["total"] for r in rows
+    }
+    return {
+        method: [lookup.get((d, method), 0.0) for d in sorted_dates]
+        for method in method_set
+    }
+
+
+def _to_week_start(date_str: str) -> str:
+    """Retorna la fecha del lunes de la semana del date_str dado."""
+    d = date.fromisoformat(date_str)
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def _aggregate_weekly(rows: list[dict]) -> list[dict]:
+    """Consolida filas diarias en filas semanales (date = lunes de la semana)."""
+    acc: dict[tuple[str, str], float] = {}
+    for r in rows:
+        key = (_to_week_start(r["date"]), r["payment_method"])
+        acc[key] = acc.get(key, 0.0) + r["total"]
+    return [
+        {"date": k[0], "payment_method": k[1], "total": v}
+        for k, v in sorted(acc.items())
+    ]
+
+
+@router.get(
+    "/cash-breakdown",
+    response_model=CashBreakdownResponse,
+    summary="Ingresos y egresos por método de pago en el período",
+)
+async def get_cash_breakdown(
+    days: int = Query(default=30, ge=7, le=365, description="Ventana en días hacia atrás"),
+    granularity: str = Query(default="daily", pattern="^(daily|weekly)$"),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> CashBreakdownResponse:
+    today = date.today()
+    from_date = today - timedelta(days=days)
+
+    sale_repo = SaleRepository(session)
+    expense_repo = ExpenseRepository(session)
+
+    income_rows = await sale_repo.cash_breakdown_by_method(tenant.tenant_id, from_date, today)
+    expense_rows = await expense_repo.cash_breakdown_by_method(tenant.tenant_id, from_date, today)
+
+    if granularity == "weekly":
+        income_rows = _aggregate_weekly(income_rows)
+        expense_rows = _aggregate_weekly(expense_rows)
+
+    all_dates = sorted({r["date"] for r in income_rows} | {r["date"] for r in expense_rows})
+
+    return CashBreakdownResponse(
+        days=days,
+        granularity=granularity,
+        from_date=from_date.isoformat(),
+        to_date=today.isoformat(),
+        dates=all_dates,
+        income_series=_aggregate_to_series(income_rows, all_dates),
+        expense_series=_aggregate_to_series(expense_rows, all_dates),
     )

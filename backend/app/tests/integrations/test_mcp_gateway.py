@@ -1,14 +1,18 @@
 """Tests de integración para HttpMcpGateway — mock del servidor HTTP."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
 
 from app.integrations.mcp.exceptions import (
     McpToolAuthError,
     McpToolNotAllowedError,
+    McpToolTimeoutError,
+    McpToolUnavailableError,
 )
-from app.integrations.mcp.http_gateway import HttpMcpGateway
 from app.integrations.mcp.google_mcp_service import GoogleMcpService
+from app.integrations.mcp.http_gateway import HttpMcpGateway
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -86,13 +90,14 @@ async def test_auth_error_raises_mcp_auth_error():
     """Respuesta con errorCode=mcp_auth_required → McpToolAuthError."""
     gateway = _make_gateway()
 
-    with _patch_httpx(_jsonrpc_error("mcp_auth_required", "auth required")):
-        with pytest.raises(McpToolAuthError):
-            await gateway.call_tool(
-                "google.gmail.list_messages",
-                {},
-                tenant_id=TENANT_ID,
-            )
+    with _patch_httpx(_jsonrpc_error("mcp_auth_required", "auth required")), pytest.raises(
+        McpToolAuthError
+    ):
+        await gateway.call_tool(
+            "google.gmail.list_messages",
+            {},
+            tenant_id=TENANT_ID,
+        )
 
 
 @pytest.mark.asyncio
@@ -139,3 +144,116 @@ async def test_disabled_flag_skips_gateway():
     assert result == []
     # El gateway real nunca fue invocado.
     mock_gateway.call_tool.assert_not_called()
+
+
+# ── Retry logic ───────────────────────────────────────────────────────────────
+
+
+def _patch_httpx_raises(exc: Exception):
+    """Patch httpx.AsyncClient.post para que siempre levante la excepción dada."""
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = AsyncMock(side_effect=exc)
+    return patch("httpx.AsyncClient", return_value=mock_client)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_retries_three_times_on_timeout():
+    """call_tool reintenta exactamente 3 veces en timeout y luego levanta McpToolTimeoutError."""
+    gateway = _make_gateway()
+    attempt_count = 0
+
+    async def mock_post(*args, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        raise httpx.TimeoutException("simulated timeout")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = mock_post
+
+    with (
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch("asyncio.sleep", new_callable=AsyncMock),
+        pytest.raises(McpToolTimeoutError),
+    ):
+        await gateway.call_tool("google.gmail.list_messages", {}, tenant_id=TENANT_ID)
+
+    assert attempt_count == 3, f"Esperaba 3 intentos, obtuvo {attempt_count}"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_does_not_retry_auth_error():
+    """Auth errors no se reintentan — asyncio.sleep no debe llamarse."""
+    gateway = _make_gateway()
+
+    with (
+        _patch_httpx(_jsonrpc_error("mcp_auth_required")),
+        patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        pytest.raises(McpToolAuthError),
+    ):
+        await gateway.call_tool("google.gmail.list_messages", {}, tenant_id=TENANT_ID)
+
+    mock_sleep.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_list_tools_raises_unavailable_on_connect_error():
+    """list_tools levanta McpToolUnavailableError cuando el server no responde."""
+    gateway = _make_gateway()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+
+    with patch("httpx.AsyncClient", return_value=mock_client), pytest.raises(
+        McpToolUnavailableError
+    ):
+        await gateway.list_tools()
+
+
+@pytest.mark.asyncio
+async def test_list_tools_raises_auth_error_on_401():
+    """list_tools levanta McpToolAuthError cuando el server devuelve 401."""
+    gateway = _make_gateway()
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(return_value=mock_resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_client), pytest.raises(McpToolAuthError):
+        await gateway.list_tools()
+
+
+@pytest.mark.asyncio
+async def test_get_auth_status_retries_before_unavailable():
+    """get_auth_status reintenta errores de red antes de devolver mcp_unavailable."""
+    gateway = _make_gateway()
+    attempt_count = 0
+
+    async def mock_get(*args, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        raise httpx.ConnectError("connection refused")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = mock_get
+
+    with (
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = await gateway.get_auth_status(tenant_id=TENANT_ID, user_id="user-1")
+
+    assert attempt_count == 3
+    assert result["connected"] is False
+    assert result["last_error"] == "mcp_unavailable"

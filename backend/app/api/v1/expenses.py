@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, get_current_user
+from app.api.v1.deps import get_current_tenant, require_role
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
@@ -56,6 +56,8 @@ async def list_expenses(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ExpenseEntry]:
+    if from_date is None:
+        from_date = date.today() - timedelta(days=30)
     repo = ExpenseRepository(session)
     return await repo.list_by_tenant(
         tenant.tenant_id,
@@ -76,7 +78,7 @@ async def list_expenses(
 async def create_expense(
     body: CreateExpenseRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
@@ -118,6 +120,7 @@ async def update_expense(
     expense_id: UUID,
     body: UpdateExpenseRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
@@ -149,6 +152,7 @@ async def update_expense(
 async def delete_expense(
     expense_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = ExpenseRepository(session)

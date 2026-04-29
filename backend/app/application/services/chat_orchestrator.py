@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from contextlib import suppress
 from typing import Any
 
 from redis.asyncio import Redis
@@ -71,21 +70,23 @@ class ChatOrchestrator:
         try:
             bm_svc = BusinessMemoryService(db=db, redis=redis)
             bm_data = await bm_svc.get(tenant_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("business_memory_failed", tenant_id=str(tenant_id), error=str(exc))
 
         # 1c. AgentMemory — patrones aprendidos del negocio (fail-silencioso)
         agent_memory_fragment = ""
         try:
             am_svc = AgentMemoryService(db=db, redis=redis)
             agent_memory_fragment = await am_svc.get_context_fragment(tenant_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("agent_memory_failed", tenant_id=str(tenant_id), error=str(exc))
 
         # 1d. Archivos procesados — uploads confirmados del tenant (fail-silencioso)
         file_context = ""
-        with suppress(Exception):
+        try:
             file_context = await self._load_file_context(tenant_id, db, request.attachments)
+        except Exception as exc:
+            logger.warning("file_context_failed", tenant_id=str(tenant_id), error=str(exc))
 
         # 2. Historial conversacional
         conversation_ctx: dict = {}

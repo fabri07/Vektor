@@ -1,7 +1,8 @@
 """Tests for /api/v1/expenses endpoints."""
 
-import pytest
 from datetime import date
+
+import pytest
 from httpx import AsyncClient
 
 _TODAY = str(date.today())
@@ -191,3 +192,31 @@ class TestExpensesTenantIsolation:
             headers=second_auth_headers,
         )
         assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+class TestExpensesRBAC:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_viewer_cannot_create_expense(
+        self, client: AsyncClient, viewer_headers: dict
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=viewer_headers
+        )
+        assert resp.status_code == 403
+
+    async def test_viewer_cannot_delete_expense(
+        self,
+        client: AsyncClient,
+        auth_headers: dict,
+        viewer_headers: dict,
+    ) -> None:
+        create_resp = await client.post(
+            "/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers
+        )
+        expense_id = create_resp.json()["id"]
+        resp = await client.delete(f"/api/v1/expenses/{expense_id}", headers=viewer_headers)
+        assert resp.status_code == 403

@@ -9,17 +9,19 @@ Estrategia:
 
 import json
 import uuid
-from contextlib import suppress
 from typing import Any
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.observability.logger import get_logger
 from app.persistence.models.conversation_context import AgentConversationContext
 
 REDIS_TTL = 86400  # 24 horas
 MAX_TOKENS_BEFORE_SUMMARIZE = 8000
 MAX_TURNS = 10
+
+logger = get_logger(__name__)
 
 
 class ConversationService:
@@ -29,16 +31,22 @@ class ConversationService:
 
     async def get_context(self, conversation_id: str) -> dict:
         """Obtener contexto: primero desde Redis, fallback a PostgreSQL."""
-        cached = await self.redis.get(f"conv:{conversation_id}")
-        if cached:
-            return json.loads(cached)
+        try:
+            cached = await self.redis.get(f"conv:{conversation_id}")
+            if cached:
+                return json.loads(cached)
+        except Exception as exc:
+            logger.warning("redis_get_failed", conversation_id=conversation_id, error=str(exc))
 
         ctx = await self.db.get(AgentConversationContext, uuid.UUID(conversation_id))
         if ctx:
             data = {"turns": ctx.turns, "summary": ctx.summary}
-            await self.redis.setex(
-                f"conv:{conversation_id}", REDIS_TTL, json.dumps(data)
-            )
+            try:
+                await self.redis.setex(
+                    f"conv:{conversation_id}", REDIS_TTL, json.dumps(data)
+                )
+            except Exception as exc:
+                logger.warning("redis_rehydrate_failed", conversation_id=conversation_id, error=str(exc))
             return data
 
         return {"turns": [], "summary": None}
@@ -86,7 +94,8 @@ class ConversationService:
                 ],
             )
             return resp.content[0].text.strip()
-        except Exception:
+        except Exception as exc:
+            logger.warning("conversation_summarize_failed", error=str(exc))
             return ""
 
     async def add_turn_with_summary(
@@ -111,10 +120,12 @@ class ConversationService:
             if summary:
                 ctx["summary"] = summary
 
-        with suppress(Exception):
+        try:
             await self.redis.setex(
                 f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx)
             )
+        except Exception as exc:
+            logger.warning("redis_write_failed", conversation_id=conversation_id, error=str(exc))
         await self.persist(conversation_id, tenant_id, user_id)
         await self.db.commit()
         return ctx

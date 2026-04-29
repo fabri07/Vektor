@@ -136,6 +136,31 @@ async def second_auth_headers(db_session: AsyncSession, second_tenant: Tenant) -
     return {"Authorization": f"Bearer {token}"}
 
 
+# ── Viewer user (for RBAC tests) ─────────────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def viewer_headers(db_session: AsyncSession, sample_tenant: Tenant) -> dict[str, str]:
+    user = User(
+        user_id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        email="viewer@kiosco.com",
+        full_name="María Viewer",
+        password_hash=hash_password("Secure789"),
+        role_code="VIEWER",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    token = create_access_token(
+        {
+            "sub": str(user.user_id),
+            "tenant_id": str(sample_tenant.tenant_id),
+            "role_code": "VIEWER",
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 # ── Celery mock (prevents Redis connection in tests) ─────────────────────────
 
 @pytest.fixture

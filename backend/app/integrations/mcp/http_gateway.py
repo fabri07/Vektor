@@ -6,6 +6,7 @@ Endpoint: POST {MCP_SERVER_URL}/tools/call
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import Any
@@ -117,84 +118,101 @@ class HttpMcpGateway(McpToolGateway):
 
         headers = self._build_headers(tenant_id=tenant_id, user_id=user_id)
 
-        t0 = time.monotonic()
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self._base_url}/tools/call",
-                    json=payload,
-                    timeout=timeout,
-                    headers=headers,
+        last_exc: BaseException | None = None
+        for attempt in range(3):
+            try:
+                t0 = time.monotonic()
+                try:
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(
+                            f"{self._base_url}/tools/call",
+                            json=payload,
+                            timeout=timeout,
+                            headers=headers,
+                        )
+                except httpx.TimeoutException as exc:
+                    duration_ms = int((time.monotonic() - t0) * 1000)
+                    logger.warning(
+                        "mcp_gateway.timeout",
+                        tool_name=tool_name,
+                        duration_ms=duration_ms,
+                        tenant_id=tenant_id,
+                    )
+                    raise McpToolTimeoutError(
+                        f"Timeout llamando {tool_name} después de {timeout}s"
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise McpToolUnavailableError(
+                        f"MCP server no disponible en {self._base_url}"
+                    ) from exc
+
+                duration_ms = int((time.monotonic() - t0) * 1000)
+
+                if resp.status_code == 404:
+                    raise McpToolNotFoundError(
+                        f"Herramienta '{tool_name}' no encontrada en el MCP server",
+                        code="tool_not_found",
+                    )
+                if resp.status_code >= 500:
+                    raise McpToolUnavailableError(
+                        f"MCP server retornó {resp.status_code}"
+                    )
+
+                try:
+                    body = resp.json()
+                except Exception as exc:
+                    raise McpToolUnavailableError(
+                        f"Respuesta inválida del MCP server: {resp.text[:200]}"
+                    ) from exc
+
+                result = body.get("result", {})
+                is_error = result.get("isError", False)
+                error_code = result.get("errorCode", "unknown")
+
+                logger.info(
+                    "mcp_gateway.call",
+                    tool_name=tool_name,
+                    duration_ms=duration_ms,
+                    is_error=is_error,
+                    error_code=error_code if is_error else None,
+                    tenant_id=tenant_id,
                 )
-        except httpx.TimeoutException as exc:
-            duration_ms = int((time.monotonic() - t0) * 1000)
-            logger.warning(
-                "mcp_gateway.timeout",
-                tool_name=tool_name,
-                duration_ms=duration_ms,
-                tenant_id=tenant_id,
-            )
-            raise McpToolTimeoutError(
-                f"Timeout llamando {tool_name} después de {timeout}s"
-            ) from exc
-        except httpx.ConnectError as exc:
-            raise McpToolUnavailableError(
-                f"MCP server no disponible en {self._base_url}"
-            ) from exc
 
-        duration_ms = int((time.monotonic() - t0) * 1000)
+                if is_error:
+                    if error_code in _AUTH_ERROR_CODES:
+                        raise McpToolAuthError(
+                            f"Error de autenticación Google: {error_code}",
+                            reason=error_code,
+                        )
+                    if error_code == "validation_error":
+                        raise McpToolValidationError(
+                            result.get("message", f"Argumentos inválidos para {tool_name}")
+                        )
+                    raise McpError(
+                        result.get("message", f"Error en {tool_name}"),
+                        code=error_code,
+                    )
 
-        if resp.status_code == 404:
-            raise McpToolNotFoundError(
-                f"Herramienta '{tool_name}' no encontrada en el MCP server",
-                code="tool_not_found",
-            )
-        if resp.status_code >= 500:
-            raise McpToolUnavailableError(
-                f"MCP server retornó {resp.status_code}"
-            )
-
-        try:
-            body = resp.json()
-        except Exception as exc:
-            raise McpToolUnavailableError(
-                f"Respuesta inválida del MCP server: {resp.text[:200]}"
-            ) from exc
-
-        result = body.get("result", {})
-        is_error = result.get("isError", False)
-        error_code = result.get("errorCode", "unknown")
-
-        logger.info(
-            "mcp_gateway.call",
-            tool_name=tool_name,
-            duration_ms=duration_ms,
-            is_error=is_error,
-            error_code=error_code if is_error else None,
-            tenant_id=tenant_id,
-        )
-
-        if is_error:
-            if error_code in _AUTH_ERROR_CODES:
-                raise McpToolAuthError(
-                    f"Error de autenticación Google: {error_code}",
-                    reason=error_code,
+                return McpToolResult(
+                    tool_name=tool_name,
+                    result=result,
+                    duration_ms=duration_ms,
+                    is_error=False,
                 )
-            if error_code == "validation_error":
-                raise McpToolValidationError(
-                    result.get("message", f"Argumentos inválidos para {tool_name}")
-                )
-            raise McpError(
-                result.get("message", f"Error en {tool_name}"),
-                code=error_code,
-            )
 
-        return McpToolResult(
-            tool_name=tool_name,
-            result=result,
-            duration_ms=duration_ms,
-            is_error=False,
-        )
+            except (McpToolTimeoutError, McpToolUnavailableError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    logger.warning(
+                        "mcp_gateway.retry",
+                        tool_name=tool_name,
+                        attempt=attempt + 1,
+                        error=str(exc),
+                        tenant_id=tenant_id,
+                    )
+                    await asyncio.sleep(2 ** attempt)
+
+        raise last_exc  # type: ignore[misc]
 
     async def list_tools(self) -> list[str]:
         try:
@@ -203,10 +221,25 @@ class HttpMcpGateway(McpToolGateway):
                     f"{self._base_url}/tools/list",
                     timeout=8.0,
                 )
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise McpToolUnavailableError("mcp_server_unreachable") from exc
+
+        if resp.status_code in (401, 403):
+            raise McpToolAuthError(
+                "MCP server rechazó tools/list",
+                reason="mcp_auth_required",
+            )
+        if resp.status_code >= 500:
+            raise McpToolUnavailableError(
+                f"MCP server retornó {resp.status_code} en /tools/list"
+            )
+        try:
             body = resp.json()
             return [t["name"] for t in body.get("tools", [])]
-        except Exception:
-            return list(TOOL_TIMEOUTS.keys())
+        except Exception as exc:
+            raise McpToolUnavailableError(
+                f"Respuesta inválida de /tools/list: {resp.text[:200]}"
+            ) from exc
 
     async def health(self) -> dict[str, Any]:
         try:
@@ -226,35 +259,53 @@ class HttpMcpGateway(McpToolGateway):
         user_id: str,
         scopes: list[str],
     ) -> dict[str, Any]:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self._base_url}/auth/start",
-                    json={"scopes": scopes},
-                    timeout=10.0,
-                    headers=self._build_headers(tenant_id=tenant_id, user_id=user_id),
-                )
-        except httpx.ConnectError as exc:
-            raise McpToolUnavailableError(
-                f"MCP server no disponible en {self._base_url}"
-            ) from exc
-        except httpx.TimeoutException as exc:
-            raise McpToolTimeoutError("Timeout iniciando auth Google") from exc
+        last_exc: BaseException | None = None
+        for attempt in range(3):
+            try:
+                try:
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(
+                            f"{self._base_url}/auth/start",
+                            json={"scopes": scopes},
+                            timeout=10.0,
+                            headers=self._build_headers(tenant_id=tenant_id, user_id=user_id),
+                        )
+                except httpx.ConnectError as exc:
+                    raise McpToolUnavailableError(
+                        f"MCP server no disponible en {self._base_url}"
+                    ) from exc
+                except httpx.TimeoutException as exc:
+                    raise McpToolTimeoutError("Timeout iniciando auth Google") from exc
 
-        if resp.status_code >= 500:
-            raise McpToolUnavailableError(f"MCP server retornó {resp.status_code} en /auth/start")
-        if resp.status_code == 401:
-            raise McpToolAuthError(
-                "MCP server rechazó la solicitud de auth",
-                reason="mcp_auth_required",
-            )
+                if resp.status_code >= 500:
+                    raise McpToolUnavailableError(
+                        f"MCP server retornó {resp.status_code} en /auth/start"
+                    )
+                if resp.status_code == 401:
+                    raise McpToolAuthError(
+                        "MCP server rechazó la solicitud de auth",
+                        reason="mcp_auth_required",
+                    )
 
-        try:
-            return resp.json()
-        except Exception as exc:
-            raise McpToolUnavailableError(
-                f"Respuesta inválida de /auth/start: {resp.text[:200]}"
-            ) from exc
+                try:
+                    return resp.json()
+                except Exception as exc:
+                    raise McpToolUnavailableError(
+                        f"Respuesta inválida de /auth/start: {resp.text[:200]}"
+                    ) from exc
+
+            except (McpToolTimeoutError, McpToolUnavailableError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    logger.warning(
+                        "mcp_gateway.start_auth_retry",
+                        attempt=attempt + 1,
+                        error=str(exc),
+                        tenant_id=tenant_id,
+                    )
+                    await asyncio.sleep(2 ** attempt)
+
+        raise last_exc  # type: ignore[misc]
 
     async def get_auth_status(
         self,
@@ -262,27 +313,39 @@ class HttpMcpGateway(McpToolGateway):
         tenant_id: str,
         user_id: str,
     ) -> dict[str, Any]:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{self._base_url}/auth/status",
-                    timeout=8.0,
-                    headers=self._build_headers(tenant_id=tenant_id, user_id=user_id),
-                )
-        except (httpx.ConnectError, httpx.TimeoutException):
-            return {"connected": False, "scopes_granted": [], "last_error": "mcp_unavailable"}
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"{self._base_url}/auth/status",
+                        timeout=8.0,
+                        headers=self._build_headers(tenant_id=tenant_id, user_id=user_id),
+                    )
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                if attempt < 2:
+                    logger.warning(
+                        "mcp_gateway.auth_status_retry",
+                        attempt=attempt + 1,
+                        error=str(exc),
+                        tenant_id=tenant_id,
+                    )
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return {"connected": False, "scopes_granted": [], "last_error": "mcp_unavailable"}
 
-        if resp.status_code >= 400:
-            return {
-                "connected": False,
-                "scopes_granted": [],
-                "last_error": f"http_{resp.status_code}",
-            }
+            if resp.status_code >= 400:
+                return {
+                    "connected": False,
+                    "scopes_granted": [],
+                    "last_error": f"http_{resp.status_code}",
+                }
 
-        try:
-            return resp.json()
-        except Exception:
-            return {"connected": False, "scopes_granted": [], "last_error": "invalid_response"}
+            try:
+                return resp.json()
+            except Exception:
+                return {"connected": False, "scopes_granted": [], "last_error": "invalid_response"}
+
+        return {"connected": False, "scopes_granted": [], "last_error": "mcp_unavailable"}
 
     async def revoke_auth(
         self,

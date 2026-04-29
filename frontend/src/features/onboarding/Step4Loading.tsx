@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -47,7 +47,7 @@ function ScorePreview({ score }: { score: HealthScoreLatest }) {
         <Badge variant={badgeVariant}>{levelLabel}</Badge>
       </div>
       <p className="mt-4 text-sm text-vk-text-muted">
-        Redirigiendo a tu panel...
+        Redirigiendo al chat...
       </p>
     </div>
   );
@@ -56,6 +56,7 @@ function ScorePreview({ score }: { score: HealthScoreLatest }) {
 export function Step4Loading() {
   const router = useRouter();
   const pollCount = useRef(0);
+  const [timedOut, setTimedOut] = useState(false);
 
   const { data: score } = useQuery<HealthScoreLatest | null>({
     queryKey: ["health-score-latest-onboarding"],
@@ -77,20 +78,38 @@ export function Step4Loading() {
     return () => clearTimeout(t);
   }, [score, router]);
 
-  // Fallback: redirigir después de MAX_POLLS * 2s + 2s de buffer
+  // Fallback: mostrar mensaje si el score no llegó a tiempo
   useEffect(() => {
     const t = setTimeout(
       () => {
-        router.replace("/chat");
+        setTimedOut(true);
       },
       (MAX_POLLS + 1) * 2_000,
     );
     return () => clearTimeout(t);
-  }, [router]);
+  }, []);
 
   return (
     <div className="flex flex-col items-center py-8 text-center">
-      {!score ? (
+      {score ? (
+        <ScorePreview score={score} />
+      ) : timedOut ? (
+        <>
+          <h2 className="text-xl font-semibold text-vk-text-primary">
+            El análisis está tardando más de lo esperado
+          </h2>
+          <p className="mt-2 text-sm text-vk-text-muted">
+            Tus datos se guardaron correctamente. El score de salud va a estar listo en unos minutos.
+          </p>
+          <button
+            type="button"
+            onClick={() => router.replace("/chat")}
+            className="mt-6 h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
+          >
+            Ir al chat
+          </button>
+        </>
+      ) : (
         <>
           <div className="relative flex h-20 w-20 items-center justify-center">
             <div className="absolute inset-0 animate-spin rounded-full border-4 border-vk-border-w border-t-vk-navy" />
@@ -102,8 +121,6 @@ export function Step4Loading() {
             Esto tarda menos de 10 segundos.
           </p>
         </>
-      ) : (
-        <ScorePreview score={score} />
       )}
     </div>
   );

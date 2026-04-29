@@ -14,7 +14,7 @@ GUARDRAILS:
 """
 
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,7 +44,7 @@ from app.integrations.anthropic_client import get_anthropic_async_client
 class AgentHealth(BaseAgent):
     agent_name = "agent_health"
 
-    def __init__(self, db: Optional[AsyncSession] = None) -> None:
+    def __init__(self, db: AsyncSession | None = None) -> None:
         self._client: Any | None = None
         self._db = db
         self._heuristics: HeuristicConfig | None = None
@@ -69,7 +69,7 @@ class AgentHealth(BaseAgent):
         self,
         business_id: str,
         business_type: str = "kiosco_almacen",
-        db: Optional[AsyncSession] = None,
+        db: AsyncSession | None = None,
     ) -> HealthScore:
         """
         Paso 1: calcular todos los componentes (DETERMINÍSTICO, sin LLM).
@@ -78,7 +78,7 @@ class AgentHealth(BaseAgent):
         effective_db = db or self._db
 
         if effective_db is not None:
-            from app.persistence.repositories.health_score_repository import HealthScoreRepository  # noqa: PLC0415
+            from app.persistence.repositories.health_score_repository import HealthScoreRepository  # noqa: PLC0415, I001
             repo = HealthScoreRepository(effective_db)
             snapshot = await repo.get_latest(uuid.UUID(business_id))
             if snapshot is not None:
@@ -142,7 +142,9 @@ class AgentHealth(BaseAgent):
             )
         return alerts[:3]  # top-3
 
-    async def generate_narrative(self, health: HealthScore, business_name: str) -> str:
+    async def generate_narrative(  # noqa: E501
+        self, health: HealthScore, business_name: str
+    ) -> tuple[str, LLMCall]:
         """
         Paso 2: generar narrativa con LLM (Sonnet).
         El LLM recibe los números ya calculados, NO los calcula.
@@ -184,10 +186,10 @@ class AgentHealth(BaseAgent):
         business_name = "el negocio"
         business_type = "kiosco_almacen"
         if self._db is not None:
-            import uuid as _uuid  # noqa: PLC0415
+            import uuid as _uuid  # noqa: PLC0415, I001
             from sqlalchemy import select as _select  # noqa: PLC0415
-            from app.persistence.models.tenant import Tenant  # noqa: PLC0415
             from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+            from app.persistence.models.tenant import Tenant  # noqa: PLC0415
             tid = _uuid.UUID(request.business_id)
             result = await self._db.execute(
                 _select(Tenant.display_name, BusinessProfile.vertical_code)

@@ -1,6 +1,7 @@
 """Health score endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant
@@ -16,6 +17,15 @@ from app.schemas.health_score import (
 )
 
 router = APIRouter()
+
+
+class MarginHistoryItem(BaseModel):
+    snapshot_date: str
+    score_margin: int
+    revenue_est: float
+    cogs_est: float
+    fixed_expenses_est: float
+    margin_pct: float
 
 
 @router.get(
@@ -148,6 +158,44 @@ async def get_latest_score(
         level=snapshot.level,
         created_at=snapshot.created_at,
     )
+
+
+@router.get(
+    "/margin-history",
+    response_model=list[MarginHistoryItem],
+    summary="Historial de componentes de margen por snapshot",
+)
+async def get_margin_history(
+    limit: int = Query(default=12, ge=1, le=24),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[MarginHistoryItem]:
+    """
+    Retorna los últimos N snapshots con composición del margen.
+    Lee monthly_sales_est / cogs_est / fixed_expenses_est desde score_inputs_json.
+    No requiere tabla nueva — los datos ya están en el snapshot.
+    """
+    repo = HealthScoreRepository(session)
+    snapshots = await repo.list_by_tenant(tenant.tenant_id, limit=limit)
+
+    result = []
+    for snap in snapshots:
+        inputs: dict = snap.score_inputs_json or {}
+        revenue = float(str(inputs.get("monthly_sales_est") or 0))
+        cogs = float(str(inputs.get("monthly_inventory_cost_est") or 0))
+        fixed = float(str(inputs.get("monthly_fixed_expenses_est") or 0))
+        margin_pct = round((revenue - cogs - fixed) / revenue * 100, 1) if revenue > 0 else 0.0
+        result.append(
+            MarginHistoryItem(
+                snapshot_date=snap.snapshot_date.isoformat(),
+                score_margin=snap.score_margin or 0,
+                revenue_est=revenue,
+                cogs_est=cogs,
+                fixed_expenses_est=fixed,
+                margin_pct=margin_pct,
+            )
+        )
+    return result
 
 
 @router.get(

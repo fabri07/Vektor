@@ -23,7 +23,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_role
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse
 from app.application.services.automation_service import (
     AUTOMATION_PAYLOAD_AGENT_KEY,
@@ -685,7 +685,7 @@ async def chat_stream(
 @router.post("/confirm/{pending_id}", summary="Confirmar acción pendiente")
 async def confirm_action(
     pending_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
 ) -> dict:
@@ -812,7 +812,7 @@ async def cancel_action(
 @router.post("/retry/{pending_id}", summary="Reintentar acción fallida")
 async def retry_action(
     pending_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
 ) -> dict:

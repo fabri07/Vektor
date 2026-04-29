@@ -105,20 +105,32 @@ def render_insight(
         If risk_code is not in TEMPLATES.
     """
     template = TEMPLATES[risk_code]
+    description_override: str | None = None
 
     if risk_code == "CASH_LOW":
         gastos_fijos = state.monthly_fixed_expenses_est
         caja = state.cash_on_hand_est
         # days of coverage: cash / (fixed_expenses / 30)
-        if gastos_fijos > 0:
-            dias_cobertura = int(caja / (gastos_fijos / Decimal("30")))
-        else:
-            dias_cobertura = 0
+        dias_cobertura = int(caja / (gastos_fijos / Decimal("30"))) if gastos_fijos > 0 else 0
         vars_: dict[str, str] = {
             "dias_cobertura": str(dias_cobertura),
             "caja_ars": _fmt_ars(caja),
             "gastos_fijos": _fmt_ars(gastos_fijos),
         }
+        # Severity-aware description variants — gated por score_cash del snapshot
+        score_cash_val = int(getattr(result, "score_cash", 100) or 100)
+        if score_cash_val < 30:
+            description_override = (
+                f"Situación crítica: con {_fmt_ars(caja)} en caja y "
+                f"{_fmt_ars(gastos_fijos)} de gastos fijos mensuales, "
+                f"tu cobertura operativa es de solo {dias_cobertura} días. "
+                "El riesgo de no poder afrontar pagos es inmediato."
+            )
+        elif score_cash_val < 60:
+            description_override = (
+                f"Con {_fmt_ars(caja)} en caja y {_fmt_ars(gastos_fijos)} de gastos fijos "
+                f"mensuales, tenés cobertura para {dias_cobertura} días. Margen muy ajustado."
+            )
 
     elif risk_code == "MARGIN_LOW":
         vertical = state.vertical_code
@@ -159,7 +171,11 @@ def render_insight(
         vars_ = {}
 
     title = template.title_tpl.format(**vars_)
-    description = template.description_tpl.format(**vars_)
+    description = (
+        description_override
+        if description_override is not None
+        else template.description_tpl.format(**vars_)
+    )
     action = template.action_tpl.format(**vars_)
 
     return title, description, action

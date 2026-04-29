@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_role
 from app.config.settings import get_settings
 from app.integrations.mcp.exceptions import McpToolUnavailableError
 from app.observability.logger import get_logger
@@ -207,8 +207,8 @@ async def google_status(
 
     connection = await _get_connection(db, current_user.tenant_id, current_user.user_id)
 
-    # Si hay conexión CONNECTING, intentar confirmar estado real con el MCP server
-    if connection and connection.status == "CONNECTING" and mcp_enabled and mcp_server_configured:
+    # Timeout de CONNECTING — independiente de si MCP está habilitado
+    if connection and connection.status == "CONNECTING":
         pending_since = _as_utc(connection.updated_at or connection.created_at)
         if _utc_now() - pending_since > _CONNECTING_TIMEOUT:
             connection.status = "ERROR"
@@ -221,33 +221,36 @@ async def google_status(
                 mcp_server_configured=mcp_server_configured,
             )
 
-        try:
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
+        # Solo consultar el MCP server si está habilitado y configurado
+        if mcp_enabled and mcp_server_configured:
+            try:
+                from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
 
-            gateway = HttpMcpGateway(settings=settings)
-            auth_status = await gateway.get_auth_status(
-                tenant_id=str(current_user.tenant_id),
-                user_id=str(current_user.user_id),
-            )
-            if auth_status.get("connected"):
-                connection.status = "CONNECTED"
-                connection.scopes_granted = auth_status.get("scopes_granted", [])
-                connection.connected_at = _utc_now()
-                connection.last_error_code = None
-                connection.state_token = None
-                await db.commit()
-            elif auth_status.get("last_error") not in (None, "pending_callback", "not_connected"):
-                connection.status = "ERROR"
-                connection.last_error_code = auth_status.get("last_error")
-                connection.state_token = None
-                await db.commit()
-        except Exception as exc:
-            logger.warning(
-                "integrations.status_check_failed",
-                tenant_id=str(current_user.tenant_id),
-                user_id=str(current_user.user_id),
-                error=str(exc),
-            )
+                gateway = HttpMcpGateway(settings=settings)
+                auth_status = await gateway.get_auth_status(
+                    tenant_id=str(current_user.tenant_id),
+                    user_id=str(current_user.user_id),
+                )
+                _last_err = auth_status.get("last_error")
+                if auth_status.get("connected"):
+                    connection.status = "CONNECTED"
+                    connection.scopes_granted = auth_status.get("scopes_granted", [])
+                    connection.connected_at = _utc_now()
+                    connection.last_error_code = None
+                    connection.state_token = None
+                    await db.commit()
+                elif _last_err not in (None, "pending_callback", "not_connected"):
+                    connection.status = "ERROR"
+                    connection.last_error_code = _last_err
+                    connection.state_token = None
+                    await db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "integrations.status_check_failed",
+                    tenant_id=str(current_user.tenant_id),
+                    user_id=str(current_user.user_id),
+                    error=str(exc),
+                )
 
     return _build_status_response(
         connection=connection,
@@ -263,7 +266,7 @@ async def google_status(
     summary="Iniciar flujo OAuth de conexión Google",
 )
 async def google_connect_start(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
 ) -> ConnectStartResponse:
     settings = get_settings()
@@ -330,7 +333,7 @@ async def google_connect_start(
     summary="Desconectar Google del usuario actual",
 )
 async def google_disconnect(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
     settings = get_settings()

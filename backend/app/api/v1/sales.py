@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, get_current_user
+from app.api.v1.deps import get_current_tenant, require_role
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
@@ -52,6 +52,8 @@ async def list_sales(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[SaleEntry]:
+    if from_date is None:
+        from_date = date.today() - timedelta(days=30)
     repo = SaleRepository(session)
     return await repo.list_by_tenant(
         tenant.tenant_id, from_date=from_date, to_date=to_date, limit=limit, offset=offset
@@ -67,7 +69,7 @@ async def list_sales(
 async def bulk_create_sales(
     body: BulkSaleRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[SaleEntry]:
     repo = SaleRepository(session)
@@ -108,7 +110,7 @@ async def bulk_create_sales(
 async def create_sale(
     body: CreateSaleRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    current_user: User = Depends(get_current_user),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> SaleEntry:
     repo = SaleRepository(session)
@@ -144,6 +146,7 @@ async def update_sale(
     sale_id: UUID,
     body: UpdateSaleRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> SaleEntry:
     repo = SaleRepository(session)
@@ -169,7 +172,7 @@ async def update_sale(
 async def delete_sale(
     sale_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = SaleRepository(session)

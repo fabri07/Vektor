@@ -66,6 +66,37 @@ class SaleRepository:
         result = await self._session.execute(q)
         return int(result.scalar_one() or 0)
 
+    async def cash_breakdown_by_method(
+        self,
+        tenant_id: UUID,
+        from_date: date,
+        to_date: date,
+    ) -> list[dict]:
+        """Ventas diarias agrupadas por método de pago."""
+        q = (
+            select(
+                SaleEntry.transaction_date,
+                SaleEntry.payment_method,
+                func.sum(SaleEntry.amount).label("total"),
+            )
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.transaction_date >= from_date,
+                SaleEntry.transaction_date <= to_date,
+            )
+            .group_by(SaleEntry.transaction_date, SaleEntry.payment_method)
+            .order_by(SaleEntry.transaction_date)
+        )
+        result = await self._session.execute(q)
+        return [
+            {
+                "date": str(row.transaction_date),
+                "payment_method": row.payment_method or "OTROS",
+                "total": float(row.total or 0),
+            }
+            for row in result.all()
+        ]
+
     async def save(self, entry: SaleEntry) -> SaleEntry:
         self._session.add(entry)
         await self._session.flush()
@@ -224,6 +255,37 @@ class ExpenseRepository:
                 ),
             }
             for r in rows
+        ]
+
+    async def cash_breakdown_by_method(
+        self,
+        tenant_id: UUID,
+        from_date: date,
+        to_date: date,
+    ) -> list[dict]:
+        """Gastos diarios agrupados por método de pago."""
+        q = (
+            select(
+                ExpenseEntry.transaction_date,
+                ExpenseEntry.payment_method,
+                func.sum(ExpenseEntry.amount).label("total"),
+            )
+            .where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.transaction_date >= from_date,
+                ExpenseEntry.transaction_date <= to_date,
+            )
+            .group_by(ExpenseEntry.transaction_date, ExpenseEntry.payment_method)
+            .order_by(ExpenseEntry.transaction_date)
+        )
+        result = await self._session.execute(q)
+        return [
+            {
+                "date": str(row.transaction_date),
+                "payment_method": row.payment_method or "OTROS",
+                "total": float(row.total or 0),
+            }
+            for row in result.all()
         ]
 
     async def save(self, entry: ExpenseEntry) -> ExpenseEntry:

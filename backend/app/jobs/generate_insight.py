@@ -132,6 +132,56 @@ async def _run(tenant_id_str: str) -> None:
             # ── 3. Render insight text ─────────────────────────────────────────
             title, description, action_text = render_insight(risk_code, state, snapshot)
 
+            # ── 3b. LLM narrative (solo si confidence HIGH o MEDIUM) ──────────
+            confidence = snapshot.confidence_level or ""
+            if confidence in ("HIGH", "MEDIUM"):
+                try:
+                    import anthropic as _anthropic  # noqa: PLC0415, I001
+                    from sqlalchemy import select as _sq  # noqa: PLC0415
+                    from app.integrations.anthropic_client import (  # noqa: PLC0415
+                        get_anthropic_async_client,
+                    )
+                    from app.persistence.models.tenant import Tenant  # noqa: PLC0415
+
+                    name_res = await session.execute(
+                        _sq(Tenant.display_name).where(Tenant.tenant_id == tenant_id)
+                    )
+                    business_name = name_res.scalar_one_or_none() or "tu negocio"
+
+                    _client = get_anthropic_async_client(_anthropic.AsyncAnthropic)
+                    _resp = await _client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=600,
+                        system=(
+                            "Sos un consultor financiero de Véktor. Generá una narrativa "
+                            "ejecutiva clara y accionable basada en los datos numéricos.\n\n"
+                            "REGLAS: Usá los números dados. Máximo 3 párrafos. "
+                            "Priorizá las alertas urgentes. Español argentino, directo."
+                        ),
+                        messages=[{
+                            "role": "user",
+                            "content": (
+                                f"Negocio: {business_name}\n"
+                                f"Score de salud: {float(snapshot.total_score):.0f}/100\n"
+                                f"  - Liquidez/Caja: {snapshot.score_cash or 70}/100\n"
+                                f"  - Inventario: {snapshot.score_stock or 70}/100\n"
+                                f"  - Proveedores: {snapshot.score_supplier or 70}/100\n"
+                                f"  - Margen comercial: {snapshot.score_margin or 70}/100\n"
+                                f"Riesgo principal: {risk_code}\n"
+                                f"Confianza de datos: {confidence}"
+                            ),
+                        }],
+                    )
+                    narrative = _resp.content[0].text.strip()
+                    if narrative:
+                        description = narrative
+                except Exception as exc:
+                    logger.warning(
+                        "generate_insight.narrative_failed",
+                        tenant_id=tenant_id_str,
+                        error=str(exc),
+                    )
+
             now = datetime.now(UTC)
 
             # ── 4. Persist Insight ────────────────────────────────────────────

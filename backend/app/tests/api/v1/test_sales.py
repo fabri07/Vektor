@@ -1,7 +1,8 @@
 """Tests for /api/v1/sales endpoints."""
 
-import pytest
 from datetime import date
+
+import pytest
 from httpx import AsyncClient
 
 _TODAY = str(date.today())
@@ -163,3 +164,39 @@ class TestSalesTenantIsolation:
 
         resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=second_auth_headers)
         assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+class TestSalesRBAC:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_viewer_cannot_create_sale(
+        self, client: AsyncClient, viewer_headers: dict
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=viewer_headers
+        )
+        assert resp.status_code == 403
+
+    async def test_viewer_cannot_bulk_create(
+        self, client: AsyncClient, viewer_headers: dict
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=viewer_headers
+        )
+        assert resp.status_code == 403
+
+    async def test_viewer_cannot_delete_sale(
+        self,
+        client: AsyncClient,
+        auth_headers: dict,
+        viewer_headers: dict,
+    ) -> None:
+        create_resp = await client.post(
+            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers
+        )
+        sale_id = create_resp.json()["id"]
+        resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=viewer_headers)
+        assert resp.status_code == 403
