@@ -16,10 +16,10 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - En frontend existe `/apps` con flujo directo de conexión Google, estado de integraciones y manejo de reconnect cuando una acción externa devuelve `REQUIRES_RECONNECT`.
 - El pipeline de archivos fue recentralizado en `app/application/services/file_parsing.py`. Los uploads de chat se parsean sincrónicamente al subir; la ingestión sigue su pipeline propio con confirmación humana.
 - La cadena Alembic actual incluye una migración de compatibilidad `20260401_0003_restore_chat_context_and_heuristics.py` y stubs `20260406_0001_stub.py` / `20260406_0002_stub.py` para conservar continuidad después de retirar migraciones viejas de Google.
-- El frontend fue rediseñado con tema dark unificado (`vektor-night`, `vektor-ink`, `vektor-surface`, `vektor-border`) y tipografías `Poppins` + `Playfair Display`.
+- El frontend fue rediseñado con tema dark unificado (`vektor-night`, `vektor-ink`, `vektor-surface`, `vektor-border`) y tipografías `Barlow Condensed` + `Inter`.
 - La landing pública (`/`) ya no es un placeholder: tiene hero full-screen, social proof con carrusel, highlights y preview de dashboard.
 - El dashboard quedó dividido en dos pantallas: `/dashboard` (resumen con health score y KPIs) y `/dashboard/analisis` (charts + insights), con navegación compartida tipo launchpad.
-- Existe un ticker económico en la parte superior del dashboard alimentado por `GET /api/economia` y un endpoint stub `GET /api/analisis/insight` para los insights de charts.
+- Existe un ticker económico en la parte superior del dashboard alimentado por `GET /api/economia`. Los insights de charts llaman a `GET /insights/current` (real, template-based); el stub `GET /api/analisis/insight` ya no se usa.
 - Para trabajo visual con Codex está operativo el proxy local `tools/stitch-proxy/`; Stitch se usa como referencia de diseño, no como dependencia runtime de la app.
 - Los benchmarks de margen se cargan desde JSON (`heuristics/verticals/loader.py → load_margin_benchmark()`), no desde un dict hardcodeado en Python. El health engine ya no importa `deco_hogar.py`, `kiosco.py` ni `limpieza.py`. Códigos alternativos (`kiosco` → `kiosco_almacen`) se normalizan en el loader.
 - `HealthAlertBanner.tsx` muestra alertas accionables fixed bottom-right cuando `score < 75` y hay `risk_code` activo (CASH_LOW, MARGIN_LOW, STOCK_CRITICAL, SUPPLIER_DEPENDENCY). Dismissable, 800ms de delay, navega a la sección relevante al hacer clic.
@@ -27,6 +27,7 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - `GET /insights/breakdown?days=N` devuelve gastos por categoría (con %), top 5 proveedores por gasto y productos con stock crítico. Alimenta dos nuevos panels en `DashboardAnalysisScreen`.
 - `GET /forecast/cash` — forecast de caja en 3 tiers según historial disponible: Tier 1 (<30 días) promedio simple 14d LOW, Tier 2 (30–90d) EWMA+día de semana 30d MEDIUM, Tier 3 (90d+) patrón semanal+tendencia 60d HIGH. Caché Redis TTL 6h; `?refresh=true` fuerza recálculo. `ForecastPanel` en `DashboardAnalysisScreen` muestra LineChart de 3 series.
 - Tabla `analytics_events` — log insert-only de métricas anonimizadas por vertical (sin `tenant_id`, sin PII). `HealthScoreService` emite un evento en cada recálculo. `AnalyticsRepository.compute_margin_benchmark()` usa `percentile_cont(p10/p25/p50/p75)` de PostgreSQL con mínimo 5 muestras (90 días) para derivar benchmarks data-driven. Cuando hay suficientes datos, `HealthScoreService` los pasa al health engine reemplazando el benchmark estático del JSON. `GET /admin/analytics/benchmarks` (SUPERADMIN) expone benchmarks vigentes con `source=data_driven|static`.
+- `decision_audit_log` tiene 3 columnas nuevas (`tokens_input`, `tokens_output`, `tokens_total`, todos `INTEGER DEFAULT 0`) y 3 campos nuevos en `decision_data` para chats con agentes: `ceo_target_agent` (a qué agente despachó el CEO), `sub_agent_name` (agente que respondió) y `token_calls` (array de objetos `{source, model, input_tokens, output_tokens}` por cada llamada LLM del turno). Migración: `20260429_0001`.
 
 ---
 
@@ -221,9 +222,11 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
 **Contratos fijos** (`app/application/agents/shared/schemas.py`):
 - `AgentRequest`: `{ request_id, user_id, business_id, message, attachments, conversation_id }` — sin `agent_target`
-- `AgentResponse`: `{ request_id, agent_name, status, risk_level, requires_approval, confidence, result, pending_action_id? }`
+- `AgentResponse`: `{ request_id, agent_name, status, risk_level, requires_approval, confidence, result, pending_action_id?, question?, message?, usage? }`
 - `status`: `"success" | "requires_approval" | "requires_clarification" | "requires_google_auth" | "error"`
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca un float
+- `LLMCall`: `{ source: str, model: str, input_tokens: int, output_tokens: int }` — captura de una llamada LLM individual
+- `UsageSummary`: `{ calls: list[LLMCall] }` con propiedades calculadas `total_input`, `total_output`, `total`. Presente en `AgentResponse.usage`; `None` si el turno no hizo ninguna llamada LLM.
 
 **ActionType** (`shared/schemas.py`) — catálogo cerrado de 16 valores:
 
@@ -277,6 +280,8 @@ Finaliza con `data: [DONE]`. El frontend usa `sendStream()` en `useChat`, que ma
 4. Archivos procesados: últimos 5 `UploadedFile` con `parsed_summary_json` (`_load_file_context`)
 
 Luego: CEO clasifica intent → `registry.get_sub_agent()` despacha → si `requires_google_auth` retorna inmediato sin LLM → si `requires_approval` usa summary estructurado → si no, el orquestador genera respuesta rica con Claude → `ConversationService` guarda el turno (best-effort).
+
+El orquestador acumula todas las `LLMCall` del turno (CEO + sub-agente + respuesta final) en `all_llm_calls` y las adjunta al `AgentResponse.usage` antes de retornar. Inyecta siempre `intent` y `target_agent` del CEO en `agent_response.result`, incluyendo los paths de corte temprano (`out_of_scope`, `requires_google_auth`).
 
 **ConversationService** (`app/application/services/conversation_service.py`) — historial de chat: Redis como caché caliente (TTL 24h) con fallback a PostgreSQL (`agent_conversation_context`). Ventana deslizante de los últimos 10 turnos; los más viejos se descartan. El `conversation_id` es UUID generado en el cliente.
 
@@ -373,7 +378,7 @@ La confirmación humana sigue siendo obligatoria antes de insertar ventas/gastos
 ### Estado visual actual
 
 - Tema base dark centralizado en `src/styles/globals.css` y `tailwind.config.ts` con tokens `vektor-*`.
-- Tipografías globales cargadas en `src/app/layout.tsx`: `Poppins` para UI y `Playfair Display` para titulares.
+- Tipografías globales cargadas en `src/app/layout.tsx`: `Barlow Condensed` para UI y `Inter` para cuerpo de texto.
 - Componente reusable `Tooltip` en `src/components/ui/Tooltip.tsx`: hover-only, delay 300ms, dark surface, arrow y animación `fade-slide-up`.
 - `EconomicTicker` en `src/components/dashboard/EconomicTicker.tsx` se renderiza desde `src/app/(protected)/layout.tsx` solo en rutas de dashboard; en mobile se reemplaza por botón/modal.
 - La navegación del dashboard usa `DashboardLaunchpadNav` para tabs/dots compartidos entre `/dashboard` y `/dashboard/analisis`.
@@ -440,9 +445,10 @@ Estado actual:
 ### Endpoints frontend agregados recientemente
 
 - `GET /api/economia` — agrega dólar oficial/blue/MEP/CCL + inflación/REM/tasa BCRA con `revalidate = 1800`
-- `GET /api/analisis/insight?metric=<id>&period=<id>` — stub hardcodeado para insights de charts hasta cablear la capa LLM
 - `GET /forecast/cash` — forecast de caja desde `dashboard.service.ts → fetchCashForecast()`; tipos `CashForecastResponse` / `ForecastPoint` en `api.ts`
 - `GET /insights/breakdown?days=N` — desglose de gastos por categoría y top proveedores; tipos `BusinessBreakdownResponse`, `CategoryBreakdownItem`, `SupplierBreakdownItem`, `ProductStockItem` en `api.ts`
+- `GET /health-scores/history/v2` — historial de scores usado en `DashboardAnalysisScreen` para las series de margen y stock del gráfico de líneas; consume `HealthScoreV2Response[]` desde `dashboard.service.ts → fetchHealthScoreHistory()`
+- `GET /insights/current` — insight real del tenant (template-based) consumido por `InsightBlock` en el dashboard de análisis. El stub `/api/analisis/insight` ya no se usa.
 
 ---
 
@@ -457,6 +463,7 @@ Estado actual:
 | 5 | ✅ Completo | Chat como página central (`/chat` = home), Google OAuth login federated, adjuntos en chat, analytics Ventas/Gastos/Productos |
 | 6 | ✅ Completo | Integración MCP Google: AgentCalendar + AgentSync, BusinessMemoryService, AgentMemoryService, file context en chat |
 | 7 | ✅ Completo | Data moat: heurísticas desde JSON, alertas accionables, SmartTable+CSV, BSL breakdown, forecast 3-tiers, analytics_events data-driven |
+| 8 | ✅ Completo | Auditoría completa de agentes + token tracking: `LLMCall`/`UsageSummary` en schemas, captura de `response.usage` en los 7 agentes + CEO + orquestador, `decision_audit_log` con columnas `tokens_*` y campos `ceo_target_agent`/`sub_agent_name`/`token_calls`. Dashboard analisis cablea `/health-scores/history/v2` e `/insights/current` (reemplaza mocks). |
 
 ### Migraciones de compatibilidad recientes
 
@@ -475,8 +482,11 @@ Estado actual:
 - `20260427_0001_add_analytics_events.py`
   - agrega tabla `analytics_events` (insert-only, sin tenant_id): `vertical_code`, `margin_ratio`, `cash_ratio`, `total_score`, `liquidity_score`, `profitability_score`, `cost_control_score`, `sales_momentum_score`, `debt_coverage_score`, `event_date`
   - modelo ORM: `AnalyticsEvent` en `app/persistence/models/analytics_event.py`
+- `20260429_0001_add_token_tracking_to_audit_log.py`
+  - agrega columnas `tokens_input`, `tokens_output`, `tokens_total` (INTEGER, DEFAULT 0) a `decision_audit_log`
+  - crea índice compuesto `ix_decision_audit_log_tenant_created` sobre `(tenant_id, created_at)` para queries de analytics por período
 
-Post-Sprint 5/6/7: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
+Post-Sprint 5/6/7/8: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
 
 ---
 
