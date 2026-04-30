@@ -181,6 +181,7 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = "noreply@vektor.app"
     SMTP_USE_TLS: bool = True
+    SMTP_TIMEOUT_SECONDS: float = 10.0
 
     # ── Feature flags ─────────────────────────────────────────────────────────
     ENABLE_SCORE_RECALCULATION: bool = True
@@ -233,7 +234,9 @@ class Settings(BaseSettings):
             self.CORS_ORIGINS = [self.FRONTEND_URL, *self.CORS_ORIGINS]
 
         if self.is_development:
-            merged_origins = list(dict.fromkeys([*self.CORS_ORIGINS, *self.__class__.DEV_CORS_ORIGINS]))
+            merged_origins = list(
+                dict.fromkeys([*self.CORS_ORIGINS, *self.__class__.DEV_CORS_ORIGINS])
+            )
             self.CORS_ORIGINS = merged_origins
 
         if self.DEBUG or self.DEMO_MODE:
@@ -244,11 +247,13 @@ class Settings(BaseSettings):
             insecure_defaults = {"insecure-change-me", "insecure-jwt-change-me", ""}
             if self.SECRET_KEY in insecure_defaults or len(self.SECRET_KEY) < 32:
                 raise ValueError(
-                    "SECRET_KEY must be at least 32 characters and not a default value in production."
+                    "SECRET_KEY must be at least 32 characters "
+                    "and not a default value in production."
                 )
             if self.JWT_SECRET_KEY in insecure_defaults or len(self.JWT_SECRET_KEY) < 32:
                 raise ValueError(
-                    "JWT_SECRET_KEY must be at least 32 characters and not a default value in production."
+                    "JWT_SECRET_KEY must be at least 32 characters "
+                    "and not a default value in production."
                 )
 
         # ── Fail-fast: credenciales OAuth requeridas cuando los flags están activos ──

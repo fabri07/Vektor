@@ -34,15 +34,27 @@ class SMTPClient:
         msg.attach(MIMEText(body_html, "html"))
 
         try:
-            with smtplib.SMTP(s.SMTP_HOST, s.SMTP_PORT) as server:
+            with smtplib.SMTP(
+                s.SMTP_HOST,
+                s.SMTP_PORT,
+                timeout=s.SMTP_TIMEOUT_SECONDS,
+            ) as server:
                 if s.SMTP_USE_TLS:
                     server.starttls()
                 if s.SMTP_USER:
                     server.login(s.SMTP_USER, s.SMTP_PASSWORD)
                 server.sendmail(s.SMTP_FROM_EMAIL, to_email, msg.as_string())
             logger.info("smtp.sent", to=to_email, subject=subject)
-        except smtplib.SMTPException as exc:
-            logger.error("smtp.send_failed", to=to_email, error=str(exc))
+        except Exception as exc:
+            logger.error(
+                "smtp.send_failed",
+                to=to_email,
+                host=s.SMTP_HOST,
+                port=s.SMTP_PORT,
+                use_tls=s.SMTP_USE_TLS,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             if s.is_development:
                 logger.warning(
                     "smtp.dev_fallback — SMTP failed, copy the link below to verify manually",

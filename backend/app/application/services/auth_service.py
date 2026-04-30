@@ -139,11 +139,12 @@ class AuthService:
             await self._session.flush()
             try:
                 self._send_verification_email(user.email, str(token.token_id))
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "auth.register.verification_email_failed",
                     user_id=str(user.user_id),
                     email=user.email,
+                    error=str(exc),
                 )
 
         logger.info(
@@ -349,11 +350,12 @@ class AuthService:
 
         try:
             self._send_reset_email(user.email, str(token.token_id))
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "auth.password_reset.email_failed",
                 user_id=str(user.user_id),
                 email=user.email,
+                error=str(exc),
             )
 
         logger.info("auth.password_reset.requested", user_id=str(user.user_id))
