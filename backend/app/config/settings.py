@@ -174,14 +174,10 @@ class Settings(BaseSettings):
     S3_REGION: str = "us-east-1"
     USE_LOCAL_FALLBACK: bool = False
 
-    # ── SMTP ──────────────────────────────────────────────────────────────────
-    SMTP_HOST: str = "localhost"
-    SMTP_PORT: int = 587
-    SMTP_USER: str = ""
-    SMTP_PASSWORD: str = ""
+    # ── Email (Resend HTTP API) ────────────────────────────────────────────────
+    RESEND_API_KEY: str = ""
+    SMTP_PASSWORD: str = ""  # alias legacy — se usa como RESEND_API_KEY si RESEND_API_KEY está vacío
     SMTP_FROM_EMAIL: str = "noreply@vektor.app"
-    SMTP_USE_TLS: bool = True
-    SMTP_TIMEOUT_SECONDS: float = 10.0
 
     # ── Feature flags ─────────────────────────────────────────────────────────
     ENABLE_SCORE_RECALCULATION: bool = True

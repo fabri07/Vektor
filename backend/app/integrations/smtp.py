@@ -1,18 +1,22 @@
-"""SMTP email integration."""
+"""Email integration via Resend HTTP API."""
 
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import httpx
 
 from app.config.settings import get_settings
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
+_RESEND_API_URL = "https://api.resend.com/emails"
+
 
 class SMTPClient:
     def __init__(self) -> None:
         self._settings = get_settings()
+
+    def _api_key(self) -> str:
+        s = self._settings
+        return s.RESEND_API_KEY or s.SMTP_PASSWORD
 
     def send(
         self,
@@ -21,44 +25,52 @@ class SMTPClient:
         body_html: str,
         body_text: str | None = None,
     ) -> None:
-        """Send an email. Logs and swallows errors to avoid blocking the caller."""
+        """Send an email via Resend HTTP API."""
         s = self._settings
+        api_key = self._api_key()
 
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = s.SMTP_FROM_EMAIL
-        msg["To"] = to_email
+        if not api_key:
+            logger.warning("smtp.skipped — no Resend API key configured", to=to_email)
+            if s.is_development:
+                logger.warning(
+                    "smtp.dev_fallback — copia el link para verificar manualmente",
+                    to=to_email,
+                    subject=subject,
+                    plain_text=body_text or "(sin texto plano)",
+                )
+            return
 
+        payload: dict = {
+            "from": s.SMTP_FROM_EMAIL,
+            "to": [to_email],
+            "subject": subject,
+            "html": body_html,
+        }
         if body_text:
-            msg.attach(MIMEText(body_text, "plain"))
-        msg.attach(MIMEText(body_html, "html"))
+            payload["text"] = body_text
 
         try:
-            with smtplib.SMTP(
-                s.SMTP_HOST,
-                s.SMTP_PORT,
-                timeout=s.SMTP_TIMEOUT_SECONDS,
-            ) as server:
-                if s.SMTP_USE_TLS:
-                    server.starttls()
-                if s.SMTP_USER:
-                    server.login(s.SMTP_USER, s.SMTP_PASSWORD)
-                server.sendmail(s.SMTP_FROM_EMAIL, to_email, msg.as_string())
+            with httpx.Client(timeout=15.0) as client:
+                response = client.post(
+                    _RESEND_API_URL,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=payload,
+                )
+                response.raise_for_status()
             logger.info("smtp.sent", to=to_email, subject=subject)
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "smtp.send_failed",
+                to=to_email,
+                status_code=exc.response.status_code,
+                response_body=exc.response.text,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
         except Exception as exc:
             logger.error(
                 "smtp.send_failed",
                 to=to_email,
-                host=s.SMTP_HOST,
-                port=s.SMTP_PORT,
-                use_tls=s.SMTP_USE_TLS,
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
-            if s.is_development:
-                logger.warning(
-                    "smtp.dev_fallback — SMTP failed, copy the link below to verify manually",
-                    to=to_email,
-                    subject=subject,
-                    plain_text=body_text if body_text else "(no plain text)",
-                )
