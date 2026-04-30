@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 
 class LoginRequest(BaseModel):
@@ -25,6 +26,20 @@ class RegisterRequest(BaseModel):
         if not any(c.isalpha() for c in v):
             raise ValueError("Password must contain at least one letter.")
         return v
+
+
+def validate_password_strength(value: str) -> str:
+    if not any(c.isdigit() for c in value):
+        raise PydanticCustomError(
+            "password_strength",
+            "Password must contain at least one digit.",
+        )
+    if not any(c.isalpha() for c in value):
+        raise PydanticCustomError(
+            "password_strength",
+            "Password must contain at least one letter.",
+        )
+    return value
 
 
 class UserInAuthResponse(BaseModel):
@@ -81,6 +96,11 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8, max_length=128)
 
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        return validate_password_strength(v)
+
 
 class RegisterResponse(BaseModel):
     """Response for POST /register.
@@ -99,3 +119,17 @@ class VerifyEmailRequest(BaseModel):
 
 class ResendVerificationRequest(BaseModel):
     email: EmailStr
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        return validate_password_strength(v)

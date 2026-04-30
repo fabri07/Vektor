@@ -41,6 +41,7 @@ export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const justRegistered = searchParams.get("registered") === "1";
+  const justReset = searchParams.get("reset") === "1";
   const login = useLogin();
 
   const [values, setValues] = useState<LoginInput>({ email: "", password: "" });
@@ -208,6 +209,12 @@ export function LoginForm() {
         </p>
       )}
 
+      {justReset && (
+        <p role="status" className="rounded-lg border border-vk-success/20 bg-vk-success-bg px-4 py-3 text-sm text-vk-success">
+          Contraseña actualizada. Ingresá con tu nueva contraseña.
+        </p>
+      )}
+
       {/* Generic server error */}
       {serverError && (
         <p role="alert" className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
@@ -232,6 +239,12 @@ export function LoginForm() {
         )}
         {login.isPending ? "Ingresando..." : "Iniciar sesión"}
       </button>
+
+      <p className="text-center text-sm">
+        <a href="/forgot-password" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
+          ¿Olvidaste tu contraseña?
+        </a>
+      </p>
 
       {/* Divider */}
       <div className="relative">

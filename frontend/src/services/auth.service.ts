@@ -36,6 +36,20 @@ export async function resendVerificationRequest(email: string): Promise<void> {
   await api.post("/auth/resend-verification", { email });
 }
 
+export async function forgotPasswordRequest(email: string): Promise<void> {
+  await api.post("/auth/forgot-password", { email });
+}
+
+export async function resetPasswordRequest(
+  token: string,
+  newPassword: string,
+): Promise<void> {
+  await api.post("/auth/reset-password", {
+    token,
+    new_password: newPassword,
+  });
+}
+
 export async function getMeRequest(config?: {
   headers?: Record<string, string>;
 }): Promise<MeResponse> {

@@ -10,8 +10,17 @@ Required tests:
   - test_me_with_invalid_token
 """
 
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.persistence.models.auth_token import PasswordResetToken
+from app.persistence.models.user import User
+from app.utils.security import verify_password
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -134,3 +143,115 @@ class TestMe:
         """GET /auth/me without any Authorization header must return 401."""
         response = await client.get("/api/v1/auth/me")
         assert response.status_code == 401
+
+
+# ── Forgot / Reset password ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestForgotResetPassword:
+    async def test_forgot_password_unknown_email_returns_200(
+        self, client: AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/api/v1/auth/forgot-password",
+            json={"email": "missing@example.com"},
+        )
+
+        assert response.status_code == 200
+
+    async def test_forgot_password_known_email_creates_token(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        sample_user: User,
+    ) -> None:
+        with patch("app.integrations.smtp.SMTPClient.send"):
+            response = await client.post(
+                "/api/v1/auth/forgot-password",
+                json={"email": sample_user.email},
+            )
+
+        assert response.status_code == 200
+        result = await db_session.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.user_id == sample_user.user_id,
+                PasswordResetToken.used.is_(False),
+            )
+        )
+        assert result.scalar_one_or_none() is not None
+
+    async def test_reset_password_valid_token(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        sample_user: User,
+    ) -> None:
+        token = PasswordResetToken(
+            user_id=sample_user.user_id,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            used=False,
+        )
+        db_session.add(token)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": str(token.token_id), "new_password": "NewSecure123"},
+        )
+
+        assert response.status_code == 200
+        await db_session.refresh(sample_user)
+        await db_session.refresh(token)
+        assert verify_password("NewSecure123", sample_user.password_hash)
+        assert token.used is True
+
+    async def test_reset_password_expired_token(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        sample_user: User,
+    ) -> None:
+        token = PasswordResetToken(
+            user_id=sample_user.user_id,
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            used=False,
+        )
+        db_session.add(token)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": str(token.token_id), "new_password": "NewSecure123"},
+        )
+
+        assert response.status_code == 400
+
+    async def test_reset_password_used_token(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        sample_user: User,
+    ) -> None:
+        token = PasswordResetToken(
+            user_id=sample_user.user_id,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            used=True,
+        )
+        db_session.add(token)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": str(token.token_id), "new_password": "NewSecure123"},
+        )
+
+        assert response.status_code == 400
+
+    async def test_reset_password_weak_password(self, client: AsyncClient) -> None:
+        response = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": "not-a-token", "new_password": "password"},
+        )
+
+        assert response.status_code == 422

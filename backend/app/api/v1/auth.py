@@ -15,12 +15,14 @@ from app.persistence.repositories.tenant_repository import TenantRepository
 from app.schemas.auth import (
     AuthResponse,
     ChangePasswordRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     MeResponse,
     RefreshRequest,
     RegisterRequest,
     RegisterResponse,
     ResendVerificationRequest,
+    ResetPasswordRequest,
     SubscriptionInMeResponse,
     TokenResponse,
     VerifyEmailRequest,
@@ -96,7 +98,44 @@ async def resend_verification(
     service = AuthService(session)
     await service.resend_verification(body.email)
     # Always return 200 regardless of whether the email exists (avoid enumeration)
-    return MessageResponse(message="Si el email está registrado y pendiente de verificación, recibirás un nuevo link.")
+    return MessageResponse(
+        message=(
+            "Si el email está registrado y pendiente de verificación, "
+            "recibirás un nuevo link."
+        )
+    )
+
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    summary="Request a password reset link",
+)
+@limiter.limit("3/15minutes")
+async def forgot_password(
+    request: Request,
+    body: ForgotPasswordRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> MessageResponse:
+    service = AuthService(session)
+    await service.request_password_reset(body.email)
+    return MessageResponse(message="Si el email existe, recibirás un link en minutos.")
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    summary="Reset password using a valid token",
+)
+@limiter.limit("5/10minutes")
+async def reset_password(
+    request: Request,
+    body: ResetPasswordRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> MessageResponse:
+    service = AuthService(session)
+    await service.reset_password(body.token, body.new_password)
+    return MessageResponse(message="Contraseña actualizada correctamente.")
 
 
 @router.get(

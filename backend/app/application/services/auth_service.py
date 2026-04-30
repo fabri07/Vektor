@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """
 Authentication service.
 
@@ -21,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import get_settings
 from app.observability.logger import get_logger
-from app.persistence.models.auth_token import EmailVerificationToken
+from app.persistence.models.auth_token import EmailVerificationToken, PasswordResetToken
 from app.persistence.models.business import BusinessProfile, MomentumProfile
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.user import User
@@ -46,6 +47,7 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 _VERIFICATION_TOKEN_TTL_HOURS = 24
+_RESET_TOKEN_TTL_HOURS = 1
 
 
 class AuthService:
@@ -201,7 +203,7 @@ class AuthService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="invalid_or_expired_token",
-            )
+            ) from None
 
         result = await self._session.execute(
             select(EmailVerificationToken).where(
@@ -318,6 +320,88 @@ class AuthService:
         logger.info("auth.password_changed", user_id=str(user.user_id))
         return True
 
+    async def request_password_reset(self, email: str) -> None:
+        """
+        Generate a password reset token and email the link.
+        Silent no-op if email not found (avoids enumeration).
+        """
+        user = await self._user_repo.get_by_email_any_tenant(email.lower())
+        if user is None:
+            return
+
+        await self._session.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user.user_id,
+                PasswordResetToken.used.is_(False),
+            )
+            .values(used=True)
+        )
+
+        token = PasswordResetToken(
+            user_id=user.user_id,
+            expires_at=datetime.now(UTC) + timedelta(hours=_RESET_TOKEN_TTL_HOURS),
+            used=False,
+        )
+        self._session.add(token)
+        await self._session.flush()
+        await self._session.commit()
+
+        try:
+            self._send_reset_email(user.email, str(token.token_id))
+        except Exception:
+            logger.warning(
+                "auth.password_reset.email_failed",
+                user_id=str(user.user_id),
+                email=user.email,
+            )
+
+        logger.info("auth.password_reset.requested", user_id=str(user.user_id))
+
+    async def reset_password(self, token_str: str, new_password: str) -> None:
+        """
+        Consume a valid reset token and update the user's password.
+        Raises 400 for invalid, used, or expired tokens.
+        """
+        try:
+            token_uuid = uuid.UUID(token_str)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="token_invalido_o_expirado",
+            ) from None
+
+        result = await self._session.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.token_id == token_uuid,
+                PasswordResetToken.used.is_(False),
+                PasswordResetToken.expires_at > datetime.now(UTC),
+            )
+        )
+        token = result.scalar_one_or_none()
+        if token is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="token_invalido_o_expirado",
+            )
+
+        user_result = await self._session.execute(
+            select(User).where(User.user_id == token.user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="token_invalido_o_expirado",
+            )
+
+        user.password_hash = hash_password(new_password)
+        token.used = True
+        await self._session.flush()
+        await self._session.commit()
+
+        logger.info("auth.password_reset.done", user_id=str(user.user_id))
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _build_auth_response(self, user: User, tenant: Tenant) -> AuthResponse:
@@ -404,6 +488,72 @@ class AuthService:
         smtp.send(
             to_email=to_email,
             subject="Verificá tu email — Véktor",
+            body_html=html,
+            body_text=plain,
+        )
+
+    def _send_reset_email(self, to_email: str, token_str: str) -> None:
+        from app.integrations.smtp import SMTPClient  # noqa: PLC0415
+
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token_str}"
+
+        html = f"""<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f9fafb;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
+          <tr>
+            <td style="background-color:#1A1A2E;padding:28px 32px;">
+              <p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Véktor</p>
+              <p style="margin:4px 0 0 0;font-size:13px;color:rgba(255,255,255,0.5);">Recuperación de contraseña</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px;">
+              <p style="margin:0 0 16px 0;font-size:16px;font-weight:600;color:#111827;">Restablecé tu contraseña</p>
+              <p style="margin:0 0 24px 0;font-size:14px;color:#6b7280;line-height:1.6;">
+                Recibiste este email porque solicitaste restablecer tu contraseña en Véktor.
+                Hacé click en el botón de abajo para continuar. Este link expira en {_RESET_TOKEN_TTL_HOURS} hora.
+              </p>
+              <a href="{reset_url}"
+                 style="display:inline-block;background-color:#2B7FD4;color:#ffffff;font-size:14px;font-weight:600;
+                        text-decoration:none;padding:12px 28px;border-radius:8px;letter-spacing:0.01em;">
+                Restablecer contraseña →
+              </a>
+              <p style="margin:24px 0 0 0;font-size:12px;color:#9ca3af;">
+                Si no solicitaste este cambio, podés ignorar este email. Tu contraseña no cambia.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 32px 24px 32px;border-top:1px solid #f3f4f6;">
+              <p style="margin:0;font-size:11px;color:#9ca3af;">
+                O copiá este link en tu navegador:<br/>
+                <span style="color:#6b7280;word-break:break-all;">{reset_url}</span>
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+        plain = (
+            f"Restablecé tu contraseña en Véktor.\n\n"
+            f"Copiá este link en tu navegador:\n{reset_url}\n\n"
+            f"Este link expira en {_RESET_TOKEN_TTL_HOURS} hora.\n"
+            f"Si no solicitaste este cambio, podés ignorar este email."
+        )
+
+        smtp = SMTPClient()
+        smtp.send(
+            to_email=to_email,
+            subject="Restablecé tu contraseña — Véktor",
             body_html=html,
             body_text=plain,
         )
