@@ -3,6 +3,6 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "sh scripts/start_web.sh"
+startCommand = "sh scripts/start.sh"
 healthcheckPath = "/health"
 restartPolicyType = "on_failure"

@@ -3,6 +3,5 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "celery -A app.jobs.celery_app worker --loglevel=info --queues=default,scores,notifications,reports,ingestion --concurrency=2"
-healthcheckPath = ""
+startCommand = "sh scripts/start_worker.sh"
 restartPolicyType = "on_failure"

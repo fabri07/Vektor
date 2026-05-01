@@ -3,6 +3,5 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "celery -A app.jobs.celery_app beat --loglevel=info"
-healthcheckPath = ""
+startCommand = "sh scripts/start_beat.sh"
 restartPolicyType = "on_failure"
