@@ -11,9 +11,16 @@ logger = get_logger(__name__)
 
 async def startup() -> None:
     """Initialize application dependencies without blocking liveness."""
+    from app.config.settings import get_settings  # noqa: PLC0415
+    _settings = get_settings()
+
     try:
         await _init_database()
     except Exception as exc:
+        if _settings.ENVIRONMENT == "production":
+            raise RuntimeError(
+                f"Database no disponible en producción: {exc}"
+            ) from exc
         logger.warning(
             "bootstrap.database.unavailable",
             exc_type=type(exc).__name__,
@@ -28,6 +35,8 @@ async def startup() -> None:
             exc_type=type(exc).__name__,
             exc_msg=str(exc),
         )
+
+    _check_celery_broker()
 
     logger.info("bootstrap.startup.complete")
 
@@ -89,3 +98,29 @@ async def _close_redis() -> None:
 
     await close_redis_pool()
     logger.info("bootstrap.redis.disconnected")
+
+
+# ── Celery ────────────────────────────────────────────────────────────────────
+
+def _check_celery_broker() -> None:
+    """Verifica que el broker de Celery sea alcanzable. No-op si Celery está deshabilitado."""
+    from app.config.settings import get_settings  # noqa: PLC0415
+
+    s = get_settings()
+    if not s.ENABLE_SCORE_RECALCULATION:
+        return
+
+    try:
+        from app.jobs.celery_app import celery_app  # noqa: PLC0415
+
+        conn = celery_app.connection_for_read()
+        conn.ensure_connection(max_retries=1, timeout=3)
+        conn.release()
+        logger.info("bootstrap.celery.connected")
+    except Exception as exc:
+        logger.warning(
+            "bootstrap.celery.unavailable",
+            exc_type=type(exc).__name__,
+            exc_msg=str(exc),
+            detail="El score de salud async no funcionará hasta que Redis/Celery esté disponible.",
+        )

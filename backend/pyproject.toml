@@ -42,6 +42,13 @@ addopts = [
     "-v",
 ]
 asyncio_default_fixture_loop_scope = "session"
+markers = [
+    "unit: tests rápidos, sin infraestructura externa",
+    "integration: tests con SQLite + FakeRedis",
+    "postgres: requiere PostgreSQL real (docker)",
+    "redis: requiere Redis real (docker)",
+    "celery: requiere Celery worker activo",
+]
 
 [tool.coverage.run]
 source = ["app"]

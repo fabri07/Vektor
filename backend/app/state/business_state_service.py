@@ -263,7 +263,12 @@ async def compute_business_state(
 
     # ── 2. Aggregate sales (last 30 days) ────────────────────────────────────
     sale_sum_result = await session.execute(
-        select(func.sum(SaleEntry.amount), func.count(SaleEntry.id)).where(
+        select(
+            func.sum(SaleEntry.amount),
+            func.count(SaleEntry.id),
+            func.min(SaleEntry.transaction_date),
+            func.max(SaleEntry.transaction_date),
+        ).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.transaction_date >= window_start,
             SaleEntry.transaction_date <= window_end,
@@ -272,6 +277,8 @@ async def compute_business_state(
     sale_sum_row = sale_sum_result.one()
     real_sales: Decimal = Decimal(str(sale_sum_row[0] or 0))
     sale_count: int = int(sale_sum_row[1] or 0)
+    first_sale_date = sale_sum_row[2]
+    last_sale_date = sale_sum_row[3]
 
     # ── 3. Aggregate expenses (last 30 days) ─────────────────────────────────
     # mercaderia cost = expenses categorized as 'mercaderia'
@@ -367,9 +374,28 @@ async def compute_business_state(
         and _profile_updated_at >= datetime.now(UTC) - timedelta(days=7)
     )
 
-    monthly_sales_est = real_sales if sale_count > 0 else (
-        profile.monthly_sales_estimate_ars or Decimal("0")
-    )
+    onboarding_sales_est = profile.monthly_sales_estimate_ars or Decimal("0")
+    if sale_count == 0:
+        monthly_sales_est = onboarding_sales_est
+    elif sale_count < 50:
+        days_with_data = (
+            (last_sale_date - first_sale_date).days + 1
+            if first_sale_date is not None and last_sale_date is not None
+            else 1
+        )
+        projected_sales = real_sales * Decimal("30") / Decimal(max(days_with_data, 1))
+        if sale_count < 10:
+            monthly_sales_est = (
+                onboarding_sales_est * Decimal("0.7")
+                + projected_sales * Decimal("0.3")
+            )
+        else:
+            monthly_sales_est = (
+                onboarding_sales_est * Decimal("0.3")
+                + projected_sales * Decimal("0.7")
+            )
+    else:
+        monthly_sales_est = real_sales
     monthly_inventory_cost_est = real_inventory_cost if real_inventory_cost > 0 else (
         profile.monthly_inventory_spend_estimate_ars or Decimal("0")
     )

@@ -20,6 +20,7 @@ On unrecoverable error: processing_status = FAILED.
 """
 
 import asyncio
+import time
 import uuid as _uuid
 from typing import Any
 
@@ -29,7 +30,8 @@ from app.application.services.file_parsing import (
     parse_uploaded_content,
 )
 from app.jobs.celery_app import celery_app
-from app.observability.logger import get_logger
+from app.observability.logger import get_logger, log_job
+from app.observability.metrics import track_job_event
 from app.persistence.models.file import (
     PROCESSING_STATUS_FAILED,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
@@ -106,6 +108,8 @@ def _build_async_session(database_url: str) -> Any:
     queue="ingestion",
     max_retries=3,
     default_retry_delay=30,
+    soft_time_limit=150,
+    time_limit=180,
 )
 def process_spreadsheet(file_id: str, tenant_id: str) -> None:
     """Parse .xlsx or .csv file and extract ventas/gastos/productos."""
@@ -117,37 +121,56 @@ def process_spreadsheet(file_id: str, tenant_id: str) -> None:
         from app.integrations.s3 import S3Client  # noqa: PLC0415
 
         engine, factory = _build_async_session(s.DATABASE_URL)
+        t0 = time.monotonic()
         try:
-            async with factory() as session:
-                record = await _load_and_lock(session, file_id, tenant_id)
-                await session.commit()
+            with log_job("jobs.process_spreadsheet", tenant_id=tenant_id, logger=logger):
+                async with factory() as session:
+                    record = await _load_and_lock(session, file_id, tenant_id)
+                    await session.commit()
 
-            # Download from S3
-            s3 = S3Client()
-            content = await s3.download(record.s3_key)
+                # Download from S3
+                s3 = S3Client()
+                content = await s3.download(record.s3_key)
 
-            # Parse
-            summary = parse_uploaded_content(content, record.content_type, record.original_filename)
-
-            async with factory() as session:
-                result_record = await _load_and_lock(session, file_id, tenant_id)
-                await _save_result(
-                    session,
-                    result_record,
-                    summary,
-                    PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                # Parse
+                summary = parse_uploaded_content(
+                    content,
+                    record.content_type,
+                    record.original_filename,
                 )
-                await session.commit()
 
-            logger.info(
-                "ingestion.spreadsheet.done",
-                file_id=file_id,
-                confidence=summary.get("confidence"),
-                rows=summary.get("rows_processed"),
-            )
+                async with factory() as session:
+                    result_record = await _load_and_lock(session, file_id, tenant_id)
+                    await _save_result(
+                        session,
+                        result_record,
+                        summary,
+                        PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                    )
+                    await track_job_event(
+                        session,
+                        "jobs.process_spreadsheet",
+                        _uuid.UUID(tenant_id),
+                        success=True,
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                    )
+                    await session.commit()
+
+                logger.info(
+                    "ingestion.spreadsheet.done",
+                    file_id=file_id,
+                    tenant_id=tenant_id,
+                    confidence=summary.get("confidence"),
+                    rows=summary.get("rows_processed"),
+                )
 
         except Exception as exc:
-            logger.error("ingestion.spreadsheet.failed", file_id=file_id, error=str(exc))
+            logger.error(
+                "ingestion.spreadsheet.failed",
+                file_id=file_id,
+                tenant_id=tenant_id,
+                error=str(exc),
+            )
             async with factory() as session:
                 result_record = await _load_and_lock(session, file_id, tenant_id)
                 await _save_result(
@@ -155,6 +178,14 @@ def process_spreadsheet(file_id: str, tenant_id: str) -> None:
                     result_record,
                     {"error": str(exc), "file_type": "spreadsheet"},
                     PROCESSING_STATUS_FAILED,
+                )
+                await track_job_event(
+                    session,
+                    "jobs.process_spreadsheet",
+                    _uuid.UUID(tenant_id),
+                    success=False,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    error=str(exc),
                 )
                 await session.commit()
             raise
@@ -169,6 +200,8 @@ def process_spreadsheet(file_id: str, tenant_id: str) -> None:
     queue="ingestion",
     max_retries=3,
     default_retry_delay=30,
+    soft_time_limit=150,
+    time_limit=180,
 )
 def process_text_document(file_id: str, tenant_id: str) -> None:
     """Parse .txt, .docx, .pdf or .pptx file, extracting reusable context."""
@@ -180,35 +213,54 @@ def process_text_document(file_id: str, tenant_id: str) -> None:
         from app.integrations.s3 import S3Client  # noqa: PLC0415
 
         engine, factory = _build_async_session(s.DATABASE_URL)
+        t0 = time.monotonic()
         try:
-            async with factory() as session:
-                record = await _load_and_lock(session, file_id, tenant_id)
-                await session.commit()
+            with log_job("jobs.process_text_document", tenant_id=tenant_id, logger=logger):
+                async with factory() as session:
+                    record = await _load_and_lock(session, file_id, tenant_id)
+                    await session.commit()
 
-            s3 = S3Client()
-            content = await s3.download(record.s3_key)
+                s3 = S3Client()
+                content = await s3.download(record.s3_key)
 
-            summary = parse_uploaded_content(content, record.content_type, record.original_filename)
-
-            async with factory() as session:
-                result_record = await _load_and_lock(session, file_id, tenant_id)
-                await _save_result(
-                    session,
-                    result_record,
-                    summary,
-                    PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                summary = parse_uploaded_content(
+                    content,
+                    record.content_type,
+                    record.original_filename,
                 )
-                await session.commit()
 
-            logger.info(
-                "ingestion.text_document.done",
-                file_id=file_id,
-                source_format=summary.get("source_format"),
-                row_count=summary.get("row_count"),
-            )
+                async with factory() as session:
+                    result_record = await _load_and_lock(session, file_id, tenant_id)
+                    await _save_result(
+                        session,
+                        result_record,
+                        summary,
+                        PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                    )
+                    await track_job_event(
+                        session,
+                        "jobs.process_text_document",
+                        _uuid.UUID(tenant_id),
+                        success=True,
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                    )
+                    await session.commit()
+
+                logger.info(
+                    "ingestion.text_document.done",
+                    file_id=file_id,
+                    tenant_id=tenant_id,
+                    source_format=summary.get("source_format"),
+                    row_count=summary.get("row_count"),
+                )
 
         except Exception as exc:
-            logger.error("ingestion.text_document.failed", file_id=file_id, error=str(exc))
+            logger.error(
+                "ingestion.text_document.failed",
+                file_id=file_id,
+                tenant_id=tenant_id,
+                error=str(exc),
+            )
             async with factory() as session:
                 result_record = await _load_and_lock(session, file_id, tenant_id)
                 await _save_result(
@@ -216,6 +268,14 @@ def process_text_document(file_id: str, tenant_id: str) -> None:
                     result_record,
                     {"error": str(exc), "file_type": "text"},
                     PROCESSING_STATUS_FAILED,
+                )
+                await track_job_event(
+                    session,
+                    "jobs.process_text_document",
+                    _uuid.UUID(tenant_id),
+                    success=False,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    error=str(exc),
                 )
                 await session.commit()
             raise
@@ -230,6 +290,8 @@ def process_text_document(file_id: str, tenant_id: str) -> None:
     queue="ingestion",
     max_retries=3,
     default_retry_delay=30,
+    soft_time_limit=150,
+    time_limit=180,
 )
 def process_image_ocr(file_id: str, tenant_id: str) -> None:
     """
@@ -247,31 +309,54 @@ def process_image_ocr(file_id: str, tenant_id: str) -> None:
         from app.integrations.s3 import S3Client  # noqa: PLC0415
 
         engine, factory = _build_async_session(s.DATABASE_URL)
+        t0 = time.monotonic()
         try:
-            async with factory() as session:
-                record = await _load_and_lock(session, file_id, tenant_id)
-                await session.commit()
+            with log_job("jobs.process_image_ocr", tenant_id=tenant_id, logger=logger):
+                async with factory() as session:
+                    record = await _load_and_lock(session, file_id, tenant_id)
+                    await session.commit()
 
-            s3 = S3Client()
-            content = await s3.download(record.s3_key)
+                s3 = S3Client()
+                content = await s3.download(record.s3_key)
 
-            summary = parse_uploaded_content(content, record.content_type, record.original_filename)
-
-            # ALWAYS NEEDS_CONFIRMATION for images — never auto-import
-            async with factory() as session:
-                result_record = await _load_and_lock(session, file_id, tenant_id)
-                await _save_result(
-                    session,
-                    result_record,
-                    summary,
-                    PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                summary = parse_uploaded_content(
+                    content,
+                    record.content_type,
+                    record.original_filename,
                 )
-                await session.commit()
 
-            logger.info("ingestion.image_ocr.done", file_id=file_id, has_ocr="error" not in summary)
+                # ALWAYS NEEDS_CONFIRMATION for images — never auto-import
+                async with factory() as session:
+                    result_record = await _load_and_lock(session, file_id, tenant_id)
+                    await _save_result(
+                        session,
+                        result_record,
+                        summary,
+                        PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                    )
+                    await track_job_event(
+                        session,
+                        "jobs.process_image_ocr",
+                        _uuid.UUID(tenant_id),
+                        success=True,
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                    )
+                    await session.commit()
+
+                logger.info(
+                    "ingestion.image_ocr.done",
+                    file_id=file_id,
+                    tenant_id=tenant_id,
+                    has_ocr="error" not in summary,
+                )
 
         except Exception as exc:
-            logger.error("ingestion.image_ocr.failed", file_id=file_id, error=str(exc))
+            logger.error(
+                "ingestion.image_ocr.failed",
+                file_id=file_id,
+                tenant_id=tenant_id,
+                error=str(exc),
+            )
             async with factory() as session:
                 result_record = await _load_and_lock(session, file_id, tenant_id)
                 await _save_result(
@@ -279,6 +364,14 @@ def process_image_ocr(file_id: str, tenant_id: str) -> None:
                     result_record,
                     {"error": str(exc), "file_type": "image", "confidence": "LOW"},
                     PROCESSING_STATUS_FAILED,
+                )
+                await track_job_event(
+                    session,
+                    "jobs.process_image_ocr",
+                    _uuid.UUID(tenant_id),
+                    success=False,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    error=str(exc),
                 )
                 await session.commit()
             raise

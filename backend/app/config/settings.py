@@ -137,7 +137,9 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def parse_bool_flags(cls, v: bool | str, info: ValidationInfo) -> bool | str:
+    def parse_bool_flags(cls, v: bool | str, info: ValidationInfo) -> bool:
+        if isinstance(v, bool):
+            return v
         if isinstance(v, str):
             normalized = v.strip().lower()
             if normalized in {"1", "true", "yes", "on"}:
@@ -146,7 +148,11 @@ class Settings(BaseSettings):
                 return False
             if info.field_name == "DEBUG" and normalized in {"release", "prod", "production"}:
                 return False
-        return v
+            raise ValueError(
+                f"Valor inválido para flag booleano '{info.field_name}': {v!r}. "
+                "Valores aceptados: true, false, 1, 0, yes, no, on, off."
+            )
+        return bool(v)
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -273,6 +279,25 @@ class Settings(BaseSettings):
         if self.ENABLE_GOOGLE_MCP_TOOLS and not self.MCP_SERVER_URL:
             raise ValueError(
                 "MCP_SERVER_URL es requerido cuando ENABLE_GOOGLE_MCP_TOOLS=true"
+            )
+
+        if self.ENABLE_GOOGLE_MCP_TOOLS and not self.MCP_SERVER_SHARED_SECRET:
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).warning(
+                "config.mcp.shared_secret_missing: "
+                "ENABLE_GOOGLE_MCP_TOOLS=true pero MCP_SERVER_SHARED_SECRET está vacío. "
+                "Las llamadas al MCP server no incluirán header de autenticación."
+            )
+
+        # ── Email: validar combo flag + credencial ────────────────────────────
+        _has_email_key = bool(self.RESEND_API_KEY or self.SMTP_PASSWORD)
+        if self.ENABLE_EMAIL_VERIFICATION and not _has_email_key:
+            raise ValueError(
+                "ENABLE_EMAIL_VERIFICATION=true requiere RESEND_API_KEY (o SMTP_PASSWORD) configurado."
+            )
+        if self.ENABLE_EMAIL_NOTIFICATIONS and not _has_email_key:
+            raise ValueError(
+                "ENABLE_EMAIL_NOTIFICATIONS=true requiere RESEND_API_KEY configurado."
             )
 
         return self

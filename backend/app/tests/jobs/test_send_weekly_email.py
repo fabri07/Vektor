@@ -13,13 +13,17 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-from app.jobs.send_weekly_email import _build_html, _build_plain, _gather_email_data
 from app.jobs.celery_app import celery_app
+from app.jobs.send_weekly_email import _build_html, _build_plain, _gather_email_data
 from app.persistence.db.base import Base
-from app.persistence.models.business import BusinessProfile, MomentumProfile, Insight
-from app.persistence.models.notification import Notification
+from app.persistence.models.business import Insight, MomentumProfile
 from app.persistence.models.score import HealthScoreSnapshot, WeeklyScoreHistory
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -269,3 +273,7 @@ class TestSchedulerConfiguredCorrectly:
         assert "jobs.send_weekly_email_summary" in routes
         assert routes["jobs.send_weekly_email_summary"]["queue"] == "notifications"
         assert "jobs.send_weekly_email_all_tenants" in routes
+
+    async def test_celery_task_time_limit_configured(self) -> None:
+        assert celery_app.conf.task_time_limit == 300
+        assert celery_app.conf.task_soft_time_limit == 240

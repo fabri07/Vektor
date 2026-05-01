@@ -17,6 +17,9 @@ from app.heuristics.verticals import (
     SupplierBenchmark,
     VerticalHeuristicConfig,
 )
+from app.observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 _HEURISTICS_DIR = (
     Path(__file__).resolve().parents[3] / "app" / "application" / "data" / "heuristics"
@@ -98,6 +101,12 @@ def load_vertical_heuristics(vertical_code: str) -> VerticalHeuristicConfig:
             return _config_from_json(data)
         except (KeyError, ValueError, json.JSONDecodeError):
             pass  # JSON malformado → caer al fallback
+
+    logger.warning(
+        "heuristics.vertical.fallback",
+        requested=vertical_code,
+        using="kiosco_almacen",
+    )
 
     default_path = _HEURISTICS_DIR / "kiosco_almacen.json"
     if default_path.exists():

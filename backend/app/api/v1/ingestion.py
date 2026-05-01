@@ -104,7 +104,14 @@ def _parse_amount(raw: Any) -> Decimal | None:
         s = s.replace(",", ".")
     try:
         val = Decimal(s)
-        return val if val > 0 else None
+        if val <= 0:
+            logger.debug(
+                "ingestion.parse.amount_discarded",
+                raw=str(raw),
+                reason="non_positive",
+            )
+            return None
+        return val
     except InvalidOperation:
         return None
 
@@ -201,8 +208,17 @@ async def _insert_confirmed_data(
             confirmed_fields.get("productos") and summary.get("has_producto") and nombre_col
         )
 
-        for row in rows:
-            tx_date = (_parse_date(row.get(fecha_col)) if fecha_col else None) or today
+        for row_index, row in enumerate(rows):
+            raw_date = row.get(fecha_col) if fecha_col else None
+            tx_date = _parse_date(raw_date) if fecha_col else None
+            if tx_date is None:
+                if fecha_col:
+                    logger.debug(
+                        "ingestion.parse.date_fallback_today",
+                        raw=str(raw_date),
+                        row_index=row_index,
+                    )
+                tx_date = today
 
             if wants_ventas:
                 amount = _parse_amount(row.get(venta_col))

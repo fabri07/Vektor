@@ -1,9 +1,22 @@
-from httpx import ASGITransport, AsyncClient
-
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 import app.main as main_module
 from app.main import create_app
+
+
+@pytest.mark.asyncio
+async def test_request_id_in_response_headers():
+    app = create_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as ac:
+        response = await ac.get("/health", headers={"X-Request-ID": "req-test-123"})
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "req-test-123"
 
 
 @pytest.mark.asyncio

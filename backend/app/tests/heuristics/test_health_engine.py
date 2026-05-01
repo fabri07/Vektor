@@ -172,6 +172,32 @@ def test_score_total_formula_correct() -> None:
     assert result.score_total == 84
 
 
+def test_score_cap_with_low_completeness() -> None:
+    products = [_product(stock=50, threshold=5) for _ in range(4)]
+    state = _make_state(
+        cash_on_hand_est=Decimal("50000"),
+        monthly_fixed_expenses_est=Decimal("10000"),
+        monthly_sales_est=Decimal("100000"),
+        monthly_inventory_cost_est=Decimal("40000"),
+        supplier_count=4,
+        products=products,
+        data_completeness_score=35.0,
+        confidence_level="LOW",
+    )
+
+    result = calculate_health_score(state)
+
+    assert result.score_total == 60
+
+
+def test_health_engine_margin_no_sales_neutral() -> None:
+    state = _make_state(monthly_sales_est=Decimal("0"))
+
+    result = calculate_health_score(state)
+
+    assert result.score_margin == 50
+
+
 # ── Test 5: cash wins tie-break over margin ───────────────────────────────────
 
 

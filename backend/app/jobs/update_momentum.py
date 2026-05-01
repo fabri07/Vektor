@@ -26,7 +26,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.jobs.celery_app import celery_app
-from app.observability.logger import get_logger
+from app.observability.logger import get_logger, log_job
 
 logger = get_logger(__name__)
 
@@ -426,7 +426,8 @@ def update_momentum_profile(tenant_id: str) -> None:
 
         await engine.dispose()
 
-    asyncio.run(_run())
+    with log_job("jobs.update_momentum_profile", tenant_id=tenant_id, logger=logger):
+        asyncio.run(_run())
 
 
 @celery_app.task(  # type: ignore[misc]
@@ -467,8 +468,9 @@ def update_momentum_all_tenants() -> None:
         await engine.dispose()
         return ids
 
-    tenant_ids = asyncio.run(_collect_tenants())
-    logger.info("momentum.fan_out", tenant_count=len(tenant_ids))
+    with log_job("jobs.update_momentum_all_tenants", logger=logger):
+        tenant_ids = asyncio.run(_collect_tenants())
+        logger.info("momentum.fan_out", tenant_count=len(tenant_ids))
 
-    for tid in tenant_ids:
-        update_momentum_profile.delay(tid)
+        for tid in tenant_ids:
+            update_momentum_profile.delay(tid)

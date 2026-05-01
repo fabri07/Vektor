@@ -115,13 +115,13 @@ def _score_cash(
 ) -> int:
     """
     cash_days = cash_on_hand / daily fixed expenses.
-    If expenses are zero (no data), return 75 as a neutral default.
+    If expenses are zero (no data), return 60 as a neutral-low default.
     """
     if monthly_fixed_expenses <= 0:
-        return 75
+        return 60
     daily_fixed_expenses = monthly_fixed_expenses / Decimal("30")
     if daily_fixed_expenses <= 0:
-        return 75
+        return 60
     cash_days = float(cash_on_hand / daily_fixed_expenses)
     return _band_score(cash_days, _cash_bands(config))
 
@@ -148,11 +148,11 @@ def _margin_bands(b: MarginBenchmark) -> list[_Band]:
 def _score_margin(state: BusinessState, benchmark: MarginBenchmark) -> int:
     """
     estimated_margin = (ventas - inventario - gastos_fijos) / ventas
-    If no sales data → score 0.
+    If no sales estimate is available, return 50 as a neutral default.
     """
     sales = state.monthly_sales_est
     if sales <= 0:
-        return 0
+        return 50
     margin = float(
         (sales - state.monthly_inventory_cost_est - state.monthly_fixed_expenses_est) / sales
     )
@@ -281,6 +281,10 @@ def calculate_health_score(
         + s_stock * 0.25
         + s_supplier * 0.15
     )
+    if state.data_completeness_score < 40:
+        total = min(total, 60)
+    elif state.data_completeness_score < 60:
+        total = min(total, 75)
 
     weakest_dim = _primary_risk(scores)
     risk_code = _DIMENSION_RISK_CODE[weakest_dim]

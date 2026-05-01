@@ -15,10 +15,13 @@ Mocks:
 import io
 import unittest.mock
 import uuid
+from datetime import date
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.file import (
@@ -27,7 +30,7 @@ from app.persistence.models.file import (
     UploadedFile,
 )
 from app.persistence.models.tenant import Tenant
-
+from app.persistence.models.transaction import SaleEntry
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -48,7 +51,11 @@ def xlsx_bytes() -> bytes:
 
 @pytest.fixture
 def csv_bytes() -> bytes:
-    return b"fecha,monto,descripcion\n2024-01-15,50000,Venta del dia\n2024-01-16,35000,Venta tarde\n"
+    return (
+        b"fecha,monto,descripcion\n"
+        b"2024-01-15,50000,Venta del dia\n"
+        b"2024-01-16,35000,Venta tarde\n"
+    )
 
 
 @pytest.fixture
@@ -119,7 +126,9 @@ async def confirmed_file(
         parsed_summary_json={
             "confidence": "HIGH",
             "file_type": "spreadsheet",
-            "ventas_detectadas": [{"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}],
+            "ventas_detectadas": [
+                {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
+            ],
         },
     )
     db_session.add(record)
@@ -499,6 +508,64 @@ class TestConfirmEndpoint:
             json={"confirmed_fields": {"ventas": True}},
         )
         assert response.status_code == 404
+
+
+class _CaptureLogger:
+    def __init__(self) -> None:
+        self.debug_events: list[tuple[str, dict]] = []
+
+    def debug(self, event: str, **kwargs) -> None:
+        self.debug_events.append((event, kwargs))
+
+
+def test_parse_amount_logs_non_positive_discard(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.api.v1.ingestion as ingestion
+
+    capture = _CaptureLogger()
+    monkeypatch.setattr(ingestion, "logger", capture)
+
+    assert ingestion._parse_amount("0") is None
+    assert capture.debug_events == [
+        (
+            "ingestion.parse.amount_discarded",
+            {"raw": "0", "reason": "non_positive"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parse_date_fallback_logs_debug(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.v1.ingestion as ingestion
+
+    capture = _CaptureLogger()
+    monkeypatch.setattr(ingestion, "logger", capture)
+
+    await ingestion._insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "ventas",
+            "has_venta": True,
+            "ventas_detectadas": [{"fecha": "fecha rara", "monto": "100"}],
+        },
+        {"ventas": True},
+    )
+
+    result = await db_session.execute(select(SaleEntry))
+    sale = result.scalar_one()
+    assert sale.amount == Decimal("100")
+    assert sale.transaction_date == date.today()
+    assert capture.debug_events == [
+        (
+            "ingestion.parse.date_fallback_today",
+            {"raw": "fecha rara", "row_index": 0},
+        )
+    ]
 
 
 # ── Worker unit tests ─────────────────────────────────────────────────────────

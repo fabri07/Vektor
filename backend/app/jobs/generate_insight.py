@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.jobs.celery_app import celery_app
-from app.observability.logger import get_logger
+from app.observability.logger import get_logger, log_job
 
 logger = get_logger(__name__)
 
@@ -105,157 +105,158 @@ async def _run(tenant_id_str: str) -> None:
     redis: Redis = Redis.from_url(s.REDIS_URL, decode_responses=True)
 
     try:
-        async with session_factory() as session:
-            # ── 1. Latest HealthScoreSnapshot ─────────────────────────────────
-            snap_result = await session.execute(
-                select(HealthScoreSnapshot)
-                .where(HealthScoreSnapshot.tenant_id == tenant_id)
-                .order_by(HealthScoreSnapshot.created_at.desc())
-                .limit(1)
-            )
-            snapshot = snap_result.scalar_one_or_none()
-
-            if snapshot is None or snapshot.primary_risk_code is None:
-                logger.warning(
-                    "generate_insight.no_snapshot",
-                    tenant_id=tenant_id_str,
+        with log_job("jobs.generate_insight", tenant_id=tenant_id, logger=logger):
+            async with session_factory() as session:
+                # ── 1. Latest HealthScoreSnapshot ─────────────────────────────
+                snap_result = await session.execute(
+                    select(HealthScoreSnapshot)
+                    .where(HealthScoreSnapshot.tenant_id == tenant_id)
+                    .order_by(HealthScoreSnapshot.created_at.desc())
+                    .limit(1)
                 )
-                return
+                snapshot = snap_result.scalar_one_or_none()
 
-            risk_code: str = snapshot.primary_risk_code
-            score_total: int = int(snapshot.total_score)
-            severity: str = severity_from_score(score_total)
-
-            # ── 2. BusinessState (cache or recompute) ─────────────────────────
-            state = await compute_business_state(tenant_id, session, redis)
-
-            # ── 3. Render insight text ─────────────────────────────────────────
-            title, description, action_text = render_insight(risk_code, state, snapshot)
-
-            # ── 3b. LLM narrative (solo si confidence HIGH o MEDIUM) ──────────
-            confidence = snapshot.confidence_level or ""
-            if confidence in ("HIGH", "MEDIUM"):
-                try:
-                    import anthropic as _anthropic  # noqa: PLC0415, I001
-                    from sqlalchemy import select as _sq  # noqa: PLC0415
-                    from app.integrations.anthropic_client import (  # noqa: PLC0415
-                        get_anthropic_async_client,
-                    )
-                    from app.persistence.models.tenant import Tenant  # noqa: PLC0415
-
-                    name_res = await session.execute(
-                        _sq(Tenant.display_name).where(Tenant.tenant_id == tenant_id)
-                    )
-                    business_name = name_res.scalar_one_or_none() or "tu negocio"
-
-                    _client = get_anthropic_async_client(_anthropic.AsyncAnthropic)
-                    _resp = await _client.messages.create(
-                        model="claude-haiku-4-5",
-                        max_tokens=600,
-                        system=(
-                            "Sos un consultor financiero de Véktor. Generá una narrativa "
-                            "ejecutiva clara y accionable basada en los datos numéricos.\n\n"
-                            "REGLAS: Usá los números dados. Máximo 3 párrafos. "
-                            "Priorizá las alertas urgentes. Español argentino, directo."
-                        ),
-                        messages=[{
-                            "role": "user",
-                            "content": (
-                                f"Negocio: {business_name}\n"
-                                f"Score de salud: {float(snapshot.total_score):.0f}/100\n"
-                                f"  - Liquidez/Caja: {snapshot.score_cash or 70}/100\n"
-                                f"  - Inventario: {snapshot.score_stock or 70}/100\n"
-                                f"  - Proveedores: {snapshot.score_supplier or 70}/100\n"
-                                f"  - Margen comercial: {snapshot.score_margin or 70}/100\n"
-                                f"Riesgo principal: {risk_code}\n"
-                                f"Confianza de datos: {confidence}"
-                            ),
-                        }],
-                    )
-                    narrative = _resp.content[0].text.strip()
-                    if narrative:
-                        description = narrative
-                except Exception as exc:
+                if snapshot is None or snapshot.primary_risk_code is None:
                     logger.warning(
-                        "generate_insight.narrative_failed",
+                        "generate_insight.no_snapshot",
                         tenant_id=tenant_id_str,
-                        error=str(exc),
                     )
+                    return
 
-            now = datetime.now(UTC)
+                risk_code: str = snapshot.primary_risk_code
+                score_total: int = int(snapshot.total_score)
+                severity: str = severity_from_score(score_total)
 
-            # ── 4. Persist Insight ────────────────────────────────────────────
-            insight = Insight(
-                id=uuid.uuid4(),
-                tenant_id=tenant_id,
-                insight_type=risk_code,
-                title=title,
-                description=description,
-                severity_code=severity,
-                heuristic_version=HEURISTIC_VERSION,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(insight)
-            await session.flush()  # populate insight.id
+                # ── 2. BusinessState (cache or recompute) ─────────────────────
+                state = await compute_business_state(tenant_id, session, redis)
 
-            # ── 5. Persist ActionSuggestion ───────────────────────────────────
-            action = ActionSuggestion(
-                id=uuid.uuid4(),
-                tenant_id=tenant_id,
-                insight_id=insight.id,
-                action_type=risk_code,
-                title=action_text,
-                description=action_text,
-                risk_level=severity,
-                status="SUGGESTED",
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(action)
-            await session.flush()
+                # ── 3. Render insight text ────────────────────────────────────
+                title, description, action_text = render_insight(risk_code, state, snapshot)
 
-            notification_count = await create_health_action_notifications(
-                session=session,
-                tenant_id=tenant_id,
-                title=title,
-                action_text=action_text,
-                insight_id=insight.id,
-                action_suggestion_id=action.id,
-                risk_code=risk_code,
-                now=now,
-            )
+                # ── 3b. LLM narrative (solo si confidence HIGH o MEDIUM) ──────
+                confidence = snapshot.confidence_level or ""
+                if confidence in ("HIGH", "MEDIUM"):
+                    try:
+                        import anthropic as _anthropic  # noqa: PLC0415, I001
+                        from sqlalchemy import select as _sq  # noqa: PLC0415
+                        from app.integrations.anthropic_client import (  # noqa: PLC0415
+                            get_anthropic_async_client,
+                        )
+                        from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
-            # ── 6. Persist DecisionAuditLog ───────────────────────────────────
-            audit = DecisionAuditLog(
-                id=uuid.uuid4(),
-                tenant_id=tenant_id,
-                decision_type="INSIGHT",
-                decision_data={
-                    "risk_code": risk_code,
-                    "score_total": score_total,
-                    "severity_code": severity,
-                    "insight_id": str(insight.id),
-                    "action_suggestion_id": str(action.id),
-                    "title": title,
-                    "description": description,
-                    "action_text": action_text,
-                    "heuristic_version": HEURISTIC_VERSION,
-                    "source_snapshot_id": str(snapshot.id),
-                    "notification_count": notification_count,
-                },
-                triggered_by="celery:generate_insight",
-                actor_user_id=None,
-                context={
-                    "risk_code": risk_code,
-                    "severity_code": severity,
-                    "confidence_level": snapshot.confidence_level or "",
-                },
-                created_at=now,
-            )
-            session.add(audit)
+                        name_res = await session.execute(
+                            _sq(Tenant.display_name).where(Tenant.tenant_id == tenant_id)
+                        )
+                        business_name = name_res.scalar_one_or_none() or "tu negocio"
 
-            await session.commit()
+                        _client = get_anthropic_async_client(_anthropic.AsyncAnthropic)
+                        _resp = await _client.messages.create(
+                            model="claude-haiku-4-5",
+                            max_tokens=600,
+                            system=(
+                                "Sos un consultor financiero de Véktor. Generá una narrativa "
+                                "ejecutiva clara y accionable basada en los datos numéricos.\n\n"
+                                "REGLAS: Usá los números dados. Máximo 3 párrafos. "
+                                "Priorizá las alertas urgentes. Español argentino, directo."
+                            ),
+                            messages=[{
+                                "role": "user",
+                                "content": (
+                                    f"Negocio: {business_name}\n"
+                                    f"Score de salud: {float(snapshot.total_score):.0f}/100\n"
+                                    f"  - Liquidez/Caja: {snapshot.score_cash or 70}/100\n"
+                                    f"  - Inventario: {snapshot.score_stock or 70}/100\n"
+                                    f"  - Proveedores: {snapshot.score_supplier or 70}/100\n"
+                                    f"  - Margen comercial: {snapshot.score_margin or 70}/100\n"
+                                    f"Riesgo principal: {risk_code}\n"
+                                    f"Confianza de datos: {confidence}"
+                                ),
+                            }],
+                        )
+                        narrative = _resp.content[0].text.strip()
+                        if narrative:
+                            description = narrative
+                    except Exception as exc:
+                        logger.warning(
+                            "generate_insight.narrative_failed",
+                            tenant_id=tenant_id_str,
+                            error=str(exc),
+                        )
+
+                now = datetime.now(UTC)
+
+                # ── 4. Persist Insight ────────────────────────────────────────
+                insight = Insight(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    insight_type=risk_code,
+                    title=title,
+                    description=description,
+                    severity_code=severity,
+                    heuristic_version=HEURISTIC_VERSION,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(insight)
+                await session.flush()  # populate insight.id
+
+                # ── 5. Persist ActionSuggestion ───────────────────────────────
+                action = ActionSuggestion(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    insight_id=insight.id,
+                    action_type=risk_code,
+                    title=action_text,
+                    description=action_text,
+                    risk_level=severity,
+                    status="SUGGESTED",
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(action)
+                await session.flush()
+
+                notification_count = await create_health_action_notifications(
+                    session=session,
+                    tenant_id=tenant_id,
+                    title=title,
+                    action_text=action_text,
+                    insight_id=insight.id,
+                    action_suggestion_id=action.id,
+                    risk_code=risk_code,
+                    now=now,
+                )
+
+                # ── 6. Persist DecisionAuditLog ───────────────────────────────
+                audit = DecisionAuditLog(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    decision_type="INSIGHT",
+                    decision_data={
+                        "risk_code": risk_code,
+                        "score_total": score_total,
+                        "severity_code": severity,
+                        "insight_id": str(insight.id),
+                        "action_suggestion_id": str(action.id),
+                        "title": title,
+                        "description": description,
+                        "action_text": action_text,
+                        "heuristic_version": HEURISTIC_VERSION,
+                        "source_snapshot_id": str(snapshot.id),
+                        "notification_count": notification_count,
+                    },
+                    triggered_by="celery:generate_insight",
+                    actor_user_id=None,
+                    context={
+                        "risk_code": risk_code,
+                        "severity_code": severity,
+                        "confidence_level": snapshot.confidence_level or "",
+                    },
+                    created_at=now,
+                )
+                session.add(audit)
+
+                await session.commit()
 
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -282,6 +283,8 @@ async def _run(tenant_id_str: str) -> None:
     queue="scores",
     max_retries=2,
     default_retry_delay=30,
+    soft_time_limit=45,
+    time_limit=60,
 )
 def generate_insight(self: Any, tenant_id: str) -> None:
     """

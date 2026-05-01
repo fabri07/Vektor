@@ -7,6 +7,7 @@ Cada test obtiene un engine y sesión frescos (scope=function).
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -40,13 +41,23 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
 class FakeRedis:
-    """Minimal Redis stub — dict-backed, satisfies compute_business_state interface."""
+    """Redis stub con TTL real — respeta expiración para tests de rate limiting y caché."""
 
     def __init__(self) -> None:
-        self._store: dict[str, str] = {}
+        self._store: dict[str, tuple[str | None, float | None]] = {}
+
+    def _is_expired(self, exp: float | None) -> bool:
+        return exp is not None and time.monotonic() > exp
 
     async def get(self, key: str) -> str | None:
-        return self._store.get(key)
+        value, exp = self._store.get(key, (None, None))
+        if self._is_expired(exp):
+            self._store.pop(key, None)
+            return None
+        return value
+
+    async def setex(self, key: str, ttl: int, value: str) -> None:
+        self._store[key] = (value, time.monotonic() + ttl)
 
     async def set(
         self,
@@ -55,20 +66,41 @@ class FakeRedis:
         *,
         nx: bool = False,
         ex: int | None = None,
-    ) -> bool | None:
+    ) -> bool:
         if nx and key in self._store:
-            return None
-        self._store[key] = value
+            entry = self._store[key]
+            exp = entry[1]
+            if not self._is_expired(exp):
+                return False
+        exp_time = time.monotonic() + ex if ex is not None else None
+        self._store[key] = (value, exp_time)
         return True
 
-    async def incr(self, key: str) -> int:
-        current = int(self._store.get(key, "0"))
-        current += 1
-        self._store[key] = str(current)
-        return current
+    async def delete(self, *keys: str) -> int:
+        deleted = 0
+        for key in keys:
+            entry = self._store.get(key)
+            if entry is not None and not self._is_expired(entry[1]):
+                deleted += 1
+            self._store.pop(key, None)
+        return deleted
 
-    async def expireat(self, key: str, when: object) -> bool:
-        return True  # no-op en tests
+    async def incr(self, key: str) -> int:
+        val, exp = self._store.get(key, ("0", None))
+        if self._is_expired(exp):
+            val, exp = "0", None
+        new_val = int(val or 0) + 1
+        self._store[key] = (str(new_val), exp)
+        return new_val
+
+    async def expireat(self, key: str, when: int | datetime) -> bool:
+        if key not in self._store:
+            return False
+        val, _ = self._store[key]
+        timestamp = when.timestamp() if isinstance(when, datetime) else float(when)
+        ttl = max(0.0, timestamp - time.time())
+        self._store[key] = (val, time.monotonic() + ttl)
+        return True
 
     async def aclose(self) -> None:
         pass

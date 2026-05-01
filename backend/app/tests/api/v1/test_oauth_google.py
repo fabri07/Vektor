@@ -172,6 +172,14 @@ async def inactive_user(db_session: AsyncSession) -> User:
 
 # ── Feature flag guard ────────────────────────────────────────────────────────
 
+@pytest.fixture
+def google_login_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "ENABLE_GOOGLE_LOGIN", False)
+
+
+@pytest.mark.usefixtures("google_login_disabled")
 @pytest.mark.asyncio
 class TestFeatureFlagGuard:
     """Todos los endpoints devuelven 404 cuando ENABLE_GOOGLE_LOGIN=False."""

@@ -54,10 +54,10 @@ test: ## Run all tests with coverage
 	pytest
 
 test-fast: ## Run tests without coverage (faster feedback)
-	pytest -p no:cov
+	pytest -o addopts="" -p no:cov
 
 test-watch: ## Run tests in watch mode
-	watchfiles "pytest -p no:cov" app
+	watchfiles "pytest -o addopts='' -p no:cov" app
 
 test-file: ## Run a specific test file (use: make test-file FILE=app/tests/api/v1/test_auth.py)
 	pytest $(FILE) -v

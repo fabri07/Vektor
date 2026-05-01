@@ -7,7 +7,7 @@ Structure mirrors app/ directory.
 import io
 import unittest.mock
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 
 import pytest
 import pytest_asyncio
@@ -159,6 +159,18 @@ async def viewer_headers(db_session: AsyncSession, sample_tenant: Tenant) -> dic
         }
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+# ── Celery eager mode (sync execution for job tests) ─────────────────────────
+
+@pytest.fixture(autouse=False)
+def celery_eager(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Ejecuta tasks de Celery síncronamente. Usar con @pytest.mark.usefixtures('celery_eager')."""
+    from app.jobs.celery_app import celery_app  # noqa: PLC0415
+
+    celery_app.conf.update(task_always_eager=True, task_eager_propagates=True)
+    yield
+    celery_app.conf.update(task_always_eager=False, task_eager_propagates=False)
 
 
 # ── Celery mock (prevents Redis connection in tests) ─────────────────────────

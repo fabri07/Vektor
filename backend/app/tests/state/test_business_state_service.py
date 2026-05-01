@@ -9,7 +9,7 @@ Uses:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -227,8 +227,65 @@ async def test_cache_invalidates_when_new_sale_added(
     )
 
     assert state1.snapshot_id != state2.snapshot_id
-    # Real sales now present → monthly_sales_est = 5000 (not the estimate)
-    assert state2.monthly_sales_est == Decimal("5000.00")
+    # A tiny amount of real data blends with onboarding instead of replacing it.
+    assert state2.monthly_sales_est == Decimal("150000.000")
+
+
+@pytest.mark.asyncio
+async def test_blend_sales_few_transactions(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    today = datetime.now(UTC).date()
+    for i in range(5):
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                amount=Decimal("1000.00"),
+                quantity=1,
+                transaction_date=today - timedelta(days=4 - i),
+                payment_method="cash",
+            )
+        )
+    await db_session.commit()
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),
+    )
+
+    # 5 sales over 5 days projects to 30000 monthly, then blends 70/30.
+    assert state.monthly_sales_est == Decimal("114000.000")
+
+
+@pytest.mark.asyncio
+async def test_blend_sales_many_transactions(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    today = datetime.now(UTC).date()
+    for i in range(60):
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                amount=Decimal("100.00"),
+                quantity=1,
+                transaction_date=today - timedelta(days=i % 30),
+                payment_method="cash",
+            )
+        )
+    await db_session.commit()
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),
+    )
+
+    assert state.monthly_sales_est == Decimal("6000.00")
 
 
 @pytest.mark.asyncio

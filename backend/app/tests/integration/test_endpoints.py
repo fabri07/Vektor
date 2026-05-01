@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import anthropic
@@ -36,17 +35,6 @@ from .conftest import FakeRedis, make_auth_headers, make_tenant, make_user
 
 class FakeRedisCounter(FakeRedis):
     """FakeRedis con contador persistente para simular rate limiting."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._counters: dict[str, int] = {}
-
-    async def incr(self, key: str) -> int:
-        self._counters[key] = self._counters.get(key, 0) + 1
-        return self._counters[key]
-
-    async def expireat(self, key: str, when: Any) -> bool:
-        return True
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -412,7 +400,7 @@ async def test_rate_limit_429(auth_client):
 
     # Precargar el contador a 50 para no hacer 51 llamadas reales al LLM
     rate_key = f"rate:chat:{tenant.tenant_id}:{__import__('datetime').date.today()}"
-    fake_redis._counters[rate_key] = 50
+    fake_redis._store[rate_key] = ("50", None)
 
     resp = await ac.post(
         "/api/v1/agent/chat",

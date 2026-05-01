@@ -5,14 +5,15 @@ Entry point: uvicorn app.main:app
 """
 
 import time
-from collections.abc import AsyncGenerator
+import uuid
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -72,11 +73,15 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
+        expose_headers=["X-Request-ID"],
     )
 
     # ── Security headers ──────────────────────────────────────────────────────
     @app.middleware("http")
-    async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def security_headers(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -93,19 +98,26 @@ def create_app() -> FastAPI:
 
     # ── Request logging ───────────────────────────────────────────────────────
     @app.middleware("http")
-    async def request_logger(request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def request_logger(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         import structlog.contextvars  # noqa: PLC0415
+
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
 
         # Reset per-request context and pre-bind known fields
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
             environment=settings.ENVIRONMENT,
+            request_id=request_id,
             method=request.method,
             endpoint=request.url.path,
         )
 
         t0 = time.monotonic()
         response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
         duration_ms = int((time.monotonic() - t0) * 1000)
 
         logger.info(

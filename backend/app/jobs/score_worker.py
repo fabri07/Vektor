@@ -5,7 +5,7 @@ Celery worker: health score recalculation tasks.
 import asyncio
 
 from app.jobs.celery_app import celery_app
-from app.observability.logger import get_logger
+from app.observability.logger import get_logger, log_job
 
 logger = get_logger(__name__)
 
@@ -32,7 +32,11 @@ def rebuild_weekly_history() -> None:
 
         from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
+        engine = create_async_engine(
+            s.DATABASE_URL,
+            pool_pre_ping=True,
+            connect_args=s.pg_connect_args,
+        )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
@@ -57,7 +61,8 @@ def rebuild_weekly_history() -> None:
 
         await engine.dispose()
 
-    asyncio.run(_run())
+    with log_job("jobs.rebuild_weekly_history", logger=logger):
+        asyncio.run(_run())
 
 
 @celery_app.task(  # type: ignore[misc]
@@ -76,12 +81,16 @@ def trigger_score_recalculation(tenant_id: str, snapshot_id: str) -> None:
     s = get_settings()
 
     async def _run() -> None:
+        import uuid as _uuid  # noqa: PLC0415
+
         from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
-        import uuid as _uuid  # noqa: PLC0415
-
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
+        engine = create_async_engine(
+            s.DATABASE_URL,
+            pool_pre_ping=True,
+            connect_args=s.pg_connect_args,
+        )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
@@ -98,4 +107,5 @@ def trigger_score_recalculation(tenant_id: str, snapshot_id: str) -> None:
 
         await engine.dispose()
 
-    asyncio.run(_run())
+    with log_job("jobs.trigger_score_recalculation", tenant_id=tenant_id, logger=logger):
+        asyncio.run(_run())

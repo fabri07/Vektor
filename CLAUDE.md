@@ -488,6 +488,8 @@ Estado actual:
 
 Post-Sprint 5/6/7/8: hardening de infra en Railway (Alembic chain, manifests de worker/beat, `/ready` endpoint para readiness probes). Migraciones manuales contra Neon con psycopg2 directo cuando la cadena Alembic está rota.
 
+Post-Sprint 8 (2026-04-30): email reemplazado de SMTP→Resend HTTP API. Railway bloquea el puerto 587 saliente; `app/integrations/smtp.py` ahora usa `httpx` contra `https://api.resend.com/emails`. Variables requeridas en Railway: `RESEND_API_KEY` (key de Resend, empieza con `re_`) y `SMTP_FROM_EMAIL=noreply@vektor.app`. Dominio `vektor.app` verificado en Resend (DKIM + SPF en Cloudflare DNS). `SMTP_PASSWORD` se mantiene como alias legacy/fallback en settings pero ya no es la variable principal.
+
 ---
 
 ## Reglas de trabajo

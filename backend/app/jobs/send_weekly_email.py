@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.jobs.celery_app import celery_app
-from app.observability.logger import get_logger
+from app.observability.logger import get_logger, log_job
 
 logger = get_logger(__name__)
 
@@ -280,7 +280,8 @@ async def _gather_email_data(
 )
 def send_weekly_email_summary(tenant_id: str) -> None:
     """Send the weekly email summary for a single tenant."""
-    asyncio.run(_async_send(tenant_id))
+    with log_job("jobs.send_weekly_email_summary", tenant_id=tenant_id, logger=logger):
+        asyncio.run(_async_send(tenant_id))
 
 
 async def _async_send(tenant_id: str) -> None:
@@ -369,7 +370,8 @@ async def _async_send(tenant_id: str) -> None:
 )
 def send_weekly_email_all_tenants() -> None:
     """Fan-out: enqueue send_weekly_email_summary for every active tenant."""
-    asyncio.run(_fan_out())
+    with log_job("jobs.send_weekly_email_all_tenants", logger=logger):
+        asyncio.run(_fan_out())
 
 
 async def _fan_out() -> None:

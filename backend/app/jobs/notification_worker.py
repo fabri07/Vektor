@@ -3,7 +3,7 @@ Celery worker: notification dispatch tasks.
 """
 
 from app.jobs.celery_app import celery_app
-from app.observability.logger import get_logger
+from app.observability.logger import get_logger, log_job
 
 logger = get_logger(__name__)
 
@@ -13,6 +13,8 @@ logger = get_logger(__name__)
     queue="notifications",
     max_retries=3,
     default_retry_delay=30,
+    soft_time_limit=45,
+    time_limit=60,
 )
 def send_notification(
     tenant_id: str,
@@ -36,7 +38,11 @@ def send_notification(
         from app.persistence.models.notification import Notification  # noqa: PLC0415
 
         s = get_settings()
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
+        engine = create_async_engine(
+            s.DATABASE_URL,
+            pool_pre_ping=True,
+            connect_args=s.pg_connect_args,
+        )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
@@ -54,17 +60,18 @@ def send_notification(
 
         await engine.dispose()
 
-    asyncio.run(_run())
+    with log_job("jobs.send_notification", tenant_id=tenant_id, logger=logger):
+        asyncio.run(_run())
 
-    if channel == "email":
-        _dispatch_email(title=title, body=body, user_id=user_id)
+        if channel == "email":
+            _dispatch_email(title=title, body=body, user_id=user_id)
 
-    logger.info(
-        "notification_worker.sent",
-        tenant_id=tenant_id,
-        type=notification_type,
-        channel=channel,
-    )
+        logger.info(
+            "notification_worker.sent",
+            tenant_id=tenant_id,
+            type=notification_type,
+            channel=channel,
+        )
 
 
 def _dispatch_email(title: str, body: str, user_id: str | None) -> None:
