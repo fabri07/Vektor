@@ -3,7 +3,7 @@
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,6 +28,12 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     stock_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     low_stock_threshold_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+
+    __table_args__ = (
+        CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_products_provenance"),
+        Index("ix_products_tenant_provenance", "tenant_id", "provenance"),
+    )
 
     def __repr__(self) -> str:
         return f"<Product tenant={self.tenant_id} name={self.name!r}>"

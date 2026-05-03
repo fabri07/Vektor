@@ -15,6 +15,7 @@ PROCESSING_STATUS_PROCESSING = "PROCESSING"
 PROCESSING_STATUS_NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
 PROCESSING_STATUS_DONE = "DONE"
 PROCESSING_STATUS_FAILED = "FAILED"
+PROCESSING_STATUS_REJECTED = "REJECTED"
 
 
 class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -43,6 +44,7 @@ class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(30), nullable=False, default=PROCESSING_STATUS_PENDING
     )
     parsed_summary_json: Mapped[Any] = mapped_column(PGJSONB, nullable=True, default=None)
+    rejection_reason: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
 
     def __repr__(self) -> str:
         return (

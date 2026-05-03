@@ -29,6 +29,7 @@ from app.application.services.file_parsing import (
     extract_amounts_from_text,
     parse_uploaded_content,
 )
+from app.application.services.validation_gate import ValidationGate
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger, log_job
 from app.observability.metrics import track_job_event
@@ -36,6 +37,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_FAILED,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     PROCESSING_STATUS_PROCESSING,
+    PROCESSING_STATUS_REJECTED,
 )
 
 logger = get_logger(__name__)
@@ -101,6 +103,49 @@ def _build_async_session(database_url: str) -> Any:
     return engine, factory
 
 
+async def _apply_validation_gate(
+    factory: Any,
+    file_id: str,
+    tenant_id: str,
+    summary: dict[str, Any],
+    t0: float,
+    task_name: str,
+    force: bool = False,
+) -> dict[str, Any] | None:
+    """
+    Runs ValidationGate on the parsed summary.
+    Returns the (possibly corrected) summary if it passed, or None if REJECTED.
+    Persists REJECTED status + rejection_reason to DB if gate fails.
+    """
+    gate = ValidationGate()
+    result = gate.validate(summary, force=force)
+
+    if not result.passed:
+        async with factory() as session:
+            record = await _load_and_lock(session, file_id, tenant_id)
+            record.processing_status = PROCESSING_STATUS_REJECTED
+            record.rejection_reason = result.rejection_reason
+            record.parsed_summary_json = summary
+            await track_job_event(
+                session,
+                task_name,
+                _uuid.UUID(tenant_id),
+                success=False,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                error=f"REJECTED:{result.rejection_reason}",
+            )
+            await session.commit()
+        logger.info(
+            "ingestion.validation_gate.rejected",
+            file_id=file_id,
+            tenant_id=tenant_id,
+            reason=result.rejection_reason,
+        )
+        return None
+
+    return result.corrected_summary if result.corrected_summary is not None else summary
+
+
 # ── Celery tasks ──────────────────────────────────────────────────────────────
 
 @celery_app.task(  # type: ignore[misc]
@@ -111,7 +156,7 @@ def _build_async_session(database_url: str) -> Any:
     soft_time_limit=150,
     time_limit=180,
 )
-def process_spreadsheet(file_id: str, tenant_id: str) -> None:
+def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> None:
     """Parse .xlsx or .csv file and extract ventas/gastos/productos."""
     from app.config.settings import get_settings  # noqa: PLC0415
 
@@ -139,12 +184,19 @@ def process_spreadsheet(file_id: str, tenant_id: str) -> None:
                     record.original_filename,
                 )
 
+                # Validation gate — REJECTED if confidence too low or schema invalid
+                validated_summary = await _apply_validation_gate(
+                    factory, file_id, tenant_id, summary, t0, "jobs.process_spreadsheet", force=force
+                )
+                if validated_summary is None:
+                    return  # REJECTED — already persisted
+
                 async with factory() as session:
                     result_record = await _load_and_lock(session, file_id, tenant_id)
                     await _save_result(
                         session,
                         result_record,
-                        summary,
+                        validated_summary,
                         PROCESSING_STATUS_NEEDS_CONFIRMATION,
                     )
                     await track_job_event(
@@ -160,8 +212,8 @@ def process_spreadsheet(file_id: str, tenant_id: str) -> None:
                     "ingestion.spreadsheet.done",
                     file_id=file_id,
                     tenant_id=tenant_id,
-                    confidence=summary.get("confidence"),
-                    rows=summary.get("rows_processed"),
+                    confidence=validated_summary.get("confidence"),
+                    rows=validated_summary.get("rows_processed"),
                 )
 
         except Exception as exc:
@@ -203,7 +255,7 @@ def process_spreadsheet(file_id: str, tenant_id: str) -> None:
     soft_time_limit=150,
     time_limit=180,
 )
-def process_text_document(file_id: str, tenant_id: str) -> None:
+def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> None:
     """Parse .txt, .docx, .pdf or .pptx file, extracting reusable context."""
     from app.config.settings import get_settings  # noqa: PLC0415
 
@@ -229,12 +281,19 @@ def process_text_document(file_id: str, tenant_id: str) -> None:
                     record.original_filename,
                 )
 
+                # Validation gate
+                validated_summary = await _apply_validation_gate(
+                    factory, file_id, tenant_id, summary, t0, "jobs.process_text_document", force=force
+                )
+                if validated_summary is None:
+                    return
+
                 async with factory() as session:
                     result_record = await _load_and_lock(session, file_id, tenant_id)
                     await _save_result(
                         session,
                         result_record,
-                        summary,
+                        validated_summary,
                         PROCESSING_STATUS_NEEDS_CONFIRMATION,
                     )
                     await track_job_event(
@@ -250,8 +309,8 @@ def process_text_document(file_id: str, tenant_id: str) -> None:
                     "ingestion.text_document.done",
                     file_id=file_id,
                     tenant_id=tenant_id,
-                    source_format=summary.get("source_format"),
-                    row_count=summary.get("row_count"),
+                    source_format=validated_summary.get("source_format"),
+                    row_count=validated_summary.get("row_count"),
                 )
 
         except Exception as exc:
@@ -293,7 +352,7 @@ def process_text_document(file_id: str, tenant_id: str) -> None:
     soft_time_limit=150,
     time_limit=180,
 )
-def process_image_ocr(file_id: str, tenant_id: str) -> None:
+def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None:
     """
     Run OCR on an image file (.jpg, .png, .heic).
 
@@ -325,13 +384,20 @@ def process_image_ocr(file_id: str, tenant_id: str) -> None:
                     record.original_filename,
                 )
 
+                # Validation gate — images are always LOW confidence, REJECTED unless force=True
+                validated_summary = await _apply_validation_gate(
+                    factory, file_id, tenant_id, summary, t0, "jobs.process_image_ocr", force=force
+                )
+                if validated_summary is None:
+                    return
+
                 # ALWAYS NEEDS_CONFIRMATION for images — never auto-import
                 async with factory() as session:
                     result_record = await _load_and_lock(session, file_id, tenant_id)
                     await _save_result(
                         session,
                         result_record,
-                        summary,
+                        validated_summary,
                         PROCESSING_STATUS_NEEDS_CONFIRMATION,
                     )
                     await track_job_event(
@@ -347,7 +413,7 @@ def process_image_ocr(file_id: str, tenant_id: str) -> None:
                     "ingestion.image_ocr.done",
                     file_id=file_id,
                     tenant_id=tenant_id,
-                    has_ocr="error" not in summary,
+                    has_ocr="error" not in validated_summary,
                 )
 
         except Exception as exc:

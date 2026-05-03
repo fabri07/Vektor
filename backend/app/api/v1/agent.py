@@ -151,6 +151,21 @@ def _extract_action_payload(agent_response: AgentResponse) -> dict[str, Any]:
     return merged_payload
 
 
+def _attach_conversation_id(agent_response: AgentResponse, conversation_id: str | None) -> None:
+    if not conversation_id:
+        return
+    result = agent_response.result or {}
+    for key in ("structured_data", "payload", "entities"):
+        payload = result.get(key)
+        if isinstance(payload, dict):
+            payload.setdefault("conversation_id", conversation_id)
+            agent_response.result = result
+            return
+
+    result["structured_data"] = {"conversation_id": conversation_id}
+    agent_response.result = result
+
+
 def _payload_for_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
     structured = payload.get("structured_data")
     if isinstance(structured, dict):
@@ -479,6 +494,7 @@ async def chat(
             status_code=500, detail=f"Orchestrator error: {type(exc).__name__}: {exc}"
         ) from exc
 
+    _attach_conversation_id(agent_response, body.conversation_id)
     action_meta = await _process_agent_action(
         agent_response=agent_response,
         tenant_id=tenant_id,
@@ -587,6 +603,7 @@ async def chat_stream(
                 tenant_id=tenant_id,
             )
 
+            _attach_conversation_id(agent_response, body.conversation_id)
             action_meta = await _process_agent_action(
                 agent_response=agent_response,
                 tenant_id=tenant_id,

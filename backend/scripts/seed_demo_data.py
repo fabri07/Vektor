@@ -123,6 +123,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
             currency="ARS",
             pricing_reference_mode="MEP",
             status="ACTIVE",
+            is_demo=True,
         )
     )
     await session.flush()
@@ -333,6 +334,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
                 stock_units=stock,
                 low_stock_threshold_units=threshold,
                 is_active=True,
+                provenance="DEMO",
             )
         )
 
@@ -349,6 +351,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
                 transaction_date=sale_date,
                 payment_method="cash",
                 notes="demo",
+                provenance="DEMO",
             )
         )
 
@@ -370,6 +373,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
                 description=desc,
                 is_recurring=recurring,
                 payment_method=method,
+                provenance="DEMO",
             )
         )
 
@@ -438,6 +442,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
             currency="ARS",
             pricing_reference_mode="MEP",
             status="ACTIVE",
+            is_demo=True,
         )
     )
     await session.flush()
@@ -660,6 +665,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
                 stock_units=stock,
                 low_stock_threshold_units=threshold,
                 is_active=True,
+                provenance="DEMO",
             )
         )
 
@@ -695,6 +701,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
                 description=desc,
                 is_recurring=recurring,
                 payment_method=method,
+                provenance="DEMO",
             )
         )
 
@@ -763,6 +770,7 @@ async def _seed_deco(session: AsyncSession) -> None:
             currency="ARS",
             pricing_reference_mode="MEP",
             status="ACTIVE",
+            is_demo=True,
         )
     )
     await session.flush()
@@ -1002,6 +1010,7 @@ async def _seed_deco(session: AsyncSession) -> None:
                 stock_units=stock,
                 low_stock_threshold_units=threshold,
                 is_active=True,
+                provenance="DEMO",
             )
         )
 
@@ -1039,6 +1048,7 @@ async def _seed_deco(session: AsyncSession) -> None:
                 description=desc,
                 is_recurring=recurring,
                 payment_method=method,
+                provenance="DEMO",
             )
         )
 

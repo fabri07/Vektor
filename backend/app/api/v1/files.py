@@ -14,6 +14,7 @@ from app.application.services.file_parsing import (
     parse_uploaded_content,
     sanitize_filename,
 )
+from app.application.services.data_intent_extractor import DataIntentExtractor
 from app.integrations.s3 import S3Client
 from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
@@ -35,6 +36,8 @@ class UploadedFileResponse(BaseModel):
     size_bytes: int
     purpose: str
     status: str
+    data_intent_detected: bool = False
+    suggested_action: str | None = None
 
 
 @router.post(
@@ -67,10 +70,19 @@ async def upload_file(
         ) from exc
 
     parsed_summary = None
+    data_intent_detected = False
+    suggested_action = None
     processing_status = None
     if purpose == "chat":
         try:
             parsed_summary = parse_uploaded_content(content, detected_mime, filename)
+            pre_check = DataIntentExtractor().check_file_summary(parsed_summary)
+            data_intent_detected = pre_check.has_data_intent
+            if pre_check.has_data_intent:
+                rows = parsed_summary.get("rows_processed", 0)
+                suggested_action = (
+                    f"¿Querés cargar estos {rows} registros de {pre_check.intent_type}?"
+                )
             processing_status = PROCESSING_STATUS_DONE
         except Exception as exc:
             raise HTTPException(
@@ -100,6 +112,8 @@ async def upload_file(
     )
     session.add(record)
     await session.flush()
+    record.data_intent_detected = data_intent_detected
+    record.suggested_action = suggested_action
     return record
 
 

@@ -4,7 +4,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,6 +30,12 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     transaction_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="cash")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+
+    __table_args__ = (
+        CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_sales_entries_provenance"),
+        Index("ix_sales_entries_tenant_provenance", "tenant_id", "provenance"),
+    )
 
     def __repr__(self) -> str:
         return f"<SaleEntry tenant={self.tenant_id} amount={self.amount} date={self.transaction_date}>"  # noqa: E501
@@ -52,6 +58,12 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="transfer")
     supplier_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+
+    __table_args__ = (
+        CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_expense_entries_provenance"),
+        Index("ix_expense_entries_tenant_provenance", "tenant_id", "provenance"),
+    )
 
     def __repr__(self) -> str:
         return (

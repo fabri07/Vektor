@@ -12,6 +12,7 @@ from app.schemas.health_score import (
     CalculatingResponse,
     HealthScoreResponse,
     HealthScoreV2Response,
+    NoDataResponse,
     ScoreSummaryResponse,
     WeeklyScoreHistoryResponse,
 )
@@ -30,16 +31,31 @@ class MarginHistoryItem(BaseModel):
 
 @router.get(
     "/current",
-    response_model=HealthScoreResponse,
+    response_model=HealthScoreResponse | NoDataResponse,
     summary="Get the latest health score for the current tenant",
 )
 async def get_current_score(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> HealthScoreResponse:
+) -> HealthScoreResponse | NoDataResponse:
+    from sqlalchemy import func, select as sa_select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
     repo = HealthScoreRepository(session)
     snapshot = await repo.get_latest(tenant.tenant_id)
     if snapshot is None:
+        ventas_q = sa_select(func.count(SaleEntry.id)).where(
+            SaleEntry.tenant_id == tenant.tenant_id,
+            SaleEntry.provenance == "REAL",
+        )
+        gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
+            ExpenseEntry.tenant_id == tenant.tenant_id,
+            ExpenseEntry.provenance == "REAL",
+        )
+        real_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
+        if real_count == 0 and not tenant.is_demo:
+            return NoDataResponse(is_demo_data=False)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No health score available yet. Add some sales or expenses to get started.",
@@ -129,21 +145,42 @@ async def get_weekly_history(
 
 @router.get(
     "/latest",
-    response_model=HealthScoreV2Response | CalculatingResponse,
+    response_model=HealthScoreV2Response | CalculatingResponse | NoDataResponse,
     summary="Latest health score with explicit subscores (F1-01)",
 )
 async def get_latest_score(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> HealthScoreV2Response | CalculatingResponse:
+) -> HealthScoreV2Response | CalculatingResponse | NoDataResponse:
     """
     Returns the most recent HealthScoreSnapshot with all F1-01 subscore columns.
-    If no score has been computed yet, returns { "status": "CALCULATING" }.
+    - CALCULATING: score existe pero aún no tiene subscores calculados.
+    - NO_DATA: tenant sin datos reales cargados (provenance='REAL' count=0).
+    - is_demo_data=true: el snapshot pertenece a un tenant demo.
     """
+    from sqlalchemy import func, select as sa_select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
     repo = HealthScoreRepository(session)
     snapshot = await repo.get_latest(tenant.tenant_id)
+
+    # Sin snapshot: verificar si hay datos reales para decidir entre CALCULATING y NO_DATA
     if snapshot is None or snapshot.score_cash is None:
+        ventas_q = sa_select(func.count(SaleEntry.id)).where(
+            SaleEntry.tenant_id == tenant.tenant_id,
+            SaleEntry.provenance == "REAL",
+        )
+        gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
+            ExpenseEntry.tenant_id == tenant.tenant_id,
+            ExpenseEntry.provenance == "REAL",
+        )
+        real_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
+        if real_count == 0 and not tenant.is_demo:
+            # Tenant real sin ningún dato cargado — estado nulo explícito
+            return NoDataResponse(is_demo_data=False)
         return CalculatingResponse()
+
     return HealthScoreV2Response(
         id=snapshot.id,
         tenant_id=snapshot.tenant_id,
@@ -157,6 +194,7 @@ async def get_latest_score(
         data_completeness_score=float(snapshot.data_completeness_score or 0),
         level=snapshot.level,
         created_at=snapshot.created_at,
+        is_demo_data=tenant.is_demo,
     )
 
 

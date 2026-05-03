@@ -24,8 +24,11 @@ import app.application.services.cash_service as cash_service
 import app.application.services.stock_service as stock_service
 from app.application.agents.shared.schemas import ActionType
 from app.application.services.automation_service import determine_external_system
+from app.application.services.chat_memory_service import ChatMemoryService
+from app.application.services.ingestion_import_service import insert_confirmed_data
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.pending_action import PendingAction
 
 logger = get_logger(__name__)
@@ -49,6 +52,76 @@ def _external_idempotency_key(
         default=str,
     )
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def _summary_from_tabular_records(records: list, record_type: str) -> dict:
+    rows = [row for row in records if isinstance(row, dict)]
+    normalized_type = record_type.lower()
+    if normalized_type in {"sales", "sale", "venta", "ventas"}:
+        return {
+            "file_type": "spreadsheet",
+            "source_format": "google_sheets",
+            "inferred_type": "ventas",
+            "confidence": "HIGH",
+            "has_venta": True,
+            "has_gasto": False,
+            "has_producto": False,
+            "ventas_detectadas": rows,
+            "gastos_detectados": [],
+            "stock_detectado": [],
+            "rows_processed": len(rows),
+        }
+    if normalized_type in {"expenses", "expense", "gasto", "gastos"}:
+        return {
+            "file_type": "spreadsheet",
+            "source_format": "google_sheets",
+            "inferred_type": "gastos",
+            "confidence": "HIGH",
+            "has_venta": False,
+            "has_gasto": True,
+            "has_producto": False,
+            "ventas_detectadas": [],
+            "gastos_detectados": rows,
+            "stock_detectado": [],
+            "rows_processed": len(rows),
+        }
+    if normalized_type in {"stock", "product", "products", "producto", "productos"}:
+        return {
+            "file_type": "spreadsheet",
+            "source_format": "google_sheets",
+            "inferred_type": "stock",
+            "confidence": "HIGH",
+            "has_venta": False,
+            "has_gasto": False,
+            "has_producto": True,
+            "ventas_detectadas": [],
+            "gastos_detectados": [],
+            "stock_detectado": rows,
+            "rows_processed": len(rows),
+        }
+    return {
+        "file_type": "spreadsheet",
+        "source_format": "google_sheets",
+        "inferred_type": "general",
+        "confidence": "MEDIUM",
+        "has_venta": False,
+        "has_gasto": False,
+        "has_producto": False,
+        "ventas_detectadas": rows,
+        "gastos_detectados": [],
+        "stock_detectado": [],
+        "rows_processed": len(rows),
+    }
+
+
+def _confirmed_fields_for_record_type(record_type: str) -> dict[str, bool]:
+    normalized_type = record_type.lower()
+    return {
+        "ventas": normalized_type in {"sales", "sale", "venta", "ventas"},
+        "gastos": normalized_type in {"expenses", "expense", "gasto", "gastos"},
+        "productos": normalized_type in {"stock", "product", "products", "producto", "productos"},
+    }
+
 
 async def create_pending_action(
     db: AsyncSession,
@@ -109,9 +182,23 @@ async def execute_pending_action(
     Ejecuta la acción de negocio y registra en audit_log.
     """
     payload = action.payload or {}
+    conversation_id = str(payload.get("conversation_id") or "direct")
+    mem = ChatMemoryService()
 
     if action.action_type == ActionType.REGISTER_SALE:
         sale = await cash_service.save_sale(payload, action.tenant_id, action.user_id, db)
+        if payload.get("conversation_id"):
+            await mem.record(
+                db=db,
+                redis=redis,
+                tenant_id=action.tenant_id,
+                session_id=conversation_id,
+                entry_type="DATA_LOADED",
+                description=f"Venta registrada por chat: ${sale.amount}",
+                entity_type="sale",
+                entity_count=1,
+                pending_action_id=action.id,
+            )
         from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
         await AgentCash().on_confirmed_sale(str(sale.id), str(action.tenant_id))
         try:
@@ -131,7 +218,19 @@ async def execute_pending_action(
         await cash_service.save_cash_inflow(payload, action.tenant_id, db)
 
     elif action.action_type == ActionType.REGISTER_EXPENSE:
-        await cash_service.save_expense(payload, action.tenant_id, db)
+        expense = await cash_service.save_expense(payload, action.tenant_id, db)
+        if payload.get("conversation_id"):
+            await mem.record(
+                db=db,
+                redis=redis,
+                tenant_id=action.tenant_id,
+                session_id=conversation_id,
+                entry_type="DATA_LOADED",
+                description=f"Gasto registrado por chat: ${expense.amount}",
+                entity_type="expense",
+                entity_count=1,
+                pending_action_id=action.id,
+            )
         try:
             if redis is not None:
                 from decimal import Decimal  # noqa: PLC0415
@@ -224,6 +323,79 @@ async def execute_pending_action(
                 payload=payload,
             )
 
+    elif action.action_type == ActionType.IMPORT_TABULAR_FILE:
+        file_id = payload.get("file_id")
+        parsed_records = payload.get("parsed_records")
+
+        if file_id:
+            from sqlalchemy import select  # noqa: PLC0415
+
+            result = await db.execute(
+                select(UploadedFile).where(
+                    UploadedFile.id == uuid.UUID(str(file_id)),
+                    UploadedFile.tenant_id == action.tenant_id,
+                )
+            )
+            uploaded_file = result.scalar_one_or_none()
+            if uploaded_file is None:
+                raise ValueError("IMPORT_TABULAR_FILE archivo no encontrado")
+            if not isinstance(uploaded_file.parsed_summary_json, dict):
+                raise ValueError("IMPORT_TABULAR_FILE archivo sin parsed_summary_json")
+
+            confirmed_fields = payload.get("confirmed_fields")
+            if not isinstance(confirmed_fields, dict):
+                confirmed_fields = {}
+
+            summary = uploaded_file.parsed_summary_json
+            counts = await insert_confirmed_data(
+                session=db,
+                tenant_id=action.tenant_id,
+                summary=summary,
+                confirmed_fields=confirmed_fields,
+            )
+            uploaded_file.processing_status = PROCESSING_STATUS_DONE
+            uploaded_file.parsed_summary_json = {
+                **summary,
+                "confirmed_fields": confirmed_fields,
+                "imported_counts": counts,
+            }
+            description = f"Importado: {uploaded_file.original_filename} — {counts}"
+            entity_type = summary.get("inferred_type")
+            uploaded_file_id = uploaded_file.id
+
+        elif isinstance(parsed_records, list):
+            record_type = str(payload.get("record_type") or "sales")
+            summary = _summary_from_tabular_records(parsed_records, record_type)
+            confirmed_fields = payload.get("confirmed_fields")
+            if not isinstance(confirmed_fields, dict):
+                confirmed_fields = _confirmed_fields_for_record_type(record_type)
+
+            counts = await insert_confirmed_data(
+                session=db,
+                tenant_id=action.tenant_id,
+                summary=summary,
+                confirmed_fields=confirmed_fields,
+            )
+            source = payload.get("source") or "tabular"
+            description = f"Importado desde {source}: {counts}"
+            entity_type = summary.get("inferred_type")
+            uploaded_file_id = None
+
+        else:
+            raise ValueError("IMPORT_TABULAR_FILE sin file_id ni parsed_records")
+
+        await mem.record(
+            db=db,
+            redis=redis,
+            tenant_id=action.tenant_id,
+            session_id=conversation_id,
+            entry_type="DATA_LOADED",
+            description=description,
+            entity_type=entity_type,
+            entity_count=sum(counts.values()),
+            uploaded_file_id=uploaded_file_id,
+            pending_action_id=action.id,
+        )
 
     elif action.action_type == ActionType.CREATE_SUPPLIER_DRAFT:
         mcp_enabled = payload.get("mode") == "mcp"

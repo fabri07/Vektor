@@ -67,9 +67,20 @@ class HealthScoreV2Response(BaseModel):
     data_completeness_score: float
     level: str
     created_at: datetime
+    is_demo_data: bool = False
 
 
 class CalculatingResponse(BaseModel):
     """Returned when no health score has been computed yet."""
 
     status: str = "CALCULATING"
+
+
+class NoDataResponse(BaseModel):
+    """Returned when the tenant has no real data uploaded yet."""
+
+    status: str = "NO_DATA"
+    score: None = None
+    score_level: str = "NO_DATA"
+    is_demo_data: bool = False
+    mensaje: str = "Cargá tus datos para ver tu análisis"

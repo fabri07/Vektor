@@ -167,6 +167,9 @@ class ChatOrchestrator:
                         bm_data,
                         agent_memory_fragment,
                         file_context,
+                        tenant_id=tenant_id,
+                        db=db,
+                        redis=redis,
                     )
                     all_llm_calls.append(orch_call)
                 except AnthropicConfigurationError:
@@ -216,6 +219,9 @@ class ChatOrchestrator:
         bm_data: dict | None = None,
         agent_memory_fragment: str = "",
         file_context: str = "",
+        tenant_id: uuid.UUID | None = None,
+        db: AsyncSession | None = None,
+        redis: Redis | None = None,
     ) -> tuple[str, LLMCall]:
         turns = conversation_ctx.get("turns", [])
         history = (
@@ -230,12 +236,65 @@ class ChatOrchestrator:
             else ""
         )
 
-        # Fragmento de BusinessMemory: solo si hay summary generado
+        # Datos financieros determinísticos (solo provenance='REAL') — null-safe
         memory_fragment = ""
-        if bm_data:
-            summary = bm_data.get("llm_context_summary")
-            if summary:
-                memory_fragment = f"\n\nEstado actual del negocio: {summary}"
+        try:
+            from app.application.services.deterministic_finance import (  # noqa: PLC0415
+                get_financial_summary,
+            )
+            fin_data = await get_financial_summary(tenant_id, db)
+            if fin_data.get("estado") == "SIN_DATOS":
+                memory_fragment = (
+                    "\n\nDAtos del negocio: SIN_DATOS. "
+                    "INSTRUCCIÓN CRÍTICA: NO INVENTES NÚMEROS. "
+                    "Indicá al usuario que debe cargar sus datos de ventas y gastos para ver análisis."
+                )
+            else:
+                flujo = fin_data.get("flujo_neto_30d", {})
+                margen = fin_data.get("margen", {})
+                ticket = fin_data.get("ticket_promedio", {})
+                lines: list[str] = ["\n\nDatos financieros reales del negocio (últimos 30 días):"]
+                if flujo:
+                    lines.append(
+                        f"  Ventas: ${flujo.get('total_ventas', 0)} | "
+                        f"Gastos: ${flujo.get('total_gastos', 0)} | "
+                        f"Flujo neto: ${flujo.get('flujo_neto', 0)}"
+                    )
+                if not margen.get("sin_datos"):
+                    lines.append(f"  Margen bruto: {margen.get('margen_pct', 0)}%")
+                if not ticket.get("sin_datos"):
+                    lines.append(
+                        f"  Ticket promedio: ${ticket.get('ticket_promedio', 0)} "
+                        f"({ticket.get('n_transacciones', 0)} transacciones)"
+                    )
+                memory_fragment = "\n".join(lines)
+        except Exception as exc:
+            logger.warning("deterministic_finance_failed", tenant_id=str(tenant_id), error=str(exc))
+            # Fail-closed: no fallback a BusinessMemory (podría contener datos demo/stale)
+            memory_fragment = (
+                "\n\nDatos del negocio: SIN_DATOS (error temporal). "
+                "INSTRUCCIÓN CRÍTICA: NO INVENTES NÚMEROS. "
+                "Indicá al usuario que intente nuevamente."
+            )
+
+        try:
+            if tenant_id is not None and db is not None and redis is not None:
+                from app.application.services.chat_memory_service import (  # noqa: PLC0415
+                    ChatMemoryService,
+                )
+
+                session_ctx = await ChatMemoryService().get_session_context_cached(
+                    db,
+                    redis,
+                    tenant_id,
+                )
+                memory_fragment += "\n\n" + self._render_session_memory(session_ctx)
+        except Exception as exc:
+            logger.warning("chat_session_memory_failed", tenant_id=str(tenant_id), error=str(exc))
+            memory_fragment += (
+                "\n\nHISTORIAL DE CARGAS: No disponible temporalmente. "
+                "No inventes información histórica."
+            )
 
         # Fragmento de AgentMemory: patrones aprendidos del negocio
         agent_mem_section = f"\n\n{agent_memory_fragment}" if agent_memory_fragment else ""
@@ -321,6 +380,25 @@ class ChatOrchestrator:
             lines.append(f"Pregunta pendiente: {q}")
         return "\n".join(lines) or str(result)[:300]
 
+    @staticmethod
+    def _render_session_memory(ctx: dict[str, Any]) -> str:
+        if not ctx.get("historial_disponible"):
+            return (
+                "HISTORIAL DE CARGAS: El usuario no tiene cargas previas registradas. "
+                "No inventes información histórica."
+            )
+        ultima = ctx.get("ultima_carga") or {}
+        descripcion = ultima.get("descripcion") or "carga registrada"
+        registros = ultima.get("registros", 0)
+        fecha = str(ultima.get("fecha") or "")[:10] or "fecha desconocida"
+        total = ctx.get("total_cargas_registradas", 0)
+        return (
+            "HISTORIAL DE CARGAS:\n"
+            f"Última carga: {descripcion} ({registros} registros, {fecha})\n"
+            f"Total cargas registradas: {total}\n"
+            "No repitas preguntas sobre datos ya cargados."
+        )
+
     async def _load_file_context(
         self,
         tenant_id: uuid.UUID,
@@ -343,6 +421,19 @@ class ChatOrchestrator:
             )
             result = await db.execute(stmt)
             loaded = list(result.scalars().all())
+            # Tenant isolation check — todos los archivos deben pertenecer al tenant activo
+            for _file in loaded:
+                if _file.tenant_id != tenant_id:
+                    logger.error(
+                        "orchestrator.tenant_isolation_violation",
+                        expected=str(tenant_id),
+                        found=str(_file.tenant_id),
+                        file_id=str(_file.id),
+                    )
+                    raise ValueError(
+                        f"Tenant isolation violation in file context: "
+                        f"file {_file.id} belongs to {_file.tenant_id}, not {tenant_id}"
+                    )
             files_by_id = {str(file.id): file for file in loaded}
             attachment_files = [
                 files_by_id[file_id] for file_id in attachment_ids if file_id in files_by_id

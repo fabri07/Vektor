@@ -519,12 +519,12 @@ class _CaptureLogger:
 
 
 def test_parse_amount_logs_non_positive_discard(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.api.v1.ingestion as ingestion
+    import app.application.services.ingestion_import_service as importer
 
     capture = _CaptureLogger()
-    monkeypatch.setattr(ingestion, "logger", capture)
+    monkeypatch.setattr(importer, "logger", capture)
 
-    assert ingestion._parse_amount("0") is None
+    assert importer._parse_amount("0") is None
     assert capture.debug_events == [
         (
             "ingestion.parse.amount_discarded",
@@ -539,12 +539,12 @@ async def test_parse_date_fallback_logs_debug(
     sample_tenant: Tenant,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import app.api.v1.ingestion as ingestion
+    import app.application.services.ingestion_import_service as importer
 
     capture = _CaptureLogger()
-    monkeypatch.setattr(ingestion, "logger", capture)
+    monkeypatch.setattr(importer, "logger", capture)
 
-    await ingestion._insert_confirmed_data(
+    await importer.insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
         {

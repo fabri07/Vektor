@@ -265,6 +265,7 @@ async def test_load_file_context_prioritizes_current_attachments():
 
     current_file = MagicMock()
     current_file.id = current_file_id
+    current_file.tenant_id = tenant_id  # necesario para el check de aislamiento
     current_file.original_filename = "ventas_actuales.csv"
     current_file.content_type = "text/csv"
     current_file.purpose = "chat"
@@ -278,6 +279,7 @@ async def test_load_file_context_prioritizes_current_attachments():
 
     old_file = MagicMock()
     old_file.id = uuid.uuid4()
+    old_file.tenant_id = tenant_id  # necesario para el check de aislamiento
     old_file.original_filename = "ventas_ayer.csv"
     old_file.content_type = "text/csv"
     old_file.purpose = "chat"

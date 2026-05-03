@@ -89,6 +89,7 @@ async def save_sale(
         ),
         payment_method=payment_method,
         notes=entities.get("product_description"),
+        provenance="REAL",
     )
     db.add(sale)
     audit = DecisionAuditLog(
@@ -123,6 +124,7 @@ async def save_cash_inflow(
         transaction_date=date.today(),
         payment_method="inflow",
         notes=entities.get("notes") or entities.get("linked_sale_id"),
+        provenance="REAL",
     )
     db.add(entry)
     await db.flush()
@@ -152,6 +154,7 @@ async def save_expense(
         payment_method=_normalize_payment_method(entities.get("payment_method")),
         supplier_name=entities.get("supplier_name"),
         notes=entities.get("notes"),
+        provenance="REAL",
     )
     db.add(expense)
     await db.flush()

@@ -7,7 +7,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Date, ForeignKey, Integer, Numeric, Text
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -25,6 +25,7 @@ class Tenant(TimestampMixin, Base):
     currency: Mapped[str] = mapped_column(Text, nullable=False, default="ARS")
     pricing_reference_mode: Mapped[str] = mapped_column(Text, nullable=False, default="MEP")
     status: Mapped[str] = mapped_column(Text, nullable=False, default="ACTIVE")
+    is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Relationships
     subscriptions: Mapped[list["Subscription"]] = relationship(

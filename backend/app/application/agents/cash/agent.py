@@ -2,6 +2,7 @@
 
 import json
 import re
+import uuid
 from calendar import monthrange
 from datetime import date
 from decimal import Decimal
@@ -124,6 +125,68 @@ class AgentCash(BaseAgent):
                 "alerts": [],
             },
         )
+
+    async def _maybe_build_uploaded_file_import(self, request: AgentRequest) -> AgentResponse | None:
+        if self._db is None or not request.attachments:
+            return None
+
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from app.application.services.data_intent_extractor import (  # noqa: PLC0415
+            DataIntentExtractor,
+        )
+        from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+        for attachment in request.attachments:
+            file_id = attachment.get("file_id") if isinstance(attachment, dict) else None
+            if not file_id:
+                continue
+            try:
+                file_uuid = uuid.UUID(str(file_id))
+                tenant_uuid = uuid.UUID(str(request.business_id))
+            except ValueError:
+                continue
+            result = await self._db.execute(
+                select(UploadedFile).where(
+                    UploadedFile.id == file_uuid,
+                    UploadedFile.tenant_id == tenant_uuid,
+                )
+            )
+            uploaded_file = result.scalar_one_or_none()
+            if uploaded_file is None or not isinstance(uploaded_file.parsed_summary_json, dict):
+                continue
+
+            pre_check = DataIntentExtractor().check_file_summary(uploaded_file.parsed_summary_json)
+            if not pre_check.has_data_intent:
+                continue
+
+            confirmed_fields = {
+                "ventas": pre_check.intent_type in ("sale", "mixed"),
+                "gastos": pre_check.intent_type in ("expense", "mixed"),
+                "productos": pre_check.intent_type == "product",
+            }
+            rows = uploaded_file.parsed_summary_json.get("rows_processed", 0)
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_approval",
+                risk_level=RiskLevel.MEDIUM,
+                requires_approval=True,
+                confidence=Confidence(pre_check.confidence),
+                result={
+                    "summary": (
+                        f"Importar {rows} registros desde {uploaded_file.original_filename}."
+                    ),
+                    "action_type": ActionType.IMPORT_TABULAR_FILE,
+                    "structured_data": {
+                        "source": "uploaded_file",
+                        "file_id": str(uploaded_file.id),
+                        "confirmed_fields": confirmed_fields,
+                    },
+                    "alerts": [],
+                },
+            )
+        return None
 
     def _looks_like_expense(self, message: str) -> bool:
         message_lower = message.lower()
@@ -259,6 +322,10 @@ class AgentCash(BaseAgent):
         }
 
     async def process(self, request: AgentRequest) -> AgentResponse:
+        file_import = await self._maybe_build_uploaded_file_import(request)
+        if file_import is not None:
+            return file_import
+
         google_import = await self._maybe_build_google_sheets_import(request.message)
         if google_import is not None:
             google_import.request_id = request.request_id

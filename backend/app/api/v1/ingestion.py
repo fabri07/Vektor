@@ -7,22 +7,13 @@ GET    /ingestion/files/{file_id}/preview   — get parsed_summary_json
 POST   /ingestion/files/{file_id}/confirm  — confirm import (NEEDS_CONFIRMATION only)
 """
 
-import re
 import uuid
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
-from app.application.services.file_parsing import (
-    FECHA_COLS as _FECHA_COLS,
-)
-from app.application.services.file_parsing import (
-    GASTO_COLS as _GASTO_COLS,
-)
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
 )
@@ -30,13 +21,11 @@ from app.application.services.file_parsing import (
     SPREADSHEET_MIMES as _SPREADSHEET_MIMES,
 )
 from app.application.services.file_parsing import (
-    VENTA_COLS as _VENTA_COLS,
-)
-from app.application.services.file_parsing import (
     detect_supported_mime,
     parse_uploaded_content,
     sanitize_filename,
 )
+from app.application.services.ingestion_import_service import insert_confirmed_data
 from app.config.settings import get_settings
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
@@ -53,6 +42,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     PROCESSING_STATUS_PENDING,
     PROCESSING_STATUS_PROCESSING,
+    PROCESSING_STATUS_REJECTED,
     UploadedFile,
 )
 from app.persistence.models.tenant import Tenant
@@ -86,264 +76,13 @@ def _pick_job(mime: str) -> object:
     return process_text_document
 
 
-# ── Ingestion data insertion helpers ─────────────────────────────────────────
-
-def _parse_amount(raw: Any) -> Decimal | None:
-    if raw is None:
-        return None
-    s = re.sub(r"[$\s]", "", str(raw).strip())
-    if not s:
-        return None
-    # Argentine/European format: 1.500,50 → 1500.50
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif "," in s:
-        s = s.replace(",", ".")
-    try:
-        val = Decimal(s)
-        if val <= 0:
-            logger.debug(
-                "ingestion.parse.amount_discarded",
-                raw=str(raw),
-                reason="non_positive",
-            )
-            return None
-        return val
-    except InvalidOperation:
-        return None
-
-
-def _parse_date(raw: Any) -> date | None:
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _find_col(headers: list[str], keywords: set[str]) -> str | None:
-    """Return first header whose normalized name contains any of the keywords."""
-    for h in headers:
-        norm = h.lower().strip().replace(" ", "_")
-        if any(k in norm for k in keywords):
-            return h
-    return None
-
-
-_NOMBRE_COLS: set[str] = {
-    "producto",
-    "descripcion",
-    "descripción",
-    "nombre",
-    "articulo",
-    "artículo",
-    "item",
-    "name",
-    "concepto",
-    "detalle",
-}
-_PRECIO_VENTA_COLS: set[str] = {"precio_venta", "precio", "price", "p_venta"}
-_COSTO_COLS: set[str] = {"costo", "cost", "precio_costo", "p_costo"}
-_STOCK_COLS: set[str] = {"stock", "cantidad", "inventario", "units", "qty", "existencia"}
-_SKU_COLS: set[str] = {"sku", "codigo", "código", "code", "ref", "id_producto"}
-
-
-async def _insert_confirmed_data(
-    session: AsyncSession,
-    tenant_id: uuid.UUID,
-    summary: dict[str, Any],
-    confirmed_fields: dict[str, bool],
-) -> dict[str, int]:
-    """Parse parsed_summary_json and insert rows into sales/expense/product tables."""
-    from sqlalchemy import select  # noqa: PLC0415
-
-    from app.persistence.models.product import Product  # noqa: PLC0415
-    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
-
-    today = date.today()
-    counts: dict[str, int] = {"ventas": 0, "gastos": 0, "productos": 0}
-    file_type = summary.get("file_type", "spreadsheet")
-
-    if file_type == "spreadsheet":
-        inferred_type = summary.get("inferred_type", "general")
-        # Para archivos de stock/inventario las filas están en stock_detectado
-        if inferred_type == "stock":
-            rows: list[dict[str, Any]] = summary.get("stock_detectado", [])
-        else:
-            rows = summary.get("ventas_detectadas", [])
-        if not rows:
-            return counts
-
-        headers = list(rows[0].keys())
-
-        fecha_col = _find_col(headers, _FECHA_COLS)
-        venta_col = _find_col(headers, _VENTA_COLS)
-        gasto_col = _find_col(headers, _GASTO_COLS)
-        nombre_col = _find_col(headers, _NOMBRE_COLS)
-        precio_col = _find_col(headers, _PRECIO_VENTA_COLS)
-        costo_col = _find_col(headers, _COSTO_COLS)
-        stock_col = _find_col(headers, _STOCK_COLS)
-        sku_col = _find_col(headers, _SKU_COLS)
-
-        wants_ventas = bool(
-            inferred_type != "stock"
-            and confirmed_fields.get("ventas")
-            and summary.get("has_venta")
-            and venta_col
-        )
-        wants_gastos = bool(
-            inferred_type != "stock"
-            and confirmed_fields.get("gastos")
-            and summary.get("has_gasto")
-            and gasto_col
-        )
-        wants_productos = bool(
-            confirmed_fields.get("productos") and summary.get("has_producto") and nombre_col
-        )
-
-        for row_index, row in enumerate(rows):
-            raw_date = row.get(fecha_col) if fecha_col else None
-            tx_date = _parse_date(raw_date) if fecha_col else None
-            if tx_date is None:
-                if fecha_col:
-                    logger.debug(
-                        "ingestion.parse.date_fallback_today",
-                        raw=str(raw_date),
-                        row_index=row_index,
-                    )
-                tx_date = today
-
-            if wants_ventas:
-                amount = _parse_amount(row.get(venta_col))
-                if amount:
-                    session.add(SaleEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        quantity=1,
-                        transaction_date=tx_date,
-                        payment_method="cash",
-                        notes="Importado desde archivo",
-                    ))
-                    counts["ventas"] += 1
-
-            if wants_gastos:
-                amount = _parse_amount(row.get(gasto_col))
-                if amount:
-                    desc_raw = row.get(nombre_col) if nombre_col else None
-                    desc = (
-                        str(desc_raw).strip()[:499]
-                        if desc_raw and str(desc_raw).strip() not in {"None", "nan", ""}
-                        else "Gasto importado"
-                    )
-                    session.add(ExpenseEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        category="importado",
-                        transaction_date=tx_date,
-                        description=desc,
-                        payment_method="transfer",
-                    ))
-                    counts["gastos"] += 1
-
-        if wants_productos:
-            for row in rows:
-                name = str(row.get(nombre_col, "")).strip()[:299]
-                if not name or name.lower() in {"none", "nan", ""}:
-                    continue
-                price = _parse_amount(row.get(precio_col)) if precio_col else None
-                cost = _parse_amount(row.get(costo_col)) if costo_col else None
-                try:
-                    stock_raw = row.get(stock_col) if stock_col else None
-                    stock_val = (
-                        int(float(str(stock_raw)))
-                        if stock_raw not in (None, "", "None", "nan")
-                        else 0
-                    )
-                except (ValueError, TypeError):
-                    stock_val = 0
-                sku_raw = row.get(sku_col) if sku_col else None
-                sku = (
-                    str(sku_raw).strip()[:99]
-                    if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"}
-                    else None
-                )
-
-                result = await session.execute(
-                    select(Product).where(
-                        Product.tenant_id == tenant_id,
-                        Product.name == name,
-                    )
-                )
-                existing = result.scalar_one_or_none()
-                if existing:
-                    if price:
-                        existing.sale_price_ars = price
-                    if cost:
-                        existing.unit_cost_ars = cost
-                    if stock_val > 0:
-                        existing.stock_units = stock_val
-                    if sku:
-                        existing.sku = sku
-                else:
-                    session.add(Product(
-                        tenant_id=tenant_id,
-                        name=name,
-                        sku=sku,
-                        sale_price_ars=price or Decimal("0"),
-                        unit_cost_ars=cost,
-                        stock_units=stock_val,
-                    ))
-                counts["productos"] += 1
-
-    else:
-        # text / image: lists of {linea, montos}
-        if confirmed_fields.get("ventas"):
-            for entry in summary.get("ventas_detectadas", []):
-                for m in entry.get("montos", []):
-                    amount = _parse_amount(m)
-                    if amount:
-                        session.add(SaleEntry(
-                            tenant_id=tenant_id,
-                            amount=amount,
-                            quantity=1,
-                            transaction_date=today,
-                            payment_method="cash",
-                            notes=str(entry.get("linea", ""))[:499],
-                        ))
-                        counts["ventas"] += 1
-
-        if confirmed_fields.get("gastos"):
-            for entry in summary.get("gastos_detectados", []):
-                for m in entry.get("montos", []):
-                    amount = _parse_amount(m)
-                    if amount:
-                        session.add(ExpenseEntry(
-                            tenant_id=tenant_id,
-                            amount=amount,
-                            category="importado",
-                            transaction_date=today,
-                            description=str(entry.get("linea", ""))[:499] or "Gasto importado",
-                            payment_method="transfer",
-                        ))
-                        counts["gastos"] += 1
-
-    await session.flush()
-    return counts
-
-
 # ── Sync fallback (beta: Celery/Redis unavailable) ───────────────────────────
 
 
 async def _process_file_sync(
     record: UploadedFile,
     session: AsyncSession,
+    force: bool = False,
 ) -> None:
     """Process a file synchronously when Celery is unavailable.
 
@@ -352,6 +91,8 @@ async def _process_file_sync(
     engine.  On failure the file is marked FAILED so the user sees a clear
     status instead of being stuck in PENDING forever.
     """
+    from app.application.services.validation_gate import ValidationGate  # noqa: PLC0415
+
     repo = FileRepository(session)
     try:
         record.processing_status = PROCESSING_STATUS_PROCESSING
@@ -362,15 +103,31 @@ async def _process_file_sync(
         content = await s3.download(record.s3_key)
         summary = parse_uploaded_content(content, record.content_type, record.original_filename)
 
-        record.parsed_summary_json = summary
+        gate = ValidationGate()
+        gate_result = gate.validate(summary, force=force)
+
+        if not gate_result.passed:
+            record.processing_status = PROCESSING_STATUS_REJECTED
+            record.rejection_reason = gate_result.rejection_reason
+            record.parsed_summary_json = summary
+            await repo.save(record)
+            logger.info(
+                "ingestion.sync_fallback.rejected",
+                file_id=str(record.id),
+                reason=gate_result.rejection_reason,
+            )
+            return
+
+        final_summary = gate_result.corrected_summary if gate_result.corrected_summary else summary
+        record.parsed_summary_json = final_summary
         record.processing_status = PROCESSING_STATUS_NEEDS_CONFIRMATION
         await repo.save(record)
 
         logger.info(
             "ingestion.sync_fallback.done",
             file_id=str(record.id),
-            file_type=summary.get("file_type"),
-            confidence=summary.get("confidence"),
+            file_type=final_summary.get("file_type"),
+            confidence=final_summary.get("confidence"),
         )
 
     except Exception as exc:
@@ -397,6 +154,7 @@ async def upload_file(
     request: Request,
     file: UploadFile = File(...),
     file_hint: FileHint = Query(default="general"),
+    force: bool = Query(default=False, description="Forzar ingestión aunque confidence=LOW"),
     tenant: Tenant = Depends(get_current_tenant),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
@@ -440,21 +198,21 @@ async def upload_file(
     saved = await repo.save(record)
 
     if get_settings().USE_LOCAL_FALLBACK:
-        await _process_file_sync(saved, session)
+        await _process_file_sync(saved, session, force=force)
         return UploadResponse(file_id=saved.id, status="PROCESSING")
 
     # Enqueue parsing job — fall back to sync processing if Celery/Redis
     # is unavailable (beta: single Railway service without workers).
     job = _pick_job(detected_mime)
     try:
-        job.delay(str(saved.id), str(tenant.tenant_id))  # type: ignore[attr-defined]
+        job.delay(str(saved.id), str(tenant.tenant_id), force)  # type: ignore[attr-defined]
     except Exception:
         logger.warning(
             "ingestion.celery_unavailable",
             file_id=str(saved.id),
             msg="Celery/Redis no disponible, procesando archivo de forma síncrona.",
         )
-        await _process_file_sync(saved, session)
+        await _process_file_sync(saved, session, force=force)
         return UploadResponse(file_id=saved.id, status="PROCESSING")
 
     return UploadResponse(file_id=saved.id, status="PROCESSING")
@@ -600,7 +358,7 @@ async def confirm_file(
     updated_summary = dict(record.parsed_summary_json or {})
     updated_summary["confirmed_fields"] = body.confirmed_fields
 
-    counts = await _insert_confirmed_data(
+    counts = await insert_confirmed_data(
         session,
         tenant.tenant_id,
         updated_summary,

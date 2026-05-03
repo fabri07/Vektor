@@ -11,6 +11,7 @@ from app.persistence.models.business import (
     Insight,
     MomentumProfile,
 )
+from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.google_mcp_connection import GoogleMcpConnection
@@ -63,4 +64,5 @@ __all__ = [
     "BusinessMemory",
     "AgentMemory",
     "GoogleMcpConnection",
+    "ChatSessionLog",
 ]
