@@ -307,13 +307,32 @@ class ChatOrchestrator:
         )
 
         action_type = agent_response.result.get("action_type", "")
+        action_executed = bool(agent_response.result.get("auto_executed")) or bool(
+            agent_response.result.get("pending_action_id")
+        )
         action_ctx = f"Acción determinada: {action_type}\n\n" if action_type else ""
+
+        no_action_rule = (
+            "REGLA CRÍTICA: No se ejecutó ninguna operación en esta respuesta. "
+            "NO afirmes que registraste, eliminaste, corregiste ni modificaste ningún dato. "
+            "Respondé solo con información o con instrucciones para que el usuario tome acción.\n\n"
+            if not action_type
+            else (
+                "REGLA CRÍTICA: Esta operación AÚN NO se ejecutó — el usuario debe confirmarla primero. "
+                "NO digas que ya fue registrada ni realizada.\n\n"
+                if not action_executed
+                else ""
+            )
+        )
 
         system = (
             f"Sos el asistente financiero de Véktor para {business_name} ({business_type}).\n\n"
             "CAPACIDADES DE VÉKTOR: registro de ventas, gastos, compras y movimientos de caja; "
             "preparar borradores de email a proveedores (Gmail); clasificar mensajes recibidos de proveedores; "
             "crear y consultar eventos en Google Calendar; sincronizar con Google Sheets y Docs.\n\n"
+            "LO QUE VÉKTOR NO PUEDE HACER VÍA CHAT: eliminar o corregir registros existentes, "
+            "modificar datos ya cargados, acceder a registros de otras sesiones sin que el usuario los nombre.\n\n"
+            f"{no_action_rule}"
             f"{action_ctx}"
             f"{heuristic_fragment}"
             f"{memory_fragment}"
@@ -323,7 +342,6 @@ class ChatOrchestrator:
             "basada en los resultados del análisis.\n\n"
             "REGLAS:\n"
             "- NUNCA respondas 'Listo.' ni frases genéricas vacías.\n"
-            "- NUNCA digas que no podés hacer algo que está dentro de las capacidades de Véktor.\n"
             "- Si hay datos numéricos, interpretálos en contexto del negocio.\n"
             "- Si hay alertas o sugerencias, destacalas con claridad.\n"
             "- Si el estado es 'requires_clarification', reformulá la pregunta amigablemente.\n"

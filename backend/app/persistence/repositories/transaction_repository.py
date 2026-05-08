@@ -29,7 +29,10 @@ class SaleRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[SaleEntry]:
-        q = select(SaleEntry).where(SaleEntry.tenant_id == tenant_id)
+        q = select(SaleEntry).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.provenance == "REAL",
+        )
         if from_date:
             q = q.where(SaleEntry.transaction_date >= from_date)
         if to_date:
@@ -44,7 +47,10 @@ class SaleRepository:
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> float:
-        q = select(func.sum(SaleEntry.amount)).where(SaleEntry.tenant_id == tenant_id)
+        q = select(func.sum(SaleEntry.amount)).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.provenance == "REAL",
+        )
         if from_date:
             q = q.where(SaleEntry.transaction_date >= from_date)
         if to_date:
@@ -60,6 +66,7 @@ class SaleRepository:
     ) -> int:
         q = select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant_id,
+            SaleEntry.provenance == "REAL",
             SaleEntry.transaction_date >= from_date,
             SaleEntry.transaction_date <= to_date,
         )
@@ -81,6 +88,7 @@ class SaleRepository:
             )
             .where(
                 SaleEntry.tenant_id == tenant_id,
+                SaleEntry.provenance == "REAL",
                 SaleEntry.transaction_date >= from_date,
                 SaleEntry.transaction_date <= to_date,
             )
@@ -133,7 +141,10 @@ class ExpenseRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[ExpenseEntry]:
-        q = select(ExpenseEntry).where(ExpenseEntry.tenant_id == tenant_id)
+        q = select(ExpenseEntry).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.provenance == "REAL",
+        )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
         if to_date:
@@ -150,7 +161,10 @@ class ExpenseRepository:
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> float:
-        q = select(func.sum(ExpenseEntry.amount)).where(ExpenseEntry.tenant_id == tenant_id)
+        q = select(func.sum(ExpenseEntry.amount)).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.provenance == "REAL",
+        )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
         if to_date:
@@ -166,6 +180,7 @@ class ExpenseRepository:
     ) -> int:
         q = select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.transaction_date >= from_date,
             ExpenseEntry.transaction_date <= to_date,
         )
@@ -181,7 +196,7 @@ class ExpenseRepository:
         """Gastos agrupados por categoría con totales y porcentaje."""
         q = (
             select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total"))
-            .where(ExpenseEntry.tenant_id == tenant_id)
+            .where(ExpenseEntry.tenant_id == tenant_id, ExpenseEntry.provenance == "REAL")
         )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
@@ -216,6 +231,7 @@ class ExpenseRepository:
             select(ExpenseEntry.supplier_name, func.sum(ExpenseEntry.amount).label("total"))
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.provenance == "REAL",
                 ExpenseEntry.supplier_name.isnot(None),
                 ExpenseEntry.supplier_name != "",
             )
@@ -234,6 +250,7 @@ class ExpenseRepository:
 
         total_q = select(func.sum(ExpenseEntry.amount)).where(
             ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.supplier_name.isnot(None),
             ExpenseEntry.supplier_name != "",
         )
@@ -272,6 +289,7 @@ class ExpenseRepository:
             )
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.provenance == "REAL",
                 ExpenseEntry.transaction_date >= from_date,
                 ExpenseEntry.transaction_date <= to_date,
             )
