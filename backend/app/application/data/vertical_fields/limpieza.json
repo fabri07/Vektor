@@ -1,0 +1,67 @@
+[
+  {
+    "entity_type": "sale",
+    "field_key": "service_type",
+    "label": "Tipo de servicio",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "limpieza_general", "label": "Limpieza general"},
+      {"value": "fondo_blanco", "label": "Fondo de blanco"},
+      {"value": "alta_gama", "label": "Alta gama"}
+    ],
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.6
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "client_address",
+    "label": "Dirección del cliente",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.3
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "service_hours",
+    "label": "Horas de servicio",
+    "data_type": "number",
+    "is_required": false,
+    "display_order": 3,
+    "context_weight": 0.5
+  },
+  {
+    "entity_type": "expense",
+    "field_key": "supplier_brand",
+    "label": "Marca proveedor",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.3
+  },
+  {
+    "entity_type": "product",
+    "field_key": "product_category",
+    "label": "Categoría",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "desengrasante", "label": "Desengrasante"},
+      {"value": "desinfectante", "label": "Desinfectante"},
+      {"value": "perfumador", "label": "Perfumador"},
+      {"value": "abrasivo", "label": "Abrasivo"}
+    ],
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.4
+  },
+  {
+    "entity_type": "product",
+    "field_key": "dilution_ratio",
+    "label": "Dilución recomendada",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.2
+  }
+]

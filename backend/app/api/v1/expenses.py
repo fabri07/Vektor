@@ -92,6 +92,7 @@ async def create_expense(
         payment_method=body.payment_method,
         supplier_name=body.supplier_name,
         notes=body.notes,
+        custom_fields=body.custom_fields,
     )
     saved = await repo.save(entry)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_created")
@@ -141,6 +142,8 @@ async def update_expense(
         entry.supplier_name = body.supplier_name
     if body.notes is not None:
         entry.notes = body.notes
+    if body.custom_fields is not None:
+        entry.custom_fields = body.custom_fields
     saved = await repo.save(entry)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_updated")
     return saved

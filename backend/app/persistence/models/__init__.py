@@ -26,6 +26,11 @@ from app.persistence.models.score import (
     HeuristicRuleSet,
     WeeklyScoreHistory,
 )
+from app.persistence.models.field_definitions import (
+    TenantCustomFieldDefinition,
+    TenantFieldChangeLog,
+    VerticalFieldDefinition,
+)
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
@@ -65,4 +70,7 @@ __all__ = [
     "AgentMemory",
     "GoogleMcpConnection",
     "ChatSessionLog",
+    "VerticalFieldDefinition",
+    "TenantCustomFieldDefinition",
+    "TenantFieldChangeLog",
 ]

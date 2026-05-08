@@ -1,0 +1,70 @@
+[
+  {
+    "entity_type": "sale",
+    "field_key": "room_type",
+    "label": "Ambiente",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "living", "label": "Living"},
+      {"value": "dormitorio", "label": "Dormitorio"},
+      {"value": "cocina", "label": "Cocina"},
+      {"value": "baño", "label": "Baño"},
+      {"value": "exterior", "label": "Exterior"}
+    ],
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.5
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "project_name",
+    "label": "Nombre del proyecto",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.4
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "installation_included",
+    "label": "Incluye instalación",
+    "data_type": "boolean",
+    "is_required": false,
+    "display_order": 3,
+    "context_weight": 0.3
+  },
+  {
+    "entity_type": "expense",
+    "field_key": "material_type",
+    "label": "Tipo de material",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.3
+  },
+  {
+    "entity_type": "product",
+    "field_key": "color",
+    "label": "Color",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.3
+  },
+  {
+    "entity_type": "product",
+    "field_key": "style",
+    "label": "Estilo",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "moderno", "label": "Moderno"},
+      {"value": "clasico", "label": "Clásico"},
+      {"value": "industrial", "label": "Industrial"},
+      {"value": "nordico", "label": "Nórdico"},
+      {"value": "rustico", "label": "Rústico"}
+    ],
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.4
+  }
+]

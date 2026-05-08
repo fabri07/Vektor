@@ -1,0 +1,74 @@
+[
+  {
+    "entity_type": "sale",
+    "field_key": "delivery_zone",
+    "label": "Zona de entrega",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.3
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "salesperson",
+    "label": "Vendedor",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.2
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "shift",
+    "label": "Turno",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "mañana", "label": "Mañana"},
+      {"value": "tarde", "label": "Tarde"},
+      {"value": "noche", "label": "Noche"}
+    ],
+    "is_required": false,
+    "display_order": 3,
+    "context_weight": 0.4
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "customer_type",
+    "label": "Tipo de cliente",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "minorista", "label": "Minorista"},
+      {"value": "mayorista", "label": "Mayorista"}
+    ],
+    "is_required": false,
+    "display_order": 4,
+    "context_weight": 0.5
+  },
+  {
+    "entity_type": "expense",
+    "field_key": "vendor_invoice",
+    "label": "N° factura proveedor",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.2
+  },
+  {
+    "entity_type": "product",
+    "field_key": "barcode",
+    "label": "Código de barras",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.2
+  },
+  {
+    "entity_type": "product",
+    "field_key": "storage_location",
+    "label": "Ubicación en depósito",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.3
+  }
+]

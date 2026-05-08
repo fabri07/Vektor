@@ -65,6 +65,9 @@ class BusinessProfile(TimestampMixin, Base):
     # y weekly_report_hour de business_profiles
     weekly_report_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     weekly_report_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    custom_fields: Mapped[dict[str, Any]] = mapped_column(
+        PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
+    )
 
     def __repr__(self) -> str:
         return f"<BusinessProfile tenant={self.tenant_id} vertical={self.vertical_code!r}>"

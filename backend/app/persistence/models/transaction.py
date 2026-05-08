@@ -3,12 +3,13 @@
 import uuid
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -31,6 +32,9 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="cash")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+    custom_fields: Mapped[dict[str, Any]] = mapped_column(
+        PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
+    )
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_sales_entries_provenance"),
@@ -59,6 +63,9 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     supplier_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+    custom_fields: Mapped[dict[str, Any]] = mapped_column(
+        PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
+    )
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_expense_entries_provenance"),

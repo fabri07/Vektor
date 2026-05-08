@@ -9,6 +9,7 @@ from app.api.v1 import (
     auth,
     business_profiles,
     expenses,
+    fields,
     files,
     forecast,
     health_scores,
@@ -53,3 +54,4 @@ api_router.include_router(integrations.router, prefix="/integrations", tags=["In
 api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])
 api_router.include_router(momentum.router, prefix="/momentum", tags=["Momentum"])
 api_router.include_router(forecast.router, prefix="/forecast", tags=["Forecast"])
+api_router.include_router(fields.router, prefix="/fields/definitions", tags=["Fields"])

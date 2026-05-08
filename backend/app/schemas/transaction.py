@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -24,6 +24,7 @@ class SaleEntryResponse(BaseModel):
     transaction_date: date
     payment_method: str
     notes: str | None
+    custom_fields: dict[str, Any] = {}
     created_at: datetime
 
 
@@ -36,6 +37,7 @@ class CreateSaleRequest(BaseModel):
     )
     product_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("transaction_date")
     @classmethod
@@ -54,6 +56,7 @@ class UpdateSaleRequest(BaseModel):
         pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$",
     )
     notes: str | None = Field(default=None, max_length=1000)
+    custom_fields: dict[str, Any] | None = None
 
     @field_validator("transaction_date")
     @classmethod
@@ -107,6 +110,7 @@ class ExpenseEntryResponse(BaseModel):
     payment_method: str
     supplier_name: str | None
     notes: str | None
+    custom_fields: dict[str, Any] = {}
     created_at: datetime
 
 
@@ -122,6 +126,7 @@ class CreateExpenseRequest(BaseModel):
         default="transfer",
     )
     supplier_name: str | None = Field(default=None, max_length=300)
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("expense_date")
     @classmethod
@@ -139,6 +144,7 @@ class UpdateExpenseRequest(BaseModel):
     is_recurring: bool | None = None
     supplier_name: str | None = Field(default=None, max_length=300)
     notes: str | None = Field(default=None, max_length=1000)
+    custom_fields: dict[str, Any] | None = None
 
     @field_validator("expense_date")
     @classmethod

@@ -122,6 +122,7 @@ async def create_sale(
         payment_method=body.payment_method,
         product_id=body.product_id,
         notes=body.notes,
+        custom_fields=body.custom_fields,
     )
     saved = await repo.save(entry)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_created")
@@ -163,6 +164,8 @@ async def update_sale(
         entry.payment_method = body.payment_method
     if body.notes is not None:
         entry.notes = body.notes
+    if body.custom_fields is not None:
+        entry.custom_fields = body.custom_fields
     saved = await repo.save(entry)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_updated")
     return saved

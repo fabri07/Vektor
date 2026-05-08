@@ -271,3 +271,41 @@ export interface GoogleStatusResponseLegacy {
   connected_at: string | null;
   last_error_code: string | null;
 }
+
+// ── Field Definitions ─────────────────────────────────────────────────────────
+
+export interface EnumOption {
+  value: string;
+  label: string;
+}
+
+export interface FieldDefinition {
+  field_key: string;
+  entity_type: "sale" | "expense" | "product" | "inventory";
+  label: string;
+  data_type: "text" | "number" | "date" | "enum" | "boolean";
+  enum_options: EnumOption[] | null;
+  is_required: boolean;
+  display_order: number;
+  is_base_field: boolean;
+  affects_scoring: boolean;
+}
+
+export interface CreateCustomFieldPayload {
+  entity_type: string;
+  field_key: string;
+  label: string;
+  data_type?: string;
+  enum_options?: EnumOption[];
+  display_order?: number;
+}
+
+export interface FieldChangeLog {
+  id: string;
+  field_key: string;
+  entity_type: string;
+  action: "enabled" | "disabled" | "modified" | "created" | "undo";
+  previous_state: Record<string, unknown> | null;
+  new_state: Record<string, unknown>;
+  changed_at: string;
+}

@@ -2,12 +2,13 @@
 
 import uuid
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -29,6 +30,9 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     low_stock_threshold_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+    custom_fields: Mapped[dict[str, Any]] = mapped_column(
+        PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
+    )
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_products_provenance"),

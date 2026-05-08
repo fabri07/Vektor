@@ -1,6 +1,7 @@
 """Pydantic schemas for product endpoints."""
 
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field
@@ -20,6 +21,7 @@ class ProductResponse(BaseModel):
     stock_units: int
     low_stock_threshold_units: int
     is_active: bool
+    custom_fields: dict[str, Any] = {}
 
     @computed_field  # type: ignore[misc]
     @property
@@ -45,6 +47,7 @@ class CreateProductRequest(BaseModel):
     low_stock_threshold_units: int = Field(default=0, ge=0)
     sku: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class UpdateProductRequest(BaseModel):
@@ -56,3 +59,4 @@ class UpdateProductRequest(BaseModel):
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
     is_active: bool | None = None
+    custom_fields: dict[str, Any] | None = None

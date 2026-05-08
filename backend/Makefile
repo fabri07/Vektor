@@ -1,4 +1,4 @@
-.PHONY: dev test migrate migrate-down lint format typecheck clean build help
+.PHONY: dev test migrate migrate-down lint format typecheck clean build help seed-vertical-fields
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 DOCKER_COMPOSE = docker compose
@@ -48,6 +48,9 @@ seed-demo: ## Seed 3 demo tenants (kiosco/limpieza/deco) with calibrated data
 
 reset-demo: ## Drop and re-seed all 3 demo tenants (useful between investor demos)
 	$(PYTHON) scripts/reset_demo_data.py
+
+seed-vertical-fields: ## Upsert vertical field definitions from JSON files (idempotent)
+	$(PYTHON) scripts/seed_vertical_fields.py
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 test: ## Run all tests with coverage
