@@ -23,11 +23,6 @@ from app.application.agents.base import BaseAgent
 from app.application.agents.health.scorer import (
     ComponentScores,
     HealthScore,
-    compute_cash_score,
-    compute_discipline_score,
-    compute_health_score,
-    compute_stock_score,
-    compute_supplier_score,
 )
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicConfig, HeuristicEngine
@@ -70,10 +65,11 @@ class AgentHealth(BaseAgent):
         business_id: str,
         business_type: str = "kiosco_almacen",
         db: AsyncSession | None = None,
-    ) -> HealthScore:
+    ) -> HealthScore | None:
         """
         Paso 1: calcular todos los componentes (DETERMINÍSTICO, sin LLM).
         Prioriza el snapshot más reciente de la BD si está disponible.
+        Retorna None si no hay snapshot — el caller debe devolver requires_clarification.
         """
         effective_db = db or self._db
 
@@ -83,10 +79,10 @@ class AgentHealth(BaseAgent):
             snapshot = await repo.get_latest(uuid.UUID(business_id))
             if snapshot is not None:
                 components = ComponentScores(
-                    cash_score=float(snapshot.score_cash or 70),
-                    stock_score=float(snapshot.score_stock or 70),
-                    supplier_score=float(snapshot.score_supplier or 70),
-                    discipline_score=float(snapshot.score_margin or 70),
+                    cash_score=float(snapshot.score_cash or 0),
+                    stock_score=float(snapshot.score_stock or 0),
+                    supplier_score=float(snapshot.score_supplier or 0),
+                    discipline_score=float(snapshot.score_margin or 0),
                 )
                 return HealthScore(
                     business_id=business_id,
@@ -94,24 +90,12 @@ class AgentHealth(BaseAgent):
                     components=components,
                     alerts=self._generate_alerts(components),
                     period=snapshot.snapshot_date.strftime("%Y-%m-%d"),
+                    confidence_level=snapshot.confidence_level or "LOW",
+                    data_completeness_score=float(snapshot.data_completeness_score or 0),
                 )
 
-        # Fallback: scorer.py con valores de muestra
-        heuristics = self.get_heuristics(business_type)
-        components = ComponentScores(
-            cash_score=compute_cash_score(15.0, heuristics),     # 15 días de cobertura
-            stock_score=compute_stock_score(0, 2, 50),            # 0 quiebres, 2 slow, 50 productos
-            supplier_score=compute_supplier_score(3, 0),          # 3 activos, 0 vencidos
-            discipline_score=compute_discipline_score(6, 7),      # 6 de 7 días con datos
-        )
-        final_score = compute_health_score(components)
-        return HealthScore(
-            business_id=business_id,
-            health_score=round(final_score, 1),
-            components=components,
-            alerts=self._generate_alerts(components),
-            period="current",
-        )
+        # Sin snapshot — no hay base real para calcular
+        return None
 
     def _generate_alerts(self, components: ComponentScores) -> list[dict[str, str]]:
         """Generar top-3 alertas más urgentes (DETERMINÍSTICO)."""
@@ -202,6 +186,26 @@ class AgentHealth(BaseAgent):
                 business_type = row.vertical_code
 
         health = await self.calculate_health(request.business_id, business_type=business_type)
+
+        # Sin snapshot o datos insuficientes — pedir datos al usuario
+        if health is None or health.confidence_level == "LOW" or health.data_completeness_score < 50:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence="LOW",
+                result={
+                    "summary": "Necesito más datos para analizar la salud del negocio.",
+                    "data_completeness": health.data_completeness_score if health else 0,
+                },
+                question=(
+                    "Para generar el informe de salud necesito que cargues "
+                    "ventas del último mes y tus gastos fijos. ¿Querés hacerlo ahora?"
+                ),
+                requires_approval=False,
+            )
+
         narrative, health_call = await self.generate_narrative(health, business_name)
 
         # Emitir evento de actualización

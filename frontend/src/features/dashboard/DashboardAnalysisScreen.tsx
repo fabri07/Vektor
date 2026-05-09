@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchBusinessBreakdown, fetchCashForecast, fetchCurrentInsight } from "@/services/dashboard.service";
@@ -114,6 +115,8 @@ function ChartSkeleton() {
 }
 
 export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistory, loading }: Props) {
+  const hasTransactionData = sales.length > 0 || expenses.length > 0;
+
   const [lineMetric, setLineMetric] = useState("caja");
   const [granularity, setGranularity] = useState<"daily" | "weekly" | "monthly">("daily");
   const [compareBy, setCompareBy] = useState("categoria");
@@ -140,6 +143,14 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
 
   return (
     <div className="grid gap-4 xl:grid-cols-3">
+      {!hasTransactionData && (
+        <div className="xl:col-span-3 rounded-xl border border-vektor-border bg-vektor-surface px-5 py-4 text-sm text-vektor-body">
+          Los gráficos estarán disponibles cuando cargues ventas o gastos.{" "}
+          <Link href="/ingestion" className="font-medium text-vektor-white underline-offset-2 hover:underline">
+            Cargar archivo →
+          </Link>
+        </div>
+      )}
       <PanelFrame
         title={lineConfig.title}
         tooltip="Este grafico muestra como fue cambiando la metrica elegida a lo largo del tiempo."
@@ -213,7 +224,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
                 Escala 0–100 · score de salud del inventario calculado por el motor financiero.
               </p>
             )}
-            <InsightBlock />
+            {hasTransactionData && <InsightBlock />}
           </>
         )}
       </PanelFrame>
@@ -251,7 +262,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
                 </BarChart>
               </ResponsiveContainer>
             </div>
-            <InsightBlock />
+            {hasTransactionData && <InsightBlock />}
           </>
         )}
       </PanelFrame>
@@ -317,7 +328,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
                 })}
               </div>
             </div>
-            <InsightBlock />
+            {hasTransactionData && <InsightBlock />}
           </>
         )}
       </PanelFrame>

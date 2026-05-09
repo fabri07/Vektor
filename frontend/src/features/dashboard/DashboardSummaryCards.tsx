@@ -107,7 +107,7 @@ export function DashboardSummaryCards({ sales, expenses, products, loading }: Pr
               <h2 className="text-lg font-semibold text-vektor-white">Caja</h2>
             </Tooltip>
             <p className="mt-2 text-3xl font-semibold text-vektor-white">
-              {formatARS(cash.total)}
+              {sales.length === 0 ? "—" : formatARS(cash.total)}
             </p>
           </div>
           <button

@@ -147,17 +147,8 @@ export function buildCashBreakdown(entries: SaleEntryResponse[]): {
 } {
   const total = entries.reduce((sum, entry) => sum + entry.amount, 0);
 
-  // TODO: wire to /api/caja/sesion-breakdown with server-side breakdown by payment method.
   if (entries.length === 0 || total === 0) {
-    const mockTotal = 1_860_000;
-    const mockRows: CashMethodRow[] = [
-      { method: "Efectivo", amount: 620_000, percentage: 33.3, colorClass: METHOD_COLORS.Efectivo },
-      { method: "Débito", amount: 410_000, percentage: 22, colorClass: METHOD_COLORS.Débito },
-      { method: "Crédito", amount: 520_000, percentage: 28, colorClass: METHOD_COLORS.Crédito },
-      { method: "Cheque", amount: 180_000, percentage: 9.7, colorClass: METHOD_COLORS.Cheque },
-      { method: "Pagaré", amount: 130_000, percentage: 7, colorClass: METHOD_COLORS.Pagaré },
-    ];
-    return { total: mockTotal, rows: mockRows };
+    return { total: 0, rows: [] };
   }
 
   const buckets = PAYMENT_METHODS.reduce<Record<(typeof PAYMENT_METHODS)[number], number>>((acc, method) => {
@@ -193,13 +184,7 @@ export function buildMarginBreakdown(products: ProductResponse[]): MarginCategor
   }
 
   if (categories.size === 0) {
-    // TODO: wire to /api/margen/por-categoria for historical margin by category.
-    return [
-      { category: "Bebidas", margin: 31.4, tone: "green" },
-      { category: "Almacén", margin: 23.8, tone: "amber" },
-      { category: "Limpieza", margin: 16.2, tone: "amber" },
-      { category: "Regalería", margin: 8.5, tone: "red" },
-    ];
+    return [];
   }
 
   return [...categories.entries()]
@@ -272,48 +257,7 @@ export function buildSupplierSummaries(expenses: ExpenseEntryResponse[]): Suppli
   }
 
   if (suppliers.size === 0) {
-    return [
-      {
-        name: "Distribuidora Narváez",
-        totalPurchased: 2_400_000,
-        lastOrderDate: "2026-04-18",
-        averageOrderValue: 480_000,
-        paymentTerms: "30 días",
-        overdueInvoicesCount: 1,
-      },
-      {
-        name: "Mayorista San Telmo",
-        totalPurchased: 1_820_000,
-        lastOrderDate: "2026-04-15",
-        averageOrderValue: 364_000,
-        paymentTerms: "15 días",
-        overdueInvoicesCount: 0,
-      },
-      {
-        name: "Lácteos del Sur",
-        totalPurchased: 1_460_000,
-        lastOrderDate: "2026-04-12",
-        averageOrderValue: 292_000,
-        paymentTerms: "7 días",
-        overdueInvoicesCount: 2,
-      },
-      {
-        name: "Bebidas Río",
-        totalPurchased: 1_210_000,
-        lastOrderDate: "2026-04-10",
-        averageOrderValue: 242_000,
-        paymentTerms: "21 días",
-        overdueInvoicesCount: 0,
-      },
-      {
-        name: "Papelería Central",
-        totalPurchased: 980_000,
-        lastOrderDate: "2026-04-06",
-        averageOrderValue: 196_000,
-        paymentTerms: "30 días",
-        overdueInvoicesCount: 0,
-      },
-    ];
+    return [];
   }
 
   return [...suppliers.entries()]

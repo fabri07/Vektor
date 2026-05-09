@@ -70,9 +70,16 @@ export default function DashboardPage() {
     retry: 1,
   });
 
+  const scoreHasData =
+    scoreData != null &&
+    !isCalculating(scoreData) &&
+    (scoreData as HealthScoreV2Response).confidence_level !== "LOW" &&
+    (scoreData as HealthScoreV2Response).data_completeness_score >= 50;
+
   const { data: insightData, isLoading: insightLoading } = useQuery({
     queryKey: ["insights", "current"],
     queryFn: fetchCurrentInsight,
+    enabled: scoreHasData,
     retry: 1,
   });
 
@@ -174,7 +181,9 @@ export default function DashboardPage() {
         loading={salesLoading || expensesLoading || productsLoading}
       />
 
-      <HealthAlertBanner score={score} />
+      {score.confidence_level !== "LOW" && score.data_completeness_score >= 50 && (
+        <HealthAlertBanner score={score} />
+      )}
     </div>
   );
 }

@@ -27,6 +27,12 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - `GET /forecast/cash`: 3 tiers según historial (Tier 1 <30d promedio 14d, Tier 2 30–90d EWMA, Tier 3 90d+ patrón semanal). Redis TTL 6h; `?refresh=true` fuerza recálculo.
 - `analytics_events`: log insert-only anonimizado por vertical (sin `tenant_id`). `AnalyticsRepository.compute_margin_benchmark()` usa `percentile_cont` con ≥5 muestras/90 días para benchmarks data-driven. `GET /admin/analytics/benchmarks` (SUPERADMIN).
 - `decision_audit_log`: columnas `tokens_input/output/total` (INTEGER DEFAULT 0) + campos en `decision_data`: `ceo_target_agent`, `sub_agent_name`, `token_calls`. Migración: `20260429_0001`.
+- **DeterministicFinance** (`app/application/services/deterministic_finance.py`): único lugar para aritmética financiera. LLMs nunca calculan números — siempre delegar a este servicio.
+- **ValidationGate** (`app/application/services/validation_gate.py`): rechaza `confidence=LOW` antes de que el agente procese datos. Sprint 11.
+- **Provenance:** columna `provenance VARCHAR(10)` en `sales_entries`/`expense_entries` (migración `20260503_0001`). Demo data marcada como `"demo"`; real data como `"manual"` o `"import"`.
+- **ChatMemoryService** (`app/application/services/chat_memory_service.py`): 4ª capa de memoria — log durable de eventos por sesión (`chat_session_log`). Entry types: `DATA_LOADED`, `DATA_REJECTED`, `FILE_UPLOADED`, `INTENT_DETECTED`, `QUERY_ANSWERED`. Sprint 11.
+- **Custom Fields** (Sprint 12): columna `custom_fields JSONB` en `sales_entries`, `expense_entries`, `products`, `business_profiles`. Definiciones base en `vertical_field_definitions`; overrides por tenant en `tenant_custom_field_definitions`; undo log en `tenant_field_change_log`. API: `/fields`. Gestión en frontend: `FieldDefinitionsPanel.tsx` + `SchemaERDView.tsx` en `/settings`.
+- **Agent Automation Rules** (`app/application/services/automation_service.py`): reglas de consentimiento explícito para auto-ejecutar acciones recurrentes. Feature flag: `ENABLE_AGENT_AUTOMATIONS`. API: `/automations`. Sprint 11.
 
 ---
 
@@ -109,7 +115,7 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: auth, cash, conversation, google_oauth, health_score, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics |
+| Application | `app/application/services/` | Orquestación: auth, cash, conversation, google_oauth, health_score, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import |
 | Commands/Queries | `app/application/commands/` `app/application/queries/` | CQRS writes/reads |
 | DTOs | `app/application/dto/` | Objetos de transferencia entre capas |
 | DB middleware | `app/application/db/tenant_context.py` | Inyecta tenant_id en SQLAlchemy |
@@ -123,7 +129,7 @@ HTTP Request
 
 ### API Routers (`app/api/v1/`)
 
-Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`.
+Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`, `fields`, `automations`.
 
 ### Autenticación y multi-tenancy
 
@@ -230,16 +236,18 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **Extras:** `agents/health/scorer.py` — scoring AgentHealth. `agents/supplier/preflight.py` — validaciones pre-envío Gmail.
 
-### Sistema de Memoria (tres capas)
+### Sistema de Memoria (cuatro capas)
 
 | Capa | Servicio | TTL | Qué almacena |
 |------|----------|-----|--------------|
-| Conversacional | `ConversationService` | 24h | Últimos 10 turnos |
+| Conversacional | `ConversationService` | 24h Redis + PG | Últimos 10 turnos |
 | Negocio | `BusinessMemoryService` | 5min | Resumen financiero (ventas, gastos, alertas) |
 | Agente | `AgentMemoryService` | 5min | Patrones: método de pago, monto promedio (Welford), top ActionTypes |
+| Sesión chat | `ChatMemoryService` | permanente PG | Eventos de carga de datos (DATA_LOADED, DATA_REJECTED, FILE_UPLOADED, INTENT_DETECTED, QUERY_ANSWERED) |
 
 `AgentMemoryService.record_action()` post-acción confirmada (fail-silent). Confianza: `min(1.0, 0.5 + count/20)`.
 **Tabla:** `agent_memory` — `(tenant_id, key)` unique, `value` JSONB, `occurrence_count`, `confidence`.
+**`ChatMemoryService`**: escribe en `chat_session_log` (migración `20260503_0002`). Permite saber qué se cargó en sesiones previas sin depender del historial conversacional.
 
 ### Integración MCP Google
 
@@ -314,7 +322,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `/expenses` | Analytics + lista de gastos |
 | `/products` | Catálogo; query param `?stock=ok|low|out` |
 | `/apps` | Integraciones Google |
-| `/settings` | Cuenta y configuración |
+| `/settings` | Cuenta, configuración y panel de custom fields (`FieldDefinitionsPanel` + `SchemaERDView`) |
 
 **Ruta pública:** `/oauth/callback?session_id=` → `POST /auth/oauth/google/exchange`.
 
@@ -358,6 +366,9 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | 7 | ✅ | Data moat: heurísticas JSON, alertas accionables, SmartTable+CSV, forecast 3-tiers, analytics_events |
 | 8 | ✅ | Token tracking: LLMCall/UsageSummary, decision_audit_log tokens_*, dashboard cablea endpoints reales |
 | 9 | ✅ | Hardening MCP, RBAC sales/expenses/agent, narrativa LLM en insights, cash-breakdown, margin-history |
+| 10 | ✅ | Observabilidad, DeterministicFinance, ValidationGate, configuración segura, motor financiero robusto |
+| 11 | ✅ | ETL Hardening: provenance tagging, ChatMemoryService, chat unificado con memoria persistente, agent automation rules |
+| 12 | ✅ | Custom fields por vertical: `vertical_field_definitions`, `tenant_custom_field_definitions`, undo log, panel en `/settings` + ERD |
 
 ### Cadena de migraciones (recientes)
 
@@ -370,6 +381,11 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `20260424_0002` | `google_oauth_tokens` (solo MCP server, sin ORM en backend) |
 | `20260427_0001` | `analytics_events` insert-only sin tenant_id (ORM: `AnalyticsEvent`) |
 | `20260429_0001` | `tokens_input/output/total` en `decision_audit_log` + índice `(tenant_id, created_at)` |
+| `20260430_0001` | índice `is_active` en `products` |
+| `20260430_0002` | `password_reset_tokens` |
+| `20260503_0001` | columna `provenance VARCHAR(10)` en `sales_entries` + `expense_entries` |
+| `20260503_0002` | `chat_session_log` (ORM: `ChatSessionLog`) — 4ª capa de memoria |
+| `20260508_0001` | custom fields: `custom_fields JSONB` en 4 tablas core + `vertical_field_definitions` + `tenant_custom_field_definitions` + `tenant_field_change_log` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
 
@@ -386,6 +402,9 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 - `ActionType` cerrado (16 valores) — cambiar requiere actualizar `RiskEngine` y tests.
 - System prompts: heurísticas como valores numéricos, nunca texto narrativo.
 - Todo input de usuario a LLM pasa por `wrap_user_input()`.
+- Toda aritmética financiera va por `DeterministicFinance` — LLMs nunca calculan montos.
+- Custom fields no se validan en write time (MVP). Agregar validación en `field_definition_service.validate_custom_fields()` cuando sea necesario.
+- **No-invention rule:** ningún componente del dashboard, agente LLM, ni job de background puede mostrar análisis, scores, narrativas, alertas o conclusiones cuando `confidence_level == "LOW"` (`data_completeness_score < 50`). La UI muestra un empty state solicitando los datos faltantes. Los jobs no persisten `Insight`, `ActionSuggestion` ni notificaciones analíticas con `confidence_level == "LOW"`. Nunca reemplazar scores `None`/`0` con defaults neutrales (`or 70`, `or 50`, etc.): si falta un componente, el score real es 0 o ausente — bajar la confianza, no maquillarlo.
 
 ---
 

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowRight, Sparkles, TrendingUp } from "lucide-react";
+import { AlertTriangle, ArrowRight, Database, Sparkles, TrendingUp } from "lucide-react";
 import { Tooltip } from "@/components/ui/Tooltip";
 import type {
   ActionSuggestionResponse,
@@ -132,16 +132,42 @@ export function HealthScoreCard({
   delta,
   isBestScore,
 }: Props) {
+  const hasData = score.confidence_level !== "LOW" && score.data_completeness_score >= 50;
   const scoreValue = Math.round(Number(score.score_total));
   const tone = gaugeTone(scoreValue);
+  // useMemo siempre se llama — los hooks deben ejecutarse en el mismo orden en cada render
   const riskDescription = useMemo(
     () => describeRisk(score.primary_risk_code, insight?.description),
     [score.primary_risk_code, insight?.description],
   );
 
-  const actionText =
-    action?.description ??
-    "Tu proximo mejor movimiento es reforzar la caja operativa y revisar los frentes que mas pesan sobre la salud general del negocio.";
+  if (!hasData) {
+    return (
+      <section className="vektor-card overflow-hidden p-6 md:p-7">
+        <div className="flex flex-col items-center gap-4 py-8 text-center">
+          <Database className="h-10 w-10 text-vektor-muted" />
+          <div>
+            <p className="text-lg font-semibold text-vektor-white">
+              Datos insuficientes para el análisis
+            </p>
+            <p className="mt-2 max-w-md text-sm leading-6 text-vektor-body">
+              Cargá al menos ventas del último mes y tus gastos fijos
+              para ver el score de salud del negocio.
+            </p>
+          </div>
+          <Link
+            href="/chat"
+            className="mt-2 inline-flex items-center gap-2 rounded-full border border-vektor-border bg-vektor-surface px-5 py-2 text-sm font-medium text-vektor-white"
+          >
+            Cargar datos en el chat
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        </div>
+      </section>
+    );
+  }
+
+  const actionText = action?.description ?? null;
 
   const deltaText =
     delta == null ? "Sin comparativa semanal disponible" : delta > 0
@@ -178,26 +204,28 @@ export function HealthScoreCard({
         </div>
 
         <div className="flex flex-col gap-4">
-          <div
-            className="rounded-2xl border border-vektor-border bg-vektor-surface p-5"
-            style={{ borderLeftColor: tone, borderLeftWidth: 4 }}
-          >
-            <Tooltip content="La acción más concreta para mover hoy la aguja del negocio sin perder tiempo en diagnósticos técnicos.">
-              <p className="text-base font-semibold text-vektor-white">
-                Qué hacer ahora
-              </p>
-            </Tooltip>
-            <p className="mt-3 max-w-2xl text-sm leading-7 text-vektor-body">
-              {actionText}
-            </p>
-            <Link
-              href="/dashboard/analisis"
-              className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-vektor-white"
+          {actionText != null && (
+            <div
+              className="rounded-2xl border border-vektor-border bg-vektor-surface p-5"
+              style={{ borderLeftColor: tone, borderLeftWidth: 4 }}
             >
-              Ver detalle
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-          </div>
+              <Tooltip content="La acción más concreta para mover hoy la aguja del negocio sin perder tiempo en diagnósticos técnicos.">
+                <p className="text-base font-semibold text-vektor-white">
+                  Qué hacer ahora
+                </p>
+              </Tooltip>
+              <p className="mt-3 max-w-2xl text-sm leading-7 text-vektor-body">
+                {actionText}
+              </p>
+              <Link
+                href="/dashboard/analisis"
+                className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-vektor-white"
+              >
+                Ver detalle
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </div>
+          )}
 
           <div className="rounded-xl border border-vektor-red bg-red-950/70 p-4">
             <div className="flex items-start gap-3">

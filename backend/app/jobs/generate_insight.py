@@ -76,6 +76,11 @@ async def create_health_action_notifications(
     return len(owner_users)
 
 
+def should_skip_insight(confidence_level: str | None, data_completeness: float) -> bool:
+    """Devuelve True cuando los datos son insuficientes para generar un insight válido."""
+    return confidence_level is None or confidence_level == "LOW" or data_completeness < 50
+
+
 # ── Main async implementation ─────────────────────────────────────────────────
 
 async def _run(tenant_id_str: str) -> None:
@@ -123,6 +128,18 @@ async def _run(tenant_id_str: str) -> None:
                     )
                     return
 
+                # ── 1b. Guard: sin datos suficientes no persistir nada ────────
+                completeness = float(snapshot.data_completeness_score or 0)
+                if should_skip_insight(snapshot.confidence_level, completeness):
+                    logger.info(
+                        "generate_insight.skipped_low_confidence",
+                        tenant_id=tenant_id_str,
+                        confidence=snapshot.confidence_level,
+                        data_completeness=completeness,
+                    )
+                    return
+
+                confidence = snapshot.confidence_level or ""
                 risk_code: str = snapshot.primary_risk_code
                 score_total: int = int(snapshot.total_score)
                 severity: str = severity_from_score(score_total)
@@ -134,7 +151,6 @@ async def _run(tenant_id_str: str) -> None:
                 title, description, action_text = render_insight(risk_code, state, snapshot)
 
                 # ── 3b. LLM narrative (solo si confidence HIGH o MEDIUM) ──────
-                confidence = snapshot.confidence_level or ""
                 if confidence in ("HIGH", "MEDIUM"):
                     try:
                         import anthropic as _anthropic  # noqa: PLC0415, I001
@@ -164,10 +180,10 @@ async def _run(tenant_id_str: str) -> None:
                                 "content": (
                                     f"Negocio: {business_name}\n"
                                     f"Score de salud: {float(snapshot.total_score):.0f}/100\n"
-                                    f"  - Liquidez/Caja: {snapshot.score_cash or 70}/100\n"
-                                    f"  - Inventario: {snapshot.score_stock or 70}/100\n"
-                                    f"  - Proveedores: {snapshot.score_supplier or 70}/100\n"
-                                    f"  - Margen comercial: {snapshot.score_margin or 70}/100\n"
+                                    f"  - Liquidez/Caja: {snapshot.score_cash or 0}/100\n"
+                                    f"  - Inventario: {snapshot.score_stock or 0}/100\n"
+                                    f"  - Proveedores: {snapshot.score_supplier or 0}/100\n"
+                                    f"  - Margen comercial: {snapshot.score_margin or 0}/100\n"
                                     f"Riesgo principal: {risk_code}\n"
                                     f"Confianza de datos: {confidence}"
                                 ),

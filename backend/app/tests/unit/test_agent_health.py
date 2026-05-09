@@ -333,48 +333,93 @@ def test_llm_not_called_for_score():
 
 # ── Test del proceso completo (process()) ─────────────────────────────────────
 
+def _make_health_score(confidence_level: str = "HIGH", completeness: float = 90.0) -> "HealthScore":
+    from app.application.agents.health.scorer import ComponentScores, HealthScore
+    return HealthScore(
+        business_id="tenant-456",
+        health_score=72.0,
+        components=ComponentScores(
+            cash_score=80.0,
+            stock_score=70.0,
+            supplier_score=60.0,
+            discipline_score=65.0,
+        ),
+        alerts=[],
+        period="2026-05-09",
+        confidence_level=confidence_level,
+        data_completeness_score=completeness,
+    )
+
+
 @pytest.mark.asyncio
-async def test_process_returns_success_with_score():
-    """process() retorna status=success con health_score en result."""
-    with patch("app.application.agents.health.agent.anthropic.AsyncAnthropic") as mock_cls:
-        with patch("app.application.agents.health.agent.EventBus.emit"):
-            from app.application.agents.health.agent import AgentHealth
+async def test_process_no_snapshot_returns_clarification():
+    """Sin snapshot disponible → requires_clarification, sin llamada a generate_narrative."""
+    from app.application.agents.health.agent import AgentHealth
 
-            mock_client = _mock_anthropic_client("Narrativa ejecutiva de prueba.")
-            mock_cls.return_value = mock_client
+    agent = AgentHealth()  # sin DB → calculate_health() retorna None
+    mock_client = _mock_anthropic_client()
+    agent.client = mock_client
 
-            agent = AgentHealth()
-            agent.client = mock_client
+    result = await agent.process(_make_request())
 
+    assert result.status == "requires_clarification"
+    assert result.confidence == "LOW"
+    mock_client.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_low_confidence_returns_clarification():
+    """Snapshot con confidence=LOW → requires_clarification, sin narrativa LLM."""
+    from app.application.agents.health.agent import AgentHealth
+
+    agent = AgentHealth()
+    mock_client = _mock_anthropic_client()
+    agent.client = mock_client
+
+    low_health = _make_health_score(confidence_level="LOW", completeness=30.0)
+    with patch.object(agent, "calculate_health", new=AsyncMock(return_value=low_health)):
+        result = await agent.process(_make_request())
+
+    assert result.status == "requires_clarification"
+    assert result.confidence == "LOW"
+    mock_client.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_high_confidence_returns_success():
+    """Snapshot con confidence=HIGH → status=success con narrativa LLM y health_score."""
+    with patch("app.application.agents.health.agent.EventBus.emit"):
+        from app.application.agents.health.agent import AgentHealth
+
+        agent = AgentHealth()
+        mock_client = _mock_anthropic_client("Narrativa ejecutiva de prueba.")
+        agent.client = mock_client
+
+        high_health = _make_health_score(confidence_level="HIGH", completeness=90.0)
+        with patch.object(agent, "calculate_health", new=AsyncMock(return_value=high_health)):
             result = await agent.process(_make_request())
 
     assert result.status == "success"
     assert "health_score" in result.result
-    assert 0.0 <= result.result["health_score"] <= 100.0
+    assert result.result["health_score"] == 72.0
     assert "components" in result.result
     assert "alerts" in result.result
-    assert "suggested_next_actions" in result.result
+    mock_client.messages.create.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_process_emits_health_score_updated_event():
-    """process() emite HEALTH_SCORE_UPDATED vía EventBus."""
-    with patch("app.application.agents.health.agent.anthropic.AsyncAnthropic") as mock_cls:
-        with patch("app.application.agents.health.agent.EventBus.emit") as mock_emit:
-            from app.application.agents.health.agent import AgentHealth
+async def test_process_emits_event_only_when_high_confidence():
+    """EventBus.emit se llama solo cuando confidence NO es LOW."""
+    with patch("app.application.agents.health.agent.EventBus.emit") as mock_emit:
+        from app.application.agents.health.agent import AgentHealth
 
-            mock_client = _mock_anthropic_client("Narrativa.")
-            mock_cls.return_value = mock_client
+        agent = AgentHealth()
+        mock_client = _mock_anthropic_client("Narrativa.")
+        agent.client = mock_client
 
-            agent = AgentHealth()
-            agent.client = mock_client
-
+        high_health = _make_health_score(confidence_level="HIGH")
+        with patch.object(agent, "calculate_health", new=AsyncMock(return_value=high_health)):
             await agent.process(_make_request())
 
-    # Verificar que se emitió el evento correcto con los campos esperados
     mock_emit.assert_called_once()
-    call_args = mock_emit.call_args
-    assert call_args[0][0] == "HEALTH_SCORE_UPDATED"
-    assert call_args[0][1]["business_id"] == "tenant-456"
-    assert "score" in call_args[0][1]
-    assert 0.0 <= call_args[0][1]["score"] <= 100.0
+    assert mock_emit.call_args[0][0] == "HEALTH_SCORE_UPDATED"

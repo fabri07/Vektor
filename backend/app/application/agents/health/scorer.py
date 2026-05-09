@@ -25,6 +25,8 @@ class HealthScore(BaseModel):
     components: ComponentScores
     alerts: list
     period: str
+    confidence_level: str = "LOW"
+    data_completeness_score: float = 0.0
 
 
 def compute_cash_score(coverage_days: float, config: HeuristicConfig) -> float:
