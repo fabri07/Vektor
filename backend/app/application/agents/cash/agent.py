@@ -64,12 +64,14 @@ class AgentCash(BaseAgent):
     async def _extract_sale_entities(self, message: str, business_context: dict[str, Any]) -> tuple[dict[str, Any], LLMCall]:
         heuristics = HeuristicEngine.get(business_context.get("type", "kiosco_almacen"))
         system = (
-            "Extraé del mensaje los datos de una venta y devolvé SOLO JSON con amount, date, "
+            "Extraé del mensaje los datos de una venta y devolvé SOLO JSON con: "
+            "amount (número o null si no se menciona en el mensaje), "
+            "quantity (entero, default 1), date, "
             "payment_status, payment_method, product_description y confidence."
         )
         response = await self.client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=250,
+            max_tokens=300,
             system=f"{system}\n\n{heuristics.to_prompt_fragment()}",
             messages=[{"role": "user", "content": self.wrap_user_input(message)}],
         )
@@ -84,6 +86,99 @@ class AgentCash(BaseAgent):
             return json.loads(raw), llm_call
         except Exception:
             return {"error": "No pude interpretar la venta. Intentá con monto y forma de pago."}, llm_call
+
+    def _safe_decimal(self, value: object) -> Decimal | None:
+        if value is None or value == "" or str(value).lower() == "null":
+            return None
+        try:
+            d = Decimal(str(value))
+            return d if d > 0 else None
+        except Exception:
+            return None
+
+    def _safe_int(self, value: object) -> int:
+        """Parseo defensivo de quantity: acepta enteros, floats como '3.0', y strings numéricos."""
+        if value is None:
+            return 1
+        try:
+            return max(1, int(float(str(value))))
+        except (ValueError, TypeError):
+            return 1
+
+    async def _lookup_product_price(
+        self, product_description: str, tenant_id: str
+    ) -> tuple[Decimal | None, str | None, str | None]:
+        """Retorna (sale_price_ars, nombre_exacto, product_id) o (None, None, None).
+
+        Búsqueda en tres pasos: exacto normalizado → SKU → ilike por cada token significativo.
+        Solo productos activos, con precio > 0 y provenance REAL.
+        """
+        if self._db is None:
+            return None, None, None
+
+        from sqlalchemy import select, func  # noqa: PLC0415
+
+        from app.persistence.models.product import Product  # noqa: PLC0415
+
+        try:
+            import uuid as uuid_mod
+            tenant_uuid = uuid_mod.UUID(str(tenant_id))
+        except ValueError:
+            return None, None, None
+
+        normalized_desc = product_description.strip().lower()
+        base_filters = [
+            Product.tenant_id == tenant_uuid,
+            Product.is_active.is_(True),
+            Product.sale_price_ars > 0,
+            Product.provenance == "REAL",
+        ]
+
+        # 1. Match exacto normalizado
+        result = await self._db.execute(
+            select(Product).where(
+                *base_filters,
+                func.lower(Product.name) == normalized_desc,
+            ).limit(1)
+        )
+        product = result.scalar_one_or_none()
+
+        # 2. Match por SKU
+        if product is None:
+            result = await self._db.execute(
+                select(Product).where(
+                    *base_filters,
+                    Product.sku.isnot(None),
+                    func.lower(Product.sku) == normalized_desc,
+                ).limit(1)
+            )
+            product = result.scalar_one_or_none()
+
+        # 3. ILIKE por cada token significativo (≥ 3 chars), en orden de longitud desc.
+        #    Se prueba cada token para no depender de que el más largo sea el más discriminativo.
+        #    Ej: "coca colas" → prueba "coca" y "colas"; "coca" matchea "Coca-Cola 600ml".
+        if product is None:
+            tokens = sorted(
+                (w for w in product_description.split() if len(w) >= 3),
+                key=len,
+                reverse=True,
+            )
+            if not tokens:
+                tokens = [product_description]
+            for keyword in tokens:
+                result = await self._db.execute(
+                    select(Product).where(
+                        *base_filters,
+                        func.lower(Product.name).contains(keyword.lower()),
+                    ).limit(1)
+                )
+                product = result.scalar_one_or_none()
+                if product is not None:
+                    break
+
+        if product is None:
+            return None, None, None
+        return product.sale_price_ars, product.name, str(product.id)
 
     async def _load_business_context(self, business_id: str) -> dict[str, Any]:
         return {"name": "el negocio", "type": "kiosco_almacen"}
@@ -386,7 +481,52 @@ class AgentCash(BaseAgent):
                 usage=usage,
             )
 
-        amount = entities.get("amount", 0)
+        # Resolver amount: si el LLM no lo extrajo, buscar precio en catálogo
+        amount = self._safe_decimal(entities.get("amount"))
+        quantity = self._safe_int(entities.get("quantity"))
+        product_desc = (entities.get("product_description") or "").strip()
+
+        if amount is None and product_desc:
+            price, matched_name, product_id = await self._lookup_product_price(
+                product_desc, request.business_id
+            )
+            if price is not None:
+                amount = price * Decimal(str(quantity))
+                entities["amount"] = str(amount)
+                entities["quantity"] = quantity
+                entities["unit_price"] = str(price)
+                entities["product_description"] = matched_name or product_desc
+                entities["product_id"] = product_id
+                entities["price_lookup_source"] = "products_db"
+            else:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=self.agent_name,
+                    status="requires_clarification",
+                    risk_level=RiskLevel.LOW,
+                    confidence=Confidence.LOW,
+                    question=(
+                        f"No encontré el precio de '{product_desc}' en tu catálogo. "
+                        "¿Cuál fue el importe total de la venta?"
+                    ),
+                    result={"summary": "Falta el importe para registrar la venta."},
+                    usage=usage,
+                )
+        elif amount is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                question="No pude identificar el monto de la venta. ¿Cuánto fue el total?",
+                result={"summary": "Falta el importe para registrar la venta."},
+                usage=usage,
+            )
+        else:
+            entities["amount"] = str(amount)
+            entities["quantity"] = quantity
+
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,

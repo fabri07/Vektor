@@ -250,6 +250,7 @@ async def get_business_breakdown(
         select(SaleEntry.product_id)
         .where(
             SaleEntry.tenant_id == tenant.tenant_id,
+            SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= from_date,
             SaleEntry.transaction_date <= today,
             SaleEntry.product_id == Product.id,

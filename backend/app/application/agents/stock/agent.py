@@ -90,6 +90,7 @@ class AgentStock(BaseAgent):
             select(SaleEntry).where(
                 SaleEntry.id == sale_uuid,
                 SaleEntry.tenant_id == tenant_uuid,
+                SaleEntry.voided_at.is_(None),
             )
         )
         sale = result.scalar_one_or_none()

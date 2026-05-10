@@ -16,7 +16,9 @@ class SaleRepository:
     async def get_by_id(self, sale_id: UUID, tenant_id: UUID) -> SaleEntry | None:
         result = await self._session.execute(
             select(SaleEntry).where(
-                SaleEntry.id == sale_id, SaleEntry.tenant_id == tenant_id
+                SaleEntry.id == sale_id,
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
             )
         )
         return result.scalar_one_or_none()
@@ -32,6 +34,7 @@ class SaleRepository:
         q = select(SaleEntry).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.provenance == "REAL",
+            SaleEntry.voided_at.is_(None),
         )
         if from_date:
             q = q.where(SaleEntry.transaction_date >= from_date)
@@ -50,6 +53,7 @@ class SaleRepository:
         q = select(func.sum(SaleEntry.amount)).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.provenance == "REAL",
+            SaleEntry.voided_at.is_(None),
         )
         if from_date:
             q = q.where(SaleEntry.transaction_date >= from_date)
@@ -67,6 +71,7 @@ class SaleRepository:
         q = select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.provenance == "REAL",
+            SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= from_date,
             SaleEntry.transaction_date <= to_date,
         )
@@ -89,6 +94,7 @@ class SaleRepository:
             .where(
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.provenance == "REAL",
+                SaleEntry.voided_at.is_(None),
                 SaleEntry.transaction_date >= from_date,
                 SaleEntry.transaction_date <= to_date,
             )

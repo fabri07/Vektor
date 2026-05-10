@@ -6,8 +6,9 @@ GET /api/v1/admin/analytics/benchmarks — benchmarks por vertical (data moat)
 """
 
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +23,10 @@ from app.schemas.admin import (
     AdminMetricsResponse,
     AnalyticsBenchmarksResponse,
     BenchmarkThresholds,
+    DataRepairItemResponse,
+    DataRepairRunResponse,
     JobStats,
+    RepairRequest,
     VerticalBenchmarkItem,
 )
 
@@ -167,3 +171,100 @@ async def get_analytics_benchmarks(
         for item in overview
     ]
     return AnalyticsBenchmarksResponse(verticals=items)
+
+
+# ── Data repair endpoints ─────────────────────────────────────────────────────
+
+@router.post(
+    "/repairs/misclassified-product-imports/dry-run",
+    response_model=DataRepairRunResponse,
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Detecta importaciones mal clasificadas (dry-run persistente, sin modificar datos)",
+)
+async def repair_dry_run(
+    body: RepairRequest,
+    db: AsyncSession = Depends(get_db_session),
+) -> DataRepairRunResponse:
+    from app.application.services.data_repair_service import apply_repair  # noqa: PLC0415
+    from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
+
+    result = await apply_repair(
+        db,
+        tenant_id=body.tenant_id,
+        dry_run=True,
+        source_run_id=body.source_run_id,
+    )
+    await db.commit()
+    run_res = await db.get(DataRepairRun, result.run_id)
+    if run_res is None:
+        raise HTTPException(status_code=500, detail="Run not found after commit")
+    return DataRepairRunResponse.model_validate(run_res)
+
+
+@router.post(
+    "/repairs/misclassified-product-imports/apply",
+    response_model=DataRepairRunResponse,
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Aplica la reparación: anula ventas incorrectas y crea productos",
+)
+async def repair_apply(
+    body: RepairRequest,
+    db: AsyncSession = Depends(get_db_session),
+) -> DataRepairRunResponse:
+    from app.application.services.data_repair_service import apply_repair  # noqa: PLC0415
+    from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
+
+    result = await apply_repair(
+        db,
+        tenant_id=body.tenant_id,
+        dry_run=False,
+        source_run_id=body.source_run_id,
+    )
+    await db.commit()
+    run_res = await db.get(DataRepairRun, result.run_id)
+    if run_res is None:
+        raise HTTPException(status_code=500, detail="Run not found after commit")
+    return DataRepairRunResponse.model_validate(run_res)
+
+
+@router.get(
+    "/repairs/{run_id}",
+    response_model=DataRepairRunResponse,
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Detalle de un DataRepairRun",
+)
+async def get_repair_run(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+) -> DataRepairRunResponse:
+    from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
+
+    run = await db.get(DataRepairRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Repair run not found")
+    return DataRepairRunResponse.model_validate(run)
+
+
+@router.get(
+    "/repairs/{run_id}/items",
+    response_model=list[DataRepairItemResponse],
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Items paginados de un DataRepairRun",
+)
+async def get_repair_run_items(
+    run_id: UUID,
+    limit: int = Query(default=100, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[DataRepairItemResponse]:
+    from app.persistence.models.repair import DataRepairItem  # noqa: PLC0415
+
+    result = await db.execute(
+        select(DataRepairItem)
+        .where(DataRepairItem.run_id == run_id)
+        .order_by(DataRepairItem.created_at)
+        .limit(limit)
+        .offset(offset)
+    )
+    items = list(result.scalars().all())
+    return [DataRepairItemResponse.model_validate(item) for item in items]

@@ -10,12 +10,19 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import func
+
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _normalize_name(name: str) -> str:
+    """Normaliza nombre de producto para comparación: lower, sin guiones, espacios únicos."""
+    return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
 
 
 _NOMBRE_COLS: set[str] = {
@@ -84,8 +91,13 @@ async def insert_confirmed_data(
     tenant_id: uuid.UUID,
     summary: dict[str, Any],
     confirmed_fields: dict[str, bool] | None = None,
-) -> dict[str, int]:
-    """Parse parsed_summary_json and insert rows into sales/expense/product tables."""
+    return_details: bool = False,
+) -> dict[str, Any]:
+    """Parse parsed_summary_json and insert rows into sales/expense/product tables.
+
+    When return_details=True, also returns product_details list with per-row
+    action ('CREATED'|'UPDATED'), product_id, name, before/after snapshots.
+    """
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.product import Product  # noqa: PLC0415
@@ -93,7 +105,8 @@ async def insert_confirmed_data(
 
     confirmed_fields = confirmed_fields or _default_confirmed_fields(summary)
     today = date.today()
-    counts: dict[str, int] = {"ventas": 0, "gastos": 0, "productos": 0}
+    counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0}
+    product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
 
     if file_type == "spreadsheet":
@@ -203,11 +216,34 @@ async def insert_confirmed_data(
                     else None
                 )
 
+                # Buscar por nombre normalizado: primero exacto case-insensitive,
+                # después normalización Python completa (cubre "Coca-Cola" vs "Coca Cola"
+                # en cualquier dirección: importado con guión, existente sin guión, o viceversa).
                 result = await session.execute(
-                    select(Product).where(Product.tenant_id == tenant_id, Product.name == name)
+                    select(Product).where(
+                        Product.tenant_id == tenant_id,
+                        func.lower(func.trim(Product.name)) == name.lower(),
+                    )
                 )
                 existing = result.scalar_one_or_none()
+                if existing is None:
+                    # Fallback: normalizar ambos lados en Python para capturar variantes
+                    # con guiones, underscores o espacios múltiples en cualquier sentido.
+                    all_result = await session.execute(
+                        select(Product).where(Product.tenant_id == tenant_id)
+                    )
+                    normalized_input = _normalize_name(name)
+                    for prod in all_result.scalars().all():
+                        if _normalize_name(prod.name) == normalized_input:
+                            existing = prod
+                            break
                 if existing:
+                    before_snap: dict[str, Any] | None = None
+                    if return_details:
+                        before_snap = {
+                            "sale_price_ars": str(existing.sale_price_ars),
+                            "stock_units": existing.stock_units,
+                        }
                     if price:
                         existing.sale_price_ars = price
                     if cost:
@@ -216,8 +252,18 @@ async def insert_confirmed_data(
                         existing.stock_units = stock_val
                     if sku:
                         existing.sku = sku
+                    if return_details:
+                        product_details.append({
+                            "action": "UPDATED",
+                            "product_id": str(existing.id),
+                            "name": name,
+                            "before": before_snap,
+                            "after": {"sale_price_ars": str(price or existing.sale_price_ars), "stock_units": stock_val or existing.stock_units},
+                        })
                 else:
-                    session.add(Product(
+                    new_product_id = uuid.uuid4()
+                    new_product = Product(
+                        id=new_product_id,
                         tenant_id=tenant_id,
                         name=name,
                         sku=sku,
@@ -225,7 +271,16 @@ async def insert_confirmed_data(
                         unit_cost_ars=cost,
                         stock_units=stock_val,
                         provenance="REAL",
-                    ))
+                    )
+                    session.add(new_product)
+                    if return_details:
+                        product_details.append({
+                            "action": "CREATED",
+                            "product_id": str(new_product_id),
+                            "name": name,
+                            "before": None,
+                            "after": {"sale_price_ars": str(price or Decimal("0")), "stock_units": stock_val},
+                        })
                 counts["productos"] += 1
 
     else:
@@ -262,6 +317,8 @@ async def insert_confirmed_data(
                         counts["gastos"] += 1
 
     await session.flush()
+    if return_details:
+        counts["product_details"] = product_details
     return counts
 
 

@@ -270,6 +270,7 @@ async def compute_business_state(
             func.max(SaleEntry.transaction_date),
         ).where(
             SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= window_start,
             SaleEntry.transaction_date <= window_end,
         )
@@ -339,6 +340,7 @@ async def compute_business_state(
         sold_units_result = await session.execute(
             select(SaleEntry.product_id, func.coalesce(func.sum(SaleEntry.quantity), 0)).where(
                 SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
                 SaleEntry.transaction_date >= window_start,
                 SaleEntry.transaction_date <= window_end,
                 SaleEntry.product_id.isnot(None),

@@ -74,17 +74,15 @@ VENTA_COLS = {
 # — se pesan por separado en infer_spreadsheet_type
 
 GASTO_COLS = {"costo", "gasto", "gastos", "egreso", "compra", "deuda", "pago", "proveedor"}
-PRODUCTO_COLS = {
-    "producto",
-    "descripcion",
-    "nombre",
-    "sku",
-    "codigo",
-    "stock",
-    "inventario",
-    "articulo",
-    "item",
-}
+
+# Señales fuertes: inequívocamente un catálogo/inventario — no aparecen en transacciones
+CATALOGO_COLS = {"sku", "codigo", "inventario", "articulo", "item"}
+
+# Señales débiles: pueden aparecer en ventas/gastos también (descripcion de venta, nombre del proveedor)
+NOMBRE_COLS = {"producto", "nombre"}
+
+# PRODUCTO_COLS = unión para retrocompatibilidad con código que ya lo usa
+PRODUCTO_COLS = CATALOGO_COLS | NOMBRE_COLS | {"stock", "descripcion"}
 FECHA_COLS = {"fecha", "date", "dia", "mes", "periodo"}
 
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
@@ -143,6 +141,10 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     has_venta = any(any(k in col for k in VENTA_COLS) for col in normalized)
     has_gasto = any(any(k in col for k in GASTO_COLS) for col in normalized)
     has_producto = any(any(k in col for k in PRODUCTO_COLS) for col in normalized)
+    # Señal fuerte de catálogo: sku/codigo/inventario/articulo/item — inequívocamente no transacción
+    has_catalogo_fuerte = any(any(k in col for k in CATALOGO_COLS) for col in normalized)
+    # Señal de nombre: producto/nombre — puede aparecer en ventas/gastos también
+    has_nombre = any(any(k in col for k in NOMBRE_COLS) for col in normalized)
 
     # Señales ambiguas: "precio" / "total" solos pueden ser precio de catálogo
     has_precio_ambiguo = any(
@@ -155,9 +157,12 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_gasto=has_gasto,
         has_producto=has_producto,
         has_precio_ambiguo=has_precio_ambiguo,
+        has_catalogo_fuerte=has_catalogo_fuerte,
+        has_nombre=has_nombre,
     )
 
-    confidence = "HIGH" if (has_fecha and has_venta) else "MEDIUM"
+    has_catalogo_signal = has_catalogo_fuerte or has_nombre
+    confidence = "HIGH" if (has_fecha and has_venta and not has_catalogo_signal) else "MEDIUM"
 
     return {
         "has_fecha": has_fecha,
@@ -176,37 +181,54 @@ def infer_spreadsheet_type(
     has_gasto: bool,
     has_producto: bool,
     has_precio_ambiguo: bool = False,
+    has_catalogo_fuerte: bool = False,
+    has_nombre: bool = False,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
     Reglas (en orden de prioridad):
-    1. Tiene fecha + columna de venta explícita → ventas
-    2. Tiene fecha + columna de gasto → gastos
-    3. Tiene columna de producto (sin fecha o sin venta) → stock/inventario
-    4. Tiene solo precio ambiguo sin producto ni fecha → ventas (fallback)
-    5. General / desconocido
+    1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
+    2. Señal de nombre/producto sin venta explícita → stock.
+    3. Señal de nombre/producto sin fecha → stock (lista de precios, catálogo).
+    4. Señal de nombre/producto + precio ambiguo (no venta transaccional) → stock.
+    5. Sin señales de catálogo: fecha + venta → ventas; fecha + gasto → gastos.
+    6. Fallbacks por señales sueltas.
     """
-    # Venta explícita con fecha = transacción de venta
+    # Señal fuerte (sku, inventario, articulo, codigo, item) → inequívocamente catálogo
+    if has_catalogo_fuerte:
+        return "stock"
+
+    # Nombre/producto sin venta explícita → catálogo (descripcion en ventas suele ir con monto)
+    if has_nombre and not has_venta:
+        return "stock"
+
+    # Nombre/producto sin fecha → lista de precios/catálogo
+    if has_nombre and not has_fecha:
+        return "stock"
+
+    # Nombre/producto + precio ambiguo (ej: nombre+precio sin monto/importe) → catálogo
+    if has_nombre and has_precio_ambiguo and not has_venta:
+        return "stock"
+
+    # Nombre/producto + fecha + venta transaccional → ambiguo; preferimos stock en Véktor
+    # porque las listas de precios con precio_venta son más comunes que las exportaciones
+    # de ventas con columna "nombre" en el contexto de PYMEs argentinas.
+    if has_nombre:
+        return "stock"
+
+    # Sin señales de catálogo: transacciones de venta con fecha explícita
     if has_venta and has_fecha:
         return "ventas"
 
-    # Gasto con fecha = transacción de egreso
+    # Sin señales de catálogo: transacciones de gasto con fecha explícita
     if has_gasto and has_fecha:
         return "gastos"
 
-    # Producto sin fecha fuerte → inventario
-    if has_producto and not has_fecha:
-        return "stock"
-
-    # Producto con fecha pero sin venta explícita → inventario (ej: lista de stock con fecha)
-    if has_producto and not has_venta:
-        return "stock"
-
-    # Solo precio ambiguo sin señales de producto → asumimos venta
+    # Solo precio ambiguo sin catálogo ni fecha → asumimos venta
     if has_precio_ambiguo and not has_producto:
         return "ventas"
 
-    # Mixto o sin señales claras
+    # Fallbacks por señales sueltas
     if has_venta:
         return "ventas"
     if has_gasto:

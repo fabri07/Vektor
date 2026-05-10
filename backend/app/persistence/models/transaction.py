@@ -1,11 +1,11 @@
 """ORM models: sales_entries, expense_entries, products."""
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,10 +35,25 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    void_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    voided_by_repair_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_sales_entries_provenance"),
+        CheckConstraint(
+            "void_reason IS NULL OR void_reason IN ("
+            "'REPAIR_MISCLASSIFIED_IMPORT','USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID')",
+            name="ck_sales_entries_void_reason",
+        ),
+        CheckConstraint(
+            "voided_at IS NULL OR void_reason IS NOT NULL",
+            name="ck_sales_entries_void_consistency",
+        ),
         Index("ix_sales_entries_tenant_provenance", "tenant_id", "provenance"),
+        Index("ix_sales_entries_tenant_voided_at", "tenant_id", "voided_at"),
     )
 
     def __repr__(self) -> str:

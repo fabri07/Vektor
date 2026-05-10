@@ -80,10 +80,13 @@ async def save_sale(
     payment_method = entities.get("payment_method") or (
         "cash" if entities.get("payment_status") == "paid" else "credit"
     )
+    product_id_raw = entities.get("product_id")
+    product_id = uuid.UUID(str(product_id_raw)) if product_id_raw else None
     sale = SaleEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
-        quantity=1,
+        quantity=int(entities.get("quantity") or 1),
+        product_id=product_id,
         transaction_date=_coerce_transaction_date(
             entities.get("transaction_date") or entities.get("date")
         ),
@@ -99,6 +102,8 @@ async def save_sale(
         decision_data={
             "amount": str(entities["amount"]),
             "payment_method": payment_method,
+            "quantity": int(entities.get("quantity") or 1),
+            "price_lookup_source": entities.get("price_lookup_source"),
         },
         triggered_by="agent:cash",
         actor_user_id=user_id,

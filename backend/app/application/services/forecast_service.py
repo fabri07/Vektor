@@ -87,6 +87,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
         select(SaleEntry.transaction_date, func.sum(SaleEntry.amount).label("total"))
         .where(
             SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= window_start,
         )
         .group_by(SaleEntry.transaction_date)

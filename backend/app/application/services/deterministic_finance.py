@@ -47,6 +47,7 @@ async def calcular_flujo_neto_30d(
     ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.provenance == provenance,
+        SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
     gastos_q = select(func.coalesce(func.sum(ExpenseEntry.amount), Decimal("0"))).where(
@@ -105,11 +106,13 @@ async def calcular_ticket_promedio(
     count_q = select(func.count(SaleEntry.id)).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.provenance == provenance,
+        SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
     sum_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.provenance == provenance,
+        SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
 
@@ -146,6 +149,7 @@ async def calcular_rotacion_inventario(
     ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.provenance == provenance,
+        SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
 

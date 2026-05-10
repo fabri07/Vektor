@@ -48,6 +48,7 @@ async def get_current_score(
         ventas_q = sa_select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant.tenant_id,
             SaleEntry.provenance == "REAL",
+            SaleEntry.voided_at.is_(None),
         )
         gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant.tenant_id,
@@ -170,6 +171,7 @@ async def get_latest_score(
         ventas_q = sa_select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant.tenant_id,
             SaleEntry.provenance == "REAL",
+            SaleEntry.voided_at.is_(None),
         )
         gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant.tenant_id,

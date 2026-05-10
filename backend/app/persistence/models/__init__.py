@@ -33,6 +33,7 @@ from app.persistence.models.field_definitions import (
 )
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.user import User
 from app.persistence.models.user_auth_identity import UserAuthIdentity
 
@@ -73,4 +74,6 @@ __all__ = [
     "VerticalFieldDefinition",
     "TenantCustomFieldDefinition",
     "TenantFieldChangeLog",
+    "DataRepairRun",
+    "DataRepairItem",
 ]
