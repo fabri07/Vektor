@@ -67,7 +67,10 @@ class AgentCash(BaseAgent):
             "Extraé del mensaje los datos de una venta y devolvé SOLO JSON con: "
             "amount (número o null si no se menciona en el mensaje), "
             "quantity (entero, default 1), date, "
-            "payment_status, payment_method, product_description y confidence."
+            "payment_status, "
+            "payment_method (null si el usuario NO lo menciona explícitamente — "
+            "NUNCA asumir ni inferir efectivo u otro método), "
+            "product_description y confidence."
         )
         response = await self.client.messages.create(
             model="claude-haiku-4-5",
@@ -107,14 +110,17 @@ class AgentCash(BaseAgent):
 
     async def _lookup_product_price(
         self, product_description: str, tenant_id: str
-    ) -> tuple[Decimal | None, str | None, str | None]:
-        """Retorna (sale_price_ars, nombre_exacto, product_id) o (None, None, None).
+    ) -> tuple[Decimal | None, str | None, str | None, list[str]]:
+        """Retorna (sale_price_ars, nombre_exacto, product_id, alternativas).
+
+        alternativas es una lista de nombres cuando hay múltiples coincidencias (producto ambiguo).
+        En ese caso los tres primeros valores son None y el llamador debe pedir al usuario que especifique.
 
         Búsqueda en tres pasos: exacto normalizado → SKU → ilike por cada token significativo.
         Solo productos activos, con precio > 0 y provenance REAL.
         """
         if self._db is None:
-            return None, None, None
+            return None, None, None, []
 
         from sqlalchemy import select, func  # noqa: PLC0415
 
@@ -124,7 +130,7 @@ class AgentCash(BaseAgent):
             import uuid as uuid_mod
             tenant_uuid = uuid_mod.UUID(str(tenant_id))
         except ValueError:
-            return None, None, None
+            return None, None, None, []
 
         normalized_desc = product_description.strip().lower()
         base_filters = [
@@ -155,8 +161,7 @@ class AgentCash(BaseAgent):
             product = result.scalar_one_or_none()
 
         # 3. ILIKE por cada token significativo (≥ 3 chars), en orden de longitud desc.
-        #    Se prueba cada token para no depender de que el más largo sea el más discriminativo.
-        #    Ej: "coca colas" → prueba "coca" y "colas"; "coca" matchea "Coca-Cola 600ml".
+        #    Si hay múltiples coincidencias para un token → producto ambiguo → pedir clarificación.
         if product is None:
             tokens = sorted(
                 (w for w in product_description.split() if len(w) >= 3),
@@ -166,19 +171,24 @@ class AgentCash(BaseAgent):
             if not tokens:
                 tokens = [product_description]
             for keyword in tokens:
-                result = await self._db.execute(
+                matches_result = await self._db.execute(
                     select(Product).where(
                         *base_filters,
                         func.lower(Product.name).contains(keyword.lower()),
-                    ).limit(1)
+                    ).limit(5)
                 )
-                product = result.scalar_one_or_none()
-                if product is not None:
+                matches = list(matches_result.scalars().all())
+                if len(matches) == 1:
+                    product = matches[0]
                     break
+                if len(matches) > 1:
+                    # Múltiples coincidencias → ambiguo, devolver opciones
+                    alternatives = [p.name for p in matches]
+                    return None, None, None, alternatives
 
         if product is None:
-            return None, None, None
-        return product.sale_price_ars, product.name, str(product.id)
+            return None, None, None, []
+        return product.sale_price_ars, product.name, str(product.id), []
 
     async def _load_business_context(self, business_id: str) -> dict[str, Any]:
         return {"name": "el negocio", "type": "kiosco_almacen"}
@@ -487,9 +497,25 @@ class AgentCash(BaseAgent):
         product_desc = (entities.get("product_description") or "").strip()
 
         if amount is None and product_desc:
-            price, matched_name, product_id = await self._lookup_product_price(
+            price, matched_name, product_id, alternatives = await self._lookup_product_price(
                 product_desc, request.business_id
             )
+            if alternatives:
+                # Múltiples productos coinciden → pedir que especifique
+                opts = ", ".join(alternatives)
+                return AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=self.agent_name,
+                    status="requires_clarification",
+                    risk_level=RiskLevel.LOW,
+                    confidence=Confidence.LOW,
+                    question=(
+                        f"Encontré varios productos que podrían ser '{product_desc}': {opts}. "
+                        "¿A cuál te referís?"
+                    ),
+                    result={"summary": "Producto ambiguo — se necesita especificar."},
+                    usage=usage,
+                )
             if price is not None:
                 amount = price * Decimal(str(quantity))
                 entities["amount"] = str(amount)
@@ -526,6 +552,20 @@ class AgentCash(BaseAgent):
         else:
             entities["amount"] = str(amount)
             entities["quantity"] = quantity
+
+        # Si el medio de pago no fue mencionado, preguntar antes de confirmar
+        payment_method_raw = (entities.get("payment_method") or "").strip().lower()
+        if not payment_method_raw or payment_method_raw in ("null", "none", "other", "otro"):
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.MEDIUM,
+                question="¿Cuál fue el medio de pago? (efectivo, débito, crédito, transferencia, QR)",
+                result={"summary": "Falta el medio de pago para completar el registro.", "partial": entities},
+                usage=usage,
+            )
 
         return AgentResponse(
             request_id=request.request_id,

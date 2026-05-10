@@ -213,13 +213,16 @@ async def test_sale_with_quantity_looks_up_product_price():
     mock_product.name = "Coca-Cola 600ml"
     mock_product.id = "00000000-0000-0000-0000-000000000099"
 
+    # Pasos 1 y 2 usan scalar_one_or_none(); pasos ILIKE usan scalars().all()
     none_result = MagicMock()
     none_result.scalar_one_or_none.return_value = None
+    none_result.scalars.return_value.all.return_value = []  # ILIKE sin match
 
     found_result = MagicMock()
     found_result.scalar_one_or_none.return_value = mock_product
+    found_result.scalars.return_value.all.return_value = [mock_product]  # ILIKE match único
 
-    # exact → None; sku → None; ilike(colas) → None; ilike(coca) → product
+    # exact → None; sku → None; ilike(colas) → []; ilike(coca) → [product]
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(
         side_effect=[none_result, none_result, none_result, found_result]
@@ -295,6 +298,7 @@ async def test_sale_product_not_in_catalog_asks_for_amount():
 
     mock_result = MagicMock()
     mock_result.scalar_one_or_none.return_value = None
+    mock_result.scalars.return_value.all.return_value = []  # ILIKE sin match
 
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(return_value=mock_result)
