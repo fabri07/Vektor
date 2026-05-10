@@ -98,7 +98,19 @@ def _re_evaluate_summary(summary: dict[str, Any]) -> str | None:
         )
     )
     from app.application.services.file_parsing import CATALOGO_COLS, NOMBRE_COLS  # noqa: PLC0415
-    headers_norm = [h.lower().strip().replace(" ", "_") for h in summary.get("columns", [])]
+
+    # Derivar headers de la lista "columns" guardada, o de las claves de las primeras filas
+    # cuando "columns" es null (formato viejo que no lo almacenaba).
+    stored_columns = summary.get("columns") or []
+    if not stored_columns:
+        # Intentar extraer nombres de columna desde las filas de cualquier bucket
+        for bucket in ("ventas_detectadas", "stock_detectado", "preview_rows", "gastos_detectados"):
+            rows_bucket = summary.get(bucket) or []
+            if rows_bucket and isinstance(rows_bucket[0], dict):
+                stored_columns = list(rows_bucket[0].keys())
+                break
+
+    headers_norm = [h.lower().strip().replace(" ", "_") for h in stored_columns]
     has_catalogo_fuerte = any(any(k in col for k in CATALOGO_COLS) for col in headers_norm)
     has_nombre = any(any(k in col for k in NOMBRE_COLS) for col in headers_norm)
 
@@ -115,13 +127,48 @@ def _re_evaluate_summary(summary: dict[str, Any]) -> str | None:
     if current_type == "stock":
         return "stock"
 
-    # Fallback: el summary guardado tenía has_producto=True (señal de catálogo, incluyendo
-    # columnas como "descripcion"/"articulo" que no están en NOMBRE_COLS) Y fue clasificado
-    # como "ventas" → patrón del bug original donde has_venta+has_fecha ganaba sobre has_producto.
-    stored_inferred = summary.get("inferred_type", "")
-    if has_producto and stored_inferred == "ventas":
+    # Fallback para el bug original (has_venta+has_fecha ganaba sobre has_producto).
+    # Solo aplica cuando el summary guardado tenía inferred_type="ventas" Y has_producto=True.
+    #
+    # Dos niveles de certeza:
+    # 1. ALTA: columnas inequívocamente de catálogo (articulo, sku, codigo, stock, inventario,
+    #    nombre, producto) → siempre tratamos como "stock".
+    # 2. MEDIA: solo "descripcion" (ambigua) → aceptar como "stock" solo si TAMBIÉN hay
+    #    columna de precio-catálogo (precio, precio_venta, price) y NO solo monto/importe
+    #    (que son columnas transaccionales de ventas).
+    stored_inferred = summary.get("inferred_type") or ""  # null → ""
+
+    # Caso especial: formato viejo sin inferred_type guardado.
+    # Si has_producto=True + ventas_detectadas tiene filas + stock_detectado vacío,
+    # los productos fueron almacenados en el bucket equivocado (ventas en lugar de stock).
+    if not stored_inferred and has_producto:
+        has_ventas_bucket = bool(summary.get("ventas_detectadas"))
+        has_stock_bucket = bool(summary.get("stock_detectado"))
+        if has_ventas_bucket and not has_stock_bucket:
+            return "stock"
+
+    if not (has_producto and stored_inferred == "ventas"):
+        return current_type
+
+    # Señales fuertes: columnas inequívocamente de catálogo
+    _STRONG_CATALOG = CATALOGO_COLS | NOMBRE_COLS  # sku, codigo, inventario, articulo, item, nombre, producto
+    has_strong_catalog = any(any(k in col for k in _STRONG_CATALOG) for col in headers_norm)
+    if has_strong_catalog:
         return "stock"
 
+    # Señal débil: "descripcion" sola
+    # Solo aceptar si hay columna de precio-catálogo (precio, precio_venta, price)
+    # y NO solo columnas transaccionales (monto, importe, total_cobrado, etc.)
+    _CATALOG_PRICE_COLS = {"precio", "precio_venta", "price", "p_venta"}
+    _TRANSACTIONAL_AMOUNT_COLS = {"monto", "importe", "total_venta", "total_cobrado", "cobro", "ingreso"}
+    has_catalog_price = any(any(k in col for k in _CATALOG_PRICE_COLS) for col in headers_norm)
+    has_transactional_only = any(any(k in col for k in _TRANSACTIONAL_AMOUNT_COLS) for col in headers_norm)
+
+    if has_catalog_price and not has_transactional_only:
+        # descripcion + precio → catálogo de productos
+        return "stock"
+
+    # descripcion + monto/importe sin precio-catálogo → probablemente ventas reales
     return current_type
 
 
