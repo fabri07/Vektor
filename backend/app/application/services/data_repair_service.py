@@ -75,27 +75,34 @@ class RepairResult:
 def _re_evaluate_summary(summary: dict[str, Any]) -> str | None:
     """Re-evalúa el parsed_summary_json con la lógica actual de clasificación.
 
-    Retorna inferred_type actual o None si no hay datos.
+    Retorna "stock" si el archivo debe ser tratado como catálogo de productos,
+    cualquier otro tipo si no, o None si no hay datos.
+
+    Además de re-ejecutar infer_spreadsheet_type con la lógica nueva, aplica
+    un fallback: si el summary guardado tiene has_producto=True Y fue clasificado
+    como ventas, es señal del bug original (ej: "descripcion+importe+fecha" donde
+    "descripcion" no está en NOMBRE_COLS pero SÍ en PRODUCTO_COLS). En ese caso
+    también se trata como "stock" para fines de detección de reparación.
     """
     if not summary:
         return None
+
     has_fecha = bool(summary.get("has_fecha"))
     has_venta = bool(summary.get("has_venta"))
     has_gasto = bool(summary.get("has_gasto"))
-    has_producto = bool(summary.get("has_producto"))
+    has_producto = bool(summary.get("has_producto"))  # incluye "descripcion", "articulo", etc.
     has_precio_ambiguo = bool(
         any(
             col in ("precio", "total", "price", "valor")
             for col in [h.lower().strip().replace(" ", "_") for h in summary.get("columns", [])]
         )
     )
-    # Detectar señales fuertes/débiles desde headers guardados
     from app.application.services.file_parsing import CATALOGO_COLS, NOMBRE_COLS  # noqa: PLC0415
     headers_norm = [h.lower().strip().replace(" ", "_") for h in summary.get("columns", [])]
     has_catalogo_fuerte = any(any(k in col for k in CATALOGO_COLS) for col in headers_norm)
     has_nombre = any(any(k in col for k in NOMBRE_COLS) for col in headers_norm)
 
-    return infer_spreadsheet_type(
+    current_type = infer_spreadsheet_type(
         has_fecha=has_fecha,
         has_venta=has_venta,
         has_gasto=has_gasto,
@@ -104,6 +111,18 @@ def _re_evaluate_summary(summary: dict[str, Any]) -> str | None:
         has_catalogo_fuerte=has_catalogo_fuerte,
         has_nombre=has_nombre,
     )
+
+    if current_type == "stock":
+        return "stock"
+
+    # Fallback: el summary guardado tenía has_producto=True (señal de catálogo, incluyendo
+    # columnas como "descripcion"/"articulo" que no están en NOMBRE_COLS) Y fue clasificado
+    # como "ventas" → patrón del bug original donde has_venta+has_fecha ganaba sobre has_producto.
+    stored_inferred = summary.get("inferred_type", "")
+    if has_producto and stored_inferred == "ventas":
+        return "stock"
+
+    return current_type
 
 
 def _extract_product_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
