@@ -354,6 +354,143 @@ async def test_sale_with_explicit_amount_skips_product_lookup():
 
 
 @pytest.mark.asyncio
+async def test_llm_invents_amount_but_message_has_no_monetary_signal_uses_catalog():
+    """LLM devuelve amount=30000 pero el mensaje no tiene monto → ignora 30000, busca en catálogo."""
+    from decimal import Decimal
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.application.agents.cash.agent import AgentCash
+
+    mock_entities = {
+        "amount": 30000,  # LLM alucinó esto
+        "quantity": 3,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca cola",
+        "confidence": "HIGH",
+    }
+
+    mock_product = MagicMock()
+    mock_product.sale_price_ars = Decimal("500")
+    mock_product.name = "Coca-Cola 600ml"
+    mock_product.id = "00000000-0000-0000-0000-000000000099"
+
+    none_result = MagicMock()
+    none_result.scalar_one_or_none.return_value = None
+    none_result.scalars.return_value.all.return_value = []
+
+    found_result = MagicMock()
+    found_result.scalars.return_value.all.return_value = [mock_product]
+
+    mock_db = MagicMock()
+    # exact → None; sku → None; ilike → [product]
+    mock_db.execute = AsyncMock(side_effect=[none_result, none_result, found_result])
+
+    with unittest.mock.patch(
+        "app.application.agents.cash.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
+        mock_cls.return_value = mock_client
+
+        agent = AgentCash(db=mock_db)
+        agent.client = mock_client
+        # Mensaje sin monto explícito → debe ignorar el 30000 del LLM
+        result = await agent.process(_make_request("vendí 3 coca colas"))
+
+    assert result.status == "requires_approval"
+    data = result.result["structured_data"]
+    # Debe usar el precio del catálogo (500 × 3 = 1500), no el inventado (30000)
+    assert str(data["amount"]) == "1500"
+    assert data["price_lookup_source"] == "products_db"
+
+
+@pytest.mark.asyncio
+async def test_product_ambiguous_returns_clarification_with_partial():
+    """Producto ambiguo → requires_clarification con partial y lista de opciones."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.application.agents.cash.agent import AgentCash
+
+    mock_entities = {
+        "amount": None,
+        "quantity": 1,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca",
+        "confidence": "HIGH",
+    }
+
+    prod_a = MagicMock()
+    prod_a.name = "Coca-Cola 600ml"
+    prod_b = MagicMock()
+    prod_b.name = "Coca-Cola 1.5L"
+
+    none_result = MagicMock()
+    none_result.scalar_one_or_none.return_value = None
+
+    multi_result = MagicMock()
+    multi_result.scalars.return_value.all.return_value = [prod_a, prod_b]
+
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(side_effect=[none_result, none_result, multi_result])
+
+    with unittest.mock.patch(
+        "app.application.agents.cash.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
+        mock_cls.return_value = mock_client
+
+        agent = AgentCash(db=mock_db)
+        agent.client = mock_client
+        result = await agent.process(_make_request("vendí una coca"))
+
+    assert result.status == "requires_clarification"
+    assert "Coca-Cola 600ml" in result.question
+    assert "Coca-Cola 1.5L" in result.question
+    assert result.result.get("partial") is not None
+
+
+@pytest.mark.asyncio
+async def test_missing_payment_method_returns_clarification_with_partial():
+    """LLM no detecta medio de pago → requires_clarification con partial."""
+    from decimal import Decimal
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.application.agents.cash.agent import AgentCash
+
+    mock_entities = {
+        "amount": 500,
+        "quantity": 1,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": None,  # no especificado
+        "product_description": "gaseosa",
+        "confidence": "HIGH",
+    }
+
+    with unittest.mock.patch(
+        "app.application.agents.cash.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
+        mock_cls.return_value = mock_client
+
+        agent = AgentCash()
+        agent.client = mock_client
+        result = await agent.process(_make_request("vendí una gaseosa a $500"))
+
+    assert result.status == "requires_clarification"
+    assert "medio de pago" in result.question.lower() or "pago" in result.question.lower()
+    partial = result.result.get("partial")
+    assert partial is not None
+    assert str(partial.get("amount")) == "500"
+
+
+@pytest.mark.asyncio
 async def test_google_sheet_import_returns_pending_action_without_llm():
     """Google Sheets import → lee filas, parsea ventas y requiere aprobación."""
     from app.application.agents.cash.agent import AgentCash

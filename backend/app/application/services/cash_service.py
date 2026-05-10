@@ -76,16 +76,32 @@ async def save_sale(
     user_id: uuid.UUID,
     db: AsyncSession,
 ) -> SaleEntry:
-    """Crea registro en sales_entries. payment_status paid→payment_method, credit→'credit'."""
-    payment_method = entities.get("payment_method") or (
-        "cash" if entities.get("payment_status") == "paid" else "credit"
-    )
+    """Crea registro en sales_entries.
+
+    Falla explícitamente si falta payment_method en lugar de defaultear a 'cash':
+    AgentCash debe haber preguntado el método antes de crear la acción.
+    """
+    raw_pm = (entities.get("payment_method") or "").strip().lower()
+    if not raw_pm or raw_pm in ("null", "none", "other", "otro"):
+        # Fallback defensivo solo si viene payment_status (flujos legacy); loguear warning.
+        logger.warning(
+            "save_sale.missing_payment_method",
+            fallback_from_status=entities.get("payment_status"),
+        )
+        payment_method = "cash" if entities.get("payment_status") == "paid" else "credit"
+    else:
+        payment_method = raw_pm
+
     product_id_raw = entities.get("product_id")
     product_id = uuid.UUID(str(product_id_raw)) if product_id_raw else None
+    try:
+        qty = max(1, int(float(str(entities.get("quantity") or 1))))
+    except (ValueError, TypeError):
+        qty = 1
     sale = SaleEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
-        quantity=int(entities.get("quantity") or 1),
+        quantity=qty,
         product_id=product_id,
         transaction_date=_coerce_transaction_date(
             entities.get("transaction_date") or entities.get("date")
@@ -102,7 +118,7 @@ async def save_sale(
         decision_data={
             "amount": str(entities["amount"]),
             "payment_method": payment_method,
-            "quantity": int(entities.get("quantity") or 1),
+            "quantity": qty,
             "price_lookup_source": entities.get("price_lookup_source"),
         },
         triggered_by="agent:cash",

@@ -8,6 +8,19 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
 
+# Patrón determinístico para detectar montos explícitos en el mensaje del usuario.
+# Matchea expresiones monetarias inequívocas. Incluye números ≥ 100 porque en ARS los
+# precios son siempre ≥ 100, mientras que las cantidades de productos raramente lo son.
+# NO matchea "3" en "3 cocas" (1-2 dígitos); SÍ matchea "5000" en "vendí 5000 al contado".
+_MONETARY_RE = re.compile(
+    r"\$\s*[\d.,]+"                    # $ seguido de número: $500, $30.000
+    r"|\b\d{1,3}(?:[.\s]\d{3})+"      # miles con punto/espacio: 3.000, 30 000
+    r"|\b\d+(?:,\d+)+"                # decimal con coma: 500,50
+    r"|\b\d+\s*(?:pesos?|ars)\b"      # número + "pesos" / "ARS"
+    r"|\b[1-9]\d{2,}\b",              # número ≥ 100 sin símbolo (3+ dígitos)
+    re.IGNORECASE,
+)
+
 import anthropic
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -89,6 +102,10 @@ class AgentCash(BaseAgent):
             return json.loads(raw), llm_call
         except Exception:
             return {"error": "No pude interpretar la venta. Intentá con monto y forma de pago."}, llm_call
+
+    def _has_explicit_amount(self, message: str) -> bool:
+        """True si el mensaje contiene una expresión monetaria inequívoca (no una cantidad de productos)."""
+        return bool(_MONETARY_RE.search(message))
 
     def _safe_decimal(self, value: object) -> Decimal | None:
         if value is None or value == "" or str(value).lower() == "null":
@@ -315,7 +332,12 @@ class AgentCash(BaseAgent):
             "proveedor",
         )
         has_amount = self._extract_amount(message) is not None
-        return has_amount and any(keyword in message_lower for keyword in expense_keywords)
+        # Usar word-boundary para evitar falsos positivos por substring
+        # (ej: "gas" dentro de "gaseosa" no debe activar la detección de gasto)
+        return has_amount and any(
+            re.search(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", message_lower)
+            for kw in expense_keywords
+        )
 
     def _extract_amount(self, message: str) -> Decimal | None:
         match = re.search(r"(?<!\d)(?:\$?\s*)?(\d{1,3}(?:[.\s]\d{3})+|\d+)(?:,\d{1,2})?", message)
@@ -491,8 +513,13 @@ class AgentCash(BaseAgent):
                 usage=usage,
             )
 
-        # Resolver amount: si el LLM no lo extrajo, buscar precio en catálogo
-        amount = self._safe_decimal(entities.get("amount"))
+        # Resolver amount: solo confiar en el LLM si el mensaje contiene monto explícito.
+        # Si el usuario no mencionó ningún número monetario, forzar None para evitar
+        # que el LLM alucinando un importe puentee la consulta al catálogo de productos.
+        if self._has_explicit_amount(request.message):
+            amount = self._safe_decimal(entities.get("amount"))
+        else:
+            amount = None  # ignorar lo que devolvió el LLM; buscar en catálogo
         quantity = self._safe_int(entities.get("quantity"))
         product_desc = (entities.get("product_description") or "").strip()
 
@@ -502,7 +529,9 @@ class AgentCash(BaseAgent):
             )
             if alternatives:
                 # Múltiples productos coinciden → pedir que especifique
-                opts = ", ".join(alternatives)
+                # (limit=5 puede no ser exhaustivo; aclararlo si hay exactamente 5)
+                opts = ", ".join(alternatives[:5])
+                suffix = " (entre otros)" if len(alternatives) >= 5 else ""
                 return AgentResponse(
                     request_id=request.request_id,
                     agent_name=self.agent_name,
@@ -510,10 +539,13 @@ class AgentCash(BaseAgent):
                     risk_level=RiskLevel.LOW,
                     confidence=Confidence.LOW,
                     question=(
-                        f"Encontré varios productos que podrían ser '{product_desc}': {opts}. "
-                        "¿A cuál te referís?"
+                        f"Encontré varios productos que podrían ser '{product_desc}'{suffix}: "
+                        f"{opts}. ¿A cuál te referís?"
                     ),
-                    result={"summary": "Producto ambiguo — se necesita especificar."},
+                    result={
+                        "summary": "Producto ambiguo — se necesita especificar.",
+                        "partial": {**entities, "quantity": quantity},
+                    },
                     usage=usage,
                 )
             if price is not None:
