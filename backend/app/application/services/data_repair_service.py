@@ -202,6 +202,16 @@ async def detect_chat_sale_quality_issues(
             product, alternatives = await _find_unique_product_for_description(
                 db, sale.tenant_id, description
             )
+        if product is None and alternatives:
+            amount_matches = [
+                alt
+                for alt in alternatives
+                if Decimal(str(alt["sale_price_ars"])) * Decimal(str(quantity)) == sale.amount
+            ]
+            if len(amount_matches) == 1:
+                product = await db.get(Product, uuid.UUID(amount_matches[0]["product_id"]))
+                if product is None or product.tenant_id != sale.tenant_id or not product.is_active:
+                    product = None
 
         if product is None:
             candidates.append(ChatSaleRepairCandidate(

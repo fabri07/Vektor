@@ -55,6 +55,7 @@ class UpdateSaleRequest(BaseModel):
         default=None,
         pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$",
     )
+    product_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
     custom_fields: dict[str, Any] | None = None
 

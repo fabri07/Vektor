@@ -209,6 +209,8 @@ async def update_sale(
         entry.transaction_date = body.transaction_date
     if body.payment_method is not None:
         entry.payment_method = body.payment_method
+    if "product_id" in body.model_fields_set:
+        entry.product_id = body.product_id
     if body.notes is not None:
         entry.notes = body.notes
     if body.custom_fields is not None:

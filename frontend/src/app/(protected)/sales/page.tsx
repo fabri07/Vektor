@@ -9,6 +9,7 @@ import { SmartTable } from "@/components/ui/SmartTable";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { salesService, type SaleEntryResponse } from "@/services/sales.service";
+import { productsService, type ProductResponse } from "@/services/products.service";
 import { useToastStore } from "@/stores/toastStore";
 
 type PeriodFilter = "month" | "week" | "prev_month";
@@ -57,7 +58,8 @@ const PAYMENT_LABELS: Record<string, string> = {
   other: "Otro",
 };
 
-const COLUMNS = [
+function buildColumns(productById: Map<string, ProductResponse>) {
+  return [
   {
     key: "transaction_date",
     header: "Fecha",
@@ -78,6 +80,19 @@ const COLUMNS = [
     csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
+    key: "product_id",
+    header: "Producto",
+    hideable: true,
+    render: (v: unknown) => {
+      const id = String(v ?? "");
+      return id ? productById.get(id)?.name ?? "Producto no encontrado" : "—";
+    },
+    csvValue: (v: unknown) => {
+      const id = String(v ?? "");
+      return id ? productById.get(id)?.name ?? "" : "";
+    },
+  },
+  {
     key: "payment_method",
     header: "Medio de pago",
     hideable: true,
@@ -88,7 +103,6 @@ const COLUMNS = [
     key: "quantity",
     header: "Cantidad",
     hideable: true,
-    defaultVisible: false,
     render: (v: unknown) => (v != null && Number(v) > 0 ? String(Number(v)) : "—"),
     csvValue: (v: unknown) => String(v ?? ""),
   },
@@ -101,7 +115,8 @@ const COLUMNS = [
     ),
     csvValue: (v: unknown) => String(Number(v)),
   },
-];
+  ];
+}
 
 const PERIOD_OPTIONS: { value: PeriodFilter; label: string }[] = [
   { value: "month", label: "Este mes" },
@@ -121,6 +136,12 @@ export default function SalesPage() {
     queryKey: ["sales-entries", from, to],
     queryFn: () => salesService.getAllEntries({ from_date: from, to_date: to }),
     staleTime: 60 * 1000,
+  });
+
+  const { data: products = [] } = useQuery({
+    queryKey: ["products-list"],
+    queryFn: () => productsService.getAllProducts({ is_active: true }),
+    staleTime: 2 * 60 * 1000,
   });
 
   const { data: prevEntries = [] } = useQuery({
@@ -179,6 +200,8 @@ export default function SalesPage() {
     (a, b) =>
       new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime(),
   );
+  const productById = new Map(products.map((product) => [product.id, product]));
+  const columns = buildColumns(productById);
 
   return (
     <PageWrapper title="Ventas">
@@ -242,7 +265,7 @@ export default function SalesPage() {
         />
       ) : (
         <SmartTable
-          columns={COLUMNS}
+          columns={columns}
           data={sorted}
           exportFilename="vektor-ventas"
           renderActions={(row) => (
@@ -279,6 +302,7 @@ export default function SalesPage() {
         saving={updateMutation.isPending}
         onClose={() => setEditing(null)}
         onSave={(sale) => updateMutation.mutate(sale)}
+        products={products}
       />
     </PageWrapper>
   );
@@ -289,11 +313,13 @@ function SaleEditModal({
   saving,
   onClose,
   onSave,
+  products,
 }: {
   sale: SaleEntryResponse | null;
   saving: boolean;
   onClose: () => void;
   onSave: (sale: SaleEntryResponse) => void;
+  products: ProductResponse[];
 }) {
   const [form, setForm] = useState<SaleEntryResponse | null>(sale);
 
@@ -307,6 +333,18 @@ function SaleEditModal({
 
   const set = (key: keyof SaleEntryResponse, value: string | number | null) => {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+
+  const setProduct = (productId: string) => {
+    const product = products.find((p) => p.id === productId);
+    setForm((prev) => {
+      if (!prev) return prev;
+      const next: SaleEntryResponse = { ...prev, product_id: productId || null };
+      if (product && Number(prev.quantity) > 0) {
+        next.amount = Number(product.sale_price_ars) * Number(prev.quantity);
+      }
+      return next;
+    });
   };
 
   return (
@@ -333,6 +371,21 @@ function SaleEditModal({
         <label className="grid gap-1 text-sm text-vk-text-secondary">
           Concepto
           <input className="rounded border border-vk-border-w px-3 py-2" value={form.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
+        </label>
+        <label className="grid gap-1 text-sm text-vk-text-secondary">
+          Producto
+          <select
+            className="rounded border border-vk-border-w px-3 py-2"
+            value={form.product_id ?? ""}
+            onChange={(e) => setProduct(e.target.value)}
+          >
+            <option value="">Sin producto asociado</option>
+            {products.map((product) => (
+              <option key={product.id} value={product.id}>
+                {product.name} · {formatARS(Number(product.sale_price_ars))}
+              </option>
+            ))}
+          </select>
         </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vk-text-secondary">
