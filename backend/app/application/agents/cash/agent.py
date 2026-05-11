@@ -8,19 +8,6 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
 
-# Patrón determinístico para detectar montos explícitos en el mensaje del usuario.
-# Matchea expresiones monetarias inequívocas. Incluye números ≥ 100 porque en ARS los
-# precios son siempre ≥ 100, mientras que las cantidades de productos raramente lo son.
-# NO matchea "3" en "3 cocas" (1-2 dígitos); SÍ matchea "5000" en "vendí 5000 al contado".
-_MONETARY_RE = re.compile(
-    r"\$\s*[\d.,]+"                    # $ seguido de número: $500, $30.000
-    r"|\b\d{1,3}(?:[.\s]\d{3})+"      # miles con punto/espacio: 3.000, 30 000
-    r"|\b\d+(?:,\d+)+"                # decimal con coma: 500,50
-    r"|\b\d+\s*(?:pesos?|ars)\b"      # número + "pesos" / "ARS"
-    r"|\b[1-9]\d{2,}\b",              # número ≥ 100 sin símbolo (3+ dígitos)
-    re.IGNORECASE,
-)
-
 import anthropic
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -39,6 +26,20 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.integrations.anthropic_client import get_anthropic_async_client
+
+# Patrón determinístico para detectar montos explícitos en el mensaje del usuario.
+# Matchea expresiones monetarias inequívocas. Los números sueltos de 3+ dígitos se
+# aceptan como monto, pero _has_explicit_amount descarta años 19xx/20xx para no
+# confundir "el 20 de abril de 2026" con un importe.
+# NO matchea "3" en "3 cocas" (1-2 dígitos); SÍ matchea "5000" en "vendí 5000 al contado".
+_MONETARY_RE = re.compile(
+    r"\$\s*[\d.,]+"                    # $ seguido de número: $500, $30.000
+    r"|\b\d{1,3}(?:[.\s]\d{3})+"      # miles con punto/espacio: 3.000, 30 000
+    r"|\b\d+(?:,\d+)+"                # decimal con coma: 500,50
+    r"|\b\d+\s*(?:pesos?|ars)\b"      # número + "pesos" / "ARS"
+    r"|\b[1-9]\d{2,}\b",              # número ≥ 100 sin símbolo (3+ dígitos)
+    re.IGNORECASE,
+)
 
 
 class SaleEntity(BaseModel):
@@ -105,7 +106,14 @@ class AgentCash(BaseAgent):
 
     def _has_explicit_amount(self, message: str) -> bool:
         """True si el mensaje contiene una expresión monetaria inequívoca (no una cantidad de productos)."""
-        return bool(_MONETARY_RE.search(message))
+        for match in _MONETARY_RE.finditer(message):
+            token = match.group(0).strip()
+            if re.fullmatch(r"\d{3,}", token):
+                value = int(token)
+                if 1900 <= value <= 2099:
+                    continue
+            return True
+        return False
 
     def _safe_decimal(self, value: object) -> Decimal | None:
         if value is None or value == "" or str(value).lower() == "null":

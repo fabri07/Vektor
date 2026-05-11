@@ -12,6 +12,8 @@ export interface CreateSalePayload {
   notes?: string | null;
 }
 
+export type UpdateSalePayload = Partial<CreateSalePayload>;
+
 export interface SaleEntryResponse {
   id: string;
   tenant_id: string;
@@ -38,6 +40,15 @@ export const salesService = {
   async createSale(payload: CreateSalePayload): Promise<SaleEntryResponse> {
     const res = await api.post<SaleEntryResponse>("/sales", payload);
     return res.data;
+  },
+
+  async updateSale(id: string, payload: UpdateSalePayload): Promise<SaleEntryResponse> {
+    const res = await api.patch<SaleEntryResponse>(`/sales/${id}`, payload);
+    return res.data;
+  },
+
+  async deleteSale(id: string): Promise<void> {
+    await api.delete(`/sales/${id}`);
   },
 
   async getSummary(): Promise<SaleSummaryResponse> {

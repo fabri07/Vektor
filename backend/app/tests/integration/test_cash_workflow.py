@@ -49,8 +49,23 @@ async def test_full_sale_workflow(session: AsyncSession, tenant, user):
     entry = result.scalar_one()
 
     assert entry.amount == Decimal("3500")
-    assert entry.payment_method == "efectivo"
+    assert entry.payment_method == "cash"
     assert entry.notes == "Gaseosa 2L"
+
+
+@pytest.mark.asyncio
+async def test_save_sale_requires_explicit_payment_method(session: AsyncSession, tenant, user):
+    """save_sale no debe asumir cash si falta el método de pago."""
+    from app.application.services.cash_service import save_sale
+
+    entities = {
+        "amount": 3500,
+        "payment_status": "paid",
+        "product_description": "Gaseosa 2L",
+    }
+
+    with pytest.raises(ValueError, match="payment_method_required_for_sale"):
+        await save_sale(entities, tenant.tenant_id, user.user_id, session)
 
 
 @pytest.mark.asyncio

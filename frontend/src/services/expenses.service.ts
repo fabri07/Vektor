@@ -14,6 +14,8 @@ export interface CreateExpensePayload {
   notes?: string | null;
 }
 
+export type UpdateExpensePayload = Partial<CreateExpensePayload>;
+
 export interface ExpenseEntryResponse {
   id: string;
   tenant_id: string;
@@ -45,6 +47,18 @@ export const expensesService = {
   ): Promise<ExpenseEntryResponse> {
     const res = await api.post<ExpenseEntryResponse>("/expenses", payload);
     return res.data;
+  },
+
+  async updateExpense(
+    id: string,
+    payload: UpdateExpensePayload,
+  ): Promise<ExpenseEntryResponse> {
+    const res = await api.patch<ExpenseEntryResponse>(`/expenses/${id}`, payload);
+    return res.data;
+  },
+
+  async deleteExpense(id: string): Promise<void> {
+    await api.delete(`/expenses/${id}`);
   },
 
   async getSummary(): Promise<ExpenseSummaryResponse> {

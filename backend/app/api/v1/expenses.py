@@ -1,6 +1,6 @@
 """Expense entry endpoints."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_current_tenant, require_role
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.persistence.db.session import get_db_session
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 from app.persistence.models.user import User
@@ -23,6 +24,53 @@ from app.schemas.transaction import (
 )
 
 router = APIRouter()
+
+VOID_REASON_MANUAL = "MANUAL_ADMIN_VOID"
+
+
+def _expense_snapshot(entry: ExpenseEntry) -> dict[str, object]:
+    return {
+        "id": str(entry.id),
+        "amount": str(entry.amount),
+        "category": entry.category,
+        "transaction_date": str(entry.transaction_date),
+        "description": entry.description,
+        "is_recurring": entry.is_recurring,
+        "payment_method": entry.payment_method,
+        "supplier_name": entry.supplier_name,
+        "notes": entry.notes,
+        "custom_fields": entry.custom_fields,
+        "voided_at": entry.voided_at.isoformat() if entry.voided_at else None,
+        "void_reason": entry.void_reason,
+    }
+
+
+def _audit_data_change(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    decision_type: str,
+    before: dict[str, object],
+    after: dict[str, object],
+) -> None:
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant_id,
+            decision_type=decision_type,
+            decision_data={
+                "record_type": "expense",
+                "record_id": before["id"],
+                "before": before,
+                "after": after,
+                "source": "ui",
+            },
+            triggered_by="ui:data_records",
+            actor_user_id=user_id,
+            context={"endpoint": "expenses"},
+            created_at=datetime.now(UTC),
+        )
+    )
 
 
 @router.get(
@@ -121,13 +169,14 @@ async def update_expense(
     expense_id: UUID,
     body: UpdateExpenseRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
     entry = await repo.get_by_id(expense_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
+    before = _expense_snapshot(entry)
     if body.amount is not None:
         entry.amount = body.amount
     if body.category is not None:
@@ -145,6 +194,14 @@ async def update_expense(
     if body.custom_fields is not None:
         entry.custom_fields = body.custom_fields
     saved = await repo.save(entry)
+    _audit_data_change(
+        session,
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        decision_type="DATA_RECORD_UPDATED",
+        before=before,
+        after=_expense_snapshot(saved),
+    )
     trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_updated")
     return saved
 
@@ -155,13 +212,24 @@ async def update_expense(
 async def delete_expense(
     expense_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = ExpenseRepository(session)
     entry = await repo.get_by_id(expense_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
-    await repo.delete(entry)
+    before = _expense_snapshot(entry)
+    entry.voided_at = datetime.now(UTC)
+    entry.void_reason = VOID_REASON_MANUAL
+    await repo.save(entry)
+    _audit_data_change(
+        session,
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        decision_type="DATA_RECORD_VOIDED",
+        before=before,
+        after=_expense_snapshot(entry),
+    )
     trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_deleted")
-    return MessageResponse(message="Expense entry deleted.")
+    return MessageResponse(message="Expense entry voided.")

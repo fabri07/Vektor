@@ -286,6 +286,7 @@ async def compute_business_state(
     inv_sum_result = await session.execute(
         select(func.sum(ExpenseEntry.amount), func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
             ExpenseEntry.transaction_date <= window_end,
             ExpenseEntry.category == "mercaderia",
@@ -298,6 +299,7 @@ async def compute_business_state(
     fixed_sum_result = await session.execute(
         select(func.sum(ExpenseEntry.amount), func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
             ExpenseEntry.transaction_date <= window_end,
             ExpenseEntry.is_recurring.is_(True),
@@ -310,6 +312,7 @@ async def compute_business_state(
     expense_count_result = await session.execute(
         select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
             ExpenseEntry.transaction_date <= window_end,
         )
@@ -320,6 +323,7 @@ async def compute_business_state(
     supplier_result = await session.execute(
         select(func.count(ExpenseEntry.supplier_name.distinct())).where(
             ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.supplier_name.isnot(None),
         )
     )

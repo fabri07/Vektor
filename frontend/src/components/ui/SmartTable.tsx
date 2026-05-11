@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Download, SlidersHorizontal, Check } from "lucide-react";
+import type { ReactNode } from "react";
 import { Table } from "./Table";
 import type { TableColumn } from "./Table";
 
@@ -16,6 +17,7 @@ interface SmartTableProps<T extends object> {
   data: T[];
   emptyMessage?: string;
   exportFilename?: string;
+  renderActions?: (row: T) => ReactNode;
 }
 
 function toCSVValue(val: unknown): string {
@@ -31,6 +33,7 @@ export function SmartTable<T extends object>({
   data,
   emptyMessage,
   exportFilename = "vektor-export",
+  renderActions,
 }: SmartTableProps<T>) {
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(
     () =>
@@ -66,6 +69,16 @@ export function SmartTable<T extends object>({
   }, []);
 
   const visibleColumns = columns.filter((c) => visibleKeys.has(c.key));
+  const tableColumns = renderActions
+    ? [
+        ...visibleColumns,
+        {
+          key: "__actions",
+          header: "Acciones",
+          render: (_: unknown, row: T) => renderActions(row),
+        },
+      ]
+    : visibleColumns;
   const hideableColumns = columns.filter((c) => c.hideable !== false);
 
   const exportCSV = useCallback(() => {
@@ -144,7 +157,7 @@ export function SmartTable<T extends object>({
         </button>
       </div>
 
-      <Table columns={visibleColumns} data={data} emptyMessage={emptyMessage} />
+      <Table columns={tableColumns} data={data} emptyMessage={emptyMessage} />
     </div>
   );
 }

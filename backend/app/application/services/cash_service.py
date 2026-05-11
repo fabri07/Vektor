@@ -48,7 +48,7 @@ _PAYMENT_METHOD_MAP = {
 
 def _normalize_payment_method(value: str | None) -> str:
     if not value:
-        return "cash"
+        return "other"
     return _PAYMENT_METHOD_MAP.get(str(value).strip().lower(), "other")
 
 
@@ -81,16 +81,9 @@ async def save_sale(
     Falla explícitamente si falta payment_method en lugar de defaultear a 'cash':
     AgentCash debe haber preguntado el método antes de crear la acción.
     """
-    raw_pm = (entities.get("payment_method") or "").strip().lower()
-    if not raw_pm or raw_pm in ("null", "none", "other", "otro"):
-        # Fallback defensivo solo si viene payment_status (flujos legacy); loguear warning.
-        logger.warning(
-            "save_sale.missing_payment_method",
-            fallback_from_status=entities.get("payment_status"),
-        )
-        payment_method = "cash" if entities.get("payment_status") == "paid" else "credit"
-    else:
-        payment_method = raw_pm
+    payment_method = _normalize_payment_method(entities.get("payment_method"))
+    if payment_method == "other":
+        raise ValueError("payment_method_required_for_sale")
 
     product_id_raw = entities.get("product_id")
     product_id = uuid.UUID(str(product_id_raw)) if product_id_raw else None

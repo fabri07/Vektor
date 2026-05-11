@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.application.services.data_repair_service import (
-    normalize_product_name,
-    _re_evaluate_summary,
-    _extract_product_rows,
     _extract_price_set,
+    _extract_product_rows,
+    _parse_quantity_from_notes,
+    _re_evaluate_summary,
+    normalize_product_name,
 )
-
 
 # ── normalize_product_name ────────────────────────────────────────────────────
 
@@ -98,6 +98,49 @@ def test_extract_price_set_empty_when_no_precio_col():
     rows = [{"nombre": "Producto", "stock": "10"}]
     prices = _extract_price_set(rows)
     assert prices == set()
+
+
+def test_parse_quantity_from_chat_sale_notes():
+    parsed = _parse_quantity_from_notes("venta de 3 coca colas")
+    assert parsed == (3, "coca colas")
+
+
+@pytest.mark.asyncio
+async def test_detect_chat_sale_quality_issue_unique_product():
+    from app.application.services.data_repair_service import detect_chat_sale_quality_issues
+
+    tenant_id = uuid.uuid4()
+    product_id = uuid.uuid4()
+
+    mock_sale = MagicMock()
+    mock_sale.id = uuid.uuid4()
+    mock_sale.tenant_id = tenant_id
+    mock_sale.product_id = None
+    mock_sale.notes = "venta de 3 coca colas"
+    mock_sale.quantity = 1
+    mock_sale.amount = Decimal("30000")
+
+    mock_product = MagicMock()
+    mock_product.id = product_id
+    mock_product.tenant_id = tenant_id
+    mock_product.name = "Coca-Cola 600ml"
+    mock_product.sale_price_ars = Decimal("500")
+    mock_product.is_active = True
+
+    sales_result = MagicMock()
+    sales_result.scalars.return_value.all.return_value = [mock_sale]
+    product_result = MagicMock()
+    product_result.scalars.return_value.all.return_value = [mock_product]
+    empty_product_result = MagicMock()
+    empty_product_result.scalars.return_value.all.return_value = []
+
+    mock_db = _mock_db_session([sales_result, product_result, empty_product_result])
+    candidates = await detect_chat_sale_quality_issues(mock_db, tenant_id=tenant_id)
+
+    assert len(candidates) == 1
+    assert candidates[0].confidence == "HIGH"
+    assert candidates[0].quantity == 3
+    assert candidates[0].product.id == product_id
 
 
 # ── apply_repair dry_run ──────────────────────────────────────────────────────
@@ -213,9 +256,20 @@ async def test_apply_voids_sales_and_creates_run():
 
     with patch(
         "app.application.services.data_repair_service.insert_confirmed_data",
-        AsyncMock(return_value={"ventas": 0, "gastos": 0, "productos": 1, "product_details": [
-            {"action": "CREATED", "product_id": str(uuid.uuid4()), "name": "Coca-Cola", "before": None, "after": {"sale_price_ars": "500"}}
-        ]}),
+        AsyncMock(return_value={
+            "ventas": 0,
+            "gastos": 0,
+            "productos": 1,
+            "product_details": [
+                {
+                    "action": "CREATED",
+                    "product_id": str(uuid.uuid4()),
+                    "name": "Coca-Cola",
+                    "before": None,
+                    "after": {"sale_price_ars": "500"},
+                }
+            ],
+        }),
     ):
         mock_db = _mock_db_session([files_result, sales_result])
         result = await apply_repair(mock_db, tenant_id=tenant_id, dry_run=False)
@@ -295,7 +349,7 @@ async def test_no_touch_non_import_sales():
 
 @pytest.mark.asyncio
 async def test_dry_run_idempotent_already_voided():
-    """SaleEntry con voided_at ya seteado → no aparece en candidatos (query filtra voided_at IS NULL)."""
+    """SaleEntry con voided_at ya seteado no aparece en candidatos."""
     from app.application.services.data_repair_service import detect_misclassified_product_imports
 
     now = datetime.now(UTC)

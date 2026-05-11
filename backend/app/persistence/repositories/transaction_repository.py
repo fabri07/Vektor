@@ -133,7 +133,9 @@ class ExpenseRepository:
     async def get_by_id(self, expense_id: UUID, tenant_id: UUID) -> ExpenseEntry | None:
         result = await self._session.execute(
             select(ExpenseEntry).where(
-                ExpenseEntry.id == expense_id, ExpenseEntry.tenant_id == tenant_id
+                ExpenseEntry.id == expense_id,
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.voided_at.is_(None),
             )
         )
         return result.scalar_one_or_none()
@@ -150,6 +152,7 @@ class ExpenseRepository:
         q = select(ExpenseEntry).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.provenance == "REAL",
+            ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
@@ -170,6 +173,7 @@ class ExpenseRepository:
         q = select(func.sum(ExpenseEntry.amount)).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.provenance == "REAL",
+            ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
@@ -187,6 +191,7 @@ class ExpenseRepository:
         q = select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.provenance == "REAL",
+            ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= from_date,
             ExpenseEntry.transaction_date <= to_date,
         )
@@ -202,7 +207,11 @@ class ExpenseRepository:
         """Gastos agrupados por categoría con totales y porcentaje."""
         q = (
             select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total"))
-            .where(ExpenseEntry.tenant_id == tenant_id, ExpenseEntry.provenance == "REAL")
+            .where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.provenance == "REAL",
+                ExpenseEntry.voided_at.is_(None),
+            )
         )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
@@ -238,6 +247,7 @@ class ExpenseRepository:
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
                 ExpenseEntry.provenance == "REAL",
+                ExpenseEntry.voided_at.is_(None),
                 ExpenseEntry.supplier_name.isnot(None),
                 ExpenseEntry.supplier_name != "",
             )
@@ -257,6 +267,7 @@ class ExpenseRepository:
         total_q = select(func.sum(ExpenseEntry.amount)).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.provenance == "REAL",
+            ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.supplier_name.isnot(None),
             ExpenseEntry.supplier_name != "",
         )
@@ -296,6 +307,7 @@ class ExpenseRepository:
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
                 ExpenseEntry.provenance == "REAL",
+                ExpenseEntry.voided_at.is_(None),
                 ExpenseEntry.transaction_date >= from_date,
                 ExpenseEntry.transaction_date <= to_date,
             )

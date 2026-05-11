@@ -50,7 +50,10 @@ class DataRepairRun(UUIDPrimaryKeyMixin, Base):
     )
 
     def __repr__(self) -> str:
-        return f"<DataRepairRun id={self.id} type={self.repair_type!r} dry_run={self.dry_run} status={self.status!r}>"
+        return (
+            f"<DataRepairRun id={self.id} type={self.repair_type!r} "
+            f"dry_run={self.dry_run} status={self.status!r}>"
+        )
 
 
 class DataRepairItem(UUIDPrimaryKeyMixin, Base):
@@ -77,7 +80,7 @@ class DataRepairItem(UUIDPrimaryKeyMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('VOID_SALE','CREATE_PRODUCT','UPDATE_PRODUCT')",
+            "action IN ('VOID_SALE','CREATE_PRODUCT','UPDATE_PRODUCT','UPDATE_SALE','REVIEW_SALE')",
             name="ck_repair_items_action",
         ),
     )

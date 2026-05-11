@@ -1,13 +1,16 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Pencil, Trash2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { StatCard } from "@/components/ui/StatCard";
 import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
+import { useToastStore } from "@/stores/toastStore";
 
 type PeriodFilter = "month" | "prev_month";
 
@@ -126,6 +129,9 @@ const PERIOD_OPTIONS: { value: PeriodFilter; label: string }[] = [
 export default function ExpensesPage() {
   const [period, setPeriod] = useState<PeriodFilter>("month");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [editing, setEditing] = useState<ExpenseEntryResponse | null>(null);
+  const queryClient = useQueryClient();
+  const toast = useToastStore((s) => s.add);
 
   const { from, to } = getPeriodDates(period);
   const prevDates = getPeriodDates("prev_month");
@@ -145,6 +151,35 @@ export default function ExpensesPage() {
       }),
     staleTime: 5 * 60 * 1000,
     enabled: period === "month",
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (payload: ExpenseEntryResponse) =>
+      expensesService.updateExpense(payload.id, {
+        amount: Number(payload.amount),
+        category: payload.category,
+        expense_date: payload.transaction_date,
+        description: payload.description,
+        is_recurring: payload.is_recurring,
+        payment_method: payload.payment_method,
+        supplier_name: payload.supplier_name,
+        notes: payload.notes,
+      }),
+    onSuccess: async () => {
+      setEditing(null);
+      toast("Gasto actualizado.", "success");
+      await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
+    },
+    onError: () => toast("No se pudo actualizar el gasto.", "error"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => expensesService.deleteExpense(id),
+    onSuccess: async () => {
+      toast("Gasto anulado.", "success");
+      await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
+    },
+    onError: () => toast("No se pudo anular el gasto.", "error"),
   });
 
   // KPI calculations
@@ -256,8 +291,78 @@ export default function ExpensesPage() {
           action={{ label: "Ir al chat", href: "/chat" }}
         />
       ) : (
-        <SmartTable columns={COLUMNS} data={sorted} exportFilename="vektor-gastos" />
+        <SmartTable
+          columns={COLUMNS}
+          data={sorted}
+          exportFilename="vektor-gastos"
+          renderActions={(row) => (
+            <div className="flex items-center gap-1">
+              <button type="button" title="Editar" aria-label="Editar gasto" onClick={() => setEditing(row)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary">
+                <Pencil className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                title="Anular"
+                aria-label="Anular gasto"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  if (confirm("¿Anular este gasto?")) deleteMutation.mutate(row.id);
+                }}
+                className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+        />
       )}
+      <ExpenseEditModal
+        expense={editing}
+        saving={updateMutation.isPending}
+        onClose={() => setEditing(null)}
+        onSave={(expense) => updateMutation.mutate(expense)}
+      />
     </PageWrapper>
+  );
+}
+
+function ExpenseEditModal({
+  expense,
+  saving,
+  onClose,
+  onSave,
+}: {
+  expense: ExpenseEntryResponse | null;
+  saving: boolean;
+  onClose: () => void;
+  onSave: (expense: ExpenseEntryResponse) => void;
+}) {
+  const [form, setForm] = useState<ExpenseEntryResponse | null>(expense);
+  useEffect(() => {
+    setForm(expense);
+  }, [expense]);
+  if (!form) return null;
+  const set = (key: keyof ExpenseEntryResponse, value: string | number | boolean | null) => {
+    setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+  return (
+    <Modal isOpen={!!expense} onClose={onClose} title="Editar gasto" size="lg">
+      <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onSave(form); }}>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="grid gap-1 text-sm text-vk-text-secondary">Fecha<input className="rounded border border-vk-border-w px-3 py-2" type="date" value={form.transaction_date} onChange={(e) => set("transaction_date", e.target.value)} /></label>
+          <label className="grid gap-1 text-sm text-vk-text-secondary">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
+        </div>
+        <label className="grid gap-1 text-sm text-vk-text-secondary">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} /></label>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="grid gap-1 text-sm text-vk-text-secondary">Proveedor<input className="rounded border border-vk-border-w px-3 py-2" value={form.supplier_name ?? ""} onChange={(e) => set("supplier_name", e.target.value || null)} /></label>
+          <label className="grid gap-1 text-sm text-vk-text-secondary">Monto<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.amount} onChange={(e) => set("amount", Number(e.target.value))} /></label>
+        </div>
+        <label className="flex items-center gap-2 text-sm text-vk-text-secondary"><input type="checkbox" checked={form.is_recurring} onChange={(e) => set("is_recurring", e.target.checked)} />Recurrente</label>
+        <div className="flex justify-end gap-2 pt-2">
+          <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
+          <button type="submit" disabled={saving} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
+        </div>
+      </form>
+    </Modal>
   );
 }

@@ -11,6 +11,10 @@ export interface CreateProductPayload {
   description?: string | null;
 }
 
+export type UpdateProductPayload = Partial<CreateProductPayload> & {
+  is_active?: boolean;
+};
+
 export interface ProductResponse {
   id: string;
   tenant_id: string;
@@ -40,6 +44,15 @@ export const productsService = {
   async createProduct(payload: CreateProductPayload): Promise<ProductResponse> {
     const res = await api.post<ProductResponse>("/products", payload);
     return res.data;
+  },
+
+  async updateProduct(id: string, payload: UpdateProductPayload): Promise<ProductResponse> {
+    const res = await api.patch<ProductResponse>(`/products/${id}`, payload);
+    return res.data;
+  },
+
+  async deleteProduct(id: string): Promise<void> {
+    await api.delete(`/products/${id}`);
   },
 
   async getProducts(params?: ProductsListParams): Promise<ProductResponse[]> {

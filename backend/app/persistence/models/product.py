@@ -1,10 +1,21 @@
 """ORM model: products."""
 
 import uuid
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,9 +44,16 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deactivation_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_products_provenance"),
+        CheckConstraint(
+            "deactivation_reason IS NULL OR deactivation_reason IN ("
+            "'USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID')",
+            name="ck_products_deactivation_reason",
+        ),
         Index("ix_products_tenant_provenance", "tenant_id", "provenance"),
     )
 

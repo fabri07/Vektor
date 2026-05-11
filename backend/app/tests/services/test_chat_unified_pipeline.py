@@ -122,7 +122,7 @@ async def test_register_sale_registra_data_loaded(
         tenant_id=sample_tenant.tenant_id,
         user_id=sample_user.user_id,
         action_type=ActionType.REGISTER_SALE,
-        payload={"amount": "400", "conversation_id": "conv-sale"},
+        payload={"amount": "400", "payment_method": "cash", "conversation_id": "conv-sale"},
         risk_level="MEDIUM",
     )
     db_session.add(action)

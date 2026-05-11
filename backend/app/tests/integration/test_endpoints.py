@@ -280,11 +280,12 @@ async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSe
     ac, headers, tenant, user, _ = auth_client
 
     # Crear pending_action directamente en DB
+    # payment_method ahora es obligatorio (save_sale rechaza ventas sin método).
     action = PendingAction(
         tenant_id=tenant.tenant_id,
         user_id=user.user_id,
         action_type="REGISTER_SALE",
-        payload={"amount": 300},
+        payload={"amount": 300, "payment_method": "cash"},
         risk_level="MEDIUM",
         status="PENDING",
         expires_at=datetime.now(UTC) + timedelta(minutes=10),

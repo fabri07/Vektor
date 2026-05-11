@@ -1,5 +1,6 @@
 """Pydantic schemas for product endpoints."""
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -22,6 +23,8 @@ class ProductResponse(BaseModel):
     low_stock_threshold_units: int
     is_active: bool
     custom_fields: dict[str, Any] = {}
+    deactivated_at: datetime | None = None
+    deactivation_reason: str | None = None
 
     @computed_field  # type: ignore[misc]
     @property

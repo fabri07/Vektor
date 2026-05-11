@@ -53,6 +53,7 @@ async def calcular_flujo_neto_30d(
     gastos_q = select(func.coalesce(func.sum(ExpenseEntry.amount), Decimal("0"))).where(
         ExpenseEntry.tenant_id == tenant_id,
         ExpenseEntry.provenance == provenance,
+        ExpenseEntry.voided_at.is_(None),
         ExpenseEntry.transaction_date >= desde,
     )
 

@@ -53,6 +53,7 @@ async def get_current_score(
         gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant.tenant_id,
             ExpenseEntry.provenance == "REAL",
+            ExpenseEntry.voided_at.is_(None),
         )
         real_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
         if real_count == 0 and not tenant.is_demo:
@@ -176,6 +177,7 @@ async def get_latest_score(
         gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant.tenant_id,
             ExpenseEntry.provenance == "REAL",
+            ExpenseEntry.voided_at.is_(None),
         )
         real_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
         if real_count == 0 and not tenant.is_demo:
