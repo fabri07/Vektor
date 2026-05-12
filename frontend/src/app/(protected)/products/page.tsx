@@ -137,7 +137,8 @@ export default function ProductsPage() {
         sale_price_ars: Number(payload.sale_price_ars),
         unit_cost_ars: payload.unit_cost_ars == null ? null : Number(payload.unit_cost_ars),
         stock_units: Number(payload.stock_units),
-        low_stock_threshold_units: Number(payload.low_stock_threshold_units),
+        // null = no configurado (usa default 5 del servidor); 0 = umbral explícito
+        low_stock_threshold_units: payload.low_stock_threshold_units == null ? null : Number(payload.low_stock_threshold_units),
       }),
     onSuccess: async () => {
       setEditing(null);
@@ -319,7 +320,7 @@ function ProductEditModal({
         </div>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vk-text-secondary">Stock<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} value={form.stock_units} onChange={(e) => set("stock_units", Number(e.target.value))} /></label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Umbral<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} value={form.low_stock_threshold_units} onChange={(e) => set("low_stock_threshold_units", Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vk-text-secondary">Umbral mínimo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} placeholder="5 (default)" value={form.low_stock_threshold_units ?? ""} onChange={(e) => set("low_stock_threshold_units", e.target.value === "" ? null : Number(e.target.value))} /></label>
         </div>
         <label className="grid gap-1 text-sm text-vk-text-secondary">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
         <div className="flex justify-end gap-2 pt-2">

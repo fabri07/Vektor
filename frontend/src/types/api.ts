@@ -92,7 +92,7 @@ export interface ProductStockItem {
   product_id: string;
   name: string;
   stock_units: number;
-  low_stock_threshold_units: number;
+  low_stock_threshold_units: number | null;
   sale_price_ars: number;
 }
 

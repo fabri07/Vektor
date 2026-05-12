@@ -4,11 +4,12 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.domain.product import effective_threshold
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
@@ -69,7 +70,7 @@ async def decrement_stock(
         "source_event_id": source_event_id,
     })
 
-    if balance.current_qty <= product.low_stock_threshold_units:
+    if balance.current_qty <= effective_threshold(product.low_stock_threshold_units):
         EventBus.emit("STOCK_ALERT_CREATED", {
             "tenant_id": str(tenant_id),
             "product_id": str(product_id),
@@ -176,7 +177,9 @@ async def get_low_stock_products(
         .where(
             Product.tenant_id == tenant_id,
             Product.is_active.is_(True),
-            InventoryBalance.current_qty <= Product.low_stock_threshold_units,
+            InventoryBalance.current_qty <= func.coalesce(
+                Product.low_stock_threshold_units, 5
+            ),
         )
     )
     return list(result.scalars().all())

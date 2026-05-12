@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.analytics_service import AnalyticsService
+from app.domain.product import effective_threshold
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -113,7 +114,7 @@ def _build_dimensions(
         low_stock_count = sum(
             1
             for product in state.products
-            if product.stock_units <= product.low_stock_threshold_units
+            if product.stock_units <= effective_threshold(product.low_stock_threshold_units)
         )
         stock_explanation = (
             f"{low_stock_count} de {len(state.products)} productos están en stock bajo."
@@ -226,7 +227,10 @@ class HealthScoreService:
             cash_ratio = float(state.cash_on_hand_est / state.monthly_fixed_expenses_est)
         low_stock_pct = 0.0
         if state.products:
-            below = sum(1 for p in state.products if p.stock_units <= p.low_stock_threshold_units)
+            below = sum(
+                1 for p in state.products
+                if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
+            )
             low_stock_pct = below / len(state.products)
 
         await analytics_svc.record_score_event(

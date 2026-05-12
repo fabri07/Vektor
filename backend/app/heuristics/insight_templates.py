@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from app.domain.product import effective_threshold
+
 
 @dataclass(frozen=True)
 class InsightTemplate:
@@ -157,7 +159,7 @@ def render_insight(
     elif risk_code == "STOCK_CRITICAL":
         critical_products = [
             p for p in state.products
-            if p.stock_units <= p.low_stock_threshold_units
+            if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
         ]
         n = len(critical_products)
         names = [p.name for p in critical_products[:3]]

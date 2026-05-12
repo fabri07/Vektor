@@ -8,9 +8,8 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
@@ -270,6 +269,8 @@ async def insert_confirmed_data(
                         sale_price_ars=price or Decimal("0"),
                         unit_cost_ars=cost,
                         stock_units=stock_val,
+                        # NULL = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor
+                        low_stock_threshold_units=None,
                         provenance="REAL",
                     )
                     session.add(new_product)

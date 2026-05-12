@@ -45,6 +45,8 @@ INTENT_CATALOG = [
     "upload_file",
     "ask_business_status",
     "ask_dashboard_report",
+    "ask_stock_status",
+    "ask_supplier_status",
     "manage_supplier",
     "ask_platform_help",
     "review_inbox_item",
@@ -62,6 +64,8 @@ INTENT_TO_AGENT: dict[str, str] = {
     "record_payment_out": "agent_cash",
     "record_stock_loss": "agent_stock",
     "upload_file": "agent_stock",
+    "ask_stock_status": "agent_stock",
+    "ask_supplier_status": "agent_supplier",
     "manage_supplier": "agent_supplier",
     "review_inbox_item": "agent_supplier",
     "record_purchase": "agent_supplier",
@@ -84,6 +88,8 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "upload_file": ActionType.IMPORT_TABULAR_FILE,
     "ask_business_status": ActionType.GENERATE_HEALTH_REPORT,
     "ask_dashboard_report": ActionType.GENERATE_HEALTH_REPORT,
+    "ask_stock_status": ActionType.GENERATE_HEALTH_REPORT,
+    "ask_supplier_status": ActionType.GENERATE_HEALTH_REPORT,
     "manage_supplier": ActionType.CREATE_SUPPLIER_DRAFT,
     "ask_platform_help": ActionType.ANSWER_HELP_REQUEST,
     "review_inbox_item": ActionType.CLASSIFY_GMAIL_MESSAGE,
@@ -114,6 +120,16 @@ class AgentCEO(BaseAgent):
         system = (
             "Sos el clasificador de intenciones de Véktor, un sistema de gestión financiera para PyMEs argentinas.\n"
             f"Intenciones válidas: {', '.join(INTENT_CATALOG)}\n\n"
+            "GUÍA DE INTENCIONES — ejemplos en español rioplatense:\n"
+            "  ask_stock_status: 'cómo está mi inventario', 'qué productos están bajos', "
+            "'me falta stock de algo', 'qué tengo sin stock', 'qué necesito reponer', "
+            "'cuántas unidades tengo', 'estado del inventario', 'qué productos faltan'\n"
+            "  ask_supplier_status: 'qué proveedores tengo', 'a quién le compré más', "
+            "'cuáles son mis proveedores principales', 'últimas compras por proveedor', "
+            "'cuánto les compré', 'mis proveedores del mes', 'análisis de proveedores'\n"
+            "  ask_business_status: salud financiera general, score del negocio, análisis financiero\n"
+            "  record_stock_loss: merma, rotura, pérdida, vencimiento de un producto específico\n"
+            "  manage_supplier: armar email a proveedor, contactar proveedor, hacer pedido\n\n"
             "REGLA CRÍTICA — out_of_scope:\n"
             "Usá 'out_of_scope' si el mensaje NO está relacionado con:\n"
             "  - Operaciones del negocio: ventas, gastos, compras, caja, stock, proveedores\n"

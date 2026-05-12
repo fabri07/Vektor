@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from app.domain.product import effective_threshold
 from app.heuristics.verticals import MarginBenchmark, VerticalHeuristicConfig
 from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
@@ -171,14 +172,15 @@ def _score_stock(products: list[ProductSummary], config: VerticalHeuristicConfig
         return 50
     total = len(products)
     below = sum(
-        1 for p in products if p.stock_units <= p.low_stock_threshold_units
+        1 for p in products
+        if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
     )
     no_rotation = sum(
         1
         for p in products
         if p.units_sold_30d is not None
         and p.units_sold_30d <= 0
-        and p.stock_units > p.low_stock_threshold_units
+        and p.stock_units > effective_threshold(p.low_stock_threshold_units)
     )
     rotation_pressure = 0.0
     if config.inventory.rotation_days_max > 0:
@@ -193,7 +195,8 @@ def _stock_is_critical(products: list[ProductSummary]) -> bool:
         return False
     total = len(products)
     below = sum(
-        1 for p in products if p.stock_units <= p.low_stock_threshold_units
+        1 for p in products
+        if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
     )
     return below > total * 0.3
 

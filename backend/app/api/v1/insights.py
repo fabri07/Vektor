@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant
+from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import ActionSuggestion, Insight
 from app.persistence.models.product import Product
@@ -180,7 +181,8 @@ class ProductStockItem(BaseModel):
     product_id: str
     name: str
     stock_units: int
-    low_stock_threshold_units: int
+    # None = umbral no configurado; el frontend muestra el default (5) con ?? 5
+    low_stock_threshold_units: int | None
     sale_price_ars: float
 
 
@@ -228,13 +230,15 @@ async def get_business_breakdown(
     )
     total_products = total_result.scalar_one()
 
-    # Stock bajo: COUNT + LIMIT 10 separados para evitar cargar todos
+    # Stock bajo: usa COALESCE para incluir productos con threshold NULL (default=5)
+    _effective_threshold = func.coalesce(
+        Product.low_stock_threshold_units, DEFAULT_LOW_STOCK_THRESHOLD_UNITS
+    )
     _low_stock_where = [
         Product.tenant_id == tenant.tenant_id,
         Product.is_active.is_(True),
         Product.stock_units.isnot(None),
-        Product.low_stock_threshold_units.isnot(None),
-        Product.stock_units <= Product.low_stock_threshold_units,
+        Product.stock_units <= _effective_threshold,
     ]
     low_stock_count_result = await session.execute(
         select(func.count(Product.id)).where(*_low_stock_where)
@@ -261,7 +265,7 @@ async def get_business_breakdown(
     _no_rotation_where = [
         Product.tenant_id == tenant.tenant_id,
         Product.is_active.is_(True),
-        func.coalesce(Product.stock_units, 0) > func.coalesce(Product.low_stock_threshold_units, 0),
+        func.coalesce(Product.stock_units, 0) > _effective_threshold,
         ~_sold_subq,
     ]
     no_rotation_count_result = await session.execute(
@@ -284,7 +288,7 @@ async def get_business_breakdown(
                 product_id=str(p.id),
                 name=p.name,
                 stock_units=p.stock_units or 0,
-                low_stock_threshold_units=p.low_stock_threshold_units or 0,
+                low_stock_threshold_units=p.low_stock_threshold_units,
                 sale_price_ars=float(p.sale_price_ars or 0),
             )
             for p in low_stock[:10]
@@ -294,7 +298,7 @@ async def get_business_breakdown(
                 product_id=str(p.id),
                 name=p.name,
                 stock_units=p.stock_units or 0,
-                low_stock_threshold_units=p.low_stock_threshold_units or 0,
+                low_stock_threshold_units=p.low_stock_threshold_units,
                 sale_price_ars=float(p.sale_price_ars or 0),
             )
             for p in no_rotation[:10]

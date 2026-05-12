@@ -33,6 +33,9 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - **ChatMemoryService** (`app/application/services/chat_memory_service.py`): 4ª capa de memoria — log durable de eventos por sesión (`chat_session_log`). Entry types: `DATA_LOADED`, `DATA_REJECTED`, `FILE_UPLOADED`, `INTENT_DETECTED`, `QUERY_ANSWERED`. Sprint 11.
 - **Custom Fields** (Sprint 12): columna `custom_fields JSONB` en `sales_entries`, `expense_entries`, `products`, `business_profiles`. Definiciones base en `vertical_field_definitions`; overrides por tenant en `tenant_custom_field_definitions`; undo log en `tenant_field_change_log`. API: `/fields`. Gestión en frontend: `FieldDefinitionsPanel.tsx` + `SchemaERDView.tsx` en `/settings`.
 - **Agent Automation Rules** (`app/application/services/automation_service.py`): reglas de consentimiento explícito para auto-ejecutar acciones recurrentes. Feature flag: `ENABLE_AGENT_AUTOMATIONS`. API: `/automations`. Sprint 11.
+- **Soft delete auditado** (Sprint 13): columnas `voided_at` + `void_reason VARCHAR(30)` en `sales_entries` y `expense_entries`. `void_reason` acepta: `REPAIR_MISCLASSIFIED_IMPORT`, `USER_REQUEST`, `DATA_QUALITY`. Migraciones: `20260510_0001` + `20260511_0001`.
+- **DataRepairService** (`app/application/services/data_repair_service.py`): detecta `SaleEntry` creadas desde CSVs de productos mal clasificados, anula las ventas (soft delete) y reconstruye los `Product`. Flujo: `dry_run=True` → preview → `apply`. Trazabilidad en `data_repair_runs` + `data_repair_items`. API admin: `POST /admin/repairs/misclassified-product-imports/dry-run` + `.../apply` (SUPERADMIN).
+- **Product lookup en AgentCash** (Sprint 13): `_lookup_product_price()` hace fuzzy match contra catálogo del tenant. Si el producto es ambiguo, el agente pregunta al usuario antes de registrar. `product_id` se inyecta en la entidad y el PATCH de ventas lo acepta y recalcula el monto.
 
 ---
 
@@ -115,7 +118,7 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: auth, cash, conversation, google_oauth, health_score, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import |
+| Application | `app/application/services/` | Orquestación: auth, cash, conversation, google_oauth, health_score, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import, data_repair |
 | Commands/Queries | `app/application/commands/` `app/application/queries/` | CQRS writes/reads |
 | DTOs | `app/application/dto/` | Objetos de transferencia entre capas |
 | DB middleware | `app/application/db/tenant_context.py` | Inyecta tenant_id en SQLAlchemy |
@@ -224,7 +227,7 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **HeuristicEngine** (`shared/heuristic_engine.py`): `get(business_type)` síncrono; `get_async(...)` aplica `BusinessHeuristicOverride` de la DB. `to_prompt_fragment()` genera valores numéricos para system prompts — nunca texto narrativo. Fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 15 intents del `INTENT_CATALOG`. Intent no reconocido → `ask_platform_help`. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/agent.py`) → `registry.get_sub_agent(name)`.
+**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 16 intents del `INTENT_CATALOG` (incluye `out_of_scope`). `out_of_scope` corta en `ChatOrchestrator` sin consumir tokens de sub-agente — retorna mensaje fijo. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/agent.py`) → `registry.get_sub_agent(name)`.
 
 **Streaming SSE** (`POST /agent/chat/stream`): `{"type": "thinking"}` → `{"type": "response", "data": AgentResponse}` → `{"type": "error"}`. Finaliza con `data: [DONE]`. Frontend: `sendStream()` con placeholder `thinkingId` que se actualiza in-place.
 
@@ -369,6 +372,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | 10 | ✅ | Observabilidad, DeterministicFinance, ValidationGate, configuración segura, motor financiero robusto |
 | 11 | ✅ | ETL Hardening: provenance tagging, ChatMemoryService, chat unificado con memoria persistente, agent automation rules |
 | 12 | ✅ | Custom fields por vertical: `vertical_field_definitions`, `tenant_custom_field_definitions`, undo log, panel en `/settings` + ERD |
+| 13 | ✅ | Datos editables/borrables unificados: soft delete auditado en ventas/gastos, sistema de reparación de importaciones mal clasificadas, product lookup en AgentCash |
 
 ### Cadena de migraciones (recientes)
 
@@ -386,6 +390,8 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `20260503_0001` | columna `provenance VARCHAR(10)` en `sales_entries` + `expense_entries` |
 | `20260503_0002` | `chat_session_log` (ORM: `ChatSessionLog`) — 4ª capa de memoria |
 | `20260508_0001` | custom fields: `custom_fields JSONB` en 4 tablas core + `vertical_field_definitions` + `tenant_custom_field_definitions` + `tenant_field_change_log` |
+| `20260510_0001` | soft delete en `sales_entries` (`voided_at`, `void_reason`) + tablas `data_repair_runs` + `data_repair_items` |
+| `20260511_0001` | soft delete en `expense_entries` + `products` (`voided_at`, `void_reason`); amplía check constraint de `data_repair_items` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
 

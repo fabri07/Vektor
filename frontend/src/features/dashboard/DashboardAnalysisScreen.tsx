@@ -452,7 +452,7 @@ function BreakdownPanels() {
                 <div>
                   <p className="text-sm font-medium text-vk-text-primary">{p.name}</p>
                   <p className="text-xs text-vk-text-muted">
-                    Stock: {p.stock_units} / mínimo {p.low_stock_threshold_units}
+                    Stock: {p.stock_units} / mínimo {p.low_stock_threshold_units ?? 5}
                   </p>
                 </div>
                 <span

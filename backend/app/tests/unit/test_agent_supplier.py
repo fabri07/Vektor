@@ -61,11 +61,12 @@ async def test_purchase_intent_returns_register():
 
 
 @pytest.mark.asyncio
-async def test_unknown_returns_clarification():
+async def test_ambiguous_message_routes_to_query():
+    # Mensaje ambiguo → cae en _handle_query (sin session → SIN_DATOS)
     agent = AgentSupplier()
     resp = await agent.process(_req("proveedor"))
-    assert resp.status == "requires_clarification"
-    assert resp.question is not None
+    assert resp.status == "success"
+    assert resp.result.get("summary") == "SIN_DATOS"
 
 
 @pytest.mark.asyncio

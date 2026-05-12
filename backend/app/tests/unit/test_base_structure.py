@@ -59,7 +59,8 @@ def test_action_type_enum_complete():
 
 
 def test_intent_catalog_complete():
-    assert len(INTENT_CATALOG) == 16
+    # 16 originales + ask_stock_status + ask_supplier_status = 18
+    assert len(INTENT_CATALOG) == 18
 
 
 def test_wrap_user_input():

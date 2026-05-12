@@ -38,7 +38,9 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     unit_cost_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     stock_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    low_stock_threshold_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    low_stock_threshold_units: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
     custom_fields: Mapped[dict[str, Any]] = mapped_column(

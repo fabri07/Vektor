@@ -30,7 +30,7 @@ export interface MarginCategoryRow {
 }
 
 export interface StockStatusRow {
-  id: "ok" | "low" | "out" | "incoming";
+  id: "ok" | "low" | "out";
   label: string;
   count: number;
   colorClass: string;
@@ -230,14 +230,7 @@ export function buildStockStatuses(products: ProductResponse[]): StockStatusRow[
       colorClass: "bg-vektor-red text-vektor-white",
       description: "Productos agotados. Perdés ventas si no reponés.",
     },
-    {
-      id: "incoming",
-      label: "En camino",
-      count: 0,
-      colorClass: "bg-vektor-blue text-vektor-white",
-      // TODO: requires purchase_order status in API.
-      description: "Comprado al proveedor pero aún no recibido en tu local.",
-    },
+    // "En camino" se implementa cuando existan purchase_orders — no mostrar placeholder.
   ];
 }
 

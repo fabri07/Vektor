@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import date, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import anthropic
-
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.product_resolver import resolve_product_id
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, LLMCall, RiskLevel, UsageSummary
+from app.application.agents.shared.schemas import (
+    ActionType,
+    AgentRequest,
+    AgentResponse,
+    Confidence,
+    LLMCall,
+    RiskLevel,
+    UsageSummary,
+)
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
@@ -28,7 +39,7 @@ class AgentSupplier(BaseAgent):
     def __init__(
         self,
         session: AsyncSession | None = None,
-        gateway: "McpToolGateway | None" = None,
+        gateway: McpToolGateway | None = None,
     ) -> None:
         self._session = session
         self._gateway = gateway
@@ -53,6 +64,9 @@ class AgentSupplier(BaseAgent):
         if intent == "record_purchase":
             return await self._handle_record_purchase(request)
 
+        if intent == "query":
+            return await self._handle_query(request)
+
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,
@@ -61,6 +75,7 @@ class AgentSupplier(BaseAgent):
             confidence=Confidence.MEDIUM,
             question=(
                 "¿Qué necesitás hacer con el proveedor?\n"
+                "- Consultar mis proveedores y compras\n"
                 "- Redactar un email de compra\n"
                 "- Revisar mensajes recibidos\n"
                 "- Registrar una compra manualmente"
@@ -320,12 +335,133 @@ class AgentSupplier(BaseAgent):
             "email a ", "mail a ", "un mail a", "un email a",
             "podés enviar", "puedes enviar", "podés mandar", "puedes mandar",
         )
-        purchase_keywords = ("compra", "compré", "compramos", "registrar compra", "factura", "proveedor cobró")
+        # Frases analíticas: se evalúan ANTES que purchase_keywords porque "compré"
+        # está en ambas y las consultas como "a quién le compré más" son más específicas.
+        query_keywords = (
+            "qué proveedores", "proveedores tengo", "a quién le compré", "a quien le compré",
+            "proveedores principales", "cuánto le compré", "cuánto les compré",
+            "últimas compras por proveedor", "mis proveedores", "análisis de proveedores",
+            "proveedores del mes", "proveedores del año",
+        )
+        # Frases de registro/mutación: verbos de acción concretos.
+        purchase_keywords = (
+            "registrar compra", "registrá compra", "factura de", "proveedor cobró",
+            "me mandaron factura", "quiero registrar",
+        )
 
         if any(kw in message for kw in inbox_keywords):
             return "classify_inbox"
         if any(kw in message for kw in draft_keywords):
             return "create_draft"
+        # query va antes que purchase para que frases analíticas no pisen registro
+        if any(kw in message for kw in query_keywords):
+            return "query"
         if any(kw in message for kw in purchase_keywords):
             return "record_purchase"
+        # Fallback: si el CEO rutea ask_supplier_status → query
         return "query"
+
+    async def _handle_query(self, request: AgentRequest) -> AgentResponse:
+        """Analiza proveedores de los últimos 90 días a partir de gastos reales."""
+        if self._session is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                result={"summary": "SIN_DATOS", "message": "Sin acceso a base de datos."},
+            )
+
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except ValueError:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="error",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                result={"summary": "SIN_DATOS", "message": "Tenant inválido."},
+            )
+
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        period_days = 90
+        cutoff = date.today() - timedelta(days=period_days)
+
+        rows = await self._session.execute(
+            select(ExpenseEntry).where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.transaction_date >= cutoff,
+                ExpenseEntry.supplier_name.isnot(None),
+                ExpenseEntry.supplier_name != "",
+                ExpenseEntry.voided_at.is_(None),
+                ExpenseEntry.provenance == "REAL",
+            )
+        )
+        expenses = list(rows.scalars().all())
+
+        if not expenses:
+            logger.info("agent_supplier.query.empty", tenant_id=str(tenant_id))
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.HIGH,
+                result={
+                    "summary": "SIN_PROVEEDORES",
+                    "period_days": period_days,
+                    "message": f"No hay gastos con proveedor registrados en los últimos {period_days} días.",
+                },
+            )
+
+        # Agrupar por proveedor
+        suppliers: dict[str, dict[str, Any]] = {}
+        for e in expenses:
+            name = (e.supplier_name or "").strip()
+            if not name:
+                continue
+            if name not in suppliers:
+                suppliers[name] = {
+                    "total": Decimal(0),
+                    "count": 0,
+                    "last_date": e.transaction_date,
+                }
+            suppliers[name]["total"] += e.amount
+            suppliers[name]["count"] += 1
+            if e.transaction_date > suppliers[name]["last_date"]:
+                suppliers[name]["last_date"] = e.transaction_date
+
+        top = sorted(suppliers.items(), key=lambda x: x[1]["total"], reverse=True)[:5]
+        top_list = [
+            {
+                "name": name,
+                "total": float(data["total"]),
+                "count": data["count"],
+                "last_purchase": str(data["last_date"]),
+            }
+            for name, data in top
+        ]
+
+        logger.info(
+            "agent_supplier.query",
+            tenant_id=str(tenant_id),
+            unique_suppliers=len(suppliers),
+            period_days=period_days,
+        )
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            confidence=Confidence.HIGH,
+            result={
+                "summary": "supplier_query",
+                "period_days": period_days,
+                "unique_suppliers": len(suppliers),
+                "top_suppliers": top_list,
+            },
+        )

@@ -23,7 +23,9 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.application.security.prompt_defense import wrap_user_input
+from app.domain.product import effective_threshold
 from app.integrations.anthropic_client import get_anthropic_async_client
+from app.observability.logger import get_logger
 
 
 class StockAdjustEntity(BaseModel):
@@ -318,11 +320,100 @@ class AgentStock(BaseAgent):
             }, extract_call
 
     async def _handle_query(self, request: AgentRequest) -> AgentResponse:
+        logger = get_logger(__name__)
+        if self._db is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                result={"summary": "SIN_DATOS", "message": "Sin acceso a base de datos."},
+            )
+
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except ValueError:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="error",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                result={"summary": "SIN_DATOS", "message": "Tenant inválido."},
+            )
+
+        from app.persistence.models.product import Product  # noqa: PLC0415
+
+        rows = await self._db.execute(
+            select(Product).where(
+                Product.tenant_id == tenant_id,
+                Product.is_active.is_(True),
+                Product.provenance == "REAL",
+            )
+        )
+        products = list(rows.scalars().all())
+
+        if not products:
+            logger.info("agent_stock.query.empty", tenant_id=str(tenant_id))
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.HIGH,
+                result={
+                    "summary": "SIN_PRODUCTOS",
+                    "message": "No hay productos cargados en el catálogo todavía.",
+                    "total_products": 0,
+                },
+            )
+
+        out_of_stock = [p for p in products if p.stock_units == 0]
+        low_stock = [
+            p for p in products
+            if p.stock_units > 0
+            and p.stock_units <= effective_threshold(p.low_stock_threshold_units)
+        ]
+        ok_stock = [
+            p for p in products
+            if p.stock_units > effective_threshold(p.low_stock_threshold_units)
+        ]
+
+        # Top 5 más críticos (sin stock primero, luego por unidades ascendente)
+        critical = sorted(out_of_stock + low_stock, key=lambda p: p.stock_units)[:5]
+        critical_list = [
+            {
+                "name": p.name,
+                "stock": p.stock_units,
+                "threshold": effective_threshold(p.low_stock_threshold_units),
+            }
+            for p in critical
+        ]
+
+        logger.info(
+            "agent_stock.query",
+            tenant_id=str(tenant_id),
+            total=len(products),
+            out_of_stock=len(out_of_stock),
+            low_stock=len(low_stock),
+            ok=len(ok_stock),
+            used_fallback=sum(1 for p in products if p.low_stock_threshold_units is None),
+        )
+
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,
             status="success",
             risk_level=RiskLevel.LOW,
             confidence=Confidence.HIGH,
-            result={"summary": "Consultá el dashboard para ver el estado del inventario."},
+            result={
+                "summary": "stock_query",
+                "total_products": len(products),
+                "in_stock": len(ok_stock),
+                "low_stock": len(low_stock),
+                "out_of_stock": len(out_of_stock),
+                "critical_products": critical_list,
+                "period": "realtime",
+            },
         )

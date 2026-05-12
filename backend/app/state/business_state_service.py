@@ -68,7 +68,8 @@ class ProductSummary:
     product_id: UUID
     name: str
     stock_units: int
-    low_stock_threshold_units: int
+    # None = no configurado por el tenant; se interpreta con effective_threshold()
+    low_stock_threshold_units: int | None
     sale_price_ars: Decimal
     units_sold_30d: int | None = None
 
@@ -155,7 +156,7 @@ def _deserialize_state(raw: str) -> BusinessState:
             product_id=UUID(p["product_id"]),
             name=p["name"],
             stock_units=p["stock_units"],
-            low_stock_threshold_units=p.get("low_stock_threshold_units", 0),
+            low_stock_threshold_units=p.get("low_stock_threshold_units"),  # None = usar default
             sale_price_ars=Decimal(p["sale_price_ars"]),
             units_sold_30d=p.get("units_sold_30d"),
         )

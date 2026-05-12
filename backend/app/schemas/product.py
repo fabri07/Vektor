@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field
 
+from app.domain.product import effective_threshold
+
 
 class ProductResponse(BaseModel):
     model_config = {"from_attributes": True}
@@ -20,7 +22,8 @@ class ProductResponse(BaseModel):
     sale_price_ars: Decimal
     unit_cost_ars: Decimal | None
     stock_units: int
-    low_stock_threshold_units: int
+    # NULL = no configurado (usa DEFAULT_LOW_STOCK_THRESHOLD_UNITS); 0 = umbral explícito
+    low_stock_threshold_units: int | None
     is_active: bool
     custom_fields: dict[str, Any] = {}
     deactivated_at: datetime | None = None
@@ -38,7 +41,7 @@ class ProductResponse(BaseModel):
     @computed_field  # type: ignore[misc]
     @property
     def is_low_stock(self) -> bool:
-        return self.stock_units <= self.low_stock_threshold_units
+        return self.stock_units <= effective_threshold(self.low_stock_threshold_units)
 
 
 class CreateProductRequest(BaseModel):
@@ -47,7 +50,8 @@ class CreateProductRequest(BaseModel):
     unit_cost_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     sale_price_ars: Decimal = Field(gt=0, decimal_places=2)
     stock_units: int = Field(default=0, ge=0)
-    low_stock_threshold_units: int = Field(default=0, ge=0)
+    # None = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS; 0 = explícito, solo sin-stock aplica
+    low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
