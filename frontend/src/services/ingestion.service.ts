@@ -11,10 +11,17 @@ export interface UploadedFileItem {
   created_at: string;
 }
 
+export interface ColumnAtRisk {
+  column: string;
+  null_pct: number;
+  recommendation: string;
+}
+
 export interface FilePreview {
   file_id: string;
   processing_status: string;
   parsed_summary_json: Record<string, unknown> | null;
+  columns_at_risk: ColumnAtRisk[];
 }
 
 export interface ConfirmIngestionResult {
@@ -76,6 +83,17 @@ export const ingestionService = {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
       { confirmed_fields: confirmedFields },
+    );
+    return res.data;
+  },
+
+  async dropColumns(
+    fileId: string,
+    columns: string[],
+  ): Promise<{ file_id: string; dropped_columns: string[] }> {
+    const res = await api.post<{ file_id: string; dropped_columns: string[] }>(
+      `/ingestion/files/${fileId}/drop-columns`,
+      { columns },
     );
     return res.data;
   },

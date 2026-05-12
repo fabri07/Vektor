@@ -24,12 +24,23 @@ class FileStatusItem(BaseModel):
     created_at: datetime
 
 
+class ColumnAtRisk(BaseModel):
+    column: str
+    null_pct: float
+    recommendation: str = "drop"
+
+
 class FilePreviewResponse(BaseModel):
     model_config = {"from_attributes": True}
 
     file_id: UUID
     processing_status: str
     parsed_summary_json: dict[str, Any] | None
+    columns_at_risk: list[ColumnAtRisk] = []
+
+
+class DropColumnsRequest(BaseModel):
+    columns: list[str] = Field(description="Columnas a eliminar antes de confirmar la importación.")
 
 
 class ConfirmIngestionRequest(BaseModel):

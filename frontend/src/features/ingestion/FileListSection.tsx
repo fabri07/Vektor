@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, CheckCircle } from "lucide-react";
 import {
   ingestionService,
+  type ColumnAtRisk,
   type UploadedFileItem,
 } from "@/services/ingestion.service";
 
@@ -50,11 +51,20 @@ function ConfirmPanel({ fileId, onDone }: { fileId: string; onDone: () => void }
     gastos: true,
     productos: true,
   });
+  const [droppedColumns, setDroppedColumns] = useState<string[]>([]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["ingestion-preview", fileId],
     queryFn: () => ingestionService.getPreview(fileId),
     retry: false,
+  });
+
+  const dropMutation = useMutation({
+    mutationFn: (cols: string[]) => ingestionService.dropColumns(fileId, cols),
+    onSuccess: (result) => {
+      setDroppedColumns((prev) => [...new Set([...prev, ...result.dropped_columns])]);
+      void queryClient.invalidateQueries({ queryKey: ["ingestion-preview", fileId] });
+    },
   });
 
   const confirmMutation = useMutation({
@@ -76,6 +86,9 @@ function ConfirmPanel({ fileId, onDone }: { fileId: string; onDone: () => void }
   const rows = Array.isArray(summary?.ventas_detectadas)
     ? (summary.ventas_detectadas as Record<string, unknown>[]).slice(0, 5)
     : null;
+  const columnsAtRisk: ColumnAtRisk[] = (data?.columns_at_risk ?? []).filter(
+    (c) => !droppedColumns.includes(c.column),
+  );
 
   return (
     <div className="ml-2 mt-3 rounded-lg border border-vk-warning/20 bg-vk-warning-bg p-4">
@@ -112,6 +125,39 @@ function ConfirmPanel({ fileId, onDone }: { fileId: string; onDone: () => void }
               {summary.rows_processed} filas en total
             </p>
           )}
+        </div>
+      )}
+
+      {columnsAtRisk.length > 0 && (
+        <div className="mb-3 rounded-lg border border-vk-danger/30 bg-vk-danger-bg p-3">
+          <p className="mb-2 text-xs font-medium text-vk-danger">
+            Columnas con datos incompletos (&gt;35% vacíos)
+          </p>
+          {columnsAtRisk.map((col) => (
+            <div key={col.column} className="mb-2 flex items-center justify-between gap-2 text-xs">
+              <span className="font-mono text-vk-text-secondary">
+                {col.column}{" "}
+                <span className="text-vk-danger">({Math.round(col.null_pct * 100)}% vacíos)</span>
+              </span>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => dropMutation.mutate([col.column])}
+                  disabled={dropMutation.isPending}
+                  className="rounded bg-vk-danger px-2 py-0.5 text-xs text-white hover:opacity-80 disabled:opacity-50"
+                >
+                  Eliminar columna
+                </button>
+                <button
+                  type="button"
+                  onClick={onDone}
+                  className="rounded border border-vk-border-w px-2 py-0.5 text-xs text-vk-text-secondary hover:bg-vk-bg-light"
+                >
+                  Cancelar y completar datos
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

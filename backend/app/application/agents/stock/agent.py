@@ -301,8 +301,9 @@ class AgentStock(BaseAgent):
             "Sos el asistente de inventario de Véktor.\n"
             "Extraé del mensaje los campos a actualizar en un producto. Retorná SOLO un JSON:\n"
             "{{\n"
-            '  "product_name": "<nombre del producto o null>",\n'
-            '  "sku": "<SKU si se menciona o null>",\n'
+            '  "product_name": "<nombre o descripción del producto para identificarlo, o null>",\n'
+            '  "sku": "<SKU actual del producto para identificarlo, o null — NO el nuevo SKU>",\n'
+            '  "new_sku": "<nuevo SKU si el usuario pide cambiar el SKU, o null>",\n'
             '  "sale_price_ars": <nuevo precio de venta o null>,\n'
             '  "unit_cost_ars": <nuevo costo unitario o null>,\n'
             '  "low_stock_threshold_units": <nuevo umbral de pocas unidades o null>,\n'
@@ -359,7 +360,7 @@ class AgentStock(BaseAgent):
 
         product_id, alternatives = await self._resolve_product_id(
             entities.get("product_name"),
-            entities.get("sku"),
+            entities.get("sku"),  # sku como identificador (no como campo a actualizar)
             request.business_id,
         )
 
@@ -369,6 +370,7 @@ class AgentStock(BaseAgent):
             ), extract_call
 
         # Construir payload solo con campos mencionados
+        # new_sku se mapea a "sku" para actualizar el campo en el producto
         _UPDATABLE = (
             "sale_price_ars", "unit_cost_ars", "low_stock_threshold_units",
             "is_active", "name", "category", "stock_units",
@@ -378,6 +380,8 @@ class AgentStock(BaseAgent):
             for k in _UPDATABLE
             if entities.get(k) is not None
         }
+        if entities.get("new_sku"):
+            update_fields["sku"] = entities["new_sku"]
 
         if not update_fields:
             return AgentResponse(

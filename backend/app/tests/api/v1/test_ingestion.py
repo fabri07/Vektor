@@ -605,7 +605,8 @@ class TestIngestionWorkers:
     async def test_analyze_headers_high_confidence(self) -> None:
         from app.jobs.ingestion_worker import _analyze_headers
 
-        headers = ["fecha", "monto", "descripcion", "producto"]
+        # Sin señal de catálogo (sin "producto"/"sku"/etc.) → HIGH
+        headers = ["fecha", "monto", "descripcion", "metodo_pago"]
         result = _analyze_headers(headers)
         assert result["confidence"] == "HIGH"
         assert result["has_fecha"] is True

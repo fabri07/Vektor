@@ -49,8 +49,10 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.file_repository import FileRepository
 from app.schemas.ingestion import (
+    ColumnAtRisk,
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
+    DropColumnsRequest,
     FilePreviewResponse,
     FileStatusItem,
     UploadResponse,
@@ -260,11 +262,72 @@ async def get_file_preview(
             detail=f"El archivo aún se está procesando (estado: {record.processing_status}).",
         )
 
+    raw_at_risk = (record.parsed_summary_json or {}).get("columns_at_risk", [])
+    columns_at_risk = [ColumnAtRisk(**col) for col in raw_at_risk if isinstance(col, dict)]
+
     return FilePreviewResponse(
         file_id=record.id,
         processing_status=record.processing_status,
         parsed_summary_json=record.parsed_summary_json,
+        columns_at_risk=columns_at_risk,
     )
+
+
+@router.post(
+    "/files/{file_id}/drop-columns",
+    summary="Drop risky columns and keep file in NEEDS_CONFIRMATION",
+)
+async def drop_columns(
+    file_id: uuid.UUID,
+    body: DropColumnsRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    if record.processing_status != PROCESSING_STATUS_NEEDS_CONFIRMATION:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Solo se pueden eliminar columnas en archivos pendientes de confirmación.",
+        )
+
+    summary = dict(record.parsed_summary_json or {})
+    columns_to_drop = set(body.columns)
+
+    # Eliminar columnas del summary (headers, preview_rows, columns_at_risk)
+    summary["headers"] = [h for h in summary.get("headers", []) if h not in columns_to_drop]
+    summary["columns"] = summary["headers"]
+    summary["columns_at_risk"] = [
+        c for c in summary.get("columns_at_risk", [])
+        if c.get("column") not in columns_to_drop
+    ]
+    summary["preview_rows"] = [
+        {k: v for k, v in row.items() if k not in columns_to_drop}
+        for row in summary.get("preview_rows", [])
+    ]
+    for data_key in ("ventas_detectadas", "gastos_detectados", "productos_detectados"):
+        if isinstance(summary.get(data_key), list):
+            summary[data_key] = [
+                {k: v for k, v in row.items() if k not in columns_to_drop}
+                for row in summary[data_key]
+            ]
+    summary.setdefault("warnings", []).append(
+        f"Columnas eliminadas por el usuario: {', '.join(sorted(columns_to_drop))}."
+    )
+
+    record.parsed_summary_json = summary
+    await repo.save(record)
+    await session.commit()
+
+    logger.info(
+        "ingestion.drop_columns",
+        file_id=str(file_id),
+        dropped=list(columns_to_drop),
+    )
+    return {"file_id": str(file_id), "dropped_columns": list(columns_to_drop)}
 
 
 @router.delete(

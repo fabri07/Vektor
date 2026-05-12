@@ -200,6 +200,35 @@ def flag_columns_at_risk(
     ]
 
 
+def impute_column(values: list, field_type: str) -> list:
+    """Imputa valores nulos en una columna según su tipo.
+
+    - field_type='quantity': nulos → 0
+    - field_type='numeric':  nulos → mediana de los valores válidos
+    - field_type='categorical': nulos → None (sin imputación)
+    """
+    import math  # noqa: PLC0415
+    from decimal import Decimal  # noqa: PLC0415
+
+    def _is_null(v: object) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return True
+        return str(v).strip().lower() in _NULL_STRINGS
+
+    if field_type == "quantity":
+        return [0 if _is_null(v) else v for v in values]
+
+    if field_type == "numeric":
+        median = impute_column_median(values)
+        fill = median if median is not None else Decimal("0")
+        return [fill if _is_null(v) else v for v in values]
+
+    # categorical — sin imputación
+    return [None if _is_null(v) else v for v in values]
+
+
 def impute_column_median(values: list) -> "Decimal | None":
     """Calcula la mediana de una lista de valores numéricos.
     Usa mediana (resistente a outliers de precios) en vez de media.
@@ -478,14 +507,22 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
         headers = rows[0]
         data_rows = rows[1:]
         analysis = analyze_headers(headers)
-        preview_rows = rows_to_dicts(headers, data_rows[:50])
+        all_dicts = rows_to_dicts(headers, data_rows)
+        preview_rows = all_dicts[:10]
+        null_stats = compute_column_null_stats(all_dicts)
+        at_risk = flag_columns_at_risk(null_stats)
         summary.update(analysis)
         summary["headers"] = headers
         summary["rows_processed"] = len(data_rows)
         summary["row_count"] = len(data_rows)
         summary["columns"] = headers
-        summary["preview_rows"] = preview_rows[:10]
-        _store_rows_by_type(summary, preview_rows, analysis.get("inferred_type", "general"))
+        summary["preview_rows"] = preview_rows
+        if at_risk:
+            summary["columns_at_risk"] = at_risk
+            summary["warnings"].append(
+                f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
+            )
+        _store_rows_by_type(summary, all_dicts[:50], analysis.get("inferred_type", "general"))
         return summary
 
     import openpyxl  # noqa: PLC0415
@@ -514,14 +551,22 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
         ]
         data_rows = [list(row) for row in all_rows[1:]]
         analysis = analyze_headers(headers)
-        preview_rows = rows_to_dicts(headers, data_rows[:50])
+        all_dicts = rows_to_dicts(headers, data_rows)
+        preview_rows = all_dicts[:10]
+        null_stats = compute_column_null_stats(all_dicts)
+        at_risk = flag_columns_at_risk(null_stats)
         summary.update(analysis)
         summary["headers"] = headers
         summary["rows_processed"] = len(data_rows)
         summary["row_count"] = len(data_rows)
         summary["columns"] = headers
-        summary["preview_rows"] = preview_rows[:10]
-        _store_rows_by_type(summary, preview_rows, analysis.get("inferred_type", "general"))
+        summary["preview_rows"] = preview_rows
+        if at_risk:
+            summary["columns_at_risk"] = at_risk
+            summary["warnings"].append(
+                f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
+            )
+        _store_rows_by_type(summary, all_dicts[:50], analysis.get("inferred_type", "general"))
         return summary
     finally:
         workbook.close()

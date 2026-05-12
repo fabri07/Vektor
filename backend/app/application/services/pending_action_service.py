@@ -345,8 +345,11 @@ async def execute_pending_action(
                     else:
                         setattr(product, field, value)
                 await repo.save(product)
-                from app.jobs.score_trigger import trigger_score_recalculation  # noqa: PLC0415
-                trigger_score_recalculation.delay(str(action.tenant_id), "product_updated")
+                # Solo recalcular score cuando cambian campos que afectan métricas financieras
+                _SCORE_RELEVANT = {"sale_price_ars", "unit_cost_ars", "stock_units"}
+                if update_fields.keys() & _SCORE_RELEVANT:
+                    from app.jobs.score_trigger import trigger_score_recalculation  # noqa: PLC0415
+                    trigger_score_recalculation.delay(str(action.tenant_id), "product_updated")
             else:
                 logger.warning(
                     "execute_pending_action: UPDATE_PRODUCT product not found",

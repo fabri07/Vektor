@@ -1,5 +1,6 @@
 """Pydantic schemas for sales and expense endpoints."""
 
+import math
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -9,6 +10,19 @@ from pydantic import BaseModel, Field, field_validator
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
 _MAX_AMOUNT = Decimal("999999999")
+
+
+def _reject_nan_inf(v: Decimal | None, field_name: str = "amount") -> Decimal | None:
+    """Rechaza NaN/Infinity de Decimals que provengan de floats."""
+    if v is None:
+        return v
+    try:
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv):
+            raise ValueError(f"{field_name} no puede ser NaN ni Infinity.")
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(str(exc)) from exc
+    return v
 
 
 # ── Sales ─────────────────────────────────────────────────────────────────────
@@ -38,6 +52,11 @@ class CreateSaleRequest(BaseModel):
     product_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("amount")
+    @classmethod
+    def amount_no_nan(cls, v: Decimal) -> Decimal:
+        return _reject_nan_inf(v, "amount")  # type: ignore[return-value]
 
     @field_validator("transaction_date")
     @classmethod
@@ -128,6 +147,11 @@ class CreateExpenseRequest(BaseModel):
     )
     supplier_name: str | None = Field(default=None, max_length=300)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("amount")
+    @classmethod
+    def amount_no_nan(cls, v: Decimal) -> Decimal:
+        return _reject_nan_inf(v, "amount")  # type: ignore[return-value]
 
     @field_validator("expense_date")
     @classmethod

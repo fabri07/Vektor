@@ -55,12 +55,13 @@ def test_heuristic_to_prompt_fragment_is_numeric():
 
 
 def test_action_type_enum_complete():
-    assert len(ActionType) == 16
+    # 16 originales + UPDATE_PRODUCT (sprint 14) = 17
+    assert len(ActionType) == 17
 
 
 def test_intent_catalog_complete():
-    # 16 originales + ask_stock_status + ask_supplier_status = 18
-    assert len(INTENT_CATALOG) == 18
+    # 16 originales + ask_stock_status + ask_supplier_status + update_product = 19
+    assert len(INTENT_CATALOG) == 19
 
 
 def test_wrap_user_input():
