@@ -214,7 +214,6 @@ export function DashboardSummaryCards({ sales, expenses, products, loading }: Pr
                   <button
                     type="button"
                     onClick={() => {
-                      if (status.id === "incoming") return;
                       router.push(`/products?stock=${status.id}`);
                     }}
                     aria-label={`Filtrar productos por ${status.label}`}
