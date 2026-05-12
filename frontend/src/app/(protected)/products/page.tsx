@@ -13,7 +13,7 @@ import { Modal } from "@/components/ui/Modal";
 import { productsService, type ProductResponse } from "@/services/products.service";
 import { useToastStore } from "@/stores/toastStore";
 
-type StockFilter = "all" | "ok" | "low" | "out";
+type StockFilter = "all" | "in_stock" | "low_stock" | "out_of_stock";
 
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
@@ -25,27 +25,37 @@ function formatARS(value: number): string {
 }
 
 function getStockBadge(product: ProductResponse) {
-  if (product.stock_units === 0) {
-    return <Badge variant="danger">Sin stock</Badge>;
-  }
-  if (product.is_low_stock) {
-    return <Badge variant="warning">Stock bajo</Badge>;
-  }
-  return <Badge variant="success">OK</Badge>;
+  const status = product.stock_status ?? (
+    product.stock_units === 0 ? "out_of_stock" : product.is_low_stock ? "low_stock" : "in_stock"
+  );
+  if (status === "out_of_stock") return <Badge variant="danger">Sin stock</Badge>;
+  if (status === "low_stock") return <Badge variant="warning">Pocas unidades</Badge>;
+  return <Badge variant="success">En stock</Badge>;
+}
+
+function getStockCsvLabel(product: ProductResponse): string {
+  const status = product.stock_status ?? (
+    product.stock_units === 0 ? "out_of_stock" : product.is_low_stock ? "low_stock" : "in_stock"
+  );
+  if (status === "out_of_stock") return "Sin stock";
+  if (status === "low_stock") return "Pocas unidades";
+  return "En stock";
 }
 
 function stockSort(a: ProductResponse, b: ProductResponse): number {
-  // out → low → ok
-  const rank = (p: ProductResponse) =>
-    p.stock_units === 0 ? 0 : p.is_low_stock ? 1 : 2;
+  // out_of_stock → low_stock → in_stock
+  const rank = (p: ProductResponse) => {
+    const s = p.stock_status ?? (p.stock_units === 0 ? "out_of_stock" : p.is_low_stock ? "low_stock" : "in_stock");
+    return s === "out_of_stock" ? 0 : s === "low_stock" ? 1 : 2;
+  };
   return rank(a) - rank(b);
 }
 
 const STOCK_FILTER_OPTIONS: { value: StockFilter; label: string }[] = [
   { value: "all", label: "Todos" },
-  { value: "ok", label: "OK" },
-  { value: "low", label: "Stock bajo" },
-  { value: "out", label: "Sin stock" },
+  { value: "in_stock", label: "En stock" },
+  { value: "low_stock", label: "Pocas unidades" },
+  { value: "out_of_stock", label: "Sin stock" },
 ];
 
 const COLUMNS = [
@@ -102,21 +112,22 @@ const COLUMNS = [
     hideable: true,
     render: (_: unknown, row: Record<string, unknown>) =>
       getStockBadge(row as unknown as ProductResponse),
-    csvValue: (_: unknown, row: Record<string, unknown>) => {
-      const product = row as unknown as ProductResponse;
-      if (product.stock_units === 0) return "Sin stock";
-      if (product.is_low_stock) return "Stock bajo";
-      return "OK";
-    },
+    csvValue: (_: unknown, row: Record<string, unknown>) =>
+      getStockCsvLabel(row as unknown as ProductResponse),
   },
 ];
 
 export default function ProductsPage() {
   const searchParams = useSearchParams();
-  const initialFilter = (searchParams.get("stock") as StockFilter | null) ?? "all";
-  const [stockFilter, setStockFilter] = useState<StockFilter>(
-    initialFilter === "ok" || initialFilter === "low" || initialFilter === "out" ? initialFilter : "all",
-  );
+  const rawFilter = searchParams.get("stock");
+  // Acepta tanto los valores nuevos como los aliases viejos (ok→in_stock, low→low_stock, out→out_of_stock)
+  const resolveFilter = (v: string | null): StockFilter => {
+    if (v === "ok" || v === "in_stock") return "in_stock";
+    if (v === "low" || v === "low_stock") return "low_stock";
+    if (v === "out" || v === "out_of_stock") return "out_of_stock";
+    return "all";
+  };
+  const [stockFilter, setStockFilter] = useState<StockFilter>(resolveFilter(rawFilter));
   const [editing, setEditing] = useState<ProductResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
@@ -166,12 +177,13 @@ export default function ProductsPage() {
     0,
   );
 
-  // Apply filter
+  // Apply filter usando stock_status del backend, con fallback al cálculo local
   const filtered = products.filter((p) => {
-    if (stockFilter === "ok") return p.stock_units > 0 && !p.is_low_stock;
-    if (stockFilter === "low") return p.is_low_stock && p.stock_units > 0;
-    if (stockFilter === "out") return p.stock_units === 0;
-    return true;
+    const status = p.stock_status ?? (
+      p.stock_units === 0 ? "out_of_stock" : p.is_low_stock ? "low_stock" : "in_stock"
+    );
+    if (stockFilter === "all") return true;
+    return status === stockFilter;
   });
 
   // Add _status key for the table (unused by render, just for key lookup)

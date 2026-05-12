@@ -209,22 +209,26 @@ export function DashboardSummaryCards({ sales, expenses, products, loading }: Pr
         ) : (
           <>
             <div className="mt-5 flex flex-wrap gap-3">
-              {stockStatuses.map((status) => (
-                <Tooltip key={status.id} content={status.description}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      router.push(`/products?stock=${status.id}`);
-                    }}
-                    aria-label={`Filtrar productos por ${status.label}`}
-                    className="inline-flex items-center gap-2 rounded-full border border-vektor-border bg-vektor-surface px-4 py-2 text-sm font-medium text-vektor-body"
-                  >
-                    <span className={`h-2.5 w-2.5 rounded-full ${status.colorClass.split(" ")[0]}`} />
-                    <span>{status.label}</span>
-                    <span className="text-vektor-white">{status.count}</span>
-                  </button>
-                </Tooltip>
-              ))}
+              {stockStatuses.map((status) => {
+                const isStub = status.id === "incoming";
+                return (
+                  <Tooltip key={status.id} content={status.description}>
+                    <button
+                      type="button"
+                      disabled={isStub}
+                      onClick={() => {
+                        if (!isStub) router.push(`/products?stock=${status.id}`);
+                      }}
+                      aria-label={`Filtrar productos por ${status.label}`}
+                      className={`inline-flex items-center gap-2 rounded-full border border-vektor-border bg-vektor-surface px-4 py-2 text-sm font-medium text-vektor-body${isStub ? " cursor-not-allowed opacity-50" : ""}`}
+                    >
+                      <span className={`h-2.5 w-2.5 rounded-full ${status.colorClass.split(" ")[0]}`} />
+                      <span>{status.label}</span>
+                      <span className="text-vektor-white">{status.count}</span>
+                    </button>
+                  </Tooltip>
+                );
+              })}
             </div>
             <p className="mt-4 text-sm leading-6 text-vektor-muted">
               Tocá un estado para abrir la vista de inventario ya filtrada cuando haya productos para revisar.

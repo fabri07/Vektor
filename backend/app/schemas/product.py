@@ -43,6 +43,17 @@ class ProductResponse(BaseModel):
     def is_low_stock(self) -> bool:
         return self.stock_units <= effective_threshold(self.low_stock_threshold_units)
 
+    @computed_field  # type: ignore[misc]
+    @property
+    def stock_status(self) -> str:
+        """Estado canónico del producto: in_stock | low_stock | out_of_stock.
+        'incoming' se reserva para cuando existan purchase_orders."""
+        if self.stock_units == 0:
+            return "out_of_stock"
+        if self.is_low_stock:
+            return "low_stock"
+        return "in_stock"
+
 
 class CreateProductRequest(BaseModel):
     name: str = Field(min_length=1, max_length=300)

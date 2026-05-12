@@ -132,8 +132,11 @@ class AgentStock(BaseAgent):
             "Clasificá el mensaje en exactamente uno de estos intents de inventario:\n"
             "STOCK_LOSS: merma, pérdida, rotura, vencimiento, daño, desaparición de producto.\n"
             "STOCK_ADJUSTMENT: ajuste de inventario, conteo, corrección de stock.\n"
+            "PRODUCT_UPDATE: cambiar precio, costo, umbral de stock bajo, activar/desactivar "
+            "un producto, renombrar, editar categoría, modificar descripción, cambiar estado "
+            "(aclarar que estado es derivado), ajustar stock a valor específico.\n"
             "STOCK_QUERY: consulta sobre stock, disponibilidad, qué hay en inventario.\n\n"
-            'Retorná SOLO un JSON: {"intent": "<STOCK_LOSS|STOCK_ADJUSTMENT|STOCK_QUERY>"}'
+            'Retorná SOLO un JSON: {"intent": "<STOCK_LOSS|STOCK_ADJUSTMENT|PRODUCT_UPDATE|STOCK_QUERY>"}'
         )
         try:
             resp = await self.client.messages.create(
@@ -150,7 +153,7 @@ class AgentStock(BaseAgent):
             )
             result = json.loads(resp.content[0].text.strip())
             intent = result.get("intent", "STOCK_QUERY")
-            if intent not in ("STOCK_LOSS", "STOCK_ADJUSTMENT", "STOCK_QUERY"):
+            if intent not in ("STOCK_LOSS", "STOCK_ADJUSTMENT", "PRODUCT_UPDATE", "STOCK_QUERY"):
                 return "STOCK_QUERY", classify_call
             return intent, classify_call
         except Exception:
@@ -162,6 +165,12 @@ class AgentStock(BaseAgent):
                 return "STOCK_LOSS", None
             if any(w in msg for w in ["ajuste", "conteo", "inventario", "corrección"]):
                 return "STOCK_ADJUSTMENT", None
+            if any(
+                w in msg
+                for w in ["precio", "costo", "umbral", "activar", "desactivar", "renombrar",
+                          "cambiar nombre", "cambiar estado", "editar", "modificar"]
+            ):
+                return "PRODUCT_UPDATE", None
             return "STOCK_QUERY", None
 
     async def process(self, request: AgentRequest) -> AgentResponse:
@@ -174,6 +183,10 @@ class AgentStock(BaseAgent):
                 all_calls.append(extract_call)
         elif intent == "STOCK_ADJUSTMENT":
             response, extract_call = await self._handle_stock_adjustment(request)
+            if extract_call:
+                all_calls.append(extract_call)
+        elif intent == "PRODUCT_UPDATE":
+            response, extract_call = await self._handle_product_update(request)
             if extract_call:
                 all_calls.append(extract_call)
         else:
@@ -282,6 +295,122 @@ class AgentStock(BaseAgent):
                 "summary": "Producto no identificado en el catálogo.",
             },
         )
+
+    async def _extract_product_update_entities(self, message: str) -> tuple[dict, LLMCall]:
+        system = (
+            "Sos el asistente de inventario de Véktor.\n"
+            "Extraé del mensaje los campos a actualizar en un producto. Retorná SOLO un JSON:\n"
+            "{{\n"
+            '  "product_name": "<nombre del producto o null>",\n'
+            '  "sku": "<SKU si se menciona o null>",\n'
+            '  "sale_price_ars": <nuevo precio de venta o null>,\n'
+            '  "unit_cost_ars": <nuevo costo unitario o null>,\n'
+            '  "low_stock_threshold_units": <nuevo umbral de pocas unidades o null>,\n'
+            '  "is_active": <true|false|null — solo si se menciona activar/desactivar>,\n'
+            '  "name": "<nuevo nombre o null — solo si se pide renombrar>",\n'
+            '  "category": "<nueva categoría o null>",\n'
+            '  "stock_units": <valor absoluto de stock o null — solo si se pide ajustar a un número exacto>,\n'
+            '  "wants_state_change": <true si solo pide cambiar estado sin especificar cómo>,\n'
+            '  "confidence": "<HIGH|MEDIUM|LOW>"\n'
+            "}}"
+        )
+        response = await self.client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=300,
+            system=system,
+            messages=[{"role": "user", "content": self.wrap_user_input(message)}],
+        )
+        extract_call = LLMCall(
+            source="agent_stock",
+            model="claude-haiku-4-5",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
+        raw = response.content[0].text.strip() if response.content else ""
+        try:
+            return json.loads(raw), extract_call
+        except (json.JSONDecodeError, ValueError):
+            return {"product_name": None, "sku": None, "confidence": "LOW"}, extract_call
+
+    async def _handle_product_update(
+        self, request: AgentRequest
+    ) -> tuple[AgentResponse, LLMCall | None]:
+        entities, extract_call = await self._extract_product_update_entities(request.message)
+
+        # Si el usuario solo quiere "cambiar el estado" sin saber que es derivado → aclarar
+        if entities.get("wants_state_change") and not any(
+            entities.get(f)
+            for f in ("sale_price_ars", "unit_cost_ars", "low_stock_threshold_units",
+                      "is_active", "name", "category", "stock_units")
+        ):
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.MEDIUM,
+                question=(
+                    "El estado del producto (En stock / Pocas unidades / Sin stock) se calcula "
+                    "automáticamente según las unidades disponibles y el umbral configurado. "
+                    "¿Querés que te ayude a ajustar el stock o el umbral de pocas unidades?"
+                ),
+                result={"action_type": ActionType.UPDATE_PRODUCT, "summary": "Estado derivado."},
+            ), extract_call
+
+        product_id, alternatives = await self._resolve_product_id(
+            entities.get("product_name"),
+            entities.get("sku"),
+            request.business_id,
+        )
+
+        if product_id is None:
+            return self._product_not_found_response(
+                request, entities.get("product_name"), alternatives, ActionType.UPDATE_PRODUCT
+            ), extract_call
+
+        # Construir payload solo con campos mencionados
+        _UPDATABLE = (
+            "sale_price_ars", "unit_cost_ars", "low_stock_threshold_units",
+            "is_active", "name", "category", "stock_units",
+        )
+        update_fields = {
+            k: entities[k]
+            for k in _UPDATABLE
+            if entities.get(k) is not None
+        }
+
+        if not update_fields:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                question="¿Qué campo querés modificar? Por ejemplo: precio, costo, umbral de stock bajo, activar o desactivar.",
+                result={"action_type": ActionType.UPDATE_PRODUCT, "summary": "Sin campos a actualizar."},
+            ), extract_call
+
+        fields_desc = ", ".join(
+            f"{k}={v}" for k, v in update_fields.items()
+        )
+        summary = (
+            f"Actualizar {entities.get('product_name') or 'producto'}: {fields_desc}"
+        )
+        update_fields["product_id"] = product_id
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_approval",
+            risk_level=RiskLevel.MEDIUM,
+            requires_approval=True,
+            confidence=Confidence.HIGH,
+            result={
+                "summary": summary,
+                "action_type": ActionType.UPDATE_PRODUCT,
+                "structured_data": update_fields,
+            },
+        ), extract_call
 
     async def _extract_stock_entities(self, message: str, context: str) -> tuple[dict, LLMCall]:
         system = (

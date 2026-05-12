@@ -91,6 +91,142 @@ STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia", "merca
 
 AMOUNT_RE = re.compile(r"\$\s*[\d.,]+")
 
+# Strings que representan ausencia de valor en imports
+_NULL_STRINGS = {"", "nan", "none", "null", "n/a", "na", "-", "nd"}
+
+# Umbral de % de nulls por columna a partir del cual se advierte al usuario
+NULL_COLUMN_WARN_THRESHOLD = 0.35
+
+
+def normalize_numeric(
+    value: object,
+    *,
+    required: bool = False,
+    field_label: str = "campo",
+) -> "Decimal | None":
+    """Normaliza un valor numérico de import o API.
+
+    - None / string vacío / strings nulos → None (o 422 si required)
+    - math.nan / math.inf → None (o 422 si required)
+    - Strings con $, comas, puntos → parseo ARS (1.234,56 → 1234.56)
+    """
+    import math  # noqa: PLC0415
+    from decimal import Decimal, InvalidOperation  # noqa: PLC0415
+
+    if value is None:
+        if required:
+            raise ValueError(f"{field_label} es obligatorio y no puede ser nulo.")
+        return None
+
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        if required:
+            raise ValueError(f"{field_label} contiene un valor inválido (NaN/Inf).")
+        return None
+
+    str_val = str(value).strip().lower()
+    if str_val in _NULL_STRINGS:
+        if required:
+            raise ValueError(f"{field_label} es obligatorio.")
+        return None
+
+    # Normalización de formato ARS: "1.234,56" → "1234.56"
+    if "," in str_val and "." in str_val:
+        str_val = str_val.replace(".", "").replace(",", ".")
+    elif "," in str_val:
+        str_val = str_val.replace(",", ".")
+    str_val = str_val.lstrip("$").strip()
+
+    try:
+        return Decimal(str_val)
+    except InvalidOperation:
+        if required:
+            raise ValueError(f"{field_label} tiene un formato numérico inválido: {value!r}")
+        return None
+
+
+def normalize_categorical(
+    value: object,
+    *,
+    required: bool = False,
+    default: "str | None" = None,
+    field_label: str = "campo",
+) -> "str | None":
+    """Normaliza un valor categórico de import o API."""
+    if value is None:
+        return default if not required else (_ for _ in ()).throw(
+            ValueError(f"{field_label} es obligatorio.")
+        )
+    str_val = str(value).strip()
+    if str_val.lower() in _NULL_STRINGS:
+        if required:
+            raise ValueError(f"{field_label} es obligatorio.")
+        return default
+    return str_val or (default if not required else (_ for _ in ()).throw(
+        ValueError(f"{field_label} no puede estar vacío.")
+    ))
+
+
+def compute_column_null_stats(rows: list[dict]) -> dict[str, float]:
+    """Calcula el porcentaje de valores nulos por columna en una lista de dicts.
+
+    Retorna {col: null_pct} para cada columna presente en al menos una fila.
+    """
+    if not rows:
+        return {}
+    all_keys: set[str] = set()
+    for row in rows:
+        all_keys.update(row.keys())
+
+    stats: dict[str, float] = {}
+    total = len(rows)
+    for col in all_keys:
+        null_count = sum(
+            1 for row in rows
+            if row.get(col) is None or str(row.get(col, "")).strip().lower() in _NULL_STRINGS
+        )
+        stats[col] = null_count / total
+    return stats
+
+
+def flag_columns_at_risk(
+    null_stats: dict[str, float],
+    threshold: float = NULL_COLUMN_WARN_THRESHOLD,
+) -> list[dict]:
+    """Retorna lista de columnas que superan el umbral de nulls, con recomendación."""
+    return [
+        {"column": col, "null_pct": round(pct, 4), "recommendation": "drop"}
+        for col, pct in null_stats.items()
+        if pct > threshold
+    ]
+
+
+def impute_column_median(values: list) -> "Decimal | None":
+    """Calcula la mediana de una lista de valores numéricos.
+    Usa mediana (resistente a outliers de precios) en vez de media.
+    Retorna None si no hay valores válidos.
+    """
+    from decimal import Decimal  # noqa: PLC0415
+    import math  # noqa: PLC0415
+
+    nums: list[Decimal] = []
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            continue
+        try:
+            nums.append(Decimal(str(v)))
+        except Exception:
+            continue
+
+    if not nums:
+        return None
+    nums_sorted = sorted(nums)
+    mid = len(nums_sorted) // 2
+    if len(nums_sorted) % 2 == 0:
+        return (nums_sorted[mid - 1] + nums_sorted[mid]) / 2
+    return nums_sorted[mid]
+
 
 def sanitize_filename(filename: str) -> str:
     """Remove path traversal and unsafe characters from a filename."""

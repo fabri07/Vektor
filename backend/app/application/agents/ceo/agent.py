@@ -42,6 +42,7 @@ INTENT_CATALOG = [
     "record_purchase",
     "record_payment_out",
     "record_stock_loss",
+    "update_product",
     "upload_file",
     "ask_business_status",
     "ask_dashboard_report",
@@ -63,6 +64,7 @@ INTENT_TO_AGENT: dict[str, str] = {
     "record_expense": "agent_cash",
     "record_payment_out": "agent_cash",
     "record_stock_loss": "agent_stock",
+    "update_product": "agent_stock",
     "upload_file": "agent_stock",
     "ask_stock_status": "agent_stock",
     "ask_supplier_status": "agent_supplier",
@@ -85,6 +87,7 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "record_purchase": ActionType.REGISTER_PURCHASE,
     "record_payment_out": ActionType.REGISTER_CASH_OUTFLOW,
     "record_stock_loss": ActionType.REGISTER_STOCK_LOSS,
+    "update_product": ActionType.UPDATE_PRODUCT,
     "upload_file": ActionType.IMPORT_TABULAR_FILE,
     "ask_business_status": ActionType.GENERATE_HEALTH_REPORT,
     "ask_dashboard_report": ActionType.GENERATE_HEALTH_REPORT,
@@ -129,6 +132,10 @@ class AgentCEO(BaseAgent):
             "'cuánto les compré', 'mis proveedores del mes', 'análisis de proveedores'\n"
             "  ask_business_status: salud financiera general, score del negocio, análisis financiero\n"
             "  record_stock_loss: merma, rotura, pérdida, vencimiento de un producto específico\n"
+            "  update_product: cambiar precio de un producto, actualizar costo, modificar umbral "
+            "de stock bajo, activar o desactivar un producto, renombrar un producto, cambiar el "
+            "estado de un producto (aclarar que el estado es derivado del stock), "
+            "ajustar el stock a un valor específico, editar descripción o categoría\n"
             "  manage_supplier: armar email a proveedor, contactar proveedor, hacer pedido\n\n"
             "REGLA CRÍTICA — out_of_scope:\n"
             "Usá 'out_of_scope' si el mensaje NO está relacionado con:\n"

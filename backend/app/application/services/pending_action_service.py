@@ -323,6 +323,43 @@ async def execute_pending_action(
                 payload=payload,
             )
 
+    elif action.action_type == ActionType.UPDATE_PRODUCT:
+        product_id_str = payload.get("product_id")
+        _UPDATABLE_FIELDS = {
+            "sale_price_ars", "unit_cost_ars", "low_stock_threshold_units",
+            "is_active", "name", "category", "stock_units", "sku",
+        }
+        update_fields = {
+            k: v for k, v in payload.items()
+            if k in _UPDATABLE_FIELDS and v is not None
+        }
+        if product_id_str and update_fields:
+            from decimal import Decimal  # noqa: PLC0415
+            from app.persistence.repositories.product_repository import ProductRepository  # noqa: PLC0415
+            repo = ProductRepository(db)
+            product = await repo.get_by_id(uuid.UUID(product_id_str), action.tenant_id)
+            if product:
+                for field, value in update_fields.items():
+                    if field in ("sale_price_ars", "unit_cost_ars") and value is not None:
+                        setattr(product, field, Decimal(str(value)))
+                    else:
+                        setattr(product, field, value)
+                await repo.save(product)
+                from app.jobs.score_trigger import trigger_score_recalculation  # noqa: PLC0415
+                trigger_score_recalculation.delay(str(action.tenant_id), "product_updated")
+            else:
+                logger.warning(
+                    "execute_pending_action: UPDATE_PRODUCT product not found",
+                    action_id=str(action.id),
+                    product_id=product_id_str,
+                )
+        else:
+            logger.warning(
+                "execute_pending_action: UPDATE_PRODUCT missing product_id or fields",
+                action_id=str(action.id),
+                payload=payload,
+            )
+
     elif action.action_type == ActionType.IMPORT_TABULAR_FILE:
         file_id = payload.get("file_id")
         parsed_records = payload.get("parsed_records")

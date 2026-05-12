@@ -7,6 +7,7 @@ ACTION_RISK_MAP = {
     ActionType.REGISTER_PURCHASE: RiskLevel.MEDIUM,
     ActionType.REGISTER_CASH_OUTFLOW: RiskLevel.MEDIUM,
     ActionType.UPDATE_STOCK: RiskLevel.MEDIUM,
+    ActionType.UPDATE_PRODUCT: RiskLevel.MEDIUM,
     ActionType.REGISTER_STOCK_LOSS: RiskLevel.HIGH,
     ActionType.IMPORT_TABULAR_FILE: RiskLevel.MEDIUM,
     ActionType.CREATE_PURCHASE_SUGGESTION: RiskLevel.LOW,

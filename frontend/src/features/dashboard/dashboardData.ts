@@ -30,7 +30,7 @@ export interface MarginCategoryRow {
 }
 
 export interface StockStatusRow {
-  id: "ok" | "low" | "out";
+  id: "in_stock" | "low_stock" | "out_of_stock" | "incoming";
   label: string;
   count: number;
   colorClass: string;
@@ -201,36 +201,44 @@ export function buildMarginBreakdown(products: ProductResponse[]): MarginCategor
 
 export function buildStockStatuses(products: ProductResponse[]): StockStatusRow[] {
   const inStock = products
-    .filter((product) => product.stock_units > 0 && !product.is_low_stock)
-    .reduce((sum, product) => sum + product.stock_units, 0);
+    .filter((p) => (p.stock_status ? p.stock_status === "in_stock" : p.stock_units > 0 && !p.is_low_stock))
+    .reduce((sum, p) => sum + p.stock_units, 0);
   const lowStock = products
-    .filter((product) => product.stock_units > 0 && product.is_low_stock)
-    .reduce((sum, product) => sum + product.stock_units, 0);
-  const outOfStock = products.filter((product) => product.stock_units === 0).length;
+    .filter((p) => (p.stock_status ? p.stock_status === "low_stock" : p.stock_units > 0 && p.is_low_stock))
+    .reduce((sum, p) => sum + p.stock_units, 0);
+  const outOfStock = products.filter(
+    (p) => (p.stock_status ? p.stock_status === "out_of_stock" : p.stock_units === 0)
+  ).length;
 
   return [
     {
-      id: "ok",
+      id: "in_stock",
       label: "En stock",
       count: inStock,
       colorClass: "bg-vektor-teal text-vektor-white",
       description: "Productos disponibles para vender ahora mismo.",
     },
     {
-      id: "low",
+      id: "low_stock",
       label: "Pocas unidades",
       count: lowStock,
       colorClass: "bg-vektor-amber text-vektor-night",
       description: "Menos de tu umbral recomendado. Conviene reponer pronto.",
     },
     {
-      id: "out",
+      id: "out_of_stock",
       label: "Sin stock",
       count: outOfStock,
       colorClass: "bg-vektor-red text-vektor-white",
       description: "Productos agotados. Perdés ventas si no reponés.",
     },
-    // "En camino" se implementa cuando existan purchase_orders — no mostrar placeholder.
+    {
+      id: "incoming",
+      label: "En camino",
+      count: 0,
+      colorClass: "bg-vektor-surface text-vektor-muted border border-vektor-border",
+      description: "Pedidos confirmados con proveedores aún no recibidos. Próximamente.",
+    },
   ];
 }
 

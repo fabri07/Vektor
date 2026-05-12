@@ -32,6 +32,7 @@ export interface ProductResponse {
   is_active: boolean;
   margin_pct: number | null;
   is_low_stock: boolean;
+  stock_status: "in_stock" | "low_stock" | "out_of_stock";
 }
 
 export interface ProductsListParams {
