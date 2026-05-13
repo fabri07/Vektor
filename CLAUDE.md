@@ -36,6 +36,10 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - **Soft delete auditado** (Sprint 13): columnas `voided_at` + `void_reason VARCHAR(30)` en `sales_entries` y `expense_entries`. `void_reason` acepta: `REPAIR_MISCLASSIFIED_IMPORT`, `USER_REQUEST`, `DATA_QUALITY`. Migraciones: `20260510_0001` + `20260511_0001`.
 - **DataRepairService** (`app/application/services/data_repair_service.py`): detecta `SaleEntry` creadas desde CSVs de productos mal clasificados, anula las ventas (soft delete) y reconstruye los `Product`. Flujo: `dry_run=True` → preview → `apply`. Trazabilidad en `data_repair_runs` + `data_repair_items`. API admin: `POST /admin/repairs/misclassified-product-imports/dry-run` + `.../apply` (SUPERADMIN).
 - **Product lookup en AgentCash** (Sprint 13): `_lookup_product_price()` hace fuzzy match contra catálogo del tenant. Si el producto es ambiguo, el agente pregunta al usuario antes de registrar. `product_id` se inyecta en la entidad y el PATCH de ventas lo acepta y recalcula el monto.
+- **Estados canónicos de producto** (Sprint 14): `ProductResponse.stock_status` computed field — `"in_stock" | "low_stock" | "out_of_stock"`. Frontend usa estos valores en badges ("En stock" / "Pocas unidades" / "Sin stock") y filtros URL (aliases `ok/low/out` siguen funcionando). Chip "En camino" es stub en dashboard (count=0, sin lógica hasta `purchase_orders`).
+- **UPDATE_PRODUCT vía chat** (Sprint 14): `ActionType.UPDATE_PRODUCT` (MEDIUM). AgentCEO intent `update_product` → AgentStock `PRODUCT_UPDATE` handler. Extrae campos a modificar; distingue `sku` (identificador) de `new_sku` (campo a actualizar). `PendingActionService` ejecuta via `ProductRepository`; recalcula score solo si cambian `sale_price_ars/unit_cost_ars/stock_units`. `ChatOrchestrator` eliminó la restricción "no puede modificar datos vía chat"; incluye regla FUENTE DE VERDAD: Google Sheets solo para import/export, nunca para modificar.
+- **Política null/NaN en imports** (Sprint 14): helpers en `file_parsing.py` — `normalize_numeric()`, `normalize_categorical()`, `impute_column()` (quantity→0, numeric→mediana, categorical→None), `compute_column_null_stats()`, `flag_columns_at_risk()` (umbral 35%). `_parse_spreadsheet` calcula `columns_at_risk` y lo incluye en `parsed_summary_json`. Validators `amount_no_nan` en `CreateSaleRequest` y `CreateExpenseRequest`.
+- **Ingesta interactiva para columnas riesgosas** (Sprint 14): `GET /ingestion/files/{id}/preview` expone `columns_at_risk[]`. `POST /files/{id}/drop-columns` elimina columnas de todos los buckets del summary (ventas/gastos/productos/stock_detectado). `POST /files/{id}/cancel` marca el archivo como `NEEDS_COMPLETION`. Frontend `FileListSection` muestra panel por cada columna >35% nulos con botones "Eliminar columna" y "Cancelar y completar datos".
 
 ---
 
@@ -197,12 +201,12 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca float
 - `LLMCall`: `{ source, model, input_tokens, output_tokens }`. `UsageSummary`: `{ calls: list[LLMCall] }` + `total_input/output/total`.
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado de 16 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado de 17 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
 REGISTER_PURCHASE      REGISTER_CASH_OUTFLOW   UPDATE_STOCK
-REGISTER_STOCK_LOSS    CREATE_PURCHASE_SUGGESTION
+UPDATE_PRODUCT         REGISTER_STOCK_LOSS     CREATE_PURCHASE_SUGGESTION
 IMPORT_TABULAR_FILE    PARSE_DOCUMENT_FILE     GENERATE_HEALTH_REPORT
 ANSWER_HELP_REQUEST    CREATE_SUPPLIER_DRAFT   CLASSIFY_GMAIL_MESSAGE
 SYNC_TO_GOOGLE         CREATE_CALENDAR_EVENT
@@ -227,7 +231,7 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **HeuristicEngine** (`shared/heuristic_engine.py`): `get(business_type)` síncrono; `get_async(...)` aplica `BusinessHeuristicOverride` de la DB. `to_prompt_fragment()` genera valores numéricos para system prompts — nunca texto narrativo. Fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 16 intents del `INTENT_CATALOG` (incluye `out_of_scope`). `out_of_scope` corta en `ChatOrchestrator` sin consumir tokens de sub-agente — retorna mensaje fijo. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/agent.py`) → `registry.get_sub_agent(name)`.
+**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 19 intents del `INTENT_CATALOG` (incluye `out_of_scope`). `out_of_scope` corta en `ChatOrchestrator` sin consumir tokens de sub-agente — retorna mensaje fijo. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/agent.py`) → `registry.get_sub_agent(name)`. Intent `update_product` → `agent_stock` → `UPDATE_PRODUCT` action.
 
 **Streaming SSE** (`POST /agent/chat/stream`): `{"type": "thinking"}` → `{"type": "response", "data": AgentResponse}` → `{"type": "error"}`. Finaliza con `data: [DONE]`. Frontend: `sendStream()` con placeholder `thinkingId` que se actualiza in-place.
 
@@ -373,6 +377,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | 11 | ✅ | ETL Hardening: provenance tagging, ChatMemoryService, chat unificado con memoria persistente, agent automation rules |
 | 12 | ✅ | Custom fields por vertical: `vertical_field_definitions`, `tenant_custom_field_definitions`, undo log, panel en `/settings` + ERD |
 | 13 | ✅ | Datos editables/borrables unificados: soft delete auditado en ventas/gastos, sistema de reparación de importaciones mal clasificadas, product lookup en AgentCash |
+| 14 | ✅ | Estados canónicos de producto (in_stock/low_stock/out_of_stock/incoming stub), UPDATE_PRODUCT vía chat, Véktor como fuente de verdad, política null/NaN con imputación por mediana, ingesta interactiva con columnas riesgosas |
 
 ### Cadena de migraciones (recientes)
 
