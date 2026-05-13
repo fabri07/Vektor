@@ -13,6 +13,7 @@ const STATUS_LABELS: Record<string, string> = {
   PENDING: "Pendiente",
   PROCESSING: "Procesando",
   NEEDS_CONFIRMATION: "Confirmar",
+  NEEDS_COMPLETION: "Completar datos",
   DONE: "Importado",
   FAILED: "Error",
 };
@@ -21,6 +22,7 @@ const STATUS_COLORS: Record<string, string> = {
   PENDING:            "text-vk-text-muted bg-vk-border-w",
   PROCESSING:         "text-vk-info bg-vk-info-bg",
   NEEDS_CONFIRMATION: "text-vk-warning bg-vk-warning-bg",
+  NEEDS_COMPLETION:   "text-vk-text-muted bg-vk-border-w",
   DONE:               "text-vk-success bg-vk-success-bg",
   FAILED:             "text-vk-danger bg-vk-danger-bg",
 };
@@ -64,6 +66,14 @@ function ConfirmPanel({ fileId, onDone }: { fileId: string; onDone: () => void }
     onSuccess: (result) => {
       setDroppedColumns((prev) => [...new Set([...prev, ...result.dropped_columns])]);
       void queryClient.invalidateQueries({ queryKey: ["ingestion-preview", fileId] });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: () => ingestionService.cancelFile(fileId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
+      onDone();
     },
   });
 
@@ -150,10 +160,11 @@ function ConfirmPanel({ fileId, onDone }: { fileId: string; onDone: () => void }
                 </button>
                 <button
                   type="button"
-                  onClick={onDone}
-                  className="rounded border border-vk-border-w px-2 py-0.5 text-xs text-vk-text-secondary hover:bg-vk-bg-light"
+                  onClick={() => cancelMutation.mutate()}
+                  disabled={cancelMutation.isPending}
+                  className="rounded border border-vk-border-w px-2 py-0.5 text-xs text-vk-text-secondary hover:bg-vk-bg-light disabled:opacity-50"
                 >
-                  Cancelar y completar datos
+                  {cancelMutation.isPending ? "Cancelando..." : "Cancelar y completar datos"}
                 </button>
               </div>
             </div>

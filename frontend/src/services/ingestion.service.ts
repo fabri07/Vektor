@@ -98,6 +98,13 @@ export const ingestionService = {
     return res.data;
   },
 
+  async cancelFile(fileId: string): Promise<{ file_id: string; status: string }> {
+    const res = await api.post<{ file_id: string; status: string }>(
+      `/ingestion/files/${fileId}/cancel`,
+    );
+    return res.data;
+  },
+
   async deleteFile(fileId: string): Promise<void> {
     await api.delete(`/ingestion/files/${fileId}`);
   },

@@ -39,6 +39,7 @@ from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
     PROCESSING_STATUS_FAILED,
+    PROCESSING_STATUS_NEEDS_COMPLETION,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     PROCESSING_STATUS_PENDING,
     PROCESSING_STATUS_PROCESSING,
@@ -308,7 +309,7 @@ async def drop_columns(
         {k: v for k, v in row.items() if k not in columns_to_drop}
         for row in summary.get("preview_rows", [])
     ]
-    for data_key in ("ventas_detectadas", "gastos_detectados", "productos_detectados"):
+    for data_key in ("ventas_detectadas", "gastos_detectados", "productos_detectados", "stock_detectado"):
         if isinstance(summary.get(data_key), list):
             summary[data_key] = [
                 {k: v for k, v in row.items() if k not in columns_to_drop}
@@ -328,6 +329,34 @@ async def drop_columns(
         dropped=list(columns_to_drop),
     )
     return {"file_id": str(file_id), "dropped_columns": list(columns_to_drop)}
+
+
+@router.post(
+    "/files/{file_id}/cancel",
+    summary="Cancel confirmation; mark file as NEEDS_COMPLETION so user can re-upload with complete data",
+)
+async def cancel_file_confirmation(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    if record.processing_status != PROCESSING_STATUS_NEEDS_CONFIRMATION:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Solo se puede cancelar un archivo en estado NEEDS_CONFIRMATION.",
+        )
+
+    record.processing_status = PROCESSING_STATUS_NEEDS_COMPLETION
+    await repo.save(record)
+    await session.commit()
+
+    logger.info("ingestion.cancel", file_id=str(file_id))
+    return {"file_id": str(file_id), "status": PROCESSING_STATUS_NEEDS_COMPLETION}
 
 
 @router.delete(
