@@ -19,6 +19,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
 )
 from app.application.services.chat_orchestrator import ChatOrchestrator
+from app.integrations.anthropic_client import AnthropicConfigurationError
 
 
 def _make_request(
@@ -254,6 +255,55 @@ async def test_orchestrator_saves_turn_after_success(mock_db, mock_redis):
     assert conv_svc_instance.add_turn.await_args_list[0].kwargs["metadata"] == {
         "attachments": request.attachments
     }
+    conv_svc_instance.persist.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_config_error_preserves_metadata_and_saves_turn(
+    mock_db,
+    mock_redis,
+):
+    """Si falla el LLM narrativo, conserva metadata CEO y guarda el turno."""
+    request = _make_request(conversation_id=str(uuid.uuid4()))
+    ceo_resp = _make_agent_response(summary="Consulta de stock.")
+    ceo_resp.result.update({"intent": "ask_stock_status", "target_agent": "agent_stock"})
+
+    with (
+        patch("app.application.services.chat_orchestrator.AgentCEO") as mock_ceo_cls,
+        patch("app.application.services.chat_orchestrator.get_sub_agent") as mock_registry,
+        patch(
+            "app.application.services.chat_orchestrator.get_anthropic_async_client"
+        ) as mock_client_factory,
+        patch("app.application.services.chat_orchestrator.ConversationService") as mock_conv_svc_cls,
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
+        mock_registry.return_value.process = AsyncMock(return_value=_make_agent_response())
+
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(
+            side_effect=AnthropicConfigurationError("missing api key")
+        )
+        mock_client_factory.return_value = mock_client
+
+        conv_svc_instance = AsyncMock()
+        conv_svc_instance.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        conv_svc_instance.add_turn = AsyncMock()
+        conv_svc_instance.persist = AsyncMock()
+        mock_conv_svc_cls.return_value = conv_svc_instance
+
+        response = await ChatOrchestrator().handle(
+            request,
+            mock_db,
+            mock_redis,
+            uuid.uuid4(),
+            uuid.uuid4(),
+        )
+
+    assert response.status == "error"
+    assert response.result["intent"] == "ask_stock_status"
+    assert response.result["target_agent"] == "agent_stock"
+    assert "IA no está disponible" in (response.message or "")
+    assert conv_svc_instance.add_turn.call_count == 2
     conv_svc_instance.persist.assert_called_once()
 
 

@@ -8,10 +8,17 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import get_status, handle_callback, revoke_auth, start_auth
+from app.config import get_settings
 from app.db import get_db_session
+from app.rate_limit import AuthStartRateLimiter
 from app.security import RequestContext, require_internal_context
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+settings = get_settings()
+auth_start_limiter = AuthStartRateLimiter(
+    max_requests=settings.AUTH_START_RATE_LIMIT_MAX,
+    window_seconds=settings.AUTH_START_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 
 class AuthStartRequest(BaseModel):
@@ -24,6 +31,7 @@ async def auth_start(
     ctx: RequestContext = Depends(require_internal_context),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    auth_start_limiter.check(tenant_id=ctx.tenant_id, user_id=ctx.user_id)
     return await start_auth(session, ctx, body.scopes)
 
 

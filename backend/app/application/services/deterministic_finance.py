@@ -1,7 +1,9 @@
 """Cálculos financieros determinísticos — sin LLM.
 
-Todas las funciones filtran exclusivamente datos con provenance='REAL'
-para evitar mezclar transacciones de demo con datos reales del tenant.
+El aislamiento de datos se hace por tenant_id. ``provenance`` describe el origen
+del dato dentro del tenant, pero no decide si el dato es visible para cálculos:
+un tenant demo debe poder mostrar su funcionamiento con números de muestra y un
+tenant real no debe tener datos demo sembrados.
 
 Usar Decimal para todos los cálculos monetarios; nunca float.
 """
@@ -21,8 +23,6 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 logger = get_logger(__name__)
 
-PROVENANCE_REAL = "REAL"
-PROVENANCE_DEMO = "DEMO"
 _WINDOW_DAYS = 30
 _TWO_PLACES = Decimal("0.01")
 
@@ -35,24 +35,19 @@ def _window_start() -> date:
     return _today() - timedelta(days=_WINDOW_DAYS)
 
 
-async def calcular_flujo_neto_30d(
-    tenant_id: uuid.UUID, db: AsyncSession, provenance: str = PROVENANCE_REAL
-) -> dict[str, Any]:
+async def calcular_flujo_neto_30d(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
     """
     Retorna ventas, gastos y flujo neto de los últimos 30 días.
-    Por defecto solo incluye datos provenance='REAL'.
     """
     desde = _window_start()
 
     ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
         SaleEntry.tenant_id == tenant_id,
-        SaleEntry.provenance == provenance,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
     gastos_q = select(func.coalesce(func.sum(ExpenseEntry.amount), Decimal("0"))).where(
         ExpenseEntry.tenant_id == tenant_id,
-        ExpenseEntry.provenance == provenance,
         ExpenseEntry.voided_at.is_(None),
         ExpenseEntry.transaction_date >= desde,
     )
@@ -71,14 +66,12 @@ async def calcular_flujo_neto_30d(
     }
 
 
-async def calcular_margen_bruto(
-    tenant_id: uuid.UUID, db: AsyncSession, provenance: str = PROVENANCE_REAL
-) -> dict[str, Any]:
+async def calcular_margen_bruto(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
     """
     Retorna margen bruto en % y absoluto sobre los últimos 30 días.
     Si ventas == 0, retorna {"margen_pct": None, "sin_datos": True}.
     """
-    flujo = await calcular_flujo_neto_30d(tenant_id, db, provenance=provenance)
+    flujo = await calcular_flujo_neto_30d(tenant_id, db)
     ventas = flujo["total_ventas"]
     gastos = flujo["total_gastos"]
 
@@ -96,9 +89,7 @@ async def calcular_margen_bruto(
     }
 
 
-async def calcular_ticket_promedio(
-    tenant_id: uuid.UUID, db: AsyncSession, provenance: str = PROVENANCE_REAL
-) -> dict[str, Any]:
+async def calcular_ticket_promedio(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
     """
     Retorna ticket promedio y número de transacciones de los últimos 30 días.
     """
@@ -106,13 +97,11 @@ async def calcular_ticket_promedio(
 
     count_q = select(func.count(SaleEntry.id)).where(
         SaleEntry.tenant_id == tenant_id,
-        SaleEntry.provenance == provenance,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
     sum_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
         SaleEntry.tenant_id == tenant_id,
-        SaleEntry.provenance == provenance,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
@@ -131,9 +120,7 @@ async def calcular_ticket_promedio(
     }
 
 
-async def calcular_rotacion_inventario(
-    tenant_id: uuid.UUID, db: AsyncSession, provenance: str = PROVENANCE_REAL
-) -> dict[str, Any]:
+async def calcular_rotacion_inventario(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
     """
     Retorna días de rotación estimados y ventas diarias promedio.
     Requiere ventas > 0 para calcular la rotación.
@@ -144,12 +131,10 @@ async def calcular_rotacion_inventario(
 
     stock_q = select(func.coalesce(func.sum(Product.stock_units), 0)).where(
         Product.tenant_id == tenant_id,
-        Product.provenance == provenance,
         Product.is_active.is_(True),
     )
     ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
         SaleEntry.tenant_id == tenant_id,
-        SaleEntry.provenance == provenance,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
     )
@@ -168,9 +153,7 @@ async def calcular_rotacion_inventario(
     }
 
 
-async def get_financial_summary(
-    tenant_id: uuid.UUID, db: AsyncSession, provenance: str = PROVENANCE_REAL
-) -> dict[str, Any]:
+async def get_financial_summary(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
     """
     Compone todos los cálculos financieros en un dict único.
     Si TODOS los valores tienen sin_datos=True, retorna {"estado": "SIN_DATOS"}.
@@ -179,10 +162,10 @@ async def get_financial_summary(
     El LLM NUNCA calcula — solo narra estos valores.
     """
     try:
-        flujo = await calcular_flujo_neto_30d(tenant_id, db, provenance=provenance)
-        margen = await calcular_margen_bruto(tenant_id, db, provenance=provenance)
-        ticket = await calcular_ticket_promedio(tenant_id, db, provenance=provenance)
-        rotacion = await calcular_rotacion_inventario(tenant_id, db, provenance=provenance)
+        flujo = await calcular_flujo_neto_30d(tenant_id, db)
+        margen = await calcular_margen_bruto(tenant_id, db)
+        ticket = await calcular_ticket_promedio(tenant_id, db)
+        rotacion = await calcular_rotacion_inventario(tenant_id, db)
     except Exception as exc:
         logger.warning(
             "deterministic_finance.error",
@@ -201,8 +184,7 @@ async def get_financial_summary(
     if sin_datos_total:
         return {
             "estado": "SIN_DATOS",
-            "mensaje": "sin datos reales cargados",
-            "provenance_checked": provenance,
+            "mensaje": "sin datos cargados para el tenant",
         }
 
     return {
@@ -211,5 +193,4 @@ async def get_financial_summary(
         "margen": margen,
         "ticket_promedio": ticket,
         "rotacion": rotacion,
-        "provenance": provenance,
     }

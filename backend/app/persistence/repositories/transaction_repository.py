@@ -33,7 +33,6 @@ class SaleRepository:
     ) -> list[SaleEntry]:
         q = select(SaleEntry).where(
             SaleEntry.tenant_id == tenant_id,
-            SaleEntry.provenance == "REAL",
             SaleEntry.voided_at.is_(None),
         )
         if from_date:
@@ -52,7 +51,6 @@ class SaleRepository:
     ) -> float:
         q = select(func.sum(SaleEntry.amount)).where(
             SaleEntry.tenant_id == tenant_id,
-            SaleEntry.provenance == "REAL",
             SaleEntry.voided_at.is_(None),
         )
         if from_date:
@@ -70,7 +68,6 @@ class SaleRepository:
     ) -> int:
         q = select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant_id,
-            SaleEntry.provenance == "REAL",
             SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= from_date,
             SaleEntry.transaction_date <= to_date,
@@ -93,7 +90,6 @@ class SaleRepository:
             )
             .where(
                 SaleEntry.tenant_id == tenant_id,
-                SaleEntry.provenance == "REAL",
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.transaction_date >= from_date,
                 SaleEntry.transaction_date <= to_date,
@@ -151,7 +147,6 @@ class ExpenseRepository:
     ) -> list[ExpenseEntry]:
         q = select(ExpenseEntry).where(
             ExpenseEntry.tenant_id == tenant_id,
-            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
@@ -172,7 +167,6 @@ class ExpenseRepository:
     ) -> float:
         q = select(func.sum(ExpenseEntry.amount)).where(
             ExpenseEntry.tenant_id == tenant_id,
-            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
@@ -190,7 +184,6 @@ class ExpenseRepository:
     ) -> int:
         q = select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
-            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= from_date,
             ExpenseEntry.transaction_date <= to_date,
@@ -209,7 +202,6 @@ class ExpenseRepository:
             select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total"))
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
-                ExpenseEntry.provenance == "REAL",
                 ExpenseEntry.voided_at.is_(None),
             )
         )
@@ -246,7 +238,6 @@ class ExpenseRepository:
             select(ExpenseEntry.supplier_name, func.sum(ExpenseEntry.amount).label("total"))
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
-                ExpenseEntry.provenance == "REAL",
                 ExpenseEntry.voided_at.is_(None),
                 ExpenseEntry.supplier_name.isnot(None),
                 ExpenseEntry.supplier_name != "",
@@ -266,7 +257,6 @@ class ExpenseRepository:
 
         total_q = select(func.sum(ExpenseEntry.amount)).where(
             ExpenseEntry.tenant_id == tenant_id,
-            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.supplier_name.isnot(None),
             ExpenseEntry.supplier_name != "",
@@ -306,7 +296,6 @@ class ExpenseRepository:
             )
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
-                ExpenseEntry.provenance == "REAL",
                 ExpenseEntry.voided_at.is_(None),
                 ExpenseEntry.transaction_date >= from_date,
                 ExpenseEntry.transaction_date <= to_date,

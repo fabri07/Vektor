@@ -18,7 +18,7 @@ class ScoreLevel(StrEnum):
     FAIR = "fair"               # 60–74
     GOOD = "good"               # 75–89
     EXCELLENT = "excellent"     # 90–100
-    NO_DATA = "NO_DATA"         # sin datos reales cargados
+    NO_DATA = "NO_DATA"         # sin datos cargados para el tenant
 
 
 class ScoreDimension(StrEnum):

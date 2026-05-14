@@ -28,10 +28,7 @@ class ProductRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Product]:
-        q = select(Product).where(
-            Product.tenant_id == tenant_id,
-            Product.provenance == "REAL",
-        )
+        q = select(Product).where(Product.tenant_id == tenant_id)
         if is_active is not None:
             q = q.where(Product.is_active == is_active)
         q = q.limit(limit).offset(offset)

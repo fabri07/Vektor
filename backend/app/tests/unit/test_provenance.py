@@ -3,12 +3,20 @@
 import uuid
 from datetime import date
 from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.repositories.product_repository import ProductRepository
+from app.persistence.repositories.transaction_repository import ExpenseRepository, SaleRepository
+
+
+def _where_text(statement: object) -> str:
+    where = getattr(statement, "whereclause", None)
+    return str(where).lower() if where is not None else ""
 
 
 class TestProvenanceDefaults:
@@ -116,6 +124,48 @@ class TestDemoTenant:
             is_demo=False,
         )
         assert tenant.is_demo is False
+
+
+class TestProvenanceDoesNotControlTenantReads:
+    @pytest.mark.asyncio
+    async def test_product_repository_list_does_not_filter_by_provenance(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute.return_value = result
+
+        await ProductRepository(session).list_by_tenant(uuid.uuid4())
+
+        statement = session.execute.call_args.args[0]
+        assert "provenance" not in _where_text(statement)
+
+    @pytest.mark.asyncio
+    async def test_sale_repository_list_filters_voided_but_not_provenance(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute.return_value = result
+
+        await SaleRepository(session).list_by_tenant(uuid.uuid4())
+
+        statement = session.execute.call_args.args[0]
+        compiled = _where_text(statement)
+        assert "voided_at" in compiled
+        assert "provenance" not in compiled
+
+    @pytest.mark.asyncio
+    async def test_expense_repository_list_filters_voided_but_not_provenance(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute.return_value = result
+
+        await ExpenseRepository(session).list_by_tenant(uuid.uuid4())
+
+        statement = session.execute.call_args.args[0]
+        compiled = _where_text(statement)
+        assert "voided_at" in compiled
+        assert "provenance" not in compiled
 
 
 class TestNoDataResponse:

@@ -49,6 +49,8 @@ class Settings(BaseSettings):
 
     MCP_SERVER_SHARED_SECRET: str = ""
     GOOGLE_OAUTH_TIMEOUT_SECONDS: float = 20.0
+    AUTH_START_RATE_LIMIT_MAX: int = 5
+    AUTH_START_RATE_LIMIT_WINDOW_SECONDS: int = 300
     # Orígenes permitidos para CORS. En producción setear al dominio del backend.
     # Lista vacía = ningún origen de browser permitido (correcto para llamadas server-to-server).
     CORS_ALLOWED_ORIGINS: list[str] = []

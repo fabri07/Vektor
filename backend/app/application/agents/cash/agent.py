@@ -142,7 +142,7 @@ class AgentCash(BaseAgent):
         En ese caso los tres primeros valores son None y el llamador debe pedir al usuario que especifique.
 
         Búsqueda en tres pasos: exacto normalizado → SKU → ilike por cada token significativo.
-        Solo productos activos, con precio > 0 y provenance REAL.
+        Solo productos activos y con precio > 0 del tenant actual.
         """
         if self._db is None:
             return None, None, None, []
@@ -162,7 +162,6 @@ class AgentCash(BaseAgent):
             Product.tenant_id == tenant_uuid,
             Product.is_active.is_(True),
             Product.sale_price_ars > 0,
-            Product.provenance == "REAL",
         ]
 
         # 1. Match exacto normalizado

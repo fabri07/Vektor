@@ -47,16 +47,14 @@ async def get_current_score(
     if snapshot is None:
         ventas_q = sa_select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant.tenant_id,
-            SaleEntry.provenance == "REAL",
             SaleEntry.voided_at.is_(None),
         )
         gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant.tenant_id,
-            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.voided_at.is_(None),
         )
-        real_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
-        if real_count == 0 and not tenant.is_demo:
+        data_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
+        if data_count == 0 and not tenant.is_demo:
             return NoDataResponse(is_demo_data=False)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -157,7 +155,7 @@ async def get_latest_score(
     """
     Returns the most recent HealthScoreSnapshot with all F1-01 subscore columns.
     - CALCULATING: score existe pero aún no tiene subscores calculados.
-    - NO_DATA: tenant sin datos reales cargados (provenance='REAL' count=0).
+    - NO_DATA: tenant real sin ventas ni gastos cargados.
     - is_demo_data=true: el snapshot pertenece a un tenant demo.
     """
     from sqlalchemy import func, select as sa_select  # noqa: PLC0415
@@ -167,21 +165,19 @@ async def get_latest_score(
     repo = HealthScoreRepository(session)
     snapshot = await repo.get_latest(tenant.tenant_id)
 
-    # Sin snapshot: verificar si hay datos reales para decidir entre CALCULATING y NO_DATA
+    # Sin snapshot: verificar si hay datos del tenant para decidir entre CALCULATING y NO_DATA.
     if snapshot is None or snapshot.score_cash is None:
         ventas_q = sa_select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant.tenant_id,
-            SaleEntry.provenance == "REAL",
             SaleEntry.voided_at.is_(None),
         )
         gastos_q = sa_select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant.tenant_id,
-            ExpenseEntry.provenance == "REAL",
             ExpenseEntry.voided_at.is_(None),
         )
-        real_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
-        if real_count == 0 and not tenant.is_demo:
-            # Tenant real sin ningún dato cargado — estado nulo explícito
+        data_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
+        if data_count == 0 and not tenant.is_demo:
+            # Tenant real sin ningún dato cargado — estado nulo explícito.
             return NoDataResponse(is_demo_data=False)
         return CalculatingResponse()
 

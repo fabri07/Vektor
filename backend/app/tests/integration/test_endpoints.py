@@ -275,6 +275,52 @@ async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSes
 
 
 @pytest.mark.asyncio
+async def test_auto_execute_failure_returns_error_status(auth_client, session: AsyncSession):
+    """Si falla la auto-ejecución local, el chat no debe reportar success."""
+    ac, headers, tenant, user, _ = auth_client
+
+    with (
+        patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator,
+        patch(
+            "app.api.v1.agent.execute_pending_action",
+            new=AsyncMock(side_effect=RuntimeError("simulated write failure")),
+        ),
+    ):
+        MockOrchestrator.return_value.handle = AsyncMock(
+            return_value=AgentResponse(
+                request_id=str(uuid.uuid4()),
+                agent_name="agent_cash",
+                status="success",
+                risk_level=RiskLevel.MEDIUM,
+                requires_approval=False,
+                result={
+                    "intent": "record_expense",
+                    "action_type": "REGISTER_EXPENSE",
+                    "target_agent": "agent_cash",
+                    "structured_data": {
+                        "amount": "1000",
+                        "category": "OTHER",
+                        "payment_method": "cash",
+                        "description": "Test",
+                    },
+                },
+            )
+        )
+
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "pagué 1000"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "error"
+    assert data["result"]["execution_status"] == "FAILED"
+    assert data["result"]["auto_executed"] is False
+
+
+@pytest.mark.asyncio
 async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSession):
     """Confirmar una pending_action → status=APPROVED, executed_at seteado."""
     ac, headers, tenant, user, _ = auth_client
@@ -411,6 +457,35 @@ async def test_rate_limit_429(auth_client):
 
     assert resp.status_code == 429
     assert "50 mensajes" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_chat_error_response_does_not_increment_rate_limit(auth_client):
+    """Errores controlados del orquestador no consumen cuota diaria."""
+    ac, headers, tenant, user, fake_redis = auth_client
+    rate_key = f"rate:chat:{tenant.tenant_id}:{__import__('datetime').date.today()}"
+
+    with patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator:
+        MockOrchestrator.return_value.handle = AsyncMock(
+            return_value=AgentResponse(
+                request_id=str(uuid.uuid4()),
+                agent_name="agent_ceo",
+                status="error",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                result={"summary": "CEO classification failed"},
+                message="No pude clasificar tu mensaje.",
+            )
+        )
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "hola"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "error"
+    assert await fake_redis.get(rate_key) is None
 
 
 @pytest.mark.asyncio

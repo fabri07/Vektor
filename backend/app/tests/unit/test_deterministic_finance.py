@@ -27,7 +27,7 @@ def _fake_session(ventas_sum: Decimal = Decimal("0"), gastos_sum: Decimal = Deci
 
 class TestFlujoNeto:
     @pytest.mark.asyncio
-    async def test_flujo_neto_con_datos_reales(self) -> None:
+    async def test_flujo_neto_con_datos_del_tenant(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
         session.scalar.side_effect = [Decimal("100000"), Decimal("40000")]
@@ -112,10 +112,9 @@ class TestFinancialSummary:
         result = await get_financial_summary(tenant_id, session)
         assert result["estado"] == "SIN_DATOS"
         assert "mensaje" in result
-        assert result.get("provenance_checked") == "REAL"
 
     @pytest.mark.asyncio
-    async def test_flujo_neto_con_datos_reales_retorna_ok(self) -> None:
+    async def test_flujo_neto_con_datos_del_tenant_retorna_ok(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
         # ventas 100k, gastos 40k → flujo positivo → no SIN_DATOS
@@ -127,20 +126,21 @@ class TestFinancialSummary:
         ]
         result = await get_financial_summary(tenant_id, session)
         assert result["estado"] == "OK"
-        assert result["provenance"] == "REAL"
 
     @pytest.mark.asyncio
-    async def test_no_mezcla_datos_demo(self) -> None:
-        """get_financial_summary filtra por provenance='REAL' — los datos demo no deben aparecer."""
+    async def test_no_filtra_por_provenance(self) -> None:
+        """La visibilidad financiera depende del tenant actual, no de provenance."""
         tenant_id = uuid.uuid4()
         session = AsyncMock()
-        # El WHERE clause con provenance='REAL' es parte de la query construida en el servicio.
-        # Aquí solo verificamos que la función llama a scalar() (que ejecuta la query filtrada).
-        session.scalar.side_effect = [Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"), 0, Decimal("0"), 0, Decimal("0")]
+        session.scalar.side_effect = [
+            Decimal("50000"), Decimal("10000"),
+            Decimal("50000"), Decimal("10000"),
+            4, Decimal("50000"),
+            20, Decimal("50000"),
+        ]
         result = await get_financial_summary(tenant_id, session)
-        # Si los datos DEMO fueran incluidos, el resultado no sería SIN_DATOS
-        # Un tenant demo con solo datos DEMO → get_financial_summary debe retornar SIN_DATOS
-        assert result["estado"] == "SIN_DATOS"
+        assert result["estado"] == "OK"
+        assert "provenance" not in result
 
     @pytest.mark.asyncio
     async def test_error_retorna_sin_datos(self) -> None:
