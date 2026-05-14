@@ -431,12 +431,10 @@ class ChatOrchestrator:
     def _format_agent_result(self, agent_response: AgentResponse) -> str:
         result = agent_response.result
         lines: list[str] = []
-
-        # Estado de ejecución — el Haiku necesita saber si la acción ya se ejecutó
-        if result.get("auto_executed"):
-            lines.append("Estado de la operación: YA EJECUTADA automáticamente.")
-        elif agent_response.pending_action_id:
-            lines.append("Estado de la operación: PENDIENTE DE CONFIRMACIÓN del usuario.")
+        # Nota: auto_executed y pending_action_id se setean en la capa HTTP
+        # DESPUÉS de que orchestrator.handle() retorna, por lo que aquí son
+        # siempre None/False. El estado se comunica al Haiku vía no_action_rule
+        # en el system prompt, que sí tiene la información disponible.
 
         if s := result.get("summary"):
             lines.append(f"Resumen: {s}")

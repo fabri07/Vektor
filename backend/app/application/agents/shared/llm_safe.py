@@ -18,6 +18,7 @@ from __future__ import annotations
 import anthropic
 
 from app.application.agents.shared.schemas import LLMCall
+from app.integrations.anthropic_client import AnthropicConfigurationError
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,9 +35,10 @@ async def call_llm(
 ) -> tuple[str | None, LLMCall | None]:
     """Llama al LLM y devuelve (texto_respuesta, llm_call).
 
-    Siempre devuelve (None, None) ante cualquier error, logueando el tipo
-    específico de falla (rate limit vs conexión vs servidor vs inesperado)
-    para que los dashboards de observabilidad distingan causas.
+    Siempre devuelve (None, None) ante errores transitorios (rate limit,
+    conexión, servidor), logueando el tipo específico para observabilidad.
+    Re-lanza AnthropicConfigurationError para que el orquestador lo capture
+    como error operacional y no como falla silenciosa de sub-agente.
     """
     try:
         response = await client.messages.create(
@@ -53,6 +55,8 @@ async def call_llm(
         )
         text = response.content[0].text.strip() if response.content else ""
         return text, llm_call
+    except AnthropicConfigurationError:
+        raise  # error de configuración → visible en el orquestador
     except anthropic.RateLimitError as exc:
         logger.warning("llm_rate_limited", source=source, error=str(exc))
     except anthropic.APIConnectionError as exc:
