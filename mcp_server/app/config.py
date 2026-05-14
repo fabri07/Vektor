@@ -49,6 +49,9 @@ class Settings(BaseSettings):
 
     MCP_SERVER_SHARED_SECRET: str = ""
     GOOGLE_OAUTH_TIMEOUT_SECONDS: float = 20.0
+    # Orígenes permitidos para CORS. En producción setear al dominio del backend.
+    # Lista vacía = ningún origen de browser permitido (correcto para llamadas server-to-server).
+    CORS_ALLOWED_ORIGINS: list[str] = []
 
     @field_validator("DEBUG", mode="before")
     @classmethod

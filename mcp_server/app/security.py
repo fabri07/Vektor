@@ -33,7 +33,7 @@ def require_internal_context(
     x_mcp_server_secret: str | None = Header(default=None),
 ) -> RequestContext:
     settings = get_settings()
-    if settings.MCP_SERVER_SHARED_SECRET and x_mcp_server_secret != settings.MCP_SERVER_SHARED_SECRET:
+    if not settings.MCP_SERVER_SHARED_SECRET or x_mcp_server_secret != settings.MCP_SERVER_SHARED_SECRET:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
 
     try:
