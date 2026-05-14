@@ -8,7 +8,16 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 
 from app.application.agents.base import BaseAgent
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, LLMCall, RiskLevel, UsageSummary
+from app.application.agents.shared.llm_safe import call_llm
+from app.application.agents.shared.schemas import (
+    ActionType,
+    AgentRequest,
+    AgentResponse,
+    Confidence,
+    LLMCall,
+    RiskLevel,
+    UsageSummary,
+)
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
@@ -22,8 +31,13 @@ logger = get_logger(__name__)
 class AgentCalendar(BaseAgent):
     agent_name = "agent_calendar"
 
-    def __init__(self, gateway: "McpToolGateway | None" = None) -> None:
+    def __init__(
+        self,
+        gateway: McpToolGateway | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
         self._gateway = gateway
+        self._tenant_id = tenant_id
         self._client: Any | None = None
 
     @property
@@ -149,21 +163,18 @@ class AgentCalendar(BaseAgent):
             "Inferí el año/mes del contexto. Si solo dice 'mañana', calculalo desde hoy.\n"
             "Si falta la hora, usá 09:00:00. Si falta la duración, asumí 1 hora."
         )
-        try:
-            response = await self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=400,
-                system=system,
-                messages=[{"role": "user", "content": wrap_user_input(message)}],
-            )
-            llm_call = LLMCall(
-                source="agent_calendar",
-                model="claude-haiku-4-5-20251001",
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-            )
-            raw = response.content[0].text.strip() if response.content else ""
-            return json.loads(raw), llm_call
-        except Exception as exc:
-            logger.warning("agent_calendar.extract_failed", error=str(exc))
+        raw, llm_call = await call_llm(
+            client=self.client,
+            source="agent_calendar",
+            model="claude-haiku-4-5-20251001",
+            system=system,
+            messages=[{"role": "user", "content": wrap_user_input(message)}],
+            max_tokens=400,
+        )
+        if raw is None:
             return {"has_enough_info": False}, None
+        try:
+            return json.loads(raw), llm_call
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("agent_calendar.extract_json_failed", raw=raw[:200])
+            return {"has_enough_info": False}, llm_call

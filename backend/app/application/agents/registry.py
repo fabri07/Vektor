@@ -22,8 +22,8 @@ def get_sub_agent(
         return AgentStock(db=db)
     if name == "agent_supplier":
         from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
-        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
         from app.config.settings import get_settings  # noqa: PLC0415
+        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
 
         settings = get_settings()
         gateway = (
@@ -34,8 +34,8 @@ def get_sub_agent(
         return AgentSupplier(session=db, gateway=gateway)
     if name == "agent_calendar":
         from app.application.agents.calendar.agent import AgentCalendar  # noqa: PLC0415
-        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
         from app.config.settings import get_settings  # noqa: PLC0415
+        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
 
         settings = get_settings()
         gateway = (
@@ -43,11 +43,11 @@ def get_sub_agent(
             if settings.ENABLE_GOOGLE_MCP_TOOLS and settings.MCP_SERVER_URL
             else None
         )
-        return AgentCalendar(gateway=gateway)
+        return AgentCalendar(gateway=gateway, tenant_id=str(tenant_id) if tenant_id else None)
     if name == "agent_sync":
         from app.application.agents.sync.agent import AgentSync  # noqa: PLC0415
-        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
         from app.config.settings import get_settings  # noqa: PLC0415
+        from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
 
         settings = get_settings()
         gateway = (

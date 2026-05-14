@@ -8,6 +8,7 @@ GET  /api/v1/agent/conversations        — lista conversaciones del tenant (úl
 GET  /api/v1/agent/conversations/{id}   — turnos completos de una conversación
 """
 
+import asyncio
 import hashlib
 import json as json_module
 import uuid
@@ -260,6 +261,9 @@ async def _process_agent_action(
     db: AsyncSession,
     redis: Redis,
 ) -> dict[str, Any] | None:
+    if agent_response.status == "error":
+        return None
+
     action_type = str(agent_response.result.get("action_type", ActionType.ANSWER_HELP_REQUEST))
     payload = _extract_action_payload(agent_response)
     payload.setdefault(AUTOMATION_PAYLOAD_AGENT_KEY, agent_response.agent_name)
@@ -348,6 +352,11 @@ async def _process_agent_action(
         if duplicate is not None:
             agent_response.message = duplicate["message"]
             agent_response.result["summary"] = duplicate["message"]
+            if duplicate.get("execution_status") == "FAILED":
+                agent_response.status = "error"
+                agent_response.requires_approval = False
+                agent_response.result["auto_executed"] = False
+                agent_response.result["execution_status"] = "FAILED"
         elif action.execution_status == "REQUIRES_RECONNECT":
             agent_response.status = "requires_google_auth"
             agent_response.result["message"] = (
@@ -494,7 +503,15 @@ async def chat(
     )
     try:
         orchestrator = ChatOrchestrator()
-        agent_response = await orchestrator.handle(request, db, redis, user_id, tenant_id)
+        agent_response = await asyncio.wait_for(
+            orchestrator.handle(request, db, redis, user_id, tenant_id),
+            timeout=45.0,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El procesamiento tardó demasiado. Por favor intentá de nuevo.",
+        )
     except AnthropicConfigurationError as exc:
         logger.error("agent_anthropic_not_configured", tenant_id=str(tenant_id))
         raise HTTPException(
@@ -531,18 +548,19 @@ async def chat(
         redis=redis,
     )
 
-    # ── Incrementar contador de rate limit post-orquestador exitoso ───────────
-    try:
-        count = await redis.incr(rate_key)
-        if count == 1:
-            midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
-            await redis.expireat(rate_key, midnight)
-    except Exception as redis_exc:
-        logger.warning(
-            "chat_rate_limit_incr_failed",
-            error=str(redis_exc),
-            tenant_id=str(tenant_id),
-        )
+    # ── Incrementar contador solo si el turno terminó sin error controlado ─────
+    if agent_response.status != "error":
+        try:
+            count = await redis.incr(rate_key)
+            if count == 1:
+                midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
+                await redis.expireat(rate_key, midnight)
+        except Exception as redis_exc:
+            logger.warning(
+                "chat_rate_limit_incr_failed",
+                error=str(redis_exc),
+                tenant_id=str(tenant_id),
+            )
 
     # ── Audit log (insert-only) ───────────────────────────────────────────────
     _usage = agent_response.usage
@@ -639,13 +657,26 @@ async def chat_stream(
 
         try:
             orchestrator = ChatOrchestrator()
-            agent_response = await orchestrator.handle(
-                request=request_obj,
-                db=db,
-                redis=redis,
-                user_id=user_id,
-                tenant_id=tenant_id,
-            )
+            try:
+                agent_response = await asyncio.wait_for(
+                    orchestrator.handle(
+                        request=request_obj,
+                        db=db,
+                        redis=redis,
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                    ),
+                    timeout=45.0,
+                )
+            except TimeoutError:
+                error_event = {
+                    "type": "error",
+                    "message": "El procesamiento tardó demasiado. Por favor intentá de nuevo.",
+                    "code": 503,
+                }
+                yield f"data: {json_module.dumps(error_event, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
 
             _attach_conversation_id(agent_response, body.conversation_id)
             action_meta = await _process_agent_action(
@@ -686,18 +717,19 @@ async def chat_stream(
             db.add(audit)
             await db.commit()
 
-            # Incrementar rate limit post-orquestador exitoso
-            try:
-                _stream_count = await redis.incr(rate_key)
-                if _stream_count == 1:
-                    _midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
-                    await redis.expireat(rate_key, _midnight)
-            except Exception as _redis_exc:
-                logger.warning(
-                    "chat_stream_rate_limit_incr_failed",
-                    error=str(_redis_exc),
-                    tenant_id=str(tenant_id),
-                )
+            # Incrementar rate limit solo si el turno terminó sin error controlado
+            if agent_response.status != "error":
+                try:
+                    _stream_count = await redis.incr(rate_key)
+                    if _stream_count == 1:
+                        _midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
+                        await redis.expireat(rate_key, _midnight)
+                except Exception as _redis_exc:
+                    logger.warning(
+                        "chat_stream_rate_limit_incr_failed",
+                        error=str(_redis_exc),
+                        tenant_id=str(tenant_id),
+                    )
 
             # 4. Emitir respuesta final
             response_event = {

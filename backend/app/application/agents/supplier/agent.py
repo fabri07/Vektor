@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
+from app.application.agents.shared.llm_safe import call_llm
 from app.application.agents.shared.product_resolver import resolve_product_id
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -174,24 +175,21 @@ class AgentSupplier(BaseAgent):
             "Si falta el destinatario, igual generá el email con to_name=null.\n"
             "Si falta el contenido → has_enough_info=false."
         )
-        try:
-            response = await self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=600,
-                system=system,
-                messages=[{"role": "user", "content": wrap_user_input(message)}],
-            )
-            llm_call = LLMCall(
-                source="agent_supplier",
-                model="claude-haiku-4-5-20251001",
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-            )
-            raw = response.content[0].text.strip() if response.content else ""
-            return json.loads(raw), llm_call
-        except Exception as exc:
-            logger.warning("agent_supplier.draft_generation_failed", error=str(exc))
+        raw, llm_call = await call_llm(
+            client=self.client,
+            source="agent_supplier",
+            model="claude-haiku-4-5-20251001",
+            system=system,
+            messages=[{"role": "user", "content": wrap_user_input(message)}],
+            max_tokens=600,
+        )
+        if raw is None:
             return {"has_enough_info": False}, None
+        try:
+            return json.loads(raw), llm_call
+        except Exception:
+            logger.warning("agent_supplier.draft_json_parse_failed", raw=raw[:200])
+            return {"has_enough_info": False}, llm_call
 
     async def _handle_record_purchase(self, request: AgentRequest) -> AgentResponse:
         entities, purchase_call = await self._extract_purchase_entities(request.message)
@@ -301,24 +299,21 @@ class AgentSupplier(BaseAgent):
             "Si no podés identificar el monto total, devolvé {\"error\": \"No pude identificar el monto. "
             "Indicame cuánto pagaste en total.\"}."
         )
-        try:
-            response = await self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=300,
-                system=system,
-                messages=[{"role": "user", "content": wrap_user_input(message)}],
-            )
-            llm_call = LLMCall(
-                source="agent_supplier",
-                model="claude-haiku-4-5-20251001",
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-            )
-            raw = response.content[0].text.strip() if response.content else ""
-            return json.loads(raw), llm_call
-        except Exception as exc:
-            logger.warning("agent_supplier.purchase_extraction_failed", error=str(exc))
+        raw, llm_call = await call_llm(
+            client=self.client,
+            source="agent_supplier",
+            model="claude-haiku-4-5-20251001",
+            system=system,
+            messages=[{"role": "user", "content": wrap_user_input(message)}],
+            max_tokens=300,
+        )
+        if raw is None:
             return {"error": "No pude interpretar la compra. Indicame el monto y el producto."}, None
+        try:
+            return json.loads(raw), llm_call
+        except Exception:
+            logger.warning("agent_supplier.purchase_json_parse_failed", raw=raw[:200])
+            return {"error": "No pude interpretar la compra. Indicame el monto y el producto."}, llm_call
 
     def _classify_intent(self, message: str) -> str:
         inbox_keywords = (

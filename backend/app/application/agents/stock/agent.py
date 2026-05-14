@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.agents.shared.llm_safe import call_llm
 from app.application.agents.shared.product_resolver import resolve_product_id
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -138,40 +139,35 @@ class AgentStock(BaseAgent):
             "STOCK_QUERY: consulta sobre stock, disponibilidad, qué hay en inventario.\n\n"
             'Retorná SOLO un JSON: {"intent": "<STOCK_LOSS|STOCK_ADJUSTMENT|PRODUCT_UPDATE|STOCK_QUERY>"}'
         )
-        try:
-            resp = await self.client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=50,
-                system=system,
-                messages=[{"role": "user", "content": wrap_user_input(message)}],
-            )
-            classify_call = LLMCall(
-                source="agent_stock",
-                model="claude-haiku-4-5",
-                input_tokens=resp.usage.input_tokens,
-                output_tokens=resp.usage.output_tokens,
-            )
-            result = json.loads(resp.content[0].text.strip())
-            intent = result.get("intent", "STOCK_QUERY")
-            if intent not in ("STOCK_LOSS", "STOCK_ADJUSTMENT", "PRODUCT_UPDATE", "STOCK_QUERY"):
-                return "STOCK_QUERY", classify_call
-            return intent, classify_call
-        except Exception:
-            msg = message.lower()
-            if any(
-                w in msg
-                for w in ["merma", "roto", "perdí", "vencido", "se rompió", "caducó", "dañado"]
-            ):
-                return "STOCK_LOSS", None
-            if any(w in msg for w in ["ajuste", "conteo", "inventario", "corrección"]):
-                return "STOCK_ADJUSTMENT", None
-            if any(
-                w in msg
-                for w in ["precio", "costo", "umbral", "activar", "desactivar", "renombrar",
-                          "cambiar nombre", "cambiar estado", "editar", "modificar"]
-            ):
-                return "PRODUCT_UPDATE", None
-            return "STOCK_QUERY", None
+        raw, classify_call = await call_llm(
+            client=self.client,
+            source="agent_stock",
+            model="claude-haiku-4-5",
+            system=system,
+            messages=[{"role": "user", "content": wrap_user_input(message)}],
+            max_tokens=50,
+        )
+        if raw is not None:
+            try:
+                parsed = json.loads(raw)
+                intent = parsed.get("intent", "STOCK_QUERY")
+                if intent in ("STOCK_LOSS", "STOCK_ADJUSTMENT", "PRODUCT_UPDATE", "STOCK_QUERY"):
+                    return intent, classify_call
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # Fallback determinístico por palabras clave
+        msg = message.lower()
+        if any(w in msg for w in ["merma", "roto", "perdí", "vencido", "se rompió", "caducó", "dañado"]):
+            return "STOCK_LOSS", classify_call
+        if any(w in msg for w in ["ajuste", "conteo", "inventario", "corrección"]):
+            return "STOCK_ADJUSTMENT", classify_call
+        if any(
+            w in msg
+            for w in ["precio", "costo", "umbral", "activar", "desactivar", "renombrar",
+                      "cambiar nombre", "cambiar estado", "editar", "modificar"]
+        ):
+            return "PRODUCT_UPDATE", classify_call
+        return "STOCK_QUERY", classify_call
 
     async def process(self, request: AgentRequest) -> AgentResponse:
         intent, classify_call = await self._classify_stock_intent(request.message)
@@ -416,7 +412,7 @@ class AgentStock(BaseAgent):
             },
         ), extract_call
 
-    async def _extract_stock_entities(self, message: str, context: str) -> tuple[dict, LLMCall]:
+    async def _extract_stock_entities(self, message: str, context: str) -> tuple[dict, LLMCall | None]:
         system = (
             f"Sos el asistente de inventario de Véktor.\n"
             f"Extraé información de {context} del mensaje. Retorná SOLO un JSON:\n"
@@ -428,29 +424,27 @@ class AgentStock(BaseAgent):
             '  "confidence": "<HIGH|MEDIUM|LOW>"\n'
             '}}'
         )
-        response = await self.client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=200,
-            system=system,
-            messages=[{"role": "user", "content": self.wrap_user_input(message)}],
-        )
-        extract_call = LLMCall(
+        _fallback: dict = {
+            "product_name": None,
+            "sku": None,
+            "qty_change": 0,
+            "reason": "ajuste",
+            "confidence": "LOW",
+        }
+        raw, extract_call = await call_llm(
+            client=self.client,
             source="agent_stock",
             model="claude-haiku-4-5",
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
+            system=system,
+            messages=[{"role": "user", "content": self.wrap_user_input(message)}],
+            max_tokens=200,
         )
-        raw = response.content[0].text.strip() if response.content else ""
+        if raw is None:
+            return _fallback, extract_call
         try:
             return json.loads(raw), extract_call
         except (json.JSONDecodeError, ValueError):
-            return {
-                "product_name": None,
-                "sku": None,
-                "qty_change": 0,
-                "reason": "ajuste",
-                "confidence": "LOW",
-            }, extract_call
+            return _fallback, extract_call
 
     async def _handle_query(self, request: AgentRequest) -> AgentResponse:
         logger = get_logger(__name__)
@@ -482,7 +476,6 @@ class AgentStock(BaseAgent):
             select(Product).where(
                 Product.tenant_id == tenant_id,
                 Product.is_active.is_(True),
-                Product.voided_at.is_(None),
             )
         )
         products = list(rows.scalars().all())

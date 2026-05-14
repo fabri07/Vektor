@@ -171,8 +171,10 @@ class ChatOrchestrator:
                 agent_response.message = agent_response.result.get(
                     "message", "Necesito acceso a Google para continuar."
                 )
-            agent_response.result.setdefault("intent", ceo_intent)
-            agent_response.result.setdefault("target_agent", ceo_target)
+            if ceo_intent:
+                agent_response.result["intent"] = ceo_intent
+            if ceo_target:
+                agent_response.result["target_agent"] = ceo_target
             agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
             return agent_response
 
@@ -203,7 +205,7 @@ class ChatOrchestrator:
                         redis=redis,
                     )
                     all_llm_calls.append(orch_call)
-                except AnthropicConfigurationError as exc:
+                except AnthropicConfigurationError:
                     logger.error(
                         "chat_orchestrator_anthropic_not_configured",
                         tenant_id=str(tenant_id),
@@ -213,8 +215,7 @@ class ChatOrchestrator:
                         "El servicio de IA no está disponible temporalmente. "
                         "Por favor intentá de nuevo más tarde."
                     )
-                    agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
-                    return agent_response
+                    agent_response.status = "error"
                 except Exception as exc:
                     logger.warning("chat_orchestrator_llm_failed", error=str(exc))
                     agent_response.message = agent_response.result.get("summary") or "Procesado."
@@ -226,8 +227,11 @@ class ChatOrchestrator:
             )
 
         # 7. Preservar metadata del CEO en result para audit log (intent + agente destino)
-        agent_response.result.setdefault("intent", ceo_intent)
-        agent_response.result.setdefault("target_agent", ceo_target)
+        # Usar asignación directa para que el CEO siempre sea la fuente de verdad de intent/target.
+        if ceo_intent:
+            agent_response.result["intent"] = ceo_intent
+        if ceo_target:
+            agent_response.result["target_agent"] = ceo_target
 
         # 8. Adjuntar usage acumulado de todas las llamadas LLM del turno
         agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
@@ -277,7 +281,7 @@ class ChatOrchestrator:
             else ""
         )
 
-        # Datos financieros determinísticos (solo provenance='REAL') — null-safe
+        # Datos financieros determinísticos del tenant actual — null-safe
         memory_fragment = ""
         try:
             from app.application.services.deterministic_finance import (  # noqa: PLC0415
@@ -286,7 +290,7 @@ class ChatOrchestrator:
             fin_data = await get_financial_summary(tenant_id, db)
             if fin_data.get("estado") == "SIN_DATOS":
                 memory_fragment = (
-                    "\n\nDAtos del negocio: SIN_DATOS. "
+                    "\n\nDatos del negocio: SIN_DATOS. "
                     "INSTRUCCIÓN CRÍTICA: NO INVENTES NÚMEROS. "
                     "Indicá al usuario que debe cargar sus datos de ventas y gastos para ver análisis."
                 )
@@ -294,7 +298,7 @@ class ChatOrchestrator:
                 flujo = fin_data.get("flujo_neto_30d", {})
                 margen = fin_data.get("margen", {})
                 ticket = fin_data.get("ticket_promedio", {})
-                lines: list[str] = ["\n\nDatos financieros reales del negocio (últimos 30 días):"]
+                lines: list[str] = ["\n\nDatos financieros del negocio (últimos 30 días):"]
                 if flujo:
                     lines.append(
                         f"  Ventas: ${flujo.get('total_ventas', 0)} | "
@@ -311,7 +315,7 @@ class ChatOrchestrator:
                 memory_fragment = "\n".join(lines)
         except Exception as exc:
             logger.warning("deterministic_finance_failed", tenant_id=str(tenant_id), error=str(exc))
-            # Fail-closed: no fallback a BusinessMemory (podría contener datos demo/stale)
+            # Fail-closed: no fallback a BusinessMemory porque podría estar desactualizado.
             memory_fragment = (
                 "\n\nDatos del negocio: SIN_DATOS (error temporal). "
                 "INSTRUCCIÓN CRÍTICA: NO INVENTES NÚMEROS. "
@@ -427,6 +431,13 @@ class ChatOrchestrator:
     def _format_agent_result(self, agent_response: AgentResponse) -> str:
         result = agent_response.result
         lines: list[str] = []
+
+        # Estado de ejecución — el Haiku necesita saber si la acción ya se ejecutó
+        if result.get("auto_executed"):
+            lines.append("Estado de la operación: YA EJECUTADA automáticamente.")
+        elif agent_response.pending_action_id:
+            lines.append("Estado de la operación: PENDIENTE DE CONFIRMACIÓN del usuario.")
+
         if s := result.get("summary"):
             lines.append(f"Resumen: {s}")
         if s := result.get("health_score"):
@@ -442,6 +453,21 @@ class ChatOrchestrator:
                     lines.append(f"Alerta: {a.get('message', '')}")
         if q := agent_response.question:
             lines.append(f"Pregunta pendiente: {q}")
+
+        # Datos estructurados de la operación (truncados)
+        structured = (
+            result.get("structured_data")
+            or result.get("entities")
+            or result.get("payload")
+        )
+        if isinstance(structured, dict):
+            relevant = {
+                k: v for k, v in structured.items()
+                if k not in ("conversation_id", "mode", "email_mode") and v is not None
+            }
+            if relevant:
+                lines.append(f"Datos de la operación: {str(relevant)[:300]}")
+
         return "\n".join(lines) or str(result)[:300]
 
     @staticmethod
