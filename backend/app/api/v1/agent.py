@@ -182,6 +182,8 @@ async def _register_operation_fingerprint(
     if str(action.action_type) not in _FINGERPRINT_ACTION_TYPES:
         return False
 
+    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
     from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
 
     payload = _payload_for_fingerprint(action.payload or {})
@@ -190,23 +192,21 @@ async def _register_operation_fingerprint(
         f":{payload.get('amount', '')}:{payload.get('transaction_date', payload.get('date', ''))}"
     )
     fingerprint = hashlib.sha256(raw.encode()).hexdigest()
-    dup = await db.execute(
-        select(OperationFingerprint).where(
-            OperationFingerprint.tenant_id == tenant_id,
-            OperationFingerprint.fingerprint == fingerprint,
-        )
-    )
-    if dup.scalar_one_or_none() is not None:
+
+    # Usar savepoint para que un IntegrityError no aborte la transacción padre.
+    try:
+        async with db.begin_nested():
+            db.add(
+                OperationFingerprint(
+                    tenant_id=tenant_id,
+                    fingerprint=fingerprint,
+                    action_type=str(action.action_type),
+                )
+            )
+    except IntegrityError:
+        # El fingerprint ya existía — operación duplicada.
         return True
 
-    db.add(
-        OperationFingerprint(
-            tenant_id=tenant_id,
-            fingerprint=fingerprint,
-            action_type=str(action.action_type),
-        )
-    )
-    await db.flush()
     return False
 
 
@@ -226,10 +226,30 @@ async def _execute_local_action(
             "execution_status": "DUPLICATE",
         }
 
-    await execute_pending_action(action, db, redis=redis)
-    action.execution_status = "SUCCEEDED"
-    action.executed_at = datetime.now(UTC)
-    return None
+    # Savepoint: si execute_pending_action falla a mitad, el rollback es atómico
+    # y no deja registros huérfanos (ej. expense persistida con status=FAILED).
+    try:
+        async with db.begin_nested():
+            await execute_pending_action(action, db, redis=redis)
+        action.execution_status = "SUCCEEDED"
+        action.executed_at = datetime.now(UTC)
+        return None
+    except Exception as exc:
+        action.execution_status = "FAILED"
+        action.executed_at = datetime.now(UTC)
+        logger.error(
+            "execute_local_action_failed",
+            action_id=str(action.id),
+            action_type=str(action.action_type),
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        return {
+            "status": "failed",
+            "message": "No se pudo completar la operación. Intente nuevamente.",
+            "execution_status": "FAILED",
+        }
 
 
 async def _process_agent_action(
@@ -444,16 +464,24 @@ async def chat(
     user_id = current_user.user_id
 
     # ── Rate limit: 50 mensajes/día por tenant ────────────────────────────────
+    # El check precede al orquestador; el incr se hace DESPUÉS de respuesta exitosa
+    # para no consumir cuota en errores 5xx ajenos al usuario.
+    # Si Redis cae, se permite el request (fail-open) con warning.
     rate_key = f"rate:chat:{tenant_id}:{date.today()}"
-    count = await redis.incr(rate_key)
-    if count == 1:
-        # Primer request del día: configurar expiración a medianoche
-        midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
-        await redis.expireat(rate_key, midnight)
-    if count > 50:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Límite diario de 50 mensajes alcanzado. Disponible mañana.",
+    try:
+        current_count = await redis.get(rate_key)
+        if current_count is not None and int(current_count) >= 50:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Límite diario de 50 mensajes alcanzado. Disponible mañana.",
+            )
+    except HTTPException:
+        raise
+    except Exception as redis_exc:
+        logger.warning(
+            "chat_rate_limit_redis_failed",
+            error=str(redis_exc),
+            tenant_id=str(tenant_id),
         )
 
     # ── ChatOrchestrator: CEO + sub-agente + LLM conversacional ─────────────
@@ -502,6 +530,19 @@ async def chat(
         db=db,
         redis=redis,
     )
+
+    # ── Incrementar contador de rate limit post-orquestador exitoso ───────────
+    try:
+        count = await redis.incr(rate_key)
+        if count == 1:
+            midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
+            await redis.expireat(rate_key, midnight)
+    except Exception as redis_exc:
+        logger.warning(
+            "chat_rate_limit_incr_failed",
+            error=str(redis_exc),
+            tenant_id=str(tenant_id),
+        )
 
     # ── Audit log (insert-only) ───────────────────────────────────────────────
     _usage = agent_response.usage
@@ -557,27 +598,30 @@ async def chat_stream(
     tenant_id = current_user.tenant_id
     user_id = current_user.user_id
 
-    # Rate limit compartido con /chat
+    # Rate limit compartido con /chat — check previo al stream, incr dentro del generator
     rate_key = f"rate:chat:{tenant_id}:{date.today()}"
-    count = await redis.incr(rate_key)
-    if count == 1:
-        midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
-        await redis.expireat(rate_key, midnight)
-    if count > 50:
-        # Retornar error como SSE (el cliente ya está escuchando el stream)
-        async def _rate_limited() -> AsyncGenerator[str, None]:
-            err = {
-                "type": "error",
-                "message": "Límite diario de 50 mensajes alcanzado. Disponible mañana.",
-                "code": 429,
-            }
-            yield f"data: {json_module.dumps(err, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+    try:
+        current_count = await redis.get(rate_key)
+        if current_count is not None and int(current_count) >= 50:
+            async def _rate_limited() -> AsyncGenerator[str, None]:
+                err = {
+                    "type": "error",
+                    "message": "Límite diario de 50 mensajes alcanzado. Disponible mañana.",
+                    "code": 429,
+                }
+                yield f"data: {json_module.dumps(err, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
 
-        return StreamingResponse(
-            _rate_limited(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            return StreamingResponse(
+                _rate_limited(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+    except Exception as redis_exc:
+        logger.warning(
+            "chat_stream_rate_limit_redis_failed",
+            error=str(redis_exc),
+            tenant_id=str(tenant_id),
         )
 
     request_obj = AgentRequest(
@@ -641,6 +685,19 @@ async def chat_stream(
             )
             db.add(audit)
             await db.commit()
+
+            # Incrementar rate limit post-orquestador exitoso
+            try:
+                _stream_count = await redis.incr(rate_key)
+                if _stream_count == 1:
+                    _midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
+                    await redis.expireat(rate_key, _midnight)
+            except Exception as _redis_exc:
+                logger.warning(
+                    "chat_stream_rate_limit_incr_failed",
+                    error=str(_redis_exc),
+                    tenant_id=str(tenant_id),
+                )
 
             # 4. Emitir respuesta final
             response_event = {

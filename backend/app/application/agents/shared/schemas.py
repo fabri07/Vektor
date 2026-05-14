@@ -1,9 +1,8 @@
-from enum import StrEnum
-from typing import Literal, Optional
 import uuid
+from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel
-
+from pydantic import BaseModel, Field
 
 AgentStatus = Literal[
     "success",
@@ -48,12 +47,12 @@ class Confidence(StrEnum):
 
 
 class AgentRequest(BaseModel):
-    request_id: str = str(uuid.uuid4())
+    request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     business_id: str
     message: str
-    attachments: list = []
-    conversation_id: Optional[str] = None
+    attachments: list = Field(default_factory=list)
+    conversation_id: str | None = None
     # NOTA: NO hay agent_target — AgentCEO lo asigna internamente
 
 
@@ -65,7 +64,7 @@ class LLMCall(BaseModel):
 
 
 class UsageSummary(BaseModel):
-    calls: list[LLMCall] = []
+    calls: list[LLMCall] = Field(default_factory=list)
 
     @property
     def total_input(self) -> int:
@@ -87,8 +86,8 @@ class AgentResponse(BaseModel):
     risk_level: RiskLevel
     requires_approval: bool = False
     confidence: Confidence = Confidence.HIGH
-    result: dict = {}
-    pending_action_id: Optional[str] = None
-    question: Optional[str] = None  # usado cuando status=requires_clarification
-    message: Optional[str] = None   # respuesta conversacional rica generada por ChatOrchestrator
-    usage: Optional[UsageSummary] = None  # tokens consumidos en este turno
+    result: dict = Field(default_factory=dict)
+    pending_action_id: str | None = None
+    question: str | None = None  # usado cuando status=requires_clarification
+    message: str | None = None   # respuesta conversacional rica generada por ChatOrchestrator
+    usage: UsageSummary | None = None  # tokens consumidos en este turno

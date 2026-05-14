@@ -335,9 +335,21 @@ async def execute_pending_action(
         }
         if product_id_str and update_fields:
             from decimal import Decimal  # noqa: PLC0415
-            from app.persistence.repositories.product_repository import ProductRepository  # noqa: PLC0415
+
+            from app.persistence.repositories.product_repository import (
+                ProductRepository,  # noqa: PLC0415
+            )
+            try:
+                product_uuid = uuid.UUID(product_id_str)
+            except ValueError:
+                logger.warning(
+                    "execute_pending_action: UPDATE_PRODUCT invalid product_id UUID",
+                    action_id=str(action.id),
+                    product_id=product_id_str,
+                )
+                return
             repo = ProductRepository(db)
-            product = await repo.get_by_id(uuid.UUID(product_id_str), action.tenant_id)
+            product = await repo.get_by_id(product_uuid, action.tenant_id)
             if product:
                 for field, value in update_fields.items():
                     if field in ("sale_price_ars", "unit_cost_ars") and value is not None:

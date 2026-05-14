@@ -96,7 +96,28 @@ class ChatOrchestrator:
 
         # 3. CEO clasifica intent
         ceo = AgentCEO()
-        ceo_response = await ceo.process(request)
+        try:
+            ceo_response = await ceo.process(request)
+        except AnthropicConfigurationError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "chat_orchestrator_ceo_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                tenant_id=str(tenant_id),
+                exc_info=True,
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="error",
+                risk_level="LOW",
+                confidence="LOW",
+                requires_approval=False,
+                message="No pude clasificar tu mensaje. Por favor intentá de nuevo.",
+                result={"summary": "CEO classification failed"},
+            )
         target_agent_name: str = ceo_response.result.get("target_agent", "agent_helper")
         all_llm_calls: list[LLMCall] = list(ceo_response.usage.calls) if ceo_response.usage else []
         ceo_intent: str | None = ceo_response.result.get("intent")
@@ -130,7 +151,17 @@ class ChatOrchestrator:
         sub_agent = get_sub_agent(
             target_agent_name, db=db, redis=redis, user_id=user_id, tenant_id=tenant_id
         )
-        agent_response = await sub_agent.process(request) if sub_agent is not None else ceo_response
+        if sub_agent is None:
+            logger.error(
+                "chat_orchestrator_agent_not_found",
+                target_agent=target_agent_name,
+                intent=ceo_intent,
+                tenant_id=str(tenant_id),
+            )
+            # Fallback: AgentHelper responde de forma genérica sin exponer el error interno
+            from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
+            sub_agent = AgentHelper()
+        agent_response = await sub_agent.process(request)
         if agent_response.usage:
             all_llm_calls.extend(agent_response.usage.calls)
 
@@ -172,8 +203,18 @@ class ChatOrchestrator:
                         redis=redis,
                     )
                     all_llm_calls.append(orch_call)
-                except AnthropicConfigurationError:
-                    raise
+                except AnthropicConfigurationError as exc:
+                    logger.error(
+                        "chat_orchestrator_anthropic_not_configured",
+                        tenant_id=str(tenant_id),
+                        exc_info=True,
+                    )
+                    agent_response.message = (
+                        "El servicio de IA no está disponible temporalmente. "
+                        "Por favor intentá de nuevo más tarde."
+                    )
+                    agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
+                    return agent_response
                 except Exception as exc:
                     logger.warning("chat_orchestrator_llm_failed", error=str(exc))
                     agent_response.message = agent_response.result.get("summary") or "Procesado."

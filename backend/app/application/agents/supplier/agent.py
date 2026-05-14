@@ -397,7 +397,6 @@ class AgentSupplier(BaseAgent):
                 ExpenseEntry.supplier_name.isnot(None),
                 ExpenseEntry.supplier_name != "",
                 ExpenseEntry.voided_at.is_(None),
-                ExpenseEntry.provenance == "REAL",
             )
         )
         expenses = list(rows.scalars().all())

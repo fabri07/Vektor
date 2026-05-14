@@ -482,7 +482,7 @@ class AgentStock(BaseAgent):
             select(Product).where(
                 Product.tenant_id == tenant_id,
                 Product.is_active.is_(True),
-                Product.provenance == "REAL",
+                Product.voided_at.is_(None),
             )
         )
         products = list(rows.scalars().all())
