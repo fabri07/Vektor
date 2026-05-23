@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.application.agents.shared.schemas import (
+    ActionType,
     AgentRequest,
     AgentResponse,
     Confidence,
@@ -157,6 +158,79 @@ async def test_orchestrator_skips_llm_for_approval(mock_db, mock_redis):
 
     mock_client.messages.create.assert_not_called()
     assert response.message == "¿Confirmás la venta de $80.000?"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_passes_agent_task_from_plan(mock_db, mock_redis):
+    """El orchestrator reconstruye AgentTask desde result['plan'] y lo pasa al sub-agente."""
+    request = _make_request()
+    task_id = str(uuid.uuid4())
+    ceo_resp = AgentResponse(
+        request_id=request.request_id,
+        agent_name="agent_ceo",
+        status="requires_approval",
+        risk_level=RiskLevel.MEDIUM,
+        requires_approval=True,
+        confidence=Confidence.HIGH,
+        result={
+            "intent": "ingresar_cobro",
+            "target_agent": "agent_income",
+            "action_type": str(ActionType.REGISTER_CASH_INFLOW),
+            "plan": {
+                "plan_id": str(uuid.uuid4()),
+                "intent": "ingresar_cobro",
+                "tasks": [
+                    {
+                        "task_id": task_id,
+                        "agent": "agent_income",
+                        "action_type": str(ActionType.REGISTER_CASH_INFLOW),
+                        "entities": {
+                            "amount": "15000",
+                            "payment_method": "transfer",
+                        },
+                        "depends_on": [],
+                        "approval_group": None,
+                    }
+                ],
+                "requires_synthesis": False,
+                "fallback_message": None,
+            },
+        },
+    )
+    sub_response = AgentResponse(
+        request_id=request.request_id,
+        agent_name="agent_income",
+        status="requires_approval",
+        risk_level=RiskLevel.MEDIUM,
+        requires_approval=True,
+        confidence=Confidence.HIGH,
+        result={
+            "summary": "Registrar cobro por $15000",
+            "action_type": ActionType.REGISTER_CASH_INFLOW,
+        },
+    )
+
+    with (
+        patch("app.application.services.chat_orchestrator.AgentCEO") as mock_ceo_cls,
+        patch("app.application.services.chat_orchestrator.get_sub_agent") as mock_registry,
+        patch("app.application.services.chat_orchestrator.get_anthropic_async_client"),
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
+        sub_agent = MagicMock()
+        sub_agent.process = AsyncMock(return_value=sub_response)
+        mock_registry.return_value = sub_agent
+
+        response = await ChatOrchestrator().handle(
+            request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4()
+        )
+
+    sub_agent.process.assert_awaited_once()
+    _, kwargs = sub_agent.process.await_args
+    assert kwargs["task"].task_id == task_id
+    assert kwargs["task"].agent == "agent_income"
+    assert kwargs["task"].action_type == ActionType.REGISTER_CASH_INFLOW
+    assert kwargs["task"].entities["amount"] == "15000"
+    assert response.result["plan"] == ceo_resp.result["plan"]
 
 
 @pytest.mark.asyncio

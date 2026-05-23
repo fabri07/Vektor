@@ -118,13 +118,48 @@ class ChatOrchestrator:
                 message="No pude clasificar tu mensaje. Por favor intentá de nuevo.",
                 result={"summary": "CEO classification failed"},
             )
-        target_agent_name: str = ceo_response.result.get("target_agent", "agent_helper")
         all_llm_calls: list[LLMCall] = list(ceo_response.usage.calls) if ceo_response.usage else []
         ceo_intent: str | None = ceo_response.result.get("intent")
         ceo_target: str | None = ceo_response.result.get("target_agent")
 
-        # 3b. out_of_scope — cortar sin sub-agente ni LLM adicional
-        if ceo_response.result.get("intent") == "out_of_scope":
+        # 3b. Leer plan del CEO; validar que sea single-task en Stage 1.
+        # Stage 3 reemplaza este bloque por TeamPlanExecutor.execute(plan).
+        raw_plan: dict | None = ceo_response.result.get("plan")
+        if raw_plan and len(raw_plan.get("tasks", [])) > 1:
+            logger.error(
+                "chat_orchestrator_multi_task_not_supported",
+                plan_id=raw_plan.get("plan_id"),
+                task_count=len(raw_plan["tasks"]),
+                intent=ceo_intent,
+                tenant_id=str(tenant_id),
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="error",
+                risk_level="LOW",
+                confidence="LOW",
+                requires_approval=False,
+                message="El orquestador recibió un plan multi-tarea pero aún no lo soporta. Por favor intentá de nuevo.",
+                result={"summary": "multi-task plan not supported in Stage 1"},
+                usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
+            )
+
+        # Resolver target_agent: preferir el del plan si está disponible
+        if raw_plan and raw_plan.get("tasks"):
+            target_agent_name: str = raw_plan["tasks"][0].get("agent", "agent_helper")
+        else:
+            target_agent_name = ceo_response.result.get("target_agent", "agent_helper")
+
+        # 3c. out_of_scope / intent_desconocido — cortar sin sub-agente ni LLM adicional
+        if ceo_intent in ("out_of_scope", "intent_desconocido"):
+            _oos_result: dict = {
+                "summary": "Consulta fuera del scope de Véktor.",
+                "intent": ceo_intent,
+                "target_agent": ceo_target,
+            }
+            if raw_plan:
+                _oos_result["plan"] = raw_plan
             out_of_scope_response = AgentResponse(
                 request_id=request.request_id,
                 agent_name="agent_ceo",
@@ -138,7 +173,7 @@ class ChatOrchestrator:
                     "Si tenés dudas sobre ventas, gastos, stock o cómo usar la plataforma, "
                     "con gusto te ayudo."
                 ),
-                result={"summary": "Consulta fuera del scope de Véktor.", "intent": "out_of_scope"},
+                result=_oos_result,
                 usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
             )
             if request.conversation_id:
@@ -147,7 +182,26 @@ class ChatOrchestrator:
                 )
             return out_of_scope_response
 
-        # 4. Sub-agente ejecuta lógica de negocio
+        # 4. Construir AgentTask desde el plan para dispatch task-aware
+        agent_task = None
+        if raw_plan and raw_plan.get("tasks"):
+            from app.application.agents.shared.schemas import ActionType, AgentTask  # noqa: PLC0415
+            task_data = raw_plan["tasks"][0]
+            try:
+                agent_task = AgentTask(
+                    task_id=task_data.get("task_id", ""),
+                    agent=task_data.get("agent", target_agent_name),
+                    action_type=ActionType(task_data.get("action_type", "ANSWER_HELP_REQUEST")),
+                    entities=task_data.get("entities") or {},
+                )
+            except (ValueError, KeyError) as exc:
+                logger.warning(
+                    "chat_orchestrator_task_build_failed",
+                    error=str(exc),
+                    task_data=task_data,
+                )
+
+        # 4b. Sub-agente ejecuta lógica de negocio
         sub_agent = get_sub_agent(
             target_agent_name, db=db, redis=redis, user_id=user_id, tenant_id=tenant_id
         )
@@ -161,7 +215,7 @@ class ChatOrchestrator:
             # Fallback: AgentHelper responde de forma genérica sin exponer el error interno
             from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
             sub_agent = AgentHelper()
-        agent_response = await sub_agent.process(request)
+        agent_response = await sub_agent.process(request, task=agent_task)
         if agent_response.usage:
             all_llm_calls.extend(agent_response.usage.calls)
 
@@ -175,6 +229,8 @@ class ChatOrchestrator:
                 agent_response.result["intent"] = ceo_intent
             if ceo_target:
                 agent_response.result["target_agent"] = ceo_target
+            if raw_plan:
+                agent_response.result["plan"] = raw_plan
             agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
             return agent_response
 
@@ -226,12 +282,14 @@ class ChatOrchestrator:
                 request, agent_response.message or "", redis, db, tenant_id, user_id
             )
 
-        # 7. Preservar metadata del CEO en result para audit log (intent + agente destino)
-        # Usar asignación directa para que el CEO siempre sea la fuente de verdad de intent/target.
+        # 7. Preservar metadata del CEO en result para audit log (intent + agente destino + plan)
+        # El CEO es siempre la fuente de verdad de intent/target/plan.
         if ceo_intent:
             agent_response.result["intent"] = ceo_intent
         if ceo_target:
             agent_response.result["target_agent"] = ceo_target
+        if raw_plan:
+            agent_response.result["plan"] = raw_plan
 
         # 8. Adjuntar usage acumulado de todas las llamadas LLM del turno
         agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None

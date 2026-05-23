@@ -46,7 +46,7 @@ class AgentCalendar(BaseAgent):
             self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
         return self._client
 
-    async def process(self, request: AgentRequest) -> AgentResponse:
+    async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         if self._gateway is None:
             return AgentResponse(
                 request_id=request.request_id,

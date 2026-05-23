@@ -120,7 +120,7 @@ Retorná SOLO un JSON:
         except (json.JSONDecodeError, ValueError):
             return {"answer": None, "confidence": "LOW", "related_module": None, "is_platform_question": False}, llm_call
 
-    async def process(self, request: AgentRequest) -> AgentResponse:
+    async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         result, helper_call = await self.find_answer(request.message)
         usage = UsageSummary(calls=[helper_call])
 

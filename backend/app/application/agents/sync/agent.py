@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, RiskLevel
@@ -73,7 +73,7 @@ class AgentSync(BaseAgent):
         self._gateway = gateway
         self._tenant_id = tenant_id
 
-    async def process(self, request: AgentRequest) -> AgentResponse:
+    async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         message_lower = request.message.lower()
 
         if self._gateway is None:

@@ -155,7 +155,7 @@ async def test_medium_action_creates_pending_not_persists(auth_client, session: 
 
     sub_mock = AsyncMock()
     sub_mock.process = AsyncMock(
-        side_effect=lambda req: _mock_requires_approval_response(req.request_id)
+        side_effect=lambda req, **_: _mock_requires_approval_response(req.request_id)
     )
     ORCHESTRATOR = "app.application.services.chat_orchestrator"
     with (
@@ -206,7 +206,7 @@ async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSes
 
     sub_mock = AsyncMock()
     sub_mock.process = AsyncMock(
-        side_effect=lambda req: AgentResponse(
+        side_effect=lambda req, **_: AgentResponse(
             request_id=req.request_id,
             agent_name="agent_cash",
             status="success",
@@ -608,7 +608,7 @@ async def test_wf02_requires_clarification_no_pending(auth_client, session: Asyn
     ORCHESTRATOR = "app.application.services.chat_orchestrator"
     sub_mock = AsyncMock()
     sub_mock.process = AsyncMock(
-        side_effect=lambda req: _mock_clarification_response(req.request_id)
+        side_effect=lambda req, **_: _mock_clarification_response(req.request_id)
     )
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,

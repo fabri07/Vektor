@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.application.agents.shared.schemas import AgentRequest
+from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTeamPlan
 
 
 def _make_request(message: str = "test") -> AgentRequest:
@@ -23,18 +23,19 @@ def _mock_llm_response(intent: str, entities: dict | None = None) -> MagicMock:
     content_block.text = json.dumps({"intent": intent, "entities": entities or {}})
     response = MagicMock()
     response.content = [content_block]
+    response.usage = MagicMock(input_tokens=50, output_tokens=20)
     return response
 
 
 @pytest.mark.asyncio
 async def test_ceo_classifies_sale_intent():
-    """"vendí 100 pesos" debe clasificar como record_sale."""
+    """'vendí 100 pesos' debe clasificar como ingresar_venta."""
     with unittest.mock.patch(
         "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
     ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(
-            return_value=_mock_llm_response("record_sale", {"amount": 100})
+            return_value=_mock_llm_response("ingresar_venta", {"monto": 100})
         )
         mock_cls.return_value = mock_client
 
@@ -45,19 +46,20 @@ async def test_ceo_classifies_sale_intent():
 
         result = await agent.process(_make_request("vendí 100 pesos"))
 
-    assert result.result["intent"] == "record_sale"
+    assert result.result["intent"] == "ingresar_venta"
     assert result.result["action_type"] == "REGISTER_SALE"
+    assert result.result["target_agent"] == "agent_income"
 
 
 @pytest.mark.asyncio
 async def test_ceo_routes_to_correct_agent():
-    """record_sale debe enrutar a agent_cash."""
+    """ingresar_venta debe enrutar a agent_income."""
     with unittest.mock.patch(
         "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
     ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(
-            return_value=_mock_llm_response("record_sale")
+            return_value=_mock_llm_response("ingresar_venta")
         )
         mock_cls.return_value = mock_client
 
@@ -67,12 +69,12 @@ async def test_ceo_routes_to_correct_agent():
         agent.client = mock_client
         result = await agent.process(_make_request("vendí algo"))
 
-    assert result.result["target_agent"] == "agent_cash"
+    assert result.result["target_agent"] == "agent_income"
 
 
 @pytest.mark.asyncio
 async def test_ceo_unknown_intent_goes_to_helper():
-    """Intent inválido del LLM debe caer en ask_platform_help."""
+    """Intent inválido del LLM debe caer en intent_desconocido → agent_helper."""
     with unittest.mock.patch(
         "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
     ) as mock_cls:
@@ -88,8 +90,56 @@ async def test_ceo_unknown_intent_goes_to_helper():
         agent.client = mock_client
         result = await agent.process(_make_request("bla bla xyz"))
 
-    assert result.result["intent"] == "ask_platform_help"
+    assert result.result["intent"] == "intent_desconocido"
     assert result.result["target_agent"] == "agent_helper"
+
+
+@pytest.mark.asyncio
+async def test_ceo_plan_is_single_task():
+    """El CEO retorna un plan con una sola tarea en Stage 1."""
+    with unittest.mock.patch(
+        "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(
+            return_value=_mock_llm_response("ingresar_gasto", {"monto": 5000})
+        )
+        mock_cls.return_value = mock_client
+
+        from app.application.agents.ceo.agent import AgentCEO
+
+        agent = AgentCEO()
+        agent.client = mock_client
+        result = await agent.process(_make_request("pagué el alquiler $5000"))
+
+    plan_dict = result.result.get("plan")
+    assert plan_dict is not None, "El resultado debe incluir un campo 'plan'"
+    plan = AgentTeamPlan(**plan_dict)
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].action_type == ActionType.REGISTER_EXPENSE
+    assert plan.intent == "ingresar_gasto"
+
+
+@pytest.mark.asyncio
+async def test_ceo_expense_routes_correctly():
+    """ingresar_gasto → agent_expense con ActionType REGISTER_EXPENSE."""
+    with unittest.mock.patch(
+        "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(
+            return_value=_mock_llm_response("ingresar_gasto")
+        )
+        mock_cls.return_value = mock_client
+
+        from app.application.agents.ceo.agent import AgentCEO
+
+        agent = AgentCEO()
+        agent.client = mock_client
+        result = await agent.process(_make_request("gasté en servicios"))
+
+    assert result.result["action_type"] == "REGISTER_EXPENSE"
+    assert result.result["target_agent"] == "agent_expense"
 
 
 def test_ceo_forbidden_imports():
@@ -110,9 +160,10 @@ async def test_prompt_injection_wrapped():
     async def capture_create(**kwargs):
         captured_call.update(kwargs)
         content_block = MagicMock()
-        content_block.text = json.dumps({"intent": "ask_platform_help", "entities": {}})
+        content_block.text = json.dumps({"intent": "ayuda_plataforma", "entities": {}})
         response = MagicMock()
         response.content = [content_block]
+        response.usage = MagicMock(input_tokens=50, output_tokens=20)
         return response
 
     with unittest.mock.patch(
@@ -133,3 +184,33 @@ async def test_prompt_injection_wrapped():
     user_content = messages[0]["content"]
     assert "<user_message>" in user_content
     assert "</user_message>" in user_content
+
+
+@pytest.mark.asyncio
+async def test_ceo_uses_haiku_model():
+    """CEO usa claude-haiku-4-5 para clasificar (no Sonnet)."""
+    captured_call: dict = {}
+
+    async def capture_create(**kwargs):
+        captured_call.update(kwargs)
+        content_block = MagicMock()
+        content_block.text = json.dumps({"intent": "consultar_estado_negocio", "entities": {}})
+        response = MagicMock()
+        response.content = [content_block]
+        response.usage = MagicMock(input_tokens=50, output_tokens=20)
+        return response
+
+    with unittest.mock.patch(
+        "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = capture_create
+        mock_cls.return_value = mock_client
+
+        from app.application.agents.ceo.agent import AgentCEO
+
+        agent = AgentCEO()
+        agent.client = mock_client
+        await agent.process(_make_request("cómo está mi negocio"))
+
+    assert captured_call.get("model") == "claude-haiku-4-5"

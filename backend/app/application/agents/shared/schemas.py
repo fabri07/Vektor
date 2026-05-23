@@ -88,6 +88,27 @@ class AgentResponse(BaseModel):
     confidence: Confidence = Confidence.HIGH
     result: dict = Field(default_factory=dict)
     pending_action_id: str | None = None
+    pending_action_ids: list[str] | None = None  # Stage 3: multi-task approval groups
+    approval_group_id: str | None = None         # Stage 3: vincula PendingActions de un plan
     question: str | None = None  # usado cuando status=requires_clarification
     message: str | None = None   # respuesta conversacional rica generada por ChatOrchestrator
     usage: UsageSummary | None = None  # tokens consumidos en este turno
+
+
+# ── Contratos de AgentTeamPlan (Stage 1) ──────────────────────────────────────
+
+class AgentTask(BaseModel):
+    task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    agent: str                                              # "agent_income", "agent_stock", etc.
+    action_type: ActionType
+    entities: dict = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list)    # task_ids previos (DAG, Stage 3)
+    approval_group: str | None = None                      # tasks con mismo group → aprueban juntas
+
+
+class AgentTeamPlan(BaseModel):
+    plan_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    intent: str
+    tasks: list[AgentTask] = Field(default_factory=list)
+    requires_synthesis: bool = False                       # True cuando CEO debe sintetizar multi-task
+    fallback_message: str | None = None

@@ -127,7 +127,7 @@ async def test_register_sale_registra_data_loaded(
     )
     db_session.add(action)
     await db_session.flush()
-    with patch("app.application.agents.cash.agent.AgentCash.on_confirmed_sale", AsyncMock()):
+    with patch("app.application.agents.income.agent.AgentIncome.on_confirmed_sale", AsyncMock()):
         await execute_pending_action(action, db_session, redis=redis_mock)
 
     log = (await db_session.execute(select(ChatSessionLog))).scalar_one()

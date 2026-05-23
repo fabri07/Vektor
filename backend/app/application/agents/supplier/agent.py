@@ -52,7 +52,7 @@ class AgentSupplier(BaseAgent):
             self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
         return self._client
 
-    async def process(self, request: AgentRequest) -> AgentResponse:
+    async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         message = request.message.lower()
         intent = self._classify_intent(message)
 

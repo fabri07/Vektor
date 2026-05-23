@@ -1,10 +1,16 @@
 CONTEXT_BUDGETS = {
     "agent_ceo": 2000,
-    "agent_cash": 3000,
+    # Stage 2: nuevos agentes
+    "agent_income": 3000,
+    "agent_expense": 3000,
+    "agent_google": 3500,   # combina budget de calendar + sync
+    # Agentes existentes
     "agent_stock": 3000,
     "agent_supplier": 3500,
     "agent_health": 4000,
     "agent_helper": 2500,
+    # Aliases deprecados (Stage 5d cleanup)
+    "agent_cash": 3000,
     "agent_calendar": 3000,
     "agent_sync": 4000,
 }

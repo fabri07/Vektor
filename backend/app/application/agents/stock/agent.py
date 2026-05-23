@@ -169,7 +169,7 @@ class AgentStock(BaseAgent):
             return "PRODUCT_UPDATE", classify_call
         return "STOCK_QUERY", classify_call
 
-    async def process(self, request: AgentRequest) -> AgentResponse:
+    async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         intent, classify_call = await self._classify_stock_intent(request.message)
         all_calls: list[LLMCall] = [classify_call] if classify_call else []
 

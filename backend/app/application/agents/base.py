@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
 from app.application.agents.shared.heuristic_engine import HeuristicConfig
 from app.application.agents.shared.schemas import AgentRequest, AgentResponse
@@ -12,7 +13,11 @@ class BaseAgent(ABC):
     def agent_name(self) -> str: ...
 
     @abstractmethod
-    async def process(self, request: AgentRequest) -> AgentResponse: ...
+    async def process(
+        self,
+        request: AgentRequest,
+        task: Any | None = None,  # AgentTask — opcional, para dispatch task-aware
+    ) -> AgentResponse: ...
 
     def build_system_prompt(self, business: dict, heuristics: HeuristicConfig) -> str:
         """Construye el system prompt inyectando heurísticas como valores numéricos."""

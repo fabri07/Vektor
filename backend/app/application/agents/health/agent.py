@@ -153,20 +153,20 @@ class AgentHealth(BaseAgent):
             f"Alertas: {health.alerts}"
         )
         response = await self.client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=600,
+            model="claude-sonnet-4-5",
+            max_tokens=800,
             system=system,
             messages=[{"role": "user", "content": data}],
         )
         llm_call = LLMCall(
             source="agent_health",
-            model="claude-haiku-4-5",
+            model="claude-sonnet-4-5",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
         )
         return response.content[0].text.strip(), llm_call
 
-    async def process(self, request: AgentRequest) -> AgentResponse:
+    async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         business_name = "el negocio"
         business_type = "kiosco_almacen"
         if self._db is not None:

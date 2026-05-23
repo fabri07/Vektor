@@ -1,4 +1,5 @@
 from app.application.agents.ceo.agent import INTENT_CATALOG
+from app.application.agents.ceo.team_plan_builder import build_plan
 from app.application.agents.shared.context_builder import CONTEXT_BUDGETS, ContextBuilder
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.agents.shared.risk_engine import RiskEngine, RiskLevel
@@ -8,12 +9,18 @@ from app.application.agents.shared.schemas import ActionType
 def test_all_agents_importable():
     from app.application.agents.cash.agent import AgentCash
     from app.application.agents.ceo.agent import AgentCEO
+    from app.application.agents.expense.agent import AgentExpense
+    from app.application.agents.google.agent import AgentGoogle
     from app.application.agents.health.agent import AgentHealth
     from app.application.agents.helper.agent import AgentHelper
+    from app.application.agents.income.agent import AgentIncome
     from app.application.agents.stock.agent import AgentStock
     from app.application.agents.supplier.agent import AgentSupplier
 
-    for cls in (AgentCEO, AgentCash, AgentStock, AgentSupplier, AgentHealth, AgentHelper):
+    for cls in (
+        AgentCEO, AgentCash, AgentIncome, AgentExpense, AgentGoogle,
+        AgentStock, AgentSupplier, AgentHealth, AgentHelper,
+    ):
         assert cls.agent_name is not None
 
 
@@ -55,13 +62,42 @@ def test_heuristic_to_prompt_fragment_is_numeric():
 
 
 def test_action_type_enum_complete():
-    # 16 originales + UPDATE_PRODUCT (sprint 14) = 17
+    # 16 originales + UPDATE_PRODUCT (sprint 14) = 17. Stage 4 agrega 3 más (Google).
     assert len(ActionType) == 17
 
 
 def test_intent_catalog_complete():
-    # 16 originales + ask_stock_status + ask_supplier_status + update_product = 19
-    assert len(INTENT_CATALOG) == 19
+    # 17 intents en español (Stage 1). Stage 4+ puede extender.
+    assert len(INTENT_CATALOG) == 17
+
+
+def test_intent_catalog_spanish():
+    """Todos los intents usan nomenclatura en español rioplatense."""
+    expected = {
+        "ingresar_venta", "ingresar_cobro", "ingresar_gasto", "ingresar_pago_salida",
+        "actualizar_stock", "registrar_merma", "actualizar_producto",
+        "importar_archivo_ventas", "importar_archivo_gastos", "registrar_compra_proveedor",
+        "consultar_estado_negocio", "generar_informe", "gestionar_proveedor",
+        "sincronizar_google", "agendar_evento", "ayuda_plataforma", "intent_desconocido",
+    }
+    assert set(INTENT_CATALOG) == expected
+
+
+def test_build_plan_returns_single_task():
+    from app.application.agents.shared.schemas import ActionType, AgentTeamPlan
+    plan = build_plan("ingresar_venta", {"producto": "gaseosa", "cantidad": 3})
+    assert isinstance(plan, AgentTeamPlan)
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].action_type == ActionType.REGISTER_SALE
+    assert plan.tasks[0].agent == "agent_income"
+    assert plan.tasks[0].entities["producto"] == "gaseosa"
+    assert plan.intent == "ingresar_venta"
+
+
+def test_build_plan_unknown_intent_falls_back_to_helper():
+    plan = build_plan("intent_desconocido", {})
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].agent == "agent_helper"
 
 
 def test_wrap_user_input():

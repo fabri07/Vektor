@@ -199,8 +199,8 @@ async def execute_pending_action(
                 entity_count=1,
                 pending_action_id=action.id,
             )
-        from app.application.agents.cash.agent import AgentCash  # noqa: PLC0415
-        await AgentCash().on_confirmed_sale(str(sale.id), str(action.tenant_id))
+        from app.application.agents.income.agent import AgentIncome  # noqa: PLC0415
+        await AgentIncome().on_confirmed_sale(str(sale.id), str(action.tenant_id))
         try:
             if redis is not None:
                 from decimal import Decimal  # noqa: PLC0415
