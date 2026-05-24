@@ -21,6 +21,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
 )
 from app.application.services.team_plan_executor import (
+    InvalidPlanDAGError,
     TeamPlanExecutor,
     _topological_levels,
 )
@@ -121,14 +122,19 @@ def test_topological_levels_diamond():
     assert [t.task_id for t in levels[2]] == ["t4"]
 
 
-def test_topological_levels_breaks_cycle():
-    """Ciclo → no entra en loop infinito; rompe con la primera task."""
+def test_topological_levels_raises_on_cycle():
+    """Ciclo → InvalidPlanDAGError, no continúa parcialmente."""
     t1 = _make_task(task_id="t1", depends_on=["t2"])
     t2 = _make_task(task_id="t2", depends_on=["t1"])
-    levels = _topological_levels([t1, t2])
-    # Debe terminar sin colgar; un nivel contiene t1 y otro t2 (o viceversa).
-    all_ids = {t.task_id for lv in levels for t in lv}
-    assert all_ids == {"t1", "t2"}
+    with pytest.raises(InvalidPlanDAGError):
+        _topological_levels([t1, t2])
+
+
+def test_topological_levels_raises_on_unknown_dependency():
+    """Referencia a task_id inexistente → InvalidPlanDAGError."""
+    t1 = _make_task(task_id="t1", depends_on=["ghost"])
+    with pytest.raises(InvalidPlanDAGError):
+        _topological_levels([t1])
 
 
 # ── TeamPlanExecutor.execute ──────────────────────────────────────────────────
@@ -416,6 +422,28 @@ async def test_execute_agent_exception_in_parallel_marks_failed():
 
     assert responses[0].status == "error"
     assert responses[1].status == "success"
+
+
+@pytest.mark.asyncio
+async def test_execute_invalid_dag_returns_errors_without_running_agents():
+    """Plan con ciclo → execute devuelve error por cada task y no llama a ningún agente."""
+    request = _make_request()
+    t1 = _make_task(task_id="t1", agent="agent_income", depends_on=["t2"])
+    t2 = _make_task(task_id="t2", agent="agent_stock", depends_on=["t1"])
+    plan = AgentTeamPlan(plan_id="p", intent="x", tasks=[t1, t2])
+
+    fake_get = MagicMock()
+    with (
+        patch(f"{EXECUTOR_MOD}.get_sub_agent", side_effect=fake_get),
+        _patch_session_factory(),
+    ):
+        executor = TeamPlanExecutor(redis=MagicMock(), user_id=uuid.uuid4(), tenant_id=uuid.uuid4())
+        responses = await executor.execute(plan, request)
+
+    fake_get.assert_not_called()  # ningún sub-agente fue invocado
+    assert len(responses) == 2
+    assert all(r.status == "error" for r in responses)
+    assert all(r.result.get("skipped_reason") == "invalid_plan_dag" for r in responses)
 
 
 @pytest.mark.asyncio

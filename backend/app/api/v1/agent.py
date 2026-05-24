@@ -169,6 +169,44 @@ def _attach_conversation_id(agent_response: AgentResponse, conversation_id: str 
     agent_response.result = result
 
 
+def _topological_position_map(plan: dict[str, Any] | None) -> dict[str, int]:
+    """Resuelve task_id → posición global por orden topológico.
+
+    Itera por niveles (tasks listas con dependencias satisfechas) y asigna
+    posiciones crecientes. Tasks paralelas dentro de un nivel quedan
+    contiguas; tasks con dependencias quedan después de las que dependen.
+    Tasks no presentes en el plan reciben posición sentinela alta.
+    """
+    if not isinstance(plan, dict):
+        return {}
+    tasks = plan.get("tasks") or []
+    if not isinstance(tasks, list) or not tasks:
+        return {}
+
+    remaining = [
+        {"task_id": str(t.get("task_id") or ""), "depends_on": list(t.get("depends_on") or [])}
+        for t in tasks
+        if t.get("task_id")
+    ]
+    completed: set[str] = set()
+    position_map: dict[str, int] = {}
+    cursor = 0
+
+    while remaining:
+        ready = [t for t in remaining if all(d in completed for d in t["depends_on"])]
+        if not ready:
+            # Ciclo o dependencia inválida: emitimos lo restante en orden recibido
+            ready = remaining[:]
+        for t in ready:
+            position_map[t["task_id"]] = cursor
+            cursor += 1
+            completed.add(t["task_id"])
+        ready_ids = {t["task_id"] for t in ready}
+        remaining = [t for t in remaining if t["task_id"] not in ready_ids]
+
+    return position_map
+
+
 def _build_tasks_audit(
     agent_response: AgentResponse,
     action_meta: dict[str, Any] | None,
@@ -318,7 +356,9 @@ async def _process_agent_action(
 
         approval_group_id = str(uuid.uuid4())
         pending_ids: list[str] = []
-        for position, tr in enumerate(task_response_list):
+        plan_dict = agent_response.result.get("plan") if isinstance(agent_response.result, dict) else None
+        topo_position = _topological_position_map(plan_dict)
+        for fallback_position, tr in enumerate(task_response_list):
             if not tr.get("requires_approval"):
                 tr["pending_action_id"] = None
                 continue
@@ -337,7 +377,9 @@ async def _process_agent_action(
             )
             pending.approval_group_id = approval_group_id
             pending.group_execution_status = "PENDING"
-            pending.group_position = position
+            # group_position desde el orden topológico del DAG (fallback al índice del array)
+            tr_task_id = str(tr.get("task_id") or "")
+            pending.group_position = topo_position.get(tr_task_id, fallback_position)
             pending_ids.append(str(pending.id))
             tr["pending_action_id"] = str(pending.id)
 
@@ -779,6 +821,7 @@ async def chat_stream(
 
             # 3. Audit log (insert-only)
             _usage_s = agent_response.usage
+            _tasks_audit_s = _build_tasks_audit(agent_response, action_meta)
             audit = DecisionAuditLog(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
@@ -792,10 +835,13 @@ async def chat_stream(
                     "requires_approval": agent_response.requires_approval,
                     "pending_action_id": agent_response.pending_action_id
                     or (action_meta or {}).get("action_id"),
+                    "approval_group_id": agent_response.approval_group_id
+                    or (action_meta or {}).get("approval_group_id"),
                     "ceo_target_agent": agent_response.result.get("target_agent"),
                     "sub_agent_name": agent_response.agent_name,
                     "plan_id": (agent_response.result.get("plan") or {}).get("plan_id"),
                     "plan": agent_response.result.get("plan"),
+                    "tasks": _tasks_audit_s,
                     "token_calls": [c.model_dump() for c in _usage_s.calls] if _usage_s else [],
                 },
                 triggered_by="agent:chat:stream",

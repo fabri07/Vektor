@@ -7,6 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useChat } from "./hooks/useChat";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { PendingActionGroupCard } from "./components/PendingActionGroupCard";
+import { PendingActionGroupStatus } from "./components/PendingActionGroupStatus";
 import {
   AttachmentPicker,
   type AttachmentFile,
@@ -285,7 +286,17 @@ export function ChatPage() {
                     key={msg.id}
                     className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                   >
-                    {msg.status === "requires_approval" && msg.approvalGroupId ? (
+                    {msg.groupResult ? (
+                      <div className="w-full max-w-[90%]">
+                        <div className="mb-2 whitespace-pre-wrap text-sm text-vk-text-primary">
+                          {msg.content}
+                        </div>
+                        <PendingActionGroupStatus
+                          groupExecutionStatus={msg.groupResult.groupExecutionStatus}
+                          tasks={msg.groupResult.tasks}
+                        />
+                      </div>
+                    ) : msg.status === "requires_approval" && msg.approvalGroupId ? (
                       <div className="w-full max-w-[90%]">
                         <PendingActionGroupCard
                           summary={msg.content}

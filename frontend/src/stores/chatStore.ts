@@ -10,6 +10,10 @@ export interface ChatMessage {
   pendingActionId?: string;
   pendingActionIds?: string[];    // Stage 3: grupo multi-task
   approvalGroupId?: string;       // Stage 3: vincula PAs del grupo
+  groupResult?: {                 // Stage 3: progreso post-confirmación
+    groupExecutionStatus: "SUCCEEDED" | "PARTIAL_FAILED";
+    tasks: Array<{ action_id: string; action_type: string; execution_status: string }>;
+  };
   automationOffer?: AutomationOffer;
   timestamp: string; // ISO string — Date no es serializable en localStorage
   requiresGoogleAuth?: boolean;

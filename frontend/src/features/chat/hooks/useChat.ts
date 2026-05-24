@@ -400,21 +400,23 @@ export function useChat() {
       const response = await confirmGroup_(groupId);
       const msg = messages.find((m) => m.approvalGroupId === groupId);
       if (msg) {
-        if (response.group_execution_status === "SUCCEEDED") {
-          updateMessage(msg.id, {
-            status: "success",
-            content: msg.content + "\n✓ Todas las operaciones confirmadas y guardadas.",
-          });
-          for (const task of response.tasks) {
+        const groupResult = {
+          groupExecutionStatus: response.group_execution_status,
+          tasks: response.tasks.map((t) => ({
+            action_id: t.action_id,
+            action_type: t.action_type,
+            execution_status: t.execution_status,
+          })),
+        };
+        updateMessage(msg.id, {
+          status: response.group_execution_status === "SUCCEEDED" ? "success" : "error",
+          groupResult,
+        });
+        // Invalidar queries para tasks que se ejecutaron con éxito
+        for (const task of response.tasks) {
+          if (task.execution_status === "SUCCEEDED") {
             await invalidateAffectedQueries(task.action_type);
           }
-        } else {
-          const failed = response.tasks.filter((t) => t.execution_status !== "SUCCEEDED");
-          const summary = failed.map((t) => t.action_type).join(", ");
-          updateMessage(msg.id, {
-            status: "error",
-            content: msg.content + `\nAlgunas operaciones fallaron: ${summary}. Revisá el estado.`,
-          });
         }
       }
     },

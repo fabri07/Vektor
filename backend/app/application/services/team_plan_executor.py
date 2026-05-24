@@ -30,8 +30,30 @@ from app.persistence.db.session import async_session_factory
 logger = get_logger(__name__)
 
 
+class InvalidPlanDAGError(ValueError):
+    """El plan tiene un ciclo o referencia a un task_id inexistente."""
+
+    def __init__(self, message: str, *, remaining_ids: list[str]):
+        super().__init__(message)
+        self.remaining_ids = remaining_ids
+
+
 def _topological_levels(tasks: list[AgentTask]) -> list[list[AgentTask]]:
-    """Ordena tasks por dependencias. Tasks en el mismo nivel corren en paralelo."""
+    """Ordena tasks por dependencias. Tasks en el mismo nivel corren en paralelo.
+
+    Lanza InvalidPlanDAGError si el plan contiene un ciclo o referencias a
+    task_ids que no existen en el plan. La validación es estricta: un plan
+    inválido nunca se ejecuta parcialmente.
+    """
+    known_ids = {t.task_id for t in tasks}
+    for t in tasks:
+        invalid = [d for d in t.depends_on if d not in known_ids]
+        if invalid:
+            raise InvalidPlanDAGError(
+                f"Task {t.task_id} depende de id(s) inexistente(s): {invalid}",
+                remaining_ids=[t.task_id],
+            )
+
     remaining = list(tasks)
     completed_ids: set[str] = set()
     levels: list[list[AgentTask]] = []
@@ -42,12 +64,15 @@ def _topological_levels(tasks: list[AgentTask]) -> list[list[AgentTask]]:
             if all(dep in completed_ids for dep in t.depends_on)
         ]
         if not ready:
-            # Dependencia circular o inválida — romper el ciclo con la primera task restante
+            # Ciclo: no hay tasks listas pero quedan pendientes
             logger.error(
                 "team_plan_executor_circular_dependency",
                 remaining_ids=[t.task_id for t in remaining],
             )
-            ready = [remaining[0]]
+            raise InvalidPlanDAGError(
+                "Dependencia circular detectada en el plan.",
+                remaining_ids=[t.task_id for t in remaining],
+            )
 
         levels.append(ready)
         ready_ids = {t.task_id for t in ready}
@@ -83,8 +108,36 @@ class TeamPlanExecutor:
 
         Outputs de nivel N se pasan en `request.context["upstream_outputs"]` a nivel N+1.
         Si una task falla, las dependientes se saltan automáticamente.
+
+        Si el plan tiene un DAG inválido (ciclo o depends_on huérfano), retorna
+        una list[AgentResponse] con status="error" para cada task — el plan no se
+        ejecuta parcialmente.
         """
-        levels = _topological_levels(plan.tasks)
+        try:
+            levels = _topological_levels(plan.tasks)
+        except InvalidPlanDAGError as exc:
+            logger.error(
+                "team_plan_executor_invalid_dag",
+                plan_id=plan.plan_id,
+                remaining_ids=exc.remaining_ids,
+                error=str(exc),
+            )
+            return [
+                AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=t.agent,
+                    status="error",
+                    risk_level="LOW",
+                    confidence="LOW",
+                    message="Plan inválido: no se ejecutó.",
+                    result={
+                        "task_id": t.task_id,
+                        "skipped_reason": "invalid_plan_dag",
+                        "error": str(exc),
+                    },
+                )
+                for t in plan.tasks
+            ]
         responses_by_id: dict[str, AgentResponse] = {}
         failed_ids: set[str] = set()
 
