@@ -73,13 +73,53 @@ def mock_redis():
     return redis
 
 
+ORCHESTRATOR = "app.application.services.chat_orchestrator"
+TEAM_EXECUTOR = "app.application.services.team_plan_executor"
+
+
+def _make_ceo_plan_response(
+    request_id: str,
+    intent: str,
+    agent: str,
+    action_type: str,
+    entities: dict | None = None,
+) -> AgentResponse:
+    """Respuesta de CEO con plan single-task (Stage 3 format)."""
+    plan_dict = {
+        "plan_id": str(uuid.uuid4()),
+        "intent": intent,
+        "tasks": [{
+            "task_id": str(uuid.uuid4()),
+            "agent": agent,
+            "action_type": action_type,
+            "entities": entities or {},
+            "depends_on": [],
+            "approval_group": None,
+        }],
+        "requires_synthesis": False,
+        "fallback_message": None,
+    }
+    return AgentResponse(
+        request_id=request_id,
+        agent_name="agent_ceo",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        requires_approval=False,
+        confidence=Confidence.HIGH,
+        result={
+            "intent": intent,
+            "action_type": action_type,
+            "target_agent": agent,
+            "plan": plan_dict,
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_returns_rich_message(mock_db, mock_redis):
     """El orchestrator no debe devolver 'Listo.' sino texto rico del LLM."""
     rich_text = "Registré la venta de $80.000. Tu caja del día suma $130.000. ¡Buen ritmo!"
     request = _make_request(conversation_id=str(uuid.uuid4()))
-    ceo_resp = _make_agent_response(summary="Venta registrada.")
-    ceo_resp.result["target_agent"] = "agent_cash"
 
     mock_content = MagicMock()
     mock_content.text = rich_text
@@ -87,21 +127,17 @@ async def test_orchestrator_returns_rich_message(mock_db, mock_redis):
     mock_llm_response.content = [mock_content]
 
     with (
-        patch(
-            "app.application.services.chat_orchestrator.AgentCEO"
-        ) as mock_ceo_cls,
-        patch(
-            "app.application.services.chat_orchestrator.get_sub_agent"
-        ) as mock_registry,
-        patch(
-            "app.application.services.chat_orchestrator.get_anthropic_async_client"
-        ) as mock_client_factory,
-        patch(
-            "app.application.services.chat_orchestrator.ConversationService"
-        ) as mock_conv_svc_cls,
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
+        patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
-        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
-        mock_registry.return_value.process = AsyncMock(return_value=_make_agent_response())
+        mock_ceo_cls.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
+            )
+        )
+        MockExecutor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_llm_response)
@@ -132,21 +168,18 @@ async def test_orchestrator_skips_llm_for_approval(mock_db, mock_redis):
         requires_approval=True,
         summary="¿Confirmás la venta de $80.000?",
     )
-    approval_resp.result["target_agent"] = "agent_cash"
 
     with (
-        patch(
-            "app.application.services.chat_orchestrator.AgentCEO"
-        ) as mock_ceo_cls,
-        patch(
-            "app.application.services.chat_orchestrator.get_sub_agent"
-        ) as mock_registry,
-        patch(
-            "app.application.services.chat_orchestrator.get_anthropic_async_client"
-        ) as mock_client_factory,
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
     ):
-        mock_ceo_cls.return_value.process = AsyncMock(return_value=approval_resp)
-        mock_registry.return_value.process = AsyncMock(return_value=approval_resp)
+        mock_ceo_cls.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
+            )
+        )
+        MockExecutor.return_value.execute = AsyncMock(return_value=[approval_resp])
 
         mock_client = AsyncMock()
         mock_client_factory.return_value = mock_client
@@ -210,10 +243,17 @@ async def test_orchestrator_passes_agent_task_from_plan(mock_db, mock_redis):
         },
     )
 
+    mock_session = AsyncMock()
+    mock_session_cm = MagicMock()
+    mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+    mock_session_factory = MagicMock(return_value=mock_session_cm)
+
     with (
-        patch("app.application.services.chat_orchestrator.AgentCEO") as mock_ceo_cls,
-        patch("app.application.services.chat_orchestrator.get_sub_agent") as mock_registry,
-        patch("app.application.services.chat_orchestrator.get_anthropic_async_client"),
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{TEAM_EXECUTOR}.get_sub_agent") as mock_registry,
+        patch(f"{TEAM_EXECUTOR}.async_session_factory", mock_session_factory),
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
     ):
         mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
         sub_agent = MagicMock()
@@ -247,21 +287,17 @@ async def test_orchestrator_loads_conversation_context(mock_db, mock_redis):
     mock_llm_response.content = [mock_content]
 
     with (
-        patch(
-            "app.application.services.chat_orchestrator.AgentCEO"
-        ) as mock_ceo_cls,
-        patch(
-            "app.application.services.chat_orchestrator.get_sub_agent"
-        ) as mock_registry,
-        patch(
-            "app.application.services.chat_orchestrator.get_anthropic_async_client"
-        ) as mock_client_factory,
-        patch(
-            "app.application.services.chat_orchestrator.ConversationService"
-        ) as mock_conv_svc_cls,
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
+        patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
-        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
-        mock_registry.return_value.process = AsyncMock(return_value=_make_agent_response())
+        mock_ceo_cls.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ayuda_plataforma", "agent_helper", "ANSWER_HELP_REQUEST"
+            )
+        )
+        MockExecutor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_llm_response)
@@ -296,21 +332,17 @@ async def test_orchestrator_saves_turn_after_success(mock_db, mock_redis):
     mock_llm_response.content = [mock_content]
 
     with (
-        patch(
-            "app.application.services.chat_orchestrator.AgentCEO"
-        ) as mock_ceo_cls,
-        patch(
-            "app.application.services.chat_orchestrator.get_sub_agent"
-        ) as mock_registry,
-        patch(
-            "app.application.services.chat_orchestrator.get_anthropic_async_client"
-        ) as mock_client_factory,
-        patch(
-            "app.application.services.chat_orchestrator.ConversationService"
-        ) as mock_conv_svc_cls,
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
+        patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
-        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
-        mock_registry.return_value.process = AsyncMock(return_value=_make_agent_response())
+        mock_ceo_cls.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
+            )
+        )
+        MockExecutor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_llm_response)
@@ -343,15 +375,19 @@ async def test_orchestrator_config_error_preserves_metadata_and_saves_turn(
     ceo_resp.result.update({"intent": "ask_stock_status", "target_agent": "agent_stock"})
 
     with (
-        patch("app.application.services.chat_orchestrator.AgentCEO") as mock_ceo_cls,
-        patch("app.application.services.chat_orchestrator.get_sub_agent") as mock_registry,
-        patch(
-            "app.application.services.chat_orchestrator.get_anthropic_async_client"
-        ) as mock_client_factory,
-        patch("app.application.services.chat_orchestrator.ConversationService") as mock_conv_svc_cls,
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
+        patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
-        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
-        mock_registry.return_value.process = AsyncMock(return_value=_make_agent_response())
+        mock_ceo_cls.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "consultar_estado_negocio", "agent_stock", "GENERATE_HEALTH_REPORT"
+            )
+        )
+        stock_resp = _make_agent_response(summary="Consulta de stock.")
+        stock_resp.result.update({"intent": "ask_stock_status", "target_agent": "agent_stock"})
+        MockExecutor.return_value.execute = AsyncMock(return_value=[stock_resp])
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(
@@ -374,7 +410,7 @@ async def test_orchestrator_config_error_preserves_metadata_and_saves_turn(
         )
 
     assert response.status == "error"
-    assert response.result["intent"] == "ask_stock_status"
+    assert response.result["intent"] == "consultar_estado_negocio"
     assert response.result["target_agent"] == "agent_stock"
     assert "IA no está disponible" in (response.message or "")
     assert conv_svc_instance.add_turn.call_count == 2

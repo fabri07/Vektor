@@ -5,6 +5,8 @@ import {
   sendMessage,
   confirmAction,
   cancelAction,
+  confirmGroup as confirmGroup_,
+  cancelGroup as cancelGroup_,
   getChatUsage,
   type AgentResponse,
   type ChatAttachment,
@@ -110,6 +112,8 @@ export function useChat() {
               "Requiere tu aprobación.",
             status: "requires_approval",
             pendingActionId: response.pending_action_id,
+            pendingActionIds: response.pending_action_ids,
+            approvalGroupId: response.approval_group_id,
           });
         } else if (response.status === "requires_clarification") {
           addMessage({
@@ -244,6 +248,8 @@ export function useChat() {
                       "Requiere tu aprobación.",
                     status: "requires_approval",
                     pendingActionId: agentResp.pending_action_id,
+                    pendingActionIds: agentResp.pending_action_ids,
+                    approvalGroupId: agentResp.approval_group_id,
                   });
                 } else if (agentResp.status === "requires_clarification") {
                   updateMessage(thinkingId, {
@@ -389,6 +395,46 @@ export function useChat() {
     [messages, updateMessage],
   );
 
+  const confirmGroup = useCallback(
+    async (groupId: string) => {
+      const response = await confirmGroup_(groupId);
+      const msg = messages.find((m) => m.approvalGroupId === groupId);
+      if (msg) {
+        if (response.group_execution_status === "SUCCEEDED") {
+          updateMessage(msg.id, {
+            status: "success",
+            content: msg.content + "\n✓ Todas las operaciones confirmadas y guardadas.",
+          });
+          for (const task of response.tasks) {
+            await invalidateAffectedQueries(task.action_type);
+          }
+        } else {
+          const failed = response.tasks.filter((t) => t.execution_status !== "SUCCEEDED");
+          const summary = failed.map((t) => t.action_type).join(", ");
+          updateMessage(msg.id, {
+            status: "error",
+            content: msg.content + `\nAlgunas operaciones fallaron: ${summary}. Revisá el estado.`,
+          });
+        }
+      }
+    },
+    [messages, updateMessage, invalidateAffectedQueries],
+  );
+
+  const cancelGroup = useCallback(
+    async (groupId: string) => {
+      await cancelGroup_(groupId);
+      const msg = messages.find((m) => m.approvalGroupId === groupId);
+      if (msg) {
+        updateMessage(msg.id, {
+          status: "error",
+          content: msg.content + "\n✗ Operaciones canceladas.",
+        });
+      }
+    },
+    [messages, updateMessage],
+  );
+
   return {
     messages,
     isLoading,
@@ -398,6 +444,8 @@ export function useChat() {
     cancel,
     automate,
     dismissAutomation,
+    confirmGroup,
+    cancelGroup,
     messagesUsedToday,
     isRateLimited,
     newConversation,

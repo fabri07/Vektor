@@ -16,6 +16,8 @@ export interface AgentResponse {
     [key: string]: unknown;
   };
   pending_action_id?: string;
+  pending_action_ids?: string[];    // Stage 3: grupo multi-task
+  approval_group_id?: string;       // Stage 3: vincula PAs del grupo
   question?: string;
   message?: string;
 }
@@ -57,6 +59,26 @@ export async function confirmAction(pendingActionId: string): Promise<ConfirmAct
 
 export async function cancelAction(pendingActionId: string): Promise<void> {
   await api.post(`/agent/cancel/${pendingActionId}`);
+}
+
+export interface ConfirmGroupResponse {
+  status: string;
+  approval_group_id: string;
+  group_execution_status: "SUCCEEDED" | "PARTIAL_FAILED";
+  tasks: Array<{
+    action_id: string;
+    action_type: string;
+    execution_status: string;
+  }>;
+}
+
+export async function confirmGroup(groupId: string): Promise<ConfirmGroupResponse> {
+  const res = await api.post<ConfirmGroupResponse>(`/agent/confirm/group/${groupId}`);
+  return res.data;
+}
+
+export async function cancelGroup(groupId: string): Promise<void> {
+  await api.post(`/agent/cancel/group/${groupId}`);
 }
 
 export async function getChatUsage(): Promise<{ messages_today: number; limit: number }> {

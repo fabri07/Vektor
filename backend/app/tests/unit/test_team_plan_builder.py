@@ -88,11 +88,56 @@ def test_build_plan_unknown_intent_fallback():
 
 # ── build_plan — invariantes estructurales ────────────────────────────────────
 
-def test_build_plan_always_single_task_stage1():
-    """Stage 1: build_plan siempre retorna exactamente 1 tarea."""
-    for intent in INTENT_CATALOG:
+# Intents que Stage 3 convierte en planes compuestos (> 1 tarea)
+_COMPOUND_INTENTS = {"importar_archivo_ventas", "registrar_compra_proveedor"}
+
+
+def test_build_plan_single_task_for_non_compound_intents():
+    """Stage 3: los intents que no son compuestos retornan exactamente 1 tarea."""
+    single_task_intents = [i for i in INTENT_CATALOG if i not in _COMPOUND_INTENTS]
+    for intent in single_task_intents:
         plan = build_plan(intent, {})
         assert len(plan.tasks) == 1, f"build_plan({intent!r}) retornó {len(plan.tasks)} tasks"
+
+
+def test_build_plan_compound_importar_ventas():
+    """Stage 3: importar_archivo_ventas genera 2 tareas paralelas."""
+    plan = build_plan("importar_archivo_ventas", {})
+    assert len(plan.tasks) == 2
+    agents = {t.agent for t in plan.tasks}
+    assert "agent_income" in agents
+    assert "agent_stock" in agents
+    assert plan.requires_synthesis is True
+    # Todas en el mismo approval_group, sin dependencias (paralelo)
+    groups = {t.approval_group for t in plan.tasks}
+    assert len(groups) == 1
+    for task in plan.tasks:
+        assert task.depends_on == []
+
+
+def test_build_plan_compound_compra_proveedor_cash():
+    """Stage 3: compra al contado genera 2 tareas secuenciales."""
+    plan = build_plan("registrar_compra_proveedor", {"monto": 5000})
+    assert len(plan.tasks) == 2
+    stock_task = next(t for t in plan.tasks if t.agent == "agent_stock")
+    expense_task = next(t for t in plan.tasks if t.agent == "agent_expense")
+    assert expense_task.depends_on == [stock_task.task_id]
+    assert plan.requires_synthesis is True
+
+
+def test_build_plan_compound_compra_proveedor_credito():
+    """Stage 3: compra a crédito genera 1 tarea (no hay outflow inmediato)."""
+    plan = build_plan("registrar_compra_proveedor", {"forma_pago": "a 30 dias"})
+    assert len(plan.tasks) == 1
+    assert plan.requires_synthesis is False
+    assert plan.fallback_message is not None
+
+
+def test_build_plan_venta_con_cobro():
+    """Stage 3: ingresar_venta con entidad cobro → 2 tareas secuenciales."""
+    plan = build_plan("ingresar_venta", {"monto": 2000, "medio_pago": "efectivo"})
+    assert len(plan.tasks) == 2
+    assert plan.requires_synthesis is True
 
 
 def test_build_plan_generates_unique_ids():

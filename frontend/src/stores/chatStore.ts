@@ -8,6 +8,8 @@ export interface ChatMessage {
   content: string;
   status?: "success" | "requires_approval" | "requires_clarification" | "error" | "requires_google_auth";
   pendingActionId?: string;
+  pendingActionIds?: string[];    // Stage 3: grupo multi-task
+  approvalGroupId?: string;       // Stage 3: vincula PAs del grupo
   automationOffer?: AutomationOffer;
   timestamp: string; // ISO string — Date no es serializable en localStorage
   requiresGoogleAuth?: boolean;

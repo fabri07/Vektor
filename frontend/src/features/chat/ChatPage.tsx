@@ -6,6 +6,7 @@ import { Send } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useChat } from "./hooks/useChat";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { PendingActionGroupCard } from "./components/PendingActionGroupCard";
 import {
   AttachmentPicker,
   type AttachmentFile,
@@ -48,6 +49,8 @@ export function ChatPage() {
     cancel,
     automate,
     dismissAutomation,
+    confirmGroup,
+    cancelGroup,
     messagesUsedToday,
     isRateLimited,
     newConversation,
@@ -282,7 +285,16 @@ export function ChatPage() {
                     key={msg.id}
                     className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                   >
-                    {msg.status === "requires_approval" && msg.pendingActionId ? (
+                    {msg.status === "requires_approval" && msg.approvalGroupId ? (
+                      <div className="w-full max-w-[90%]">
+                        <PendingActionGroupCard
+                          summary={msg.content}
+                          approvalGroupId={msg.approvalGroupId}
+                          onConfirmGroup={confirmGroup}
+                          onCancelGroup={cancelGroup}
+                        />
+                      </div>
+                    ) : msg.status === "requires_approval" && msg.pendingActionId ? (
                       <div className="w-full max-w-[90%]">
                         <ApprovalCard
                           summary={msg.content}

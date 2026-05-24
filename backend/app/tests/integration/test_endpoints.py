@@ -97,6 +97,45 @@ async def auth_client_second_tenant(session: AsyncSession):
 
 # ── Helper: AgentResponse mock ────────────────────────────────────────────────
 
+TEAM_EXECUTOR = "app.application.services.team_plan_executor"
+
+
+def _make_ceo_plan_response(
+    request_id: str,
+    intent: str,
+    agent: str,
+    action_type: str,
+    entities: dict | None = None,
+) -> AgentResponse:
+    """Respuesta del CEO con un plan single-task (Stage 3 format)."""
+    plan_dict = {
+        "plan_id": str(uuid.uuid4()),
+        "intent": intent,
+        "tasks": [{
+            "task_id": str(uuid.uuid4()),
+            "agent": agent,
+            "action_type": action_type,
+            "entities": entities or {},
+            "depends_on": [],
+            "approval_group": None,
+        }],
+        "requires_synthesis": False,
+        "fallback_message": None,
+    }
+    return AgentResponse(
+        request_id=request_id,
+        agent_name="agent_ceo",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        requires_approval=False,
+        result={
+            "intent": intent,
+            "action_type": action_type,
+            "target_agent": agent,
+            "plan": plan_dict,
+        },
+    )
+
 
 def _mock_requires_approval_response(request_id: str) -> AgentResponse:
     return AgentResponse(
@@ -160,12 +199,14 @@ async def test_medium_action_creates_pending_not_persists(auth_client, session: 
     ORCHESTRATOR = "app.application.services.chat_orchestrator"
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
-        patch(f"{ORCHESTRATOR}.get_sub_agent", return_value=sub_mock),
+        patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
         patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
         patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
     ):
         MockCEO.return_value.process = AsyncMock(
-            side_effect=lambda req: _mock_requires_approval_response(req.request_id)
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE", {"amount": 500}
+            )
         )
         MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
         MockConv.return_value.add_turn = AsyncMock()
@@ -231,23 +272,13 @@ async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSes
     ORCHESTRATOR = "app.application.services.chat_orchestrator"
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
-        patch(f"{ORCHESTRATOR}.get_sub_agent", return_value=sub_mock),
+        patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
         patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
         patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
     ):
         MockCEO.return_value.process = AsyncMock(
-            side_effect=lambda req: AgentResponse(
-                request_id=req.request_id,
-                agent_name="agent_ceo",
-                status="success",
-                risk_level=RiskLevel.MEDIUM,
-                requires_approval=False,
-                result={
-                    "intent": "record_expense",
-                    "action_type": "REGISTER_EXPENSE",
-                    "target_agent": "agent_cash",
-                    "entities": {},
-                },
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ingresar_gasto", "agent_expense", "REGISTER_EXPENSE"
             )
         )
         MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
@@ -612,12 +643,14 @@ async def test_wf02_requires_clarification_no_pending(auth_client, session: Asyn
     )
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
-        patch(f"{ORCHESTRATOR}.get_sub_agent", return_value=sub_mock),
+        patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
         patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
         patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as MockAnthropicFactory,
     ):
         MockCEO.return_value.process = AsyncMock(
-            side_effect=lambda req: _mock_clarification_response(req.request_id)
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
+            )
         )
         MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
         MockConv.return_value.add_turn = AsyncMock()

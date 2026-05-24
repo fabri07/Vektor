@@ -180,23 +180,24 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 | Agente | Context Budget | Responsabilidad |
 |--------|---------------|-----------------|
 | AgentCEO | 2.000 tokens | Router/coordinador — nunca accede a datos de negocio |
-| AgentCash | 3.000 tokens | Caja, ventas, cobros, pagos, import Google Sheets |
-| AgentStock | 3.000 tokens | Inventario, quiebres, rotación, merma |
+| AgentIncome | 3.000 tokens | Ventas, cobros, ingresos, import archivos de ventas |
+| AgentExpense | 3.000 tokens | Gastos, pagos, salidas de caja, import archivos de gastos |
+| AgentStock | 3.000 tokens | Inventario, quiebres, rotación, merma, actualizar productos |
 | AgentSupplier | 3.500 tokens | Proveedores, Gmail vía MCP |
 | AgentHealth | 4.000 tokens | Score de salud, narrativa ejecutiva |
 | AgentHelper | 2.500 tokens | FAQ, manual, guía funcional |
-| AgentCalendar | 3.000 tokens | Google Calendar vía MCP |
-| AgentSync | 4.000 tokens | Google Sheets / Docs vía MCP |
+| AgentGoogle | 4.000 tokens | Google Calendar + Sheets + Docs vía MCP |
 
 > Verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir estado del agente.
+> Aliases deprecados en `registry.py` (cleanup Stage 5d): `agent_cash` → `agent_income`, `agent_calendar`/`agent_sync` → `agent_google`.
 
-**Modelos LLM:** AgentCEO: `claude-sonnet-4-5`. ChatOrchestrator: `claude-haiku-4-5-20251001`. Cash/Stock/Health/Helper: `claude-haiku-4-5`. Verificar cada agente — no todos usan el mismo sufijo.
+**Modelos LLM:** AgentCEO: `claude-haiku-4-5`. ChatOrchestrator: `claude-haiku-4-5-20251001`. Income/Expense/Stock/Health/Helper: `claude-haiku-4-5`. Verificar cada agente — no todos usan el mismo sufijo.
 
 **Cliente Anthropic:** todos los agentes via `get_anthropic_async_client()`. No instanciar `anthropic.AsyncAnthropic` directo.
 
 **Contratos fijos** (`app/application/agents/shared/schemas.py`):
 - `AgentRequest`: `{ request_id, user_id, business_id, message, attachments, conversation_id }` — sin `agent_target`
-- `AgentResponse`: `{ request_id, agent_name, status, risk_level, requires_approval, confidence, result, pending_action_id?, question?, message?, usage? }`
+- `AgentResponse`: `{ request_id, agent_name, status, risk_level, requires_approval, confidence, result, pending_action_id?, pending_action_ids?, approval_group_id?, question?, message?, usage? }` — `pending_action_ids`/`approval_group_id` reservados para Stage 3 (multi-task)
 - `status`: `"success" | "requires_approval" | "requires_clarification" | "requires_google_auth" | "error"`
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca float
 - `LLMCall`: `{ source, model, input_tokens, output_tokens }`. `UsageSummary`: `{ calls: list[LLMCall] }` + `total_input/output/total`.
@@ -231,7 +232,9 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **HeuristicEngine** (`shared/heuristic_engine.py`): `get(business_type)` síncrono; `get_async(...)` aplica `BusinessHeuristicOverride` de la DB. `to_prompt_fragment()` genera valores numéricos para system prompts — nunca texto narrativo. Fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 19 intents del `INTENT_CATALOG` (incluye `out_of_scope`). `out_of_scope` corta en `ChatOrchestrator` sin consumir tokens de sub-agente — retorna mensaje fijo. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/agent.py`) → `registry.get_sub_agent(name)`. Intent `update_product` → `agent_stock` → `UPDATE_PRODUCT` action.
+**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 17 intents del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido`). `intent_desconocido` rutea a `agent_helper` — no hay corte en ChatOrchestrator. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
+
+**AgentTeamPlan / AgentTask** (`shared/schemas.py`): contratos de Stage 1. `AgentTeamPlan { plan_id, intent, tasks: list[AgentTask], requires_synthesis, fallback_message? }`. `AgentTask { task_id, agent, action_type, entities, depends_on, approval_group? }`. Stage 3 extenderá `build_plan()` para planes multi-task y DAGs (`depends_on` ya es lista de `task_id`s).
 
 **Streaming SSE** (`POST /agent/chat/stream`): `{"type": "thinking"}` → `{"type": "response", "data": AgentResponse}` → `{"type": "error"}`. Finaliza con `data: [DONE]`. Frontend: `sendStream()` con placeholder `thinkingId` que se actualiza in-place.
 
@@ -378,6 +381,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | 12 | ✅ | Custom fields por vertical: `vertical_field_definitions`, `tenant_custom_field_definitions`, undo log, panel en `/settings` + ERD |
 | 13 | ✅ | Datos editables/borrables unificados: soft delete auditado en ventas/gastos, sistema de reparación de importaciones mal clasificadas, product lookup en AgentCash |
 | 14 | ✅ | Estados canónicos de producto (in_stock/low_stock/out_of_stock/incoming stub), UPDATE_PRODUCT vía chat, Véktor como fuente de verdad, política null/NaN con imputación por mediana, ingesta interactiva con columnas riesgosas |
+| 15 | ✅ | **Agent Teams (Stage 1+2):** AgentCash → AgentIncome + AgentExpense; AgentCalendar + AgentSync → AgentGoogle; intents en español rioplatense (17); AgentTeamPlan/AgentTask en schemas; CEO migrado a haiku-4-5; team_plan_builder.py; aliases deprecados en registry.py |
 
 ### Cadena de migraciones (recientes)
 
@@ -410,7 +414,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 - Scores recalculan solo ante cambios de datos (Celery async).
 - Toda decisión → `decision_audit_log` (insert-only).
 - Fail-closed en writes sensibles.
-- `ActionType` cerrado (16 valores) — cambiar requiere actualizar `RiskEngine` y tests.
+- `ActionType` cerrado (17 valores) — cambiar requiere actualizar `RiskEngine` y tests.
 - System prompts: heurísticas como valores numéricos, nunca texto narrativo.
 - Todo input de usuario a LLM pasa por `wrap_user_input()`.
 - Toda aritmética financiera va por `DeterministicFinance` — LLMs nunca calculan montos.

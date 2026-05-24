@@ -2,10 +2,12 @@
 
 GET  /api/v1/agent/usage     — uso de mensajes del día actual (para el contador frontend)
 POST /api/v1/agent/chat      — procesa mensaje, crea pending_action si MEDIUM/HIGH
-POST /api/v1/agent/confirm/{pending_id} — confirma y ejecuta una acción pendiente
-POST /api/v1/agent/cancel/{pending_id}  — rechaza una acción pendiente
-GET  /api/v1/agent/conversations        — lista conversaciones del tenant (últimas 30)
-GET  /api/v1/agent/conversations/{id}   — turnos completos de una conversación
+POST /api/v1/agent/confirm/{pending_id}       — confirma y ejecuta una acción pendiente
+POST /api/v1/agent/cancel/{pending_id}        — rechaza una acción pendiente
+POST /api/v1/agent/confirm/group/{group_id}  — confirma todas las PAs de un grupo (Stage 3)
+POST /api/v1/agent/cancel/group/{group_id}   — rechaza todas las PAs PENDING de un grupo (Stage 3)
+GET  /api/v1/agent/conversations             — lista conversaciones del tenant (últimas 30)
+GET  /api/v1/agent/conversations/{id}        — turnos completos de una conversación
 """
 
 import asyncio
@@ -264,6 +266,42 @@ async def _process_agent_action(
     if agent_response.status == "error":
         return None
 
+    # ── Multi-task: crear PendingActions agrupadas (Stage 3) ──────────────────
+    task_response_list = agent_response.result.get("task_responses")
+    if task_response_list is not None:
+        if not agent_response.requires_approval:
+            return None
+
+        approval_group_id = str(uuid.uuid4())
+        pending_ids: list[str] = []
+        for position, tr in enumerate(task_response_list):
+            if not tr.get("requires_approval"):
+                continue
+            action_type_tr = str(tr.get("action_type") or ActionType.ANSWER_HELP_REQUEST)
+            payload_tr = dict(tr.get("payload") or {})
+            payload_tr.setdefault(AUTOMATION_PAYLOAD_AGENT_KEY, str(tr.get("agent") or ""))
+            risk_level_tr = str(tr.get("risk_level") or "MEDIUM")
+
+            pending = await create_pending_action(
+                db=db,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                action_type=action_type_tr,
+                payload=payload_tr,
+                risk_level=risk_level_tr,
+            )
+            pending.approval_group_id = approval_group_id
+            pending.group_execution_status = "PENDING"
+            pending.group_position = position
+            pending_ids.append(str(pending.id))
+
+        if pending_ids:
+            agent_response.pending_action_ids = pending_ids
+            agent_response.approval_group_id = approval_group_id
+            return {"action_id": pending_ids[0], "approval_group_id": approval_group_id}
+        return None
+
+    # ── Single-task ───────────────────────────────────────────────────────────
     action_type = str(agent_response.result.get("action_type", ActionType.ANSWER_HELP_REQUEST))
     payload = _extract_action_payload(agent_response)
     payload.setdefault(AUTOMATION_PAYLOAD_AGENT_KEY, agent_response.agent_name)
@@ -914,6 +952,149 @@ async def cancel_action(
     await db.commit()
 
     return {"status": "cancelled", "action_type": action.action_type}
+
+
+# ── POST /confirm/group/{group_id} ───────────────────────────────────────────
+
+
+@router.post("/confirm/group/{group_id}", summary="Confirmar grupo de acciones pendientes")
+async def confirm_action_group(
+    group_id: str,
+    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    """Aprueba todas las PendingActions del grupo y las ejecuta en orden por group_position.
+
+    Si alguna falla, el resto se ejecuta de todos modos (best-effort).
+    group_execution_status → SUCCEEDED | PARTIAL_FAILED.
+    """
+    stmt = (
+        select(PendingAction)
+        .where(
+            PendingAction.tenant_id == current_user.tenant_id,
+            PendingAction.approval_group_id == group_id,
+            PendingAction.status == "PENDING",
+        )
+        .order_by(PendingAction.group_position)
+        .with_for_update()
+    )
+    result = await db.execute(stmt)
+    actions = list(result.scalars().all())
+
+    if not actions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Grupo no encontrado o ya procesado.",
+        )
+
+    now = datetime.now(UTC)
+    expired = [a for a in actions if a.expires_at.replace(tzinfo=UTC) < now]
+    if expired:
+        for a in expired:
+            a.status = "EXPIRED"
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Una o más acciones del grupo vencieron. Volvé a enviar el mensaje.",
+        )
+
+    for action in actions:
+        action.status = "APPROVED"
+        action.approved_at = now
+        action.group_execution_status = "IN_PROGRESS"
+    await db.flush()
+
+    task_results: list[dict[str, Any]] = []
+    any_failed = False
+
+    for action in sorted(actions, key=lambda a: (a.group_position or 0)):
+        if action.is_external:
+            action.execution_status = "IN_PROGRESS"
+            await db.flush()
+            try:
+                await execute_pending_action(action, db, redis=redis)
+                action.execution_status = "SUCCEEDED"
+            except McpToolAuthError as exc:
+                action.execution_status = "REQUIRES_RECONNECT"
+                action.failure_code = exc.reason
+                any_failed = True
+            except Exception as exc:
+                action.execution_status = "FAILED"
+                action.failure_message = str(exc)[:500]
+                any_failed = True
+        else:
+            duplicate = await _execute_local_action(
+                action=action,
+                tenant_id=current_user.tenant_id,
+                db=db,
+                redis=redis,
+            )
+            if duplicate and duplicate.get("execution_status") == "FAILED":
+                any_failed = True
+
+        action.executed_at = now
+        task_results.append({
+            "action_id": str(action.id),
+            "action_type": action.action_type,
+            "execution_status": action.execution_status,
+        })
+
+    group_execution_status = "PARTIAL_FAILED" if any_failed else "SUCCEEDED"
+    for action in actions:
+        action.group_execution_status = group_execution_status
+
+    await db.commit()
+
+    logger.info(
+        "pending_action_group_confirmed",
+        group_id=group_id,
+        action_count=len(actions),
+        group_execution_status=group_execution_status,
+        tenant_id=str(current_user.tenant_id),
+    )
+    return {
+        "status": "confirmed",
+        "approval_group_id": group_id,
+        "group_execution_status": group_execution_status,
+        "tasks": task_results,
+    }
+
+
+# ── POST /cancel/group/{group_id} ─────────────────────────────────────────────
+
+
+@router.post("/cancel/group/{group_id}", summary="Cancelar grupo de acciones pendientes")
+async def cancel_action_group(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Rechaza todas las PendingActions PENDING del grupo en un solo commit."""
+    stmt = select(PendingAction).where(
+        PendingAction.tenant_id == current_user.tenant_id,
+        PendingAction.approval_group_id == group_id,
+        PendingAction.status == "PENDING",
+    )
+    result = await db.execute(stmt)
+    actions = list(result.scalars().all())
+
+    if not actions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Grupo no encontrado o ya procesado.",
+        )
+
+    for action in actions:
+        action.status = "REJECTED"
+        action.group_execution_status = "FAILED"
+
+    await db.commit()
+    return {
+        "status": "cancelled",
+        "approval_group_id": group_id,
+        "cancelled_count": len(actions),
+    }
 
 
 # ── POST /retry/{pending_id} ──────────────────────────────────────────────────

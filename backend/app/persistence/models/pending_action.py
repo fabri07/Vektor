@@ -85,6 +85,14 @@ class PendingAction(UUIDPrimaryKeyMixin, Base):
     failure_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ── Approval groups (Stage 3) ─────────────────────────────────────────────
+    # Todas las PAs con el mismo approval_group_id se aprueban/cancelan juntas.
+    approval_group_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PENDING | IN_PROGRESS | PARTIAL_FAILED | SUCCEEDED | FAILED
+    group_execution_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Orden de ejecución dentro del grupo (resuelto desde depends_on del plan)
+    group_position: Mapped[int | None] = mapped_column(nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

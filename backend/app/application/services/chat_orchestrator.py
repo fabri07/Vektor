@@ -3,10 +3,12 @@
 Flujo:
   1. Cargar contexto del negocio (nombre, tipo) + heurísticas numéricas
   2. Cargar historial de la conversación (ConversationService)
-  3. AgentCEO clasifica el intent → nombre del sub-agente destino
-  4. Sub-agente ejecuta la lógica de negocio → AgentResponse
-  5a. Si requires_approval → message = summary estructurado (sin LLM adicional)
-  5b. Si success / requires_clarification → LLM Haiku genera respuesta conversacional rica
+  3. AgentCEO clasifica el intent → AgentTeamPlan
+  4. TeamPlanExecutor ejecuta el plan (sesiones DB aisladas por task)
+  5a. Multi-task con requires_approval → respuesta agrupada (pending_action_ids + approval_group_id)
+  5b. Multi-task sin approval + requires_synthesis → synthesis con Sonnet
+  5c. Single-task requires_approval → summary estructurado (sin LLM adicional)
+  5d. Single-task success / requires_clarification → LLM Haiku genera respuesta conversacional rica
   6. Guardar turno en ConversationService (best-effort)
 """
 
@@ -21,9 +23,18 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.ceo.agent import AgentCEO
-from app.application.agents.registry import get_sub_agent
+from app.application.agents.ceo.synthesis import synthesize_team_results
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
-from app.application.agents.shared.schemas import AgentRequest, AgentResponse, LLMCall, UsageSummary
+from app.application.agents.shared.schemas import (
+    AgentRequest,
+    AgentResponse,
+    AgentTeamPlan,
+    Confidence,
+    LLMCall,
+    RiskLevel,
+    UsageSummary,
+)
+from app.application.services.team_plan_executor import TeamPlanExecutor
 from app.application.security.prompt_defense import wrap_user_input
 from app.application.services.agent_memory_service import AgentMemoryService
 from app.application.services.business_memory_service import BusinessMemoryService
@@ -122,34 +133,32 @@ class ChatOrchestrator:
         ceo_intent: str | None = ceo_response.result.get("intent")
         ceo_target: str | None = ceo_response.result.get("target_agent")
 
-        # 3b. Leer plan del CEO; validar que sea single-task en Stage 1.
-        # Stage 3 reemplaza este bloque por TeamPlanExecutor.execute(plan).
+        # 3b. Reconstruir el plan tipado desde el dict del CEO
         raw_plan: dict | None = ceo_response.result.get("plan")
-        if raw_plan and len(raw_plan.get("tasks", [])) > 1:
-            logger.error(
-                "chat_orchestrator_multi_task_not_supported",
-                plan_id=raw_plan.get("plan_id"),
-                task_count=len(raw_plan["tasks"]),
-                intent=ceo_intent,
-                tenant_id=str(tenant_id),
-            )
-            return AgentResponse(
-                request_id=request.request_id,
-                agent_name="agent_ceo",
-                status="error",
-                risk_level="LOW",
-                confidence="LOW",
-                requires_approval=False,
-                message="El orquestador recibió un plan multi-tarea pero aún no lo soporta. Por favor intentá de nuevo.",
-                result={"summary": "multi-task plan not supported in Stage 1"},
-                usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
-            )
-
-        # Resolver target_agent: preferir el del plan si está disponible
-        if raw_plan and raw_plan.get("tasks"):
-            target_agent_name: str = raw_plan["tasks"][0].get("agent", "agent_helper")
-        else:
-            target_agent_name = ceo_response.result.get("target_agent", "agent_helper")
+        plan: AgentTeamPlan | None = None
+        if raw_plan:
+            try:
+                from app.application.agents.shared.schemas import AgentTask, ActionType  # noqa: PLC0415
+                tasks = [
+                    AgentTask(
+                        task_id=td.get("task_id", ""),
+                        agent=td.get("agent", "agent_helper"),
+                        action_type=ActionType(td.get("action_type", "ANSWER_HELP_REQUEST")),
+                        entities=td.get("entities") or {},
+                        depends_on=td.get("depends_on") or [],
+                        approval_group=td.get("approval_group"),
+                    )
+                    for td in raw_plan.get("tasks", [])
+                ]
+                plan = AgentTeamPlan(
+                    plan_id=raw_plan.get("plan_id", ""),
+                    intent=raw_plan.get("intent", ceo_intent or ""),
+                    tasks=tasks,
+                    requires_synthesis=raw_plan.get("requires_synthesis", False),
+                    fallback_message=raw_plan.get("fallback_message"),
+                )
+            except Exception as exc:
+                logger.warning("chat_orchestrator_plan_parse_failed", error=str(exc))
 
         # 3c. out_of_scope / intent_desconocido — cortar sin sub-agente ni LLM adicional
         if ceo_intent in ("out_of_scope", "intent_desconocido"):
@@ -182,42 +191,70 @@ class ChatOrchestrator:
                 )
             return out_of_scope_response
 
-        # 4. Construir AgentTask desde el plan para dispatch task-aware
-        agent_task = None
-        if raw_plan and raw_plan.get("tasks"):
-            from app.application.agents.shared.schemas import ActionType, AgentTask  # noqa: PLC0415
-            task_data = raw_plan["tasks"][0]
-            try:
-                agent_task = AgentTask(
-                    task_id=task_data.get("task_id", ""),
-                    agent=task_data.get("agent", target_agent_name),
-                    action_type=ActionType(task_data.get("action_type", "ANSWER_HELP_REQUEST")),
-                    entities=task_data.get("entities") or {},
-                )
-            except (ValueError, KeyError) as exc:
-                logger.warning(
-                    "chat_orchestrator_task_build_failed",
-                    error=str(exc),
-                    task_data=task_data,
-                )
-
-        # 4b. Sub-agente ejecuta lógica de negocio
-        sub_agent = get_sub_agent(
-            target_agent_name, db=db, redis=redis, user_id=user_id, tenant_id=tenant_id
-        )
-        if sub_agent is None:
-            logger.error(
-                "chat_orchestrator_agent_not_found",
-                target_agent=target_agent_name,
-                intent=ceo_intent,
-                tenant_id=str(tenant_id),
+        # 4. Ejecutar plan via TeamPlanExecutor (single-task y multi-task)
+        if plan is None or not plan.tasks:
+            # Fallback defensivo: si no hay plan válido, crear uno single-task helper
+            from app.application.agents.shared.schemas import AgentTask, ActionType  # noqa: PLC0415
+            plan = AgentTeamPlan(
+                plan_id="",
+                intent=ceo_intent or "intent_desconocido",
+                tasks=[
+                    AgentTask(
+                        task_id="",
+                        agent="agent_helper",
+                        action_type=ActionType.ANSWER_HELP_REQUEST,
+                        entities={},
+                    )
+                ],
             )
-            # Fallback: AgentHelper responde de forma genérica sin exponer el error interno
-            from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
-            sub_agent = AgentHelper()
-        agent_response = await sub_agent.process(request, task=agent_task)
-        if agent_response.usage:
-            all_llm_calls.extend(agent_response.usage.calls)
+
+        executor = TeamPlanExecutor(redis=redis, user_id=user_id, tenant_id=tenant_id)
+        task_responses = await executor.execute(plan, request)
+        for resp in task_responses:
+            if resp.usage:
+                all_llm_calls.extend(resp.usage.calls)
+
+        is_multi = len(task_responses) > 1
+
+        # 4b. Para multi-task: construir respuesta agrupada y retornar
+        if is_multi:
+            agent_response = self._merge_multi_task_responses(
+                plan=plan,
+                task_responses=task_responses,
+                request=request,
+                all_llm_calls=all_llm_calls,
+                ceo_intent=ceo_intent,
+                ceo_target=ceo_target,
+                raw_plan=raw_plan,
+            )
+            # Si ninguna tarea requiere aprobación y el plan pide síntesis → sintetizar
+            any_approval = any(r.requires_approval for r in task_responses)
+            if not any_approval and plan.requires_synthesis:
+                try:
+                    synth_text, synth_call = await synthesize_team_results(
+                        plan=plan,
+                        responses=task_responses,
+                        request=request,
+                        business_name=business_name,
+                        client=self.client,
+                    )
+                    agent_response.message = synth_text
+                    all_llm_calls.append(synth_call)
+                except Exception as exc:
+                    logger.warning("chat_orchestrator_synthesis_failed", error=str(exc))
+                    agent_response.message = agent_response.result.get("summary") or "Procesado."
+            elif not any_approval and not agent_response.message:
+                agent_response.message = agent_response.result.get("summary") or "Operaciones completadas."
+
+            agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
+            if request.conversation_id:
+                await self._save_turn(
+                    request, agent_response.message or "", redis, db, tenant_id, user_id
+                )
+            return agent_response
+
+        # ── Single-task: flujo heredado ───────────────────────────────────────
+        agent_response = task_responses[0]
 
         # 4b. requires_google_auth — propagar sin llamar LLM ni guardar turno
         if agent_response.status == "requires_google_auth":
@@ -282,8 +319,7 @@ class ChatOrchestrator:
                 request, agent_response.message or "", redis, db, tenant_id, user_id
             )
 
-        # 7. Preservar metadata del CEO en result para audit log (intent + agente destino + plan)
-        # El CEO es siempre la fuente de verdad de intent/target/plan.
+        # 7. Preservar metadata del CEO en result para audit log
         if ceo_intent:
             agent_response.result["intent"] = ceo_intent
         if ceo_target:
@@ -291,10 +327,115 @@ class ChatOrchestrator:
         if raw_plan:
             agent_response.result["plan"] = raw_plan
 
-        # 8. Adjuntar usage acumulado de todas las llamadas LLM del turno
+        # 8. Adjuntar usage acumulado
         agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
 
         return agent_response
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _merge_multi_task_responses(
+        self,
+        plan: AgentTeamPlan,
+        task_responses: list[AgentResponse],
+        request: AgentRequest,
+        all_llm_calls: list[LLMCall],
+        ceo_intent: str | None,
+        ceo_target: str | None,
+        raw_plan: dict | None,
+    ) -> AgentResponse:
+        """Combina las respuestas de un plan multi-task en una sola AgentResponse.
+
+        Para planes con requires_approval: status=requires_approval, embeds task_responses.
+        Para planes exitosos: status=success con message vacío (synthesis lo llena luego).
+        """
+        _RISK_ORDER = {str(RiskLevel.LOW): 0, str(RiskLevel.MEDIUM): 1, str(RiskLevel.HIGH): 2}
+        max_risk = max(
+            task_responses,
+            key=lambda r: _RISK_ORDER.get(str(r.risk_level), 0),
+            default=task_responses[0],
+        ).risk_level
+
+        any_approval = any(r.requires_approval for r in task_responses)
+        any_google_auth = any(r.status == "requires_google_auth" for r in task_responses)
+        any_error = any(r.status == "error" for r in task_responses)
+
+        if any_google_auth:
+            # Propagar el primero con auth error
+            auth_resp = next(r for r in task_responses if r.status == "requires_google_auth")
+            auth_resp.result["intent"] = ceo_intent
+            if raw_plan:
+                auth_resp.result["plan"] = raw_plan
+            return auth_resp
+
+        if any_error and not any_approval:
+            # Solo errores sin aprobaciones → reportar error
+            error_summaries = [
+                r.result.get("error") or r.result.get("summary") or "error"
+                for r in task_responses
+                if r.status == "error"
+            ]
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="error",
+                risk_level=max_risk,
+                confidence=Confidence.LOW,
+                requires_approval=False,
+                message=f"Error en las operaciones: {'; '.join(error_summaries[:2])}",
+                result={
+                    "intent": ceo_intent,
+                    "plan": raw_plan,
+                    "task_responses": [r.result for r in task_responses],
+                },
+            )
+
+        # Construir summaries por task para mostrar al usuario
+        task_summaries = []
+        for i, (task, resp) in enumerate(zip(plan.tasks, task_responses, strict=True)):
+            summary = resp.result.get("summary") or f"Tarea {i + 1} ({task.agent})"
+            task_summaries.append(f"• {summary}")
+
+        merged_summary = "\n".join(task_summaries)
+
+        merged_result: dict = {
+            "intent": ceo_intent,
+            "target_agent": ceo_target,
+            "plan": raw_plan,
+            "summary": merged_summary,
+            "task_responses": [
+                {
+                    "agent": r.agent_name,
+                    "action_type": r.result.get("action_type"),
+                    "summary": r.result.get("summary"),
+                    "payload": (
+                        r.result.get("structured_data")
+                        or r.result.get("payload")
+                        or r.result.get("entities")
+                        or {}
+                    ),
+                    "risk_level": str(r.risk_level),
+                    "requires_approval": r.requires_approval,
+                    "status": r.status,
+                }
+                for r in task_responses
+            ],
+        }
+        # Agregar fallback_message del plan si existe
+        if plan.fallback_message:
+            merged_result["fallback_message"] = plan.fallback_message
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name="agent_ceo",
+            status="requires_approval" if any_approval else "success",
+            risk_level=max_risk,
+            confidence=Confidence.HIGH,
+            requires_approval=any_approval,
+            message=merged_summary if any_approval else "",
+            result=merged_result,
+            usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
 
