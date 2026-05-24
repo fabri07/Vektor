@@ -53,6 +53,9 @@ class AgentRequest(BaseModel):
     message: str
     attachments: list = Field(default_factory=list)
     conversation_id: str | None = None
+    # context: outputs upstream del DAG multi-task. Llave reservada: "upstream_outputs"
+    # → dict[task_id, result_dict]. Vacío en single-task y en el primer nivel.
+    context: dict = Field(default_factory=dict)
     # NOTA: NO hay agent_target — AgentCEO lo asigna internamente
 
 

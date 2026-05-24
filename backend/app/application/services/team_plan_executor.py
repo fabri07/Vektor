@@ -4,7 +4,10 @@ Flujo:
   1. Calcular niveles topológicos a partir de depends_on
   2. Por nivel: asyncio.gather para tasks paralelas, o ejecución directa si es única
   3. Cada task obtiene su propia AsyncSession (no concurrent-safe compartir sesiones)
-  4. Retorna list[AgentResponse] en el orden original del plan
+  4. Outputs de nivel N se inyectan en request.context["upstream_outputs"] para nivel N+1
+  5. Si una task falla, las que dependen de ella se saltan con status="error"
+     y result["skipped_reason"] = "upstream_failure"
+  6. Retorna list[AgentResponse] en el orden original del plan
 """
 
 from __future__ import annotations
@@ -54,6 +57,11 @@ def _topological_levels(tasks: list[AgentTask]) -> list[list[AgentTask]]:
     return levels
 
 
+def _is_failure(resp: AgentResponse) -> bool:
+    """Determina si una AgentResponse cuenta como fallo upstream para sus dependientes."""
+    return resp.status == "error"
+
+
 class TeamPlanExecutor:
     def __init__(
         self,
@@ -71,21 +79,69 @@ class TeamPlanExecutor:
         request: AgentRequest,
     ) -> list[AgentResponse]:
         """Ejecuta el plan respetando dependencias. Tareas sin dependencias pendientes
-        corren en paralelo con asyncio.gather y sesiones DB aisladas."""
+        corren en paralelo con asyncio.gather y sesiones DB aisladas.
+
+        Outputs de nivel N se pasan en `request.context["upstream_outputs"]` a nivel N+1.
+        Si una task falla, las dependientes se saltan automáticamente.
+        """
         levels = _topological_levels(plan.tasks)
         responses_by_id: dict[str, AgentResponse] = {}
+        failed_ids: set[str] = set()
 
         for level_tasks in levels:
-            if len(level_tasks) == 1:
-                task = level_tasks[0]
-                resp = await self._run_task(task, request)
+            # Particionar el nivel: skipped (dep upstream falló) vs ejecutables
+            to_skip: list[AgentTask] = []
+            to_run: list[AgentTask] = []
+            for task in level_tasks:
+                failed_upstream = [d for d in task.depends_on if d in failed_ids]
+                if failed_upstream:
+                    to_skip.append(task)
+                else:
+                    to_run.append(task)
+
+            for task in to_skip:
+                upstream = next(d for d in task.depends_on if d in failed_ids)
+                logger.warning(
+                    "team_plan_executor_skip_downstream",
+                    task_id=task.task_id,
+                    agent=task.agent,
+                    upstream_task_id=upstream,
+                )
+                skipped = AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=task.agent,
+                    status="error",
+                    risk_level="LOW",
+                    confidence="LOW",
+                    message="Tarea omitida: dependencia falló.",
+                    result={
+                        "task_id": task.task_id,
+                        "skipped_reason": "upstream_failure",
+                        "upstream_task_id": upstream,
+                    },
+                )
+                responses_by_id[task.task_id] = skipped
+                failed_ids.add(task.task_id)
+
+            if not to_run:
+                continue
+
+            if len(to_run) == 1:
+                task = to_run[0]
+                task_request = self._request_for_task(request, task, responses_by_id)
+                resp = await self._run_task(task, task_request)
                 responses_by_id[task.task_id] = resp
+                if _is_failure(resp):
+                    failed_ids.add(task.task_id)
             else:
+                task_requests = [
+                    self._request_for_task(request, t, responses_by_id) for t in to_run
+                ]
                 results = await asyncio.gather(
-                    *[self._run_task(t, request) for t in level_tasks],
+                    *[self._run_task(t, r) for t, r in zip(to_run, task_requests, strict=True)],
                     return_exceptions=True,
                 )
-                for task, result in zip(level_tasks, results, strict=True):
+                for task, result in zip(to_run, results, strict=True):
                     if isinstance(result, BaseException):
                         logger.error(
                             "team_plan_executor_task_exception",
@@ -103,10 +159,35 @@ class TeamPlanExecutor:
                             message="Error interno al ejecutar la tarea.",
                             result={"error": str(result), "task_id": task.task_id},
                         )
+                        failed_ids.add(task.task_id)
                     else:
                         responses_by_id[task.task_id] = result  # type: ignore[assignment]
+                        if _is_failure(result):  # type: ignore[arg-type]
+                            failed_ids.add(task.task_id)
 
         return [responses_by_id[t.task_id] for t in plan.tasks]
+
+    def _request_for_task(
+        self,
+        base_request: AgentRequest,
+        task: AgentTask,
+        responses_by_id: dict[str, AgentResponse],
+    ) -> AgentRequest:
+        """Clona el request inyectando outputs de tareas upstream en context."""
+        if not task.depends_on:
+            return base_request
+        upstream_outputs = {
+            dep_id: responses_by_id[dep_id].result
+            for dep_id in task.depends_on
+            if dep_id in responses_by_id
+        }
+        if not upstream_outputs:
+            return base_request
+        new_context = dict(base_request.context)
+        existing = dict(new_context.get("upstream_outputs", {}))
+        existing.update(upstream_outputs)
+        new_context["upstream_outputs"] = existing
+        return base_request.model_copy(update={"context": new_context})
 
     async def _run_task(self, task: AgentTask, request: AgentRequest) -> AgentResponse:
         """Ejecuta una tarea con sesión DB propia — aislada del resto del plan."""

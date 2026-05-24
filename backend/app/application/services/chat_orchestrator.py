@@ -405,8 +405,9 @@ class ChatOrchestrator:
             "summary": merged_summary,
             "task_responses": [
                 {
+                    "task_id": task.task_id,
                     "agent": r.agent_name,
-                    "action_type": r.result.get("action_type"),
+                    "action_type": r.result.get("action_type") or str(task.action_type),
                     "summary": r.result.get("summary"),
                     "payload": (
                         r.result.get("structured_data")
@@ -417,8 +418,10 @@ class ChatOrchestrator:
                     "risk_level": str(r.risk_level),
                     "requires_approval": r.requires_approval,
                     "status": r.status,
+                    "tokens_input": (r.usage.total_input if r.usage else 0),
+                    "tokens_output": (r.usage.total_output if r.usage else 0),
                 }
-                for r in task_responses
+                for task, r in zip(plan.tasks, task_responses, strict=True)
             ],
         }
         # Agregar fallback_message del plan si existe

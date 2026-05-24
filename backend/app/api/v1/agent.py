@@ -169,6 +169,50 @@ def _attach_conversation_id(agent_response: AgentResponse, conversation_id: str 
     agent_response.result = result
 
 
+def _build_tasks_audit(
+    agent_response: AgentResponse,
+    action_meta: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Construye decision_data.tasks para el audit log.
+
+    Multi-task: lee result["task_responses"] (enriquecido por el orchestrator).
+    Single-task: deriva un único elemento desde el agent_response.
+    """
+    task_responses = agent_response.result.get("task_responses")
+    if isinstance(task_responses, list) and task_responses:
+        return [
+            {
+                "task_id": tr.get("task_id"),
+                "agent": tr.get("agent"),
+                "action_type": tr.get("action_type"),
+                "status": tr.get("status"),
+                "risk_level": tr.get("risk_level"),
+                "requires_approval": tr.get("requires_approval"),
+                "pending_action_id": tr.get("pending_action_id"),
+                "tokens_input": int(tr.get("tokens_input") or 0),
+                "tokens_output": int(tr.get("tokens_output") or 0),
+            }
+            for tr in task_responses
+        ]
+
+    # Single-task: derivar entrada desde la AgentResponse
+    usage = agent_response.usage
+    return [
+        {
+            "task_id": None,
+            "agent": agent_response.agent_name,
+            "action_type": agent_response.result.get("action_type"),
+            "status": agent_response.status,
+            "risk_level": str(agent_response.risk_level),
+            "requires_approval": agent_response.requires_approval,
+            "pending_action_id": agent_response.pending_action_id
+            or (action_meta or {}).get("action_id"),
+            "tokens_input": usage.total_input if usage else 0,
+            "tokens_output": usage.total_output if usage else 0,
+        }
+    ]
+
+
 def _payload_for_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
     structured = payload.get("structured_data")
     if isinstance(structured, dict):
@@ -276,6 +320,7 @@ async def _process_agent_action(
         pending_ids: list[str] = []
         for position, tr in enumerate(task_response_list):
             if not tr.get("requires_approval"):
+                tr["pending_action_id"] = None
                 continue
             action_type_tr = str(tr.get("action_type") or ActionType.ANSWER_HELP_REQUEST)
             payload_tr = dict(tr.get("payload") or {})
@@ -294,6 +339,7 @@ async def _process_agent_action(
             pending.group_execution_status = "PENDING"
             pending.group_position = position
             pending_ids.append(str(pending.id))
+            tr["pending_action_id"] = str(pending.id)
 
         if pending_ids:
             agent_response.pending_action_ids = pending_ids
@@ -602,6 +648,7 @@ async def chat(
 
     # ── Audit log (insert-only) ───────────────────────────────────────────────
     _usage = agent_response.usage
+    _tasks_audit = _build_tasks_audit(agent_response, action_meta)
     audit = DecisionAuditLog(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -615,10 +662,13 @@ async def chat(
             "requires_approval": agent_response.requires_approval,
             "pending_action_id": agent_response.pending_action_id
             or (action_meta or {}).get("action_id"),
+            "approval_group_id": agent_response.approval_group_id
+            or (action_meta or {}).get("approval_group_id"),
             "ceo_target_agent": agent_response.result.get("target_agent"),
             "sub_agent_name": agent_response.agent_name,
             "plan_id": (agent_response.result.get("plan") or {}).get("plan_id"),
             "plan": agent_response.result.get("plan"),
+            "tasks": _tasks_audit,
             "token_calls": [c.model_dump() for c in _usage.calls] if _usage else [],
         },
         triggered_by="agent:chat",
@@ -966,8 +1016,10 @@ async def confirm_action_group(
 ) -> dict:
     """Aprueba todas las PendingActions del grupo y las ejecuta en orden por group_position.
 
-    Si alguna falla, el resto se ejecuta de todos modos (best-effort).
-    group_execution_status → SUCCEEDED | PARTIAL_FAILED.
+    Semántica abort-all: si alguna task falla, las posteriores se marcan FAILED con
+    failure_message="upstream_task_failed" y NO se ejecutan. Cada task commitea su
+    propia transacción para no perder progreso ante un fallo intermedio.
+    group_execution_status final → SUCCEEDED | PARTIAL_FAILED.
     """
     stmt = (
         select(PendingAction)
@@ -999,19 +1051,34 @@ async def confirm_action_group(
             detail="Una o más acciones del grupo vencieron. Volvé a enviar el mensaje.",
         )
 
+    # Aprobamos todas en un solo commit (precondición de ejecución)
     for action in actions:
         action.status = "APPROVED"
         action.approved_at = now
         action.group_execution_status = "IN_PROGRESS"
-    await db.flush()
+    await db.commit()
 
     task_results: list[dict[str, Any]] = []
     any_failed = False
+    sorted_actions = sorted(actions, key=lambda a: (a.group_position or 0))
 
-    for action in sorted(actions, key=lambda a: (a.group_position or 0)):
+    for action in sorted_actions:
+        # Abort-all: si una previa falló, esta queda en FAILED sin ejecutar
+        if any_failed:
+            action.execution_status = "FAILED"
+            action.failure_message = "upstream_task_failed"
+            action.executed_at = now
+            await db.commit()
+            task_results.append({
+                "action_id": str(action.id),
+                "action_type": action.action_type,
+                "execution_status": action.execution_status,
+            })
+            continue
+
         if action.is_external:
             action.execution_status = "IN_PROGRESS"
-            await db.flush()
+            await db.commit()
             try:
                 await execute_pending_action(action, db, redis=redis)
                 action.execution_status = "SUCCEEDED"
@@ -1034,6 +1101,8 @@ async def confirm_action_group(
                 any_failed = True
 
         action.executed_at = now
+        # Commit por task: garantiza durabilidad de cada paso completado
+        await db.commit()
         task_results.append({
             "action_id": str(action.id),
             "action_type": action.action_type,

@@ -701,3 +701,187 @@ async def test_cancel_succeeds(auth_client, session: AsyncSession):
 
     await session.refresh(action)
     assert action.status == "REJECTED"
+
+
+# ── /confirm/group y /cancel/group ──────────────────────────────────────────
+
+
+def _make_group_action(
+    *,
+    tenant_id,
+    user_id,
+    group_id: str,
+    position: int,
+    action_type: str = "REGISTER_EXPENSE",
+    payload: dict | None = None,
+) -> PendingAction:
+    return PendingAction(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action_type=action_type,
+        payload=payload or {"amount": 100},
+        risk_level="MEDIUM",
+        status="PENDING",
+        approval_group_id=group_id,
+        group_execution_status="PENDING",
+        group_position=position,
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_group_success_executes_all_in_order(
+    auth_client, session: AsyncSession
+):
+    """Grupo de 2 PAs locales que terminan bien → group_execution_status=SUCCEEDED."""
+    ac, headers, tenant, user, _ = auth_client
+    group_id = str(uuid.uuid4())
+
+    a1 = _make_group_action(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        group_id=group_id,
+        position=0,
+        action_type="REGISTER_PURCHASE",
+        payload={"amount": 5000, "supplier": "Coca"},
+    )
+    a2 = _make_group_action(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        group_id=group_id,
+        position=1,
+        action_type="REGISTER_EXPENSE",
+        payload={"amount": 5000, "payment_method": "cash"},
+    )
+    session.add_all([a1, a2])
+    await session.commit()
+
+    with patch(
+        "app.api.v1.agent._execute_local_action",
+        new=AsyncMock(return_value=None),
+    ):
+        # _execute_local_action no setea SUCCEEDED por sí mismo en tests; lo emulamos
+        async def _execute_and_mark(action, **_kw):
+            action.execution_status = "SUCCEEDED"
+            return None
+
+        with patch(
+            "app.api.v1.agent._execute_local_action",
+            new=AsyncMock(side_effect=_execute_and_mark),
+        ):
+            resp = await ac.post(
+                f"/api/v1/agent/confirm/group/{group_id}", headers=headers
+            )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["group_execution_status"] == "SUCCEEDED"
+    assert len(data["tasks"]) == 2
+    assert all(t["execution_status"] == "SUCCEEDED" for t in data["tasks"])
+
+    await session.refresh(a1)
+    await session.refresh(a2)
+    assert a1.execution_status == "SUCCEEDED"
+    assert a2.execution_status == "SUCCEEDED"
+    assert a1.group_execution_status == "SUCCEEDED"
+    assert a2.group_execution_status == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_confirm_group_aborts_chain_after_first_failure(
+    auth_client, session: AsyncSession
+):
+    """Si la primera task falla, la segunda queda FAILED sin ejecutarse (abort-all)."""
+    ac, headers, tenant, user, _ = auth_client
+    group_id = str(uuid.uuid4())
+
+    a1 = _make_group_action(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        group_id=group_id,
+        position=0,
+        action_type="REGISTER_PURCHASE",
+        payload={"amount": 5000},
+    )
+    a2 = _make_group_action(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        group_id=group_id,
+        position=1,
+        action_type="REGISTER_EXPENSE",
+        payload={"amount": 5000, "payment_method": "cash"},
+    )
+    session.add_all([a1, a2])
+    await session.commit()
+
+    call_log: list[str] = []
+
+    async def fail_first(action, **_kw):
+        call_log.append(str(action.id))
+        action.execution_status = "FAILED"
+        return {"execution_status": "FAILED"}
+
+    with patch(
+        "app.api.v1.agent._execute_local_action", new=AsyncMock(side_effect=fail_first)
+    ) as mock_exec:
+        resp = await ac.post(f"/api/v1/agent/confirm/group/{group_id}", headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["group_execution_status"] == "PARTIAL_FAILED"
+    # _execute_local_action sólo debe haberse llamado una vez (la primera task)
+    assert mock_exec.await_count == 1
+    assert str(a1.id) in call_log
+    assert str(a2.id) not in call_log
+
+    await session.refresh(a1)
+    await session.refresh(a2)
+    assert a1.execution_status == "FAILED"
+    # a2 queda FAILED sin ejecutar
+    assert a2.execution_status == "FAILED"
+    assert a2.failure_message == "upstream_task_failed"
+    assert a2.group_execution_status == "PARTIAL_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_cancel_group_rejects_all(auth_client, session: AsyncSession):
+    """Cancelar grupo → todas las PAs PENDING quedan REJECTED."""
+    ac, headers, tenant, user, _ = auth_client
+    group_id = str(uuid.uuid4())
+
+    a1 = _make_group_action(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        group_id=group_id,
+        position=0,
+    )
+    a2 = _make_group_action(
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        group_id=group_id,
+        position=1,
+    )
+    session.add_all([a1, a2])
+    await session.commit()
+
+    resp = await ac.post(f"/api/v1/agent/cancel/group/{group_id}", headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "cancelled"
+    assert data["cancelled_count"] == 2
+
+    await session.refresh(a1)
+    await session.refresh(a2)
+    assert a1.status == "REJECTED"
+    assert a2.status == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_confirm_group_not_found_404(auth_client):
+    """Grupo inexistente → 404."""
+    ac, headers, _, _, _ = auth_client
+    resp = await ac.post(
+        f"/api/v1/agent/confirm/group/{uuid.uuid4()}", headers=headers
+    )
+    assert resp.status_code == 404
