@@ -49,6 +49,13 @@ def determine_external_system(action_type: str, payload: dict[str, Any]) -> str 
         if "calendar" in sync_type:
             return "GOOGLE_CALENDAR"
         return "GOOGLE_SHEETS"
+    # Stage 4: nuevos ActionTypes Google
+    if action_type == "UPLOAD_TO_DRIVE":
+        return "GOOGLE_DRIVE"
+    if action_type == "CREATE_GOOGLE_DOC":
+        return "GOOGLE_DOCS"
+    if action_type == "APPEND_TO_SHEET":
+        return "GOOGLE_SHEETS"
     return None
 
 

@@ -32,6 +32,10 @@ class ActionType(StrEnum):
     CLASSIFY_GMAIL_MESSAGE = "CLASSIFY_GMAIL_MESSAGE"
     SYNC_TO_GOOGLE = "SYNC_TO_GOOGLE"
     CREATE_CALENDAR_EVENT = "CREATE_CALENDAR_EVENT"
+    # Stage 4: Google writes via GoogleToolBroker (ejecutados por PendingActionService)
+    UPLOAD_TO_DRIVE = "UPLOAD_TO_DRIVE"
+    CREATE_GOOGLE_DOC = "CREATE_GOOGLE_DOC"
+    APPEND_TO_SHEET = "APPEND_TO_SHEET"
 
 
 class RiskLevel(StrEnum):

@@ -16,6 +16,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +31,9 @@ from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.pending_action import PendingAction
+
+if TYPE_CHECKING:
+    from app.application.agents.google.tool_broker import GoogleToolBroker
 
 logger = get_logger(__name__)
 
@@ -171,6 +175,19 @@ async def create_pending_action(
         tenant_id=str(tenant_id),
     )
     return action
+
+
+def _make_google_broker(action: "PendingAction") -> "GoogleToolBroker":
+    """Instancia el broker Google para ejecutar una PendingAction."""
+    from app.application.agents.google.tool_broker import GoogleToolBroker  # noqa: PLC0415
+    from app.config.settings import get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+    return GoogleToolBroker(
+        user_id=str(action.user_id),
+        tenant_id=str(action.tenant_id),
+        settings=settings,
+    )
 
 
 async def execute_pending_action(
@@ -450,35 +467,24 @@ async def execute_pending_action(
         )
 
     elif action.action_type == ActionType.CREATE_SUPPLIER_DRAFT:
-        mcp_enabled = payload.get("mode") == "mcp"
-        if mcp_enabled:
-            from app.config.settings import get_settings  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
-            svc = GoogleMcpService(
-                gateway=gateway,
-                agent_name="agent_supplier",
-                tenant_id=str(action.tenant_id),
-                settings=settings,
-            )
+        if payload.get("mode") == "mcp":
+            broker = _make_google_broker(action)
             email_mode = str(payload.get("email_mode") or "draft").lower()
             if email_mode == "send":
-                await svc.send_gmail_message(
+                await broker.send_gmail_message(
                     to=[payload.get("to", "")],
                     subject=payload.get("subject", "Consulta de proveedor"),
                     body=payload.get("body", payload.get("message", "")),
                     cc=payload.get("cc") or [],
                 )
             elif email_mode == "reply":
-                await svc.reply_gmail_message(
+                await broker.reply_gmail_message(
                     message_id=payload.get("message_id", ""),
                     body=payload.get("body", payload.get("message", "")),
                     cc=payload.get("cc") or [],
                 )
             else:
-                await svc.create_gmail_draft(
+                await broker.create_gmail_draft(
                     to=[payload.get("to", "")],
                     subject=payload.get("subject", "Consulta de proveedor"),
                     body=payload.get("body", payload.get("message", "")),
@@ -487,84 +493,47 @@ async def execute_pending_action(
         action.external_system = determine_external_system(action.action_type, payload)
 
     elif action.action_type == ActionType.CLASSIFY_GMAIL_MESSAGE:
-        mcp_enabled = payload.get("mode") == "mcp"
-        if mcp_enabled:
-            from app.config.settings import get_settings  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
-            svc = GoogleMcpService(
-                gateway=gateway,
-                agent_name="agent_supplier",
-                tenant_id=str(action.tenant_id),
-                settings=settings,
-            )
-            await svc.get_gmail_message(
-                message_id=payload.get("message_id", ""),
-            )
+        if payload.get("mode") == "mcp":
+            broker = _make_google_broker(action)
+            await broker.get_gmail_message(message_id=payload.get("message_id", ""))
         action.external_system = determine_external_system(action.action_type, payload)
 
     elif action.action_type == ActionType.SYNC_TO_GOOGLE:
-        mcp_enabled = payload.get("mode") == "mcp"
-        if mcp_enabled:
+        if payload.get("mode") == "mcp":
             sync_type = payload.get("sync_type", "")
-            from app.config.settings import get_settings  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
-            svc = GoogleMcpService(
-                gateway=gateway,
-                agent_name="agent_sync",
-                tenant_id=str(action.tenant_id),
-                settings=settings,
-            )
+            broker = _make_google_broker(action)
             if sync_type == "export_sales_to_sheets":
-                await svc.append_sheet_rows(
+                await broker.append_sheet_rows(
                     spreadsheet_id=payload.get("spreadsheet_id", ""),
                     range_name=payload.get("range_name", "Sheet1"),
                     rows=payload.get("values", []),
                 )
             elif sync_type == "export_report_to_docs":
-                doc = await svc.create_doc(
-                    title=payload.get("title", "Reporte Véktor"),
-                )
+                doc = await broker.create_doc(title=payload.get("title", "Reporte Véktor"))
                 content = payload.get("content", "")
                 document_id = doc.get("document_id") or doc.get("id")
                 if content and document_id:
-                    await svc.append_doc_content(document_id=document_id, content=content)
+                    await broker.append_doc_content(document_id=document_id, content=content)
             elif sync_type == "import_from_sheets":
-                await svc.read_sheet_range(
+                await broker.read_sheet_range(
                     spreadsheet_id=payload.get("spreadsheet_id", ""),
                     range_name=payload.get("range_name", "Sheet1"),
                 )
             elif sync_type == "import_from_drive":
-                files = await svc.list_drive_files(
+                files = await broker.list_drive_files(
                     query=payload.get("query") or payload.get("raw_message", ""),
                     max_results=int(payload.get("max_results", 5)),
                 )
                 if files:
                     first_file_id = str(files[0].get("id", "")).strip()
                     if first_file_id:
-                        await svc.read_drive_file(file_id=first_file_id)
+                        await broker.read_drive_file(file_id=first_file_id)
         action.external_system = determine_external_system(action.action_type, payload)
 
     elif action.action_type == ActionType.CREATE_CALENDAR_EVENT:
-        mcp_enabled = payload.get("mode") == "mcp"
-        if mcp_enabled:
-            from app.config.settings import get_settings  # noqa: PLC0415
-            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
-            from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
-            settings = get_settings()
-            gateway = HttpMcpGateway(settings=settings, user_id=str(action.user_id))
-            svc = GoogleMcpService(
-                gateway=gateway,
-                agent_name="agent_calendar",
-                tenant_id=str(action.tenant_id),
-                settings=settings,
-            )
-            await svc.create_calendar_event(
+        if payload.get("mode") == "mcp":
+            broker = _make_google_broker(action)
+            await broker.create_calendar_event(
                 summary=payload.get("summary", "Evento"),
                 start=payload.get("start_datetime", payload.get("start", "")),
                 end=payload.get("end_datetime", payload.get("end", "")),
@@ -573,11 +542,10 @@ async def execute_pending_action(
             if payload.get("send_email") or payload.get("email_mode") == "send":
                 recipients = payload.get("email_recipients") or payload.get("attendees") or []
                 if recipients:
-                    await svc.send_gmail_message(
+                    await broker.send_gmail_message(
                         to=recipients,
                         subject=payload.get(
-                            "email_subject",
-                            payload.get("summary", "Recordatorio"),
+                            "email_subject", payload.get("summary", "Recordatorio")
                         ),
                         body=payload.get(
                             "email_body",
@@ -585,6 +553,34 @@ async def execute_pending_action(
                         ),
                     )
         action.external_system = determine_external_system(action.action_type, payload)
+
+    elif action.action_type == ActionType.UPLOAD_TO_DRIVE:
+        broker = _make_google_broker(action)
+        await broker.upload_drive_file(
+            name=payload.get("filename", payload.get("name", "archivo.bin")),
+            content_base64=payload.get("content_base64", ""),
+            mime_type=payload.get("mime_type", "application/octet-stream"),
+            folder_id=payload.get("folder_id"),
+        )
+        action.external_system = "GOOGLE_DRIVE"
+
+    elif action.action_type == ActionType.CREATE_GOOGLE_DOC:
+        broker = _make_google_broker(action)
+        doc = await broker.create_doc(title=payload.get("title", "Documento Véktor"))
+        content = payload.get("content", "")
+        document_id = doc.get("document_id") or doc.get("id")
+        if content and document_id:
+            await broker.append_doc_content(document_id=document_id, content=content)
+        action.external_system = "GOOGLE_DOCS"
+
+    elif action.action_type == ActionType.APPEND_TO_SHEET:
+        broker = _make_google_broker(action)
+        await broker.append_sheet_rows(
+            spreadsheet_id=payload.get("spreadsheet_id", ""),
+            range_name=payload.get("range_name", "Sheet1"),
+            rows=payload.get("rows", []),
+        )
+        action.external_system = "GOOGLE_SHEETS"
 
     else:
         logger.warning(

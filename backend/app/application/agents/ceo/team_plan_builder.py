@@ -18,7 +18,8 @@ _COBRO_ENTITY_KEYS = frozenset(
     {"cobrado", "medio_pago", "monto_cobrado", "forma_pago", "metodo_pago", "pago_efectivo"}
 )
 
-# ── Catálogo cerrado de intents (17, español rioplatense) ─────────────────────
+# ── Catálogo cerrado de intents (18, español rioplatense) ─────────────────────
+# Stage 4: agrega generar_informe_con_export → DAG health + upload Drive
 INTENT_CATALOG: list[str] = [
     "ingresar_venta",
     "ingresar_cobro",
@@ -32,6 +33,7 @@ INTENT_CATALOG: list[str] = [
     "registrar_compra_proveedor",
     "consultar_estado_negocio",
     "generar_informe",
+    "generar_informe_con_export",
     "gestionar_proveedor",
     "sincronizar_google",
     "agendar_evento",
@@ -56,6 +58,7 @@ INTENT_TO_AGENT: dict[str, str] = {
     "registrar_compra_proveedor": "agent_supplier",
     "consultar_estado_negocio":   "agent_health",
     "generar_informe":            "agent_health",
+    "generar_informe_con_export": "agent_health",  # Stage 4: DAG health → upload Drive
     "gestionar_proveedor":        "agent_supplier",
     "sincronizar_google":         "agent_google",
     "agendar_evento":             "agent_google",
@@ -77,6 +80,7 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "registrar_compra_proveedor": ActionType.REGISTER_PURCHASE,
     "consultar_estado_negocio":   ActionType.GENERATE_HEALTH_REPORT,
     "generar_informe":            ActionType.GENERATE_HEALTH_REPORT,
+    "generar_informe_con_export": ActionType.GENERATE_HEALTH_REPORT,  # Stage 4: primary action
     "gestionar_proveedor":        ActionType.CREATE_SUPPLIER_DRAFT,
     "sincronizar_google":         ActionType.SYNC_TO_GOOGLE,
     "agendar_evento":             ActionType.CREATE_CALENDAR_EVENT,
@@ -208,6 +212,29 @@ def build_plan(intent: str, entities: dict) -> AgentTeamPlan:
             intent=intent,
             tasks=[task_sale, task_cobro],
             requires_synthesis=True,
+        )
+
+    # ── generar_informe_con_export → DAG: health report + upload a Drive ─────
+    if intent == "generar_informe_con_export":
+        task_health = AgentTask(
+            task_id=str(uuid.uuid4()),
+            agent="agent_health",
+            action_type=ActionType.GENERATE_HEALTH_REPORT,
+            entities=entities,
+            depends_on=[],
+        )
+        task_upload = AgentTask(
+            task_id=str(uuid.uuid4()),
+            agent="agent_google",
+            action_type=ActionType.UPLOAD_TO_DRIVE,
+            entities={**entities, "mode": "mcp"},
+            depends_on=[task_health.task_id],  # espera el reporte antes de subir
+        )
+        return AgentTeamPlan(
+            plan_id=plan_id,
+            intent=intent,
+            tasks=[task_health, task_upload],
+            requires_synthesis=False,
         )
 
     # ── Caso general: single-task ─────────────────────────────────────────────

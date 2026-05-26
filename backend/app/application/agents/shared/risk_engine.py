@@ -18,6 +18,10 @@ ACTION_RISK_MAP = {
     ActionType.CLASSIFY_GMAIL_MESSAGE: RiskLevel.LOW,
     ActionType.SYNC_TO_GOOGLE:         RiskLevel.MEDIUM,
     ActionType.CREATE_CALENDAR_EVENT:  RiskLevel.MEDIUM,
+    # Stage 4: Google writes via broker
+    ActionType.UPLOAD_TO_DRIVE:        RiskLevel.MEDIUM,
+    ActionType.CREATE_GOOGLE_DOC:      RiskLevel.MEDIUM,
+    ActionType.APPEND_TO_SHEET:        RiskLevel.MEDIUM,
 }
 
 

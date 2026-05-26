@@ -32,6 +32,12 @@ def test_risk_engine_medium_actions():
     assert RiskEngine.evaluate(ActionType.REGISTER_SALE) == RiskLevel.MEDIUM
 
 
+def test_risk_engine_stage4_google_actions():
+    assert RiskEngine.evaluate(ActionType.UPLOAD_TO_DRIVE) == RiskLevel.MEDIUM
+    assert RiskEngine.evaluate(ActionType.CREATE_GOOGLE_DOC) == RiskLevel.MEDIUM
+    assert RiskEngine.evaluate(ActionType.APPEND_TO_SHEET) == RiskLevel.MEDIUM
+
+
 def test_risk_engine_high_actions():
     assert RiskEngine.evaluate(ActionType.REGISTER_STOCK_LOSS) == RiskLevel.HIGH
 
@@ -62,13 +68,13 @@ def test_heuristic_to_prompt_fragment_is_numeric():
 
 
 def test_action_type_enum_complete():
-    # 16 originales + UPDATE_PRODUCT (sprint 14) = 17. Stage 4 agrega 3 más (Google).
-    assert len(ActionType) == 17
+    # 17 originales + 3 Stage 4 (UPLOAD_TO_DRIVE, CREATE_GOOGLE_DOC, APPEND_TO_SHEET) = 20
+    assert len(ActionType) == 20
 
 
 def test_intent_catalog_complete():
-    # 17 intents en español (Stage 1). Stage 4+ puede extender.
-    assert len(INTENT_CATALOG) == 17
+    # 17 Stage 1 + 1 Stage 4 (generar_informe_con_export) = 18
+    assert len(INTENT_CATALOG) == 18
 
 
 def test_intent_catalog_spanish():
@@ -77,8 +83,9 @@ def test_intent_catalog_spanish():
         "ingresar_venta", "ingresar_cobro", "ingresar_gasto", "ingresar_pago_salida",
         "actualizar_stock", "registrar_merma", "actualizar_producto",
         "importar_archivo_ventas", "importar_archivo_gastos", "registrar_compra_proveedor",
-        "consultar_estado_negocio", "generar_informe", "gestionar_proveedor",
-        "sincronizar_google", "agendar_evento", "ayuda_plataforma", "intent_desconocido",
+        "consultar_estado_negocio", "generar_informe", "generar_informe_con_export",
+        "gestionar_proveedor", "sincronizar_google", "agendar_evento",
+        "ayuda_plataforma", "intent_desconocido",
     }
     assert set(INTENT_CATALOG) == expected
 

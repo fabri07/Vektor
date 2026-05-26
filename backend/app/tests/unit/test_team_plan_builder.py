@@ -14,7 +14,8 @@ from app.application.agents.shared.schemas import ActionType, AgentTeamPlan
 # ── Catálogo ──────────────────────────────────────────────────────────────────
 
 def test_intent_catalog_size():
-    assert len(INTENT_CATALOG) == 17
+    # 17 Stage 1 + 1 Stage 4 (generar_informe_con_export) = 18
+    assert len(INTENT_CATALOG) == 18
 
 
 def test_all_intents_have_agent_mapping():
@@ -88,8 +89,14 @@ def test_build_plan_unknown_intent_fallback():
 
 # ── build_plan — invariantes estructurales ────────────────────────────────────
 
-# Intents que Stage 3 convierte en planes compuestos (> 1 tarea)
-_COMPOUND_INTENTS = {"importar_archivo_ventas", "registrar_compra_proveedor"}
+# Intents que generan planes compuestos (> 1 tarea)
+# Stage 3: importar_archivo_ventas, registrar_compra_proveedor
+# Stage 4: generar_informe_con_export
+_COMPOUND_INTENTS = {
+    "importar_archivo_ventas",
+    "registrar_compra_proveedor",
+    "generar_informe_con_export",
+}
 
 
 def test_build_plan_single_task_for_non_compound_intents():
@@ -155,3 +162,33 @@ def test_build_plan_entities_isolated():
     plan.tasks[0].entities["extra"] = "x"
     # El dict original no debe mutarse
     assert "extra" not in entities
+
+
+# ── Stage 4: generar_informe_con_export ───────────────────────────────────────
+
+def test_build_plan_generar_informe_con_export_dag():
+    """Stage 4: informe + upload a Drive genera DAG de 2 tareas con dependencia."""
+    plan = build_plan("generar_informe_con_export", {})
+    assert len(plan.tasks) == 2
+    health_task = next(t for t in plan.tasks if t.agent == "agent_health")
+    upload_task = next(t for t in plan.tasks if t.agent == "agent_google")
+    assert health_task.action_type == ActionType.GENERATE_HEALTH_REPORT
+    assert upload_task.action_type == ActionType.UPLOAD_TO_DRIVE
+    # DAG: upload depende del health report
+    assert upload_task.depends_on == [health_task.task_id]
+    # Sin synthesizer — el health report habla por sí mismo
+    assert plan.requires_synthesis is False
+
+
+def test_build_plan_new_action_types_in_risk_engine():
+    """Los 3 ActionTypes nuevos del Stage 4 están en el RiskEngine."""
+    from app.application.agents.shared.risk_engine import RiskEngine
+    assert RiskEngine.evaluate(ActionType.UPLOAD_TO_DRIVE) is not None
+    assert RiskEngine.evaluate(ActionType.CREATE_GOOGLE_DOC) is not None
+    assert RiskEngine.evaluate(ActionType.APPEND_TO_SHEET) is not None
+
+
+def test_tool_broker_importable():
+    """GoogleToolBroker se puede importar desde el módulo correcto."""
+    from app.application.agents.google.tool_broker import GoogleToolBroker
+    assert GoogleToolBroker is not None
