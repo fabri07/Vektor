@@ -1,9 +1,10 @@
 """Fábrica de sub-agentes. Usa lazy imports para evitar circulares.
 
-Aliases deprecados (Stage 2a → cleanup en Stage 5d):
-  agent_cash      → AgentIncome  (protege PendingActions en vuelo con target_agent viejo)
-  agent_calendar  → AgentGoogle
-  agent_sync      → AgentGoogle
+Alias deprecado (Stage 2a):
+  agent_cash → AgentIncome  (protege PendingActions en vuelo con target_agent viejo)
+
+Stage 5d completado: AgentCalendar y AgentSync eliminados; su lógica fue absorbida
+por AgentGoogle. Los aliases agent_calendar y agent_sync ya no existen.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def get_sub_agent(
 
         return AgentHelper()
 
-    # ── Aliases deprecados (Stage 2a → cleanup Stage 5d) ─────────────────────
+    # ── Alias deprecado (Stage 2a) ────────────────────────────────────────────
     if name == "agent_cash":
         logger.warning(
             "registry_deprecated_alias",
@@ -85,31 +86,5 @@ def get_sub_agent(
         from app.application.agents.income.agent import AgentIncome  # noqa: PLC0415
 
         return AgentIncome(db=db, redis=redis)
-
-    if name == "agent_calendar":
-        logger.warning(
-            "registry_deprecated_alias",
-            alias="agent_calendar",
-            redirect="agent_google",
-        )
-        from app.application.agents.google.agent import AgentGoogle  # noqa: PLC0415
-        from app.config.settings import get_settings  # noqa: PLC0415
-
-        settings = get_settings()
-        gateway = _make_gateway(settings, user_id)
-        return AgentGoogle(gateway=gateway, tenant_id=str(tenant_id) if tenant_id else None)
-
-    if name == "agent_sync":
-        logger.warning(
-            "registry_deprecated_alias",
-            alias="agent_sync",
-            redirect="agent_google",
-        )
-        from app.application.agents.google.agent import AgentGoogle  # noqa: PLC0415
-        from app.config.settings import get_settings  # noqa: PLC0415
-
-        settings = get_settings()
-        gateway = _make_gateway(settings, user_id)
-        return AgentGoogle(gateway=gateway, tenant_id=str(tenant_id) if tenant_id else None)
 
     return None

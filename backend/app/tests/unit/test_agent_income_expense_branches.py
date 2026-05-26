@@ -175,43 +175,24 @@ async def test_expense_outflow_is_requires_approval_not_auto_execute():
 
 @pytest.mark.asyncio
 async def test_google_no_gateway_returns_auth_required():
-    """AgentGoogle sin gateway → requires_google_auth."""
+    """AgentGoogle sin gateway → requires_google_auth (calendar handler)."""
     from app.application.agents.google.agent import AgentGoogle
 
     agent = AgentGoogle(gateway=None)
     result = await agent.process(_req("agendá una reunión"))
-
-    # El delegate (AgentCalendar) retorna requires_google_auth cuando no tiene gateway
     assert result.status == "requires_google_auth"
 
 
 @pytest.mark.asyncio
-async def test_google_with_calendar_task_dispatches_to_calendar():
-    """Con task CREATE_CALENDAR_EVENT → AgentGoogle despacha a AgentCalendar."""
-    from unittest.mock import MagicMock, AsyncMock, patch
+async def test_google_with_calendar_task_no_gateway():
+    """Con task CREATE_CALENDAR_EVENT y sin gateway → requires_google_auth."""
     from app.application.agents.google.agent import AgentGoogle
-    from app.application.agents.shared.schemas import RiskLevel as RL, Confidence
-
-    # Mock AgentCalendar para evitar dependencia de gateway real
-    mock_response = MagicMock()
-    mock_response.status = "requires_google_auth"
-    mock_response.agent_name = "agent_calendar"
-    mock_response.risk_level = RL.LOW
-    mock_response.confidence = Confidence.HIGH
-    mock_response.requires_approval = False
-    mock_response.result = {}
-    mock_response.usage = None
-
-    with patch("app.application.agents.google.agent.AgentGoogle._dispatch_calendar",
-               new_callable=lambda: lambda self, *a, **kw: __import__('asyncio').coroutine(lambda: mock_response)()):
-        pass  # skip complex mock, just test task routing
 
     agent = AgentGoogle(gateway=None)
     task = AgentTask(agent="agent_google", action_type=ActionType.CREATE_CALENDAR_EVENT)
     result = await agent.process(_req("agendá una reunión"), task=task)
-
-    # Calendar dispatch retorna requires_google_auth cuando no hay gateway
     assert result.status == "requires_google_auth"
+    assert result.agent_name == "agent_google"
 
 
 @pytest.mark.asyncio

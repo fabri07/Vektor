@@ -166,7 +166,5 @@ class GoogleToolBroker:
             await self.append_doc_content(document_id=doc_id, content=content)
         return doc
 
-    # ── Nota Stage 5d ─────────────────────────────────────────────────────────
-    # AgentCalendar y AgentSync todavía instancian GoogleMcpService directamente.
-    # Stage 5d (cleanup): reemplazar esas instancias con llamadas al broker,
-    # luego eliminar agents/calendar/ y agents/sync/.
+    # Stage 5d completado: AgentCalendar y AgentSync fueron eliminados.
+    # Su lógica fue absorbida por AgentGoogle, que usa este broker directamente.

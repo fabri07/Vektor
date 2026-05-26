@@ -9,10 +9,8 @@ CONTEXT_BUDGETS = {
     "agent_supplier": 3500,
     "agent_health": 4000,
     "agent_helper": 2500,
-    # Aliases deprecados (Stage 5d cleanup)
+    # Alias deprecado (Stage 2a)
     "agent_cash": 3000,
-    "agent_calendar": 3000,
-    "agent_sync": 4000,
 }
 
 CONTEXT_PRIORITY = [
