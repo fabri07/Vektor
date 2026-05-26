@@ -96,7 +96,10 @@ class AgentGoogle(BaseAgent):
         if action_type == ActionType.UPLOAD_TO_DRIVE and not entities.get("content_base64"):
             upstream_outputs = request.context.get("upstream_outputs", {})
             if upstream_outputs:
-                # Toma el primer resultado upstream (esperamos el health report)
+                # Toma el primer resultado upstream (esperamos el health report de AgentHealth).
+                # Stage 4: export como texto plano con narrativa + score.
+                # Stage 5a: AgentHealth generará PDF con reportlab y lo persistirá en R2;
+                #           el payload incluirá blob_id en lugar de content_base64 inline.
                 upstream_result = next(iter(upstream_outputs.values()), {})
                 narrative: str = upstream_result.get("summary", "")
                 health_score = upstream_result.get("health_score")
@@ -138,8 +141,16 @@ class AgentGoogle(BaseAgent):
 
     async def _dispatch_sync(self, request: AgentRequest) -> AgentResponse:
         from app.application.agents.sync.agent import AgentSync  # noqa: PLC0415
+        from app.config.settings import get_settings  # noqa: PLC0415
 
-        delegate = AgentSync(gateway=self._gateway, tenant_id=self._tenant_id)
+        # Inyectar broker para que AgentSync use el broker en lugar de GoogleMcpService directo
+        broker = GoogleToolBroker(
+            user_id=request.user_id,
+            tenant_id=self._tenant_id or "",
+            settings=get_settings(),
+        ) if self._tenant_id else None
+
+        delegate = AgentSync(gateway=self._gateway, tenant_id=self._tenant_id, broker=broker)
         response = await delegate.process(request)
         response.agent_name = self.agent_name
         return response

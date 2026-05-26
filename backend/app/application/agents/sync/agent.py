@@ -6,10 +6,15 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from app.application.agents.base import BaseAgent
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, RiskLevel
+from app.application.agents.shared.schemas import (
+    ActionType,
+    AgentRequest,
+    AgentResponse,
+    Confidence,
+    RiskLevel,
+)
 from app.config.settings import get_settings
 from app.integrations.mcp.exceptions import McpToolAuthError
-from app.integrations.mcp.google_mcp_service import GoogleMcpService
 from app.observability.logger import get_logger
 
 if TYPE_CHECKING:
@@ -67,11 +72,14 @@ class AgentSync(BaseAgent):
 
     def __init__(
         self,
-        gateway: "McpToolGateway | None" = None,
+        gateway: McpToolGateway | None = None,
         tenant_id: str | None = None,
+        broker: Any | None = None,
     ) -> None:
         self._gateway = gateway
         self._tenant_id = tenant_id
+        # broker: GoogleToolBroker inyectado por AgentGoogle (duck typing, no import directo)
+        self._broker = broker
 
     async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         message_lower = request.message.lower()
@@ -235,14 +243,19 @@ class AgentSync(BaseAgent):
                 result={"summary": "Falta la búsqueda para Drive."},
             )
 
-        svc = GoogleMcpService(
-            gateway=self._gateway,
-            agent_name=self.agent_name,
-            tenant_id=self._tenant_id,
-            settings=get_settings(),
-        )
+        # Usar broker inyectado por AgentGoogle (Stage 4) o fallback a GoogleMcpService directo
+        if self._broker is not None:
+            drive_client: Any = self._broker
+        else:
+            from app.integrations.mcp.google_mcp_service import GoogleMcpService  # noqa: PLC0415
+            drive_client = GoogleMcpService(
+                gateway=self._gateway,
+                agent_name=self.agent_name,
+                tenant_id=self._tenant_id,
+                settings=get_settings(),
+            )
         try:
-            files = await svc.list_drive_files(query=drive_query, max_results=5)
+            files = await drive_client.list_drive_files(query=drive_query, max_results=5)
             if not files:
                 return AgentResponse(
                     request_id=request.request_id,
@@ -264,7 +277,7 @@ class AgentSync(BaseAgent):
                 if not file_id or mime_type == "application/vnd.google-apps.folder":
                     continue
                 try:
-                    file_data = await svc.read_drive_file(file_id=file_id)
+                    file_data = await drive_client.read_drive_file(file_id=file_id)
                 except Exception as exc:
                     logger.warning("agent_sync.drive_read_failed", file_id=file_id, error=str(exc))
                     continue

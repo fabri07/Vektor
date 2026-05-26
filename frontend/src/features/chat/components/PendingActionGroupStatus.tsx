@@ -15,6 +15,10 @@ const ACTION_LABELS: Record<string, string> = {
   CREATE_SUPPLIER_DRAFT: "Mensaje al proveedor",
   CREATE_CALENDAR_EVENT: "Evento de calendario",
   SYNC_TO_GOOGLE: "Sincronizar con Google",
+  // Stage 4: nuevos ActionTypes Google
+  UPLOAD_TO_DRIVE: "Subir a Google Drive",
+  CREATE_GOOGLE_DOC: "Crear documento",
+  APPEND_TO_SHEET: "Agregar a Sheets",
 };
 
 interface GroupTaskResult {

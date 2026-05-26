@@ -19,7 +19,10 @@ _COBRO_ENTITY_KEYS = frozenset(
 )
 
 # ── Catálogo cerrado de intents (18, español rioplatense) ─────────────────────
-# Stage 4: agrega generar_informe_con_export → DAG health + upload Drive
+# Stage 1: 17 intents base.
+# Stage 4: agrega generar_informe_con_export → DAG (health report → upload Drive).
+# El plan original mencionaba "17 canónicos" refiriéndose al estado de Stage 1.
+# 18 es el conteo correcto post-Stage 4.
 INTENT_CATALOG: list[str] = [
     "ingresar_venta",
     "ingresar_cobro",
