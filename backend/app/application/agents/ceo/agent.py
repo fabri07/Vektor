@@ -79,6 +79,7 @@ class AgentCEO(BaseAgent):
             "  registrar_compra_proveedor: 'compré a Mayorista X', 'pedido a proveedor Y', 'orden de compra'\n"
             "  consultar_estado_negocio: 'cómo está mi negocio', 'score financiero', 'salud del negocio'\n"
             "  generar_informe: 'generá un informe', 'reporte del mes', 'dame un análisis completo'\n"
+            "  generar_informe_con_export: 'subí el informe a Drive', 'exportá el reporte a Google Drive', 'mandame el informe a Drive'\n"
             "  gestionar_proveedor: 'mandá mail a proveedor', 'armá email a X', 'contactar proveedor'\n"
             "  sincronizar_google: 'sincronizá con Sheets', 'exportá a Drive', 'sync Google'\n"
             "  agendar_evento: 'agendá una reunión', 'crear evento en calendario', 'recordatorio para'\n"

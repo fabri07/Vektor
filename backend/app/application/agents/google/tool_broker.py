@@ -130,3 +130,43 @@ class GoogleToolBroker:
 
     async def append_doc_content(self, document_id: str, content: str) -> dict[str, Any]:
         return await self._svc.append_doc_content(document_id=document_id, content=content)
+
+    # ── Aliases spec-compatibles (nombres del plan de migración) ──────────────
+    # Los métodos anteriores usan convención interna (upload_drive_file, append_sheet_rows).
+    # Estos alias exponen la interfaz descrita en la arquitectura Stage 4.
+
+    async def upload_to_drive(
+        self,
+        name: str,
+        content_base64: str,
+        mime_type: str,
+        folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.upload_drive_file(
+            name=name,
+            content_base64=content_base64,
+            mime_type=mime_type,
+            folder_id=folder_id,
+        )
+
+    async def append_sheet(
+        self,
+        spreadsheet_id: str,
+        range_name: str,
+        rows: list[list[Any]],
+    ) -> dict[str, Any]:
+        return await self.append_sheet_rows(
+            spreadsheet_id=spreadsheet_id, range_name=range_name, rows=rows
+        )
+
+    async def create_doc_with_content(self, title: str, content: str = "") -> dict[str, Any]:
+        doc = await self.create_doc(title=title)
+        doc_id = doc.get("document_id") or doc.get("id")
+        if content and doc_id:
+            await self.append_doc_content(document_id=doc_id, content=content)
+        return doc
+
+    # ── Nota Stage 5d ─────────────────────────────────────────────────────────
+    # AgentCalendar y AgentSync todavía instancian GoogleMcpService directamente.
+    # Stage 5d (cleanup): reemplazar esas instancias con llamadas al broker,
+    # luego eliminar agents/calendar/ y agents/sync/.

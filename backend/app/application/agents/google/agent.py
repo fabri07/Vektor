@@ -13,6 +13,7 @@ Los agentes de dominio (income, expense, stock, health, supplier) NO importan el
 
 from __future__ import annotations
 
+import base64
 from typing import TYPE_CHECKING, Any
 
 from app.application.agents.base import BaseAgent
@@ -85,8 +86,32 @@ class AgentGoogle(BaseAgent):
         action_type: ActionType,
         task: Any | None,
     ) -> AgentResponse:
-        """Emite requires_approval para que PendingActionService ejecute via broker."""
-        entities = task.entities if task else {}
+        """Emite requires_approval para que PendingActionService ejecute via broker.
+
+        Para UPLOAD_TO_DRIVE: lee upstream_outputs del DAG para obtener el contenido
+        real del informe de salud (generado por AgentHealth en el task previo).
+        """
+        entities = dict(task.entities) if task else {}
+
+        if action_type == ActionType.UPLOAD_TO_DRIVE and not entities.get("content_base64"):
+            upstream_outputs = request.context.get("upstream_outputs", {})
+            if upstream_outputs:
+                # Toma el primer resultado upstream (esperamos el health report)
+                upstream_result = next(iter(upstream_outputs.values()), {})
+                narrative: str = upstream_result.get("summary", "")
+                health_score = upstream_result.get("health_score")
+                if narrative:
+                    lines: list[str] = []
+                    if health_score is not None:
+                        lines.append(f"Score de salud: {health_score}/100\n")
+                    lines.append(narrative)
+                    report_text = "\n".join(lines)
+                    entities["content_base64"] = base64.b64encode(
+                        report_text.encode()
+                    ).decode()
+                    entities.setdefault("filename", "informe_salud_vektor.txt")
+                    entities.setdefault("mime_type", "text/plain")
+
         payload = {**entities, "mode": "mcp", "raw_message": request.message}
         return AgentResponse(
             request_id=request.request_id,
