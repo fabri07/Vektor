@@ -22,6 +22,7 @@ from app.api.v1 import (
     onboarding,
     products,
     sales,
+    settings,
     tenants,
     users,
 )
@@ -55,3 +56,4 @@ api_router.include_router(onboarding.router, prefix="/onboarding", tags=["Onboar
 api_router.include_router(momentum.router, prefix="/momentum", tags=["Momentum"])
 api_router.include_router(forecast.router, prefix="/forecast", tags=["Forecast"])
 api_router.include_router(fields.router, prefix="/fields/definitions", tags=["Fields"])
+api_router.include_router(settings.router, prefix="/settings", tags=["Settings"])

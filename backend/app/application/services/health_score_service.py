@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.analytics_service import AnalyticsService
+from app.application.services.health_config_service import get_margin_benchmark
 from app.domain.product import effective_threshold
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
 from app.observability.logger import get_logger
@@ -24,7 +25,7 @@ from app.state.business_state_service import BusinessState, compute_business_sta
 
 logger = get_logger(__name__)
 
-HEURISTIC_VERSION = "v1"
+HEURISTIC_VERSION = "v2"
 
 
 class _NullRedis:
@@ -128,6 +129,16 @@ def _build_dimensions(
         else "Sin proveedores cargados; score de proveedores en mínimo."
     )
 
+    # Growth explanation
+    if state.prev_monthly_sales_est > 0:
+        growth_pct = float(
+            (state.monthly_sales_est - state.prev_monthly_sales_est)
+            / state.prev_monthly_sales_est * 100
+        )
+        growth_explanation = f"Ventas {growth_pct:+.1f}% vs período anterior (30 días previos)."
+    else:
+        growth_explanation = "Sin historial del período anterior; crecimiento calculado como neutro."
+
     return [
         {
             "dimension": "cash",
@@ -137,25 +148,32 @@ def _build_dimensions(
             "explanation": cash_explanation,
         },
         {
-            "dimension": "margin",
-            "value": str(result.score_margin),
-            "weight": "0.30",
-            "weighted_value": f"{Decimal(result.score_margin) * Decimal('0.30'):.3f}",
-            "explanation": margin_explanation,
-        },
-        {
             "dimension": "stock",
             "value": str(result.score_stock),
-            "weight": "0.25",
-            "weighted_value": f"{Decimal(result.score_stock) * Decimal('0.25'):.3f}",
+            "weight": "0.20",
+            "weighted_value": f"{Decimal(result.score_stock) * Decimal('0.20'):.3f}",
             "explanation": stock_explanation,
         },
         {
             "dimension": "supplier",
             "value": str(result.score_supplier),
-            "weight": "0.15",
-            "weighted_value": f"{Decimal(result.score_supplier) * Decimal('0.15'):.3f}",
+            "weight": "0.10",
+            "weighted_value": f"{Decimal(result.score_supplier) * Decimal('0.10'):.3f}",
             "explanation": supplier_explanation,
+        },
+        {
+            "dimension": "margin",
+            "value": str(result.score_margin),
+            "weight": "0.20",
+            "weighted_value": f"{Decimal(result.score_margin) * Decimal('0.20'):.3f}",
+            "explanation": margin_explanation,
+        },
+        {
+            "dimension": "growth",
+            "value": str(result.score_growth),
+            "weight": "0.20",
+            "weighted_value": f"{Decimal(result.score_growth) * Decimal('0.20'):.3f}",
+            "explanation": growth_explanation,
         },
     ]
 
@@ -185,12 +203,16 @@ class HealthScoreService:
         # ── 1. Business State Layer ───────────────────────────────────────────
         state = await compute_business_state(tenant_id, self._session, redis)
 
-        # ── 2. Benchmark data-driven (si hay suficientes muestras en analytics_events)
-        analytics_svc = AnalyticsService(self._session)
-        data_benchmark = await analytics_svc.get_data_driven_benchmark(state.vertical_code)
+        # ── 2a. Tenant override de margen (tiene prioridad sobre data-driven) ──
+        tenant_benchmark = await get_margin_benchmark(tenant_id, self._session)
+
+        # ── 2b. Benchmark data-driven (fallback si no hay override) ──────────
+        if tenant_benchmark is None:
+            analytics_svc = AnalyticsService(self._session)
+            tenant_benchmark = await analytics_svc.get_data_driven_benchmark(state.vertical_code)
 
         # ── 3. Heuristic Engine ───────────────────────────────────────────────
-        result = calculate_health_score(state, benchmark=data_benchmark)
+        result = calculate_health_score(state, benchmark=tenant_benchmark)
         dimensions = _build_dimensions(state, result)
 
         # ── 4. Persist snapshot ───────────────────────────────────────────────
@@ -206,6 +228,7 @@ class HealthScoreService:
             score_margin=result.score_margin,
             score_stock=result.score_stock,
             score_supplier=result.score_supplier,
+            score_growth=result.score_growth,
             source_snapshot_id=state.snapshot_id,
             heuristic_version=HEURISTIC_VERSION,
             primary_risk_code=result.primary_risk_code,

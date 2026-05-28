@@ -32,7 +32,9 @@ boto3==1.35.87
 
 # ── File parsing / ingestion ───────────────────────────────────────────────────
 openpyxl==3.1.5                  # read .xlsx
-python-docx==1.1.2               # read .docx
+python-docx==1.1.2               # read .docx; write .docx reports (Stage 5a)
+reportlab==4.2.5                 # generate PDF reports (Stage 5a)
+PyYAML==6.0.2                    # user manual YAML (Stage 5b)
 pypdf==5.4.0                     # read .pdf
 python-pptx==1.0.2               # read .pptx
 filetype==1.2.0                  # real MIME detection from magic bytes

@@ -1,9 +1,10 @@
 """Unit tests for AgentHealth — scorer determinístico + narrativa Sonnet.
 
-Reglas del agente:
-- El score se calcula en Python, NUNCA con LLM.
-- El LLM solo genera narrativa a partir de los números ya calculados.
-- FÓRMULA CANÓNICA: cash×0.35 + stock×0.30 + supplier×0.15 + discipline×0.20
+Stage 5a: AgentHealth refactorizado a thin coordinator.
+  - scorer.py (compat shim) → ComponentScores v1 (tests de fórmula legacy)
+  - sub_calculator.py → ComponentScoresV2 (tests de fórmula v2 y alertas)
+  - sub_narrator.py → genera narrativa
+  - agent.py → thin coordinator (tests de process())
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,14 +19,14 @@ from app.application.agents.health.scorer import (
     compute_stock_score,
     compute_supplier_score,
 )
-from app.application.agents.shared.heuristic_engine import HeuristicConfig, CashHealthConfig
+from app.application.agents.health.sub_calculator import ComponentScoresV2
+from app.application.agents.shared.heuristic_engine import CashHealthConfig, HeuristicConfig
 from app.application.agents.shared.schemas import AgentRequest
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_config(healthy_days_min: float = 10.0, warning_days_min: float = 7.0) -> HeuristicConfig:
-    """Crea una HeuristicConfig con umbrales controlados para tests."""
     return HeuristicConfig(
         business_type="kiosco_almacen",
         cash_health=CashHealthConfig(
@@ -45,75 +46,86 @@ def _make_request(message: str = "generar informe de salud") -> AgentRequest:
 
 
 def _mock_anthropic_client(narrative_text: str = "Narrativa de prueba.") -> MagicMock:
-    """Crea un mock del cliente AsyncAnthropic que retorna narrative_text."""
     content_block = MagicMock()
     content_block.text = narrative_text
+    usage = MagicMock()
+    usage.input_tokens = 100
+    usage.output_tokens = 50
     response = MagicMock()
     response.content = [content_block]
+    response.usage = usage
     mock_client = MagicMock()
     mock_client.messages.create = AsyncMock(return_value=response)
     return mock_client
 
 
-# ── Tests de la fórmula canónica ──────────────────────────────────────────────
+def _make_scores_v2(
+    cash: int = 70,
+    stock: int = 70,
+    supplier: int = 70,
+    margin: int = 70,
+    growth: int = 70,
+    total: int = 70,
+    confidence_level: str = "HIGH",
+    completeness: float = 90.0,
+) -> ComponentScoresV2:
+    return ComponentScoresV2(
+        cash_score=cash,
+        stock_score=stock,
+        supplier_score=supplier,
+        margin_score=margin,
+        growth_score=growth,
+        total_score=total,
+        primary_risk_code="CASH_LOW",
+        confidence_level=confidence_level,
+        data_completeness_score=completeness,
+    )
+
+
+# ── Tests de fórmula v1 (compat shim scorer.py) ───────────────────────────────
 
 def test_score_formula_correct():
     """components={100,100,100,100} → score=100.0"""
     components = ComponentScores(
-        cash_score=100.0,
-        stock_score=100.0,
-        supplier_score=100.0,
-        discipline_score=100.0,
+        cash_score=100.0, stock_score=100.0, supplier_score=100.0, discipline_score=100.0,
     )
     assert compute_health_score(components) == 100.0
 
 
 def test_score_weights():
-    """cash_score=100, resto=0 → health_score=35.0 (peso del cash es 0.35)."""
+    """cash_score=100, resto=0 → health_score=35.0 (peso del cash es 0.35 en fórmula v1)."""
     components = ComponentScores(
-        cash_score=100.0,
-        stock_score=0.0,
-        supplier_score=0.0,
-        discipline_score=0.0,
+        cash_score=100.0, stock_score=0.0, supplier_score=0.0, discipline_score=0.0,
     )
     assert compute_health_score(components) == pytest.approx(35.0, abs=0.001)
 
 
 def test_score_weight_stock():
-    """stock_score=100, resto=0 → health_score=30.0 (peso del stock es 0.30)."""
+    """stock_score=100, resto=0 → health_score=30.0 (fórmula v1)."""
     components = ComponentScores(
-        cash_score=0.0,
-        stock_score=100.0,
-        supplier_score=0.0,
-        discipline_score=0.0,
+        cash_score=0.0, stock_score=100.0, supplier_score=0.0, discipline_score=0.0,
     )
     assert compute_health_score(components) == pytest.approx(30.0, abs=0.001)
 
 
 def test_score_weight_supplier():
-    """supplier_score=100, resto=0 → health_score=15.0 (peso del supplier es 0.15)."""
+    """supplier_score=100, resto=0 → health_score=15.0 (fórmula v1)."""
     components = ComponentScores(
-        cash_score=0.0,
-        stock_score=0.0,
-        supplier_score=100.0,
-        discipline_score=0.0,
+        cash_score=0.0, stock_score=0.0, supplier_score=100.0, discipline_score=0.0,
     )
     assert compute_health_score(components) == pytest.approx(15.0, abs=0.001)
 
 
 def test_score_weight_discipline():
-    """discipline_score=100, resto=0 → health_score=20.0 (peso de discipline es 0.20)."""
+    """discipline_score=100, resto=0 → health_score=20.0 (fórmula v1)."""
     components = ComponentScores(
-        cash_score=0.0,
-        stock_score=0.0,
-        supplier_score=0.0,
-        discipline_score=100.0,
+        cash_score=0.0, stock_score=0.0, supplier_score=0.0, discipline_score=100.0,
     )
     assert compute_health_score(components) == pytest.approx(20.0, abs=0.001)
 
 
 def test_score_is_deterministic():
-    """Mismos inputs → mismo score en 1000 ejecuciones."""
+    """Mismos inputs → mismo score en 1000 ejecuciones (compat shim)."""
     config = _make_config()
     results = set()
     for _ in range(1000):
@@ -125,199 +137,116 @@ def test_score_is_deterministic():
         )
         score = compute_health_score(components)
         results.add(round(score, 6))
-    assert len(results) == 1, f"Score no es determinístico: {results}"
+    assert len(results) == 1
 
 
 # ── Tests de componentes individuales ─────────────────────────────────────────
 
 def test_cash_component_critical():
-    """coverage_days=2 con healthy_min=10 → cash_score < 30 (zona crítica)."""
     config = _make_config(healthy_days_min=10.0, warning_days_min=7.0)
-    score = compute_cash_score(2.0, config)
-    assert score < 30.0, f"Esperaba cash_score < 30, obtuvo {score}"
+    assert compute_cash_score(2.0, config) < 30.0
 
 
 def test_cash_component_healthy():
-    """coverage_days=25 con healthy_min=10 → 25 >= 10*2=20 → cash_score=100."""
     config = _make_config(healthy_days_min=10.0, warning_days_min=7.0)
-    score = compute_cash_score(25.0, config)
-    assert score == 100.0
+    assert compute_cash_score(25.0, config) == 100.0
 
 
 def test_cash_component_warning_zone():
-    """coverage_days=8 con healthy_min=10, warning_min=7 → 30 <= score < 70."""
     config = _make_config(healthy_days_min=10.0, warning_days_min=7.0)
     score = compute_cash_score(8.0, config)
-    assert 30.0 <= score < 70.0, f"Esperaba zona de advertencia, obtuvo {score}"
+    assert 30.0 <= score < 70.0
 
 
 def test_cash_component_healthy_zone():
-    """coverage_days=12 con healthy_min=10 → 12 >= 10 pero < 20 → 70 <= score < 100."""
     config = _make_config(healthy_days_min=10.0, warning_days_min=7.0)
     score = compute_cash_score(12.0, config)
-    assert 70.0 <= score < 100.0, f"Esperaba zona saludable, obtuvo {score}"
+    assert 70.0 <= score < 100.0
 
 
 def test_stock_score_no_stockouts():
-    """0 quiebres, 0 slow moving → score=100."""
     assert compute_stock_score(0, 0, 50) == 100.0
 
 
 def test_stock_score_with_stockouts():
-    """3 quiebres → score=100 - 30 = 70."""
     assert compute_stock_score(3, 0, 50) == pytest.approx(70.0)
 
 
 def test_stock_score_no_products():
-    """Sin productos → score neutro=50."""
     assert compute_stock_score(0, 0, 0) == 50.0
 
 
 def test_supplier_score_all_ok():
-    """3 activos, 0 vencidos → score=100."""
     assert compute_supplier_score(3, 0) == 100.0
 
 
 def test_supplier_score_overdue():
-    """3 activos, 2 vencidos → score=100 - 30 = 70."""
     assert compute_supplier_score(3, 2) == pytest.approx(70.0)
 
 
 def test_supplier_score_no_suppliers():
-    """Sin proveedores → score neutro=50."""
     assert compute_supplier_score(0, 0) == 50.0
 
 
 def test_discipline_score_full():
-    """7 de 7 días con datos → score=100."""
     assert compute_discipline_score(7, 7) == 100.0
 
 
 def test_discipline_score_partial():
-    """6 de 7 días → score≈85.7."""
-    score = compute_discipline_score(6, 7)
-    assert score == pytest.approx(85.71, abs=0.1)
+    assert compute_discipline_score(6, 7) == pytest.approx(85.71, abs=0.1)
 
 
 def test_discipline_score_no_days():
-    """0 días totales → score=0 (evitar división por cero)."""
     assert compute_discipline_score(0, 0) == 0.0
 
 
-# ── Tests de alertas ──────────────────────────────────────────────────────────
+# ── Tests de alertas v2 (_build_alerts con ComponentScoresV2) ────────────────
 
 def test_alerts_are_top3():
-    """_generate_alerts siempre retorna máximo 3 alertas."""
-    with patch("app.application.agents.health.agent.anthropic.Anthropic"):
-        from app.application.agents.health.agent import AgentHealth
-
-        agent = AgentHealth()
-        # Componentes todos en estado crítico/bajo para generar muchas alertas
-        components = ComponentScores(
-            cash_score=10.0,   # CRITICAL cash
-            stock_score=20.0,  # WARNING stock
-            supplier_score=100.0,
-            discipline_score=30.0,  # INFO discipline
-        )
-        alerts = agent._generate_alerts(components)
-        assert len(alerts) <= 3, f"Retornó {len(alerts)} alertas, máximo permitido: 3"
+    """_build_alerts siempre retorna máximo 3 alertas."""
+    from app.application.agents.health.agent import AgentHealth
+    agent = AgentHealth()
+    scores = _make_scores_v2(cash=10, stock=20, supplier=100, margin=30, growth=20)
+    alerts = agent._build_alerts(scores)
+    assert len(alerts) <= 3
 
 
 def test_alerts_cash_critical():
     """cash_score < 30 → alerta CRITICAL."""
-    with patch("app.application.agents.health.agent.anthropic.Anthropic"):
-        from app.application.agents.health.agent import AgentHealth
-
-        agent = AgentHealth()
-        components = ComponentScores(
-            cash_score=10.0,
-            stock_score=100.0,
-            supplier_score=100.0,
-            discipline_score=100.0,
-        )
-        alerts = agent._generate_alerts(components)
-        types = [a["type"] for a in alerts]
-        assert "CRITICAL" in types
+    from app.application.agents.health.agent import AgentHealth
+    agent = AgentHealth()
+    scores = _make_scores_v2(cash=10, stock=100, supplier=100, margin=100, growth=100)
+    alerts = agent._build_alerts(scores)
+    assert any(a["type"] == "CRITICAL" for a in alerts)
 
 
 def test_alerts_cash_warning():
     """cash_score entre 30 y 60 → alerta WARNING (no CRITICAL)."""
-    with patch("app.application.agents.health.agent.anthropic.Anthropic"):
-        from app.application.agents.health.agent import AgentHealth
-
-        agent = AgentHealth()
-        components = ComponentScores(
-            cash_score=45.0,
-            stock_score=100.0,
-            supplier_score=100.0,
-            discipline_score=100.0,
-        )
-        alerts = agent._generate_alerts(components)
-        types = [a["type"] for a in alerts]
-        assert "WARNING" in types
-        assert "CRITICAL" not in types
+    from app.application.agents.health.agent import AgentHealth
+    agent = AgentHealth()
+    scores = _make_scores_v2(cash=45, stock=100, supplier=100, margin=100, growth=100)
+    alerts = agent._build_alerts(scores)
+    types = [a["type"] for a in alerts]
+    assert "WARNING" in types
+    assert "CRITICAL" not in types
 
 
-# ── Test de narrativa ─────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_narrative_uses_computed_numbers():
-    """La narrativa contiene el score calculado (LLM recibe el número, no lo inventa)."""
-    # El test verifica que generate_narrative llama al LLM con el score en el prompt
-    with patch("app.application.agents.health.agent.anthropic.AsyncAnthropic") as mock_cls:
-        from app.application.agents.health.agent import AgentHealth
-
-        mock_client = _mock_anthropic_client("El negocio tiene un score de 78.5 sobre 100.")
-        mock_cls.return_value = mock_client
-
-        agent = AgentHealth()
-        agent.client = mock_client
-
-        from app.application.agents.health.scorer import ComponentScores, HealthScore
-
-        health = HealthScore(
-            business_id="tenant-456",
-            health_score=78.5,
-            components=ComponentScores(
-                cash_score=80.0,
-                stock_score=90.0,
-                supplier_score=60.0,
-                discipline_score=70.0,
-            ),
-            alerts=[],
-            period="current",
-        )
-
-        narrative = await agent.generate_narrative(health, "Kiosco San Martín")
-
-        # Verificar que el LLM fue llamado
-        assert mock_client.messages.create.called
-
-        # Verificar que el score aparece en el call al LLM
-        call_kwargs = mock_client.messages.create.call_args
-        messages_arg = call_kwargs[1].get("messages") or call_kwargs[0][2]
-        prompt_content = str(messages_arg)
-        assert "78.5" in prompt_content or "78" in prompt_content
+def test_alerts_growth_low():
+    """growth_score < 40 → alerta INFO."""
+    from app.application.agents.health.agent import AgentHealth
+    agent = AgentHealth()
+    scores = _make_scores_v2(cash=80, stock=80, supplier=80, margin=80, growth=30)
+    alerts = agent._build_alerts(scores)
+    components = [a["component"] for a in alerts]
+    assert "growth" in components
 
 
-# ── Test de separación LLM / cálculo ─────────────────────────────────────────
+# ── Tests del cálculo — LLM no debe ser llamado ───────────────────────────────
 
 def test_llm_not_called_for_score():
     """El cálculo del score NO llama al cliente Anthropic."""
-    from app.application.agents.health.scorer import (
-        ComponentScores,
-        compute_health_score,
-        compute_cash_score,
-        compute_stock_score,
-        compute_supplier_score,
-        compute_discipline_score,
-    )
-
     config = _make_config()
-
-    # Crear un mock del cliente y verificar que NO es llamado durante el cálculo
     mock_client = MagicMock()
-
     components = ComponentScores(
         cash_score=compute_cash_score(15.0, config),
         stock_score=compute_stock_score(0, 2, 50),
@@ -325,60 +254,36 @@ def test_llm_not_called_for_score():
         discipline_score=compute_discipline_score(6, 7),
     )
     score = compute_health_score(components)
-
-    # El cliente Anthropic nunca debe ser invocado durante el cálculo
     mock_client.messages.create.assert_not_called()
     assert 0.0 <= score <= 100.0
 
 
-# ── Test del proceso completo (process()) ─────────────────────────────────────
-
-def _make_health_score(confidence_level: str = "HIGH", completeness: float = 90.0) -> "HealthScore":
-    from app.application.agents.health.scorer import ComponentScores, HealthScore
-    return HealthScore(
-        business_id="tenant-456",
-        health_score=72.0,
-        components=ComponentScores(
-            cash_score=80.0,
-            stock_score=70.0,
-            supplier_score=60.0,
-            discipline_score=65.0,
-        ),
-        alerts=[],
-        period="2026-05-09",
-        confidence_level=confidence_level,
-        data_completeness_score=completeness,
-    )
-
+# ── Tests de process() ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_process_no_snapshot_returns_clarification():
-    """Sin snapshot disponible → requires_clarification, sin llamada a generate_narrative."""
+async def test_process_no_db_returns_error():
+    """Sin DB → status=error."""
     from app.application.agents.health.agent import AgentHealth
-
-    agent = AgentHealth()  # sin DB → calculate_health() retorna None
-    mock_client = _mock_anthropic_client()
-    agent.client = mock_client
-
+    agent = AgentHealth()  # sin DB
     result = await agent.process(_make_request())
-
-    assert result.status == "requires_clarification"
-    assert result.confidence == "LOW"
-    mock_client.messages.create.assert_not_called()
+    assert result.status == "error"
 
 
 @pytest.mark.asyncio
 async def test_process_low_confidence_returns_clarification():
-    """Snapshot con confidence=LOW → requires_clarification, sin narrativa LLM."""
+    """BusinessState con confidence=LOW → requires_clarification, sin LLM."""
     from app.application.agents.health.agent import AgentHealth
 
-    agent = AgentHealth()
+    agent = AgentHealth(db=MagicMock())
+    mock_state = MagicMock()
+    mock_state.confidence_level = "LOW"
+    mock_state.data_completeness_score = 30.0
     mock_client = _mock_anthropic_client()
     agent.client = mock_client
 
-    low_health = _make_health_score(confidence_level="LOW", completeness=30.0)
-    with patch.object(agent, "calculate_health", new=AsyncMock(return_value=low_health)):
-        result = await agent.process(_make_request())
+    with patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))):
+        with patch("app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)):
+            result = await agent.process(_make_request())
 
     assert result.status == "requires_clarification"
     assert result.confidence == "LOW"
@@ -387,39 +292,53 @@ async def test_process_low_confidence_returns_clarification():
 
 @pytest.mark.asyncio
 async def test_process_high_confidence_returns_success():
-    """Snapshot con confidence=HIGH → status=success con narrativa LLM y health_score."""
+    """BusinessState con confidence=HIGH → status=success con narrativa LLM."""
+    from app.application.agents.health.agent import AgentHealth
+
+    agent = AgentHealth(db=MagicMock())
+    mock_client = _mock_anthropic_client("Narrativa ejecutiva de prueba.")
+    agent.client = mock_client
+
+    mock_state = MagicMock()
+    mock_state.confidence_level = "HIGH"
+    mock_state.data_completeness_score = 90.0
+    mock_state.vertical_code = "kiosco"
+
+    high_scores = _make_scores_v2(total=72, confidence_level="HIGH", completeness=90.0)
+
     with patch("app.application.agents.health.agent.EventBus.emit"):
-        from app.application.agents.health.agent import AgentHealth
-
-        agent = AgentHealth()
-        mock_client = _mock_anthropic_client("Narrativa ejecutiva de prueba.")
-        agent.client = mock_client
-
-        high_health = _make_health_score(confidence_level="HIGH", completeness=90.0)
-        with patch.object(agent, "calculate_health", new=AsyncMock(return_value=high_health)):
-            result = await agent.process(_make_request())
+        with patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))):
+            with patch("app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)):
+                with patch("app.application.agents.health.agent.compute_scores", return_value=high_scores):
+                    result = await agent.process(_make_request())
 
     assert result.status == "success"
-    assert "health_score" in result.result
-    assert result.result["health_score"] == 72.0
+    assert result.result["health_score"] == 72
     assert "components" in result.result
-    assert "alerts" in result.result
+    assert result.result["formula_version"] == "v2"
     mock_client.messages.create.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_process_emits_event_only_when_high_confidence():
-    """EventBus.emit se llama solo cuando confidence NO es LOW."""
+async def test_process_emits_event_on_success():
+    """EventBus.emit se llama cuando el score se calcula con éxito."""
+    from app.application.agents.health.agent import AgentHealth
+
+    agent = AgentHealth(db=MagicMock())
+    mock_client = _mock_anthropic_client("Narrativa.")
+    agent.client = mock_client
+
+    mock_state = MagicMock()
+    mock_state.confidence_level = "HIGH"
+    mock_state.data_completeness_score = 90.0
+    mock_state.vertical_code = "kiosco"
+    high_scores = _make_scores_v2(total=72)
+
     with patch("app.application.agents.health.agent.EventBus.emit") as mock_emit:
-        from app.application.agents.health.agent import AgentHealth
-
-        agent = AgentHealth()
-        mock_client = _mock_anthropic_client("Narrativa.")
-        agent.client = mock_client
-
-        high_health = _make_health_score(confidence_level="HIGH")
-        with patch.object(agent, "calculate_health", new=AsyncMock(return_value=high_health)):
-            await agent.process(_make_request())
+        with patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))):
+            with patch("app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)):
+                with patch("app.application.agents.health.agent.compute_scores", return_value=high_scores):
+                    await agent.process(_make_request())
 
     mock_emit.assert_called_once()
     assert mock_emit.call_args[0][0] == "HEALTH_SCORE_UPDATED"

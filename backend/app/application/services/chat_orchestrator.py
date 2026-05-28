@@ -326,6 +326,9 @@ class ChatOrchestrator:
             agent_response.result["target_agent"] = ceo_target
         if raw_plan:
             agent_response.result["plan"] = raw_plan
+        # 7b. ayuda_plataforma via chat principal → sugerir /help
+        if ceo_intent == "ayuda_plataforma" and "redirect_to" not in agent_response.result:
+            agent_response.result["redirect_to"] = "help_chat"
 
         # 8. Adjuntar usage acumulado
         agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None

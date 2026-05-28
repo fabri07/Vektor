@@ -19,6 +19,7 @@ from redis.asyncio import Redis
 
 from app.application.agents.registry import get_sub_agent
 from app.application.agents.shared.schemas import (
+    ActionType,
     AgentRequest,
     AgentResponse,
     AgentTask,
@@ -28,6 +29,19 @@ from app.observability.logger import get_logger
 from app.persistence.db.session import async_session_factory
 
 logger = get_logger(__name__)
+
+# Tipos de acción que involucran MCP externo: merecen un retry ante fallos transientes
+_EXTERNAL_ACTION_TYPES: frozenset[str] = frozenset({
+    str(ActionType.SYNC_TO_GOOGLE),
+    str(ActionType.CREATE_CALENDAR_EVENT),
+    str(ActionType.CREATE_SUPPLIER_DRAFT),
+    str(ActionType.CLASSIFY_GMAIL_MESSAGE),
+    str(ActionType.UPLOAD_TO_DRIVE),
+    str(ActionType.CREATE_GOOGLE_DOC),
+    str(ActionType.APPEND_TO_SHEET),
+})
+
+_RETRY_BACKOFF_SECONDS = 2.0  # espera entre intento 1 y retry 1
 
 
 class InvalidPlanDAGError(ValueError):
@@ -243,47 +257,78 @@ class TeamPlanExecutor:
         return base_request.model_copy(update={"context": new_context})
 
     async def _run_task(self, task: AgentTask, request: AgentRequest) -> AgentResponse:
-        """Ejecuta una tarea con sesión DB propia — aislada del resto del plan."""
-        async with async_session_factory() as own_db:
-            agent = get_sub_agent(
-                task.agent,
-                db=own_db,
-                redis=self._redis,
-                user_id=self._user_id,
-                tenant_id=self._tenant_id,
-            )
-            if agent is None:
-                logger.error(
-                    "team_plan_executor_agent_not_found",
-                    agent=task.agent,
-                    task_id=task.task_id,
+        """Ejecuta una tarea con sesión DB propia.
+
+        Para tasks externas (MCP Google): 1 retry con backoff de _RETRY_BACKOFF_SECONDS
+        si el primer intento lanza una excepción (transient failure).
+        No reintenta si el agente retorna requires_google_auth — eso requiere intervención humana.
+        """
+        is_external = str(task.action_type) in _EXTERNAL_ACTION_TYPES
+        attempts = 2 if is_external else 1
+
+        for attempt in range(1, attempts + 1):
+            async with async_session_factory() as own_db:
+                agent = get_sub_agent(
+                    task.agent,
+                    db=own_db,
+                    redis=self._redis,
+                    user_id=self._user_id,
+                    tenant_id=self._tenant_id,
                 )
-                return AgentResponse(
-                    request_id=request.request_id,
-                    agent_name=task.agent,
-                    status="error",
-                    risk_level="LOW",
-                    confidence="LOW",
-                    message=f"Agente '{task.agent}' no disponible.",
-                    result={"task_id": task.task_id},
-                )
-            try:
-                return await agent.process(request, task=task)
-            except Exception as exc:
-                logger.error(
-                    "team_plan_executor_agent_failed",
-                    agent=task.agent,
-                    task_id=task.task_id,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                    exc_info=True,
-                )
-                return AgentResponse(
-                    request_id=request.request_id,
-                    agent_name=task.agent,
-                    status="error",
-                    risk_level="LOW",
-                    confidence="LOW",
-                    message="Error al ejecutar la tarea.",
-                    result={"error": str(exc), "task_id": task.task_id},
-                )
+                if agent is None:
+                    logger.error(
+                        "team_plan_executor_agent_not_found",
+                        agent=task.agent,
+                        task_id=task.task_id,
+                    )
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        agent_name=task.agent,
+                        status="error",
+                        risk_level="LOW",
+                        confidence="LOW",
+                        message=f"Agente '{task.agent}' no disponible.",
+                        result={"task_id": task.task_id},
+                    )
+                try:
+                    resp = await agent.process(request, task=task)
+                    if attempt > 1:
+                        logger.info(
+                            "team_plan_executor_retry_succeeded",
+                            agent=task.agent,
+                            task_id=task.task_id,
+                            attempt=attempt,
+                        )
+                    return resp
+                except Exception as exc:
+                    if attempt < attempts:
+                        logger.warning(
+                            "team_plan_executor_agent_failed_retrying",
+                            agent=task.agent,
+                            task_id=task.task_id,
+                            attempt=attempt,
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                        )
+                        await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+                        continue
+                    logger.error(
+                        "team_plan_executor_agent_failed",
+                        agent=task.agent,
+                        task_id=task.task_id,
+                        attempt=attempt,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                        exc_info=True,
+                    )
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        agent_name=task.agent,
+                        status="error",
+                        risk_level="LOW",
+                        confidence="LOW",
+                        message="Error al ejecutar la tarea.",
+                        result={"error": str(exc), "task_id": task.task_id},
+                    )
+        # unreachable — satisface type checker
+        raise RuntimeError("_run_task loop exited without return")

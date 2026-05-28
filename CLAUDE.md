@@ -189,7 +189,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 | AgentGoogle | 4.000 tokens | Google Calendar + Sheets + Docs vía MCP |
 
 > Verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir estado del agente.
-> Aliases deprecados en `registry.py` (cleanup Stage 5d): `agent_cash` → `agent_income`, `agent_calendar`/`agent_sync` → `agent_google`.
+> Stage 5d completado: `agent_calendar` y `agent_sync` eliminados del registry. Solo queda el alias `agent_cash` → `agent_income` (backward-compat para `PendingActions` en vuelo con target viejo).
 
 **Modelos LLM:** AgentCEO: `claude-haiku-4-5`. ChatOrchestrator: `claude-haiku-4-5-20251001`. Income/Expense/Stock/Health/Helper: `claude-haiku-4-5`. Verificar cada agente — no todos usan el mismo sufijo.
 
@@ -197,12 +197,13 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
 **Contratos fijos** (`app/application/agents/shared/schemas.py`):
 - `AgentRequest`: `{ request_id, user_id, business_id, message, attachments, conversation_id }` — sin `agent_target`
-- `AgentResponse`: `{ request_id, agent_name, status, risk_level, requires_approval, confidence, result, pending_action_id?, pending_action_ids?, approval_group_id?, question?, message?, usage? }` — `pending_action_ids`/`approval_group_id` reservados para Stage 3 (multi-task)
+- `AgentResponse`: `{ request_id, agent_name, status, risk_level, requires_approval, confidence, result, pending_action_id?, pending_action_ids?, approval_group_id?, question?, message?, usage? }` — `pending_action_ids`/`approval_group_id` implementados en Stage 3 (multi-task)
+- `AgentRequest.context`: dict reservado para outputs upstream del DAG (`{"upstream_outputs": {task_id: result_dict}}`). Vacío en single-task y en el primer nivel.
 - `status`: `"success" | "requires_approval" | "requires_clarification" | "requires_google_auth" | "error"`
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca float
 - `LLMCall`: `{ source, model, input_tokens, output_tokens }`. `UsageSummary`: `{ calls: list[LLMCall] }` + `total_input/output/total`.
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado de 17 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado de 20 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
@@ -211,6 +212,8 @@ UPDATE_PRODUCT         REGISTER_STOCK_LOSS     CREATE_PURCHASE_SUGGESTION
 IMPORT_TABULAR_FILE    PARSE_DOCUMENT_FILE     GENERATE_HEALTH_REPORT
 ANSWER_HELP_REQUEST    CREATE_SUPPLIER_DRAFT   CLASSIFY_GMAIL_MESSAGE
 SYNC_TO_GOOGLE         CREATE_CALENDAR_EVENT
+# Stage 4 — Google writes via GoogleToolBroker
+UPLOAD_TO_DRIVE        CREATE_GOOGLE_DOC       APPEND_TO_SHEET
 ```
 
 Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
@@ -234,7 +237,9 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 17 intents del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido`). `intent_desconocido` rutea a `agent_helper` — no hay corte en ChatOrchestrator. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
 
-**AgentTeamPlan / AgentTask** (`shared/schemas.py`): contratos de Stage 1. `AgentTeamPlan { plan_id, intent, tasks: list[AgentTask], requires_synthesis, fallback_message? }`. `AgentTask { task_id, agent, action_type, entities, depends_on, approval_group? }`. Stage 3 extenderá `build_plan()` para planes multi-task y DAGs (`depends_on` ya es lista de `task_id`s).
+**AgentTeamPlan / AgentTask** (`shared/schemas.py`): `AgentTeamPlan { plan_id, intent, tasks: list[AgentTask], requires_synthesis, fallback_message? }`. `AgentTask { task_id, agent, action_type, entities, depends_on: list[task_id], approval_group? }`. Stage 3 completado: `build_plan()` soporta planes multi-task y DAGs; ejecución con skip-downstream ante fallo; `agents/ceo/synthesis.py` genera narrativa sintetizada de múltiples resultados (`claude-sonnet-4-5`).
+
+**GoogleToolBroker** (`agents/google/tool_broker.py`): ejecuta las 3 acciones Google de escritura (`UPLOAD_TO_DRIVE`, `CREATE_GOOGLE_DOC`, `APPEND_TO_SHEET`) via MCP. `PendingActionService` lo llama al confirmar acciones externas de AgentGoogle.
 
 **Streaming SSE** (`POST /agent/chat/stream`): `{"type": "thinking"}` → `{"type": "response", "data": AgentResponse}` → `{"type": "error"}`. Finaliza con `data: [DONE]`. Frontend: `sendStream()` con placeholder `thinkingId` que se actualiza in-place.
 
@@ -381,7 +386,8 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | 12 | ✅ | Custom fields por vertical: `vertical_field_definitions`, `tenant_custom_field_definitions`, undo log, panel en `/settings` + ERD |
 | 13 | ✅ | Datos editables/borrables unificados: soft delete auditado en ventas/gastos, sistema de reparación de importaciones mal clasificadas, product lookup en AgentCash |
 | 14 | ✅ | Estados canónicos de producto (in_stock/low_stock/out_of_stock/incoming stub), UPDATE_PRODUCT vía chat, Véktor como fuente de verdad, política null/NaN con imputación por mediana, ingesta interactiva con columnas riesgosas |
-| 15 | ✅ | **Agent Teams (Stage 1+2):** AgentCash → AgentIncome + AgentExpense; AgentCalendar + AgentSync → AgentGoogle; intents en español rioplatense (17); AgentTeamPlan/AgentTask en schemas; CEO migrado a haiku-4-5; team_plan_builder.py; aliases deprecados en registry.py |
+| 15 | ✅ | **Agent Teams (Stages 1–5d completos):** AgentIncome + AgentExpense (split de AgentCash); AgentGoogle absorbe AgentCalendar + AgentSync; 17 intents rioplatense; AgentTeamPlan/AgentTask; CEO → haiku-4-5; `team_plan_builder.py`. **Stage 3:** `TeamPlanExecutor` DAG (skip downstream en fallo, context N→N+1), `synthesis.py` (sonnet-4-5), planes compuestos, `/confirm/group`. **Stage 4:** `GoogleToolBroker`, 3 ActionTypes Google (`UPLOAD_TO_DRIVE`, `CREATE_GOOGLE_DOC`, `APPEND_TO_SHEET`). **Stage 5d:** AgentCalendar + AgentSync eliminados del registry. |
+| 16 | ✅ | **Stage 5a:** AgentHealth v2 — fórmula 5 dims, `sub_collector/calculator/narrator`, `scorer.py` shim, `health_config_service`, PDF/DOCX export, `score_growth` en API/schema, margen configurable en `/settings`. **Stage 5b:** AgentHelper con `docs/vektor_user_manual.yaml` + `help_documentation_service.py`, endpoint `/agent/help/chat` (sin rate limit), `redirect_to` bidireccional, frontend `/help` + `HelpChat`. **Stage 5c:** retry en `TeamPlanExecutor` para tasks externas (1 retry + backoff), structlog `agent_name` en CEO, `test_health_engine_regression.py`, `test_team_plan_executor_retry.py`, `test_help_documentation.py`. PyYAML agregado a deps. |
 
 ### Cadena de migraciones (recientes)
 

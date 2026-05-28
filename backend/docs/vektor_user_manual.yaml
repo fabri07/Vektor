@@ -1,0 +1,189 @@
+version: "1.0"
+last_updated: "2026-05-27"
+
+modules:
+  - name: Chat
+    slug: chat
+    description: >
+      La interfaz principal de Véktor. Usás lenguaje natural para cargar ventas,
+      gastos, consultar el estado del negocio e importar archivos.
+    faq:
+      - q: ¿Cómo cargo una venta?
+        a: >
+          Escribí en el chat: "vendí X pesos", "vendí 3 gaseosas a $500 c/u",
+          o "vendí [cantidad] [producto] a $X". El sistema te pedirá confirmación
+          antes de guardar. También podés adjuntar un Excel con el historial.
+      - q: ¿Cómo registro un gasto?
+        a: >
+          Escribí: "pagué alquiler $X", "gasto de $X en [concepto]", o
+          "gasté $X en mercadería a [proveedor]". Se te pedirá confirmación.
+      - q: ¿Cómo registro una compra de mercadería?
+        a: >
+          Escribí: "compré X unidades de [producto] a $Y por unidad a [proveedor]".
+          Si fue al contado, también se registra el egreso de caja. Las compras
+          a plazo quedan como pedido pendiente (sin impacto en caja todavía).
+      - q: ¿Cómo cobro una deuda o ingreso de caja?
+        a: >
+          Escribí: "cobré $X a [cliente]" o "entró $X de [concepto]".
+          Esto registra el cobro sin asociarlo a una venta nueva.
+      - q: ¿Puedo modificar o anular una venta ya registrada?
+        a: >
+          Sí. Escribí: "actualizá la venta de [fecha/monto/producto]" para
+          modificarla, o pedile al sistema que la anule. Los cambios quedan
+          auditados con razón de cambio.
+      - q: ¿Cómo consulto el estado general del negocio?
+        a: >
+          Escribí: "¿cómo está el negocio?", "informe de salud" o
+          "¿cuál es mi score?". Recibirás un resumen con el score de salud
+          y las principales alertas.
+      - q: ¿Cómo actualizo el stock de un producto?
+        a: >
+          Escribí: "actualizá el stock de [producto] a X unidades" o
+          "cambié el precio de [producto] a $Y". Requiere confirmación.
+      - q: ¿Cuántos mensajes puedo enviar por día?
+        a: >
+          El chat tiene un límite de 50 mensajes por día. Este panel de Ayuda
+          no cuenta contra ese límite.
+
+  - name: Dashboard
+    slug: dashboard
+    description: >
+      Pantalla de resumen con el health score, KPIs y alertas accionables.
+    faq:
+      - q: ¿Qué es el health score?
+        a: >
+          Es un número del 0 al 100 que refleja la salud financiera del negocio.
+          Combina cinco dimensiones: caja (30%), inventario (20%), proveedores (10%),
+          márgenes (20%) y crecimiento de ventas (20%). Cuanto más alto, mejor.
+      - q: ¿Con qué frecuencia se actualiza el score?
+        a: >
+          El score se recalcula automáticamente cada vez que cargás o modificás
+          ventas, gastos o productos. También podés forzar un recálculo desde el chat.
+      - q: ¿Qué significan los niveles del score?
+        a: >
+          0–39: Crítico (riesgo inmediato). 40–59: Advertencia (requiere atención).
+          60–74: Regular (estable pero con oportunidades de mejora).
+          75–89: Bueno. 90–100: Excelente.
+      - q: ¿Qué mide la dimensión de crecimiento?
+        a: >
+          Compara las ventas del último mes con las del mes anterior.
+          Caída > 30%: score bajo. Caída 10-30%: advertencia. Crecimiento > 25%: excelente.
+          Si no hay historial del período anterior, se muestra como neutro (50).
+
+  - name: Análisis
+    slug: analisis
+    description: >
+      Gráficos, tendencias, proyección de caja y desglose de gastos e inventario crítico.
+    faq:
+      - q: ¿Qué muestra el forecast de caja?
+        a: >
+          Proyecta el efectivo disponible en los próximos 14-30 días en base al
+          historial reciente. Usa tres métodos según la cantidad de datos: promedio
+          simple, EWMA o patrón semanal. Se actualiza cada 6 horas.
+      - q: ¿Cómo interpreto los gráficos de ventas?
+        a: >
+          Muestran el total diario real. Los días sin ventas registradas aparecen
+          en blanco — no se interpolan. Si ves muchos días vacíos, puede ser un
+          signo de baja carga de datos.
+
+  - name: Ventas
+    slug: ventas
+    description: >
+      Historial de ventas con filtros, edición y exportación a CSV.
+    faq:
+      - q: ¿Cómo exporto mis ventas?
+        a: >
+          En la pantalla de Ventas, usá el botón "Exportar CSV" en la esquina
+          superior derecha. Podés filtrar por período antes de exportar.
+      - q: ¿Puedo importar un historial de ventas?
+        a: >
+          Sí. Adjuntá el archivo Excel o CSV en el chat y escribí "importar ventas".
+          Verás un preview de los datos antes de confirmar.
+
+  - name: Gastos
+    slug: gastos
+    description: >
+      Registro de gastos operativos, pagos a proveedores y salidas de caja.
+    faq:
+      - q: ¿Cómo categorizo un gasto?
+        a: >
+          Al registrar un gasto podés especificar: "alquiler", "sueldos",
+          "servicios", "mercadería", "mantenimiento", etc. Si no lo especificás,
+          se clasifica como "general".
+      - q: ¿Puedo importar un historial de gastos?
+        a: >
+          Sí. Igual que en ventas: adjuntá el archivo en el chat con el mensaje
+          "importar gastos".
+
+  - name: Inventario
+    slug: inventario
+    description: >
+      Catálogo de productos con stock, precios y alertas de quiebre.
+    faq:
+      - q: ¿Cómo agrego un producto nuevo?
+        a: >
+          En el panel de Inventario hacé clic en "Nuevo producto". Completá
+          nombre, SKU (opcional), precio de venta, costo unitario y stock inicial.
+          También podés pedirlo por el chat: "agregá el producto [nombre] a $X".
+      - q: ¿Cómo configuro el umbral de stock bajo?
+        a: >
+          En la ficha del producto podés ingresar el umbral mínimo. Por defecto
+          se usa el umbral estándar del vertical. Cuando el stock baja del umbral,
+          aparece el chip "Pocas unidades".
+      - q: ¿Qué es "Sin stock" vs "Pocas unidades"?
+        a: >
+          "Sin stock": stock_units = 0. "Pocas unidades": stock por debajo del
+          umbral mínimo configurado. "En stock": stock por encima del umbral.
+
+  - name: Proveedores
+    slug: proveedores
+    description: >
+      Gestión de proveedores y redacción de comunicaciones por email.
+    faq:
+      - q: ¿Cómo envío un email a un proveedor?
+        a: >
+          Escribí en el chat: "escribile a [proveedor] sobre [tema]". El agente
+          redacta el borrador y te lo muestra para aprobar antes de enviarlo
+          a tu Gmail. Requiere tener Google conectado en /apps.
+      - q: ¿Cuántos proveedores necesito para un buen score?
+        a: >
+          El score de proveedores mejora a partir de 3 proveedores activos.
+          Con 4+ proveedores llegás a la zona "buena". Con 1 solo proveedor
+          el sistema marca alta dependencia.
+
+  - name: Integraciones
+    slug: apps
+    description: >
+      Conexión con Google (Gmail, Calendar, Sheets, Drive) vía OAuth.
+    faq:
+      - q: ¿Cómo conecto Google?
+        a: >
+          Andá a /apps y hacé clic en "Conectar Google". Se abre una ventana
+          de autorización de Google. Una vez conectado, podés sincronizar datos
+          con Sheets, agendar en Calendar y leer correos de proveedores.
+      - q: ¿Por qué aparece "REQUIRES_RECONNECT"?
+        a: >
+          El token de Google expiró o los permisos fueron revocados. Andá a
+          /apps y reconectá tu cuenta. La acción pendiente podrá reintentarse
+          una vez reconectado.
+      - q: ¿Qué permisos usa Véktor en Google?
+        a: >
+          Solo los necesarios para cada función: Gmail (leer y redactar borradores),
+          Calendar (crear eventos), Sheets (leer y escribir rangos), Drive (subir
+          archivos). Nunca se eliminan correos ni eventos sin tu confirmación.
+
+  - name: Configuración
+    slug: settings
+    description: >
+      Ajustes de cuenta, margen objetivo, campos personalizados y diagrama de datos.
+    faq:
+      - q: ¿Cómo cambio mi objetivo de margen?
+        a: >
+          Andá a /settings → tab "Score de salud". Allí podés ajustar el
+          margen objetivo (meta de rentabilidad bruta) y el umbral de alerta.
+          Cambiar estos valores recalcula la dimensión "Márgenes" de tu score.
+      - q: ¿Qué son los campos personalizados?
+        a: >
+          Son campos adicionales que podés agregar a ventas, gastos y productos
+          según las necesidades de tu rubro. Por ejemplo, un kiosco puede agregar
+          "origen" a sus ventas. Se gestionan en /settings → "Campos".

@@ -35,6 +35,9 @@ from app.application.agents.shared.schemas import (
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.integrations.anthropic_client import get_anthropic_async_client
+from app.observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Re-export para backward compat (test_base_structure.py importa desde aquí)
 __all__ = ["AgentCEO", "INTENT_CATALOG", "INTENT_TO_AGENT", "INTENT_TO_ACTION_TYPE"]
@@ -132,6 +135,12 @@ class AgentCEO(BaseAgent):
         classified, ceo_call = await self.classify_intent(request.message)
         intent: str = classified.get("intent", "intent_desconocido")
         entities: dict = classified.get("entities", {})
+        logger.info(
+            "agent_ceo.intent_classified",
+            agent_name=self.agent_name,
+            intent=intent,
+            entity_keys=list(entities.keys()),
+        )
 
         # 2. Construir AgentTeamPlan (Stage 1: single-task)
         plan = self.build_team_plan(intent, entities)

@@ -1,10 +1,12 @@
 """
-Tests for Health Engine v1.
+Tests for Health Engine v2 (Stage 5a).
 
 All tests use hardcoded BusinessState objects — no DB, no Redis.
 Numeric assertions are derived from the strict linear interpolation spec:
     score = int(s_low + pos * (s_high - s_low))
     where pos = (value - band_low) / (band_high - band_low)
+
+Formula v2: cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ def _make_state(
     monthly_inventory_cost_est: Decimal = Decimal("60000"),
     monthly_fixed_expenses_est: Decimal = Decimal("17000"),
     cash_on_hand_est: Decimal = Decimal("40000"),
+    prev_monthly_sales_est: Decimal = Decimal("0"),
     supplier_count: int = 3,
     products: list[ProductSummary] | None = None,
     data_completeness_score: float = 75.0,
@@ -52,6 +55,7 @@ def _make_state(
         monthly_inventory_cost_est=monthly_inventory_cost_est,
         monthly_fixed_expenses_est=monthly_fixed_expenses_est,
         cash_on_hand_est=cash_on_hand_est,
+        prev_monthly_sales_est=prev_monthly_sales_est,
         product_count=len(products) if products else 0,
         supplier_count=supplier_count,
         products=products or [],
@@ -138,7 +142,7 @@ def test_single_supplier_penalizes_supplier_score() -> None:
 
 def test_score_total_formula_correct() -> None:
     """
-    Construct a state that produces predictable exact subscores:
+    Construct a state that produces predictable exact subscores (fórmula v2):
 
     cash_days = 6666.67 / (20000 / 30) ~= 10 → healthy boundary → score_cash = 70
 
@@ -146,13 +150,15 @@ def test_score_total_formula_correct() -> None:
         kiosco band [0.18, 0.28) → pos=(0.25-0.18)/(0.28-0.18)=0.7
         score_margin = int(70 + 0.7*19) = int(83.3) = 83
 
-    products: 4 products all healthy (score_stock = 100)
+    products: 4 products all healthy → score_stock = 100
 
     supplier_count=4 → band [4, 10) → pos=0 → score_supplier = 85
 
-    total = round(70*0.30 + 83*0.30 + 100*0.25 + 85*0.15)
-          = round(21.0 + 24.9 + 25.0 + 12.75)
-          = round(83.65) = 84
+    prev_monthly_sales_est=0 → score_growth = 50 (sin historial, neutro)
+
+    Formula v2: round(70*0.30 + 100*0.20 + 85*0.10 + 83*0.20 + 50*0.20)
+              = round(21.0 + 20.0 + 8.5 + 16.6 + 10.0)
+              = round(76.1) = 76
     """
     products = [_product(stock=50, threshold=5) for _ in range(4)]
     state = _make_state(
@@ -160,6 +166,7 @@ def test_score_total_formula_correct() -> None:
         monthly_fixed_expenses_est=Decimal("20000"),
         monthly_sales_est=Decimal("100000"),
         monthly_inventory_cost_est=Decimal("55000"),
+        prev_monthly_sales_est=Decimal("0"),   # sin historial → growth=50
         supplier_count=4,
         products=products,
     )
@@ -169,7 +176,8 @@ def test_score_total_formula_correct() -> None:
     assert result.score_margin == 83
     assert result.score_stock == 100
     assert result.score_supplier == 85
-    assert result.score_total == 84
+    assert result.score_growth == 50
+    assert result.score_total == 76
 
 
 def test_score_cap_with_low_completeness() -> None:

@@ -117,6 +117,7 @@ export interface HealthScoreV2Response {
   score_margin: number;
   score_stock: number;
   score_supplier: number;
+  score_growth: number | null;   // null = snapshot v1 (pre-Stage-5a)
   primary_risk_code: string;
   confidence_level: string;
   data_completeness_score: number;

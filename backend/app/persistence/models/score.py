@@ -42,11 +42,14 @@ class HealthScoreSnapshot(UUIDPrimaryKeyMixin, Base):
     snapshot_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    # ── Subscore columns (schema F1-01) ───────────────────────────────────────
+    # ── Subscore columns ───────────────────────────────────────────────────────
+    # v1 dims (schema F1-01): siempre presentes en snapshots post-Stage-3
     score_cash: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_margin: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_supplier: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # v2 dim (Stage 5a): NULL → snapshot v1; NOT NULL → snapshot v2 (fórmula 5-dims)
+    score_growth: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     source_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

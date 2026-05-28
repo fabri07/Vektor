@@ -13,6 +13,12 @@ class HealthScoreRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, snapshot_id: UUID) -> HealthScoreSnapshot | None:
+        result = await self._session.execute(
+            select(HealthScoreSnapshot).where(HealthScoreSnapshot.id == snapshot_id)
+        )
+        return result.scalar_one_or_none()
+
     async def get_latest(self, tenant_id: UUID) -> HealthScoreSnapshot | None:
         result = await self._session.execute(
             select(HealthScoreSnapshot)

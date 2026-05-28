@@ -52,6 +52,18 @@ export async function sendMessage(
   return res.data;
 }
 
+export async function sendHelpMessage(
+  message: string,
+  conversationId?: string,
+): Promise<AgentResponse> {
+  const res = await api.post<AgentResponse>(
+    "/agent/help/chat",
+    { message, conversation_id: conversationId },
+    { timeout: 60_000 },
+  );
+  return res.data;
+}
+
 export async function confirmAction(pendingActionId: string): Promise<ConfirmActionResponse> {
   const res = await api.post<ConfirmActionResponse>(`/agent/confirm/${pendingActionId}`);
   return res.data;

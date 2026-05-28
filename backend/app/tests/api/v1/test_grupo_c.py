@@ -173,3 +173,124 @@ def test_cash_low_template_fallback():
     snapshot = _make_snapshot(score_cash=65)
     _, description, _ = render_insight("CASH_LOW", state, snapshot)
     assert "cobertura operativa es limitada" in description
+
+
+# ── POST /health-scores/{id}/export ───────────────────────────────────────────
+
+
+async def _create_snapshot(db_session, tenant_id, score_growth=70) -> "HealthScoreSnapshot":
+    """Helper: inserta un snapshot mínimo para testear el export."""
+    from datetime import UTC, datetime as _dt  # noqa: PLC0415
+    from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
+
+    now = _dt.now(UTC)
+    snap = HealthScoreSnapshot(
+        tenant_id=tenant_id,
+        total_score=Decimal("75"),
+        level="good",
+        dimensions=[],
+        triggered_by="test",
+        snapshot_date=now,
+        created_at=now,
+        score_cash=70,
+        score_margin=80,
+        score_stock=75,
+        score_supplier=85,
+        score_growth=score_growth,
+        primary_risk_code="CASH_LOW",
+        confidence_level="HIGH",
+        data_completeness_score=Decimal("90.0"),
+    )
+    db_session.add(snap)
+    await db_session.commit()
+    await db_session.refresh(snap)
+    return snap
+
+
+@pytest.mark.asyncio
+class TestExportHealthReport:
+    async def test_export_pdf_success(
+        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+    ) -> None:
+        snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
+        resp = await client.post(
+            f"/api/v1/health-scores/{snap.id}/export",
+            json={"format": "pdf", "narrative": "Análisis de prueba."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/pdf"
+        assert resp.content.startswith(b"%PDF")
+        assert "attachment" in resp.headers["content-disposition"].lower()
+
+    async def test_export_docx_success(
+        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+    ) -> None:
+        snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
+        resp = await client.post(
+            f"/api/v1/health-scores/{snap.id}/export",
+            json={"format": "docx", "narrative": ""},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert "wordprocessingml" in resp.headers["content-type"]
+        assert resp.content[:4] == b"PK\x03\x04"
+
+    async def test_export_invalid_format_rejected(
+        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+    ) -> None:
+        snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
+        resp = await client.post(
+            f"/api/v1/health-scores/{snap.id}/export",
+            json={"format": "html", "narrative": ""},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_export_narrative_too_long_rejected(
+        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+    ) -> None:
+        snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
+        resp = await client.post(
+            f"/api/v1/health-scores/{snap.id}/export",
+            json={"format": "pdf", "narrative": "x" * 5000},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_export_other_tenant_returns_404(
+        self,
+        client: AsyncClient,
+        auth_headers: dict,
+        sample_tenant,
+        db_session,
+    ) -> None:
+        """Snapshot de otro tenant → 404 (no se filtra el snapshot ajeno)."""
+        import uuid as _uuid  # noqa: PLC0415
+
+        other_tenant_id = _uuid.uuid4()
+        # Crear tenant para satisfacer FK
+        from app.persistence.models.tenant import Tenant  # noqa: PLC0415
+
+        other = Tenant(tenant_id=other_tenant_id, legal_name="Otro SA", display_name="Otro")
+        db_session.add(other)
+        await db_session.commit()
+        snap = await _create_snapshot(db_session, other_tenant_id)
+        resp = await client.post(
+            f"/api/v1/health-scores/{snap.id}/export",
+            json={"format": "pdf", "narrative": ""},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+
+    async def test_export_nonexistent_snapshot_returns_404(
+        self, client: AsyncClient, auth_headers: dict
+    ) -> None:
+        import uuid as _uuid  # noqa: PLC0415
+
+        resp = await client.post(
+            f"/api/v1/health-scores/{_uuid.uuid4()}/export",
+            json={"format": "pdf", "narrative": ""},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404

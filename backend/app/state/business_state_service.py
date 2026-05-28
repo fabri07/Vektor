@@ -95,6 +95,8 @@ class BusinessState:
     supplier_count: int
     products: list[ProductSummary]
     main_concern: str | None
+    # Ventas reales del período anterior (días 31-60). Decimal("0") si no hay historial.
+    prev_monthly_sales_est: Decimal = Decimal("0")
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
@@ -113,8 +115,9 @@ def _make_fingerprint(
     expense_count: int,
     product_count: int,
     profile_updated_at: datetime,
+    prev_sales_amount: str = "0",
 ) -> str:
-    raw = f"{sale_count}:{expense_count}:{product_count}:{profile_updated_at.isoformat()}"
+    raw = f"{sale_count}:{expense_count}:{product_count}:{profile_updated_at.isoformat()}:{prev_sales_amount}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -128,6 +131,7 @@ def _serialize_state(state: BusinessState) -> str:
     d["monthly_inventory_cost_est"] = str(state.monthly_inventory_cost_est)
     d["monthly_fixed_expenses_est"] = str(state.monthly_fixed_expenses_est)
     d["cash_on_hand_est"] = str(state.cash_on_hand_est)
+    d["prev_monthly_sales_est"] = str(state.prev_monthly_sales_est)
     # ruleset is not JSON-serializable; store vertical_code only (re-loaded on deserialize)
     d["ruleset"] = state.ruleset.vertical
     d["products"] = [
@@ -177,6 +181,7 @@ def _deserialize_state(raw: str) -> BusinessState:
         supplier_count=d["supplier_count"],
         products=products,
         main_concern=d.get("main_concern"),
+        prev_monthly_sales_est=Decimal(d.get("prev_monthly_sales_est", "0")),
     )
 
 
@@ -282,6 +287,19 @@ async def compute_business_state(
     first_sale_date = sale_sum_row[2]
     last_sale_date = sale_sum_row[3]
 
+    # ── 2b. Previous 30-day sales (days 31–60 ago) — para score de crecimiento ─
+    prev_window_start = (now - timedelta(days=60)).date()
+    prev_window_end = (now - timedelta(days=31)).date()
+    prev_sale_result = await session.execute(
+        select(func.sum(SaleEntry.amount)).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+            SaleEntry.transaction_date >= prev_window_start,
+            SaleEntry.transaction_date <= prev_window_end,
+        )
+    )
+    prev_real_sales: Decimal = Decimal(str(prev_sale_result.scalar_one() or 0))
+
     # ── 3. Aggregate expenses (last 30 days) ─────────────────────────────────
     # mercaderia cost = expenses categorized as 'mercaderia'
     inv_sum_result = await session.execute(
@@ -363,6 +381,7 @@ async def compute_business_state(
         expense_count=expense_count,
         product_count=real_product_count,
         profile_updated_at=profile.updated_at,
+        prev_sales_amount=str(prev_real_sales),
     )
     cached_hash: str | None = await redis.get(_hash_key(tenant_id))
     if cached_hash == fingerprint:
@@ -495,6 +514,7 @@ async def compute_business_state(
         supplier_count=supplier_count,
         products=product_summaries,
         main_concern=main_concern,
+        prev_monthly_sales_est=prev_real_sales,
     )
 
     # ── 10. Update Redis cache ───────────────────────────────────────────────

@@ -19,6 +19,7 @@ export interface HealthScoreLatest {
   score_margin: number;
   score_stock: number;
   score_supplier: number;
+  score_growth: number | null;   // null = snapshot v1 (pre-Stage-5a)
   primary_risk_code: string;
   confidence_level: string;
   data_completeness_score: number;
@@ -47,6 +48,32 @@ export const healthScoreService = {
         return null;
       }
       return res.data as HealthScoreLatest;
+    } catch {
+      return null;
+    }
+  },
+
+  async getHistoryV2(): Promise<HealthScoreLatest[]> {
+    try {
+      const res = await api.get<HealthScoreLatest[]>("/health-scores/history/v2");
+      return res.data;
+    } catch {
+      return [];
+    }
+  },
+
+  async exportReport(
+    snapshotId: string,
+    format: "pdf" | "docx",
+    narrative = "",
+  ): Promise<Blob | null> {
+    try {
+      const res = await api.post(
+        `/health-scores/${snapshotId}/export`,
+        { format, narrative },
+        { responseType: "blob" },
+      );
+      return res.data as Blob;
     } catch {
       return null;
     }

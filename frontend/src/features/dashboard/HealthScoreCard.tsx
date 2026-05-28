@@ -40,6 +40,9 @@ function describeRisk(riskCode: string, fallback?: string | null): string {
   if (key.includes("supplier") || key.includes("proveedor")) {
     return "La dependencia de pocos proveedores aumenta tu exposicion a faltantes, subas de precio y demoras de reposicion.";
   }
+  if (key.includes("growth") || key.includes("crecimiento")) {
+    return "Las ventas bajaron respecto al mes anterior. Analiza si es estacional, un problema de demanda o una perdida de clientes recurrentes.";
+  }
   return "Hoy hay senales mixtas entre liquidez, margen y operacion. Conviene atacar primero el factor con mayor impacto para recuperar estabilidad.";
 }
 
@@ -179,7 +182,7 @@ export function HealthScoreCard({
       <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
         <div className="rounded-[28px] border border-vektor-border bg-[radial-gradient(circle_at_top,rgba(58,134,255,0.18),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <Tooltip content="Una medida sintetica de 0 a 100 que combina caja, margen, stock y proveedores para mostrar la salud general del negocio.">
+            <Tooltip content={score.score_growth != null ? "Una medida sintética de 0 a 100 que combina caja, inventario, proveedores, márgenes y crecimiento de ventas." : "Una medida sintetica de 0 a 100 que combina caja, margen, stock y proveedores para mostrar la salud general del negocio."}>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-vektor-muted">
                 Health Score
               </p>
@@ -243,27 +246,51 @@ export function HealthScoreCard({
             </div>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-3">
-            {[
-              { label: "Caja", value: score.score_cash },
-              { label: "Margen", value: score.score_margin },
-              { label: "Stock", value: score.score_stock },
-            ].map((item) => (
-              <div
-                key={item.label}
-                className="rounded-2xl border border-vektor-border bg-vektor-night/50 p-4"
-              >
-                <Tooltip content={`${item.label}: puntaje parcial dentro del Health Score.`}>
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
+          {score.score_growth != null ? (
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+              {[
+                { label: "Caja", value: score.score_cash },
+                { label: "Stock", value: score.score_stock },
+                { label: "Prov.", value: score.score_supplier },
+                { label: "Margen", value: score.score_margin },
+                { label: "Crec.", value: score.score_growth },
+              ].map((item) => (
+                <div
+                  key={item.label}
+                  className="rounded-xl border border-vektor-border bg-vektor-night/50 px-3 py-3"
+                >
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-vektor-muted">
                     {item.label}
                   </p>
-                </Tooltip>
-                <p className="mt-2 text-2xl font-semibold text-vektor-white">
-                  {Math.round(item.value)}
-                </p>
-              </div>
-            ))}
-          </div>
+                  <p className="mt-1.5 text-xl font-semibold text-vektor-white">
+                    {Math.round(item.value)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-3">
+              {[
+                { label: "Caja", value: score.score_cash },
+                { label: "Margen", value: score.score_margin },
+                { label: "Stock", value: score.score_stock },
+              ].map((item) => (
+                <div
+                  key={item.label}
+                  className="rounded-2xl border border-vektor-border bg-vektor-night/50 p-4"
+                >
+                  <Tooltip content={`${item.label}: puntaje parcial dentro del Health Score.`}>
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
+                      {item.label}
+                    </p>
+                  </Tooltip>
+                  <p className="mt-2 text-2xl font-semibold text-vektor-white">
+                    {Math.round(item.value)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </section>

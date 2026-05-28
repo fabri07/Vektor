@@ -11,6 +11,7 @@ import {
 import { useAuthStore } from "@/stores/authStore";
 import { useToastStore } from "@/stores/toastStore";
 import { FieldDefinitionsPanel } from "@/features/settings/components/FieldDefinitionsPanel";
+import { HealthConfigPanel } from "@/features/settings/components/HealthConfigPanel";
 import { SchemaERDView } from "@/features/settings/components/SchemaERDView";
 
 const AGENT_LABELS: Record<string, string> = {
@@ -460,6 +461,7 @@ function GeneralTab() {
 
 const TABS = [
   { id: "general", label: "General" },
+  { id: "salud", label: "Score de salud" },
   { id: "campos", label: "Campos" },
   { id: "diagrama", label: "Diagrama" },
 ] as const;
@@ -489,6 +491,7 @@ export default function SettingsPage() {
       </div>
 
       {activeTab === "general" && <GeneralTab />}
+      {activeTab === "salud" && <HealthConfigPanel />}
       {activeTab === "campos" && <FieldDefinitionsPanel />}
       {activeTab === "diagrama" && <SchemaERDView />}
     </PageWrapper>

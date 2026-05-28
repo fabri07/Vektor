@@ -62,6 +62,7 @@ class HealthScoreV2Response(BaseModel):
     score_margin: int
     score_stock: int
     score_supplier: int
+    score_growth: int | None = None   # None → snapshot v1 (pre-Stage-5a)
     primary_risk_code: str
     confidence_level: str
     data_completeness_score: float

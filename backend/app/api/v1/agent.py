@@ -2,6 +2,7 @@
 
 GET  /api/v1/agent/usage     — uso de mensajes del día actual (para el contador frontend)
 POST /api/v1/agent/chat      — procesa mensaje, crea pending_action si MEDIUM/HIGH
+POST /api/v1/agent/help/chat — chat de ayuda de plataforma (sin rate limit)
 POST /api/v1/agent/confirm/{pending_id}       — confirma y ejecuta una acción pendiente
 POST /api/v1/agent/cancel/{pending_id}        — rechaza una acción pendiente
 POST /api/v1/agent/confirm/group/{group_id}  — confirma todas las PAs de un grupo (Stage 3)
@@ -1349,3 +1350,49 @@ async def retry_action(
         "failure_code": action.failure_code,
     }
     return response
+
+
+# ── Help chat (sin rate limit) ────────────────────────────────────────────────
+
+
+@router.post(
+    "/help/chat",
+    summary="Chat de ayuda de plataforma — sin rate limit",
+)
+async def help_chat(
+    body: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> AgentResponse:
+    """Chat dedicado al soporte y documentación de Véktor.
+
+    No consume mensajes del rate limit diario (50/día).
+    Rutea directamente a AgentHelper — el CEO no clasifica.
+    Si AgentHelper detecta pregunta de negocio, retorna result["redirect_to"] = "main_chat".
+    """
+    from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
+
+    agent = AgentHelper()
+    request = AgentRequest(
+        user_id=str(current_user.id),
+        business_id=str(current_user.tenant_id),
+        message=body.message,
+        conversation_id=body.conversation_id,
+    )
+    try:
+        return await agent.process(request)
+    except Exception as exc:
+        logger.error(
+            "help_chat_failed",
+            user_id=str(current_user.id),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name="agent_helper",
+            status="error",
+            risk_level="LOW",
+            confidence="LOW",
+            result={"summary": "Error temporal al procesar tu consulta. Intentá de nuevo."},
+        )

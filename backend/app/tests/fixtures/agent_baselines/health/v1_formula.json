@@ -1,0 +1,64 @@
+{
+  "_meta": {
+    "formula_version": "v1",
+    "captured_at": "2026-05-27",
+    "reason": "Baseline pre-Stage-5a. score_growth IS NULL on snapshots captured before this date.",
+    "formula": "total = cash*0.30 + margin*0.30 + stock*0.25 + supplier*0.15",
+    "note_score_margin": "In DB column score_margin stores the margin dimension score (from health_engine.py). agents/health/agent.py incorrectly labeled it as discipline_score before Stage 5a — that mapping is fixed in Stage 5a.",
+    "demo_tenant_scores": {
+      "kiosco": 74,
+      "limpieza": 51,
+      "decoracion": 62
+    }
+  },
+  "test_cases": [
+    {
+      "id": "all_healthy",
+      "description": "Todos los componentes en rango healthy",
+      "inputs": { "cash": 80, "margin": 80, "stock": 80, "supplier": 80 },
+      "expected_total": 80,
+      "expected_level": "good"
+    },
+    {
+      "id": "cash_critical_others_healthy",
+      "description": "Caja crítica, resto sano — score limitado por caja",
+      "inputs": { "cash": 10, "margin": 80, "stock": 80, "supplier": 80 },
+      "expected_total": 62,
+      "expected_level": "fair"
+    },
+    {
+      "id": "all_critical",
+      "description": "Todos los componentes en zona crítica",
+      "inputs": { "cash": 10, "margin": 10, "stock": 10, "supplier": 10 },
+      "expected_total": 10,
+      "expected_level": "critical"
+    },
+    {
+      "id": "typical_kiosco",
+      "description": "Perfil típico kiosco demo (score ~74)",
+      "inputs": { "cash": 70, "margin": 75, "stock": 75, "supplier": 80 },
+      "expected_total": 74,
+      "expected_level": "good"
+    },
+    {
+      "id": "typical_limpieza",
+      "description": "Perfil típico limpieza demo (score ~51)",
+      "inputs": { "cash": 45, "margin": 55, "stock": 50, "supplier": 55 },
+      "expected_total": 51,
+      "expected_level": "warning"
+    }
+  ],
+  "v2_migration_notes": {
+    "new_formula": "total = cash*0.30 + stock*0.20 + supplier*0.10 + margin*0.20 + growth*0.20",
+    "added_dimension": "growth (crecimiento de ventas)",
+    "score_growth_null_means": "Snapshot es v1 — renderizar con formato de 4 dimensiones",
+    "score_growth_not_null_means": "Snapshot es v2 — renderizar con formato de 5 dimensiones",
+    "weight_changes": {
+      "cash": "0.30 → 0.30 (sin cambio)",
+      "margin": "0.30 → 0.20 (-10pp)",
+      "stock": "0.25 → 0.20 (-5pp)",
+      "supplier": "0.15 → 0.10 (-5pp)",
+      "growth": "nueva dimensión (+0.20)"
+    }
+  }
+}

@@ -1,7 +1,9 @@
 """Health score endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant
@@ -189,6 +191,7 @@ async def get_latest_score(
         score_margin=snapshot.score_margin,
         score_stock=snapshot.score_stock,
         score_supplier=snapshot.score_supplier,
+        score_growth=snapshot.score_growth,      # None si es snapshot v1
         primary_risk_code=snapshot.primary_risk_code or "",
         confidence_level=snapshot.confidence_level or "",
         data_completeness_score=float(snapshot.data_completeness_score or 0),
@@ -257,6 +260,7 @@ async def get_score_history_v2(
             score_margin=s.score_margin or 0,
             score_stock=s.score_stock or 0,
             score_supplier=s.score_supplier or 0,
+            score_growth=s.score_growth,          # None si es snapshot v1
             primary_risk_code=s.primary_risk_code or "",
             confidence_level=s.confidence_level or "",
             data_completeness_score=float(s.data_completeness_score or 0),
@@ -266,3 +270,49 @@ async def get_score_history_v2(
         for s in snapshots
         if s.score_cash is not None  # only F1-01 snapshots
     ]
+
+
+class ExportRequest(BaseModel):
+    format: str = Field("pdf", pattern="^(pdf|docx)$")
+    narrative: str = Field("", max_length=4000)
+
+
+@router.post(
+    "/{snapshot_id}/export",
+    summary="Exportar informe de salud como PDF o DOCX",
+)
+async def export_health_report(
+    snapshot_id: uuid.UUID,
+    body: ExportRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Genera y descarga el informe de salud financiera en PDF o DOCX.
+
+    Body JSON:
+    - format: 'pdf' (default) o 'docx'.
+    - narrative: texto del análisis ejecutivo (max 4000 chars; opcional).
+    """
+    from app.application.services.report_export_service import generate_docx, generate_pdf  # noqa: PLC0415
+
+    repo = HealthScoreRepository(session)
+    snapshot = await repo.get_by_id(snapshot_id)
+    if snapshot is None or snapshot.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snapshot no encontrado.")
+
+    business_name = tenant.display_name or "Mi negocio"
+
+    if body.format == "pdf":
+        content = generate_pdf(snapshot, body.narrative, business_name)
+        media_type = "application/pdf"
+        filename = f"informe-salud-{snapshot.snapshot_date.strftime('%Y%m%d')}.pdf"
+    else:
+        content = generate_docx(snapshot, body.narrative, business_name)
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = f"informe-salud-{snapshot.snapshot_date.strftime('%Y%m%d')}.docx"
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

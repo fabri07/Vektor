@@ -1,3 +1,15 @@
+"""AgentHelper — soporte y documentación de Véktor.
+
+Responde preguntas sobre cómo usar la plataforma usando el manual YAML.
+Si detecta una pregunta sobre datos de negocio (ventas, gastos, etc.) →
+retorna `result["redirect_to"] = "main_chat"` para que el frontend muestre
+el banner de redirección al chat principal.
+
+Context Budget: 2.500 tokens.
+"""
+
+from __future__ import annotations
+
 import json
 from typing import Any
 
@@ -14,48 +26,47 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.application.security.prompt_defense import wrap_user_input
+from app.application.services.help_documentation_service import (
+    format_faq_context,
+    is_business_data_question,
+    search,
+)
 from app.integrations.anthropic_client import get_anthropic_async_client
+from app.observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 FALLBACK_RESPONSE = (
     "Todavía no tengo información específica sobre eso en mi base de conocimiento. "
     "Podés escribirnos a soporte@vek7or.com o revisar el manual en el panel de Ayuda."
 )
 
-FAQ_CONTENT = """
-PREGUNTAS FRECUENTES DE VÉKTOR:
+_BUSINESS_REDIRECT_MSG = (
+    "Esa pregunta es sobre las operaciones de tu negocio. "
+    "El chat principal es el lugar indicado: podés decir "
+    "'vendí X pesos', 'pagué X de alquiler', '¿cómo está el negocio?', etc."
+)
 
-P: ¿Cómo cargo una venta?
-R: Escribí en el chat "vendí X pesos" o "vendí [cantidad] [producto] a $X". Te pedirá confirmación antes de guardar.
+_SYSTEM_TEMPLATE = """\
+Sos el asistente de soporte de Véktor. Respondé SOLO preguntas sobre cómo
+usar la plataforma Véktor. Si la pregunta es sobre operaciones del negocio
+(cargar ventas, gastos, consultar stock, etc.), indicalo.
 
-P: ¿Cómo registro un gasto?
-R: Escribí "pagué alquiler X pesos" o "gasto de X pesos en [concepto]".
+{doc_context}
 
-P: ¿Qué es el score de salud?
-R: Es un número del 0 al 100. Se calcula en base a caja (35%), inventario (30%), proveedores (15%) y disciplina de carga (20%).
+REGLAS ESTRICTAS:
+1. Respondé SOLO usando la información de la documentación provista.
+2. Si no encontrás la respuesta en la documentación → confidence="LOW", answer=null.
+3. NO inventés funcionalidades no documentadas.
+4. Si la pregunta es sobre operaciones del negocio → is_platform_question=false.
 
-P: ¿Cómo agrego un proveedor?
-R: En el panel de Proveedores, hacé clic en "Agregar proveedor".
-
-P: ¿Cómo importo un Excel?
-R: Adjuntá el archivo en el chat con el mensaje "importar ventas". Verás un preview antes de guardar.
-
-P: ¿Qué pasa con los correos de proveedores?
-R: Véktor puede leer correos a los que les pongas la etiqueta "Véktor" en Gmail.
-
-P: ¿Puedo borrar una venta?
-R: Por ahora no desde el chat, pero podés cargar un ajuste negativo.
-
-P: ¿Cómo genero un informe?
-R: Escribí "informe de la semana" o "estado del negocio".
-
-MÓDULOS:
-- Dashboard: resumen del score y métricas
-- Chat: interfaz principal para cargar y consultar
-- Ventas: historial de ventas
-- Caja: movimientos de dinero
-- Inventario: catálogo y stock
-- Proveedores: contactos y pedidos
-- Informes: reportes por período
+Retorná SOLO un JSON válido:
+{{
+  "answer": "<respuesta concreta o null>",
+  "confidence": "<HIGH|MEDIUM|LOW>",
+  "related_module": "<slug del módulo o null>",
+  "is_platform_question": <true|false>
+}}
 """
 
 
@@ -76,32 +87,11 @@ class AgentHelper(BaseAgent):
         self._client = value
 
     async def find_answer(self, question: str) -> tuple[dict, LLMCall]:
-        """
-        Busca respuesta en el FAQ y la documentación.
-        Si confidence < MEDIUM: retornar fallback, NUNCA inventar.
-        """
-        system = f"""
-Sos el asistente de soporte de Véktor. Respondé SOLO preguntas sobre cómo
-usar la plataforma Véktor. Si la pregunta no es sobre la plataforma,
-indicalo claramente.
+        """Busca respuesta usando el manual YAML + LLM."""
+        matches = search(question, max_results=3)
+        doc_context = format_faq_context(matches) if matches else "Sin documentación relevante encontrada."
 
-BASE DE CONOCIMIENTO:
-{FAQ_CONTENT}
-
-REGLAS ESTRICTAS:
-1. Respondé SOLO usando la información de la base de conocimiento.
-2. Si no encontrás la respuesta → confidence="LOW", answer=null.
-3. NO inventés funcionalidades que no estén documentadas.
-4. Si es sobre operaciones del negocio (ventas, stock, etc.) → is_platform_question=false.
-
-Retorná SOLO un JSON:
-{{
-  "answer": "<respuesta o null si no encontrás>",
-  "confidence": "<HIGH|MEDIUM|LOW>",
-  "related_module": "<nombre del módulo o null>",
-  "is_platform_question": <true|false>
-}}
-"""
+        system = _SYSTEM_TEMPLATE.format(doc_context=doc_context)
         response = await self.client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=400,
@@ -109,7 +99,7 @@ Retorná SOLO un JSON:
             messages=[{"role": "user", "content": wrap_user_input(question)}],
         )
         llm_call = LLMCall(
-            source="agent_helper",
+            source=self.agent_name,
             model="claude-haiku-4-5",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
@@ -118,13 +108,42 @@ Retorná SOLO un JSON:
         try:
             return json.loads(raw), llm_call
         except (json.JSONDecodeError, ValueError):
-            return {"answer": None, "confidence": "LOW", "related_module": None, "is_platform_question": False}, llm_call
+            return {
+                "answer": None,
+                "confidence": "LOW",
+                "related_module": None,
+                "is_platform_question": False,
+            }, llm_call
 
     async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
+        # Heurística rápida antes de llamar al LLM: detectar pregunta de negocio
+        if is_business_data_question(request.message):
+            logger.info(
+                "agent_helper.business_redirect",
+                message_preview=request.message[:60],
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                result={
+                    "summary": _BUSINESS_REDIRECT_MSG,
+                    "redirect_to": "main_chat",
+                },
+            )
+
         result, helper_call = await self.find_answer(request.message)
         usage = UsageSummary(calls=[helper_call])
 
-        # Si no es pregunta sobre la plataforma
+        logger.info(
+            "agent_helper.answered",
+            confidence=result.get("confidence"),
+            is_platform_question=result.get("is_platform_question"),
+            module=result.get("related_module"),
+        )
+
+        # El LLM también puede detectar pregunta de negocio
         if not result.get("is_platform_question"):
             return AgentResponse(
                 request_id=request.request_id,
@@ -132,16 +151,13 @@ Retorná SOLO un JSON:
                 status="success",
                 risk_level=RiskLevel.LOW,
                 result={
-                    "summary": (
-                        "Esta pregunta es sobre las operaciones de tu negocio. "
-                        "Podés cargar datos directamente en el chat: "
-                        "'vendí X pesos', 'pagué X de alquiler', etc."
-                    )
+                    "summary": _BUSINESS_REDIRECT_MSG,
+                    "redirect_to": "main_chat",
                 },
                 usage=usage,
             )
 
-        # Si confidence es LOW: usar fallback, NUNCA inventar
+        # confidence LOW o sin respuesta → fallback
         if result.get("confidence") == "LOW" or not result.get("answer"):
             return AgentResponse(
                 request_id=request.request_id,
@@ -153,10 +169,9 @@ Retorná SOLO un JSON:
                 usage=usage,
             )
 
-        # Respuesta encontrada
         answer = result["answer"]
         if result.get("related_module"):
-            answer += f"\n\n📍 Módulo relacionado: {result['related_module']}"
+            answer += f"\n\nMódulo: {result['related_module']}"
 
         return AgentResponse(
             request_id=request.request_id,
