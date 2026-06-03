@@ -16,7 +16,7 @@ import uuid
 from calendar import monthrange
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.schemas import (
@@ -37,8 +37,8 @@ class AgentExpense(BaseAgent):
 
     def __init__(
         self,
-        db: Optional["AsyncSession"] = None,
-        redis: Optional["Redis"] = None,
+        db: AsyncSession | None = None,
+        redis: Redis | None = None,
         gateway: Any | None = None,
     ) -> None:
         self._db = db
@@ -74,8 +74,16 @@ class AgentExpense(BaseAgent):
         category_rules = (
             ("RENT", ("alquiler", "renta"), "Alquiler"),
             ("UTILITIES", ("luz", "gas", "internet", "agua", "servicio"), "Servicios"),
-            ("PAYROLL", ("sueldo", "sueldos", "empleado", "personal", "nomina", "nómina"), "Sueldos"),
-            ("INVENTORY", ("mercadería", "mercaderia", "stock", "proveedor", "compra"), "Mercadería / stock"),
+            (
+                "PAYROLL",
+                ("sueldo", "sueldos", "empleado", "personal", "nomina", "nómina"),
+                "Sueldos",
+            ),
+            (
+                "INVENTORY",
+                ("mercadería", "mercaderia", "stock", "proveedor", "compra"),
+                "Mercadería / stock",
+            ),
             ("MARKETING", ("marketing", "publicidad", "anuncio", "ads"), "Marketing"),
         )
         for canonical, keywords, label in category_rules:
@@ -118,17 +126,31 @@ class AgentExpense(BaseAgent):
 
     def _month_from_spanish(self, value: str) -> int:
         month_map = {
-            "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
-            "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
-            "septiembre": 9, "setiembre": 9, "octubre": 10,
-            "noviembre": 11, "diciembre": 12,
+            "enero": 1,
+            "febrero": 2,
+            "marzo": 3,
+            "abril": 4,
+            "mayo": 5,
+            "junio": 6,
+            "julio": 7,
+            "agosto": 8,
+            "septiembre": 9,
+            "setiembre": 9,
+            "octubre": 10,
+            "noviembre": 11,
+            "diciembre": 12,
         }
         return month_map[value]
 
     def _extract_expense_entities(self, message: str) -> dict[str, Any]:
         amount = self._extract_amount(message)
         if amount is None:
-            return {"error": "No pude identificar el monto del gasto. Probá con algo como 'Pagué alquiler $450.000'."}
+            return {
+                "error": (
+                    "No pude identificar el monto del gasto. Probá con algo como 'Pagué alquiler "
+                    "$450.000'."
+                )
+            }
         category, label = self._extract_expense_category(message)
         return {
             "amount": str(amount),
@@ -136,7 +158,9 @@ class AgentExpense(BaseAgent):
             "description": label,
             "transaction_date": self._extract_transaction_date(message),
             "payment_method": self._extract_payment_method(message),
-            "is_recurring": any(token in message.lower() for token in ("mensual", "cada mes", "alquiler")),
+            "is_recurring": any(
+                token in message.lower() for token in ("mensual", "cada mes", "alquiler")
+            ),
             "notes": message.strip(),
             "confidence": "HIGH",
         }
@@ -149,7 +173,9 @@ class AgentExpense(BaseAgent):
 
         from sqlalchemy import select  # noqa: PLC0415
 
-        from app.application.services.data_intent_extractor import DataIntentExtractor  # noqa: PLC0415
+        from app.application.services.data_intent_extractor import (
+            DataIntentExtractor,  # noqa: PLC0415
+        )
         from app.persistence.models.file import UploadedFile  # noqa: PLC0415
 
         for attachment in request.attachments:
@@ -182,7 +208,9 @@ class AgentExpense(BaseAgent):
                 requires_approval=True,
                 confidence=Confidence(pre_check.confidence),
                 result={
-                    "summary": f"Importar {rows} registros desde {uploaded_file.original_filename}.",
+                    "summary": (
+                        f"Importar {rows} registros desde " f"{uploaded_file.original_filename}."
+                    ),
                     "action_type": ActionType.IMPORT_TABULAR_FILE,
                     "structured_data": {
                         "source": "uploaded_file",
@@ -198,16 +226,21 @@ class AgentExpense(BaseAgent):
             )
         return None
 
-    async def process(  # type: ignore[override]
+    async def process(
         self,
         request: AgentRequest,
         task: Any | None = None,
     ) -> AgentResponse:
+        action_type = getattr(task, "action_type", None)
+        analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+
+        # ── Sprint 17: análisis de gastos read-only ──────────────────────────
+        if action_type == ActionType.ANALYZE_EXPENSE_DATA:
+            return await self._handle_expense_analysis(request, analysis_intent)
+
         file_import = await self._maybe_build_uploaded_file_import(request)
         if file_import is not None:
             return file_import
-
-        action_type = getattr(task, "action_type", None)
 
         # Branch: pago de deuda / salida de caja (REGISTER_CASH_OUTFLOW)
         if action_type == ActionType.REGISTER_CASH_OUTFLOW:
@@ -258,6 +291,257 @@ class AgentExpense(BaseAgent):
             },
         )
 
+    # ── Sprint 17: handlers analíticos read-only (sin LLM, determinísticos) ────
+
+    def _analysis_response(
+        self,
+        request: AgentRequest,
+        summary: str,
+        message: str,
+        structured: dict[str, Any] | None = None,
+        confidence: Confidence = Confidence.HIGH,
+    ) -> AgentResponse:
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=confidence,
+            message=message,
+            result={"summary": summary, "structured_data": structured or {}, "analysis": True},
+        )
+
+    async def _handle_expense_analysis(
+        self, request: AgentRequest, intent: str | None
+    ) -> AgentResponse:
+        if self._db is None:
+            return self._analysis_response(
+                request,
+                "gastos_sin_datos",
+                "Necesito acceso a tus gastos para analizarlos.",
+            )
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            return self._analysis_response(
+                request,
+                "gastos_sin_datos",
+                "No pude identificar tu negocio.",
+            )
+
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            ExpenseRepository,
+        )
+
+        repo = ExpenseRepository(self._db)
+
+        # ── detectar_gastos_anomalos ──────────────────────────────────────────
+        if intent == "detectar_gastos_anomalos":
+            from app.application.agents.shared import analytics  # noqa: PLC0415
+
+            stats = await repo.get_expense_stats_by_category(tenant_id, days=90)
+            if not stats:
+                return self._analysis_response(
+                    request,
+                    "gastos_sin_historial",
+                    "Todavía no tengo suficientes gastos cargados (últimos 90 días) para "
+                    "detectar valores fuera de lo normal.",
+                )
+            anomalies = analytics.detect_expense_anomalies(stats, sigma=2.0)
+            if not anomalies:
+                return self._analysis_response(
+                    request,
+                    "gastos_anomalos_ninguno",
+                    "No detecté gastos fuera de lo normal en los últimos 90 días. "
+                    "Tus gastos por categoría se mantienen consistentes.",
+                )
+            lines = ["Detecté gastos inusualmente altos (más de 2 desvíos sobre el promedio):"]
+            for a in anomalies[:6]:
+                top = a["outliers"][0]
+                lines.append(
+                    f"- {a['category']}: ${top:,.0f} (promedio ${a['mean']:,.0f}, "
+                    f"{a['n_outliers']} caso/s)"
+                )
+            return self._analysis_response(
+                request,
+                "detectar_gastos_anomalos",
+                "\n".join(lines),
+                {"anomalies": anomalies},
+            )
+
+        # ── detectar_gastos_recurrentes ───────────────────────────────────────
+        if intent == "detectar_gastos_recurrentes":
+            from datetime import timedelta  # noqa: PLC0415
+
+            from sqlalchemy import select  # noqa: PLC0415
+
+            from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+            cutoff = date.today() - timedelta(days=90)
+            rows = await self._db.execute(
+                select(ExpenseEntry).where(
+                    ExpenseEntry.tenant_id == tenant_id,
+                    ExpenseEntry.voided_at.is_(None),
+                    ExpenseEntry.is_recurring.is_(True),
+                    ExpenseEntry.transaction_date >= cutoff,
+                )
+            )
+            recurring = list(rows.scalars().all())
+            if not recurring:
+                return self._analysis_response(
+                    request,
+                    "recurrentes_ninguno",
+                    "No tenés gastos marcados como recurrentes en los últimos 90 días. "
+                    "Los gastos fijos como alquiler o sueldos conviene marcarlos como "
+                    "recurrentes para seguirlos mejor.",
+                )
+            by_supplier: dict[str, dict[str, Any]] = {}
+            for e in recurring:
+                key = (e.supplier_name or e.description or e.category or "Gasto fijo").strip()
+                slot = by_supplier.setdefault(key, {"total": Decimal(0), "count": 0})
+                slot["total"] += e.amount
+                slot["count"] += 1
+            ordered = sorted(by_supplier.items(), key=lambda kv: kv[1]["total"], reverse=True)
+            total = float(sum(s["total"] for _, s in ordered))
+            lines = [
+                f"Tenés {len(recurring)} gastos recurrentes (90 días), ${total:,.0f} en total:"
+            ]
+            for name, slot in ordered[:8]:
+                lines.append(f"- {name}: ${float(slot['total']):,.0f} ({slot['count']} veces)")
+            return self._analysis_response(
+                request,
+                "detectar_gastos_recurrentes",
+                "\n".join(lines),
+                {
+                    "recurring": [
+                        {"name": n, "total": float(s["total"]), "count": s["count"]}
+                        for n, s in ordered
+                    ]
+                },
+            )
+
+        # ── analizar_costos_fijos_variables ───────────────────────────────────
+        if intent == "analizar_costos_fijos_variables":
+            from datetime import timedelta  # noqa: PLC0415
+
+            from sqlalchemy import func, select  # noqa: PLC0415
+
+            from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+            cutoff = date.today() - timedelta(days=90)
+            rows = await self._db.execute(
+                select(
+                    ExpenseEntry.is_recurring,
+                    func.sum(ExpenseEntry.amount).label("total"),
+                )
+                .where(
+                    ExpenseEntry.tenant_id == tenant_id,
+                    ExpenseEntry.voided_at.is_(None),
+                    ExpenseEntry.transaction_date >= cutoff,
+                )
+                .group_by(ExpenseEntry.is_recurring)
+            )
+            fijos = 0.0
+            variables = 0.0
+            for r in rows.all():
+                if r.is_recurring:
+                    fijos = float(r.total or 0)
+                else:
+                    variables = float(r.total or 0)
+            total = fijos + variables
+            if total <= 0:
+                return self._analysis_response(
+                    request,
+                    "costos_sin_datos",
+                    "No tengo gastos cargados en los últimos 90 días para separar fijos de "
+                    "variables.",
+                )
+            pct_fijos = round(fijos / total * 100, 1)
+            lines = [
+                "Estructura de costos (últimos 90 días, usando 'recurrente' como proxy de fijo):",
+                f"- Fijos: ${fijos:,.0f} ({pct_fijos:.0f}%)",
+                f"- Variables: ${variables:,.0f} ({100 - pct_fijos:.0f}%)",
+            ]
+            return self._analysis_response(
+                request,
+                "analizar_costos_fijos_variables",
+                "\n".join(lines),
+                {"fijos": fijos, "variables": variables, "pct_fijos": pct_fijos},
+            )
+
+        # ── calcular_punto_equilibrio ─────────────────────────────────────────
+        if intent == "calcular_punto_equilibrio":
+            from datetime import timedelta  # noqa: PLC0415
+
+            from sqlalchemy import func, select  # noqa: PLC0415
+
+            from app.application.agents.shared import analytics  # noqa: PLC0415
+            from app.application.services.deterministic_finance import (  # noqa: PLC0415
+                calcular_margen_bruto,
+            )
+            from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+            cutoff = date.today() - timedelta(days=30)
+            fixed_q = await self._db.execute(
+                select(func.coalesce(func.sum(ExpenseEntry.amount), 0)).where(
+                    ExpenseEntry.tenant_id == tenant_id,
+                    ExpenseEntry.voided_at.is_(None),
+                    ExpenseEntry.is_recurring.is_(True),
+                    ExpenseEntry.transaction_date >= cutoff,
+                )
+            )
+            fixed_costs = float(fixed_q.scalar_one() or 0)
+            margen = await calcular_margen_bruto(tenant_id, self._db)
+            if margen.get("sin_datos") or not margen.get("margen_pct"):
+                return self._analysis_response(
+                    request,
+                    "equilibrio_sin_margen",
+                    "Para calcular tu punto de equilibrio necesito tu margen bruto, y todavía "
+                    "no tengo ventas suficientes para calcularlo. Cargá ventas y gastos del mes.",
+                )
+            margen_pct = float(margen["margen_pct"])
+            be = analytics.breakeven_point(fixed_costs, margen_pct)
+            if be is None:
+                return self._analysis_response(
+                    request,
+                    "equilibrio_sin_margen",
+                    "No puedo calcular el punto de equilibrio sin un margen bruto positivo.",
+                )
+            lines = [
+                f"Tu punto de equilibrio mensual es ${be:,.0f} en ventas.",
+                f"Se calcula con tus costos fijos (${fixed_costs:,.0f}/mes) y tu margen "
+                f"bruto ({margen_pct:.0f}%). Por encima de ese nivel, empezás a ganar.",
+            ]
+            return self._analysis_response(
+                request,
+                "calcular_punto_equilibrio",
+                "\n".join(lines),
+                {"breakeven": be, "fixed_costs": fixed_costs, "margin_pct": margen_pct},
+            )
+
+        # ── clasificar_gastos (default) ───────────────────────────────────────
+        from datetime import timedelta  # noqa: PLC0415
+
+        cutoff = date.today() - timedelta(days=90)
+        by_cat = await repo.expenses_by_category(tenant_id, from_date=cutoff)
+        if not by_cat:
+            return self._analysis_response(
+                request,
+                "gastos_sin_categorias",
+                "No tengo gastos cargados en los últimos 90 días para clasificar.",
+            )
+        total = sum(c["total"] for c in by_cat)
+        lines = [f"Tus gastos de los últimos 90 días (${total:,.0f}) por categoría:"]
+        for c in by_cat[:8]:
+            lines.append(f"- {c['category']}: ${c['total']:,.0f} ({c['pct']:.0f}%)")
+        return self._analysis_response(
+            request,
+            "clasificar_gastos",
+            "\n".join(lines),
+            {"by_category": by_cat},
+        )
+
     async def _handle_cash_outflow(self, request: AgentRequest, task: Any | None) -> AgentResponse:
         """Maneja pagos de deudas / salidas de caja (REGISTER_CASH_OUTFLOW).
 
@@ -286,7 +570,8 @@ class AgentExpense(BaseAgent):
             "amount": str(amount),
             "transaction_date": pre_entities.get("transaction_date", date.today().isoformat()),
             "description": pre_entities.get("description", "Pago / salida de caja"),
-            "payment_method": pre_entities.get("payment_method") or self._extract_payment_method(request.message),
+            "payment_method": pre_entities.get("payment_method")
+            or self._extract_payment_method(request.message),
             "notes": request.message.strip(),
         }
         return AgentResponse(

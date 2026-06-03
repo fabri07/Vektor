@@ -2,6 +2,7 @@
 
 import json
 import unittest.mock
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,7 +18,7 @@ def _make_request(message: str = "test") -> AgentRequest:
     )
 
 
-def _mock_llm_response(intent: str, entities: dict | None = None) -> MagicMock:
+def _mock_llm_response(intent: str, entities: dict[str, Any] | None = None) -> MagicMock:
     """Construye un mock del response del cliente Anthropic."""
     content_block = MagicMock()
     content_block.text = json.dumps({"intent": intent, "entities": entities or {}})
@@ -58,9 +59,7 @@ async def test_ceo_routes_to_correct_agent():
         "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
     ) as mock_cls:
         mock_client = MagicMock()
-        mock_client.messages.create = AsyncMock(
-            return_value=_mock_llm_response("ingresar_venta")
-        )
+        mock_client.messages.create = AsyncMock(return_value=_mock_llm_response("ingresar_venta"))
         mock_cls.return_value = mock_client
 
         from app.application.agents.ceo.agent import AgentCEO
@@ -127,9 +126,7 @@ async def test_ceo_expense_routes_correctly():
         "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
     ) as mock_cls:
         mock_client = MagicMock()
-        mock_client.messages.create = AsyncMock(
-            return_value=_mock_llm_response("ingresar_gasto")
-        )
+        mock_client.messages.create = AsyncMock(return_value=_mock_llm_response("ingresar_gasto"))
         mock_cls.return_value = mock_client
 
         from app.application.agents.ceo.agent import AgentCEO
@@ -155,7 +152,7 @@ def test_ceo_forbidden_imports():
 @pytest.mark.asyncio
 async def test_prompt_injection_wrapped():
     """El mensaje del usuario debe estar envuelto en <user_message>...</user_message>."""
-    captured_call: dict = {}
+    captured_call: dict[str, Any] = {}
 
     async def capture_create(**kwargs):
         captured_call.update(kwargs)
@@ -187,9 +184,9 @@ async def test_prompt_injection_wrapped():
 
 
 @pytest.mark.asyncio
-async def test_ceo_uses_haiku_model():
-    """CEO usa claude-haiku-4-5 para clasificar (no Sonnet)."""
-    captured_call: dict = {}
+async def test_ceo_uses_sonnet_model():
+    """CEO usa claude-sonnet-4-6 para clasificar (upgrade de Haiku a Sonnet)."""
+    captured_call: dict[str, Any] = {}
 
     async def capture_create(**kwargs):
         captured_call.update(kwargs)
@@ -213,4 +210,4 @@ async def test_ceo_uses_haiku_model():
         agent.client = mock_client
         await agent.process(_make_request("cómo está mi negocio"))
 
-    assert captured_call.get("model") == "claude-haiku-4-5"
+    assert captured_call.get("model") == "claude-sonnet-4-6"

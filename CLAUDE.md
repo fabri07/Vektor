@@ -122,7 +122,7 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: auth, cash, conversation, google_oauth, health_score, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import, data_repair |
+| Application | `app/application/services/` | Orquestación: auth, cash, conversation, google_oauth, health_score, health_config, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import, data_repair, report_export, team_plan_executor, help_documentation |
 | Commands/Queries | `app/application/commands/` `app/application/queries/` | CQRS writes/reads |
 | DTOs | `app/application/dto/` | Objetos de transferencia entre capas |
 | DB middleware | `app/application/db/tenant_context.py` | Inyecta tenant_id en SQLAlchemy |
@@ -136,7 +136,14 @@ HTTP Request
 
 ### API Routers (`app/api/v1/`)
 
-Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`, `fields`, `automations`.
+Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`, `fields`, `automations`, `settings`.
+
+**Router `settings`** (`app/api/v1/settings.py`):
+- `GET /settings/health-config` — configuración de margen actual del tenant
+- `PATCH /settings/health-config` — actualizar objetivos (OWNER/ADMIN); valida `target_margin_pct >= warning_margin_pct`, rango [0.0, 80.0]
+- `DELETE /settings/health-config` — resetear a valores del vertical
+
+**`POST /health-scores/{snapshot_id}/export`** — genera informe PDF o DOCX vía `report_export_service.py`. Body: `{format: "pdf"|"docx", narrative: str}`.
 
 ### Autenticación y multi-tenancy
 
@@ -191,7 +198,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 > Verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir estado del agente.
 > Stage 5d completado: `agent_calendar` y `agent_sync` eliminados del registry. Solo queda el alias `agent_cash` → `agent_income` (backward-compat para `PendingActions` en vuelo con target viejo).
 
-**Modelos LLM:** AgentCEO: `claude-haiku-4-5`. ChatOrchestrator: `claude-haiku-4-5-20251001`. Income/Expense/Stock/Health/Helper: `claude-haiku-4-5`. Verificar cada agente — no todos usan el mismo sufijo.
+**Modelos LLM:** AgentCEO: `claude-haiku-4-5`. ChatOrchestrator: `claude-haiku-4-5-20251001`. Income/Expense/Stock/Supplier/Helper/Google: `claude-haiku-4-5`. AgentHealth sub_narrator: `claude-sonnet-4-6` (narrativa ejecutiva). Verificar cada agente — no todos usan el mismo sufijo.
 
 **Cliente Anthropic:** todos los agentes via `get_anthropic_async_client()`. No instanciar `anthropic.AsyncAnthropic` directo.
 
@@ -203,7 +210,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca float
 - `LLMCall`: `{ source, model, input_tokens, output_tokens }`. `UsageSummary`: `{ calls: list[LLMCall] }` + `total_input/output/total`.
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado de 20 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado de 27 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
@@ -214,6 +221,10 @@ ANSWER_HELP_REQUEST    CREATE_SUPPLIER_DRAFT   CLASSIFY_GMAIL_MESSAGE
 SYNC_TO_GOOGLE         CREATE_CALENDAR_EVENT
 # Stage 4 — Google writes via GoogleToolBroker
 UPLOAD_TO_DRIVE        CREATE_GOOGLE_DOC       APPEND_TO_SHEET
+# Sprint 17 — analíticos read-only (LOW risk, sin aprobación, los LLM no calculan)
+ANALYZE_FILE           ANALYZE_PRICES          ANALYZE_STOCK_DATA
+ANALYZE_SALES_DATA     ANALYZE_EXPENSE_DATA    ANALYZE_SUPPLIER_DATA
+SIMULATE_SCENARIO
 ```
 
 Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
@@ -235,7 +246,11 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **HeuristicEngine** (`shared/heuristic_engine.py`): `get(business_type)` síncrono; `get_async(...)` aplica `BusinessHeuristicOverride` de la DB. `to_prompt_fragment()` genera valores numéricos para system prompts — nunca texto narrativo. Fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 17 intents del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido`). `intent_desconocido` rutea a `agent_helper` — no hay corte en ChatOrchestrator. Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
+**AgentCEO — flujo:** `classify_intent()` → LLM (max_tokens=300) → 60 intents del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido`). Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
+
+**Rescate de intent (Sprint 17):** cuando el CEO devuelve `intent_desconocido`, ChatOrchestrator NO corta inmediatamente. Aplica dos capas determinísticas (sin LLM) en `_rescue_unknown_intent()`: (1) `DataIntentExtractor` sobre los adjuntos parseados → si hay datos importables, mapea a `analizar_lista_precios`/`analizar_archivo_cargado`; (2) `intent_rescue.rescue_intent()` (en `shared/intent_rescue.py`) — scoring semántico de verbo ambiguo + objeto de negocio + tipo de adjunto, con normalización de voseo/tildes y fuzzy matching (`rapidfuzz`, umbral 85) para typos. Solo si ambas fallan corta: `out_of_scope` (off-topic claro → mensaje de scope) o `pedir_aclaracion_negocio`/`pedir_aclaracion_sobre_archivo` (suena a negocio pero ambiguo → pide detalle). Constantes `_NO_AGENT_INTENTS`/`_NO_AGENT_MESSAGES` en `chat_orchestrator.py`. Para los 7 ActionTypes analíticos (+`ANSWER_HELP_REQUEST`), `build_plan()` inyecta el intent específico en `entities["_intent"]` para que el handler distinga sub-análisis dentro de un mismo ActionType.
+
+**Handlers analíticos (Sprint 17):** read-only, LOW risk, sin aprobación. Math determinística centralizada en `shared/analytics.py` (funciones puras: márgenes, días de stock, sobrestock, estrella/problemático, anomalías de gasto, punto de equilibrio). Los agentes cargan datos vía repos y arman un `message` determinístico — los LLM NUNCA calculan. Familias: AgentStock (`ANALYZE_PRICES`, `ANALYZE_STOCK_DATA`), AgentIncome (`ANALYZE_FILE`, `ANALYZE_SALES_DATA` + clientes stub), AgentExpense (`ANALYZE_EXPENSE_DATA`), AgentSupplier (`ANALYZE_SUPPLIER_DATA`), AgentHealth (`SIMULATE_SCENARIO`: proyección de caja vía ForecastService + what-if vía DeterministicFinance). Queries nuevas: `product_repository.get_products_with_margin`, `sale_repository.get_daily_velocity`/`get_sales_by_product`, `expense_repository.get_expense_stats_by_category`.
 
 **AgentTeamPlan / AgentTask** (`shared/schemas.py`): `AgentTeamPlan { plan_id, intent, tasks: list[AgentTask], requires_synthesis, fallback_message? }`. `AgentTask { task_id, agent, action_type, entities, depends_on: list[task_id], approval_group? }`. Stage 3 completado: `build_plan()` soporta planes multi-task y DAGs; ejecución con skip-downstream ante fallo; `agents/ceo/synthesis.py` genera narrativa sintetizada de múltiples resultados (`claude-sonnet-4-5`).
 
@@ -249,7 +264,15 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **EventBus** (`shared/event_bus.py`): wrapper sobre Celery `send_task`. Sin suscripción CEO en código — coordinación via tasks/event handlers.
 
-**Extras:** `agents/health/scorer.py` — scoring AgentHealth. `agents/supplier/preflight.py` — validaciones pre-envío Gmail.
+**AgentHealth v2 — sub-pipeline interno** (`agents/health/`):
+- `sub_collector.py` — recolecta `BusinessState` vía BSL (misma fuente que Celery)
+- `sub_calculator.py` — calcula `ComponentScoresV2` (fórmula: `cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20`)
+- `sub_narrator.py` — genera narrativa ejecutiva con `claude-sonnet-4-6`
+- `scorer.py` — shim de compatibilidad con la API anterior
+
+**AgentHelper — contrato `redirect_to`:** si el usuario pregunta algo del negocio (fuera del scope del manual), AgentHelper devuelve `result["redirect_to"] = "main_chat"`. Si AgentCEO detecta pregunta de ayuda de plataforma, devuelve `result["redirect_to"] = "help"`. Frontend `/help` usa `HelpChat.tsx`; endpoint: `POST /agent/help/chat` (sin rate limit, sin token billing de sesión).
+
+**Extras:** `agents/supplier/preflight.py` — validaciones pre-envío Gmail.
 
 ### Sistema de Memoria (cuatro capas)
 
@@ -337,7 +360,8 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `/expenses` | Analytics + lista de gastos |
 | `/products` | Catálogo; query param `?stock=ok|low|out` |
 | `/apps` | Integraciones Google |
-| `/settings` | Cuenta, configuración y panel de custom fields (`FieldDefinitionsPanel` + `SchemaERDView`) |
+| `/settings` | Cuenta, configuración, panel de custom fields (`FieldDefinitionsPanel` + `SchemaERDView`) y config de margen (`HealthConfigPanel`) |
+| `/help` | Chat de ayuda de plataforma — `HelpChat.tsx`, endpoint `/agent/help/chat` |
 
 **Ruta pública:** `/oauth/callback?session_id=` → `POST /auth/oauth/google/exchange`.
 
@@ -388,6 +412,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | 14 | ✅ | Estados canónicos de producto (in_stock/low_stock/out_of_stock/incoming stub), UPDATE_PRODUCT vía chat, Véktor como fuente de verdad, política null/NaN con imputación por mediana, ingesta interactiva con columnas riesgosas |
 | 15 | ✅ | **Agent Teams (Stages 1–5d completos):** AgentIncome + AgentExpense (split de AgentCash); AgentGoogle absorbe AgentCalendar + AgentSync; 17 intents rioplatense; AgentTeamPlan/AgentTask; CEO → haiku-4-5; `team_plan_builder.py`. **Stage 3:** `TeamPlanExecutor` DAG (skip downstream en fallo, context N→N+1), `synthesis.py` (sonnet-4-5), planes compuestos, `/confirm/group`. **Stage 4:** `GoogleToolBroker`, 3 ActionTypes Google (`UPLOAD_TO_DRIVE`, `CREATE_GOOGLE_DOC`, `APPEND_TO_SHEET`). **Stage 5d:** AgentCalendar + AgentSync eliminados del registry. |
 | 16 | ✅ | **Stage 5a:** AgentHealth v2 — fórmula 5 dims, `sub_collector/calculator/narrator`, `scorer.py` shim, `health_config_service`, PDF/DOCX export, `score_growth` en API/schema, margen configurable en `/settings`. **Stage 5b:** AgentHelper con `docs/vektor_user_manual.yaml` + `help_documentation_service.py`, endpoint `/agent/help/chat` (sin rate limit), `redirect_to` bidireccional, frontend `/help` + `HelpChat`. **Stage 5c:** retry en `TeamPlanExecutor` para tasks externas (1 retry + backoff), structlog `agent_name` en CEO, `test_health_engine_regression.py`, `test_team_plan_executor_retry.py`, `test_help_documentation.py`. PyYAML agregado a deps. |
+| 17 | ✅ | **Intents analíticos + tolerancia al lenguaje natural:** catálogo 18→60 intents en 8 familias (archivos, precios, stock, ventas, gastos, proveedores, caja, clientes-stub, fallback). 7 ActionTypes analíticos read-only (`ANALYZE_*`, `SIMULATE_SCENARIO`). Dos capas de rescate antes de cortar: `DataIntentExtractor` (adjuntos) + `intent_rescue.py` (scoring semántico + `rapidfuzz`, normalización voseo/tildes). Se conserva `out_of_scope` para off-topic claro; ambiguo de negocio → `pedir_aclaracion_negocio`/`_sobre_archivo`. Math determinística en `shared/analytics.py`. Handlers en los 5 agentes; 4 queries nuevas en repos. Clientes (4 intents) stub → Sprint 18. `rapidfuzz` agregado a deps. |
 
 ### Cadena de migraciones (recientes)
 
@@ -407,6 +432,9 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `20260508_0001` | custom fields: `custom_fields JSONB` en 4 tablas core + `vertical_field_definitions` + `tenant_custom_field_definitions` + `tenant_field_change_log` |
 | `20260510_0001` | soft delete en `sales_entries` (`voided_at`, `void_reason`) + tablas `data_repair_runs` + `data_repair_items` |
 | `20260511_0001` | soft delete en `expense_entries` + `products` (`voided_at`, `void_reason`); amplía check constraint de `data_repair_items` |
+| `20260512_0001` | `low_stock_threshold_units` nullable en `products` (NULL = no configurado; 0 = umbral explícito sin alerta) |
+| `20260601_0001` | `approval_group_id` + `group_execution_status` en `pending_actions` (Stage 3 multi-task) |
+| `20260615_0001` | `score_growth INTEGER NULL` en `health_score_snapshots` (NULL = snapshot v1 pre-Stage-5a; NOT NULL = fórmula v2 con 5 dims) |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
 
@@ -420,7 +448,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 - Scores recalculan solo ante cambios de datos (Celery async).
 - Toda decisión → `decision_audit_log` (insert-only).
 - Fail-closed en writes sensibles.
-- `ActionType` cerrado (17 valores) — cambiar requiere actualizar `RiskEngine` y tests.
+- `ActionType` cerrado (27 valores) — cambiar requiere actualizar `RiskEngine` y tests.
 - System prompts: heurísticas como valores numéricos, nunca texto narrativo.
 - Todo input de usuario a LLM pasa por `wrap_user_input()`.
 - Toda aritmética financiera va por `DeterministicFinance` — LLMs nunca calculan montos.

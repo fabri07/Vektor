@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
     Confidence,
+    LLMCall,
     RiskLevel,
 )
 from app.application.services.chat_orchestrator import ChatOrchestrator
@@ -82,20 +84,22 @@ def _make_ceo_plan_response(
     intent: str,
     agent: str,
     action_type: str,
-    entities: dict | None = None,
+    entities: dict[str, Any] | None = None,
 ) -> AgentResponse:
     """Respuesta de CEO con plan single-task (Stage 3 format)."""
     plan_dict = {
         "plan_id": str(uuid.uuid4()),
         "intent": intent,
-        "tasks": [{
-            "task_id": str(uuid.uuid4()),
-            "agent": agent,
-            "action_type": action_type,
-            "entities": entities or {},
-            "depends_on": [],
-            "approval_group": None,
-        }],
+        "tasks": [
+            {
+                "task_id": str(uuid.uuid4()),
+                "agent": agent,
+                "action_type": action_type,
+                "entities": entities or {},
+                "depends_on": [],
+                "approval_group": None,
+            }
+        ],
         "requires_synthesis": False,
         "fallback_message": None,
     }
@@ -117,19 +121,19 @@ def _make_ceo_plan_response(
 
 @pytest.mark.asyncio
 async def test_orchestrator_returns_rich_message(mock_db, mock_redis):
-    """El orchestrator no debe devolver 'Listo.' sino texto rico del LLM."""
+    """El orchestrator no debe devolver 'Listo.' sino texto rico generado por AgentChat."""
     rich_text = "Registré la venta de $80.000. Tu caja del día suma $130.000. ¡Buen ritmo!"
     request = _make_request(conversation_id=str(uuid.uuid4()))
 
-    mock_content = MagicMock()
-    mock_content.text = rich_text
-    mock_llm_response = MagicMock()
-    mock_llm_response.content = [mock_content]
+    _mock_llm_call = LLMCall(
+        source="agent_chat", model="claude-sonnet-4-6", input_tokens=100, output_tokens=200
+    )
 
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
-        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
-        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
+        patch(f"{ORCHESTRATOR}.AgentChat") as mock_agent_chat_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_executor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
         patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
         mock_ceo_cls.return_value.process = AsyncMock(
@@ -137,11 +141,12 @@ async def test_orchestrator_returns_rich_message(mock_db, mock_redis):
                 req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
             )
         )
-        MockExecutor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
+        mock_executor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
 
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_llm_response)
-        mock_client_factory.return_value = mock_client
+        # AgentChat.generate_response retorna (texto_rico, LLMCall)
+        mock_agent_chat_cls.return_value.generate_response = AsyncMock(
+            return_value=(rich_text, _mock_llm_call)
+        )
 
         conv_svc_instance = AsyncMock()
         conv_svc_instance.get_context = AsyncMock(return_value={"turns": [], "summary": None})
@@ -171,7 +176,7 @@ async def test_orchestrator_skips_llm_for_approval(mock_db, mock_redis):
 
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
-        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_executor,
         patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
     ):
         mock_ceo_cls.return_value.process = AsyncMock(
@@ -179,7 +184,7 @@ async def test_orchestrator_skips_llm_for_approval(mock_db, mock_redis):
                 req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
             )
         )
-        MockExecutor.return_value.execute = AsyncMock(return_value=[approval_resp])
+        mock_executor.return_value.execute = AsyncMock(return_value=[approval_resp])
 
         mock_client = AsyncMock()
         mock_client_factory.return_value = mock_client
@@ -288,7 +293,7 @@ async def test_orchestrator_loads_conversation_context(mock_db, mock_redis):
 
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
-        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_executor,
         patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
         patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
@@ -297,7 +302,7 @@ async def test_orchestrator_loads_conversation_context(mock_db, mock_redis):
                 req.request_id, "ayuda_plataforma", "agent_helper", "ANSWER_HELP_REQUEST"
             )
         )
-        MockExecutor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
+        mock_executor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_llm_response)
@@ -333,7 +338,7 @@ async def test_orchestrator_saves_turn_after_success(mock_db, mock_redis):
 
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
-        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_executor,
         patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
         patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
@@ -342,7 +347,7 @@ async def test_orchestrator_saves_turn_after_success(mock_db, mock_redis):
                 req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
             )
         )
-        MockExecutor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
+        mock_executor.return_value.execute = AsyncMock(return_value=[_make_agent_response()])
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_llm_response)
@@ -369,15 +374,14 @@ async def test_orchestrator_config_error_preserves_metadata_and_saves_turn(
     mock_db,
     mock_redis,
 ):
-    """Si falla el LLM narrativo, conserva metadata CEO y guarda el turno."""
+    """Si AgentChat falla con AnthropicConfigurationError, conserva metadata y guarda turno."""
     request = _make_request(conversation_id=str(uuid.uuid4()))
-    ceo_resp = _make_agent_response(summary="Consulta de stock.")
-    ceo_resp.result.update({"intent": "ask_stock_status", "target_agent": "agent_stock"})
 
     with (
         patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
-        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as MockExecutor,
-        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as mock_client_factory,
+        patch(f"{ORCHESTRATOR}.AgentChat") as mock_agent_chat_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_executor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
         patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
     ):
         mock_ceo_cls.return_value.process = AsyncMock(
@@ -387,13 +391,12 @@ async def test_orchestrator_config_error_preserves_metadata_and_saves_turn(
         )
         stock_resp = _make_agent_response(summary="Consulta de stock.")
         stock_resp.result.update({"intent": "ask_stock_status", "target_agent": "agent_stock"})
-        MockExecutor.return_value.execute = AsyncMock(return_value=[stock_resp])
+        mock_executor.return_value.execute = AsyncMock(return_value=[stock_resp])
 
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(
+        # AgentChat.generate_response lanza el error de configuración
+        mock_agent_chat_cls.return_value.generate_response = AsyncMock(
             side_effect=AnthropicConfigurationError("missing api key")
         )
-        mock_client_factory.return_value = mock_client
 
         conv_svc_instance = AsyncMock()
         conv_svc_instance.get_context = AsyncMock(return_value={"turns": [], "summary": None})
@@ -460,9 +463,7 @@ async def test_load_file_context_prioritizes_current_attachments():
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[current_result, recent_result])
 
-    with patch(
-        "app.application.services.chat_orchestrator.get_anthropic_async_client"
-    ):
+    with patch("app.application.services.chat_orchestrator.get_anthropic_async_client"):
         orchestrator = ChatOrchestrator()
 
     context = await orchestrator._load_file_context(

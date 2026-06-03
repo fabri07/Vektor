@@ -86,21 +86,23 @@ class AgentHelper(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
-    async def find_answer(self, question: str) -> tuple[dict, LLMCall]:
+    async def find_answer(self, question: str) -> tuple[dict[str, Any], LLMCall]:
         """Busca respuesta usando el manual YAML + LLM."""
         matches = search(question, max_results=3)
-        doc_context = format_faq_context(matches) if matches else "Sin documentación relevante encontrada."
+        doc_context = (
+            format_faq_context(matches) if matches else "Sin documentación relevante encontrada."
+        )
 
         system = _SYSTEM_TEMPLATE.format(doc_context=doc_context)
         response = await self.client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=400,
+            model="claude-sonnet-4-6",
+            max_tokens=800,
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(question)}],
         )
         llm_call = LLMCall(
             source=self.agent_name,
-            model="claude-haiku-4-5",
+            model="claude-sonnet-4-6",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
         )

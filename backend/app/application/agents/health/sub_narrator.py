@@ -30,7 +30,9 @@ _MAX_TOKENS = 800
 
 
 def _build_prompt(scores: ComponentScoresV2, business_name: str) -> str:
-    growth_label = "sin historial" if scores.growth_score == 50 else f"{scores.growth_score:.0f}/100"
+    growth_label = (
+        "sin historial" if scores.growth_score == 50 else f"{scores.growth_score:.0f}/100"
+    )
     return (
         f"Negocio: {wrap_user_input(business_name)}\n"
         f"Score de salud: {scores.total_score}/100\n"

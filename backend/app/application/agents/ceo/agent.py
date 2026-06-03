@@ -64,51 +64,74 @@ class AgentCEO(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
-    async def classify_intent(self, message: str) -> tuple[dict, LLMCall]:
-        """Clasifica el intent vía LLM Haiku. Retorna ({intent, entities}, LLMCall)."""
+    async def classify_intent(self, message: str) -> tuple[dict[str, Any], LLMCall]:
+        """Clasifica el intent usando NLP + Sonnet. Retorna ({intent, entities}, LLMCall).
+
+        Pre-procesa el mensaje con el normalizer argentino antes de enviarlo al LLM.
+        """
+        from app.application.agents.shared.nlp_preprocessor import preprocess  # noqa: PLC0415
+
+        prep = preprocess(message)
+        normalized = prep.normalized_message
+
+        # Construir anotación NLP con entidades pre-extraídas (hint para el LLM)
+        _nlp_hints: list[str] = []
+        if amounts := prep.entities.get("amount_hints"):
+            _nlp_hints.append(f"montos detectados: {', '.join(str(a) for a in amounts[:3])}")
+        if qtys := prep.entities.get("quantity_hints"):
+            _nlp_hints.append(f"cantidades: {', '.join(str(q) for q in qtys[:2])}")
+        if lemmas := prep.entities.get("action_lemmas"):
+            _nlp_hints.append(f"verbos: {', '.join(lemmas[:2])}")
+        if pcts := prep.entities.get("percentage_hints"):
+            _nlp_hints.append(f"porcentajes: {', '.join(str(p) + '%' for p in pcts[:2])}")
+        nlp_annotation = (
+            f"[Pre-análisis NLP: {'; '.join(_nlp_hints)}]\n" if _nlp_hints else ""
+        )
+
+        # Construir guía de intents dinámicamente desde el catálogo
+        _guide_lines: list[str] = []
+        for _intent, _info in INTENT_CATALOG.items():
+            _triggers = _info.get("triggers", [])
+            if _triggers:
+                _examples = ", ".join(f"'{t}'" for t in _triggers[:4])
+                _guide_lines.append(f"  {_intent}: {_examples}")
+            elif _intent not in ("intent_desconocido", "pedir_aclaracion_sobre_archivo",
+                                  "pedir_aclaracion_negocio"):
+                _guide_lines.append(f"  {_intent}: {_info.get('desc', '')}")
+        _intent_guide = "\n".join(_guide_lines)
+
         system = (
-            "Sos el clasificador de intenciones de Véktor, un sistema de gestión financiera para PyMEs argentinas.\n"
+            "Sos el clasificador de intenciones de Véktor, sistema de gestión financiera para "
+            "PyMEs argentinas (kioscos, almacenes, distribuidoras, locales de limpieza y decoración).\n"
+            "Hablás con dueños de pequeños negocios en Argentina — español rioplatense, voseo, "
+            "lunfardo de negocio. Tu tarea: entender QUÉ quieren hacer y retornar el intent correcto.\n\n"
             f"Intenciones válidas: {', '.join(INTENT_CATALOG)}\n\n"
-            "GUÍA DE INTENCIONES — ejemplos en español rioplatense:\n"
-            "  ingresar_venta: 'vendí X unidades', 'hice una venta de $Y', 'venta de producto Z'\n"
-            "  ingresar_cobro: 'cobré la deuda de X', 'me pagaron $Y', 'ingresó plata por cobro'\n"
-            "  ingresar_gasto: 'pagué el alquiler', 'gasté en servicios', 'compré útiles de oficina'\n"
-            "  ingresar_pago_salida: 'pagué una deuda', 'salida de caja por pago', 'transferí $Y'\n"
-            "  actualizar_stock: 'ajustá el stock de X', 'tengo Y unidades de Z', 'actualizá inventario'\n"
-            "  registrar_merma: 'se rompió X unidades', 'merma de Y', 'vencieron Z productos'\n"
-            "  actualizar_producto: 'cambiá el precio de X', 'actualizá el costo de Y', 'renombrá producto'\n"
-            "  importar_archivo_ventas: 'subí un Excel de ventas', 'adjunté CSV de ventas', 'importar ventas'\n"
-            "  importar_archivo_gastos: 'subí planilla de gastos', 'adjunté CSV de egresos'\n"
-            "  registrar_compra_proveedor: 'compré a Mayorista X', 'pedido a proveedor Y', 'orden de compra'\n"
-            "  consultar_estado_negocio: 'cómo está mi negocio', 'score financiero', 'salud del negocio'\n"
-            "  generar_informe: 'generá un informe', 'reporte del mes', 'dame un análisis completo'\n"
-            "  generar_informe_con_export: 'subí el informe a Drive', 'exportá el reporte a Google Drive', 'mandame el informe a Drive'\n"
-            "  gestionar_proveedor: 'mandá mail a proveedor', 'armá email a X', 'contactar proveedor'\n"
-            "  sincronizar_google: 'sincronizá con Sheets', 'exportá a Drive', 'sync Google'\n"
-            "  agendar_evento: 'agendá una reunión', 'crear evento en calendario', 'recordatorio para'\n"
-            "  ayuda_plataforma: 'cómo uso Véktor', 'qué puedo hacer', 'ayuda con la plataforma'\n\n"
+            "=== DISPARADORES POR INTENT (cómo hablan realmente los usuarios) ===\n\n"
+            f"{_intent_guide}\n\n"
             "REGLA CRÍTICA — intent_desconocido:\n"
             "Usá 'intent_desconocido' si el mensaje NO está relacionado con:\n"
             "  - Operaciones del negocio: ventas, gastos, compras, caja, stock, proveedores\n"
             "  - Salud financiera o análisis del negocio\n"
             "  - Uso de la plataforma Véktor\n"
             "  - Eventos de Google Calendar o emails de proveedores\n"
-            "Ejemplos: programación, código, historia, ciencias, recetas, medicina, entretenimiento.\n\n"
+            "Ejemplos de out-of-scope: programación, código, historia, ciencias, recetas, "
+            "medicina, entretenimiento, política.\n\n"
             "Retorná SOLO un JSON con:\n"
-            '{"intent": "<una de las intenciones válidas>", "entities": {...campos relevantes...}}\n\n'
+            '{"intent": "<una de las intenciones válidas>", '
+            '"entities": {...campos relevantes: monto, producto, proveedor, fecha, porcentaje, etc.}}\n\n'
             "Si no podés clasificar → "
             '{"intent": "intent_desconocido", "entities": {}}\n'
             "NO retornes nada más que el JSON. Sin texto adicional."
         )
         response = await self.client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=300,
+            model="claude-sonnet-4-6",
+            max_tokens=800,
             system=system,
-            messages=[{"role": "user", "content": wrap_user_input(message)}],
+            messages=[{"role": "user", "content": f"{nlp_annotation}{wrap_user_input(normalized)}"}],
         )
         llm_call = LLMCall(
             source="ceo",
-            model="claude-haiku-4-5",
+            model="claude-sonnet-4-6",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
         )
@@ -122,7 +145,7 @@ class AgentCEO(BaseAgent):
             parsed["intent"] = "intent_desconocido"
         return parsed, llm_call
 
-    def build_team_plan(self, intent: str, entities: dict) -> AgentTeamPlan:
+    def build_team_plan(self, intent: str, entities: dict[str, Any]) -> AgentTeamPlan:
         """Construye el AgentTeamPlan para el intent clasificado.
 
         Stage 1: siempre single-task.
@@ -134,7 +157,7 @@ class AgentCEO(BaseAgent):
         # 1. Clasificar intent vía LLM Haiku
         classified, ceo_call = await self.classify_intent(request.message)
         intent: str = classified.get("intent", "intent_desconocido")
-        entities: dict = classified.get("entities", {})
+        entities: dict[str, Any] = classified.get("entities", {})
         logger.info(
             "agent_ceo.intent_classified",
             agent_name=self.agent_name,
@@ -147,7 +170,9 @@ class AgentCEO(BaseAgent):
 
         # 3. Extraer campos del primer task para backward compat
         first_task = plan.tasks[0] if plan.tasks else None
-        action_type: ActionType = first_task.action_type if first_task else ActionType.ANSWER_HELP_REQUEST
+        action_type: ActionType = (
+            first_task.action_type if first_task else ActionType.ANSWER_HELP_REQUEST
+        )
         target_agent: str = first_task.agent if first_task else "agent_helper"
 
         # 4. Riesgo determinístico
@@ -163,11 +188,11 @@ class AgentCEO(BaseAgent):
             requires_approval=requires_approval,
             confidence=Confidence.HIGH,
             result={
-                "target_agent": target_agent,       # legacy — orchestrator lo lee si no hay plan
+                "target_agent": target_agent,  # legacy — orchestrator lo lee si no hay plan
                 "intent": intent,
                 "entities": entities,
                 "action_type": str(action_type),
-                "plan": plan.model_dump(),           # Stage 1: plan single-task
+                "plan": plan.model_dump(),  # Stage 1: plan single-task
             },
             usage=UsageSummary(calls=[ceo_call]),
         )

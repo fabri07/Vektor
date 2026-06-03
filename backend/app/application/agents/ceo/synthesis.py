@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.application.agents.shared.schemas import AgentRequest, AgentResponse, AgentTeamPlan, LLMCall
+from app.application.agents.shared.schemas import (
+    AgentRequest,
+    AgentResponse,
+    AgentTeamPlan,
+    LLMCall,
+)
 from app.application.security.prompt_defense import wrap_user_input
 from app.observability.logger import get_logger
 
@@ -32,8 +37,7 @@ async def synthesize_team_results(
         client: cliente Anthropic async (del orchestrator)
     """
     results_text = "\n\n".join(
-        f"[Tarea {i + 1} — {r.agent_name}]\n"
-        f"{r.result.get('summary') or str(r.result)[:300]}"
+        f"[Tarea {i + 1} — {r.agent_name}]\n" f"{r.result.get('summary') or str(r.result)[:300]}"
         for i, r in enumerate(responses)
     )
 
@@ -49,19 +53,17 @@ async def synthesize_team_results(
     )
 
     response = await client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=600,
+        model="claude-sonnet-4-6",
+        max_tokens=1200,
         system=system,
         messages=[{"role": "user", "content": user_content}],
     )
 
     call = LLMCall(
         source="ceo_synthesis",
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-6",
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
     )
-    text = (
-        response.content[0].text.strip() if response.content else "Operaciones completadas."
-    )
+    text = response.content[0].text.strip() if response.content else "Operaciones completadas."
     return text, call

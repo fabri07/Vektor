@@ -1,5 +1,5 @@
-import uuid
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,6 +15,7 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
+from app.application.agents.chat.agent import AgentChat
 from app.application.services.chat_orchestrator import ChatOrchestrator
 from app.application.services.pending_action_service import execute_pending_action
 from app.persistence.models.chat_session_log import ChatSessionLog
@@ -34,7 +35,7 @@ def redis_mock() -> AsyncMock:
     return redis
 
 
-def _sales_summary() -> dict:
+def _sales_summary() -> dict[str, Any]:
     return {
         "file_type": "spreadsheet",
         "inferred_type": "ventas",
@@ -145,21 +146,23 @@ async def test_contexto_proxima_sesion_incluye_ultima_carga(
     svc = ChatMemoryService()
     await svc.record(db_session, sample_tenant.tenant_id, "conv-a", "DATA_LOADED", "Ventas mayo")
     ctx = await svc.get_session_context(db_session, sample_tenant.tenant_id)
-    rendered = ChatOrchestrator._render_session_memory(ctx)
+    rendered = AgentChat._render_session_memory(ctx)
     assert "Última carga: Ventas mayo" in rendered
     assert "No repitas preguntas" in rendered
 
 
 def test_orchestrator_inyecta_historial_en_memoria_llm() -> None:
-    rendered = ChatOrchestrator._render_session_memory({
-        "historial_disponible": True,
-        "ultima_carga": {
-            "descripcion": "Importado ventas.csv",
-            "registros": 5,
-            "fecha": "2026-05-03T10:00:00",
-        },
-        "total_cargas_registradas": 2,
-    })
+    rendered = AgentChat._render_session_memory(
+        {
+            "historial_disponible": True,
+            "ultima_carga": {
+                "descripcion": "Importado ventas.csv",
+                "registros": 5,
+                "fecha": "2026-05-03T10:00:00",
+            },
+            "total_cargas_registradas": 2,
+        }
+    )
     assert "HISTORIAL DE CARGAS" in rendered
     assert "Importado ventas.csv" in rendered
 

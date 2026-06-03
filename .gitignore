@@ -54,3 +54,22 @@ coverage.xml
 *.db
 *.pem
 .vercel
+
+# ── Claude Flow runtime data (sesiones y contexto generados automáticamente) ──
+.claude-flow/data/
+.claude-flow/sessions/
+backend/.claude-flow/data/
+backend/.claude-flow/sessions/
+
+# ── Secrets locales del MCP server ────────────────────────────────────────────
+mcp_server/.env
+
+# ── Graphify output (knowledge graph generado, no va en repo) ─────────────────
+graphify-out/
+
+# ── Coverage artifacts ────────────────────────────────────────────────────────
+.coverage*
+!.coverage.xml
+
+# ── Claude Code internal ───────────────────────────────────────────────────────
+.claude/scheduled_tasks.lock

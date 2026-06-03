@@ -47,7 +47,12 @@ _BARE_ID_RE = re.compile(r"(?<![/\w])([a-zA-Z0-9_-]{20,})(?![/\w])")
 # ── Sync types + keyword mapping ──────────────────────────────────────────────
 _SYNC_TYPES: dict[str, dict[str, Any]] = {
     "export_sales_to_sheets": {
-        "keywords": ("exportar ventas", "ventas a sheets", "exportar a google sheets", "subir ventas"),
+        "keywords": (
+            "exportar ventas",
+            "ventas a sheets",
+            "exportar a google sheets",
+            "subir ventas",
+        ),
         "tool": "google.sheets.append_rows",
         "summary": "Exportar ventas a Google Sheets.",
         "needs_sheet": True,
@@ -59,15 +64,24 @@ _SYNC_TYPES: dict[str, dict[str, Any]] = {
         "needs_sheet": False,
     },
     "import_from_sheets": {
-        "keywords": ("importar desde sheets", "importar de google", "traer datos de sheets", "leer sheets"),
+        "keywords": (
+            "importar desde sheets",
+            "importar de google",
+            "traer datos de sheets",
+            "leer sheets",
+        ),
         "tool": "google.sheets.read_range",
         "summary": "Importar datos desde Google Sheets.",
         "needs_sheet": True,
     },
     "import_from_drive": {
         "keywords": (
-            "google drive", "buscar en drive", "leer drive",
-            "archivos en drive", "carpeta de drive", "analizar drive",
+            "google drive",
+            "buscar en drive",
+            "leer drive",
+            "archivos en drive",
+            "carpeta de drive",
+            "analizar drive",
         ),
         "tool": "google.drive.read_file",
         "summary": "Buscar y leer archivos desde Google Drive.",
@@ -77,17 +91,25 @@ _SYNC_TYPES: dict[str, dict[str, Any]] = {
 
 # ── Calendar query keywords ────────────────────────────────────────────────────
 _CALENDAR_QUERY_KW = (
-    "ver agenda", "mis eventos", "qué tengo", "que tengo",
-    "próximos eventos", "proximos eventos", "consultar calendario",
-    "ver calendario", "agenda de",
+    "ver agenda",
+    "mis eventos",
+    "qué tengo",
+    "que tengo",
+    "próximos eventos",
+    "proximos eventos",
+    "consultar calendario",
+    "ver calendario",
+    "agenda de",
 )
 
 # ── ActionTypes despachados via PendingAction → broker ────────────────────────
-_BROKER_ACTION_TYPES = frozenset({
-    ActionType.UPLOAD_TO_DRIVE,
-    ActionType.CREATE_GOOGLE_DOC,
-    ActionType.APPEND_TO_SHEET,
-})
+_BROKER_ACTION_TYPES = frozenset(
+    {
+        ActionType.UPLOAD_TO_DRIVE,
+        ActionType.CREATE_GOOGLE_DOC,
+        ActionType.APPEND_TO_SHEET,
+    }
+)
 
 _BROKER_ACTION_LABELS: dict[ActionType, str] = {
     ActionType.UPLOAD_TO_DRIVE: "Subir archivo a Google Drive",
@@ -97,9 +119,27 @@ _BROKER_ACTION_LABELS: dict[ActionType, str] = {
 
 # Palabras irrelevantes para la query de Drive
 _DRIVE_STOP_WORDS = {
-    "google", "drive", "buscar", "busca", "buscá", "leer", "lee",
-    "analizar", "analiza", "archivo", "archivos", "carpeta", "carpetas",
-    "de", "en", "del", "la", "los", "las", "mis", "mi",
+    "google",
+    "drive",
+    "buscar",
+    "busca",
+    "buscá",
+    "leer",
+    "lee",
+    "analizar",
+    "analiza",
+    "archivo",
+    "archivos",
+    "carpeta",
+    "carpetas",
+    "de",
+    "en",
+    "del",
+    "la",
+    "los",
+    "las",
+    "mis",
+    "mi",
 }
 
 
@@ -146,7 +186,7 @@ class AgentGoogle(BaseAgent):
 
     # ── Router principal ──────────────────────────────────────────────────────
 
-    async def process(  # type: ignore[override]
+    async def process(
         self,
         request: AgentRequest,
         task: Any | None = None,
@@ -184,7 +224,7 @@ class AgentGoogle(BaseAgent):
         if action_type == ActionType.UPLOAD_TO_DRIVE and not entities.get("content_base64"):
             upstream_outputs = request.context.get("upstream_outputs", {})
             if upstream_outputs:
-                upstream_result = next(iter(upstream_outputs.values()), {})
+                upstream_result: dict[str, Any] = next(iter(upstream_outputs.values()), {})
                 narrative: str = upstream_result.get("summary", "")
                 health_score = upstream_result.get("health_score")
                 if narrative:
@@ -253,6 +293,7 @@ class AgentGoogle(BaseAgent):
 
         if not extracted.get("has_enough_info"):
             from app.application.agents.shared.schemas import UsageSummary  # noqa: PLC0415
+
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
@@ -271,6 +312,7 @@ class AgentGoogle(BaseAgent):
             )
 
         from app.application.agents.shared.schemas import UsageSummary  # noqa: PLC0415
+
         summary_text = extracted.get("summary", "Evento")
         start = extracted.get("start_datetime", "")
         end = extracted.get("end_datetime", "")
@@ -305,6 +347,7 @@ class AgentGoogle(BaseAgent):
         self, message: str
     ) -> tuple[dict[str, Any], LLMCall | None]:
         from datetime import date  # noqa: PLC0415
+
         today = date.today().isoformat()
 
         system = (
@@ -325,10 +368,10 @@ class AgentGoogle(BaseAgent):
         raw, llm_call = await call_llm(
             client=self.client,
             source="agent_google",
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(message)}],
-            max_tokens=400,
+            max_tokens=600,
         )
         if raw is None:
             return {"has_enough_info": False}, None
@@ -498,15 +541,21 @@ class AgentGoogle(BaseAgent):
                 try:
                     file_data = await broker.read_drive_file(file_id=file_id)
                 except Exception as exc:
-                    logger.warning("agent_google.drive_read_failed", file_id=file_id, error=str(exc))
+                    logger.warning(
+                        "agent_google.drive_read_failed", file_id=file_id, error=str(exc)
+                    )
                     continue
-                preview = (file_data.get("content_preview") or file_data.get("raw_text_preview") or "")
-                readable_files.append({
-                    "id": file_id,
-                    "name": str(file_item.get("name", "Archivo")),
-                    "mime_type": mime_type,
-                    "preview": str(preview).strip()[:500],
-                })
+                preview = (
+                    file_data.get("content_preview") or file_data.get("raw_text_preview") or ""
+                )
+                readable_files.append(
+                    {
+                        "id": file_id,
+                        "name": str(file_item.get("name", "Archivo")),
+                        "mime_type": mime_type,
+                        "preview": str(preview).strip()[:500],
+                    }
+                )
                 if len(readable_files) >= 2:
                     break
 
@@ -556,8 +605,7 @@ class AgentGoogle(BaseAgent):
 
     def _extract_drive_query(self, message: str) -> str:
         normalized = "".join(
-            c.lower() if c.isalnum() or c in {" ", ".", "-", "_"} else " "
-            for c in message
+            c.lower() if c.isalnum() or c in {" ", ".", "-", "_"} else " " for c in message
         )
         tokens = [t for t in normalized.split() if len(t) > 2 and t not in _DRIVE_STOP_WORDS]
         return " ".join(tokens)[:120].strip()
