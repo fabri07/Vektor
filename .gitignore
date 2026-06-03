@@ -11,6 +11,11 @@ venv/
 env/
 ENV/
 .python*/
+.python312/
+
+# ── Herramientas de desarrollo local (no van en el repo) ──────────────────────
+.pgsql16/
+.pgsql*/
 
 # ── Environment & Secrets ─────────────────────────────────────────────────────
 .env
