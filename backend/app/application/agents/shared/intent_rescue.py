@@ -290,15 +290,17 @@ def _has_ambiguous_verb(normalized: str) -> bool:
 
 
 # ── Resultado del rescate ─────────────────────────────────────────────────────
-# Devuelve un intent del INTENT_CATALOG, o uno de los sentinelas de aclaración,
-# o "out_of_scope" si no hay ninguna señal de negocio.
+# Devuelve (intent, entities) donde intent es del INTENT_CATALOG consolidado (o un
+# sentinela de aclaración / "out_of_scope") y entities lleva `analysis_type` cuando
+# el sub-análisis es específico. Sprint 19: el rescate emite intents consolidados,
+# no los granulares viejos.
 
 
 def rescue_intent(
     message: str,
     has_attachment: bool,
     attachment_type: str | None = None,
-) -> str:
+) -> tuple[str, dict[str, str]]:
     """Rescata un intent a partir de un mensaje que el CEO no pudo clasificar.
 
     Args:
@@ -308,65 +310,66 @@ def rescue_intent(
             "expense"/"mixed"/None) — proviene de DataIntentExtractor.
 
     Returns:
-        Un intent del catálogo, o "pedir_aclaracion_sobre_archivo" /
-        "pedir_aclaracion_negocio" / "out_of_scope".
+        Tupla (intent, entities): un intent consolidado del catálogo + entities con
+        `analysis_type` opcional, o ("pedir_aclaracion_sobre_archivo", {}) /
+        ("pedir_aclaracion_negocio", {}) / ("out_of_scope", {}).
     """
     norm = normalize(message)
     verb = _has_ambiguous_verb(norm)
 
     # ── Reglas con attachment (prioridad alta) ────────────────────────────────
     if has_attachment:
-        # 1-2. attachment de productos/precios + verbo ambiguo (o sin verbo) → lista de precios
+        # 1-2. attachment de productos/precios → análisis de lista de precios
         if attachment_type == "product":
-            return "analizar_lista_precios"
+            return "analizar_precios", {"analysis_type": "lista"}
         # 2. attachment de stock
         if attachment_type == "stock":
-            return "analizar_stock"
+            return "analizar_stock", {}
         # 3. attachment de ventas/gastos/mixto
         if attachment_type in ("sale", "expense", "mixed"):
-            return "analizar_archivo_cargado"
+            return "analizar_archivo", {}
         # 10. "que puedo hacer con esto" + attachment
         if "que puedo hacer" in norm or "que podes hacer" in norm:
-            return "explicar_que_puedo_hacer_con_datos"
+            return "ayuda_plataforma", {"analysis_type": "explicar_datos"}
         # 4. attachment sin tipo claro + verbo ambiguo → análisis genérico
         if verb:
-            return "analizar_archivo_cargado"
+            return "analizar_archivo", {}
         # 11. attachment pero sin señal clara → pedir aclaración sobre el archivo
-        return "pedir_aclaracion_sobre_archivo"
+        return "pedir_aclaracion_sobre_archivo", {}
 
     # ── Reglas sin attachment: objeto de negocio detectado ────────────────────
     # 5. márgenes / rentabilidad
     if _contains_any(norm, OBJECTS_MARGEN):
-        return "analizar_margenes_productos"
+        return "analizar_precios", {"analysis_type": "margenes"}
     # 6. proveedor + aumento/remarcar
     if _contains_any(norm, OBJECTS_PROVEEDOR):
         if "remarcar" in norm or "remarcacion" in norm:
-            return "simular_actualizacion_precios"
+            return "analizar_precios", {"analysis_type": "simulacion"}
         if "aumento" in norm or "aumentos" in norm:
-            return "detectar_aumentos_proveedor"
-        return "analizar_proveedores"
+            return "analizar_precios", {"analysis_type": "aumentos_proveedor"}
+        return "analizar_proveedores", {}
     # 7. caja / liquidez
     if _contains_any(norm, OBJECTS_CAJA):
-        return "proyectar_caja"
+        return "proyectar_caja", {}
     # 8. stock
     if _contains_any(norm, OBJECTS_STOCK):
-        return "detectar_quiebres_stock"
+        return "analizar_stock", {"analysis_type": "quiebres"}
     # 9. señales de "cómo viene el negocio"
     if _contains_any(norm, VERBS_NEGOCIO):
-        return "consultar_estado_negocio"
+        return "consultar_estado_negocio", {}
     # precios / catálogo sin attachment
     if _contains_any(norm, OBJECTS_PRECIOS):
-        return "analizar_lista_precios"
+        return "analizar_precios", {}
     # gastos
     if _contains_any(norm, OBJECTS_GASTOS):
-        return "clasificar_gastos"
+        return "analizar_gastos", {"analysis_type": "clasificacion"}
     # ventas
     if _contains_any(norm, OBJECTS_VENTAS):
-        return "analizar_rentabilidad_ventas"
+        return "analizar_ventas", {"analysis_type": "rentabilidad"}
 
     # ── 12. Verbo ambiguo pero ningún objeto claro → pedir aclaración ─────────
     if verb:
-        return "pedir_aclaracion_negocio"
+        return "pedir_aclaracion_negocio", {}
 
     # ── 13. Ninguna señal de negocio → out_of_scope (ajuste #1) ──────────────
-    return "out_of_scope"
+    return "out_of_scope", {}

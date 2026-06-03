@@ -88,7 +88,8 @@ async def test_rescue_product_attachment_maps_to_lista_precios(
         attachments=[{"file_id": file_id, "filename": "lista.xlsx"}],
     )
     intent, entities = await orch._rescue_unknown_intent(req, tid, db_session)
-    assert intent == "analizar_lista_precios"
+    assert intent == "analizar_precios"
+    assert entities == {"analysis_type": "lista"}
 
 
 @pytest.mark.asyncio
@@ -101,8 +102,9 @@ async def test_rescue_no_attachment_uses_text(db_session):
         message="cuánto gano con cada producto",
         attachments=[],
     )
-    intent, _ = await orch._rescue_unknown_intent(req, tid, db_session)
-    assert intent == "analizar_margenes_productos"
+    intent, entities = await orch._rescue_unknown_intent(req, tid, db_session)
+    assert intent == "analizar_precios"
+    assert entities == {"analysis_type": "margenes"}
 
 
 @pytest.mark.asyncio
@@ -151,7 +153,7 @@ def _ceo_unknown_response() -> AgentResponse:
 @pytest.mark.asyncio
 async def test_handle_e2e_price_attachment_not_out_of_scope(db_session, tenant_with_product_file):
     """E2E del incidente: CEO falla con intent_desconocido + adjunto de precios →
-    handle() debe rescatar a analizar_lista_precios, NO cortar con out_of_scope."""
+    handle() debe rescatar a analizar_precios, NO cortar con out_of_scope."""
     tid, file_id = tenant_with_product_file
 
     # Respuesta del sub-agente (stock) tras el rescate — análisis determinístico
@@ -188,8 +190,8 @@ async def test_handle_e2e_price_attachment_not_out_of_scope(db_session, tenant_w
         mock_exec_cls.return_value.execute = AsyncMock(return_value=[exec_resp])
         resp = await orch.handle(req, db_session, redis, uuid.UUID(req.user_id), tid)
 
-    # El rescate convirtió intent_desconocido → analizar_lista_precios
-    assert resp.result.get("intent") == "analizar_lista_precios"
+    # El rescate convirtió intent_desconocido → analizar_precios
+    assert resp.result.get("intent") == "analizar_precios"
     assert resp.status != "error"
     # NO debe ser el corte de fuera de scope
     assert resp.message != _OUT_OF_SCOPE_MESSAGE

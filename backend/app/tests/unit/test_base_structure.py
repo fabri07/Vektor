@@ -83,12 +83,15 @@ def test_action_type_enum_complete():
 
 
 def test_intent_catalog_complete():
-    # 18 previos + 42 analíticos/fallback Sprint 17 = 60
-    assert len(INTENT_CATALOG) == 60
+    # Sprint 19: catálogo consolidado a 28 (35 variantes analíticas → entidad analysis_type).
+    assert len(INTENT_CATALOG) == 28
 
 
 def test_intent_catalog_spanish():
-    """Los 18 intents base siguen presentes y todos usan nomenclatura español snake_case."""
+    """Los intents base siguen presentes y todos usan nomenclatura español snake_case.
+
+    Sprint 19: `generar_informe` se fusionó en `consultar_estado_negocio`.
+    """
     base = {
         "ingresar_venta",
         "ingresar_cobro",
@@ -101,7 +104,6 @@ def test_intent_catalog_spanish():
         "importar_archivo_gastos",
         "registrar_compra_proveedor",
         "consultar_estado_negocio",
-        "generar_informe",
         "generar_informe_con_export",
         "gestionar_proveedor",
         "sincronizar_google",

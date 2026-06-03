@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.agent import _attach_conversation_id
 from app.application.agents.cash.agent import AgentCash
+from app.application.agents.chat.agent import AgentChat
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -15,8 +16,6 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
-from app.application.agents.chat.agent import AgentChat
-from app.application.services.chat_orchestrator import ChatOrchestrator
 from app.application.services.pending_action_service import execute_pending_action
 from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile

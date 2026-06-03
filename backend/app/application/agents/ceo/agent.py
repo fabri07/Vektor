@@ -18,6 +18,7 @@ import anthropic
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.ceo.team_plan_builder import (
+    _ANALYTIC_FAMILIES,
     INTENT_CATALOG,
     INTENT_TO_ACTION_TYPE,
     INTENT_TO_AGENT,
@@ -92,22 +93,39 @@ class AgentCEO(BaseAgent):
         _guide_lines: list[str] = []
         for _intent, _info in INTENT_CATALOG.items():
             _triggers = _info.get("triggers", [])
-            if _triggers:
-                _examples = ", ".join(f"'{t}'" for t in _triggers[:4])
+            if isinstance(_triggers, list) and _triggers:
+                _examples = ", ".join(f"'{t}'" for t in _triggers[:6])
                 _guide_lines.append(f"  {_intent}: {_examples}")
             elif _intent not in ("intent_desconocido", "pedir_aclaracion_sobre_archivo",
                                   "pedir_aclaracion_negocio"):
                 _guide_lines.append(f"  {_intent}: {_info.get('desc', '')}")
         _intent_guide = "\n".join(_guide_lines)
 
+        # Guía de entidad `analysis_type`: para los intents analíticos consolidados,
+        # el sub-análisis va en la entidad (NO en el intent). Es best-effort —
+        # si el usuario no es específico, omitir `analysis_type` y el handler corre
+        # el análisis general por defecto.
+        _entity_lines = [
+            f"  {_fam}: {', '.join(_info['types'].keys())}"
+            for _fam, _info in _ANALYTIC_FAMILIES.items()
+        ]
+        _entity_guide = "\n".join(_entity_lines)
+
         system = (
             "Sos el clasificador de intenciones de Véktor, sistema de gestión financiera para "
-            "PyMEs argentinas (kioscos, almacenes, distribuidoras, locales de limpieza y decoración).\n"
+            "PyMEs argentinas (kioscos, almacenes, distribuidoras, locales de limpieza y "
+            "decoración).\n"
             "Hablás con dueños de pequeños negocios en Argentina — español rioplatense, voseo, "
-            "lunfardo de negocio. Tu tarea: entender QUÉ quieren hacer y retornar el intent correcto.\n\n"
+            "lunfardo de negocio. Tu tarea: entender QUÉ quieren hacer y retornar el intent "
+            "correcto.\n\n"
             f"Intenciones válidas: {', '.join(INTENT_CATALOG)}\n\n"
             "=== DISPARADORES POR INTENT (cómo hablan realmente los usuarios) ===\n\n"
             f"{_intent_guide}\n\n"
+            "=== ENTIDAD analysis_type (sub-análisis dentro de un intent analítico) ===\n"
+            "Para estos intents, si el usuario es ESPECÍFICO sobre el sub-análisis, agregá "
+            "`analysis_type` en entities con uno de los valores listados. Si es genérico, "
+            "OMITILO (corre el análisis general). Valores válidos por intent:\n"
+            f"{_entity_guide}\n\n"
             "REGLA CRÍTICA — intent_desconocido:\n"
             "Usá 'intent_desconocido' si el mensaje NO está relacionado con:\n"
             "  - Operaciones del negocio: ventas, gastos, compras, caja, stock, proveedores\n"
@@ -118,7 +136,8 @@ class AgentCEO(BaseAgent):
             "medicina, entretenimiento, política.\n\n"
             "Retorná SOLO un JSON con:\n"
             '{"intent": "<una de las intenciones válidas>", '
-            '"entities": {...campos relevantes: monto, producto, proveedor, fecha, porcentaje, etc.}}\n\n'
+            '"entities": {...campos relevantes: monto, producto, proveedor, fecha, '
+            'porcentaje, analysis_type, etc.}}\n\n'
             "Si no podés clasificar → "
             '{"intent": "intent_desconocido", "entities": {}}\n'
             "NO retornes nada más que el JSON. Sin texto adicional."
@@ -127,7 +146,9 @@ class AgentCEO(BaseAgent):
             model="claude-sonnet-4-6",
             max_tokens=800,
             system=system,
-            messages=[{"role": "user", "content": f"{nlp_annotation}{wrap_user_input(normalized)}"}],
+            messages=[
+                {"role": "user", "content": f"{nlp_annotation}{wrap_user_input(normalized)}"}
+            ],
         )
         llm_call = LLMCall(
             source="ceo",

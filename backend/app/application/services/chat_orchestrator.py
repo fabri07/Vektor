@@ -557,18 +557,19 @@ class ChatOrchestrator:
             result = extractor.check_file_summary(file.parsed_summary_json or {})
             if result.has_data_intent:
                 attachment_type = result.intent_type
-                mapped = {"product": "analizar_lista_precios"}.get(
-                    result.intent_type or "", "analizar_archivo_cargado"
-                )
-                return mapped, {}
+                # Sprint 19: intents consolidados — un adjunto de productos es un
+                # análisis de lista de precios; el resto, análisis de archivo.
+                if result.intent_type == "product":
+                    return "analizar_precios", {"analysis_type": "lista"}
+                return "analizar_archivo", {}
 
         # ── Capa 2: IntentRescue — scoring semántico + fuzzy sobre el texto ────
-        rescued = rescue_intent(
+        rescued_intent, rescued_entities = rescue_intent(
             request.message,
             has_attachment=has_attachment,
             attachment_type=attachment_type,
         )
-        return rescued, {}
+        return rescued_intent, rescued_entities
 
     async def _load_attachment_files(
         self,
