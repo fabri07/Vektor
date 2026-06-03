@@ -12,15 +12,14 @@ logger = get_logger(__name__)
 async def startup() -> None:
     """Initialize application dependencies without blocking liveness."""
     from app.config.settings import get_settings  # noqa: PLC0415
+
     _settings = get_settings()
 
     try:
         await _init_database()
     except Exception as exc:
         if _settings.ENVIRONMENT == "production":
-            raise RuntimeError(
-                f"Database no disponible en producción: {exc}"
-            ) from exc
+            raise RuntimeError(f"Database no disponible en producción: {exc}") from exc
         logger.warning(
             "bootstrap.database.unavailable",
             exc_type=type(exc).__name__,
@@ -50,6 +49,7 @@ async def shutdown() -> None:
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
+
 async def _init_database() -> None:
     # Validate connectivity on startup (fail fast)
     from sqlalchemy import text  # noqa: PLC0415
@@ -69,6 +69,7 @@ async def _close_database() -> None:
 
 
 # ── Redis ─────────────────────────────────────────────────────────────────────
+
 
 async def _init_redis() -> None:
     import asyncio  # noqa: PLC0415
@@ -101,6 +102,7 @@ async def _close_redis() -> None:
 
 
 # ── Celery ────────────────────────────────────────────────────────────────────
+
 
 def _check_celery_broker() -> None:
     """Verifica que el broker de Celery sea alcanzable. No-op si Celery está deshabilitado."""

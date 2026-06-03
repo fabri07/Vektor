@@ -11,7 +11,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.persistence.db.base import Base, UUIDPrimaryKeyMixin
 
-
 CHAT_SESSION_ENTRY_TYPES = (
     "DATA_LOADED",
     "DATA_REJECTED",

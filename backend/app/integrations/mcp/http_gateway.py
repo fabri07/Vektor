@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -47,16 +47,17 @@ TOOL_TIMEOUTS: dict[str, float] = {
 DEFAULT_TIMEOUT = 15.0
 
 # Códigos de error del MCP server que mapean a McpToolAuthError
-_AUTH_ERROR_CODES = frozenset({
-    "mcp_auth_required",
-    "not_connected",
-    "insufficient_scope",
-    "refresh_failed",
-})
+_AUTH_ERROR_CODES = frozenset(
+    {
+        "mcp_auth_required",
+        "not_connected",
+        "insufficient_scope",
+        "refresh_failed",
+    }
+)
 
 
 class HttpMcpGateway(McpToolGateway):
-
     def __init__(
         self,
         settings: Any | None = None,
@@ -154,9 +155,7 @@ class HttpMcpGateway(McpToolGateway):
                         code="tool_not_found",
                     )
                 if resp.status_code >= 500:
-                    raise McpToolUnavailableError(
-                        f"MCP server retornó {resp.status_code}"
-                    )
+                    raise McpToolUnavailableError(f"MCP server retornó {resp.status_code}")
 
                 try:
                     body = resp.json()
@@ -210,7 +209,7 @@ class HttpMcpGateway(McpToolGateway):
                         error=str(exc),
                         tenant_id=tenant_id,
                     )
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
         raise last_exc  # type: ignore[misc]
 
@@ -230,9 +229,7 @@ class HttpMcpGateway(McpToolGateway):
                 reason="mcp_auth_required",
             )
         if resp.status_code >= 500:
-            raise McpToolUnavailableError(
-                f"MCP server retornó {resp.status_code} en /tools/list"
-            )
+            raise McpToolUnavailableError(f"MCP server retornó {resp.status_code} en /tools/list")
         try:
             body = resp.json()
             return [t["name"] for t in body.get("tools", [])]
@@ -288,7 +285,7 @@ class HttpMcpGateway(McpToolGateway):
                     )
 
                 try:
-                    return resp.json()
+                    return cast("dict[str, Any]", resp.json())
                 except Exception as exc:
                     raise McpToolUnavailableError(
                         f"Respuesta inválida de /auth/start: {resp.text[:200]}"
@@ -303,7 +300,7 @@ class HttpMcpGateway(McpToolGateway):
                         error=str(exc),
                         tenant_id=tenant_id,
                     )
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
         raise last_exc  # type: ignore[misc]
 
@@ -329,7 +326,7 @@ class HttpMcpGateway(McpToolGateway):
                         error=str(exc),
                         tenant_id=tenant_id,
                     )
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
                 return {"connected": False, "scopes_granted": [], "last_error": "mcp_unavailable"}
 
@@ -341,7 +338,7 @@ class HttpMcpGateway(McpToolGateway):
                 }
 
             try:
-                return resp.json()
+                return cast("dict[str, Any]", resp.json())
             except Exception:
                 return {"connected": False, "scopes_granted": [], "last_error": "invalid_response"}
 

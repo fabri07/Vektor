@@ -41,7 +41,7 @@ def rebuild_weekly_history() -> None:
 
         async with factory() as session:
             result = await session.execute(
-                select(Tenant.id).where(Tenant.status.in_(["active", "trial"]))
+                select(Tenant.tenant_id).where(Tenant.status.in_(["active", "trial"]))
             )
             tenant_ids = result.scalars().all()
 
@@ -52,6 +52,7 @@ def rebuild_weekly_history() -> None:
                 from app.application.services.health_score_service import (
                     HealthScoreService,  # noqa: PLC0415
                 )
+
                 svc = HealthScoreService(session)
                 await svc.recalculate_for_tenant(
                     tenant_id=tid,

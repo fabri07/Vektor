@@ -8,7 +8,7 @@ save_supplier_draft guarda en tabla `supplier_drafts` — NO envía el correo.
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +28,7 @@ async def get_supplier_by_email(
     email: str,
     business_id: str,
     db: AsyncSession,
-) -> Optional[dict]:
+) -> dict[str, Any] | None:
     """Busca un proveedor por email dentro del negocio. Retorna None si no existe."""
     result = await db.execute(
         text(
@@ -56,7 +56,7 @@ async def save_supplier_draft(
     supplier_id: str,
     business_id: str,
     db: AsyncSession,
-) -> dict:
+) -> dict[str, Any]:
     """Guarda un borrador de respuesta a proveedor. NUNCA envía el correo."""
     draft_id = str(uuid.uuid4())
     await db.execute(

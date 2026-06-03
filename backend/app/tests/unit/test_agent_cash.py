@@ -8,6 +8,7 @@ Las tests del shim verifican el dispatch y la preservación de agent_name legacy
 import json
 import unittest.mock
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,7 +27,7 @@ def _make_request(message: str = "test") -> AgentRequest:
     )
 
 
-def _mock_llm_response(entities: dict) -> MagicMock:
+def _mock_llm_response(entities: dict[str, Any]) -> MagicMock:
     content_block = MagicMock()
     content_block.text = json.dumps(entities)
     response = MagicMock()
@@ -37,19 +38,27 @@ def _mock_llm_response(entities: dict) -> MagicMock:
 
 # ── Tests de AgentIncome (lógica de ingresos) ─────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_sale_extraction_with_amount():
     """'vendí 5000 pesos al contado' → amount=5000, status=requires_approval."""
     mock_entities = {
-        "amount": 5000, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": None, "confidence": "HIGH",
+        "amount": 5000,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": None,
+        "confidence": "HIGH",
     }
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
 
         from app.application.agents.income.agent import AgentIncome
+
         agent = AgentIncome()
         result = await agent.process(_make_request("vendí 5000 pesos al contado"))
 
@@ -61,15 +70,22 @@ async def test_sale_extraction_with_amount():
 async def test_unknown_payment_returns_clarification():
     """'vendí 5000' sin método de pago → requires_clarification."""
     mock_entities = {
-        "amount": 5000, "date": "hoy", "payment_status": "unknown",
-        "payment_method": None, "product_description": None, "confidence": "MEDIUM",
+        "amount": 5000,
+        "date": "hoy",
+        "payment_status": "unknown",
+        "payment_method": None,
+        "product_description": None,
+        "confidence": "MEDIUM",
     }
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
 
         from app.application.agents.income.agent import AgentIncome
+
         agent = AgentIncome()
         result = await agent.process(_make_request("vendí 5000"))
 
@@ -81,15 +97,22 @@ async def test_unknown_payment_returns_clarification():
 async def test_paid_sale_returns_approval():
     """'vendí 5000 al contado' → requires_approval, risk=MEDIUM."""
     mock_entities = {
-        "amount": 5000, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": None, "confidence": "HIGH",
+        "amount": 5000,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": None,
+        "confidence": "HIGH",
     }
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
 
         from app.application.agents.income.agent import AgentIncome
+
         agent = AgentIncome()
         result = await agent.process(_make_request("vendí 5000 al contado"))
 
@@ -103,15 +126,22 @@ async def test_paid_sale_returns_approval():
 async def test_sale_and_inflow_are_separate_actions():
     """REGISTER_SALE y REGISTER_CASH_INFLOW son ActionTypes distintos."""
     mock_entities = {
-        "amount": 5000, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": None, "confidence": "HIGH",
+        "amount": 5000,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": None,
+        "confidence": "HIGH",
     }
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
 
         from app.application.agents.income.agent import AgentIncome
+
         agent = AgentIncome()
         result = await agent.process(_make_request("vendí y cobré 5000"))
 
@@ -125,8 +155,13 @@ async def test_sale_with_quantity_looks_up_product_price():
     from app.application.agents.income.agent import AgentIncome
 
     mock_entities = {
-        "amount": None, "quantity": 3, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": "coca colas", "confidence": "HIGH",
+        "amount": None,
+        "quantity": 3,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca colas",
+        "confidence": "HIGH",
     }
     mock_product = MagicMock()
     mock_product.sale_price_ars = Decimal("500")
@@ -144,7 +179,9 @@ async def test_sale_with_quantity_looks_up_product_price():
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(side_effect=[none_result, none_result, none_result, found_result])
 
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
@@ -163,15 +200,23 @@ async def test_sale_with_quantity_looks_up_product_price():
 async def test_sale_with_float_quantity_parsed_safely():
     """quantity='3.0' del LLM → se parsea como 3, no lanza ValueError."""
     mock_entities = {
-        "amount": 1500, "quantity": "3.0", "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": "coca cola", "confidence": "HIGH",
+        "amount": 1500,
+        "quantity": "3.0",
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca cola",
+        "confidence": "HIGH",
     }
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
 
         from app.application.agents.income.agent import AgentIncome
+
         agent = AgentIncome()
         result = await agent.process(_make_request("vendí 3 coca colas a $1500"))
 
@@ -185,8 +230,13 @@ async def test_sale_product_not_in_catalog_asks_for_amount():
     from app.application.agents.income.agent import AgentIncome
 
     mock_entities = {
-        "amount": None, "quantity": 1, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": "producto inexistente", "confidence": "HIGH",
+        "amount": None,
+        "quantity": 1,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "producto inexistente",
+        "confidence": "HIGH",
     }
     mock_result = MagicMock()
     mock_result.scalar_one_or_none.return_value = None
@@ -195,7 +245,9 @@ async def test_sale_product_not_in_catalog_asks_for_amount():
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(return_value=mock_result)
 
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
@@ -213,13 +265,20 @@ async def test_sale_with_explicit_amount_skips_product_lookup():
     from app.application.agents.income.agent import AgentIncome
 
     mock_entities = {
-        "amount": 1500, "quantity": 3, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": "coca cola", "confidence": "HIGH",
+        "amount": 1500,
+        "quantity": 3,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca cola",
+        "confidence": "HIGH",
     }
     mock_db = MagicMock()
     mock_db.execute = AsyncMock()
 
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
@@ -234,12 +293,18 @@ async def test_sale_with_explicit_amount_skips_product_lookup():
 
 @pytest.mark.asyncio
 async def test_llm_invents_amount_but_message_has_no_monetary_signal_uses_catalog():
-    """LLM devuelve amount=30000 pero el mensaje no tiene monto → ignora 30000, busca en catálogo."""
+    """LLM devuelve amount=30000 pero el mensaje no tiene monto →
+    ignora 30000, busca en catálogo."""
     from app.application.agents.income.agent import AgentIncome
 
     mock_entities = {
-        "amount": 30000, "quantity": 3, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": "coca cola", "confidence": "HIGH",
+        "amount": 30000,
+        "quantity": 3,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca cola",
+        "confidence": "HIGH",
     }
     mock_product = MagicMock()
     mock_product.sale_price_ars = Decimal("500")
@@ -256,7 +321,9 @@ async def test_llm_invents_amount_but_message_has_no_monetary_signal_uses_catalo
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(side_effect=[none_result, none_result, found_result])
 
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
@@ -276,8 +343,13 @@ async def test_llm_invents_amount_but_message_only_has_year_uses_catalog():
     from app.application.agents.income.agent import AgentIncome
 
     mock_entities = {
-        "amount": 2026, "quantity": 3, "date": "2026-04-20", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": "coca cola", "confidence": "HIGH",
+        "amount": 2026,
+        "quantity": 3,
+        "date": "2026-04-20",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca cola",
+        "confidence": "HIGH",
     }
     mock_product = MagicMock()
     mock_product.sale_price_ars = Decimal("500")
@@ -294,7 +366,9 @@ async def test_llm_invents_amount_but_message_only_has_year_uses_catalog():
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(side_effect=[none_result, none_result, found_result])
 
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
@@ -314,11 +388,18 @@ async def test_product_ambiguous_returns_clarification_with_partial():
     from app.application.agents.income.agent import AgentIncome
 
     mock_entities = {
-        "amount": None, "quantity": 1, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": "coca", "confidence": "HIGH",
+        "amount": None,
+        "quantity": 1,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": "coca",
+        "confidence": "HIGH",
     }
-    prod_a = MagicMock(); prod_a.name = "Coca-Cola 600ml"
-    prod_b = MagicMock(); prod_b.name = "Coca-Cola 1.5L"
+    prod_a = MagicMock()
+    prod_a.name = "Coca-Cola 600ml"
+    prod_b = MagicMock()
+    prod_b.name = "Coca-Cola 1.5L"
 
     none_result = MagicMock()
     none_result.scalar_one_or_none.return_value = None
@@ -329,7 +410,9 @@ async def test_product_ambiguous_returns_clarification_with_partial():
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(side_effect=[none_result, none_result, multi_result])
 
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
@@ -348,10 +431,17 @@ async def test_missing_payment_method_returns_clarification_with_partial():
     from app.application.agents.income.agent import AgentIncome
 
     mock_entities = {
-        "amount": 500, "quantity": 1, "date": "hoy", "payment_status": "paid",
-        "payment_method": None, "product_description": "gaseosa", "confidence": "HIGH",
+        "amount": 500,
+        "quantity": 1,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": None,
+        "product_description": "gaseosa",
+        "confidence": "HIGH",
     }
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
@@ -367,6 +457,7 @@ async def test_missing_payment_method_returns_clarification_with_partial():
 
 
 # ── Tests de AgentExpense (lógica de egresos) ─────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_expense_message_is_auto_executed_candidate():
@@ -387,6 +478,7 @@ async def test_expense_message_is_auto_executed_candidate():
 
 # ── Tests del shim AgentCash ──────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_cash_shim_dispatches_expense_to_expense_agent():
     """AgentCash despacha mensajes de gasto a AgentExpense."""
@@ -404,15 +496,22 @@ async def test_cash_shim_dispatches_expense_to_expense_agent():
 async def test_cash_shim_dispatches_sale_to_income_agent():
     """AgentCash despacha mensajes de venta a AgentIncome."""
     mock_entities = {
-        "amount": 5000, "date": "hoy", "payment_status": "paid",
-        "payment_method": "efectivo", "product_description": None, "confidence": "HIGH",
+        "amount": 5000,
+        "date": "hoy",
+        "payment_status": "paid",
+        "payment_method": "efectivo",
+        "product_description": None,
+        "confidence": "HIGH",
     }
-    with unittest.mock.patch("app.application.agents.income.agent.anthropic.AsyncAnthropic") as mock_cls:
+    with unittest.mock.patch(
+        "app.application.agents.income.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
 
         from app.application.agents.cash.agent import AgentCash
+
         agent = AgentCash()
         result = await agent.process(_make_request("vendí 5000 al contado"))
 
@@ -425,6 +524,7 @@ async def test_sale_emits_event_after_confirm():
     """on_confirmed_sale → EventBus emite SALE_RECORDED."""
     with unittest.mock.patch("app.application.agents.cash.agent.EventBus.emit") as mock_emit:
         from app.application.agents.cash.agent import AgentCash
+
         agent = AgentCash()
         await agent.on_confirmed_sale("sale-001", "tenant-001")
 
@@ -449,7 +549,7 @@ async def test_google_sheet_import_returns_pending_action_without_llm():
             result.values = values
             return result
 
-    agent = AgentCash(gateway=FakeGateway())  # type: ignore[arg-type]
+    agent = AgentCash(gateway=FakeGateway())
     result = await agent.process(
         _make_request("Importa ventas desde https://docs.google.com/spreadsheets/d/sheet123/edit")
     )

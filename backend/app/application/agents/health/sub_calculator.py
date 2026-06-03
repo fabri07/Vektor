@@ -19,6 +19,7 @@ from app.state.business_state_service import BusinessState
 
 class ComponentScoresV2(BaseModel):
     """Score de cada dimensión (0–100, entero)."""
+
     cash_score: int
     stock_score: int
     supplier_score: int
@@ -36,9 +37,7 @@ def compute_scores(
 ) -> ComponentScoresV2:
     """Calcula los 5 subscores y el total v2 a partir del BusinessState."""
     config = load_vertical_heuristics(state.vertical_code)
-    result: HealthScoreResult = calculate_health_score(
-        state, benchmark=benchmark, config=config
-    )
+    result: HealthScoreResult = calculate_health_score(state, benchmark=benchmark, config=config)
     return ComponentScoresV2(
         cash_score=result.score_cash,
         stock_score=result.score_stock,

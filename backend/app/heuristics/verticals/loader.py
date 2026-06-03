@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from app.heuristics.verticals import (
     CashHealthBenchmark,
@@ -59,7 +60,7 @@ _DEFAULT_CONFIG = VerticalHeuristicConfig(
 )
 
 
-def _config_from_json(data: dict) -> VerticalHeuristicConfig:
+def _config_from_json(data: dict[str, Any]) -> VerticalHeuristicConfig:
     margin = data["margin"]
     cash = data["cash_health"]
     inventory = data["inventory"]

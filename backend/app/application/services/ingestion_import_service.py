@@ -159,20 +159,24 @@ async def insert_confirmed_data(
                 tx_date = today
 
             if wants_ventas:
+                assert venta_col is not None  # wants_ventas implica venta_col presente
                 amount = _parse_amount(row.get(venta_col))
                 if amount:
-                    session.add(SaleEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        quantity=1,
-                        transaction_date=tx_date,
-                        payment_method="cash",
-                        notes="Importado desde archivo",
-                        provenance="REAL",
-                    ))
+                    session.add(
+                        SaleEntry(
+                            tenant_id=tenant_id,
+                            amount=amount,
+                            quantity=1,
+                            transaction_date=tx_date,
+                            payment_method="cash",
+                            notes="Importado desde archivo",
+                            provenance="REAL",
+                        )
+                    )
                     counts["ventas"] += 1
 
             if wants_gastos:
+                assert gasto_col is not None  # wants_gastos implica gasto_col presente
                 amount = _parse_amount(row.get(gasto_col))
                 if amount:
                     desc_raw = row.get(nombre_col) if nombre_col else None
@@ -181,18 +185,21 @@ async def insert_confirmed_data(
                         if desc_raw and str(desc_raw).strip() not in {"None", "nan", ""}
                         else "Gasto importado"
                     )
-                    session.add(ExpenseEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        category="importado",
-                        transaction_date=tx_date,
-                        description=desc,
-                        payment_method="transfer",
-                        provenance="REAL",
-                    ))
+                    session.add(
+                        ExpenseEntry(
+                            tenant_id=tenant_id,
+                            amount=amount,
+                            category="importado",
+                            transaction_date=tx_date,
+                            description=desc,
+                            payment_method="transfer",
+                            provenance="REAL",
+                        )
+                    )
                     counts["gastos"] += 1
 
         if wants_productos:
+            assert nombre_col is not None  # wants_productos implica nombre_col presente
             for row in rows:
                 name = str(row.get(nombre_col, "")).strip()[:299]
                 if not name or name.lower() in {"none", "nan", ""}:
@@ -252,13 +259,18 @@ async def insert_confirmed_data(
                     if sku:
                         existing.sku = sku
                     if return_details:
-                        product_details.append({
-                            "action": "UPDATED",
-                            "product_id": str(existing.id),
-                            "name": name,
-                            "before": before_snap,
-                            "after": {"sale_price_ars": str(price or existing.sale_price_ars), "stock_units": stock_val or existing.stock_units},
-                        })
+                        product_details.append(
+                            {
+                                "action": "UPDATED",
+                                "product_id": str(existing.id),
+                                "name": name,
+                                "before": before_snap,
+                                "after": {
+                                    "sale_price_ars": str(price or existing.sale_price_ars),
+                                    "stock_units": stock_val or existing.stock_units,
+                                },
+                            }
+                        )
                 else:
                     new_product_id = uuid.uuid4()
                     new_product = Product(
@@ -275,13 +287,18 @@ async def insert_confirmed_data(
                     )
                     session.add(new_product)
                     if return_details:
-                        product_details.append({
-                            "action": "CREATED",
-                            "product_id": str(new_product_id),
-                            "name": name,
-                            "before": None,
-                            "after": {"sale_price_ars": str(price or Decimal("0")), "stock_units": stock_val},
-                        })
+                        product_details.append(
+                            {
+                                "action": "CREATED",
+                                "product_id": str(new_product_id),
+                                "name": name,
+                                "before": None,
+                                "after": {
+                                    "sale_price_ars": str(price or Decimal("0")),
+                                    "stock_units": stock_val,
+                                },
+                            }
+                        )
                 counts["productos"] += 1
 
     else:
@@ -290,15 +307,17 @@ async def insert_confirmed_data(
                 for m in entry.get("montos", []):
                     amount = _parse_amount(m)
                     if amount:
-                        session.add(SaleEntry(
-                            tenant_id=tenant_id,
-                            amount=amount,
-                            quantity=1,
-                            transaction_date=today,
-                            payment_method="cash",
-                            notes=str(entry.get("linea", ""))[:499],
-                            provenance="REAL",
-                        ))
+                        session.add(
+                            SaleEntry(
+                                tenant_id=tenant_id,
+                                amount=amount,
+                                quantity=1,
+                                transaction_date=today,
+                                payment_method="cash",
+                                notes=str(entry.get("linea", ""))[:499],
+                                provenance="REAL",
+                            )
+                        )
                         counts["ventas"] += 1
 
         if confirmed_fields.get("gastos"):
@@ -306,15 +325,17 @@ async def insert_confirmed_data(
                 for m in entry.get("montos", []):
                     amount = _parse_amount(m)
                     if amount:
-                        session.add(ExpenseEntry(
-                            tenant_id=tenant_id,
-                            amount=amount,
-                            category="importado",
-                            transaction_date=today,
-                            description=str(entry.get("linea", ""))[:499] or "Gasto importado",
-                            payment_method="transfer",
-                            provenance="REAL",
-                        ))
+                        session.add(
+                            ExpenseEntry(
+                                tenant_id=tenant_id,
+                                amount=amount,
+                                category="importado",
+                                transaction_date=today,
+                                description=str(entry.get("linea", ""))[:499] or "Gasto importado",
+                                payment_method="transfer",
+                                provenance="REAL",
+                            )
+                        )
                         counts["gastos"] += 1
 
     await session.flush()

@@ -8,20 +8,24 @@ Uses SQLite in-memory DB + FakeRedis, no real infrastructure.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.persistence.db.base import Base
 from app.persistence.models.audit import DecisionAuditLog
-from app.persistence.models.business import BusinessProfile, BusinessSnapshot, MomentumProfile
+from app.persistence.models.business import BusinessProfile, MomentumProfile
 from app.persistence.models.score import HealthScoreSnapshot
 from app.persistence.models.tenant import Tenant
-
 
 # ── Test DB setup ──────────────────────────────────────────────────────────────
 
@@ -29,7 +33,7 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
 @pytest_asyncio.fixture
-async def engine() -> AsyncEngine:
+async def engine() -> AsyncEngine:  # type: ignore[misc]  # test double / fixture
     eng = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -40,7 +44,7 @@ async def engine() -> AsyncEngine:
 
 
 @pytest_asyncio.fixture
-async def session(engine: AsyncEngine) -> AsyncSession:
+async def session(engine: AsyncEngine) -> AsyncSession:  # type: ignore[misc]  # test double / fixture
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         yield s
@@ -124,24 +128,23 @@ def _make_run(session: AsyncSession, redis: FakeRedis):
     Return a patched version of _run() that injects the test session and redis
     instead of creating real infrastructure.
     """
+    from sqlalchemy import select  # noqa: PLC0415
+
     import app.jobs.recalculate_health_score as job_module  # noqa: PLC0415
-    from app.state.business_state_service import compute_business_state  # noqa: PLC0415
     from app.heuristics.health_engine import calculate_health_score  # noqa: PLC0415
     from app.persistence.models.audit import DecisionAuditLog  # noqa: PLC0415
     from app.persistence.models.business import MomentumProfile  # noqa: PLC0415
     from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
-    from sqlalchemy import select  # noqa: PLC0415
+    from app.state.business_state_service import compute_business_state  # noqa: PLC0415
 
     async def _patched_run(tenant_id_str: str) -> None:
         import uuid as _uuid  # noqa: PLC0415
-        import time  # noqa: PLC0415
         from datetime import UTC, datetime  # noqa: PLC0415
         from decimal import Decimal  # noqa: PLC0415
 
         tenant_id = _uuid.UUID(tenant_id_str)
-        t0 = time.monotonic()
 
-        state = await compute_business_state(tenant_id, session, redis)
+        state = await compute_business_state(tenant_id, session, redis)  # type: ignore[arg-type]  # test double / fixture
         result = calculate_health_score(state)
         now = datetime.now(UTC)
 
@@ -233,9 +236,7 @@ async def test_job_persists_health_score_snapshot(
     await run(str(tenant.tenant_id))
 
     result = await session.execute(
-        select(HealthScoreSnapshot).where(
-            HealthScoreSnapshot.tenant_id == tenant.tenant_id
-        )
+        select(HealthScoreSnapshot).where(HealthScoreSnapshot.tenant_id == tenant.tenant_id)
     )
     snapshots = result.scalars().all()
 
@@ -247,7 +248,12 @@ async def test_job_persists_health_score_snapshot(
     assert snap.score_stock is not None
     assert snap.score_supplier is not None
     assert snap.heuristic_version == "v1"
-    assert snap.primary_risk_code in {"CASH_LOW", "MARGIN_LOW", "STOCK_CRITICAL", "SUPPLIER_DEPENDENCY"}
+    assert snap.primary_risk_code in {
+        "CASH_LOW",
+        "MARGIN_LOW",
+        "STOCK_CRITICAL",
+        "SUPPLIER_DEPENDENCY",
+    }
     assert 0 <= int(snap.total_score) <= 100
     assert snap.score_inputs_json is not None
     assert snap.score_inputs_json.get("vertical_code") == "kiosco"
@@ -327,9 +333,9 @@ async def test_job_updates_best_score_ever(
     await run(str(tenant.tenant_id))
 
     await session.refresh(momentum)
-    assert momentum.best_score_ever >= first_best - 10, (
-        "best_score_ever must be updated when new score exceeds previous best"
-    )
+    assert (
+        momentum.best_score_ever >= first_best - 10
+    ), "best_score_ever must be updated when new score exceeds previous best"
 
 
 # ── Test 4: concurrent jobs don't duplicate (Redis lock) ─────────────────────
@@ -355,9 +361,7 @@ async def test_concurrent_jobs_dont_duplicate(
     await redis.set(lock_key, "1")
 
     # Patch in the home module so the lazy import inside the function picks it up
-    with patch(
-        "app.jobs.recalculate_health_score.recalculate_health_score"
-    ) as mock_task:
+    with patch("app.jobs.recalculate_health_score.recalculate_health_score") as mock_task:
         mock_task.delay = MagicMock()
         dispatched = await maybe_trigger_recalculation(
             tenant_id=str(tenant.tenant_id),

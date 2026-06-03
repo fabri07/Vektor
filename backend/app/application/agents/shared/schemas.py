@@ -1,6 +1,6 @@
 import uuid
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +36,16 @@ class ActionType(StrEnum):
     UPLOAD_TO_DRIVE = "UPLOAD_TO_DRIVE"
     CREATE_GOOGLE_DOC = "CREATE_GOOGLE_DOC"
     APPEND_TO_SHEET = "APPEND_TO_SHEET"
+    # Sprint 17: acciones analíticas read-only (sin aprobación — no mutan datos)
+    ANALYZE_FILE = "ANALYZE_FILE"  # type detection, resumen ejecutivo, normalización
+    ANALYZE_PRICES = "ANALYZE_PRICES"  # márgenes, sugerencias, simulaciones, comparación listas
+    ANALYZE_STOCK_DATA = "ANALYZE_STOCK_DATA"  # quiebres, sobrestock, reposición, días de stock
+    ANALYZE_SALES_DATA = "ANALYZE_SALES_DATA"  # rentabilidad, productos estrella, ticket, clientes
+    ANALYZE_EXPENSE_DATA = (
+        "ANALYZE_EXPENSE_DATA"  # costos fijos/variables, anómalos, punto equilibrio
+    )
+    ANALYZE_SUPPLIER_DATA = "ANALYZE_SUPPLIER_DATA"  # ranking, dependencia, pedidos sugeridos
+    SIMULATE_SCENARIO = "SIMULATE_SCENARIO"  # escenarios financieros what-if
 
 
 class RiskLevel(StrEnum):
@@ -55,17 +65,17 @@ class AgentRequest(BaseModel):
     user_id: str
     business_id: str
     message: str
-    attachments: list = Field(default_factory=list)
+    attachments: list[Any] = Field(default_factory=list)
     conversation_id: str | None = None
     # context: outputs upstream del DAG multi-task. Llave reservada: "upstream_outputs"
     # → dict[task_id, result_dict]. Vacío en single-task y en el primer nivel.
-    context: dict = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
     # NOTA: NO hay agent_target — AgentCEO lo asigna internamente
 
 
 class LLMCall(BaseModel):
-    source: str        # "ceo" | "agent_cash" | "agent_health" | "orchestrator" | etc.
-    model: str         # "claude-sonnet-4-5" | "claude-haiku-4-5-20251001" | etc.
+    source: str  # "ceo" | "agent_cash" | "agent_health" | "orchestrator" | etc.
+    model: str  # "claude-sonnet-4-5" | "claude-haiku-4-5-20251001" | etc.
     input_tokens: int
     output_tokens: int
 
@@ -93,29 +103,30 @@ class AgentResponse(BaseModel):
     risk_level: RiskLevel
     requires_approval: bool = False
     confidence: Confidence = Confidence.HIGH
-    result: dict = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
     pending_action_id: str | None = None
     pending_action_ids: list[str] | None = None  # Stage 3: multi-task approval groups
-    approval_group_id: str | None = None         # Stage 3: vincula PendingActions de un plan
+    approval_group_id: str | None = None  # Stage 3: vincula PendingActions de un plan
     question: str | None = None  # usado cuando status=requires_clarification
-    message: str | None = None   # respuesta conversacional rica generada por ChatOrchestrator
+    message: str | None = None  # respuesta conversacional rica generada por ChatOrchestrator
     usage: UsageSummary | None = None  # tokens consumidos en este turno
 
 
 # ── Contratos de AgentTeamPlan (Stage 1) ──────────────────────────────────────
 
+
 class AgentTask(BaseModel):
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    agent: str                                              # "agent_income", "agent_stock", etc.
+    agent: str  # "agent_income", "agent_stock", etc.
     action_type: ActionType
-    entities: dict = Field(default_factory=dict)
-    depends_on: list[str] = Field(default_factory=list)    # task_ids previos (DAG, Stage 3)
-    approval_group: str | None = None                      # tasks con mismo group → aprueban juntas
+    entities: dict[str, Any] = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list)  # task_ids previos (DAG, Stage 3)
+    approval_group: str | None = None  # tasks con mismo group → aprueban juntas
 
 
 class AgentTeamPlan(BaseModel):
     plan_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     intent: str
     tasks: list[AgentTask] = Field(default_factory=list)
-    requires_synthesis: bool = False                       # True cuando CEO debe sintetizar multi-task
+    requires_synthesis: bool = False  # True cuando CEO debe sintetizar multi-task
     fallback_message: str | None = None

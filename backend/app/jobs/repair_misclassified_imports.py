@@ -60,7 +60,7 @@ async def _run(
     print(f"  Productos creados:        {result.products_created}")
     print(f"  Productos actualizados:   {result.products_updated}")
     if result.tenant_results:
-        print(f"\n  Detalle por tenant:")
+        print("\n  Detalle por tenant:")
         for tr in result.tenant_results:
             status = tr.get("status", "?")
             tid = tr.get("tenant_id", "?")[:8]
@@ -68,7 +68,10 @@ async def _run(
             if error:
                 print(f"    [{status}] tenant={tid}... error={error}")
             else:
-                print(f"    [{status}] tenant={tid}... sales={tr.get('sales_processed',0)} products={tr.get('product_rows',0)}")
+                print(
+                    f"    [{status}] tenant={tid}... sales={tr.get('sales_processed',0)} "
+                    f"products={tr.get('product_rows',0)}"
+                )
     if dry_run:
         print("\n  ⚠️  Modo dry-run: no se modificaron datos.")
         print(f"  Para aplicar: --apply --source-run-id {result.run_id}")
@@ -82,9 +85,13 @@ def main() -> None:
         description="Repara importaciones de productos mal clasificadas como ventas."
     )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--dry-run", action="store_true", default=True, help="Solo detectar, no modificar (default)")
+    group.add_argument(
+        "--dry-run", action="store_true", default=True, help="Solo detectar, no modificar (default)"
+    )
     group.add_argument("--apply", action="store_true", default=False, help="Aplicar la reparación")
-    parser.add_argument("--tenant-id", type=str, default=None, help="Limitar a un tenant específico")
+    parser.add_argument(
+        "--tenant-id", type=str, default=None, help="Limitar a un tenant específico"
+    )
     parser.add_argument("--source-run-id", type=str, default=None, help="UUID de un dry-run previo")
 
     args = parser.parse_args()

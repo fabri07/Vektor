@@ -47,9 +47,7 @@ def test_health_score_formula_discipline_only() -> None:
 
 def test_health_score_formula_all_100() -> None:
     """Todos 100 → score debe ser exactamente 100.0"""
-    c = ComponentScores(
-        cash_score=100, stock_score=100, supplier_score=100, discipline_score=100
-    )
+    c = ComponentScores(cash_score=100, stock_score=100, supplier_score=100, discipline_score=100)
     assert compute_health_score(c) == 100.0
 
 

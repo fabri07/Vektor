@@ -1,6 +1,7 @@
 """Insights and action suggestions endpoints."""
 
 from datetime import date, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -323,17 +324,14 @@ class CashBreakdownResponse(BaseModel):
 
 
 def _aggregate_to_series(
-    rows: list[dict], sorted_dates: list[str]
+    rows: list[dict[str, Any]], sorted_dates: list[str]
 ) -> dict[str, list[float]]:
     """Transforma filas (date, payment_method, total) en series alineadas con sorted_dates."""
     method_set = sorted({r["payment_method"] for r in rows})
     lookup: dict[tuple[str, str], float] = {
         (r["date"], r["payment_method"]): r["total"] for r in rows
     }
-    return {
-        method: [lookup.get((d, method), 0.0) for d in sorted_dates]
-        for method in method_set
-    }
+    return {method: [lookup.get((d, method), 0.0) for d in sorted_dates] for method in method_set}
 
 
 def _to_week_start(date_str: str) -> str:
@@ -342,16 +340,13 @@ def _to_week_start(date_str: str) -> str:
     return (d - timedelta(days=d.weekday())).isoformat()
 
 
-def _aggregate_weekly(rows: list[dict]) -> list[dict]:
+def _aggregate_weekly(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Consolida filas diarias en filas semanales (date = lunes de la semana)."""
     acc: dict[tuple[str, str], float] = {}
     for r in rows:
         key = (_to_week_start(r["date"]), r["payment_method"])
         acc[key] = acc.get(key, 0.0) + r["total"]
-    return [
-        {"date": k[0], "payment_method": k[1], "total": v}
-        for k, v in sorted(acc.items())
-    ]
+    return [{"date": k[0], "payment_method": k[1], "total": v} for k, v in sorted(acc.items())]
 
 
 @router.get(

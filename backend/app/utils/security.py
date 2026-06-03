@@ -20,6 +20,7 @@ _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__round
 
 # ── Password ──────────────────────────────────────────────────────────────────
 
+
 def hash_password(plain: str) -> str:
     return _pwd_context.hash(plain)
 
@@ -29,6 +30,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 # ── JWT ───────────────────────────────────────────────────────────────────────
+
 
 def _create_token(payload: dict[str, Any], expires_delta: timedelta) -> str:
     to_encode = payload.copy()

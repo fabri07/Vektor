@@ -211,7 +211,9 @@ async def create_rule_from_action(
     created = False
     if rule is None:
         active_count = await db.scalar(
-            select(func.count()).select_from(AgentAutomationRule).where(
+            select(func.count())
+            .select_from(AgentAutomationRule)
+            .where(
                 AgentAutomationRule.tenant_id == action.tenant_id,
                 AgentAutomationRule.user_id == action.user_id,
                 AgentAutomationRule.enabled.is_(True),

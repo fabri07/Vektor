@@ -14,9 +14,9 @@ from decimal import Decimal
 class DimensionThresholds:
     """Thresholds that map a raw metric to a 0–100 score."""
 
-    critical_below: Decimal   # score → CRITICAL if metric < this
-    warning_below: Decimal    # score → WARNING if metric < this
-    good_above: Decimal       # score → GOOD if metric >= this
+    critical_below: Decimal  # score → CRITICAL if metric < this
+    warning_below: Decimal  # score → WARNING if metric < this
+    good_above: Decimal  # score → GOOD if metric >= this
     excellent_above: Decimal  # score → EXCELLENT if metric >= this
 
 
@@ -42,9 +42,7 @@ class BaseHeuristicRuleSet(ABC):
     @abstractmethod
     def get_rules(self) -> VerticalRules: ...
 
-    def score_from_metric(
-        self, value: Decimal, thresholds: DimensionThresholds
-    ) -> Decimal:
+    def score_from_metric(self, value: Decimal, thresholds: DimensionThresholds) -> Decimal:
         """
         Map a raw financial metric to a 0–100 score using linear interpolation
         between the defined threshold points.

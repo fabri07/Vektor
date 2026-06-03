@@ -34,9 +34,7 @@ class HealthScoreRepository:
         since: datetime | None = None,
         limit: int = 30,
     ) -> list[HealthScoreSnapshot]:
-        q = select(HealthScoreSnapshot).where(
-            HealthScoreSnapshot.tenant_id == tenant_id
-        )
+        q = select(HealthScoreSnapshot).where(HealthScoreSnapshot.tenant_id == tenant_id)
         if since:
             q = q.where(HealthScoreSnapshot.snapshot_date >= since)
         q = q.order_by(HealthScoreSnapshot.snapshot_date.desc()).limit(limit)

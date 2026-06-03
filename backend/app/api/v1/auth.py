@@ -100,8 +100,7 @@ async def resend_verification(
     # Always return 200 regardless of whether the email exists (avoid enumeration)
     return MessageResponse(
         message=(
-            "Si el email está registrado y pendiente de verificación, "
-            "recibirás un nuevo link."
+            "Si el email está registrado y pendiente de verificación, " "recibirás un nuevo link."
         )
     )
 

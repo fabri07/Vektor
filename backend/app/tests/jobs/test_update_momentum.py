@@ -14,9 +14,14 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-from app.jobs.update_momentum import compute_trend_label, run_momentum_update, _current_week
+from app.jobs.update_momentum import _current_week, compute_trend_label, run_momentum_update
 from app.persistence.db.base import Base
 from app.persistence.models.business import BusinessProfile, MomentumProfile
 from app.persistence.models.notification import Notification
@@ -29,7 +34,7 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
 @pytest_asyncio.fixture
-async def engine() -> AsyncEngine:
+async def engine() -> AsyncEngine:  # type: ignore[misc]  # test double / fixture
     eng = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -40,13 +45,14 @@ async def engine() -> AsyncEngine:
 
 
 @pytest_asyncio.fixture
-async def session(engine: AsyncEngine) -> AsyncSession:
+async def session(engine: AsyncEngine) -> AsyncSession:  # type: ignore[misc]  # test double / fixture
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         yield s
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def _tenant() -> Tenant:
     return Tenant(
@@ -143,7 +149,7 @@ async def test_weekly_delta_calculated_correctly(session: AsyncSession) -> None:
     row = result.scalar_one()
 
     assert float(row.avg_score) == pytest.approx(70.0)
-    assert float(row.delta) == pytest.approx(10.0)
+    assert float(row.delta) == pytest.approx(10.0)  # type: ignore[arg-type]  # test double / fixture
 
 
 @pytest.mark.asyncio

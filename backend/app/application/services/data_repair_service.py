@@ -214,16 +214,18 @@ async def detect_chat_sale_quality_issues(
                     product = None
 
         if product is None:
-            candidates.append(ChatSaleRepairCandidate(
-                tenant_id=sale.tenant_id,
-                sale=sale,
-                quantity=quantity,
-                product_description=description,
-                product=None,
-                alternatives=alternatives,
-                confidence="MEDIUM",
-                reason="ambiguous_or_missing_product",
-            ))
+            candidates.append(
+                ChatSaleRepairCandidate(
+                    tenant_id=sale.tenant_id,
+                    sale=sale,
+                    quantity=quantity,
+                    product_description=description,
+                    product=None,
+                    alternatives=alternatives,
+                    confidence="MEDIUM",
+                    reason="ambiguous_or_missing_product",
+                )
+            )
             continue
 
         expected_amount = product.sale_price_ars * Decimal(str(quantity))
@@ -234,16 +236,18 @@ async def detect_chat_sale_quality_issues(
         )
         if not needs_update:
             continue
-        candidates.append(ChatSaleRepairCandidate(
-            tenant_id=sale.tenant_id,
-            sale=sale,
-            quantity=quantity,
-            product_description=description,
-            product=product,
-            alternatives=[],
-            confidence="HIGH",
-            reason="unique_catalog_match",
-        ))
+        candidates.append(
+            ChatSaleRepairCandidate(
+                tenant_id=sale.tenant_id,
+                sale=sale,
+                quantity=quantity,
+                product_description=description,
+                product=product,
+                alternatives=[],
+                confidence="HIGH",
+                reason="unique_catalog_match",
+            )
+        )
 
     logger.info(
         "data_repair.detect_chat_sales.completed",
@@ -376,6 +380,7 @@ def _extract_product_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
 def _extract_price_set(rows: list[dict[str, Any]]) -> set[Decimal]:
     """Extrae el conjunto de precios detectados en las filas para matching con SaleEntry."""
     from app.application.services.ingestion_import_service import _parse_amount  # noqa: PLC0415
+
     prices: set[Decimal] = set()
     if not rows:
         return prices
@@ -475,14 +480,16 @@ async def detect_misclassified_product_imports(
         # Confidencia: HIGH si hay precios que matchean; MEDIUM si solo nombre
         confidence = "HIGH" if price_set and suspicious_sales else "MEDIUM"
 
-        candidates.append(RepairCandidate(
-            tenant_id=uploaded_file.tenant_id,
-            uploaded_file=uploaded_file,
-            suspicious_sales=suspicious_sales,
-            product_rows=product_rows,
-            price_set=price_set,
-            confidence=confidence,
-        ))
+        candidates.append(
+            RepairCandidate(
+                tenant_id=uploaded_file.tenant_id,
+                uploaded_file=uploaded_file,
+                suspicious_sales=suspicious_sales,
+                product_rows=product_rows,
+                price_set=price_set,
+                confidence=confidence,
+            )
+        )
 
     logger.info(
         "data_repair.detect.completed",
@@ -538,6 +545,7 @@ def _filter_candidates_to_plan(
     Loguea si alguna venta planificada ya no aparece (puede haber sido anulada manualmente).
     """
     from app.observability.logger import get_logger as _get_logger  # noqa: PLC0415
+
     _log = _get_logger(__name__)
 
     filtered: list[RepairCandidate] = []
@@ -559,14 +567,16 @@ def _filter_candidates_to_plan(
                 skipped_count=len(missing),
             )
         if filtered_sales or candidate.product_rows:
-            filtered.append(RepairCandidate(
-                tenant_id=candidate.tenant_id,
-                uploaded_file=candidate.uploaded_file,
-                suspicious_sales=filtered_sales,
-                product_rows=candidate.product_rows,
-                price_set=candidate.price_set,
-                confidence=candidate.confidence,
-            ))
+            filtered.append(
+                RepairCandidate(
+                    tenant_id=candidate.tenant_id,
+                    uploaded_file=candidate.uploaded_file,
+                    suspicious_sales=filtered_sales,
+                    product_rows=candidate.product_rows,
+                    price_set=candidate.price_set,
+                    confidence=candidate.confidence,
+                )
+            )
     return filtered
 
 
@@ -622,8 +632,8 @@ async def apply_repair(
         if planned_sale_ids is not None:
             candidates = _filter_candidates_to_plan(candidates, planned_sale_ids)
             result.candidates_found = len(candidates)
-            result.sales_detected = (
-                sum(len(c.suspicious_sales) for c in candidates) + len(chat_candidates)
+            result.sales_detected = sum(len(c.suspicious_sales) for c in candidates) + len(
+                chat_candidates
             )
             result.products_detected = sum(len(c.product_rows) for c in candidates)
 
@@ -645,32 +655,36 @@ async def apply_repair(
                 file_id=str(candidate.uploaded_file.id),
                 error=str(exc),
             )
-            result.tenant_results.append({
-                "tenant_id": str(candidate.tenant_id),
-                "file_id": str(candidate.uploaded_file.id),
-                "status": "FAILED",
-                "error": str(exc),
-            })
+            result.tenant_results.append(
+                {
+                    "tenant_id": str(candidate.tenant_id),
+                    "file_id": str(candidate.uploaded_file.id),
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            )
 
-    for candidate in chat_candidates:
+    for chat_candidate in chat_candidates:
         savepoint = await db.begin_nested()
         try:
-            await _process_chat_sale_candidate(db, run, candidate, dry_run, result)
+            await _process_chat_sale_candidate(db, run, chat_candidate, dry_run, result)
             await savepoint.commit()
         except Exception as exc:
             await savepoint.rollback()
             logger.warning(
                 "data_repair.chat_sale.failed",
-                tenant_id=str(candidate.tenant_id),
-                sale_id=str(candidate.sale.id),
+                tenant_id=str(chat_candidate.tenant_id),
+                sale_id=str(chat_candidate.sale.id),
                 error=str(exc),
             )
-            result.tenant_results.append({
-                "tenant_id": str(candidate.tenant_id),
-                "sale_id": str(candidate.sale.id),
-                "status": "FAILED",
-                "error": str(exc),
-            })
+            result.tenant_results.append(
+                {
+                    "tenant_id": str(chat_candidate.tenant_id),
+                    "sale_id": str(chat_candidate.sale.id),
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            )
 
     run.sales_voided = result.sales_voided
     run.products_created = result.products_created
@@ -733,18 +747,22 @@ async def _process_candidate(
                 result.products_created += 1
             elif action == "UPDATED":
                 result.products_updated += 1
-            db.add(DataRepairItem(
-                id=uuid.uuid4(),
-                run_id=run.id,
-                tenant_id=tenant_id,
-                source_file_id=file_id,
-                product_id=uuid.UUID(detail["product_id"]) if detail.get("product_id") else None,
-                action="CREATE_PRODUCT" if action == "CREATED" else "UPDATE_PRODUCT",
-                before_json=detail.get("before"),
-                after_json=detail.get("after"),
-                confidence=candidate.confidence,
-                created_at=now,
-            ))
+            db.add(
+                DataRepairItem(
+                    id=uuid.uuid4(),
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    product_id=uuid.UUID(detail["product_id"])
+                    if detail.get("product_id")
+                    else None,
+                    action="CREATE_PRODUCT" if action == "CREATED" else "UPDATE_PRODUCT",
+                    before_json=detail.get("before"),
+                    after_json=detail.get("after"),
+                    confidence=candidate.confidence,
+                    created_at=now,
+                )
+            )
     else:
         # Dry-run: registrar items planificados; distingue CREATE vs UPDATE comprobando DB
         from sqlalchemy import func as _func  # noqa: PLC0415
@@ -769,9 +787,7 @@ async def _process_candidate(
             )
             existing_product = existing_res.scalar_one_or_none()
             if existing_product is None:
-                all_res = await db.execute(
-                    select(_Product).where(_Product.tenant_id == tenant_id)
-                )
+                all_res = await db.execute(select(_Product).where(_Product.tenant_id == tenant_id))
                 norm_input = _normalize_name(name)
                 for prod in all_res.scalars().all():
                     if _normalize_name(prod.name) == norm_input:
@@ -779,23 +795,25 @@ async def _process_candidate(
                         break
             planned_action = "UPDATE_PRODUCT" if existing_product else "CREATE_PRODUCT"
 
-            db.add(DataRepairItem(
-                id=uuid.uuid4(),
-                run_id=run.id,
-                tenant_id=tenant_id,
-                source_file_id=file_id,
-                product_id=existing_product.id if existing_product else None,
-                action=planned_action,
-                before_json={
-                    "sale_price_ars": (
-                        str(existing_product.sale_price_ars) if existing_product else None
-                    ),
-                    "planned": True,
-                },
-                after_json={"name": name, "planned": True},
-                confidence=candidate.confidence,
-                created_at=now,
-            ))
+            db.add(
+                DataRepairItem(
+                    id=uuid.uuid4(),
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    product_id=existing_product.id if existing_product else None,
+                    action=planned_action,
+                    before_json={
+                        "sale_price_ars": (
+                            str(existing_product.sale_price_ars) if existing_product else None
+                        ),
+                        "planned": True,
+                    },
+                    after_json={"name": name, "planned": True},
+                    confidence=candidate.confidence,
+                    created_at=now,
+                )
+            )
 
     # ── Anular SaleEntry sospechosas ─────────────────────────────────────────
     for sale in candidate.suspicious_sales:
@@ -805,30 +823,34 @@ async def _process_candidate(
             sale.voided_by_repair_run_id = run.id
             result.sales_voided += 1
 
-        db.add(DataRepairItem(
-            id=uuid.uuid4(),
-            run_id=run.id,
-            tenant_id=tenant_id,
-            source_file_id=file_id,
-            sale_entry_id=sale.id,
-            action="VOID_SALE",
-            before_json={
-                "amount": str(sale.amount),
-                "transaction_date": str(sale.transaction_date),
-                "notes": sale.notes,
-                "planned": dry_run,
-            },
-            confidence=candidate.confidence,
-            created_at=now,
-        ))
+        db.add(
+            DataRepairItem(
+                id=uuid.uuid4(),
+                run_id=run.id,
+                tenant_id=tenant_id,
+                source_file_id=file_id,
+                sale_entry_id=sale.id,
+                action="VOID_SALE",
+                before_json={
+                    "amount": str(sale.amount),
+                    "transaction_date": str(sale.transaction_date),
+                    "notes": sale.notes,
+                    "planned": dry_run,
+                },
+                confidence=candidate.confidence,
+                created_at=now,
+            )
+        )
 
-    result.tenant_results.append({
-        "tenant_id": str(tenant_id),
-        "file_id": str(file_id),
-        "status": "COMPLETED",
-        "sales_processed": len(candidate.suspicious_sales),
-        "product_rows": len(candidate.product_rows),
-    })
+    result.tenant_results.append(
+        {
+            "tenant_id": str(tenant_id),
+            "file_id": str(file_id),
+            "status": "COMPLETED",
+            "sales_processed": len(candidate.suspicious_sales),
+            "product_rows": len(candidate.product_rows),
+        }
+    )
 
     await db.flush()
 
@@ -845,30 +867,34 @@ async def _process_chat_sale_candidate(
     before = _sale_snapshot(sale)
 
     if candidate.product is None:
-        db.add(DataRepairItem(
-            id=uuid.uuid4(),
-            run_id=run.id,
-            tenant_id=candidate.tenant_id,
-            sale_entry_id=sale.id,
-            action="REVIEW_SALE",
-            before_json=before,
-            after_json={
-                "planned": True,
+        db.add(
+            DataRepairItem(
+                id=uuid.uuid4(),
+                run_id=run.id,
+                tenant_id=candidate.tenant_id,
+                sale_entry_id=sale.id,
+                action="REVIEW_SALE",
+                before_json=before,
+                after_json={
+                    "planned": True,
+                    "reason": candidate.reason,
+                    "quantity_detected": candidate.quantity,
+                    "product_description": candidate.product_description,
+                    "alternatives": candidate.alternatives,
+                },
+                confidence=candidate.confidence,
+                created_at=now,
+            )
+        )
+        result.tenant_results.append(
+            {
+                "tenant_id": str(candidate.tenant_id),
+                "sale_id": str(sale.id),
+                "status": "REVIEW_REQUIRED",
                 "reason": candidate.reason,
-                "quantity_detected": candidate.quantity,
-                "product_description": candidate.product_description,
                 "alternatives": candidate.alternatives,
-            },
-            confidence=candidate.confidence,
-            created_at=now,
-        ))
-        result.tenant_results.append({
-            "tenant_id": str(candidate.tenant_id),
-            "sale_id": str(sale.id),
-            "status": "REVIEW_REQUIRED",
-            "reason": candidate.reason,
-            "alternatives": candidate.alternatives,
-        })
+            }
+        )
         await db.flush()
         return
 
@@ -888,37 +914,43 @@ async def _process_chat_sale_candidate(
         sale.product_id = candidate.product.id
         result.products_skipped += 0
 
-    db.add(DataRepairItem(
-        id=uuid.uuid4(),
-        run_id=run.id,
-        tenant_id=candidate.tenant_id,
-        sale_entry_id=sale.id,
-        product_id=candidate.product.id,
-        action="UPDATE_SALE",
-        before_json=before,
-        after_json=after,
-        confidence=candidate.confidence,
-        created_at=now,
-    ))
+    db.add(
+        DataRepairItem(
+            id=uuid.uuid4(),
+            run_id=run.id,
+            tenant_id=candidate.tenant_id,
+            sale_entry_id=sale.id,
+            product_id=candidate.product.id,
+            action="UPDATE_SALE",
+            before_json=before,
+            after_json=after,
+            confidence=candidate.confidence,
+            created_at=now,
+        )
+    )
 
     if not dry_run:
         result.sales_voided += 0
-        result.tenant_results.append({
-            "tenant_id": str(candidate.tenant_id),
-            "sale_id": str(sale.id),
-            "status": "CORRECTED",
-            "amount": str(expected_amount),
-            "quantity": candidate.quantity,
-            "product_id": str(candidate.product.id),
-        })
+        result.tenant_results.append(
+            {
+                "tenant_id": str(candidate.tenant_id),
+                "sale_id": str(sale.id),
+                "status": "CORRECTED",
+                "amount": str(expected_amount),
+                "quantity": candidate.quantity,
+                "product_id": str(candidate.product.id),
+            }
+        )
     else:
-        result.tenant_results.append({
-            "tenant_id": str(candidate.tenant_id),
-            "sale_id": str(sale.id),
-            "status": "PLANNED_CORRECTION",
-            "amount": str(expected_amount),
-            "quantity": candidate.quantity,
-            "product_id": str(candidate.product.id),
-        })
+        result.tenant_results.append(
+            {
+                "tenant_id": str(candidate.tenant_id),
+                "sale_id": str(sale.id),
+                "status": "PLANNED_CORRECTION",
+                "amount": str(expected_amount),
+                "quantity": candidate.quantity,
+                "product_id": str(candidate.product.id),
+            }
+        )
 
     await db.flush()

@@ -92,7 +92,7 @@ async def test_compute_business_state_from_onboarding_only(
     state = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=redis,
+        redis=redis,  # type: ignore[arg-type]  # test double / fixture
     )
 
     assert state.tenant_id == sample_tenant.tenant_id
@@ -102,7 +102,7 @@ async def test_compute_business_state_from_onboarding_only(
     assert state.monthly_fixed_expenses_est == Decimal("20000.00")
     assert state.cash_on_hand_est == Decimal("15000.00")
     assert state.supplier_count == 2
-    assert state.product_count == 3          # estimate, < 5
+    assert state.product_count == 3  # estimate, < 5
 
     # completeness: 25+20+15+20+0+10 = 90
     assert state.data_completeness_score == 90.0
@@ -145,7 +145,7 @@ async def test_completeness_increases_with_products(
     state = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=redis,
+        redis=redis,  # type: ignore[arg-type]  # test double / fixture
     )
 
     # product_count now = 5 (real), so +10 pts
@@ -173,12 +173,12 @@ async def test_cache_is_used_when_no_new_inputs(
     state1 = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=redis,
+        redis=redis,  # type: ignore[arg-type]  # test double / fixture
     )
     state2 = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=redis,
+        redis=redis,  # type: ignore[arg-type]  # test double / fixture
     )
 
     # Same snapshot — no recomputation
@@ -205,7 +205,7 @@ async def test_cache_invalidates_when_new_sale_added(
     state1 = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=redis,
+        redis=redis,  # type: ignore[arg-type]  # test double / fixture
     )
 
     # Insert a new sale
@@ -223,7 +223,7 @@ async def test_cache_invalidates_when_new_sale_added(
     state2 = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=redis,
+        redis=redis,  # type: ignore[arg-type]  # test double / fixture
     )
 
     assert state1.snapshot_id != state2.snapshot_id
@@ -253,7 +253,7 @@ async def test_blend_sales_few_transactions(
     state = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=FakeRedis(),
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
     )
 
     # 5 sales over 5 days projects to 30000 monthly, then blends 70/30.
@@ -282,7 +282,7 @@ async def test_blend_sales_many_transactions(
     state = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=FakeRedis(),
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
     )
 
     assert state.monthly_sales_est == Decimal("6000.00")
@@ -319,7 +319,7 @@ async def test_product_summaries_include_30_day_rotation_units(
     state = await compute_business_state(
         tenant_id=sample_tenant.tenant_id,
         session=db_session,
-        redis=FakeRedis(),
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
     )
 
     assert len(state.products) == 1

@@ -39,7 +39,7 @@ class ForecastPoint:
 @dataclass
 class ForecastResult:
     tier: int
-    confidence: str          # HIGH | MEDIUM | LOW
+    confidence: str  # HIGH | MEDIUM | LOW
     data_days: int
     horizon_days: int
     points: list[ForecastPoint]
@@ -106,9 +106,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
     )
     expense_rows = (await db.execute(expense_q)).all()
 
-    daily_income: dict[date, float] = {
-        r.transaction_date: float(r.total or 0) for r in income_rows
-    }
+    daily_income: dict[date, float] = {r.transaction_date: float(r.total or 0) for r in income_rows}
     daily_expense: dict[date, float] = {
         r.transaction_date: float(r.total or 0) for r in expense_rows
     }
@@ -117,7 +115,11 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
 
     if not all_dates:
         return ForecastResult(
-            tier=0, confidence="LOW", data_days=0, horizon_days=0, points=[],
+            tier=0,
+            confidence="LOW",
+            data_days=0,
+            horizon_days=0,
+            points=[],
             message="Sin datos suficientes para proyectar.",
         )
 
@@ -127,7 +129,11 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
 
     if data_days < 14:
         return ForecastResult(
-            tier=0, confidence="LOW", data_days=data_days, horizon_days=0, points=[],
+            tier=0,
+            confidence="LOW",
+            data_days=data_days,
+            horizon_days=0,
+            points=[],
             message=f"Necesitás al menos 14 días de datos para proyectar (tenés {data_days}).",
         )
 
@@ -181,12 +187,14 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
         wd = future.weekday()
         trend_adj = trend_daily * i if tier == 3 else 0.0
         proj_income = max(0.0, avg_income * wd_mult[wd] + trend_adj)
-        points.append(ForecastPoint(
-            date=future.isoformat(),
-            income=round(proj_income),
-            expense=round(avg_expense),
-            net=round(proj_income - avg_expense),
-        ))
+        points.append(
+            ForecastPoint(
+                date=future.isoformat(),
+                income=round(proj_income),
+                expense=round(avg_expense),
+                net=round(proj_income - avg_expense),
+            )
+        )
 
     return ForecastResult(
         tier=tier,

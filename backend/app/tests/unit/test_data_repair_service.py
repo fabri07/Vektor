@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,6 +20,7 @@ from app.application.services.data_repair_service import (
 
 # ── normalize_product_name ────────────────────────────────────────────────────
 
+
 def test_normalize_removes_hyphens_and_extra_spaces():
     assert normalize_product_name("Coca-Cola  600ml") == "coca cola 600ml"
 
@@ -32,6 +34,7 @@ def test_normalize_underscores_to_space():
 
 
 # ── _re_evaluate_summary ─────────────────────────────────────────────────────
+
 
 def test_re_evaluate_product_csv_returns_stock():
     """Un summary de CSV de productos (nombre + precio) → stock con nueva lógica."""
@@ -67,6 +70,7 @@ def test_re_evaluate_empty_summary_returns_none():
 
 # ── _extract_product_rows ─────────────────────────────────────────────────────
 
+
 def test_extract_product_rows_from_stock_detectado():
     summary = {
         "stock_detectado": [{"nombre": "Coca-Cola", "precio": "500"}],
@@ -86,6 +90,7 @@ def test_extract_product_rows_fallback_to_preview():
 
 
 # ── _extract_price_set ────────────────────────────────────────────────────────
+
 
 def test_extract_price_set_from_precio_col():
     rows = [{"nombre": "Coca-Cola", "precio": "500"}, {"nombre": "Agua", "precio": "200"}]
@@ -145,10 +150,11 @@ async def test_detect_chat_sale_quality_issue_unique_product():
 
 # ── apply_repair dry_run ──────────────────────────────────────────────────────
 
-def _mock_db_session(execute_side_effects: list) -> MagicMock:
+
+def _mock_db_session(execute_side_effects: list[Any]) -> MagicMock:
     """Crea un mock de AsyncSession con begin_nested() correctamente mockeado."""
     mock_db = MagicMock()
-    items_added: list = []
+    items_added: list[Any] = []
     mock_db.add = lambda item: items_added.append(item)
     mock_db.flush = AsyncMock()
     mock_db.get = AsyncMock(return_value=None)
@@ -256,20 +262,22 @@ async def test_apply_voids_sales_and_creates_run():
 
     with patch(
         "app.application.services.data_repair_service.insert_confirmed_data",
-        AsyncMock(return_value={
-            "ventas": 0,
-            "gastos": 0,
-            "productos": 1,
-            "product_details": [
-                {
-                    "action": "CREATED",
-                    "product_id": str(uuid.uuid4()),
-                    "name": "Coca-Cola",
-                    "before": None,
-                    "after": {"sale_price_ars": "500"},
-                }
-            ],
-        }),
+        AsyncMock(
+            return_value={
+                "ventas": 0,
+                "gastos": 0,
+                "productos": 1,
+                "product_details": [
+                    {
+                        "action": "CREATED",
+                        "product_id": str(uuid.uuid4()),
+                        "name": "Coca-Cola",
+                        "before": None,
+                        "after": {"sale_price_ars": "500"},
+                    }
+                ],
+            }
+        ),
     ):
         mock_db = _mock_db_session([files_result, sales_result])
         result = await apply_repair(mock_db, tenant_id=tenant_id, dry_run=False)

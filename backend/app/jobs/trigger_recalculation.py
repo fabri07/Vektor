@@ -13,6 +13,7 @@ Usage (from FastAPI endpoint or other async context)
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from app.observability.logger import get_logger
@@ -25,7 +26,7 @@ _LOCK_KEY_PREFIX = "score_lock:"
 
 async def maybe_trigger_recalculation(
     tenant_id: str | UUID,
-    redis: object,
+    redis: Any,
     snapshot_id: str | None = None,
 ) -> bool:
     """
@@ -48,7 +49,7 @@ async def maybe_trigger_recalculation(
     tid = str(tenant_id)
     lock_key = f"{_LOCK_KEY_PREFIX}{tid}"
 
-    acquired = await redis.set(lock_key, "1", nx=True, ex=_LOCK_TTL_SECONDS)  # type: ignore[union-attr]
+    acquired = await redis.set(lock_key, "1", nx=True, ex=_LOCK_TTL_SECONDS)
     if not acquired:
         logger.debug(
             "trigger_recalculation.locked",

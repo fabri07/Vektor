@@ -13,9 +13,12 @@ import csv
 import io
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import filetype
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 from app.observability.logger import get_logger
 
@@ -78,7 +81,8 @@ GASTO_COLS = {"costo", "gasto", "gastos", "egreso", "compra", "deuda", "pago", "
 # Señales fuertes: inequívocamente un catálogo/inventario — no aparecen en transacciones
 CATALOGO_COLS = {"sku", "codigo", "inventario", "articulo", "item"}
 
-# Señales débiles: pueden aparecer en ventas/gastos también (descripcion de venta, nombre del proveedor)
+# Señales débiles: pueden aparecer en ventas/gastos también (descripcion de venta, nombre del
+# proveedor)
 NOMBRE_COLS = {"producto", "nombre"}
 
 # PRODUCTO_COLS = unión para retrocompatibilidad con código que ya lo usa
@@ -103,7 +107,7 @@ def normalize_numeric(
     *,
     required: bool = False,
     field_label: str = "campo",
-) -> "Decimal | None":
+) -> Decimal | None:
     """Normaliza un valor numérico de import o API.
 
     - None / string vacío / strings nulos → None (o 422 si required)
@@ -138,9 +142,11 @@ def normalize_numeric(
 
     try:
         return Decimal(str_val)
-    except InvalidOperation:
+    except InvalidOperation as exc:
         if required:
-            raise ValueError(f"{field_label} tiene un formato numérico inválido: {value!r}")
+            raise ValueError(
+                f"{field_label} tiene un formato numérico inválido: {value!r}"
+            ) from exc
         return None
 
 
@@ -148,25 +154,29 @@ def normalize_categorical(
     value: object,
     *,
     required: bool = False,
-    default: "str | None" = None,
+    default: str | None = None,
     field_label: str = "campo",
-) -> "str | None":
+) -> str | None:
     """Normaliza un valor categórico de import o API."""
     if value is None:
-        return default if not required else (_ for _ in ()).throw(
-            ValueError(f"{field_label} es obligatorio.")
+        return (
+            default
+            if not required
+            else (_ for _ in ()).throw(ValueError(f"{field_label} es obligatorio."))
         )
     str_val = str(value).strip()
     if str_val.lower() in _NULL_STRINGS:
         if required:
             raise ValueError(f"{field_label} es obligatorio.")
         return default
-    return str_val or (default if not required else (_ for _ in ()).throw(
-        ValueError(f"{field_label} no puede estar vacío.")
-    ))
+    return str_val or (
+        default
+        if not required
+        else (_ for _ in ()).throw(ValueError(f"{field_label} no puede estar vacío."))
+    )
 
 
-def compute_column_null_stats(rows: list[dict]) -> dict[str, float]:
+def compute_column_null_stats(rows: list[dict[str, Any]]) -> dict[str, float]:
     """Calcula el porcentaje de valores nulos por columna en una lista de dicts.
 
     Retorna {col: null_pct} para cada columna presente en al menos una fila.
@@ -181,7 +191,8 @@ def compute_column_null_stats(rows: list[dict]) -> dict[str, float]:
     total = len(rows)
     for col in all_keys:
         null_count = sum(
-            1 for row in rows
+            1
+            for row in rows
             if row.get(col) is None or str(row.get(col, "")).strip().lower() in _NULL_STRINGS
         )
         stats[col] = null_count / total
@@ -191,7 +202,7 @@ def compute_column_null_stats(rows: list[dict]) -> dict[str, float]:
 def flag_columns_at_risk(
     null_stats: dict[str, float],
     threshold: float = NULL_COLUMN_WARN_THRESHOLD,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Retorna lista de columnas que superan el umbral de nulls, con recomendación."""
     return [
         {"column": col, "null_pct": round(pct, 4), "recommendation": "drop"}
@@ -200,7 +211,7 @@ def flag_columns_at_risk(
     ]
 
 
-def impute_column(values: list, field_type: str) -> list:
+def impute_column(values: list[Any], field_type: str) -> list[Any]:
     """Imputa valores nulos en una columna según su tipo.
 
     - field_type='quantity': nulos → 0
@@ -229,13 +240,13 @@ def impute_column(values: list, field_type: str) -> list:
     return [None if _is_null(v) else v for v in values]
 
 
-def impute_column_median(values: list) -> "Decimal | None":
+def impute_column_median(values: list[Any]) -> Decimal | None:
     """Calcula la mediana de una lista de valores numéricos.
     Usa mediana (resistente a outliers de precios) en vez de media.
     Retorna None si no hay valores válidos.
     """
-    from decimal import Decimal  # noqa: PLC0415
     import math  # noqa: PLC0415
+    from decimal import Decimal  # noqa: PLC0415
 
     nums: list[Decimal] = []
     for v in values:
@@ -312,9 +323,7 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     has_nombre = any(any(k in col for k in NOMBRE_COLS) for col in normalized)
 
     # Señales ambiguas: "precio" / "total" solos pueden ser precio de catálogo
-    has_precio_ambiguo = any(
-        col in ("precio", "total", "price", "valor") for col in normalized
-    )
+    has_precio_ambiguo = any(col in ("precio", "total", "price", "valor") for col in normalized)
 
     inferred_type = infer_spreadsheet_type(
         has_fecha=has_fecha,
@@ -421,9 +430,9 @@ def classify_line(line: str) -> str:
 
 def extract_amounts_from_text(text: str) -> dict[str, Any]:
     lines = text.splitlines()
-    ventas: list[dict[str, str]] = []
-    gastos: list[dict[str, str]] = []
-    stock: list[dict[str, str]] = []
+    ventas: list[dict[str, Any]] = []
+    gastos: list[dict[str, Any]] = []
+    stock: list[dict[str, Any]] = []
 
     for line in lines:
         matches = AMOUNT_RE.findall(line)
@@ -530,7 +539,7 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
     workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     try:
         worksheet = workbook.active
-        all_rows = list(worksheet.iter_rows(values_only=True))  # type: ignore[union-attr]
+        all_rows = list(worksheet.iter_rows(values_only=True))
         if not all_rows:
             summary.update(
                 {

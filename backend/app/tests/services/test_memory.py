@@ -13,7 +13,6 @@ from app.application.services.business_memory_service import BusinessMemoryServi
 from app.application.services.conversation_service import ConversationService
 from app.persistence.models.memory import BusinessMemory
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -123,7 +122,9 @@ async def test_conversation_summarized_after_max_turns(
 
     svc = ConversationService(redis_client=mock_redis, db_session=mock_db)
 
-    with patch.object(svc, "_summarize_turns", AsyncMock(return_value="Resumen del chat")) as mock_sum:
+    with patch.object(
+        svc, "_summarize_turns", AsyncMock(return_value="Resumen del chat")
+    ) as mock_sum:
         result = await svc.add_turn_with_summary(
             conversation_id=str(uuid.uuid4()),
             role="user",

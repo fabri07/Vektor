@@ -44,8 +44,7 @@ async def verify_rls() -> None:
     conn = await asyncpg.connect(database_url)
     try:
         rows = await conn.fetch(
-            "SELECT tablename FROM pg_tables "
-            "WHERE rowsecurity = true AND schemaname = 'public'"
+            "SELECT tablename FROM pg_tables " "WHERE rowsecurity = true AND schemaname = 'public'"
         )
         protected = {r["tablename"] for r in rows}
         missing = [t for t in REQUIRED_TABLES if t not in protected]

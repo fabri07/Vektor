@@ -28,6 +28,4 @@ class CreateUserRequest(BaseModel):
 
 class UpdateUserRequest(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=200)
-    role_code: str | None = Field(
-        default=None, pattern=r"^(OWNER|ADMIN|ANALYST|VIEWER)$"
-    )
+    role_code: str | None = Field(default=None, pattern=r"^(OWNER|ADMIN|ANALYST|VIEWER)$")

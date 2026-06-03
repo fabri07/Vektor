@@ -26,7 +26,17 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["app.tests.*"]
+# Tests exentos de tipado estricto: las firmas usan fixtures sin tipar y los
+# cuerpos usan MagicMock/AsyncMock (tipo Any) extensamente. Relajar las 3 flags
+# hermanas mantiene los tests verdes sin ruido de type:ignore en cada mock.
 disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# Migraciones Alembic: archivos autogenerados, no se tipan.
+module = ["app.persistence.migrations.*"]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

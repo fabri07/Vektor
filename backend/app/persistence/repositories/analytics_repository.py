@@ -46,18 +46,10 @@ class AnalyticsRepository:
             return None
 
         q = select(
-            func.percentile_cont(0.10)
-            .within_group(AnalyticsEvent.margin_ratio)
-            .label("p10"),
-            func.percentile_cont(0.25)
-            .within_group(AnalyticsEvent.margin_ratio)
-            .label("p25"),
-            func.percentile_cont(0.50)
-            .within_group(AnalyticsEvent.margin_ratio)
-            .label("p50"),
-            func.percentile_cont(0.75)
-            .within_group(AnalyticsEvent.margin_ratio)
-            .label("p75"),
+            func.percentile_cont(0.10).within_group(AnalyticsEvent.margin_ratio).label("p10"),
+            func.percentile_cont(0.25).within_group(AnalyticsEvent.margin_ratio).label("p25"),
+            func.percentile_cont(0.50).within_group(AnalyticsEvent.margin_ratio).label("p50"),
+            func.percentile_cont(0.75).within_group(AnalyticsEvent.margin_ratio).label("p75"),
         ).where(
             AnalyticsEvent.vertical_code == vertical_code,
             AnalyticsEvent.created_at >= cutoff,

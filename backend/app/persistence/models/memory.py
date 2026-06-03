@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.persistence.db.base import PGJSONB, Base, TimestampMixin
+from app.persistence.db.base import PGJSONB, Base
 
 
 class OperationFingerprint(Base):
@@ -19,9 +19,7 @@ class OperationFingerprint(Base):
 
     __tablename__ = "operation_fingerprints"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
@@ -37,9 +35,7 @@ class OperationFingerprint(Base):
     )
 
     __table_args__ = (
-        sa.UniqueConstraint(
-            "tenant_id", "fingerprint", name="uq_operation_fingerprints_tenant_fp"
-        ),
+        sa.UniqueConstraint("tenant_id", "fingerprint", name="uq_operation_fingerprints_tenant_fp"),
     )
 
 
@@ -53,9 +49,7 @@ class BusinessMemory(Base):
         sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    last_sale_amount: Mapped[Decimal | None] = mapped_column(
-        sa.Numeric(12, 2), nullable=True
-    )
+    last_sale_amount: Mapped[Decimal | None] = mapped_column(sa.Numeric(12, 2), nullable=True)
     last_sale_at: Mapped[datetime | None] = mapped_column(
         sa.TIMESTAMP(timezone=True), nullable=True
     )
@@ -71,12 +65,8 @@ class BusinessMemory(Base):
     expenses_today: Mapped[Decimal] = mapped_column(
         sa.Numeric(12, 2), nullable=False, default=Decimal("0")
     )
-    products_in_stockout: Mapped[int] = mapped_column(
-        sa.Integer(), nullable=False, default=0
-    )
-    recent_actions: Mapped[list[Any]] = mapped_column(
-        PGJSONB, nullable=True, default=list
-    )
+    products_in_stockout: Mapped[int] = mapped_column(sa.Integer(), nullable=False, default=0)
+    recent_actions: Mapped[list[Any]] = mapped_column(PGJSONB, nullable=True, default=list)
     llm_context_summary: Mapped[str | None] = mapped_column(sa.Text(), nullable=True)
     llm_context_updated_at: Mapped[datetime | None] = mapped_column(
         sa.TIMESTAMP(timezone=True), nullable=True
@@ -94,9 +84,7 @@ class AgentMemory(Base):
 
     __tablename__ = "agent_memory"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
@@ -104,7 +92,7 @@ class AgentMemory(Base):
         index=True,
     )
     key: Mapped[str] = mapped_column(sa.String(120), nullable=False)
-    value: Mapped[dict] = mapped_column(PGJSONB, nullable=False, default=dict)
+    value: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False, default=dict)
     occurrence_count: Mapped[int] = mapped_column(sa.Integer(), nullable=False, default=1)
     confidence: Mapped[float] = mapped_column(sa.Float(), nullable=False, default=1.0)
     last_seen_at: Mapped[datetime] = mapped_column(
@@ -118,6 +106,4 @@ class AgentMemory(Base):
         nullable=False,
     )
 
-    __table_args__ = (
-        sa.UniqueConstraint("tenant_id", "key", name="uq_agent_memory_tenant_key"),
-    )
+    __table_args__ = (sa.UniqueConstraint("tenant_id", "key", name="uq_agent_memory_tenant_key"),)

@@ -9,7 +9,7 @@ Stage 5d: eliminar junto con el alias en registry.py.
 
 import re
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 import anthropic  # noqa: F401  # compatibility: legacy tests patch cash.agent.anthropic
 from redis.asyncio import Redis
@@ -17,7 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.event_bus import EventBus
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse, Confidence, RiskLevel
+from app.application.agents.shared.schemas import (
+    ActionType,
+    AgentRequest,
+    AgentResponse,
+    Confidence,
+    RiskLevel,
+)
 
 
 class AgentCash(BaseAgent):
@@ -25,8 +31,8 @@ class AgentCash(BaseAgent):
 
     def __init__(
         self,
-        db: Optional[AsyncSession] = None,
-        redis: Optional[Redis] = None,
+        db: AsyncSession | None = None,
+        redis: Redis | None = None,
         gateway: Any | None = None,
     ) -> None:
         self._db = db
@@ -48,9 +54,23 @@ class AgentCash(BaseAgent):
     def _looks_like_expense(self, message: str) -> bool:
         message_lower = message.lower()
         expense_keywords = (
-            "pagué", "pague", "gasto", "egreso", "alquiler", "servicio",
-            "luz", "gas", "internet", "agua", "sueldo", "mercadería",
-            "mercaderia", "stock", "publicidad", "marketing", "proveedor",
+            "pagué",
+            "pague",
+            "gasto",
+            "egreso",
+            "alquiler",
+            "servicio",
+            "luz",
+            "gas",
+            "internet",
+            "agua",
+            "sueldo",
+            "mercadería",
+            "mercaderia",
+            "stock",
+            "publicidad",
+            "marketing",
+            "proveedor",
         )
         has_amount = self._extract_amount(message) is not None
         return has_amount and any(
@@ -92,7 +112,7 @@ class AgentCash(BaseAgent):
 
     # ── Shim: process delega a Income o Expense ───────────────────────────────
 
-    async def process(  # type: ignore[override]
+    async def process(
         self,
         request: AgentRequest,
         task: Any | None = None,
@@ -111,9 +131,13 @@ class AgentCash(BaseAgent):
 
         if is_expense:
             from app.application.agents.expense.agent import AgentExpense  # noqa: PLC0415
-            delegate: BaseAgent = AgentExpense(db=self._db, redis=self._redis, gateway=self._gateway)
+
+            delegate: BaseAgent = AgentExpense(
+                db=self._db, redis=self._redis, gateway=self._gateway
+            )
         else:
             from app.application.agents.income.agent import AgentIncome  # noqa: PLC0415
+
             delegate = AgentIncome(db=self._db, redis=self._redis, gateway=self._gateway)
 
         response = await delegate.process(request, task=task)

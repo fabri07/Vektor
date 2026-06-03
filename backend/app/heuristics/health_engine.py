@@ -62,7 +62,7 @@ class HealthScoreResult:
     score_margin: int
     score_stock: int
     score_supplier: int
-    score_growth: int          # Stage 5a — crecimiento de ventas 0-100
+    score_growth: int  # Stage 5a — crecimiento de ventas 0-100
     primary_risk_code: str
     risk_description: str
     confidence_level: str
@@ -100,6 +100,7 @@ def _band_score(value: float, bands: list[_Band]) -> int:
 
 
 # ── Cash score ────────────────────────────────────────────────────────────────
+
 
 def _cash_bands(config: VerticalHeuristicConfig) -> list[_Band]:
     critical = config.cash_health.critical_days_below
@@ -144,11 +145,11 @@ def _margin_bands(b: MarginBenchmark) -> list[_Band]:
     """
     cap = b.healthy_max + 0.30  # reasonable upper anchor for top band
     return [
-        (-1.0,              b.critical_below, 0,  14),
-        (b.critical_below,  b.warning_below, 15,  39),
-        (b.warning_below,   b.healthy_min,   40,  69),  # zero-width for current verticals
-        (b.healthy_min,     b.healthy_max,   70,  89),
-        (b.healthy_max,     cap,             90, 100),
+        (-1.0, b.critical_below, 0, 14),
+        (b.critical_below, b.warning_below, 15, 39),
+        (b.warning_below, b.healthy_min, 40, 69),  # zero-width for current verticals
+        (b.healthy_min, b.healthy_max, 70, 89),
+        (b.healthy_max, cap, 90, 100),
     ]
 
 
@@ -178,8 +179,7 @@ def _score_stock(products: list[ProductSummary], config: VerticalHeuristicConfig
         return 50
     total = len(products)
     below = sum(
-        1 for p in products
-        if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
+        1 for p in products if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
     )
     no_rotation = sum(
         1
@@ -201,22 +201,22 @@ def _stock_is_critical(products: list[ProductSummary]) -> bool:
         return False
     total = len(products)
     below = sum(
-        1 for p in products
-        if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
+        1 for p in products if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
     )
     return below > total * 0.3
 
 
 # ── Supplier score ────────────────────────────────────────────────────────────
 
+
 def _supplier_bands(config: VerticalHeuristicConfig) -> list[_Band]:
     sensitivity = config.supplier.stockout_sensitivity.lower()
     healthy_min = 4 if sensitivity in {"alta", "muy_alta"} else 3
     warning_min = max(2, healthy_min - 1)
     return [
-        (1,  2, 15, 44),
-        (2,  warning_min, 45, 69),
-        (warning_min,  healthy_min, 70, 84),
+        (1, 2, 15, 44),
+        (2, warning_min, 45, 69),
+        (warning_min, healthy_min, 70, 84),
         (healthy_min, healthy_min + 6, 85, 100),
     ]
 
@@ -239,11 +239,11 @@ def _score_supplier(supplier_count: int, config: VerticalHeuristicConfig) -> int
 
 _GROWTH_BANDS: list[_Band] = [
     # (low_pct, high_pct, score_low, score_high)
-    (-100.0, -30.0,  0, 14),   # caída fuerte
-    (-30.0,  -10.0, 15, 39),   # caída moderada
-    (-10.0,    5.0, 40, 69),   # estancamiento / leve variación
-    (  5.0,   25.0, 70, 89),   # crecimiento sano
-    ( 25.0,   75.0, 90, 100),  # crecimiento fuerte
+    (-100.0, -30.0, 0, 14),  # caída fuerte
+    (-30.0, -10.0, 15, 39),  # caída moderada
+    (-10.0, 5.0, 40, 69),  # estancamiento / leve variación
+    (5.0, 25.0, 70, 89),  # crecimiento sano
+    (25.0, 75.0, 90, 100),  # crecimiento fuerte
 ]
 
 
@@ -312,11 +312,7 @@ def calculate_health_score(
 
     # Fórmula v2 (Stage 5a): cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20
     total = round(
-        s_cash * 0.30
-        + s_stock * 0.20
-        + s_supplier * 0.10
-        + s_margin * 0.20
-        + s_growth * 0.20
+        s_cash * 0.30 + s_stock * 0.20 + s_supplier * 0.10 + s_margin * 0.20 + s_growth * 0.20
     )
     if state.data_completeness_score < 40:
         total = min(total, 60)

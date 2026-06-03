@@ -17,9 +17,7 @@ from app.persistence.db.base import PGJSONB, Base, TimestampMixin
 class AgentConversationContext(TimestampMixin, Base):
     __tablename__ = "agent_conversation_context"
 
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, default=uuid.uuid4
-    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
         nullable=False,
@@ -35,6 +33,4 @@ class AgentConversationContext(TimestampMixin, Base):
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     def __repr__(self) -> str:
-        return (
-            f"<AgentConversationContext id={self.conversation_id} tenant={self.tenant_id}>"
-        )
+        return f"<AgentConversationContext id={self.conversation_id} tenant={self.tenant_id}>"

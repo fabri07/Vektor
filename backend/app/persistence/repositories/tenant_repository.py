@@ -13,9 +13,7 @@ class TenantRepository:
         self._session = session
 
     async def get_by_id(self, tenant_id: UUID) -> Tenant | None:
-        result = await self._session.execute(
-            select(Tenant).where(Tenant.tenant_id == tenant_id)
-        )
+        result = await self._session.execute(select(Tenant).where(Tenant.tenant_id == tenant_id))
         return result.scalar_one_or_none()
 
     async def save(self, tenant: Tenant) -> Tenant:

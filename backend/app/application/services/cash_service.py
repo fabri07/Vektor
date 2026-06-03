@@ -3,6 +3,7 @@
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,7 +72,7 @@ def _coerce_transaction_date(value: object) -> date:
 
 
 async def save_sale(
-    entities: dict,
+    entities: dict[str, Any],
     tenant_id: uuid.UUID,
     user_id: uuid.UUID,
     db: AsyncSession,
@@ -126,7 +127,7 @@ async def save_sale(
 
 
 async def save_cash_inflow(
-    entities: dict,
+    entities: dict[str, Any],
     tenant_id: uuid.UUID,
     db: AsyncSession,
 ) -> SaleEntry:
@@ -151,7 +152,7 @@ async def save_cash_inflow(
 
 
 async def save_expense(
-    entities: dict,
+    entities: dict[str, Any],
     tenant_id: uuid.UUID,
     db: AsyncSession,
 ) -> ExpenseEntry:

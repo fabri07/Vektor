@@ -1,7 +1,8 @@
 """TenantMiddleware — extrae tenant_id del JWT y lo almacena en request.state."""
 
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
+from starlette.responses import Response
 
 from app.observability.logger import get_logger
 
@@ -15,7 +16,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
     que tenant_context.set_tenant_context() lo use al abrir cada conexión DB.
     """
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
         if token:
             try:

@@ -50,7 +50,7 @@ celery_app.conf.update(
     timezone="America/Argentina/Buenos_Aires",
     enable_utc=True,
     task_track_started=True,
-    task_acks_late=True,           # re-queue on worker crash
+    task_acks_late=True,  # re-queue on worker crash
     task_time_limit=300,
     task_soft_time_limit=240,
     worker_prefetch_multiplier=1,  # one task at a time per worker

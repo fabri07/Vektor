@@ -14,14 +14,22 @@ ACTION_RISK_MAP = {
     ActionType.PARSE_DOCUMENT_FILE: RiskLevel.LOW,
     ActionType.GENERATE_HEALTH_REPORT: RiskLevel.LOW,
     ActionType.ANSWER_HELP_REQUEST: RiskLevel.LOW,
-    ActionType.CREATE_SUPPLIER_DRAFT:  RiskLevel.LOW,
+    ActionType.CREATE_SUPPLIER_DRAFT: RiskLevel.LOW,
     ActionType.CLASSIFY_GMAIL_MESSAGE: RiskLevel.LOW,
-    ActionType.SYNC_TO_GOOGLE:         RiskLevel.MEDIUM,
-    ActionType.CREATE_CALENDAR_EVENT:  RiskLevel.MEDIUM,
+    ActionType.SYNC_TO_GOOGLE: RiskLevel.MEDIUM,
+    ActionType.CREATE_CALENDAR_EVENT: RiskLevel.MEDIUM,
     # Stage 4: Google writes via broker
-    ActionType.UPLOAD_TO_DRIVE:        RiskLevel.MEDIUM,
-    ActionType.CREATE_GOOGLE_DOC:      RiskLevel.MEDIUM,
-    ActionType.APPEND_TO_SHEET:        RiskLevel.MEDIUM,
+    ActionType.UPLOAD_TO_DRIVE: RiskLevel.MEDIUM,
+    ActionType.CREATE_GOOGLE_DOC: RiskLevel.MEDIUM,
+    ActionType.APPEND_TO_SHEET: RiskLevel.MEDIUM,
+    # Sprint 17: acciones analíticas read-only — LOW, sin aprobación
+    ActionType.ANALYZE_FILE: RiskLevel.LOW,
+    ActionType.ANALYZE_PRICES: RiskLevel.LOW,
+    ActionType.ANALYZE_STOCK_DATA: RiskLevel.LOW,
+    ActionType.ANALYZE_SALES_DATA: RiskLevel.LOW,
+    ActionType.ANALYZE_EXPENSE_DATA: RiskLevel.LOW,
+    ActionType.ANALYZE_SUPPLIER_DATA: RiskLevel.LOW,
+    ActionType.SIMULATE_SCENARIO: RiskLevel.LOW,
 }
 
 

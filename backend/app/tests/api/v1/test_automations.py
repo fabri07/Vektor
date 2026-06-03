@@ -46,7 +46,7 @@ async def test_create_rule_from_successful_pending_action(
     db_session: AsyncSession,
     sample_user: User,
     monkeypatch,
-):
+) -> None:
     monkeypatch.setattr(get_settings(), "ENABLE_AGENT_AUTOMATIONS", True)
     action = await _successful_pending_action(db_session, sample_user)
 
@@ -69,7 +69,7 @@ async def test_does_not_create_rule_for_failed_pending_action(
     db_session: AsyncSession,
     sample_user: User,
     monkeypatch,
-):
+) -> None:
     monkeypatch.setattr(get_settings(), "ENABLE_AGENT_AUTOMATIONS", True)
     action = await _successful_pending_action(db_session, sample_user)
     action.execution_status = "FAILED"
@@ -91,7 +91,7 @@ async def test_toggle_rule_enabled_disabled(
     db_session: AsyncSession,
     sample_user: User,
     monkeypatch,
-):
+) -> None:
     monkeypatch.setattr(get_settings(), "ENABLE_AGENT_AUTOMATIONS", True)
     action = await _successful_pending_action(db_session, sample_user)
     created = await client.post(
@@ -124,7 +124,7 @@ async def test_rules_are_isolated_by_tenant_and_user(
     db_session: AsyncSession,
     sample_user: User,
     monkeypatch,
-):
+) -> None:
     monkeypatch.setattr(get_settings(), "ENABLE_AGENT_AUTOMATIONS", True)
     action = await _successful_pending_action(db_session, sample_user)
     created = await client.post(
@@ -151,7 +151,7 @@ async def test_feature_flag_off_blocks_rule_creation(
     db_session: AsyncSession,
     sample_user: User,
     monkeypatch,
-):
+) -> None:
     monkeypatch.setattr(get_settings(), "ENABLE_AGENT_AUTOMATIONS", False)
     action = await _successful_pending_action(db_session, sample_user)
 

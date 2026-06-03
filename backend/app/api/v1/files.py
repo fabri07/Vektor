@@ -8,13 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
+from app.application.services.data_intent_extractor import DataIntentExtractor
 from app.application.services.file_parsing import (
     MAX_FILE_SIZE_BYTES,
     detect_supported_mime,
     parse_uploaded_content,
     sanitize_filename,
 )
-from app.application.services.data_intent_extractor import DataIntentExtractor
 from app.integrations.s3 import S3Client
 from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
@@ -26,6 +26,7 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 
 router = APIRouter()
+
 
 class UploadedFileResponse(BaseModel):
     model_config = {"from_attributes": True}
@@ -112,8 +113,10 @@ async def upload_file(
     )
     session.add(record)
     await session.flush()
-    record.data_intent_detected = data_intent_detected
-    record.suggested_action = suggested_action
+    # Atributos transitorios (no columnas): consumidos en la respuesta del request,
+    # no se persisten. mypy no modela atributos dinámicos sobre el ORM.
+    record.data_intent_detected = data_intent_detected  # type: ignore[attr-defined]
+    record.suggested_action = suggested_action  # type: ignore[attr-defined]
     return record
 
 

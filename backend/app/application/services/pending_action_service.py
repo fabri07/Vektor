@@ -16,7 +16,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +43,7 @@ def _external_idempotency_key(
     tenant_id: uuid.UUID,
     user_id: uuid.UUID,
     action_type: str,
-    payload: dict,
+    payload: dict[str, Any],
 ) -> str:
     raw = json.dumps(
         {
@@ -58,7 +58,7 @@ def _external_idempotency_key(
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
-def _summary_from_tabular_records(records: list, record_type: str) -> dict:
+def _summary_from_tabular_records(records: list[Any], record_type: str) -> dict[str, Any]:
     rows = [row for row in records if isinstance(row, dict)]
     normalized_type = record_type.lower()
     if normalized_type in {"sales", "sale", "venta", "ventas"}:
@@ -132,16 +132,12 @@ async def create_pending_action(
     tenant_id: uuid.UUID,
     user_id: uuid.UUID,
     action_type: str,
-    payload: dict,
+    payload: dict[str, Any],
     risk_level: str,
 ) -> PendingAction:
-    """Crea un PendingAction con TTL de 10 minutos. Hace flush para obtener el id.
-
-    """
+    """Crea un PendingAction con TTL de 10 minutos. Hace flush para obtener el id."""
     external_system = (
-        determine_external_system(action_type, payload)
-        if payload.get("mode") == "mcp"
-        else None
+        determine_external_system(action_type, payload) if payload.get("mode") == "mcp" else None
     )
     idempotency_key = (
         _external_idempotency_key(
@@ -217,6 +213,7 @@ async def execute_pending_action(
                 pending_action_id=action.id,
             )
         from app.application.agents.income.agent import AgentIncome  # noqa: PLC0415
+
         await AgentIncome().on_confirmed_sale(str(sale.id), str(action.tenant_id))
         try:
             if redis is not None:
@@ -225,6 +222,7 @@ async def execute_pending_action(
                 from app.application.services.business_memory_service import (
                     BusinessMemoryService,  # noqa: PLC0415
                 )
+
                 amount = Decimal(str(payload.get("amount", 0)))
                 bm_svc = BusinessMemoryService(db=db, redis=redis)
                 await bm_svc.update_after_sale(action.tenant_id, amount)
@@ -255,6 +253,7 @@ async def execute_pending_action(
                 from app.application.services.business_memory_service import (
                     BusinessMemoryService,  # noqa: PLC0415
                 )
+
                 amount = Decimal(str(payload.get("amount", 0)))
                 category = payload.get("category", "")
                 bm_svc = BusinessMemoryService(db=db, redis=redis)
@@ -273,6 +272,7 @@ async def execute_pending_action(
         qty = int(payload.get("qty") or 0)
         if product_id_str and qty > 0:
             from decimal import Decimal  # noqa: PLC0415
+
             product_uuid = uuid.UUID(product_id_str)
             unit_cost_raw = payload.get("unit_cost")
             unit_cost = Decimal(str(unit_cost_raw)) if unit_cost_raw is not None else None
@@ -305,6 +305,7 @@ async def execute_pending_action(
             else:
                 unit_cost = payload.get("unit_cost")
                 from decimal import Decimal  # noqa: PLC0415
+
                 await stock_service.increment_stock(
                     product_id=product_uuid,
                     tenant_id=action.tenant_id,
@@ -342,13 +343,18 @@ async def execute_pending_action(
 
     elif action.action_type == ActionType.UPDATE_PRODUCT:
         product_id_str = payload.get("product_id")
-        _UPDATABLE_FIELDS = {
-            "sale_price_ars", "unit_cost_ars", "low_stock_threshold_units",
-            "is_active", "name", "category", "stock_units", "sku",
+        _updatable_fields = {
+            "sale_price_ars",
+            "unit_cost_ars",
+            "low_stock_threshold_units",
+            "is_active",
+            "name",
+            "category",
+            "stock_units",
+            "sku",
         }
         update_fields = {
-            k: v for k, v in payload.items()
-            if k in _UPDATABLE_FIELDS and v is not None
+            k: v for k, v in payload.items() if k in _updatable_fields and v is not None
         }
         if product_id_str and update_fields:
             from decimal import Decimal  # noqa: PLC0415
@@ -356,6 +362,7 @@ async def execute_pending_action(
             from app.persistence.repositories.product_repository import (
                 ProductRepository,  # noqa: PLC0415
             )
+
             try:
                 product_uuid = uuid.UUID(product_id_str)
             except ValueError:
@@ -375,9 +382,10 @@ async def execute_pending_action(
                         setattr(product, field, value)
                 await repo.save(product)
                 # Solo recalcular score cuando cambian campos que afectan métricas financieras
-                _SCORE_RELEVANT = {"sale_price_ars", "unit_cost_ars", "stock_units"}
-                if update_fields.keys() & _SCORE_RELEVANT:
+                _score_relevant = {"sale_price_ars", "unit_cost_ars", "stock_units"}
+                if update_fields.keys() & _score_relevant:
                     from app.jobs.score_trigger import trigger_score_recalculation  # noqa: PLC0415
+
                     trigger_score_recalculation.delay(str(action.tenant_id), "product_updated")
             else:
                 logger.warning(
@@ -595,6 +603,7 @@ async def execute_pending_action(
             from app.application.services.agent_memory_service import (
                 AgentMemoryService,  # noqa: PLC0415
             )
+
             am_svc = AgentMemoryService(db=db, redis=redis)
             await am_svc.record_action(action.tenant_id, action.action_type, payload)
     except Exception:

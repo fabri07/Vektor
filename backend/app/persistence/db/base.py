@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Text, DateTime, func
+from sqlalchemy import JSON, DateTime, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY as _ARRAY
 from sqlalchemy.dialects.postgresql import JSONB as _JSONB
 from sqlalchemy.dialects.postgresql import UUID

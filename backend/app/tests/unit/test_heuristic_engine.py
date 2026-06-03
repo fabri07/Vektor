@@ -23,6 +23,7 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 # ── Fixtures SQLite in-memory ─────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def sqlite_engine():
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
@@ -42,6 +43,7 @@ async def sqlite_session(sqlite_engine):
 
 
 # ── Tests síncronos (sin BD) ──────────────────────────────────────────────────
+
 
 def test_default_kiosco_loads():
     config = HeuristicEngine.get("kiosco_almacen")
@@ -125,8 +127,9 @@ def test_unknown_business_type_uses_fallback():
 
 # ── Test asíncrono con override en BD ────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_async_override_applies(sqlite_session: AsyncSession):
+async def test_async_override_applies(sqlite_session: AsyncSession) -> None:
     """
     Insertar override margin.net_expected_min=0.30 para un tenant,
     verificar que get_async() lo aplica sobre el default (0.12).
@@ -153,9 +156,7 @@ async def test_async_override_applies(sqlite_session: AsyncSession):
     sqlite_session.add(override)
     await sqlite_session.commit()
 
-    config = await HeuristicEngine.get_async(
-        "kiosco_almacen", str(tenant_id), sqlite_session
-    )
+    config = await HeuristicEngine.get_async("kiosco_almacen", str(tenant_id), sqlite_session)
 
     assert config.margin.net_expected_min == 0.30
     # El resto de los valores deben seguir siendo los defaults

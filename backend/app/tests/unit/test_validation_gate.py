@@ -1,7 +1,7 @@
 """Tests para ValidationGate — puerta de calidad del pipeline de ingestión."""
 
 from datetime import date, timedelta
-from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -15,7 +15,8 @@ def gate() -> ValidationGate:
 
 # ── Fixtures de summaries ──────────────────────────────────────────────────────
 
-def _spreadsheet_ventas(confidence: str = "HIGH") -> dict:
+
+def _spreadsheet_ventas(confidence: str = "HIGH") -> dict[str, Any]:
     return {
         "file_type": "spreadsheet",
         "confidence": confidence,
@@ -33,7 +34,7 @@ def _spreadsheet_ventas(confidence: str = "HIGH") -> dict:
     }
 
 
-def _image_ocr() -> dict:
+def _image_ocr() -> dict[str, Any]:
     return {
         "file_type": "image",
         "confidence": "LOW",
@@ -48,6 +49,7 @@ def _image_ocr() -> dict:
 
 
 # ── Regla 1: Confidence ───────────────────────────────────────────────────────
+
 
 class TestRegla1Confidence:
     def test_rejects_low_confidence_ocr(self, gate: ValidationGate) -> None:
@@ -73,6 +75,7 @@ class TestRegla1Confidence:
 
 
 # ── Regla 2: Schema mínimo ────────────────────────────────────────────────────
+
 
 class TestRegla2Schema:
     def test_rejects_ventas_sin_filas(self, gate: ValidationGate) -> None:
@@ -124,6 +127,7 @@ class TestRegla2Schema:
 
 # ── Regla 3: Montos ───────────────────────────────────────────────────────────
 
+
 class TestRegla3Montos:
     def test_negative_amount_rejected(self, gate: ValidationGate) -> None:
         summary = _spreadsheet_ventas()
@@ -156,6 +160,7 @@ class TestRegla3Montos:
 
 # ── Regla 4: Fechas ───────────────────────────────────────────────────────────
 
+
 class TestRegla4Fechas:
     def test_passes_with_date_warnings_future(self, gate: ValidationGate) -> None:
         future_date = (date.today() + timedelta(days=10)).strftime("%d/%m/%Y")
@@ -164,7 +169,9 @@ class TestRegla4Fechas:
         result = gate.validate(summary)
         assert result.passed
         assert result.corrected_summary is not None
-        assert any("future_date_warning" in str(w) for w in result.corrected_summary.get("warnings", []))
+        assert any(
+            "future_date_warning" in str(w) for w in result.corrected_summary.get("warnings", [])
+        )
 
     def test_passes_with_date_warnings_old(self, gate: ValidationGate) -> None:
         old_date = (date.today() - timedelta(days=800)).strftime("%d/%m/%Y")
@@ -195,6 +202,7 @@ class TestRegla4Fechas:
 
 
 # ── Corrected summary ─────────────────────────────────────────────────────────
+
 
 class TestCorrectedSummary:
     def test_no_correction_when_clean(self, gate: ValidationGate) -> None:

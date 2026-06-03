@@ -69,6 +69,7 @@ def _make_redis_mock() -> AsyncMock:
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def client_with_google(
     db_session: AsyncSession,
@@ -87,10 +88,12 @@ async def client_with_google(
     app.dependency_overrides[get_db_session] = lambda: db_session
     app.dependency_overrides[get_redis] = lambda: redis_mock
 
-    with patch.object(get_settings(), "ENABLE_GOOGLE_LOGIN", True), \
-         patch.object(get_settings(), "GOOGLE_OAUTH_CLIENT_ID", "test-client-id"), \
-         patch.object(get_settings(), "GOOGLE_OAUTH_CLIENT_SECRET", "test-secret"), \
-         patch.object(get_settings(), "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8000/cb"):
+    with (
+        patch.object(get_settings(), "ENABLE_GOOGLE_LOGIN", True),
+        patch.object(get_settings(), "GOOGLE_OAUTH_CLIENT_ID", "test-client-id"),
+        patch.object(get_settings(), "GOOGLE_OAUTH_CLIENT_SECRET", "test-secret"),
+        patch.object(get_settings(), "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8000/cb"),
+    ):
         async with AsyncClient(
             transport=__import__("httpx").ASGITransport(app=app),
             base_url="http://test",
@@ -172,6 +175,7 @@ async def inactive_user(db_session: AsyncSession) -> User:
 
 # ── Feature flag guard ────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def google_login_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.config.settings import get_settings
@@ -213,6 +217,7 @@ class TestFeatureFlagGuard:
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestOAuthStart:
     async def test_returns_authorization_url(
@@ -246,6 +251,7 @@ class TestOAuthStart:
 
 # ── Callback: inválido/expirado ───────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestOAuthCallbackInvalid:
     async def test_invalid_state_redirects_with_error(
@@ -278,10 +284,15 @@ class TestOAuthCallbackInvalid:
         ac, redis = client_with_google
 
         # Simular que el state existe en Redis
-        await redis.set("oauth:state:teststate", json.dumps({
-            "nonce": "testnonce",
-            "code_verifier": "testverifier",
-        }))
+        await redis.set(
+            "oauth:state:teststate",
+            json.dumps(
+                {
+                    "nonce": "testnonce",
+                    "code_verifier": "testverifier",
+                }
+            ),
+        )
 
         # Primer uso: GETDEL consume el state, pero el token exchange falla
         # (no hay httpx real configurado aquí)
@@ -289,7 +300,7 @@ class TestOAuthCallbackInvalid:
             "app.application.services.google_oauth_service._verify_id_token",
             side_effect=Exception("exchange_failed"),
         ):
-            resp1 = await ac.get(
+            await ac.get(
                 "/api/v1/auth/oauth/google/callback?code=code1&state=teststate",
                 follow_redirects=False,
             )
@@ -304,6 +315,7 @@ class TestOAuthCallbackInvalid:
 
 
 # ── Exchange: sesión inválida ─────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 class TestOAuthExchangeInvalid:
@@ -357,6 +369,7 @@ class TestOAuthExchangeInvalid:
 
 # ── Nuevo usuario Google ──────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestOAuthNewUser:
     async def test_new_user_gets_jwt(
@@ -367,23 +380,31 @@ class TestOAuthNewUser:
 
         # Poblar state en Redis
         state = "validstate123"
-        await redis.set(f"oauth:state:{state}", json.dumps({
-            "nonce": "testnonce",
-            "code_verifier": "testverifier",
-        }))
+        await redis.set(
+            f"oauth:state:{state}",
+            json.dumps(
+                {
+                    "nonce": "testnonce",
+                    "code_verifier": "testverifier",
+                }
+            ),
+        )
 
         token_response = MagicMock()
         token_response.json.return_value = {"id_token": "fake.id.token"}
         token_response.raise_for_status = MagicMock()
 
-        with patch(
-            "app.application.services.google_oauth_service._verify_id_token",
-            new_callable=AsyncMock,
-            return_value=_VALID_CLAIMS,
-        ), patch(
-            "httpx.AsyncClient.post",
-            new_callable=AsyncMock,
-            return_value=token_response,
+        with (
+            patch(
+                "app.application.services.google_oauth_service._verify_id_token",
+                new_callable=AsyncMock,
+                return_value=_VALID_CLAIMS,
+            ),
+            patch(
+                "httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=token_response,
+            ),
         ):
             resp = await ac.get(
                 f"/api/v1/auth/oauth/google/callback?code=authcode&state={state}",
@@ -410,37 +431,45 @@ class TestOAuthNewUser:
     ) -> None:
         """El usuario nuevo creado vía Google debe estar activo."""
         from sqlalchemy import select as sa_select
+
         ac, redis = client_with_google
 
         state = "stateforactive"
-        await redis.set(f"oauth:state:{state}", json.dumps({
-            "nonce": "nonce2",
-            "code_verifier": "verifier2",
-        }))
+        await redis.set(
+            f"oauth:state:{state}",
+            json.dumps(
+                {
+                    "nonce": "nonce2",
+                    "code_verifier": "verifier2",
+                }
+            ),
+        )
 
         token_response = MagicMock()
         token_response.json.return_value = {"id_token": "fake.id.token"}
         token_response.raise_for_status = MagicMock()
 
-        with patch(
-            "app.application.services.google_oauth_service._verify_id_token",
-            new_callable=AsyncMock,
-            return_value={**_VALID_CLAIMS, "email": "newuser@gmail.com", "sub": "new-sub-999"},
-        ), patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response):
+        with (
+            patch(
+                "app.application.services.google_oauth_service._verify_id_token",
+                new_callable=AsyncMock,
+                return_value={**_VALID_CLAIMS, "email": "newuser@gmail.com", "sub": "new-sub-999"},
+            ),
+            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response),
+        ):
             await ac.get(
                 f"/api/v1/auth/oauth/google/callback?code=x&state={state}",
                 follow_redirects=False,
             )
 
-        result = await db_session.execute(
-            sa_select(User).where(User.email == "newuser@gmail.com")
-        )
+        result = await db_session.execute(sa_select(User).where(User.email == "newuser@gmail.com"))
         user = result.scalar_one_or_none()
         assert user is not None
         assert user.is_active is True
 
 
 # ── Identidad ya vinculada ────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 class TestOAuthExistingIdentity:
@@ -486,24 +515,32 @@ class TestOAuthExistingIdentity:
         await db_session.commit()
 
         state = "statelinked"
-        await redis.set(f"oauth:state:{state}", json.dumps({
-            "nonce": "n3",
-            "code_verifier": "v3",
-        }))
+        await redis.set(
+            f"oauth:state:{state}",
+            json.dumps(
+                {
+                    "nonce": "n3",
+                    "code_verifier": "v3",
+                }
+            ),
+        )
 
         token_response = MagicMock()
         token_response.json.return_value = {"id_token": "tok"}
         token_response.raise_for_status = MagicMock()
 
-        with patch(
-            "app.application.services.google_oauth_service._verify_id_token",
-            new_callable=AsyncMock,
-            return_value={
-                **_VALID_CLAIMS,
-                "sub": "existing-sub-456",
-                "email": "linked@gmail.com",
-            },
-        ), patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response):
+        with (
+            patch(
+                "app.application.services.google_oauth_service._verify_id_token",
+                new_callable=AsyncMock,
+                return_value={
+                    **_VALID_CLAIMS,
+                    "sub": "existing-sub-456",
+                    "email": "linked@gmail.com",
+                },
+            ),
+            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response),
+        ):
             resp = await ac.get(
                 f"/api/v1/auth/oauth/google/callback?code=x&state={state}",
                 follow_redirects=False,
@@ -520,6 +557,7 @@ class TestOAuthExistingIdentity:
 
 # ── link_required ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestOAuthLinkRequired:
     async def _trigger_link_required(
@@ -529,19 +567,27 @@ class TestOAuthLinkRequired:
         user: User,
     ) -> str:
         state = f"state-{uuid.uuid4().hex[:8]}"
-        await redis.set(f"oauth:state:{state}", json.dumps({
-            "nonce": "nonce-lr",
-            "code_verifier": "verifier-lr",
-        }))
+        await redis.set(
+            f"oauth:state:{state}",
+            json.dumps(
+                {
+                    "nonce": "nonce-lr",
+                    "code_verifier": "verifier-lr",
+                }
+            ),
+        )
         token_response = MagicMock()
         token_response.json.return_value = {"id_token": "tok"}
         token_response.raise_for_status = MagicMock()
 
-        with patch(
-            "app.application.services.google_oauth_service._verify_id_token",
-            new_callable=AsyncMock,
-            return_value=_VALID_CLAIMS,  # email == _GOOGLE_EMAIL que ya existe
-        ), patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response):
+        with (
+            patch(
+                "app.application.services.google_oauth_service._verify_id_token",
+                new_callable=AsyncMock,
+                return_value=_VALID_CLAIMS,  # email == _GOOGLE_EMAIL que ya existe
+            ),
+            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response),
+        ):
             resp = await ac.get(
                 f"/api/v1/auth/oauth/google/callback?code=x&state={state}",
                 follow_redirects=False,
@@ -593,11 +639,16 @@ class TestOAuthLinkRequired:
         ac, redis = client_with_google
 
         pending_id = "pending-session-ok"
-        await redis.set(f"oauth:link:{pending_id}", json.dumps({
-            "provider": "google",
-            "provider_subject": _GOOGLE_SUB,
-            "provider_email": _GOOGLE_EMAIL,
-        }))
+        await redis.set(
+            f"oauth:link:{pending_id}",
+            json.dumps(
+                {
+                    "provider": "google",
+                    "provider_subject": _GOOGLE_SUB,
+                    "provider_email": _GOOGLE_EMAIL,
+                }
+            ),
+        )
 
         resp = await ac.post(
             "/api/v1/auth/oauth/google/link-pending",
@@ -621,11 +672,16 @@ class TestOAuthLinkRequired:
         ac, redis = client_with_google
 
         pending_id = "pending-single-use"
-        await redis.set(f"oauth:link:{pending_id}", json.dumps({
-            "provider": "google",
-            "provider_subject": _GOOGLE_SUB,
-            "provider_email": _GOOGLE_EMAIL,
-        }))
+        await redis.set(
+            f"oauth:link:{pending_id}",
+            json.dumps(
+                {
+                    "provider": "google",
+                    "provider_subject": _GOOGLE_SUB,
+                    "provider_email": _GOOGLE_EMAIL,
+                }
+            ),
+        )
 
         body = {
             "pending_oauth_session_id": pending_id,
@@ -647,11 +703,16 @@ class TestOAuthLinkRequired:
         ac, redis = client_with_google
 
         pending_id = "pending-badpass"
-        await redis.set(f"oauth:link:{pending_id}", json.dumps({
-            "provider": "google",
-            "provider_subject": _GOOGLE_SUB,
-            "provider_email": _GOOGLE_EMAIL,
-        }))
+        await redis.set(
+            f"oauth:link:{pending_id}",
+            json.dumps(
+                {
+                    "provider": "google",
+                    "provider_subject": _GOOGLE_SUB,
+                    "provider_email": _GOOGLE_EMAIL,
+                }
+            ),
+        )
 
         resp = await ac.post(
             "/api/v1/auth/oauth/google/link-pending",
@@ -672,11 +733,16 @@ class TestOAuthLinkRequired:
         ac, redis = client_with_google
 
         pending_id = "pending-inactive"
-        await redis.set(f"oauth:link:{pending_id}", json.dumps({
-            "provider": "google",
-            "provider_subject": _GOOGLE_SUB,
-            "provider_email": _GOOGLE_EMAIL,
-        }))
+        await redis.set(
+            f"oauth:link:{pending_id}",
+            json.dumps(
+                {
+                    "provider": "google",
+                    "provider_subject": _GOOGLE_SUB,
+                    "provider_email": _GOOGLE_EMAIL,
+                }
+            ),
+        )
 
         resp = await ac.post(
             "/api/v1/auth/oauth/google/link-pending",
@@ -708,6 +774,7 @@ class TestOAuthLinkRequired:
 
 # ── email_verified=False fail-closed ─────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestOAuthEmailNotVerified:
     async def test_email_not_verified_redirects_with_error(
@@ -717,10 +784,15 @@ class TestOAuthEmailNotVerified:
         ac, redis = client_with_google
 
         state = "state-unverified"
-        await redis.set(f"oauth:state:{state}", json.dumps({
-            "nonce": "n4",
-            "code_verifier": "v4",
-        }))
+        await redis.set(
+            f"oauth:state:{state}",
+            json.dumps(
+                {
+                    "nonce": "n4",
+                    "code_verifier": "v4",
+                }
+            ),
+        )
 
         unverified_claims = {**_VALID_CLAIMS, "email_verified": False}
 
@@ -728,11 +800,14 @@ class TestOAuthEmailNotVerified:
         token_response.json.return_value = {"id_token": "tok"}
         token_response.raise_for_status = MagicMock()
 
-        with patch(
-            "app.application.services.google_oauth_service._verify_id_token",
-            new_callable=AsyncMock,
-            return_value=unverified_claims,
-        ), patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response):
+        with (
+            patch(
+                "app.application.services.google_oauth_service._verify_id_token",
+                new_callable=AsyncMock,
+                return_value=unverified_claims,
+            ),
+            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response),
+        ):
             resp = await ac.get(
                 f"/api/v1/auth/oauth/google/callback?code=x&state={state}",
                 follow_redirects=False,

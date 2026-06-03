@@ -17,6 +17,7 @@ import unittest.mock
 import uuid
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -34,6 +35,7 @@ from app.persistence.models.transaction import SaleEntry
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def xlsx_bytes() -> bytes:
     """Minimal real xlsx file created in-memory."""
@@ -41,9 +43,9 @@ def xlsx_bytes() -> bytes:
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(["fecha", "monto", "descripcion"])  # type: ignore[union-attr]
-    ws.append(["2024-01-15", "50000", "Venta del día"])  # type: ignore[union-attr]
-    ws.append(["2024-01-16", "35000", "Venta tarde"])  # type: ignore[union-attr]
+    ws.append(["fecha", "monto", "descripcion"])
+    ws.append(["2024-01-15", "50000", "Venta del día"])
+    ws.append(["2024-01-16", "35000", "Venta tarde"])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -138,12 +140,13 @@ async def confirmed_file(
 
 # ── Upload tests ──────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestUploadEndpoint:
     async def test_upload_xlsx_returns_processing(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         xlsx_bytes: bytes,
         mock_s3_upload: unittest.mock.AsyncMock,
         mock_spreadsheet_delay: unittest.mock.MagicMock,
@@ -164,7 +167,7 @@ class TestUploadEndpoint:
     async def test_upload_csv_enqueues_spreadsheet_job(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         csv_bytes: bytes,
         mock_s3_upload: unittest.mock.AsyncMock,
         mock_spreadsheet_delay: unittest.mock.MagicMock,
@@ -180,7 +183,7 @@ class TestUploadEndpoint:
     async def test_upload_txt_enqueues_text_job(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         txt_bytes: bytes,
         mock_s3_upload: unittest.mock.AsyncMock,
         mock_text_delay: unittest.mock.MagicMock,
@@ -196,7 +199,7 @@ class TestUploadEndpoint:
     async def test_upload_png_enqueues_ocr_job(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         png_bytes: bytes,
         mock_s3_upload: unittest.mock.AsyncMock,
         mock_image_delay: unittest.mock.MagicMock,
@@ -212,7 +215,7 @@ class TestUploadEndpoint:
     async def test_upload_pdf_enqueues_text_job(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         pdf_bytes: bytes,
         mock_s3_upload: unittest.mock.AsyncMock,
         mock_text_delay: unittest.mock.MagicMock,
@@ -228,7 +231,7 @@ class TestUploadEndpoint:
     async def test_upload_pptx_enqueues_text_job(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         pptx_bytes: bytes,
         mock_s3_upload: unittest.mock.AsyncMock,
         mock_text_delay: unittest.mock.MagicMock,
@@ -244,7 +247,7 @@ class TestUploadEndpoint:
     async def test_upload_unsupported_type_returns_415(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         response = await client.post(
             "/api/v1/ingestion/upload",
@@ -256,7 +259,7 @@ class TestUploadEndpoint:
     async def test_upload_too_large_returns_413(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         # 11 MB of zeros (no valid magic bytes → will also fail MIME check first)
         # Use xlsx magic bytes prefix + junk to get past MIME detection
@@ -282,15 +285,13 @@ class TestUploadEndpoint:
     async def test_upload_csv_sync_fallback_when_celery_unavailable(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         csv_bytes: bytes,
         mock_s3_upload: unittest.mock.AsyncMock,
     ) -> None:
         """When Celery/Redis is unavailable, the file is processed synchronously."""
         # Mock .delay() to raise (simulating Redis down)
-        with unittest.mock.patch(
-            "app.api.v1.ingestion.process_spreadsheet"
-        ) as mock_task:
+        with unittest.mock.patch("app.api.v1.ingestion.process_spreadsheet") as mock_task:
             mock_task.delay.side_effect = ConnectionError("Redis unavailable")
             # Mock S3 download for sync fallback
             with unittest.mock.patch(
@@ -311,12 +312,13 @@ class TestUploadEndpoint:
 
 # ── List files tests ──────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestListFilesEndpoint:
     async def test_list_files_empty(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         response = await client.get("/api/v1/ingestion/files", headers=auth_headers)
         assert response.status_code == 200
@@ -325,8 +327,8 @@ class TestListFilesEndpoint:
     async def test_list_files_tenant_isolation(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-        second_auth_headers: dict,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
@@ -359,7 +361,7 @@ class TestListFilesEndpoint:
     async def test_list_files_filter_by_status(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         db_session: AsyncSession,
         sample_tenant: Tenant,
         confirmed_file: UploadedFile,
@@ -377,12 +379,13 @@ class TestListFilesEndpoint:
 
 # ── Preview tests ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestPreviewEndpoint:
     async def test_preview_returns_summary(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         confirmed_file: UploadedFile,
     ) -> None:
         response = await client.get(
@@ -397,7 +400,7 @@ class TestPreviewEndpoint:
     async def test_preview_pending_file_returns_409(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
@@ -424,7 +427,7 @@ class TestPreviewEndpoint:
     async def test_preview_nonexistent_returns_404(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         response = await client.get(
             f"/api/v1/ingestion/files/{uuid.uuid4()}/preview",
@@ -435,12 +438,13 @@ class TestPreviewEndpoint:
 
 # ── Confirm tests ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestConfirmEndpoint:
     async def test_confirm_needs_confirmation_returns_200(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         confirmed_file: UploadedFile,
         mock_score_trigger: unittest.mock.MagicMock,
     ) -> None:
@@ -458,7 +462,7 @@ class TestConfirmEndpoint:
     async def test_confirm_wrong_status_returns_409(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
@@ -486,7 +490,7 @@ class TestConfirmEndpoint:
     async def test_confirm_nonexistent_returns_404(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         response = await client.post(
             f"/api/v1/ingestion/files/{uuid.uuid4()}/confirm",
@@ -498,7 +502,7 @@ class TestConfirmEndpoint:
     async def test_confirm_enforces_tenant_isolation(
         self,
         client: AsyncClient,
-        second_auth_headers: dict,
+        second_auth_headers: dict[str, Any],
         confirmed_file: UploadedFile,
     ) -> None:
         """Tenant B cannot confirm Tenant A's file."""
@@ -512,7 +516,7 @@ class TestConfirmEndpoint:
 
 class _CaptureLogger:
     def __init__(self) -> None:
-        self.debug_events: list[tuple[str, dict]] = []
+        self.debug_events: list[tuple[str, dict[str, Any]]] = []
 
     def debug(self, event: str, **kwargs) -> None:
         self.debug_events.append((event, kwargs))
@@ -569,6 +573,7 @@ async def test_parse_date_fallback_logs_debug(
 
 
 # ── Worker unit tests ─────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 class TestIngestionWorkers:

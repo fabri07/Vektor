@@ -40,7 +40,7 @@ class BusinessState:
     total_revenue: Decimal
     total_expenses: Decimal
     gross_profit: Decimal
-    expense_ratio: Decimal        # expenses / revenue (lower = better)
+    expense_ratio: Decimal  # expenses / revenue (lower = better)
     avg_daily_sales: Decimal
     transaction_count: int
 
@@ -79,18 +79,14 @@ class BusinessStateLayer:
         from_date = period_start.date()
         to_date = period_end.date()
 
-        total_revenue = Decimal(
-            str(await sale_repo.total_revenue(tenant_id, from_date, to_date))
-        )
+        total_revenue = Decimal(str(await sale_repo.total_revenue(tenant_id, from_date, to_date)))
         total_expenses = Decimal(
             str(await expense_repo.total_expenses(tenant_id, from_date, to_date))
         )
 
         days = max((period_end - period_start).days, 1)
         gross_profit = total_revenue - total_expenses
-        expense_ratio = (
-            total_expenses / total_revenue if total_revenue > 0 else Decimal("1")
-        )
+        expense_ratio = total_expenses / total_revenue if total_revenue > 0 else Decimal("1")
         avg_daily_sales = total_revenue / Decimal(str(days))
 
         sales_list = await sale_repo.list_by_tenant(

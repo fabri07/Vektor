@@ -90,8 +90,9 @@ async def test_auth_error_raises_mcp_auth_error():
     """Respuesta con errorCode=mcp_auth_required → McpToolAuthError."""
     gateway = _make_gateway()
 
-    with _patch_httpx(_jsonrpc_error("mcp_auth_required", "auth required")), pytest.raises(
-        McpToolAuthError
+    with (
+        _patch_httpx(_jsonrpc_error("mcp_auth_required", "auth required")),
+        pytest.raises(McpToolAuthError),
     ):
         await gateway.call_tool(
             "google.gmail.list_messages",
@@ -209,8 +210,9 @@ async def test_list_tools_raises_unavailable_on_connect_error():
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
 
-    with patch("httpx.AsyncClient", return_value=mock_client), pytest.raises(
-        McpToolUnavailableError
+    with (
+        patch("httpx.AsyncClient", return_value=mock_client),
+        pytest.raises(McpToolUnavailableError),
     ):
         await gateway.list_tools()
 

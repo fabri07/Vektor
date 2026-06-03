@@ -68,7 +68,9 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     def __repr__(self) -> str:
-        return f"<SaleEntry tenant={self.tenant_id} amount={self.amount} date={self.transaction_date}>"  # noqa: E501
+        return (
+            f"<SaleEntry tenant={self.tenant_id} amount={self.amount} date={self.transaction_date}>"  # noqa: E501
+        )
 
 
 class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):

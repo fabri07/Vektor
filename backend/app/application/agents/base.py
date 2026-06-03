@@ -7,7 +7,6 @@ from app.application.security.prompt_defense import wrap_user_input as _defense_
 
 
 class BaseAgent(ABC):
-
     @property
     @abstractmethod
     def agent_name(self) -> str: ...
@@ -19,7 +18,7 @@ class BaseAgent(ABC):
         task: Any | None = None,  # AgentTask — opcional, para dispatch task-aware
     ) -> AgentResponse: ...
 
-    def build_system_prompt(self, business: dict, heuristics: HeuristicConfig) -> str:
+    def build_system_prompt(self, business: dict[str, Any], heuristics: HeuristicConfig) -> str:
         """Construye el system prompt inyectando heurísticas como valores numéricos."""
         return heuristics.to_prompt_fragment()
 

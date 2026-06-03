@@ -17,8 +17,6 @@ async def set_tenant_context(conn: AsyncConnection, tenant_id: str) -> None:
         # Usar execute_sync para el SET de sesión (es un comando, no una query)
         # format_string parametrizado para evitar inyección — tenant_id
         # siempre viene del JWT verificado en deps.py, nunca del cliente.
-        __import__("sqlalchemy").text(
-            "SET app.current_tenant_id = :tid"
-        ),
+        __import__("sqlalchemy").text("SET app.current_tenant_id = :tid"),
         {"tid": tenant_id},
     )

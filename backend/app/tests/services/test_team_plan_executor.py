@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -236,8 +237,10 @@ async def test_execute_sequential_respects_dependencies():
         events.append("expense_end")
         return _make_response(req.request_id, agent_name="agent_expense")
 
-    stock_agent = MagicMock(); stock_agent.process = AsyncMock(side_effect=stock_run)
-    expense_agent = MagicMock(); expense_agent.process = AsyncMock(side_effect=expense_run)
+    stock_agent = MagicMock()
+    stock_agent.process = AsyncMock(side_effect=stock_run)
+    expense_agent = MagicMock()
+    expense_agent.process = AsyncMock(side_effect=expense_run)
 
     def fake_get(name, **_kw):
         return {"agent_stock": stock_agent, "agent_expense": expense_agent}[name]
@@ -266,7 +269,9 @@ async def test_execute_skips_downstream_on_failure():
     )
     expense_agent = MagicMock()
     expense_agent.process = AsyncMock(
-        return_value=_make_response(request.request_id, agent_name="agent_expense", status="success")
+        return_value=_make_response(
+            request.request_id, agent_name="agent_expense", status="success"
+        )
     )
 
     def fake_get(name, **_kw):
@@ -332,14 +337,16 @@ async def test_execute_propagates_context_to_dependents():
     stock_response = _make_response(request.request_id, agent_name="agent_stock")
     stock_response.result["product_id"] = "abc123"
 
-    captured_request: dict = {}
+    captured_request: dict[str, Any] = {}
 
     async def expense_run(req, *, task):
         captured_request["request"] = req
         return _make_response(req.request_id, agent_name="agent_expense")
 
-    stock_agent = MagicMock(); stock_agent.process = AsyncMock(return_value=stock_response)
-    expense_agent = MagicMock(); expense_agent.process = AsyncMock(side_effect=expense_run)
+    stock_agent = MagicMock()
+    stock_agent.process = AsyncMock(return_value=stock_response)
+    expense_agent = MagicMock()
+    expense_agent.process = AsyncMock(side_effect=expense_run)
 
     def fake_get(name, **_kw):
         return {"agent_stock": stock_agent, "agent_expense": expense_agent}[name]
@@ -376,9 +383,13 @@ async def test_execute_uses_isolated_session_per_task():
         return cm
 
     income_agent = MagicMock()
-    income_agent.process = AsyncMock(return_value=_make_response(request.request_id, agent_name="agent_income"))
+    income_agent.process = AsyncMock(
+        return_value=_make_response(request.request_id, agent_name="agent_income")
+    )
     stock_agent = MagicMock()
-    stock_agent.process = AsyncMock(return_value=_make_response(request.request_id, agent_name="agent_stock"))
+    stock_agent.process = AsyncMock(
+        return_value=_make_response(request.request_id, agent_name="agent_stock")
+    )
 
     def fake_get(name, **_kw):
         return {"agent_income": income_agent, "agent_stock": stock_agent}[name]

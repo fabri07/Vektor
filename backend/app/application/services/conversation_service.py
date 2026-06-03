@@ -9,7 +9,7 @@ Estrategia:
 
 import json
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,12 +29,12 @@ class ConversationService:
         self.redis = redis_client
         self.db = db_session
 
-    async def get_context(self, conversation_id: str) -> dict:
+    async def get_context(self, conversation_id: str) -> dict[str, Any]:
         """Obtener contexto: primero desde Redis, fallback a PostgreSQL."""
         try:
             cached = await self.redis.get(f"conv:{conversation_id}")
             if cached:
-                return json.loads(cached)
+                return cast("dict[str, Any]", json.loads(cached))
         except Exception as exc:
             logger.warning("redis_get_failed", conversation_id=conversation_id, error=str(exc))
 
@@ -42,11 +42,11 @@ class ConversationService:
         if ctx:
             data = {"turns": ctx.turns, "summary": ctx.summary}
             try:
-                await self.redis.setex(
-                    f"conv:{conversation_id}", REDIS_TTL, json.dumps(data)
-                )
+                await self.redis.setex(f"conv:{conversation_id}", REDIS_TTL, json.dumps(data))
             except Exception as exc:
-                logger.warning("redis_rehydrate_failed", conversation_id=conversation_id, error=str(exc))
+                logger.warning(
+                    "redis_rehydrate_failed", conversation_id=conversation_id, error=str(exc)
+                )
             return data
 
         return {"turns": [], "summary": None}
@@ -58,7 +58,7 @@ class ConversationService:
         content: str,
         tokens: int = 200,
         metadata: dict[str, Any] | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Agregar un turno al historial. Mantiene los últimos MAX_TURNS turnos."""
         ctx = await self.get_context(conversation_id)
         turn: dict[str, Any] = {"role": role, "content": content}
@@ -69,19 +69,17 @@ class ConversationService:
         if len(ctx["turns"]) > MAX_TURNS:
             ctx["turns"] = ctx["turns"][-MAX_TURNS:]
 
-        await self.redis.setex(
-            f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx)
-        )
+        await self.redis.setex(f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx))
         return ctx
 
-    async def _summarize_turns(self, turns: list[dict]) -> str:
+    async def _summarize_turns(self, turns: list[dict[str, Any]]) -> str:
         """Resume turnos viejos con Haiku. Fail-silencioso."""
         try:
             from app.integrations.anthropic_client import (
                 get_anthropic_async_client,  # noqa: PLC0415
             )
 
-            client = get_anthropic_async_client()
+            client: Any = get_anthropic_async_client()
             resp = await client.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=80,
@@ -93,7 +91,7 @@ class ConversationService:
                     }
                 ],
             )
-            return resp.content[0].text.strip()
+            return cast("str", resp.content[0].text.strip())
         except Exception as exc:
             logger.warning("conversation_summarize_failed", error=str(exc))
             return ""
@@ -106,7 +104,7 @@ class ConversationService:
         tenant_id: uuid.UUID,
         user_id: uuid.UUID,
         metadata: dict[str, Any] | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Agrega turno con summarización automática al superar MAX_TURNS."""
         ctx = await self.get_context(conversation_id)
         turn: dict[str, Any] = {"role": role, "content": content}
@@ -121,9 +119,7 @@ class ConversationService:
                 ctx["summary"] = summary
 
         try:
-            await self.redis.setex(
-                f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx)
-            )
+            await self.redis.setex(f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx))
         except Exception as exc:
             logger.warning("redis_write_failed", conversation_id=conversation_id, error=str(exc))
         await self.persist(conversation_id, tenant_id, user_id)

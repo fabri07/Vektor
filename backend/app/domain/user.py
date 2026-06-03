@@ -11,10 +11,10 @@ from uuid import UUID, uuid4
 
 
 class UserRole(StrEnum):
-    OWNER = "owner"       # Dueño del negocio — acceso total al tenant
-    ADMIN = "admin"       # Administrador — acceso total salvo billing
-    ANALYST = "analyst"   # Solo lectura de reportes y scores
-    VIEWER = "viewer"     # Solo lectura del dashboard
+    OWNER = "owner"  # Dueño del negocio — acceso total al tenant
+    ADMIN = "admin"  # Administrador — acceso total salvo billing
+    ANALYST = "analyst"  # Solo lectura de reportes y scores
+    VIEWER = "viewer"  # Solo lectura del dashboard
 
 
 class UserStatus(StrEnum):

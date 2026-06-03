@@ -6,6 +6,7 @@ Gathers: business name, health score + delta, primary risk, active goal,
 priority action, value protected.
 Sends HTML email via SMTPClient and records a notification row (channel='email').
 """
+# ruff: noqa: E501 — plantilla HTML de email con líneas largas inevitables
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ logger = get_logger(__name__)
 
 # ── Email HTML template ────────────────────────────────────────────────────────
 
+
 def _build_html(
     business_name: str,
     score: int,
@@ -37,9 +39,13 @@ def _build_html(
 
     delta_html = ""
     if delta is not None and delta > 0:
-        delta_html = f'<span style="color:#10b981;font-size:14px;">↑ +{delta} vs semana pasada</span>'
+        delta_html = (
+            f'<span style="color:#10b981;font-size:14px;">↑ +{delta} vs semana pasada</span>'
+        )
     elif delta is not None and delta < 0:
-        delta_html = f'<span style="color:#ef4444;font-size:14px;">↓ {delta} vs semana pasada</span>'
+        delta_html = (
+            f'<span style="color:#ef4444;font-size:14px;">↓ {delta} vs semana pasada</span>'
+        )
     else:
         delta_html = '<span style="color:#9ca3af;font-size:14px;">→ Sin cambios</span>'
 
@@ -180,6 +186,7 @@ def _build_plain(
 
 # ── Data gathering ─────────────────────────────────────────────────────────────
 
+
 async def _gather_email_data(
     tenant_id: _uuid.UUID,
     session: Any,
@@ -187,11 +194,16 @@ async def _gather_email_data(
     """Return dict with all data needed for the email, or None if tenant not ready."""
     from sqlalchemy import select  # noqa: PLC0415
 
-    from app.persistence.models.business import BusinessProfile, MomentumProfile  # noqa: PLC0415
-    from app.persistence.models.score import HealthScoreSnapshot, WeeklyScoreHistory  # noqa: PLC0415
+    from app.persistence.models.business import (  # noqa: PLC0415
+        Insight,  # noqa: PLC0415
+        MomentumProfile,
+    )
+    from app.persistence.models.score import (  # noqa: PLC0415
+        HealthScoreSnapshot,
+        WeeklyScoreHistory,
+    )
     from app.persistence.models.tenant import Tenant  # noqa: PLC0415
     from app.persistence.models.user import User  # noqa: PLC0415
-    from app.persistence.models.business import Insight  # noqa: PLC0415
 
     # Tenant + business name
     tenant_row = await session.get(Tenant, tenant_id)
@@ -272,6 +284,7 @@ async def _gather_email_data(
 
 # ── Celery task ────────────────────────────────────────────────────────────────
 
+
 @celery_app.task(  # type: ignore[misc]
     name="jobs.send_weekly_email_summary",
     queue="notifications",
@@ -303,7 +316,11 @@ async def _async_send(tenant_id: str) -> None:
             await engine.dispose()
             return
 
-        dashboard_url = f"{s.FRONTEND_URL}/dashboard" if hasattr(s, "FRONTEND_URL") else "https://app.vektor.com.ar/dashboard"
+        dashboard_url = (
+            f"{s.FRONTEND_URL}/dashboard"
+            if hasattr(s, "FRONTEND_URL")
+            else "https://app.vektor.com.ar/dashboard"
+        )
 
         html = _build_html(
             business_name=data["business_name"],
@@ -364,6 +381,7 @@ async def _async_send(tenant_id: str) -> None:
 
 # ── Fan-out task (all tenants) ─────────────────────────────────────────────────
 
+
 @celery_app.task(  # type: ignore[misc]
     name="jobs.send_weekly_email_all_tenants",
     queue="notifications",
@@ -387,9 +405,7 @@ async def _fan_out() -> None:
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
     async with factory() as session:
-        result = await session.execute(
-            select(Tenant.tenant_id).where(Tenant.status == "ACTIVE")
-        )
+        result = await session.execute(select(Tenant.tenant_id).where(Tenant.status == "ACTIVE"))
         tenant_ids = [str(row) for row in result.scalars().all()]
 
     await engine.dispose()

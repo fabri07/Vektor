@@ -23,7 +23,7 @@ def _is_mock_factory(factory: Callable[..., Any]) -> bool:
 
 
 def get_anthropic_async_client(
-    client_factory: Callable[..., ClientT] = anthropic.AsyncAnthropic,
+    client_factory: Callable[..., ClientT] = anthropic.AsyncAnthropic,  # type: ignore[assignment]
 ) -> ClientT:
     settings = get_settings()
     api_key = settings.ANTHROPIC_API_KEY.strip()

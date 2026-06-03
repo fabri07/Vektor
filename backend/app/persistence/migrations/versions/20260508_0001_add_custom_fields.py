@@ -8,8 +8,9 @@ Create Date: 2026-05-08
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "20260508_0001"
 down_revision = "20260503_0002"
@@ -123,7 +124,9 @@ def upgrade() -> None:
         sa.Column("override_label", sa.String(200), nullable=True),
         sa.Column("override_required", sa.Boolean(), nullable=True),
         sa.Column("override_enum_options", postgresql.JSONB(), nullable=True),
-        sa.Column("data_type", sa.String(20), nullable=True),  # NULL for base fields (data_type lives in vertical_field_definitions)
+        sa.Column(
+            "data_type", sa.String(20), nullable=True
+        ),  # NULL for base fields (data_type lives in vertical_field_definitions)
         sa.CheckConstraint(
             "data_type IS NULL OR data_type IN ('text', 'number', 'date', 'enum', 'boolean')",
             name="ck_tcfd_data_type",

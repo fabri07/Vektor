@@ -7,6 +7,7 @@ Create Date: 2026-04-30
 Enables the forgot-password / reset-password flow.
 Tokens expire after 1 hour and are marked used=True after consumption.
 """
+
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 

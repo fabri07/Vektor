@@ -54,7 +54,6 @@ from .conftest import (
     run_pipeline,
 )
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SCENARIO 1 — Kiosco saludable
 #
@@ -92,16 +91,14 @@ async def test_s1_kiosco_saludable(session: AsyncSession, fake_redis: FakeRedis)
     snap = await run_pipeline(session, fake_redis, tenant.tenant_id)
 
     # ── Assert ────────────────────────────────────────────────────────────────
-    assert int(snap.total_score) > 65, (
-        f"score_total esperado > 65, obtenido {snap.total_score}"
-    )
-    assert snap.primary_risk_code != "CASH_LOW", (
-        f"primary_risk no debe ser CASH_LOW, obtenido {snap.primary_risk_code!r}"
-    )
+    assert int(snap.total_score) > 65, f"score_total esperado > 65, obtenido {snap.total_score}"
+    assert (
+        snap.primary_risk_code != "CASH_LOW"
+    ), f"primary_risk no debe ser CASH_LOW, obtenido {snap.primary_risk_code!r}"
     # score_cash debe reflejar la buena liquidez (ratio 1.875)
-    assert snap.score_cash is not None and snap.score_cash > 65, (
-        f"score_cash esperado > 65, obtenido {snap.score_cash}"
-    )
+    assert (
+        snap.score_cash is not None and snap.score_cash > 65
+    ), f"score_cash esperado > 65, obtenido {snap.score_cash}"
     assert snap.confidence_level in ("HIGH", "MEDIUM", "LOW")
     assert snap.heuristic_version == "v1"
 
@@ -142,12 +139,12 @@ async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedi
     snap = await run_pipeline(session, fake_redis, tenant.tenant_id)
 
     # ── Assert ────────────────────────────────────────────────────────────────
-    assert snap.primary_risk_code == "CASH_LOW", (
-        f"primary_risk_code esperado 'CASH_LOW', obtenido {snap.primary_risk_code!r}"
-    )
-    assert snap.score_cash is not None and snap.score_cash < 30, (
-        f"score_cash esperado < 30 (crítico), obtenido {snap.score_cash}"
-    )
+    assert (
+        snap.primary_risk_code == "CASH_LOW"
+    ), f"primary_risk_code esperado 'CASH_LOW', obtenido {snap.primary_risk_code!r}"
+    assert (
+        snap.score_cash is not None and snap.score_cash < 30
+    ), f"score_cash esperado < 30 (crítico), obtenido {snap.score_cash}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -168,9 +165,7 @@ async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedi
 
 
 @pytest.mark.asyncio
-async def test_s3_deco_hogar_margen_bajo(
-    session: AsyncSession, fake_redis: FakeRedis
-) -> None:
+async def test_s3_deco_hogar_margen_bajo(session: AsyncSession, fake_redis: FakeRedis) -> None:
     # ── Setup ─────────────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Deco Hogar Sur")
     await make_profile(
@@ -188,12 +183,12 @@ async def test_s3_deco_hogar_margen_bajo(
     snap = await run_pipeline(session, fake_redis, tenant.tenant_id)
 
     # ── Assert ────────────────────────────────────────────────────────────────
-    assert snap.primary_risk_code == "MARGIN_LOW", (
-        f"primary_risk_code esperado 'MARGIN_LOW', obtenido {snap.primary_risk_code!r}"
-    )
-    assert snap.score_margin is not None and snap.score_margin < 40, (
-        f"score_margin esperado < 40 (warning zone), obtenido {snap.score_margin}"
-    )
+    assert (
+        snap.primary_risk_code == "MARGIN_LOW"
+    ), f"primary_risk_code esperado 'MARGIN_LOW', obtenido {snap.primary_risk_code!r}"
+    assert (
+        snap.score_margin is not None and snap.score_margin < 40
+    ), f"score_margin esperado < 40 (warning zone), obtenido {snap.score_margin}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -230,12 +225,12 @@ async def test_s4_proveedor_unico(session: AsyncSession, fake_redis: FakeRedis) 
     snap = await run_pipeline(session, fake_redis, tenant.tenant_id)
 
     # ── Assert ────────────────────────────────────────────────────────────────
-    assert snap.score_supplier is not None and snap.score_supplier < 45, (
-        f"score_supplier esperado < 45, obtenido {snap.score_supplier}"
-    )
-    assert snap.primary_risk_code == "SUPPLIER_DEPENDENCY", (
-        f"primary_risk_code esperado 'SUPPLIER_DEPENDENCY', obtenido {snap.primary_risk_code!r}"
-    )
+    assert (
+        snap.score_supplier is not None and snap.score_supplier < 45
+    ), f"score_supplier esperado < 45, obtenido {snap.score_supplier}"
+    assert (
+        snap.primary_risk_code == "SUPPLIER_DEPENDENCY"
+    ), f"primary_risk_code esperado 'SUPPLIER_DEPENDENCY', obtenido {snap.primary_risk_code!r}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -268,7 +263,7 @@ async def test_s5_tenant_isolation(
         cash_on_hand=Decimal("100000"),
         supplier_count=2,
     )
-    snap_a = await run_pipeline(session, fake_redis, tenant_a.tenant_id)
+    await run_pipeline(session, fake_redis, tenant_a.tenant_id)
 
     product_a = Product(
         tenant_id=tenant_a.tenant_id,
@@ -294,7 +289,7 @@ async def test_s5_tenant_isolation(
         cash_on_hand=Decimal("80000"),
         supplier_count=2,
     )
-    snap_b = await run_pipeline(session, fake_redis, tenant_b.tenant_id)
+    await run_pipeline(session, fake_redis, tenant_b.tenant_id)
 
     product_b = Product(
         tenant_id=tenant_b.tenant_id,
@@ -325,9 +320,9 @@ async def test_s5_tenant_isolation(
     assert "score_total" in data_b, f"Tenant B debe tener score, obtenido: {data_b}"
 
     # Los snapshot IDs deben ser distintos (cada tenant ve su propio score)
-    assert data_a["id"] != data_b["id"], (
-        "Tenant A y Tenant B retornaron el mismo snapshot — violación de aislación"
-    )
+    assert (
+        data_a["id"] != data_b["id"]
+    ), "Tenant A y Tenant B retornaron el mismo snapshot — violación de aislación"
     # El tenant_id en la respuesta debe coincidir con el tenant autenticado
     assert data_a["tenant_id"] == str(tenant_a.tenant_id)
     assert data_b["tenant_id"] == str(tenant_b.tenant_id)
@@ -336,17 +331,13 @@ async def test_s5_tenant_isolation(
     r = await client.get("/api/v1/products", headers=headers_a)
     assert r.status_code == 200, r.text
     product_ids_a = {p["id"] for p in r.json()}
-    assert str(product_b.id) not in product_ids_a, (
-        "Tenant A no debe ver productos de Tenant B"
-    )
+    assert str(product_b.id) not in product_ids_a, "Tenant A no debe ver productos de Tenant B"
 
     # ── c) Product isolation: Tenant B no ve productos de A ───────────────────
     r = await client.get("/api/v1/products", headers=headers_b)
     assert r.status_code == 200, r.text
     product_ids_b = {p["id"] for p in r.json()}
-    assert str(product_a.id) not in product_ids_b, (
-        "Tenant B no debe ver productos de Tenant A"
-    )
+    assert str(product_a.id) not in product_ids_b, "Tenant B no debe ver productos de Tenant A"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -413,21 +404,17 @@ async def test_s6_end_to_end(
     assert r.status_code == 200, r.text
     data = r.json()
 
-    assert "score_total" in data, (
-        f"Esperado score_total en respuesta, obtenido: {data}"
-    )
-    assert "status" not in data, (
-        "No debe retornar {status: CALCULATING} si el score ya fue calculado"
-    )
-    assert "confidence_level" in data, (
-        f"Esperado confidence_level en respuesta, obtenido: {data}"
-    )
-    assert 0 <= data["score_total"] <= 100, (
-        f"score_total fuera de rango: {data['score_total']}"
-    )
-    assert data["confidence_level"] in ("HIGH", "MEDIUM", "LOW"), (
-        f"confidence_level inválido: {data['confidence_level']!r}"
-    )
+    assert "score_total" in data, f"Esperado score_total en respuesta, obtenido: {data}"
+    assert (
+        "status" not in data
+    ), "No debe retornar {status: CALCULATING} si el score ya fue calculado"
+    assert "confidence_level" in data, f"Esperado confidence_level en respuesta, obtenido: {data}"
+    assert 0 <= data["score_total"] <= 100, f"score_total fuera de rango: {data['score_total']}"
+    assert data["confidence_level"] in (
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+    ), f"confidence_level inválido: {data['confidence_level']!r}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -444,9 +431,7 @@ async def test_s6_end_to_end(
 
 
 @pytest.mark.asyncio
-async def test_s7_momentum_dos_semanas(
-    session: AsyncSession, fake_redis: FakeRedis
-) -> None:
+async def test_s7_momentum_dos_semanas(session: AsyncSession, fake_redis: FakeRedis) -> None:
     # ── Setup tenant ──────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Kiosco Momentum")
     await make_profile(
@@ -470,7 +455,9 @@ async def test_s7_momentum_dos_semanas(
         week_start_prev.year,
         week_start_prev.month,
         week_start_prev.day,
-        12, 0, 0,
+        12,
+        0,
+        0,
         tzinfo=UTC,
     )
     prev_snap = HealthScoreSnapshot(
@@ -523,7 +510,7 @@ async def test_s7_momentum_dos_semanas(
         snapshot_date=cur_created_at,
         created_at=cur_created_at,
         score_cash=80,
-        score_margin=25,   # ← mínimo → active_goal debe apuntar a "margin"
+        score_margin=25,  # ← mínimo → active_goal debe apuntar a "margin"
         score_stock=60,
         score_supplier=70,
         primary_risk_code="MARGIN_LOW",
@@ -544,16 +531,14 @@ async def test_s7_momentum_dos_semanas(
         .order_by(WeeklyScoreHistory.week_start)
     )
     rows = result.scalars().all()
-    assert len(rows) == 2, (
-        f"Esperado 2 entradas en weekly_score_history, encontrado {len(rows)}"
-    )
+    assert len(rows) == 2, f"Esperado 2 entradas en weekly_score_history, encontrado {len(rows)}"
     assert rows[0].week_start == week_start_prev, "Primera entrada debe ser semana anterior"
     assert rows[1].week_start == week_start_cur, "Segunda entrada debe ser semana actual"
 
     # La semana actual debe mostrar delta positivo (60 → 65 = +5)
-    assert rows[1].delta is not None and float(rows[1].delta) > 0, (
-        f"delta esperado > 0 (mejora), obtenido {rows[1].delta}"
-    )
+    assert (
+        rows[1].delta is not None and float(rows[1].delta) > 0
+    ), f"delta esperado > 0 (mejora), obtenido {rows[1].delta}"
 
     # ── Assert b) active_goal apunta al subscore más bajo (margin=25) ─────────
     mp_result = await session.execute(
@@ -607,9 +592,7 @@ async def test_s8_celery_task_run() -> None:
     fresh_engine = _real_cae("sqlite+aiosqlite:///:memory:", echo=False)
     async with fresh_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    fresh_factory = async_sessionmaker(
-        fresh_engine, class_=AsyncSession, expire_on_commit=False
-    )
+    fresh_factory = async_sessionmaker(fresh_engine, class_=AsyncSession, expire_on_commit=False)
 
     async with fresh_factory() as setup_session:
         tenant = await make_tenant(setup_session, legal_name="Celery Run Test")
@@ -647,9 +630,7 @@ async def test_s8_celery_task_run() -> None:
     # ── Verify snapshot was persisted ─────────────────────────────────────────
     async with fresh_factory() as verify_session:
         res = await verify_session.execute(
-            select(HealthScoreSnapshot).where(
-                HealthScoreSnapshot.tenant_id == tenant.tenant_id
-            )
+            select(HealthScoreSnapshot).where(HealthScoreSnapshot.tenant_id == tenant.tenant_id)
         )
         snap = res.scalar_one()
         assert snap.total_score > 0

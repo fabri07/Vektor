@@ -1,5 +1,7 @@
 """Email integration via Resend HTTP API."""
 
+from typing import Any
+
 import httpx
 
 from app.config.settings import get_settings
@@ -40,7 +42,7 @@ class SMTPClient:
                 )
             return
 
-        payload: dict = {
+        payload: dict[str, Any] = {
             "from": s.SMTP_FROM_EMAIL,
             "to": [to_email],
             "subject": subject,

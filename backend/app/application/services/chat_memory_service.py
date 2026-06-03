@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import date
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,7 +106,7 @@ class ChatMemoryService:
             cached = await redis.get(key)
             if cached:
                 raw = cached.decode() if isinstance(cached, bytes) else cached
-                return json.loads(raw)
+                return cast("dict[str, Any]", json.loads(raw))
         except Exception as exc:
             logger.warning("chat_memory.cache_get_failed", error=str(exc))
 

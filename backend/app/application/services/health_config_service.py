@@ -17,7 +17,6 @@ Validaciones:
 
 from __future__ import annotations
 
-from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -41,7 +40,7 @@ class HealthConfigRequest(BaseModel):
     warning_margin_pct: float = Field(..., ge=0.0, le=80.0)
 
     @model_validator(mode="after")
-    def _target_gte_warning(self) -> "HealthConfigRequest":
+    def _target_gte_warning(self) -> HealthConfigRequest:
         if self.target_margin_pct < self.warning_margin_pct:
             raise ValueError("target_margin_pct debe ser >= warning_margin_pct")
         return self
@@ -58,9 +57,9 @@ def _benchmark_from_pcts(target_pct: float, warning_pct: float) -> MarginBenchma
     warning = warning_pct / 100.0
     target = target_pct / 100.0
     return MarginBenchmark(
-        critical_below=warning * 0.5,   # la mitad del umbral de warning
+        critical_below=warning * 0.5,  # la mitad del umbral de warning
         warning_below=warning,
-        healthy_min=warning,            # diseño canónico: warning_below == healthy_min
+        healthy_min=warning,  # diseño canónico: warning_below == healthy_min
         healthy_max=target,
     )
 
@@ -80,7 +79,9 @@ async def get_margin_benchmark(
     if _KEY_TARGET not in overrides and _KEY_WARNING not in overrides:
         return None
     target = float(overrides[_KEY_TARGET]["value"]) if _KEY_TARGET in overrides else _DEFAULT_TARGET
-    warning = float(overrides[_KEY_WARNING]["value"]) if _KEY_WARNING in overrides else _DEFAULT_WARNING
+    warning = (
+        float(overrides[_KEY_WARNING]["value"]) if _KEY_WARNING in overrides else _DEFAULT_WARNING
+    )
     return _benchmark_from_pcts(target, warning)
 
 
@@ -96,8 +97,14 @@ class HealthConfigService:
             )
         )
         overrides = {row.param_key: row.param_value for row in rows.scalars()}
-        target = float(overrides[_KEY_TARGET]["value"]) if _KEY_TARGET in overrides else _DEFAULT_TARGET
-        warning = float(overrides[_KEY_WARNING]["value"]) if _KEY_WARNING in overrides else _DEFAULT_WARNING
+        target = (
+            float(overrides[_KEY_TARGET]["value"]) if _KEY_TARGET in overrides else _DEFAULT_TARGET
+        )
+        warning = (
+            float(overrides[_KEY_WARNING]["value"])
+            if _KEY_WARNING in overrides
+            else _DEFAULT_WARNING
+        )
         return HealthConfigResponse(
             target_margin_pct=target,
             warning_margin_pct=warning,
@@ -112,16 +119,20 @@ class HealthConfigService:
                 BusinessHeuristicOverride.param_key.in_([_KEY_TARGET, _KEY_WARNING]),
             )
         )
-        self._session.add(BusinessHeuristicOverride(
-            tenant_id=tenant_id,
-            param_key=_KEY_TARGET,
-            param_value={"value": config.target_margin_pct},
-        ))
-        self._session.add(BusinessHeuristicOverride(
-            tenant_id=tenant_id,
-            param_key=_KEY_WARNING,
-            param_value={"value": config.warning_margin_pct},
-        ))
+        self._session.add(
+            BusinessHeuristicOverride(
+                tenant_id=tenant_id,
+                param_key=_KEY_TARGET,
+                param_value={"value": config.target_margin_pct},
+            )
+        )
+        self._session.add(
+            BusinessHeuristicOverride(
+                tenant_id=tenant_id,
+                param_key=_KEY_WARNING,
+                param_value={"value": config.warning_margin_pct},
+            )
+        )
         await self._session.commit()
         logger.info(
             "health_config.updated",

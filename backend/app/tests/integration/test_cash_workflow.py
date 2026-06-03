@@ -23,7 +23,7 @@ async def user(session: AsyncSession, tenant):
 
 
 @pytest.mark.asyncio
-async def test_full_sale_workflow(session: AsyncSession, tenant, user):
+async def test_full_sale_workflow(session: AsyncSession, tenant, user) -> None:
     """save_sale → SaleEntry persiste en DB con el payment_method correcto."""
     from app.application.services.cash_service import save_sale
 
@@ -34,9 +34,7 @@ async def test_full_sale_workflow(session: AsyncSession, tenant, user):
         "product_description": "Gaseosa 2L",
     }
 
-    with unittest.mock.patch(
-        "app.application.services.cash_service.logger"
-    ):
+    with unittest.mock.patch("app.application.services.cash_service.logger"):
         sale = await save_sale(entities, tenant.tenant_id, user.user_id, session)
         await session.commit()
 
@@ -54,7 +52,9 @@ async def test_full_sale_workflow(session: AsyncSession, tenant, user):
 
 
 @pytest.mark.asyncio
-async def test_save_sale_requires_explicit_payment_method(session: AsyncSession, tenant, user):
+async def test_save_sale_requires_explicit_payment_method(
+    session: AsyncSession, tenant, user
+) -> None:
     """save_sale no debe asumir cash si falta el método de pago."""
     from app.application.services.cash_service import save_sale
 
@@ -69,17 +69,15 @@ async def test_save_sale_requires_explicit_payment_method(session: AsyncSession,
 
 
 @pytest.mark.asyncio
-async def test_sale_not_in_db_before_confirm(session: AsyncSession, tenant, user):
+async def test_sale_not_in_db_before_confirm(session: AsyncSession, tenant, user) -> None:
     """Antes de ejecutar save_sale no hay SaleEntry para el tenant."""
-    result = await session.execute(
-        select(SaleEntry).where(SaleEntry.tenant_id == tenant.tenant_id)
-    )
+    result = await session.execute(select(SaleEntry).where(SaleEntry.tenant_id == tenant.tenant_id))
     entries = result.scalars().all()
     assert len(entries) == 0
 
 
 @pytest.mark.asyncio
-async def test_sale_confirmed_emits_event(session: AsyncSession, tenant):
+async def test_sale_confirmed_emits_event(session: AsyncSession, tenant) -> None:
     """on_confirmed_sale emite SALE_RECORDED vía EventBus."""
     with (
         unittest.mock.patch("app.application.agents.cash.agent.anthropic.AsyncAnthropic"),

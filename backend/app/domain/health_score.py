@@ -13,12 +13,12 @@ from uuid import UUID, uuid4
 
 
 class ScoreLevel(StrEnum):
-    CRITICAL = "critical"       # 0–39
-    WARNING = "warning"         # 40–59
-    FAIR = "fair"               # 60–74
-    GOOD = "good"               # 75–89
-    EXCELLENT = "excellent"     # 90–100
-    NO_DATA = "NO_DATA"         # sin datos cargados para el tenant
+    CRITICAL = "critical"  # 0–39
+    WARNING = "warning"  # 40–59
+    FAIR = "fair"  # 60–74
+    GOOD = "good"  # 75–89
+    EXCELLENT = "excellent"  # 90–100
+    NO_DATA = "NO_DATA"  # sin datos cargados para el tenant
 
 
 class ScoreDimension(StrEnum):
@@ -34,8 +34,8 @@ class DimensionScore:
     """Score for a single financial dimension."""
 
     dimension: ScoreDimension
-    value: Decimal           # 0.00 – 100.00
-    weight: Decimal          # 0.00 – 1.00; all dimensions must sum to 1
+    value: Decimal  # 0.00 – 100.00
+    weight: Decimal  # 0.00 – 1.00; all dimensions must sum to 1
     explanation: str
 
     def __post_init__(self) -> None:
@@ -62,7 +62,7 @@ class HealthScore:
     level: ScoreLevel
     dimensions: list[DimensionScore]
     snapshot_date: datetime
-    triggered_by: str           # e.g. "sale_entry_created", "expense_updated"
+    triggered_by: str  # e.g. "sale_entry_created", "expense_updated"
     id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(default_factory=datetime.utcnow)
 

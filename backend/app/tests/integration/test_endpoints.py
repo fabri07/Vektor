@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import anthropic
@@ -28,7 +29,6 @@ from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 from .conftest import FakeRedis, make_auth_headers, make_tenant, make_user
-
 
 # ── FakeRedis extendida con contador de rate limit ────────────────────────────
 
@@ -64,9 +64,7 @@ async def auth_client(session: AsyncSession, tenant_and_user):
     app.dependency_overrides[get_db_session] = _override_session
     app.dependency_overrides[get_redis] = _override_redis
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac, headers, tenant, user, fake_redis
 
 
@@ -89,9 +87,7 @@ async def auth_client_second_tenant(session: AsyncSession):
     app.dependency_overrides[get_db_session] = _override_session
     app.dependency_overrides[get_redis] = _override_redis
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac, headers2, tenant2, user2
 
 
@@ -105,20 +101,22 @@ def _make_ceo_plan_response(
     intent: str,
     agent: str,
     action_type: str,
-    entities: dict | None = None,
+    entities: dict[str, Any] | None = None,
 ) -> AgentResponse:
     """Respuesta del CEO con un plan single-task (Stage 3 format)."""
     plan_dict = {
         "plan_id": str(uuid.uuid4()),
         "intent": intent,
-        "tasks": [{
-            "task_id": str(uuid.uuid4()),
-            "agent": agent,
-            "action_type": action_type,
-            "entities": entities or {},
-            "depends_on": [],
-            "approval_group": None,
-        }],
+        "tasks": [
+            {
+                "task_id": str(uuid.uuid4()),
+                "agent": agent,
+                "action_type": action_type,
+                "entities": entities or {},
+                "depends_on": [],
+                "approval_group": None,
+            }
+        ],
         "requires_synthesis": False,
         "fallback_message": None,
     }
@@ -188,7 +186,9 @@ def _mock_anthropic_overload_error() -> anthropic.InternalServerError:
 
 
 @pytest.mark.asyncio
-async def test_medium_action_creates_pending_not_persists(auth_client, session: AsyncSession):
+async def test_medium_action_creates_pending_not_persists(
+    auth_client, session: AsyncSession
+) -> None:
     """Un REGISTER_SALE (MEDIUM) debe crear pending_action en DB, NO SaleEntry."""
     ac, headers, tenant, user, _ = auth_client
 
@@ -196,21 +196,21 @@ async def test_medium_action_creates_pending_not_persists(auth_client, session: 
     sub_mock.process = AsyncMock(
         side_effect=lambda req, **_: _mock_requires_approval_response(req.request_id)
     )
-    ORCHESTRATOR = "app.application.services.chat_orchestrator"
+    orchestrator = "app.application.services.chat_orchestrator"
     with (
-        patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
+        patch(f"{orchestrator}.AgentCEO") as mock_ceo,
         patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
-        patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
-        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
+        patch(f"{orchestrator}.ConversationService") as mock_conv,
+        patch(f"{orchestrator}.get_anthropic_async_client"),
     ):
-        MockCEO.return_value.process = AsyncMock(
+        mock_ceo.return_value.process = AsyncMock(
             side_effect=lambda req: _make_ceo_plan_response(
                 req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE", {"amount": 500}
             )
         )
-        MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
-        MockConv.return_value.add_turn = AsyncMock()
-        MockConv.return_value.persist = AsyncMock()
+        mock_conv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        mock_conv.return_value.add_turn = AsyncMock()
+        mock_conv.return_value.persist = AsyncMock()
 
         resp = await ac.post(
             "/api/v1/agent/chat",
@@ -234,14 +234,12 @@ async def test_medium_action_creates_pending_not_persists(auth_client, session: 
     assert pending.status == "PENDING"
 
     # Verificar que NO se creó SaleEntry
-    sales = await session.execute(
-        select(SaleEntry).where(SaleEntry.tenant_id == tenant.tenant_id)
-    )
+    sales = await session.execute(select(SaleEntry).where(SaleEntry.tenant_id == tenant.tenant_id))
     assert sales.scalar_one_or_none() is None
 
 
 @pytest.mark.asyncio
-async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSession):
+async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSession) -> None:
     """Un REGISTER_EXPENSE marcado para auto-ejecución debe persistirse sin pending visible."""
     ac, headers, tenant, user, _ = auth_client
 
@@ -269,21 +267,21 @@ async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSes
             },
         )
     )
-    ORCHESTRATOR = "app.application.services.chat_orchestrator"
+    orchestrator = "app.application.services.chat_orchestrator"
     with (
-        patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
+        patch(f"{orchestrator}.AgentCEO") as mock_ceo,
         patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
-        patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
-        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
+        patch(f"{orchestrator}.ConversationService") as mock_conv,
+        patch(f"{orchestrator}.get_anthropic_async_client"),
     ):
-        MockCEO.return_value.process = AsyncMock(
+        mock_ceo.return_value.process = AsyncMock(
             side_effect=lambda req: _make_ceo_plan_response(
                 req.request_id, "ingresar_gasto", "agent_expense", "REGISTER_EXPENSE"
             )
         )
-        MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
-        MockConv.return_value.add_turn = AsyncMock()
-        MockConv.return_value.persist = AsyncMock()
+        mock_conv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        mock_conv.return_value.add_turn = AsyncMock()
+        mock_conv.return_value.persist = AsyncMock()
 
         resp = await ac.post(
             "/api/v1/agent/chat",
@@ -306,18 +304,20 @@ async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSes
 
 
 @pytest.mark.asyncio
-async def test_auto_execute_failure_returns_error_status(auth_client, session: AsyncSession):
+async def test_auto_execute_failure_returns_error_status(
+    auth_client, session: AsyncSession
+) -> None:
     """Si falla la auto-ejecución local, el chat no debe reportar success."""
     ac, headers, tenant, user, _ = auth_client
 
     with (
-        patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator,
+        patch("app.api.v1.agent.ChatOrchestrator") as mock_orchestrator,
         patch(
             "app.api.v1.agent.execute_pending_action",
             new=AsyncMock(side_effect=RuntimeError("simulated write failure")),
         ),
     ):
-        MockOrchestrator.return_value.handle = AsyncMock(
+        mock_orchestrator.return_value.handle = AsyncMock(
             return_value=AgentResponse(
                 request_id=str(uuid.uuid4()),
                 agent_name="agent_cash",
@@ -352,7 +352,7 @@ async def test_auto_execute_failure_returns_error_status(auth_client, session: A
 
 
 @pytest.mark.asyncio
-async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSession):
+async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSession) -> None:
     """Confirmar una pending_action → status=APPROVED, executed_at seteado."""
     ac, headers, tenant, user, _ = auth_client
 
@@ -384,7 +384,7 @@ async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSe
 
 
 @pytest.mark.asyncio
-async def test_confirm_same_id_twice_fails(auth_client, session: AsyncSession):
+async def test_confirm_same_id_twice_fails(auth_client, session: AsyncSession) -> None:
     """Intentar confirmar la misma pending_action dos veces → 404 en el segundo intento."""
     ac, headers, tenant, user, _ = auth_client
 
@@ -408,7 +408,7 @@ async def test_confirm_same_id_twice_fails(auth_client, session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_confirm_expired_fails(auth_client, session: AsyncSession):
+async def test_confirm_expired_fails(auth_client, session: AsyncSession) -> None:
     """Confirmar una pending_action vencida → 410 Gone."""
     ac, headers, tenant, user, _ = auth_client
 
@@ -433,7 +433,7 @@ async def test_confirm_expired_fails(auth_client, session: AsyncSession):
 @pytest.mark.asyncio
 async def test_confirm_external_action_requires_reconnect_on_mcp_auth_error(
     auth_client, session: AsyncSession
-):
+) -> None:
     """Una acción externa debe quedar en REQUIRES_RECONNECT cuando el MCP pide auth."""
     ac, headers, tenant, user, _ = auth_client
 
@@ -496,8 +496,8 @@ async def test_chat_error_response_does_not_increment_rate_limit(auth_client):
     ac, headers, tenant, user, fake_redis = auth_client
     rate_key = f"rate:chat:{tenant.tenant_id}:{__import__('datetime').date.today()}"
 
-    with patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator:
-        MockOrchestrator.return_value.handle = AsyncMock(
+    with patch("app.api.v1.agent.ChatOrchestrator") as mock_orchestrator:
+        mock_orchestrator.return_value.handle = AsyncMock(
             return_value=AgentResponse(
                 request_id=str(uuid.uuid4()),
                 agent_name="agent_ceo",
@@ -524,8 +524,8 @@ async def test_chat_overloaded_provider_returns_safe_503(auth_client):
     """Un 529 de Anthropic debe degradar a 503 sin filtrar el error crudo."""
     ac, headers, tenant, user, _ = auth_client
 
-    with patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator:
-        MockOrchestrator.return_value.handle = AsyncMock(
+    with patch("app.api.v1.agent.ChatOrchestrator") as mock_orchestrator:
+        mock_orchestrator.return_value.handle = AsyncMock(
             side_effect=_mock_anthropic_overload_error()
         )
         resp = await ac.post(
@@ -548,8 +548,8 @@ async def test_chat_stream_overloaded_provider_returns_safe_sse_error(auth_clien
     """El stream debe emitir un error seguro y finalizar cuando Anthropic devuelve 529."""
     ac, headers, tenant, user, _ = auth_client
 
-    with patch("app.api.v1.agent.ChatOrchestrator") as MockOrchestrator:
-        MockOrchestrator.return_value.handle = AsyncMock(
+    with patch("app.api.v1.agent.ChatOrchestrator") as mock_orchestrator:
+        mock_orchestrator.return_value.handle = AsyncMock(
             side_effect=_mock_anthropic_overload_error()
         )
         resp = await ac.post(
@@ -571,9 +571,7 @@ async def test_chat_stream_overloaded_provider_returns_safe_sse_error(auth_clien
 
 
 @pytest.mark.asyncio
-async def test_cross_tenant_pending_action_invisible(
-    auth_client, session: AsyncSession
-):
+async def test_cross_tenant_pending_action_invisible(auth_client, session: AsyncSession) -> None:
     """Tenant B no puede confirmar ni cancelar una pending_action de Tenant A."""
     ac_a, headers_a, tenant_a, user_a, _ = auth_client
 
@@ -594,9 +592,7 @@ async def test_cross_tenant_pending_action_invisible(
     app.dependency_overrides[get_db_session] = _override_session
     app.dependency_overrides[get_redis] = _override_redis
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac_b:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac_b:
         # Crear pending_action de tenant A
         action = PendingAction(
             tenant_id=tenant_a.tenant_id,
@@ -611,9 +607,7 @@ async def test_cross_tenant_pending_action_invisible(
         await session.commit()
 
         # Tenant B intenta confirmar → debe recibir 404
-        resp = await ac_b.post(
-            f"/api/v1/agent/confirm/{action.id}", headers=headers_b
-        )
+        resp = await ac_b.post(f"/api/v1/agent/confirm/{action.id}", headers=headers_b)
         assert resp.status_code == 404
 
 
@@ -632,34 +626,36 @@ def _mock_clarification_response(request_id: str) -> AgentResponse:
 
 
 @pytest.mark.asyncio
-async def test_wf02_requires_clarification_no_pending(auth_client, session: AsyncSession):
+async def test_wf02_requires_clarification_no_pending(auth_client, session: AsyncSession) -> None:
     """WF-02: requires_clarification no crea PendingAction en DB."""
     ac, headers, tenant, user, _ = auth_client
 
-    ORCHESTRATOR = "app.application.services.chat_orchestrator"
+    orchestrator = "app.application.services.chat_orchestrator"
     sub_mock = AsyncMock()
     sub_mock.process = AsyncMock(
         side_effect=lambda req, **_: _mock_clarification_response(req.request_id)
     )
     with (
-        patch(f"{ORCHESTRATOR}.AgentCEO") as MockCEO,
+        patch(f"{orchestrator}.AgentCEO") as mock_ceo,
         patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
-        patch(f"{ORCHESTRATOR}.ConversationService") as MockConv,
-        patch(f"{ORCHESTRATOR}.get_anthropic_async_client") as MockAnthropicFactory,
+        patch(f"{orchestrator}.ConversationService") as mock_conv,
+        patch(f"{orchestrator}.get_anthropic_async_client") as mock_anthropic_factory,
     ):
-        MockCEO.return_value.process = AsyncMock(
+        mock_ceo.return_value.process = AsyncMock(
             side_effect=lambda req: _make_ceo_plan_response(
                 req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE"
             )
         )
-        MockConv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
-        MockConv.return_value.add_turn = AsyncMock()
-        MockConv.return_value.persist = AsyncMock()
+        mock_conv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        mock_conv.return_value.add_turn = AsyncMock()
+        mock_conv.return_value.persist = AsyncMock()
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(
-            return_value=AsyncMock(content=[AsyncMock(text="¿Fue al contado o en cuenta corriente?")])
+            return_value=AsyncMock(
+                content=[AsyncMock(text="¿Fue al contado o en cuenta corriente?")]
+            )
         )
-        MockAnthropicFactory.return_value = mock_client
+        mock_anthropic_factory.return_value = mock_client
 
         resp = await ac.post(
             "/api/v1/agent/chat",
@@ -679,7 +675,7 @@ async def test_wf02_requires_clarification_no_pending(auth_client, session: Asyn
 
 
 @pytest.mark.asyncio
-async def test_cancel_succeeds(auth_client, session: AsyncSession):
+async def test_cancel_succeeds(auth_client, session: AsyncSession) -> None:
     """Cancelar una pending_action → status=REJECTED."""
     ac, headers, tenant, user, _ = auth_client
 
@@ -713,7 +709,7 @@ def _make_group_action(
     group_id: str,
     position: int,
     action_type: str = "REGISTER_EXPENSE",
-    payload: dict | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> PendingAction:
     return PendingAction(
         tenant_id=tenant_id,
@@ -732,7 +728,7 @@ def _make_group_action(
 @pytest.mark.asyncio
 async def test_confirm_group_success_executes_all_in_order(
     auth_client, session: AsyncSession
-):
+) -> None:
     """Grupo de 2 PAs locales que terminan bien → group_execution_status=SUCCEEDED."""
     ac, headers, tenant, user, _ = auth_client
     group_id = str(uuid.uuid4())
@@ -769,9 +765,7 @@ async def test_confirm_group_success_executes_all_in_order(
             "app.api.v1.agent._execute_local_action",
             new=AsyncMock(side_effect=_execute_and_mark),
         ):
-            resp = await ac.post(
-                f"/api/v1/agent/confirm/group/{group_id}", headers=headers
-            )
+            resp = await ac.post(f"/api/v1/agent/confirm/group/{group_id}", headers=headers)
 
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -790,7 +784,7 @@ async def test_confirm_group_success_executes_all_in_order(
 @pytest.mark.asyncio
 async def test_confirm_group_aborts_chain_after_first_failure(
     auth_client, session: AsyncSession
-):
+) -> None:
     """Si la primera task falla, la segunda queda FAILED sin ejecutarse (abort-all)."""
     ac, headers, tenant, user, _ = auth_client
     group_id = str(uuid.uuid4())
@@ -844,7 +838,7 @@ async def test_confirm_group_aborts_chain_after_first_failure(
 
 
 @pytest.mark.asyncio
-async def test_cancel_group_rejects_all(auth_client, session: AsyncSession):
+async def test_cancel_group_rejects_all(auth_client, session: AsyncSession) -> None:
     """Cancelar grupo → todas las PAs PENDING quedan REJECTED."""
     ac, headers, tenant, user, _ = auth_client
     group_id = str(uuid.uuid4())
@@ -881,7 +875,5 @@ async def test_cancel_group_rejects_all(auth_client, session: AsyncSession):
 async def test_confirm_group_not_found_404(auth_client):
     """Grupo inexistente → 404."""
     ac, headers, _, _, _ = auth_client
-    resp = await ac.post(
-        f"/api/v1/agent/confirm/group/{uuid.uuid4()}", headers=headers
-    )
+    resp = await ac.post(f"/api/v1/agent/confirm/group/{uuid.uuid4()}", headers=headers)
     assert resp.status_code == 404

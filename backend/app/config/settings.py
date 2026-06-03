@@ -182,7 +182,9 @@ class Settings(BaseSettings):
 
     # ── Email (Resend HTTP API) ────────────────────────────────────────────────
     RESEND_API_KEY: str = ""
-    SMTP_PASSWORD: str = ""  # alias legacy — se usa como RESEND_API_KEY si RESEND_API_KEY está vacío
+    SMTP_PASSWORD: str = (
+        ""  # alias legacy — se usa como RESEND_API_KEY si RESEND_API_KEY está vacío
+    )
     SMTP_FROM_EMAIL: str = "noreply@vektor.app"
 
     # ── Feature flags ─────────────────────────────────────────────────────────
@@ -209,7 +211,6 @@ class Settings(BaseSettings):
     GOOGLE_OAUTH_CLIENT_SECRET: str = ""
     # Redirect URI para login social (Google Cloud Console)
     GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/oauth/google/callback"
-
 
     # ── Demo mode ─────────────────────────────────────────────────────────────
     # Set DEMO_MODE=true to pre-load a kiosco tenant with realistic sample data.
@@ -277,12 +278,11 @@ class Settings(BaseSettings):
                 )
 
         if self.ENABLE_GOOGLE_MCP_TOOLS and not self.MCP_SERVER_URL:
-            raise ValueError(
-                "MCP_SERVER_URL es requerido cuando ENABLE_GOOGLE_MCP_TOOLS=true"
-            )
+            raise ValueError("MCP_SERVER_URL es requerido cuando ENABLE_GOOGLE_MCP_TOOLS=true")
 
         if self.ENABLE_GOOGLE_MCP_TOOLS and not self.MCP_SERVER_SHARED_SECRET:
             import logging as _logging  # noqa: PLC0415
+
             _logging.getLogger(__name__).warning(
                 "config.mcp.shared_secret_missing: "
                 "ENABLE_GOOGLE_MCP_TOOLS=true pero MCP_SERVER_SHARED_SECRET está vacío. "
@@ -293,12 +293,11 @@ class Settings(BaseSettings):
         _has_email_key = bool(self.RESEND_API_KEY or self.SMTP_PASSWORD)
         if self.ENABLE_EMAIL_VERIFICATION and not _has_email_key:
             raise ValueError(
-                "ENABLE_EMAIL_VERIFICATION=true requiere RESEND_API_KEY (o SMTP_PASSWORD) configurado."
+                "ENABLE_EMAIL_VERIFICATION=true requiere RESEND_API_KEY (o SMTP_PASSWORD) "
+                "configurado."
             )
         if self.ENABLE_EMAIL_NOTIFICATIONS and not _has_email_key:
-            raise ValueError(
-                "ENABLE_EMAIL_NOTIFICATIONS=true requiere RESEND_API_KEY configurado."
-            )
+            raise ValueError("ENABLE_EMAIL_NOTIFICATIONS=true requiere RESEND_API_KEY configurado.")
 
         return self
 
@@ -333,6 +332,7 @@ class Settings(BaseSettings):
         """SSL connect_args for asyncpg when DATABASE_URL requires SSL (Neon, RDS, etc.)."""
         if self.DATABASE_URL_RAW and "sslmode=require" in self.DATABASE_URL_RAW:
             import ssl  # noqa: PLC0415
+
             return {"ssl": ssl.create_default_context()}
         return {}
 

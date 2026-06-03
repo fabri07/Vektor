@@ -79,7 +79,9 @@ async def calcular_margen_bruto(tenant_id: uuid.UUID, db: AsyncSession) -> dict[
         return {"margen_pct": None, "margen_abs": None, "sin_datos": True}
 
     margen_abs = ventas - gastos
-    margen_pct = (margen_abs / ventas * Decimal("100")).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    margen_pct = (margen_abs / ventas * Decimal("100")).quantize(
+        _TWO_PLACES, rounding=ROUND_HALF_UP
+    )
 
     return {
         "margen_pct": margen_pct,

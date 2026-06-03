@@ -20,8 +20,8 @@ else:
         settings.DATABASE_URL,
         pool_size=10,
         max_overflow=20,
-        pool_pre_ping=True,          # detect stale connections
-        pool_recycle=3600,           # recycle connections every hour
+        pool_pre_ping=True,  # detect stale connections
+        pool_recycle=3600,  # recycle connections every hour
         echo=settings.DEBUG,
         connect_args=settings.pg_connect_args,
     )

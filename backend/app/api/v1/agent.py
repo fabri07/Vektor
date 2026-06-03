@@ -70,7 +70,6 @@ _ANTHROPIC_UNAVAILABLE_MESSAGE = (
 )
 
 
-
 class ChatRequest(BaseModel):
     message: str
     attachments: list[Any] = []
@@ -99,9 +98,7 @@ def _anthropic_error_response(exc: Exception) -> tuple[int, str] | None:
 
     if isinstance(
         exc,
-        anthropic.InternalServerError
-        | anthropic.APIConnectionError
-        | anthropic.APITimeoutError,
+        anthropic.InternalServerError | anthropic.APIConnectionError | anthropic.APITimeoutError,
     ) or status_code in {
         status.HTTP_500_INTERNAL_SERVER_ERROR,
         status.HTTP_502_BAD_GATEWAY,
@@ -139,12 +136,7 @@ def _derive_title(turns: list[Any]) -> str:
 
 def _extract_action_payload(agent_response: AgentResponse) -> dict[str, Any]:
     result = agent_response.result or {}
-    payload = (
-        result.get("structured_data")
-        or result.get("payload")
-        or result.get("entities")
-        or {}
-    )
+    payload = result.get("structured_data") or result.get("payload") or result.get("entities") or {}
     if not isinstance(payload, dict):
         payload = {}
 
@@ -199,9 +191,9 @@ def _topological_position_map(plan: dict[str, Any] | None) -> dict[str, int]:
             # Ciclo o dependencia inválida: emitimos lo restante en orden recibido
             ready = remaining[:]
         for t in ready:
-            position_map[t["task_id"]] = cursor
+            position_map[str(t["task_id"])] = cursor
             cursor += 1
-            completed.add(t["task_id"])
+            completed.add(str(t["task_id"]))
         ready_ids = {t["task_id"] for t in ready}
         remaining = [t for t in remaining if t["task_id"] not in ready_ids]
 
@@ -357,7 +349,9 @@ async def _process_agent_action(
 
         approval_group_id = str(uuid.uuid4())
         pending_ids: list[str] = []
-        plan_dict = agent_response.result.get("plan") if isinstance(agent_response.result, dict) else None
+        plan_dict = (
+            agent_response.result.get("plan") if isinstance(agent_response.result, dict) else None
+        )
         topo_position = _topological_position_map(plan_dict)
         for fallback_position, tr in enumerate(task_response_list):
             if not tr.get("requires_approval"):
@@ -395,9 +389,7 @@ async def _process_agent_action(
     payload = _extract_action_payload(agent_response)
     payload.setdefault(AUTOMATION_PAYLOAD_AGENT_KEY, agent_response.agent_name)
     external_system = (
-        determine_external_system(action_type, payload)
-        if payload.get("mode") == "mcp"
-        else None
+        determine_external_system(action_type, payload) if payload.get("mode") == "mcp" else None
     )
     auto_execute = action_type in _AUTO_EXECUTE_ACTION_TYPES
 
@@ -526,7 +518,7 @@ async def _process_agent_action(
 async def get_chat_usage(
     current_user: User = Depends(get_current_user),
     redis: Redis = Depends(get_redis),
-) -> dict:
+) -> dict[str, Any]:
     rate_key = f"rate:chat:{current_user.tenant_id}:{date.today()}"
     count = await redis.get(rate_key)
     return {"messages_today": int(count) if count else 0, "limit": 50}
@@ -638,7 +630,7 @@ async def chat(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="El procesamiento tardó demasiado. Por favor intentá de nuevo.",
-        )
+        ) from None
     except AnthropicConfigurationError as exc:
         logger.error("agent_anthropic_not_configured", tenant_id=str(tenant_id))
         raise HTTPException(
@@ -754,6 +746,7 @@ async def chat_stream(
     try:
         current_count = await redis.get(rate_key)
         if current_count is not None and int(current_count) >= 50:
+
             async def _rate_limited() -> AsyncGenerator[str, None]:
                 err = {
                     "type": "error",
@@ -933,7 +926,7 @@ async def confirm_action(
     current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
-) -> dict:
+) -> dict[str, Any]:
     # SELECT FOR UPDATE — previene race conditions
     stmt = (
         select(PendingAction)
@@ -1008,10 +1001,7 @@ async def confirm_action(
         "execution_status": action.execution_status,
         "failure_code": action.failure_code,
     }
-    if (
-        get_settings().ENABLE_AGENT_AUTOMATIONS
-        and action.execution_status == "SUCCEEDED"
-    ):
+    if get_settings().ENABLE_AGENT_AUTOMATIONS and action.execution_status == "SUCCEEDED":
         response["automation_offer"] = automation_offer_for_action(action)
     return response
 
@@ -1024,7 +1014,7 @@ async def cancel_action(
     pending_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     stmt = select(PendingAction).where(
         PendingAction.id == pending_id,
         PendingAction.tenant_id == current_user.tenant_id,
@@ -1060,7 +1050,7 @@ async def confirm_action_group(
     current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
-) -> dict:
+) -> dict[str, Any]:
     """Aprueba todas las PendingActions del grupo y las ejecuta en orden por group_position.
 
     Semántica abort-all: si alguna task falla, las posteriores se marcan FAILED con
@@ -1116,11 +1106,13 @@ async def confirm_action_group(
             action.failure_message = "upstream_task_failed"
             action.executed_at = now
             await db.commit()
-            task_results.append({
-                "action_id": str(action.id),
-                "action_type": action.action_type,
-                "execution_status": action.execution_status,
-            })
+            task_results.append(
+                {
+                    "action_id": str(action.id),
+                    "action_type": action.action_type,
+                    "execution_status": action.execution_status,
+                }
+            )
             continue
 
         if action.is_external:
@@ -1150,11 +1142,13 @@ async def confirm_action_group(
         action.executed_at = now
         # Commit por task: garantiza durabilidad de cada paso completado
         await db.commit()
-        task_results.append({
-            "action_id": str(action.id),
-            "action_type": action.action_type,
-            "execution_status": action.execution_status,
-        })
+        task_results.append(
+            {
+                "action_id": str(action.id),
+                "action_type": action.action_type,
+                "execution_status": action.execution_status,
+            }
+        )
 
     group_execution_status = "PARTIAL_FAILED" if any_failed else "SUCCEEDED"
     for action in actions:
@@ -1185,7 +1179,7 @@ async def cancel_action_group(
     group_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     """Rechaza todas las PendingActions PENDING del grupo en un solo commit."""
     stmt = select(PendingAction).where(
         PendingAction.tenant_id == current_user.tenant_id,
@@ -1222,7 +1216,7 @@ async def retry_action(
     current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
-) -> dict:
+) -> dict[str, Any]:
     """Re-ejecuta una acción APPROVED cuya ejecución externa falló.
 
     Condiciones de elegibilidad:
@@ -1288,8 +1282,7 @@ async def retry_action(
     )
     retry_logs = (await db.execute(retry_logs_stmt)).scalars().all()
     retry_count = sum(
-        1 for row in retry_logs
-        if row.decision_data.get("pending_action_id") == str(action.id)
+        1 for row in retry_logs if row.decision_data.get("pending_action_id") == str(action.id)
     )
     if retry_count >= 1:
         raise HTTPException(
@@ -1374,7 +1367,7 @@ async def help_chat(
 
     agent = AgentHelper()
     request = AgentRequest(
-        user_id=str(current_user.id),
+        user_id=str(current_user.user_id),
         business_id=str(current_user.tenant_id),
         message=body.message,
         conversation_id=body.conversation_id,
@@ -1384,7 +1377,7 @@ async def help_chat(
     except Exception as exc:
         logger.error(
             "help_chat_failed",
-            user_id=str(current_user.id),
+            user_id=str(current_user.user_id),
             error=str(exc),
             error_type=type(exc).__name__,
         )

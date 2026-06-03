@@ -10,17 +10,16 @@ from app.application.agents.shared.schemas import (
     AgentResponse,
     AgentTask,
     AgentTeamPlan,
-    Confidence,
     RiskLevel,
 )
 
-
 # ── AgentTask ──────────────────────────────────────────────────────────────────
+
 
 def test_agent_task_defaults():
     task = AgentTask(agent="agent_income", action_type=ActionType.REGISTER_SALE)
     assert isinstance(task.task_id, str)
-    assert uuid.UUID(task.task_id)           # es un UUID válido
+    assert uuid.UUID(task.task_id)  # es un UUID válido
     assert task.entities == {}
     assert task.depends_on == []
     assert task.approval_group is None
@@ -62,10 +61,11 @@ def test_agent_task_requires_agent_and_action_type():
     with pytest.raises(ValidationError):
         AgentTask(action_type=ActionType.REGISTER_SALE)  # falta agent
     with pytest.raises(ValidationError):
-        AgentTask(agent="agent_income")                   # falta action_type
+        AgentTask(agent="agent_income")  # falta action_type
 
 
 # ── AgentTeamPlan ──────────────────────────────────────────────────────────────
+
 
 def test_agent_team_plan_defaults():
     plan = AgentTeamPlan(intent="ingresar_venta")
@@ -98,8 +98,10 @@ def test_agent_team_plan_with_tasks():
 
 
 def test_agent_team_plan_model_dump_serializable():
-    """model_dump() debe producir un dict que se puede guardar en JSON (sin tipos no serializables)."""
+    """model_dump() debe producir un dict que se puede guardar en JSON
+    (sin tipos no serializables)."""
     import json
+
     task = AgentTask(agent="agent_income", action_type=ActionType.REGISTER_SALE, entities={"x": 1})
     plan = AgentTeamPlan(intent="ingresar_venta", tasks=[task])
     dumped = plan.model_dump()
@@ -108,6 +110,7 @@ def test_agent_team_plan_model_dump_serializable():
 
 
 # ── AgentResponse: nuevos campos Stage 1 ──────────────────────────────────────
+
 
 def test_agent_response_pending_action_ids_optional():
     """pending_action_ids y approval_group_id son opcionales y default None."""

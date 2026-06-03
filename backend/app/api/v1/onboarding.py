@@ -30,7 +30,7 @@ async def submit_onboarding(
     try:
         return await svc.submit(tenant_id=tenant_id, body=body)
     except AlreadyOnboardedError:
-        raise HTTPException(status_code=409, detail="Onboarding already completed.")
+        raise HTTPException(status_code=409, detail="Onboarding already completed.") from None
 
 
 @router.get("/status", response_model=OnboardingStatusResponse)

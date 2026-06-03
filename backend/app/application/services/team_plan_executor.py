@@ -31,15 +31,17 @@ from app.persistence.db.session import async_session_factory
 logger = get_logger(__name__)
 
 # Tipos de acción que involucran MCP externo: merecen un retry ante fallos transientes
-_EXTERNAL_ACTION_TYPES: frozenset[str] = frozenset({
-    str(ActionType.SYNC_TO_GOOGLE),
-    str(ActionType.CREATE_CALENDAR_EVENT),
-    str(ActionType.CREATE_SUPPLIER_DRAFT),
-    str(ActionType.CLASSIFY_GMAIL_MESSAGE),
-    str(ActionType.UPLOAD_TO_DRIVE),
-    str(ActionType.CREATE_GOOGLE_DOC),
-    str(ActionType.APPEND_TO_SHEET),
-})
+_EXTERNAL_ACTION_TYPES: frozenset[str] = frozenset(
+    {
+        str(ActionType.SYNC_TO_GOOGLE),
+        str(ActionType.CREATE_CALENDAR_EVENT),
+        str(ActionType.CREATE_SUPPLIER_DRAFT),
+        str(ActionType.CLASSIFY_GMAIL_MESSAGE),
+        str(ActionType.UPLOAD_TO_DRIVE),
+        str(ActionType.CREATE_GOOGLE_DOC),
+        str(ActionType.APPEND_TO_SHEET),
+    }
+)
 
 _RETRY_BACKOFF_SECONDS = 2.0  # espera entre intento 1 y retry 1
 
@@ -47,7 +49,7 @@ _RETRY_BACKOFF_SECONDS = 2.0  # espera entre intento 1 y retry 1
 class InvalidPlanDAGError(ValueError):
     """El plan tiene un ciclo o referencia a un task_id inexistente."""
 
-    def __init__(self, message: str, *, remaining_ids: list[str]):
+    def __init__(self, message: str, *, remaining_ids: list[str]) -> None:
         super().__init__(message)
         self.remaining_ids = remaining_ids
 
@@ -73,10 +75,7 @@ def _topological_levels(tasks: list[AgentTask]) -> list[list[AgentTask]]:
     levels: list[list[AgentTask]] = []
 
     while remaining:
-        ready = [
-            t for t in remaining
-            if all(dep in completed_ids for dep in t.depends_on)
-        ]
+        ready = [t for t in remaining if all(dep in completed_ids for dep in t.depends_on)]
         if not ready:
             # Ciclo: no hay tasks listas pero quedan pendientes
             logger.error(
@@ -228,8 +227,8 @@ class TeamPlanExecutor:
                         )
                         failed_ids.add(task.task_id)
                     else:
-                        responses_by_id[task.task_id] = result  # type: ignore[assignment]
-                        if _is_failure(result):  # type: ignore[arg-type]
+                        responses_by_id[task.task_id] = result
+                        if _is_failure(result):
                             failed_ids.add(task.task_id)
 
         return [responses_by_id[t.task_id] for t in plan.tasks]

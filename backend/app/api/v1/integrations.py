@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -107,8 +108,7 @@ def _as_utc(value: datetime) -> datetime:
 def _has_required_scopes(granted: list[str], required: list[str]) -> bool:
     granted_set = set(granted)
     return all(
-        scope in granted_set or _SHORT_SCOPE_TO_URL.get(scope) in granted_set
-        for scope in required
+        scope in granted_set or _SHORT_SCOPE_TO_URL.get(scope) in granted_set for scope in required
     )
 
 
@@ -335,7 +335,7 @@ async def google_connect_start(
 async def google_disconnect(
     current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     settings = get_settings()
     connection = await _get_connection(db, current_user.tenant_id, current_user.user_id)
 

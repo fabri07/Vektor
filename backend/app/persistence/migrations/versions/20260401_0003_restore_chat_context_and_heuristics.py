@@ -14,15 +14,14 @@ still used by the current codebase is recreated here:
 
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260401_0003"
-down_revision: Union[str, None] = "20260401_0002"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "20260401_0002"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -132,7 +131,8 @@ def downgrade() -> None:
         )
         op.execute("ALTER TABLE agent_conversation_context DISABLE ROW LEVEL SECURITY")
         op.execute(
-            "DROP POLICY IF EXISTS business_heuristic_overrides_tenant ON business_heuristic_overrides"
+            "DROP POLICY IF EXISTS business_heuristic_overrides_tenant ON "
+            "business_heuristic_overrides"
         )
         op.execute("ALTER TABLE business_heuristic_overrides DISABLE ROW LEVEL SECURITY")
 

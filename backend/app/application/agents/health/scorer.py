@@ -17,6 +17,8 @@ El mislabeling era un bug en agent.py corregido en Stage 5a.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from app.application.agents.shared.heuristic_engine import HeuristicConfig
@@ -24,6 +26,7 @@ from app.application.agents.shared.heuristic_engine import HeuristicConfig
 
 class ComponentScores(BaseModel):
     """Modelo v1. Usar ComponentScoresV2 de sub_calculator.py para código nuevo."""
+
     cash_score: float
     stock_score: float
     supplier_score: float
@@ -32,16 +35,18 @@ class ComponentScores(BaseModel):
 
 class HealthScore(BaseModel):
     """Modelo v1."""
+
     business_id: str
     health_score: float
     components: ComponentScores
-    alerts: list
+    alerts: list[Any]
     period: str
     confidence_level: str = "LOW"
     data_completeness_score: float = 0.0
 
 
 # ── Funciones v1 (preservadas para tests existentes) ──────────────────────────
+
 
 def compute_cash_score(coverage_days: float, config: HeuristicConfig) -> float:
     h = config.cash_health

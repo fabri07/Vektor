@@ -108,11 +108,13 @@ async def list_notifications(
 
     unread_result = await session.execute(
         select(func.count()).select_from(
-            select(Notification).where(
+            select(Notification)
+            .where(
                 Notification.tenant_id == tenant.tenant_id,
                 Notification.user_id == current_user.user_id,
                 Notification.is_read.is_(False),
-            ).subquery()
+            )
+            .subquery()
         )
     )
     unread_count: int = unread_result.scalar_one()
@@ -143,9 +145,7 @@ async def mark_notification_read(
     )
     notification = result.scalar_one_or_none()
     if not notification:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found."
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
     notification.is_read = True
     notification.read_at = datetime.now(UTC)
     session.add(notification)

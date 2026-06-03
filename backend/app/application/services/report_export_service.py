@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
-from decimal import Decimal
 from typing import Any
 
 from app.persistence.models.score import HealthScoreSnapshot
@@ -61,7 +60,7 @@ def generate_pdf(
     """Genera un PDF con el informe de salud. Retorna bytes listos para HTTP response."""
     from reportlab.lib import colors  # noqa: PLC0415
     from reportlab.lib.pagesizes import A4  # noqa: PLC0415
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # noqa: PLC0415
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet  # noqa: PLC0415
     from reportlab.lib.units import cm  # noqa: PLC0415
     from reportlab.platypus import (  # noqa: PLC0415
         Paragraph,
@@ -109,7 +108,9 @@ def generate_pdf(
 
     # Score total
     total = int(snapshot.total_score)
-    story.append(Paragraph(f"Score general: <b>{total}/100</b> — {_score_label(total)}", heading_style))
+    story.append(
+        Paragraph(f"Score general: <b>{total}/100</b> — {_score_label(total)}", heading_style)
+    )
     story.append(Spacer(1, 0.3 * cm))
 
     # Tabla de dimensiones (v2 si score_growth no es None, v1 si es None)
@@ -128,17 +129,21 @@ def generate_pdf(
             table_data.append([label, str(val), _score_label(val)])
 
     table = Table(table_data, colWidths=[5 * cm, 3 * cm, 5 * cm])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 10),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
-        ("ALIGN", (1, 0), (1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 10),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+                ("ALIGN", (1, 0), (1, -1), "CENTER"),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
     story.append(table)
     story.append(Spacer(1, 0.5 * cm))
 
@@ -162,13 +167,13 @@ def generate_docx(
 ) -> bytes:
     """Genera un DOCX con el informe de salud. Retorna bytes listos para HTTP response."""
     from docx import Document  # noqa: PLC0415
-    from docx.shared import Pt, RGBColor  # noqa: PLC0415
+    from docx.shared import RGBColor  # noqa: PLC0415
 
     doc = Document()
 
     # Título
     title = doc.add_heading(f"Informe de Salud Financiera — {business_name}", level=1)
-    title.runs[0].font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
+    title.runs[0].font.color.rgb = RGBColor(0x1A, 0x1A, 0x2E)
 
     doc.add_paragraph(f"Generado el {_format_date(snapshot.snapshot_date)}")
 

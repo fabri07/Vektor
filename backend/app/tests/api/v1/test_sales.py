@@ -1,6 +1,7 @@
 """Tests for /api/v1/sales endpoints."""
 
 from datetime import date
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
@@ -38,11 +39,9 @@ class TestSalesBulk:
         pass
 
     async def test_bulk_without_entries_creates_one_record(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        resp = await client.post(
-            "/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=auth_headers
-        )
+        resp = await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=auth_headers)
         assert resp.status_code == 201
         data = resp.json()
         assert len(data) == 1
@@ -50,7 +49,7 @@ class TestSalesBulk:
         assert data[0]["transaction_date"] == _TODAY
 
     async def test_bulk_with_entries_creates_multiple_records(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         resp = await client.post(
             "/api/v1/sales/bulk", json=_BULK_PAYLOAD_WITH_ENTRIES, headers=auth_headers
@@ -63,7 +62,7 @@ class TestSalesBulk:
         assert "2000.00" in amounts
 
     async def test_bulk_invalid_period_type(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         payload = {**_BULK_PAYLOAD, "period_type": "yearly"}
         resp = await client.post("/api/v1/sales/bulk", json=payload, headers=auth_headers)
@@ -80,9 +79,7 @@ class TestSalesSummary:
     def patch_celery(self, mock_score_trigger):
         pass
 
-    async def test_summary_empty(
-        self, client: AsyncClient, auth_headers: dict
-    ) -> None:
+    async def test_summary_empty(self, client: AsyncClient, auth_headers: dict[str, Any]) -> None:
         resp = await client.get("/api/v1/sales/summary", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
@@ -91,7 +88,7 @@ class TestSalesSummary:
         assert "period_covered" in data
 
     async def test_summary_counts_entries(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=auth_headers)
         await client.post(
@@ -113,13 +110,11 @@ class TestSalesTenantIsolation:
     async def test_cannot_read_other_tenant_sale(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-        second_auth_headers: dict,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
     ) -> None:
         # Tenant A creates a sale
-        create_resp = await client.post(
-            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers
-        )
+        create_resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
         assert create_resp.status_code == 201
         sale_id = create_resp.json()["id"]
 
@@ -130,8 +125,8 @@ class TestSalesTenantIsolation:
     async def test_list_only_own_sales(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-        second_auth_headers: dict,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
     ) -> None:
         await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
 
@@ -142,8 +137,8 @@ class TestSalesTenantIsolation:
     async def test_summary_isolates_tenants(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-        second_auth_headers: dict,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
     ) -> None:
         await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=auth_headers)
 
@@ -154,12 +149,10 @@ class TestSalesTenantIsolation:
     async def test_cannot_delete_other_tenant_sale(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-        second_auth_headers: dict,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
     ) -> None:
-        create_resp = await client.post(
-            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers
-        )
+        create_resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
         sale_id = create_resp.json()["id"]
 
         resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=second_auth_headers)
@@ -173,30 +166,24 @@ class TestSalesRBAC:
         pass
 
     async def test_viewer_cannot_create_sale(
-        self, client: AsyncClient, viewer_headers: dict
+        self, client: AsyncClient, viewer_headers: dict[str, Any]
     ) -> None:
-        resp = await client.post(
-            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=viewer_headers
-        )
+        resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=viewer_headers)
         assert resp.status_code == 403
 
     async def test_viewer_cannot_bulk_create(
-        self, client: AsyncClient, viewer_headers: dict
+        self, client: AsyncClient, viewer_headers: dict[str, Any]
     ) -> None:
-        resp = await client.post(
-            "/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=viewer_headers
-        )
+        resp = await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=viewer_headers)
         assert resp.status_code == 403
 
     async def test_viewer_cannot_delete_sale(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-        viewer_headers: dict,
+        auth_headers: dict[str, Any],
+        viewer_headers: dict[str, Any],
     ) -> None:
-        create_resp = await client.post(
-            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers
-        )
+        create_resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
         sale_id = create_resp.json()["id"]
         resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=viewer_headers)
         assert resp.status_code == 403

@@ -7,8 +7,8 @@ Healthy net margin range: 20%-35%.
 from app.heuristics.verticals import MarginBenchmark
 
 BENCHMARK = MarginBenchmark(
-    critical_below=0.10,   # < 10% → critical
-    warning_below=0.20,    # < 20% → warning
-    healthy_min=0.20,      # 20%-35% → healthy
-    healthy_max=0.35,      # >= 35% → excellent
+    critical_below=0.10,  # < 10% → critical
+    warning_below=0.20,  # < 20% → warning
+    healthy_min=0.20,  # 20%-35% → healthy
+    healthy_max=0.35,  # >= 35% → excellent
 )

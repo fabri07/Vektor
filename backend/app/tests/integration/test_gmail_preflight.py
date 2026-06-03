@@ -6,8 +6,9 @@ permite el paso cuando se cumple al menos una de las 3 condiciones.
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 
 @pytest.mark.asyncio
@@ -41,7 +42,7 @@ async def test_wf05_registered_sender_passes() -> None:
         "app.application.agents.supplier.preflight.get_approved_senders",
         new=AsyncMock(return_value=["proveedor@conocido.com"]),
     ):
-        result = await gmail_preflight_check(metadata, "any-tenant-id", db=fake_db)
+        result = await gmail_preflight_check(metadata, "any-tenant-id", db=fake_db)  # type: ignore[arg-type]  # test double / fixture
     assert result is True
 
 
@@ -86,7 +87,5 @@ async def test_user_requested_passes() -> None:
         "labels": ["INBOX"],
         "snippet": "",
     }
-    result = await gmail_preflight_check(
-        metadata, "any-tenant-id", user_requested=True
-    )
+    result = await gmail_preflight_check(metadata, "any-tenant-id", user_requested=True)
     assert result is True

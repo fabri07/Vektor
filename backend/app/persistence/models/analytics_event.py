@@ -19,9 +19,7 @@ from app.persistence.db.base import Base
 class AnalyticsEvent(Base):
     __tablename__ = "analytics_events"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     vertical_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
 
     # Dimensiones del health score

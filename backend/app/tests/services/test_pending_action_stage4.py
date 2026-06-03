@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import uuid
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,7 +20,7 @@ from app.application.services.pending_action_service import execute_pending_acti
 _PATCH = "app.application.services.pending_action_service._make_google_broker"
 
 
-def _make_action(action_type: str, payload: dict):
+def _make_action(action_type: str, payload: dict[str, Any]):
     from app.persistence.models.pending_action import PendingAction  # noqa: PLC0415
 
     action = PendingAction()
@@ -46,6 +47,7 @@ def _make_broker(**overrides):
 
 
 # ── UPLOAD_TO_DRIVE ───────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_upload_to_drive_calls_broker():
@@ -88,8 +90,12 @@ async def test_upload_to_drive_default_name_when_no_filename():
 async def test_upload_to_drive_with_folder_id():
     action = _make_action(
         ActionType.UPLOAD_TO_DRIVE,
-        {"filename": "doc.pdf", "content_base64": "cGRm", "mime_type": "application/pdf",
-         "folder_id": "folder789"},
+        {
+            "filename": "doc.pdf",
+            "content_base64": "cGRm",
+            "mime_type": "application/pdf",
+            "folder_id": "folder789",
+        },
     )
     broker = _make_broker()
     db = MagicMock()
@@ -106,6 +112,7 @@ async def test_upload_to_drive_with_folder_id():
 
 
 # ── CREATE_GOOGLE_DOC ─────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_create_google_doc_with_content():
@@ -157,6 +164,7 @@ async def test_create_google_doc_default_title():
 
 # ── APPEND_TO_SHEET ───────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_append_to_sheet_calls_broker():
     rows = [[100, "gaseosa", "2026-05-26"], [200, "agua", "2026-05-26"]]
@@ -198,6 +206,7 @@ async def test_append_to_sheet_default_range():
 
 
 # ── AgentGoogle — lectura de upstream_outputs ─────────────────────────────────
+
 
 def test_agent_google_upload_reads_upstream_outputs():
     """AgentGoogle popula content_base64 desde el health report del upstream DAG."""

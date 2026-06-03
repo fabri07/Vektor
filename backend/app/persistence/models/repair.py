@@ -16,9 +16,7 @@ from app.persistence.db.base import PGJSONB, Base, UUIDPrimaryKeyMixin
 class DataRepairRun(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "data_repair_runs"
 
-    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     repair_type: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
     dry_run: Mapped[bool] = mapped_column(nullable=False, default=True)

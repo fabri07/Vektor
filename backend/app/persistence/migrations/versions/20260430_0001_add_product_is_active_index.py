@@ -7,6 +7,7 @@ Create Date: 2026-04-30
 Speeds up /insights/breakdown which filters by both tenant_id and is_active
 in COUNT, low_stock and no_rotation queries.
 """
+
 from alembic import op
 
 revision = "20260430_0001"

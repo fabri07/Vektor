@@ -1,7 +1,5 @@
 """Tests para team_plan_builder — contrato del catálogo de intents y construcción de planes."""
 
-import pytest
-
 from app.application.agents.ceo.team_plan_builder import (
     INTENT_CATALOG,
     INTENT_TO_ACTION_TYPE,
@@ -10,12 +8,12 @@ from app.application.agents.ceo.team_plan_builder import (
 )
 from app.application.agents.shared.schemas import ActionType, AgentTeamPlan
 
-
 # ── Catálogo ──────────────────────────────────────────────────────────────────
 
+
 def test_intent_catalog_size():
-    # 17 Stage 1 + 1 Stage 4 (generar_informe_con_export) = 18
-    assert len(INTENT_CATALOG) == 18
+    # 18 previos + 42 analíticos/fallback Sprint 17 = 60
+    assert len(INTENT_CATALOG) == 60
 
 
 def test_all_intents_have_agent_mapping():
@@ -38,6 +36,7 @@ def test_no_extra_mappings_vs_catalog():
 
 
 # ── build_plan — correctness ──────────────────────────────────────────────────
+
 
 def test_build_plan_ingresar_venta():
     plan = build_plan("ingresar_venta", {"monto": 1500})
@@ -166,6 +165,7 @@ def test_build_plan_entities_isolated():
 
 # ── Stage 4: generar_informe_con_export ───────────────────────────────────────
 
+
 def test_build_plan_generar_informe_con_export_dag():
     """Stage 4: informe + upload a Drive genera DAG de 2 tareas con dependencia."""
     plan = build_plan("generar_informe_con_export", {})
@@ -183,6 +183,7 @@ def test_build_plan_generar_informe_con_export_dag():
 def test_build_plan_new_action_types_in_risk_engine():
     """Los 3 ActionTypes nuevos del Stage 4 están en el RiskEngine."""
     from app.application.agents.shared.risk_engine import RiskEngine
+
     assert RiskEngine.evaluate(ActionType.UPLOAD_TO_DRIVE) is not None
     assert RiskEngine.evaluate(ActionType.CREATE_GOOGLE_DOC) is not None
     assert RiskEngine.evaluate(ActionType.APPEND_TO_SHEET) is not None
@@ -191,4 +192,5 @@ def test_build_plan_new_action_types_in_risk_engine():
 def test_tool_broker_importable():
     """GoogleToolBroker se puede importar desde el módulo correcto."""
     from app.application.agents.google.tool_broker import GoogleToolBroker
+
     assert GoogleToolBroker is not None

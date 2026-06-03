@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
@@ -47,7 +48,7 @@ class TestNotificationCreatedOnMilestone:
         sample_tenant: Tenant,
         sample_user: User,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         # Simulate milestone notification created by momentum job
         await _create_notification(
@@ -75,7 +76,7 @@ class TestNotificationCreatedOnMilestone:
         sample_tenant: Tenant,
         sample_user: User,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         count = await create_health_action_notifications(
             session=db_session,
@@ -94,7 +95,7 @@ class TestNotificationCreatedOnMilestone:
         notification = result.scalar_one()
         assert notification.user_id == sample_user.user_id
         assert notification.notification_type == "health_action"
-        assert notification.metadata_["action_url"] == "/dashboard?focus=health"
+        assert notification.metadata_["action_url"] == "/dashboard?focus=health"  # type: ignore[index]  # test double / fixture
 
         resp = await client.get("/api/v1/notifications", headers=auth_headers)
         assert resp.status_code == 200
@@ -110,7 +111,7 @@ class TestUnreadCountDecreasesAfterRead:
         sample_tenant: Tenant,
         sample_user: User,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         n1 = await _create_notification(db_session, sample_tenant, sample_user, title="Notif 1")
         n2 = await _create_notification(db_session, sample_tenant, sample_user, title="Notif 2")
@@ -121,9 +122,7 @@ class TestUnreadCountDecreasesAfterRead:
         assert resp.json()["unread_count"] == 2
 
         # Mark first notification as read
-        resp = await client.patch(
-            f"/api/v1/notifications/{n1.id}/read", headers=auth_headers
-        )
+        resp = await client.patch(f"/api/v1/notifications/{n1.id}/read", headers=auth_headers)
         assert resp.status_code == 200
 
         # Unread count should decrease to 1
@@ -133,9 +132,7 @@ class TestUnreadCountDecreasesAfterRead:
         assert data["unread_count"] == 1
 
         # Mark second as read
-        resp = await client.patch(
-            f"/api/v1/notifications/{n2.id}/read", headers=auth_headers
-        )
+        resp = await client.patch(f"/api/v1/notifications/{n2.id}/read", headers=auth_headers)
         assert resp.status_code == 200
 
         resp = await client.get("/api/v1/notifications", headers=auth_headers)
@@ -144,12 +141,10 @@ class TestUnreadCountDecreasesAfterRead:
     async def test_mark_nonexistent_notification_returns_404(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
     ) -> None:
         fake_id = uuid.uuid4()
-        resp = await client.patch(
-            f"/api/v1/notifications/{fake_id}/read", headers=auth_headers
-        )
+        resp = await client.patch(f"/api/v1/notifications/{fake_id}/read", headers=auth_headers)
         assert resp.status_code == 404
 
     async def test_tenant_isolation(
@@ -158,8 +153,8 @@ class TestUnreadCountDecreasesAfterRead:
         sample_tenant: Tenant,
         sample_user: User,
         client: AsyncClient,
-        auth_headers: dict,
-        second_auth_headers: dict,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
     ) -> None:
         """Notifications from tenant A must not be visible to tenant B."""
         await _create_notification(db_session, sample_tenant, sample_user)

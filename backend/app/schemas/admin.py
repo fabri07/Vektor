@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -21,6 +22,7 @@ class AdminMetricsResponse(BaseModel):
 
 
 # ── Analytics / benchmarks ────────────────────────────────────────────────────
+
 
 class BenchmarkThresholds(BaseModel):
     critical_below: float
@@ -45,8 +47,8 @@ class AnalyticsBenchmarksResponse(BaseModel):
     verticals: list[VerticalBenchmarkItem]
 
 
-
 # ── Data repair ────────────────────────────────────────────────────────────────
+
 
 class RepairRequest(BaseModel):
     tenant_id: uuid.UUID | None = None
@@ -61,8 +63,8 @@ class DataRepairItemResponse(BaseModel):
     sale_entry_id: uuid.UUID | None
     product_id: uuid.UUID | None
     action: str
-    before_json: dict | None
-    after_json: dict | None
+    before_json: dict[str, Any] | None
+    after_json: dict[str, Any] | None
     confidence: str
     created_at: datetime
 
@@ -83,7 +85,7 @@ class DataRepairRunResponse(BaseModel):
     products_created: int
     products_updated: int
     products_skipped: int
-    details_json: dict | None
+    details_json: dict[str, Any] | None
     created_at: datetime
     completed_at: datetime | None
 

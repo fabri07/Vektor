@@ -53,6 +53,7 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
 
 # ── Sample entities ───────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def sample_tenant(db_session: AsyncSession) -> Tenant:
     tenant = Tenant(
@@ -98,6 +99,7 @@ async def auth_headers(sample_user: User, sample_tenant: Tenant) -> dict[str, st
 
 # ── Second tenant (for isolation tests) ──────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def second_tenant(db_session: AsyncSession) -> Tenant:
     tenant = Tenant(
@@ -138,6 +140,7 @@ async def second_auth_headers(db_session: AsyncSession, second_tenant: Tenant) -
 
 # ── Viewer user (for RBAC tests) ─────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def viewer_headers(db_session: AsyncSession, sample_tenant: Tenant) -> dict[str, str]:
     user = User(
@@ -163,6 +166,7 @@ async def viewer_headers(db_session: AsyncSession, sample_tenant: Tenant) -> dic
 
 # ── Celery eager mode (sync execution for job tests) ─────────────────────────
 
+
 @pytest.fixture(autouse=False)
 def celery_eager(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Ejecuta tasks de Celery síncronamente. Usar con @pytest.mark.usefixtures('celery_eager')."""
@@ -175,6 +179,7 @@ def celery_eager(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]
 
 # ── Celery mock (prevents Redis connection in tests) ─────────────────────────
 
+
 @pytest.fixture
 def mock_score_trigger():
     from app.application.services.score_trigger_service import trigger_score_recalculation
@@ -185,9 +190,11 @@ def mock_score_trigger():
 
 # ── HTTP test client ──────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     from app.main import limiter  # noqa: PLC0415
+
     limiter._storage.reset()
 
     app = create_app()
@@ -206,15 +213,16 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 
 # ── Reusable file fixtures ───────────────────────────────────────────────────
 
+
 @pytest.fixture
 def xlsx_bytes() -> bytes:
     openpyxl = pytest.importorskip("openpyxl")
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active
-    sheet.append(["fecha", "monto", "descripcion"])  # type: ignore[union-attr]
-    sheet.append(["2024-01-15", "50000", "Venta del día"])  # type: ignore[union-attr]
-    sheet.append(["2024-01-16", "35000", "Venta tarde"])  # type: ignore[union-attr]
+    sheet.append(["fecha", "monto", "descripcion"])
+    sheet.append(["2024-01-15", "50000", "Venta del día"])
+    sheet.append(["2024-01-16", "35000", "Venta tarde"])
     buf = io.BytesIO()
     workbook.save(buf)
     return buf.getvalue()

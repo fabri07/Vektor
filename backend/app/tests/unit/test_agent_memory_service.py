@@ -2,12 +2,11 @@
 
 import json
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.application.services.agent_memory_service import AgentMemoryService
-
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
@@ -38,6 +37,7 @@ def _make_service(db_rows=None, redis_hit=None):
 
 
 # ── Tests: get() ─────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_get_returns_redis_cache_when_available():
@@ -81,6 +81,7 @@ async def test_get_builds_dict_from_db_rows():
 
 
 # ── Tests: record_action() ────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_record_sale_updates_payment_method():
@@ -150,6 +151,7 @@ async def test_record_action_always_updates_top_action_types():
 
 # ── Tests: get_context_fragment() ────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_get_context_fragment_returns_string():
     """get_context_fragment retorna string no vacío cuando hay patrones."""
@@ -198,6 +200,7 @@ async def test_get_context_fragment_includes_header():
 
 
 # ── Tests: fail-silencioso ────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_record_action_is_fail_silent():

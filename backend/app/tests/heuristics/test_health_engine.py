@@ -50,7 +50,8 @@ def _make_state(
         vertical_code=vertical_code,
         data_completeness_score=data_completeness_score,
         confidence_level=confidence_level,
-        ruleset=KIOSCO_BENCHMARK,          # not read by engine; uses vertical_code
+        # ruleset no lo lee el engine (usa vertical_code); benchmark como test double
+        ruleset=KIOSCO_BENCHMARK,  # type: ignore[arg-type]
         monthly_sales_est=monthly_sales_est,
         monthly_inventory_cost_est=monthly_inventory_cost_est,
         monthly_fixed_expenses_est=monthly_fixed_expenses_est,
@@ -81,9 +82,9 @@ def test_kiosco_healthy_margin_scores_high() -> None:
     )
     result: HealthScoreResult = calculate_health_score(state)
 
-    assert 70 <= result.score_margin <= 89, (
-        f"Expected score_margin in [70, 89], got {result.score_margin}"
-    )
+    assert (
+        70 <= result.score_margin <= 89
+    ), f"Expected score_margin in [70, 89], got {result.score_margin}"
     assert result.score_margin == 79
 
 
@@ -121,7 +122,7 @@ def test_single_supplier_penalizes_supplier_score() -> None:
     Scores for other dimensions set high to isolate supplier effect.
     """
     state = _make_state(
-        cash_on_hand_est=Decimal("50000"),    # ratio >> 2 → score_cash = 90+
+        cash_on_hand_est=Decimal("50000"),  # ratio >> 2 → score_cash = 90+
         monthly_fixed_expenses_est=Decimal("10000"),
         monthly_sales_est=Decimal("100000"),
         monthly_inventory_cost_est=Decimal("40000"),  # margin=0.50 → excellent
@@ -130,9 +131,9 @@ def test_single_supplier_penalizes_supplier_score() -> None:
     )
     result: HealthScoreResult = calculate_health_score(state)
 
-    assert 15 <= result.score_supplier <= 44, (
-        f"Expected score_supplier in [15, 44], got {result.score_supplier}"
-    )
+    assert (
+        15 <= result.score_supplier <= 44
+    ), f"Expected score_supplier in [15, 44], got {result.score_supplier}"
     assert result.score_supplier == 15
     assert result.primary_risk_code == "SUPPLIER_DEPENDENCY"
 
@@ -166,7 +167,7 @@ def test_score_total_formula_correct() -> None:
         monthly_fixed_expenses_est=Decimal("20000"),
         monthly_sales_est=Decimal("100000"),
         monthly_inventory_cost_est=Decimal("55000"),
-        prev_monthly_sales_est=Decimal("0"),   # sin historial → growth=50
+        prev_monthly_sales_est=Decimal("0"),  # sin historial → growth=50
         supplier_count=4,
         products=products,
     )
@@ -224,8 +225,8 @@ def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
         monthly_fixed_expenses_est=Decimal("20000"),
         monthly_sales_est=Decimal("100000"),
         monthly_inventory_cost_est=Decimal("70000"),  # margin=0.10
-        supplier_count=3,   # score_supplier = 70
-        products=[],        # score_stock = 50 (neutral, no real data)
+        supplier_count=3,  # score_supplier = 70
+        products=[],  # score_stock = 50 (neutral, no real data)
     )
     result: HealthScoreResult = calculate_health_score(state)
 

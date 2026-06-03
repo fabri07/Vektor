@@ -63,7 +63,9 @@ class BaseRepository(Generic[ModelT]):
         from sqlalchemy import func  # noqa: PLC0415
 
         result = await self._session.execute(
-            select(func.count()).select_from(self.model).where(
+            select(func.count())
+            .select_from(self.model)
+            .where(
                 self.model.tenant_id == tenant_id  # type: ignore[attr-defined]
             )
         )

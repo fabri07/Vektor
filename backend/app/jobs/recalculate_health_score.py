@@ -31,6 +31,7 @@ HEURISTIC_VERSION = "v1"
 
 # ── Score → level label ───────────────────────────────────────────────────────
 
+
 def _score_level(score_total: int) -> str:
     if score_total >= 80:
         return "excellent"
@@ -42,6 +43,7 @@ def _score_level(score_total: int) -> str:
 
 
 # ── BusinessState → JSON-serializable dict ────────────────────────────────────
+
 
 def _state_to_dict(state: Any) -> dict[str, Any]:
     """
@@ -76,6 +78,7 @@ def _state_to_dict(state: Any) -> dict[str, Any]:
 
 # ── HealthScoreResult → JSON-serializable dict ────────────────────────────────
 
+
 def _result_to_dict(result: Any) -> dict[str, Any]:
     return {
         "score_total": result.score_total,
@@ -91,6 +94,7 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
 
 
 # ── Main async implementation ─────────────────────────────────────────────────
+
 
 async def _run(tenant_id_str: str) -> None:
     from redis.asyncio import Redis  # noqa: PLC0415
@@ -131,7 +135,7 @@ async def _run(tenant_id_str: str) -> None:
                     tenant_id=tenant_id,
                     total_score=Decimal(result.score_total),
                     level=_score_level(result.score_total),
-                    dimensions={},               # legacy field — kept for compat
+                    dimensions={},  # legacy field — kept for compat
                     triggered_by="celery:recalculate_health_score",
                     snapshot_date=now,
                     created_at=now,
@@ -210,6 +214,7 @@ async def _run(tenant_id_str: str) -> None:
 
         # ── 6. Dispatch generate_insight ──────────────────────────────────────
         from app.jobs.generate_insight import generate_insight  # noqa: PLC0415
+
         generate_insight.delay(tenant_id_str)
 
         # ── 7. Structured log ─────────────────────────────────────────────────
@@ -229,6 +234,7 @@ async def _run(tenant_id_str: str) -> None:
 
 
 # ── Celery task ───────────────────────────────────────────────────────────────
+
 
 @celery_app.task(  # type: ignore[misc]
     bind=True,

@@ -12,9 +12,10 @@ Todas las operaciones son fail-silencioso.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from redis.asyncio import Redis
@@ -131,9 +132,7 @@ class AgentMemoryService:
             },
         )
 
-    async def _update_avg_sale_amount(
-        self, tenant_id: uuid.UUID, payload: dict[str, Any]
-    ) -> None:
+    async def _update_avg_sale_amount(self, tenant_id: uuid.UUID, payload: dict[str, Any]) -> None:
         amount = payload.get("amount")
         if not amount:
             return
@@ -190,14 +189,12 @@ class AgentMemoryService:
                 )
             )
             row = res.scalar_one_or_none()
-            return row.value if row else {}  # type: ignore[return-value]
+            return row.value if row else {}
         except Exception:
             return {}
 
-    async def _upsert_pattern(
-        self, tenant_id: uuid.UUID, key: str, value: dict[str, Any]
-    ) -> None:
-        now = datetime.now(timezone.utc)
+    async def _upsert_pattern(self, tenant_id: uuid.UUID, key: str, value: dict[str, Any]) -> None:
+        now = datetime.now(UTC)
         res = await self._db.execute(
             select(AgentMemory).where(
                 AgentMemory.tenant_id == tenant_id,
@@ -234,22 +231,16 @@ class AgentMemoryService:
             return data
         except Exception:
             logger.warning("agent_mem.db_load_failed", tenant_id=str(tenant_id))
-            try:
+            with contextlib.suppress(Exception):
                 await self._db.rollback()
-            except Exception:
-                pass
             return {}
 
     async def _set_cache(self, tenant_id: uuid.UUID, data: dict[str, Any]) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await self._redis.setex(
                 _REDIS_KEY.format(tenant_id=tenant_id), _REDIS_TTL, json.dumps(data)
             )
-        except Exception:
-            pass
 
     async def _invalidate(self, tenant_id: uuid.UUID) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await self._redis.delete(_REDIS_KEY.format(tenant_id=tenant_id))
-        except Exception:
-            pass

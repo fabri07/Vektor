@@ -6,11 +6,12 @@ Todas las operaciones son fail-silencioso: nunca bloquean el request principal.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -36,7 +37,7 @@ class BusinessMemoryService:
         try:
             raw = await self._redis.get(_REDIS_KEY.format(tenant_id=tenant_id))
             if raw:
-                return json.loads(raw)
+                return cast("dict[str, Any]", json.loads(raw))
         except Exception:
             logger.warning("biz_mem.redis_miss", tenant_id=str(tenant_id))
 
@@ -52,10 +53,8 @@ class BusinessMemoryService:
             return data
         except Exception:
             logger.warning("biz_mem.db_miss", tenant_id=str(tenant_id))
-            try:
+            with contextlib.suppress(Exception):
                 await self._db.rollback()
-            except Exception:
-                pass
             return self._empty()
 
     async def update_after_sale(self, tenant_id: uuid.UUID, amount: Decimal) -> None:
@@ -65,7 +64,7 @@ class BusinessMemoryService:
                 select(BusinessMemory).where(BusinessMemory.tenant_id == tenant_id)
             )
             mem = res.scalar_one_or_none()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if mem is None:
                 mem = BusinessMemory(
                     tenant_id=tenant_id,
@@ -97,7 +96,7 @@ class BusinessMemoryService:
                 select(BusinessMemory).where(BusinessMemory.tenant_id == tenant_id)
             )
             mem = res.scalar_one_or_none()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if mem is None:
                 mem = BusinessMemory(tenant_id=tenant_id, expenses_today=amount)
                 self._db.add(mem)
@@ -126,7 +125,7 @@ class BusinessMemoryService:
             mem = res.scalar_one_or_none()
             if mem:
                 mem.llm_context_summary = summary
-                mem.llm_context_updated_at = datetime.now(timezone.utc)
+                mem.llm_context_updated_at = datetime.now(UTC)
                 await self._db.flush()
             await self._invalidate(tenant_id)
         except Exception:
@@ -134,7 +133,7 @@ class BusinessMemoryService:
 
     async def _generate_summary(self, memory: dict[str, Any]) -> str:
         try:
-            client = get_anthropic_async_client()
+            client: Any = get_anthropic_async_client()
             resp = await client.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=80,
@@ -153,23 +152,19 @@ class BusinessMemoryService:
                     }
                 ],
             )
-            return resp.content[0].text.strip()
+            return cast("str", resp.content[0].text.strip())
         except Exception:
             return ""
 
     async def _set_cache(self, tenant_id: uuid.UUID, data: dict[str, Any]) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await self._redis.setex(
                 _REDIS_KEY.format(tenant_id=tenant_id), _REDIS_TTL, json.dumps(data)
             )
-        except Exception:
-            pass
 
     async def _invalidate(self, tenant_id: uuid.UUID) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await self._redis.delete(_REDIS_KEY.format(tenant_id=tenant_id))
-        except Exception:
-            pass
 
     @staticmethod
     def _empty() -> dict[str, Any]:

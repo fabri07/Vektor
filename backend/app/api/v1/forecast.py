@@ -9,10 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant
 from app.application.services.forecast_service import ForecastResult, get_forecast
+from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
-
-from app.persistence.db.redis_client import get_redis
 
 router = APIRouter()
 

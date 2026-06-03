@@ -7,12 +7,10 @@ que el guard en `_run()` funciona correctamente sin copiar su lógica.
 
 from __future__ import annotations
 
-import pytest
-
 from app.jobs.generate_insight import should_skip_insight
 
-
 # ── Tests de la función pura del guard ───────────────────────────────────────
+
 
 def test_skip_when_confidence_low():
     """confidence=LOW con cualquier completitud → skip."""

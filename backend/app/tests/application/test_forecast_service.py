@@ -59,7 +59,7 @@ async def _seed_daily_cashflow(
 async def test_forecast_tier_0_with_less_than_14_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 7)
 
-    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)
+    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)  # type: ignore[arg-type]  # test double / fixture
 
     assert result.tier == 0
     assert result.horizon_days == 0
@@ -70,7 +70,7 @@ async def test_forecast_tier_0_with_less_than_14_days(db_session, sample_tenant)
 async def test_forecast_tier_1_between_14_and_30_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 20)
 
-    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)
+    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)  # type: ignore[arg-type]  # test double / fixture
 
     assert result.tier == 1
     assert result.confidence == "LOW"
@@ -82,7 +82,7 @@ async def test_forecast_tier_1_between_14_and_30_days(db_session, sample_tenant)
 async def test_forecast_tier_2_between_30_and_90_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 45)
 
-    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)
+    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)  # type: ignore[arg-type]  # test double / fixture
 
     assert result.tier == 2
     assert result.confidence == "MEDIUM"
@@ -94,7 +94,7 @@ async def test_forecast_tier_2_between_30_and_90_days(db_session, sample_tenant)
 async def test_forecast_tier_3_after_90_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 120)
 
-    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)
+    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)  # type: ignore[arg-type]  # test double / fixture
 
     assert result.tier == 3
     assert result.confidence == "HIGH"
@@ -107,7 +107,7 @@ async def test_forecast_marks_stale_data_as_low_confidence(db_session, sample_te
     stale_end = date.today() - timedelta(days=10)
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 45, end_date=stale_end)
 
-    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)
+    result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)  # type: ignore[arg-type]  # test double / fixture
 
     assert result.tier == 2
     assert result.confidence == "LOW"

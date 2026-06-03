@@ -221,9 +221,7 @@ class AuthService:
             )
 
         # Load user directly by user_id (no tenant context needed here)
-        user_result = await self._session.execute(
-            select(User).where(User.user_id == token.user_id)
-        )
+        user_result = await self._session.execute(select(User).where(User.user_id == token.user_id))
         user = user_result.scalar_one_or_none()
         if user is None:
             raise HTTPException(
@@ -287,9 +285,7 @@ class AuthService:
         if not user_id_str or not tenant_id_str:
             return None
 
-        user = await self._user_repo.get_by_id(
-            uuid.UUID(user_id_str), uuid.UUID(tenant_id_str)
-        )
+        user = await self._user_repo.get_by_id(uuid.UUID(user_id_str), uuid.UUID(tenant_id_str))
         if user is None or not user.is_active:
             return None
 
@@ -311,9 +307,7 @@ class AuthService:
             expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         )
 
-    async def change_password(
-        self, user: User, current_password: str, new_password: str
-    ) -> bool:
+    async def change_password(self, user: User, current_password: str, new_password: str) -> bool:
         if not verify_password(current_password, user.password_hash):
             return False
         user.password_hash = hash_password(new_password)
@@ -387,9 +381,7 @@ class AuthService:
                 detail="token_invalido_o_expirado",
             )
 
-        user_result = await self._session.execute(
-            select(User).where(User.user_id == token.user_id)
-        )
+        user_result = await self._session.execute(select(User).where(User.user_id == token.user_id))
         user = user_result.scalar_one_or_none()
         if user is None:
             raise HTTPException(

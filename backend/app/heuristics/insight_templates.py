@@ -34,9 +34,9 @@ _VERTICAL_NAMES: dict[str, str] = {
 # ── Margin benchmarks (pct strings) per vertical ──────────────────────────────
 
 _MARGIN_RANGES: dict[str, tuple[int, int]] = {
-    "kiosco":           (18, 28),
+    "kiosco": (18, 28),
     "decoracion_hogar": (30, 45),
-    "limpieza":         (20, 35),
+    "limpieza": (20, 35),
 }
 
 # ── Templates ─────────────────────────────────────────────────────────────────
@@ -158,7 +158,8 @@ def render_insight(
 
     elif risk_code == "STOCK_CRITICAL":
         critical_products = [
-            p for p in state.products
+            p
+            for p in state.products
             if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
         ]
         n = len(critical_products)

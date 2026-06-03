@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E501 — script de seed con datos demo de líneas largas
 """
 Seed demo data for Véktor — F5-03.
 
@@ -24,7 +25,7 @@ import asyncio
 import os
 import sys
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -49,7 +50,7 @@ DEMO_TENANTS = [
     "demo.deco@vektor.app",
 ]
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 TODAY = date.today()
 
 
@@ -193,9 +194,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
 
     for i, score in enumerate(weekly_scores):
         weeks_back = len(weekly_scores) - i  # 8→1
-        snap_date = datetime.combine(
-            _weeks_ago(weeks_back), datetime.min.time(), tzinfo=timezone.utc
-        )
+        snap_date = datetime.combine(_weeks_ago(weeks_back), datetime.min.time(), tzinfo=UTC)
         sid = latest_score_id if weeks_back == 1 else uuid.uuid4()
         session.add(
             HealthScoreSnapshot(
@@ -204,9 +203,18 @@ async def _seed_kiosco(session: AsyncSession) -> None:
                 total_score=Decimal(str(score)),
                 level=_score_level(score),
                 dimensions={
-                    "cash":     {"score": 78 if weeks_back == 1 else score + 4, "label": _score_level(score)},
-                    "margin":   {"score": 72 if weeks_back == 1 else score - 2, "label": _score_level(score)},
-                    "stock":    {"score": 76 if weeks_back == 1 else score + 2, "label": _score_level(score)},
+                    "cash": {
+                        "score": 78 if weeks_back == 1 else score + 4,
+                        "label": _score_level(score),
+                    },
+                    "margin": {
+                        "score": 72 if weeks_back == 1 else score - 2,
+                        "label": _score_level(score),
+                    },
+                    "stock": {
+                        "score": 76 if weeks_back == 1 else score + 2,
+                        "label": _score_level(score),
+                    },
                     "supplier": {"score": 68 if weeks_back == 1 else score - 6, "label": "MEDIUM"},
                 },
                 triggered_by="seed_demo",
@@ -239,7 +247,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
                 min_score=Decimal(str(score - 2)),
                 max_score=Decimal(str(score + 2)),
                 level=_score_level(score),
-                created_at=datetime.combine(w_start, datetime.min.time(), tzinfo=timezone.utc),
+                created_at=datetime.combine(w_start, datetime.min.time(), tzinfo=UTC),
                 delta=delta,
                 trend_label="IMPROVING" if delta and delta > 0 else None,
             )
@@ -305,21 +313,21 @@ async def _seed_kiosco(session: AsyncSession) -> None:
 
     # 15 productos kiosco
     kiosco_products = [
-        ("Coca-Cola 2.25L",           "BEB-001", "bebidas",    Decimal("1400"), Decimal("850"),  48, 12),
-        ("Cigarrillos Marlboro x10",  "TAB-001", "tabaco",     Decimal("2200"), Decimal("1800"), 24,  6),
-        ("Alfajor Havanna",           "DUL-001", "dulces",     Decimal("700"),  Decimal("420"),  36, 10),
-        ("Agua mineral 500ml",        "BEB-002", "bebidas",    Decimal("500"),  Decimal("280"),  60, 20),
-        ("Lavandina 1L",              "LIM-001", "limpieza",   Decimal("550"),  Decimal("320"),  24,  6),
-        ("Sprite 2.25L",              "BEB-003", "bebidas",    Decimal("1350"), Decimal("820"),  36, 12),
-        ("Palitos Traviesos",         "SNA-001", "snacks",     Decimal("350"),  Decimal("180"),  48, 12),
-        ("Chicles Topline x12",       "DUL-002", "dulces",     Decimal("280"),  Decimal("150"),  72, 20),
-        ("Café Nescafé 200g",         "INF-001", "infusiones", Decimal("2000"), Decimal("1200"), 12,  4),
-        ("Galletitas Oreo x3",        "DUL-003", "dulces",     Decimal("1100"), Decimal("650"),  36, 10),
-        ("Jugo Tang sobre",           "BEB-004", "bebidas",    Decimal("180"),  Decimal("90"),   96, 30),
-        ("Yogur Danone 190g",         "LAC-001", "lacteos",    Decimal("680"),  Decimal("380"),  24,  8),
-        ("Flan Casero x4",            "LAC-002", "lacteos",    Decimal("520"),  Decimal("290"),  18,  6),
-        ("Vino Tetra Brick 1L",       "BEB-005", "bebidas",    Decimal("1200"), Decimal("750"),  30,  8),
-        ("Maní con sal 200g",         "SNA-002", "snacks",     Decimal("420"),  Decimal("220"),  42, 12),
+        ("Coca-Cola 2.25L", "BEB-001", "bebidas", Decimal("1400"), Decimal("850"), 48, 12),
+        ("Cigarrillos Marlboro x10", "TAB-001", "tabaco", Decimal("2200"), Decimal("1800"), 24, 6),
+        ("Alfajor Havanna", "DUL-001", "dulces", Decimal("700"), Decimal("420"), 36, 10),
+        ("Agua mineral 500ml", "BEB-002", "bebidas", Decimal("500"), Decimal("280"), 60, 20),
+        ("Lavandina 1L", "LIM-001", "limpieza", Decimal("550"), Decimal("320"), 24, 6),
+        ("Sprite 2.25L", "BEB-003", "bebidas", Decimal("1350"), Decimal("820"), 36, 12),
+        ("Palitos Traviesos", "SNA-001", "snacks", Decimal("350"), Decimal("180"), 48, 12),
+        ("Chicles Topline x12", "DUL-002", "dulces", Decimal("280"), Decimal("150"), 72, 20),
+        ("Café Nescafé 200g", "INF-001", "infusiones", Decimal("2000"), Decimal("1200"), 12, 4),
+        ("Galletitas Oreo x3", "DUL-003", "dulces", Decimal("1100"), Decimal("650"), 36, 10),
+        ("Jugo Tang sobre", "BEB-004", "bebidas", Decimal("180"), Decimal("90"), 96, 30),
+        ("Yogur Danone 190g", "LAC-001", "lacteos", Decimal("680"), Decimal("380"), 24, 8),
+        ("Flan Casero x4", "LAC-002", "lacteos", Decimal("520"), Decimal("290"), 18, 6),
+        ("Vino Tetra Brick 1L", "BEB-005", "bebidas", Decimal("1200"), Decimal("750"), 30, 8),
+        ("Maní con sal 200g", "SNA-002", "snacks", Decimal("420"), Decimal("220"), 42, 12),
     ]
     for name, sku, cat, price, cost, stock, threshold in kiosco_products:
         session.add(
@@ -357,11 +365,11 @@ async def _seed_kiosco(session: AsyncSession) -> None:
 
     # Gastos del mes
     for cat, amount, recurring, desc, method, days_ago in [
-        ("rent",     Decimal("380000"), True,  "Alquiler mensual",          "transfer", 1),
-        ("utilities",Decimal("22000"),  True,  "Luz, gas y agua",           "transfer", 5),
-        ("supplies", Decimal("1900000"),False, "Reposición de mercadería",  "transfer", 3),
-        ("cleaning", Decimal("8000"),   False, "Productos de limpieza",     "cash",     8),
-        ("misc",     Decimal("12000"),  False, "Varios y bolsas",           "cash",     12),
+        ("rent", Decimal("380000"), True, "Alquiler mensual", "transfer", 1),
+        ("utilities", Decimal("22000"), True, "Luz, gas y agua", "transfer", 5),
+        ("supplies", Decimal("1900000"), False, "Reposición de mercadería", "transfer", 3),
+        ("cleaning", Decimal("8000"), False, "Productos de limpieza", "cash", 8),
+        ("misc", Decimal("12000"), False, "Varios y bolsas", "cash", 12),
     ]:
         session.add(
             ExpenseEntry(
@@ -512,9 +520,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
 
     for i, score in enumerate(weekly_scores):
         weeks_back = len(weekly_scores) - i
-        snap_date = datetime.combine(
-            _weeks_ago(weeks_back), datetime.min.time(), tzinfo=timezone.utc
-        )
+        snap_date = datetime.combine(_weeks_ago(weeks_back), datetime.min.time(), tzinfo=UTC)
         sid = latest_score_id if weeks_back == 1 else uuid.uuid4()
         session.add(
             HealthScoreSnapshot(
@@ -523,10 +529,22 @@ async def _seed_limpieza(session: AsyncSession) -> None:
                 total_score=Decimal(str(score)),
                 level=_score_level(score),
                 dimensions={
-                    "cash":     {"score": 42 if weeks_back == 1 else max(30, score - 9), "label": "CRITICAL" if weeks_back == 1 else _score_level(score)},
-                    "margin":   {"score": 55 if weeks_back == 1 else score + 4, "label": _score_level(score)},
-                    "stock":    {"score": 62 if weeks_back == 1 else score + 11, "label": _score_level(score)},
-                    "supplier": {"score": 22 if weeks_back == 1 else max(18, score - 31), "label": "CRITICAL"},
+                    "cash": {
+                        "score": 42 if weeks_back == 1 else max(30, score - 9),
+                        "label": "CRITICAL" if weeks_back == 1 else _score_level(score),
+                    },
+                    "margin": {
+                        "score": 55 if weeks_back == 1 else score + 4,
+                        "label": _score_level(score),
+                    },
+                    "stock": {
+                        "score": 62 if weeks_back == 1 else score + 11,
+                        "label": _score_level(score),
+                    },
+                    "supplier": {
+                        "score": 22 if weeks_back == 1 else max(18, score - 31),
+                        "label": "CRITICAL",
+                    },
                 },
                 triggered_by="seed_demo",
                 snapshot_date=snap_date,
@@ -558,7 +576,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
                 min_score=Decimal(str(score - 1)),
                 max_score=Decimal(str(score + 1)),
                 level=_score_level(score),
-                created_at=datetime.combine(w_start, datetime.min.time(), tzinfo=timezone.utc),
+                created_at=datetime.combine(w_start, datetime.min.time(), tzinfo=UTC),
                 delta=delta,
                 trend_label="DECLINING" if delta and delta < 0 else None,
             )
@@ -643,14 +661,46 @@ async def _seed_limpieza(session: AsyncSession) -> None:
 
     # Productos limpieza
     limpieza_products = [
-        ("Lavandina 5L",             "LAV-001", "lavandinas",    Decimal("1800"), Decimal("1100"), 40,  8),
-        ("Detergente Magistral 750ml","DET-001", "detergentes",  Decimal("1200"), Decimal("720"),  60, 15),
-        ("Desinfectante Lysoform 1L", "DES-001", "desinfectantes",Decimal("2200"),Decimal("1400"), 30,  8),
-        ("Limpiador multiuso Flash",  "LIM-001", "limpiadores",  Decimal("980"),  Decimal("580"),  45, 12),
-        ("Bolsas basura x10 50L",     "BOL-001", "descartables", Decimal("650"),  Decimal("380"),  80, 20),
-        ("Escoba plástica",           "ACC-001", "accesorios",   Decimal("1500"), Decimal("900"),  20,  5),
-        ("Trapo de piso x3",          "ACC-002", "accesorios",   Decimal("800"),  Decimal("480"),  35, 10),
-        ("Jabón en polvo 500g",       "JAB-001", "jabones",      Decimal("1100"), Decimal("650"),  50, 12),
+        ("Lavandina 5L", "LAV-001", "lavandinas", Decimal("1800"), Decimal("1100"), 40, 8),
+        (
+            "Detergente Magistral 750ml",
+            "DET-001",
+            "detergentes",
+            Decimal("1200"),
+            Decimal("720"),
+            60,
+            15,
+        ),
+        (
+            "Desinfectante Lysoform 1L",
+            "DES-001",
+            "desinfectantes",
+            Decimal("2200"),
+            Decimal("1400"),
+            30,
+            8,
+        ),
+        (
+            "Limpiador multiuso Flash",
+            "LIM-001",
+            "limpiadores",
+            Decimal("980"),
+            Decimal("580"),
+            45,
+            12,
+        ),
+        (
+            "Bolsas basura x10 50L",
+            "BOL-001",
+            "descartables",
+            Decimal("650"),
+            Decimal("380"),
+            80,
+            20,
+        ),
+        ("Escoba plástica", "ACC-001", "accesorios", Decimal("1500"), Decimal("900"), 20, 5),
+        ("Trapo de piso x3", "ACC-002", "accesorios", Decimal("800"), Decimal("480"), 35, 10),
+        ("Jabón en polvo 500g", "JAB-001", "jabones", Decimal("1100"), Decimal("650"), 50, 12),
     ]
     for name, sku, cat, price, cost, stock, threshold in limpieza_products:
         session.add(
@@ -686,10 +736,10 @@ async def _seed_limpieza(session: AsyncSession) -> None:
         )
 
     for cat, amount, recurring, desc, method, days_ago in [
-        ("rent",     Decimal("320000"), True,  "Alquiler depósito",       "transfer", 1),
-        ("supplies", Decimal("2100000"),False, "Compra mercadería",       "transfer", 4),
-        ("utilities",Decimal("18000"),  True,  "Electricidad y agua",     "transfer", 6),
-        ("misc",     Decimal("25000"),  False, "Fletes y distribución",   "cash",     10),
+        ("rent", Decimal("320000"), True, "Alquiler depósito", "transfer", 1),
+        ("supplies", Decimal("2100000"), False, "Compra mercadería", "transfer", 4),
+        ("utilities", Decimal("18000"), True, "Electricidad y agua", "transfer", 6),
+        ("misc", Decimal("25000"), False, "Fletes y distribución", "cash", 10),
     ]:
         session.add(
             ExpenseEntry(
@@ -840,9 +890,7 @@ async def _seed_deco(session: AsyncSession) -> None:
 
     for i, score in enumerate(weekly_scores):
         weeks_back = len(weekly_scores) - i
-        snap_date = datetime.combine(
-            _weeks_ago(weeks_back), datetime.min.time(), tzinfo=timezone.utc
-        )
+        snap_date = datetime.combine(_weeks_ago(weeks_back), datetime.min.time(), tzinfo=UTC)
         sid = latest_score_id if weeks_back == 1 else uuid.uuid4()
         session.add(
             HealthScoreSnapshot(
@@ -851,10 +899,22 @@ async def _seed_deco(session: AsyncSession) -> None:
                 total_score=Decimal(str(score)),
                 level=_score_level(score),
                 dimensions={
-                    "cash":     {"score": 72 if weeks_back == 1 else min(80, score + 10), "label": _score_level(score)},
-                    "margin":   {"score": 68 if weeks_back == 1 else score + 6, "label": _score_level(score)},
-                    "stock":    {"score": 48 if weeks_back == 1 else max(40, score - 14), "label": "MEDIUM"},
-                    "supplier": {"score": 78 if weeks_back == 1 else min(80, score + 16), "label": "GOOD"},
+                    "cash": {
+                        "score": 72 if weeks_back == 1 else min(80, score + 10),
+                        "label": _score_level(score),
+                    },
+                    "margin": {
+                        "score": 68 if weeks_back == 1 else score + 6,
+                        "label": _score_level(score),
+                    },
+                    "stock": {
+                        "score": 48 if weeks_back == 1 else max(40, score - 14),
+                        "label": "MEDIUM",
+                    },
+                    "supplier": {
+                        "score": 78 if weeks_back == 1 else min(80, score + 16),
+                        "label": "GOOD",
+                    },
                 },
                 triggered_by="seed_demo",
                 snapshot_date=snap_date,
@@ -894,7 +954,7 @@ async def _seed_deco(session: AsyncSession) -> None:
                 min_score=Decimal(str(score - 2)),
                 max_score=Decimal(str(score + 2)),
                 level=_score_level(score),
-                created_at=datetime.combine(w_start, datetime.min.time(), tzinfo=timezone.utc),
+                created_at=datetime.combine(w_start, datetime.min.time(), tzinfo=UTC),
                 delta=delta,
                 trend_label=trend,
             )
@@ -986,16 +1046,24 @@ async def _seed_deco(session: AsyncSession) -> None:
 
     # Productos decoración
     deco_products = [
-        ("Maceta cerámica 20cm",       "MAC-001", "macetas",     Decimal("3500"),  Decimal("1800"), 25, 5),
-        ("Portarretrato madera 10x15", "DEC-001", "decoracion",  Decimal("2200"),  Decimal("1100"), 40, 8),
-        ("Vela aromática soja",        "VEL-001", "velas",       Decimal("1800"),  Decimal("800"),  60, 15),
-        ("Cojín decorativo 45x45",     "COJ-001", "textiles",    Decimal("4500"),  Decimal("2200"), 18, 4),
-        ("Espejo redondo 50cm",        "ESP-001", "espejos",     Decimal("8900"),  Decimal("4200"), 10, 3),
-        ("Mantel de lino 150x200",     "MAN-001", "textiles",    Decimal("6200"),  Decimal("3100"), 15, 4),
-        ("Florero vidrio soplado",     "FLO-001", "floreros",    Decimal("4800"),  Decimal("2400"), 22, 5),
-        ("Lampara velador E27",        "LAM-001", "iluminacion", Decimal("7500"),  Decimal("3800"), 12, 3),
-        ("Canasta mimbre pequeña",     "CAN-001", "canastas",    Decimal("2800"),  Decimal("1400"), 30, 8),
-        ("Cuadro canvas 40x60",        "CUA-001", "cuadros",     Decimal("5500"),  Decimal("2700"), 20, 5),
+        ("Maceta cerámica 20cm", "MAC-001", "macetas", Decimal("3500"), Decimal("1800"), 25, 5),
+        (
+            "Portarretrato madera 10x15",
+            "DEC-001",
+            "decoracion",
+            Decimal("2200"),
+            Decimal("1100"),
+            40,
+            8,
+        ),
+        ("Vela aromática soja", "VEL-001", "velas", Decimal("1800"), Decimal("800"), 60, 15),
+        ("Cojín decorativo 45x45", "COJ-001", "textiles", Decimal("4500"), Decimal("2200"), 18, 4),
+        ("Espejo redondo 50cm", "ESP-001", "espejos", Decimal("8900"), Decimal("4200"), 10, 3),
+        ("Mantel de lino 150x200", "MAN-001", "textiles", Decimal("6200"), Decimal("3100"), 15, 4),
+        ("Florero vidrio soplado", "FLO-001", "floreros", Decimal("4800"), Decimal("2400"), 22, 5),
+        ("Lampara velador E27", "LAM-001", "iluminacion", Decimal("7500"), Decimal("3800"), 12, 3),
+        ("Canasta mimbre pequeña", "CAN-001", "canastas", Decimal("2800"), Decimal("1400"), 30, 8),
+        ("Cuadro canvas 40x60", "CUA-001", "cuadros", Decimal("5500"), Decimal("2700"), 20, 5),
     ]
     for name, sku, cat, price, cost, stock, threshold in deco_products:
         session.add(
@@ -1032,11 +1100,11 @@ async def _seed_deco(session: AsyncSession) -> None:
         )
 
     for cat, amount, recurring, desc, method, days_ago in [
-        ("rent",     Decimal("450000"), True,  "Alquiler local Palermo",   "transfer", 1),
-        ("supplies", Decimal("980000"), False, "Compra de colección",      "transfer", 5),
-        ("utilities",Decimal("28000"),  True,  "Servicios del local",      "transfer", 7),
-        ("marketing",Decimal("45000"),  False, "Instagram y publicidad",   "transfer", 10),
-        ("misc",     Decimal("18000"),  False, "Materiales y embalaje",    "cash",     14),
+        ("rent", Decimal("450000"), True, "Alquiler local Palermo", "transfer", 1),
+        ("supplies", Decimal("980000"), False, "Compra de colección", "transfer", 5),
+        ("utilities", Decimal("28000"), True, "Servicios del local", "transfer", 7),
+        ("marketing", Decimal("45000"), False, "Instagram y publicidad", "transfer", 10),
+        ("misc", Decimal("18000"), False, "Materiales y embalaje", "cash", 14),
     ]:
         session.add(
             ExpenseEntry(

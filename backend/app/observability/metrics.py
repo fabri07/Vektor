@@ -14,7 +14,7 @@ Replace in-memory counters with Prometheus if needed:
 """
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -94,7 +94,7 @@ async def track_event(
         user_id=user_id,
         event_type=str(event_type),
         metadata_json=metadata,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(event)
     # increment in-memory counter too
@@ -127,7 +127,7 @@ async def track_job_event(
         user_id=None,
         event_type=str(event_type),
         metadata_json=metadata,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(event)
     increment(f"job.{event_type.lower()}", labels={"job_name": job_name})

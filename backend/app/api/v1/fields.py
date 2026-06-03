@@ -1,11 +1,11 @@
 """Field definitions endpoints — vertical base + tenant customization."""
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
 from app.application.services import field_definition_service as svc
@@ -26,6 +26,7 @@ router = APIRouter()
 
 async def _get_vertical_code(tenant_id: UUID, session: AsyncSession) -> str:
     from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
+
     profile = await BusinessProfileRepository(session).get_by_tenant_id(tenant_id)
     return profile.vertical_code if profile else "kiosco_almacen"
 
@@ -39,13 +40,15 @@ async def _resolve_data_type(
 ) -> str:
     if override_data_type:
         return override_data_type
-    base = (await session.execute(
-        select(VerticalFieldDefinition).where(
-            VerticalFieldDefinition.vertical_code == vertical_code,
-            VerticalFieldDefinition.field_key == field_key,
-            VerticalFieldDefinition.entity_type == entity_type,
+    base = (
+        await session.execute(
+            select(VerticalFieldDefinition).where(
+                VerticalFieldDefinition.vertical_code == vertical_code,
+                VerticalFieldDefinition.field_key == field_key,
+                VerticalFieldDefinition.entity_type == entity_type,
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
     return base.data_type if base else "text"
 
 
@@ -54,7 +57,7 @@ async def get_definitions(
     entity_type: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     vertical_code = await _get_vertical_code(tenant.tenant_id, session)
     return await svc.get_merged_definitions(
         session,
@@ -70,7 +73,7 @@ async def create_field(
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     field = await svc.create_custom_field(
         session,
         tenant_id=tenant.tenant_id,
@@ -103,7 +106,7 @@ async def update_field(
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     vertical_code = await _get_vertical_code(tenant.tenant_id, session)
     field = await svc.update_custom_field(
         session,
@@ -114,7 +117,9 @@ async def update_field(
         vertical_code=vertical_code,
         label=body.label,
         override_required=body.override_required,
-        override_enum_options=[o.model_dump() for o in body.override_enum_options] if body.override_enum_options else None,
+        override_enum_options=[o.model_dump() for o in body.override_enum_options]
+        if body.override_enum_options
+        else None,
         display_order=body.display_order,
     )
     if field is None:
@@ -140,7 +145,7 @@ async def toggle_field(
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     vertical_code = await _get_vertical_code(tenant.tenant_id, session)
     field = await svc.toggle_field(
         session,
@@ -174,7 +179,7 @@ async def undo_field_change(
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     undone = await svc.undo_last_change(
         session,
         tenant_id=tenant.tenant_id,
@@ -195,5 +200,5 @@ async def get_history(
     limit: int = Query(default=50, ge=1, le=200),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list:
+) -> list[Any]:
     return await svc.get_change_history(session, tenant_id=tenant.tenant_id, limit=limit)

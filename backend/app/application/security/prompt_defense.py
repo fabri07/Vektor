@@ -1,24 +1,26 @@
 """prompt_defense — protección contra prompt injection y validación de action_types."""
 
-VALID_ACTION_TYPES: frozenset[str] = frozenset({
-    "REGISTER_SALE",
-    "REGISTER_CASH_INFLOW",
-    "REGISTER_EXPENSE",
-    "REGISTER_PURCHASE",
-    "REGISTER_CASH_OUTFLOW",
-    "UPDATE_STOCK",
-    "UPDATE_PRODUCT",
-    "REGISTER_STOCK_LOSS",
-    "CREATE_PURCHASE_SUGGESTION",
-    "IMPORT_TABULAR_FILE",
-    "PARSE_DOCUMENT_FILE",
-    "GENERATE_HEALTH_REPORT",
-    "ANSWER_HELP_REQUEST",
-    "CREATE_SUPPLIER_DRAFT",
-    "CLASSIFY_GMAIL_MESSAGE",
-    "SYNC_TO_GOOGLE",
-    "CREATE_CALENDAR_EVENT",
-})
+VALID_ACTION_TYPES: frozenset[str] = frozenset(
+    {
+        "REGISTER_SALE",
+        "REGISTER_CASH_INFLOW",
+        "REGISTER_EXPENSE",
+        "REGISTER_PURCHASE",
+        "REGISTER_CASH_OUTFLOW",
+        "UPDATE_STOCK",
+        "UPDATE_PRODUCT",
+        "REGISTER_STOCK_LOSS",
+        "CREATE_PURCHASE_SUGGESTION",
+        "IMPORT_TABULAR_FILE",
+        "PARSE_DOCUMENT_FILE",
+        "GENERATE_HEALTH_REPORT",
+        "ANSWER_HELP_REQUEST",
+        "CREATE_SUPPLIER_DRAFT",
+        "CLASSIFY_GMAIL_MESSAGE",
+        "SYNC_TO_GOOGLE",
+        "CREATE_CALENDAR_EVENT",
+    }
+)
 
 
 def wrap_user_input(message: str) -> str:

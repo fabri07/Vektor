@@ -1,6 +1,5 @@
 """Integration tests for HealthScoreService."""
 
-
 from datetime import UTC, datetime
 from decimal import Decimal
 

@@ -7,16 +7,17 @@ Create Date: 2026-04-24
 
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
 from alembic import op
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 revision: str = "20260424_0001"
-down_revision: Union[str, None] = "20260421_0002"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "20260421_0002"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -54,7 +55,8 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.UniqueConstraint(
-            "tenant_id", "user_id",
+            "tenant_id",
+            "user_id",
             name="uq_google_mcp_connection_tenant_user",
         ),
     )
