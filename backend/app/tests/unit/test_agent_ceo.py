@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTeamPlan
+from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTeamPlan, LLMCall
 
 
 def _make_request(message: str = "test") -> AgentRequest:
@@ -211,3 +211,58 @@ async def test_ceo_uses_sonnet_model():
         await agent.process(_make_request("cómo está mi negocio"))
 
     assert captured_call.get("model") == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_ceo_prompt_includes_attachment_context_for_import():
+    captured_call: dict[str, Any] = {}
+
+    async def capture_create(**kwargs):
+        captured_call.update(kwargs)
+        return _mock_llm_response("importar_archivo_productos")
+
+    with unittest.mock.patch(
+        "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = capture_create
+        mock_cls.return_value = mock_client
+
+        from app.application.agents.ceo.agent import AgentCEO
+
+        agent = AgentCEO()
+        agent.client = mock_client
+        classified, _ = await agent.classify_intent(
+            "importá y anotá los registros",
+            has_attachment=True,
+            attachment_type="product",
+        )
+
+    assert classified["intent"] == "importar_archivo_productos"
+    system = captured_call.get("system", "")
+    assert "Hay un archivo adjunto de tipo product" in system
+    assert "importar_archivo_productos" in system
+
+
+@pytest.mark.asyncio
+async def test_ceo_process_passes_attachment_meta_to_classifier():
+    from app.application.agents.ceo.agent import AgentCEO
+
+    agent = AgentCEO()
+    agent.classify_intent = AsyncMock(
+        return_value=(
+            {"intent": "importar_archivo_gastos", "entities": {}},
+            LLMCall(source="ceo", model="test", input_tokens=1, output_tokens=1),
+        )
+    )
+
+    request = _make_request("cargá esto")
+    request.context["attachment_meta"] = {"has_attachment": True, "attachment_type": "expense"}
+    result = await agent.process(request)
+
+    agent.classify_intent.assert_awaited_once_with(
+        "cargá esto",
+        has_attachment=True,
+        attachment_type="expense",
+    )
+    assert result.result["intent"] == "importar_archivo_gastos"

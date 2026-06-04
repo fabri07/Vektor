@@ -65,7 +65,12 @@ class AgentCEO(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
-    async def classify_intent(self, message: str) -> tuple[dict[str, Any], LLMCall]:
+    async def classify_intent(
+        self,
+        message: str,
+        has_attachment: bool = False,
+        attachment_type: str | None = None,
+    ) -> tuple[dict[str, Any], LLMCall]:
         """Clasifica el intent usando NLP + Sonnet. Retorna ({intent, entities}, LLMCall).
 
         Pre-procesa el mensaje con el normalizer argentino antes de enviarlo al LLM.
@@ -110,6 +115,27 @@ class AgentCEO(BaseAgent):
             for _fam, _info in _ANALYTIC_FAMILIES.items()
         ]
         _entity_guide = "\n".join(_entity_lines)
+        attachment_type_label = attachment_type or "desconocido"
+        attachment_context = ""
+        if has_attachment:
+            attachment_context = (
+                "\n=== CONTEXTO DE ARCHIVO ADJUNTO ===\n"
+                f"Hay un archivo adjunto de tipo {attachment_type_label}. "
+                "Si el usuario pide importar, cargar o subir los datos del archivo (o dice "
+                "'anotá/registrá los registros del archivo', 'cargá esto', 'metelos donde "
+                "corresponda'), elegí importar_archivo_ventas, importar_archivo_gastos o "
+                "importar_archivo_productos según el tipo del archivo. "
+                "Mapeo: product/stock → importar_archivo_productos; expense → "
+                "importar_archivo_gastos; sale/mixed/desconocido → importar_archivo_ventas. "
+                "Si el usuario pide analizar, revisar, mirar, comparar, resumir o diagnosticar "
+                "el archivo, elegí analizar_archivo, analizar_precios o analizar_stock según "
+                "corresponda.\n"
+                "EXCEPCIÓN IMPORTANTE: si el usuario menciona el monto o la cantidad de UNA "
+                "operación puntual (ej. 'anotame una venta de $1200', 'registrá un gasto de "
+                "$500 de luz'), eso es un REGISTRO MANUAL — clasificá ingresar_venta o "
+                "registrar_gasto, NO una importación, aunque haya un adjunto presente.\n"
+                "El CEO no toca la base de datos: solo clasifica.\n"
+            )
 
         system = (
             "Sos el clasificador de intenciones de Véktor, sistema de gestión financiera para "
@@ -125,7 +151,8 @@ class AgentCEO(BaseAgent):
             "Para estos intents, si el usuario es ESPECÍFICO sobre el sub-análisis, agregá "
             "`analysis_type` en entities con uno de los valores listados. Si es genérico, "
             "OMITILO (corre el análisis general). Valores válidos por intent:\n"
-            f"{_entity_guide}\n\n"
+            f"{_entity_guide}\n"
+            f"{attachment_context}\n"
             "REGLA CRÍTICA — intent_desconocido:\n"
             "Usá 'intent_desconocido' si el mensaje NO está relacionado con:\n"
             "  - Operaciones del negocio: ventas, gastos, compras, caja, stock, proveedores\n"
@@ -176,7 +203,12 @@ class AgentCEO(BaseAgent):
 
     async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         # 1. Clasificar intent vía LLM Haiku
-        classified, ceo_call = await self.classify_intent(request.message)
+        attachment_meta = request.context.get("attachment_meta", {})
+        classified, ceo_call = await self.classify_intent(
+            request.message,
+            has_attachment=bool(attachment_meta.get("has_attachment")),
+            attachment_type=attachment_meta.get("attachment_type"),
+        )
         intent: str = classified.get("intent", "intent_desconocido")
         entities: dict[str, Any] = classified.get("entities", {})
         logger.info(

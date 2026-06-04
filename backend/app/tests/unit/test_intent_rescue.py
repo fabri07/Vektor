@@ -112,3 +112,24 @@ def test_fuzzy_typos():
 def test_attachment_no_verb_no_type_asks_about_file():
     # adjunto sin tipo ni verbo claro → pedir aclaración sobre el archivo
     assert rescue_intent("xyz", True, None) == ("pedir_aclaracion_sobre_archivo", {})
+
+
+def test_import_verbs_with_attachment_route_to_import_intents():
+    assert rescue_intent("importá y anotá esto", True, "product") == (
+        "importar_archivo_productos",
+        {},
+    )
+    assert rescue_intent("cargá estos registros", True, "expense") == (
+        "importar_archivo_gastos",
+        {},
+    )
+    assert rescue_intent("registrá lo de la planilla", True, "sale") == (
+        "importar_archivo_ventas",
+        {},
+    )
+    assert rescue_intent("guardá estos datos", True, "mixed") == (
+        "importar_archivo_ventas",
+        {},
+    )
+    assert rescue_intent("subí el archivo", True, None) == ("importar_archivo_ventas", {})
+    assert rescue_intent("importalo", True, "product") == ("importar_archivo_productos", {})

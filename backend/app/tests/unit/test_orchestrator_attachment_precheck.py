@@ -4,6 +4,7 @@ Cubre las dos capas determinísticas (DataIntentExtractor + IntentRescue) y los
 cortes sin sub-agente (_NO_AGENT_INTENTS).
 """
 
+import json
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -195,3 +196,369 @@ async def test_handle_e2e_price_attachment_not_out_of_scope(db_session, tenant_w
     assert resp.status != "error"
     # NO debe ser el corte de fuera de scope
     assert resp.message != _OUT_OF_SCOPE_MESSAGE
+
+
+@pytest_asyncio.fixture
+async def tenant_with_imported_file(db_session: AsyncSession) -> tuple[uuid.UUID, str]:
+    """Archivo ya importado: su summary tiene `imported_counts` (lo escribe
+    pending_action_service al confirmar IMPORT_TABULAR_FILE). No debe re-ofrecerse."""
+    tid = uuid.uuid4()
+    uid = uuid.uuid4()
+    db_session.add(
+        Tenant(
+            tenant_id=tid,
+            legal_name="T",
+            display_name="T",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status="ACTIVE",
+        )
+    )
+    f = UploadedFile(
+        tenant_id=tid,
+        uploaded_by=uid,
+        original_filename="ventas.xlsx",
+        s3_key="k",
+        content_type="application/vnd.ms-excel",
+        size_bytes=100,
+        purpose="chat",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={
+            "inferred_type": "ventas",
+            "confidence": "HIGH",
+            "ventas_detectadas": [{"monto": 1000}],
+            "gastos_detectados": [],
+            "stock_detectado": [],
+            # marcador de que YA se importó
+            "imported_counts": {"ventas": 1, "gastos": 0, "productos": 0},
+            "confirmed_fields": {"ventas": True, "gastos": False, "productos": False},
+        },
+    )
+    db_session.add(f)
+    await db_session.commit()
+    return tid, str(f.id)
+
+
+def test_can_reuse_pending_file_excludes_manual_register():
+    """#1(b): un registro manual sin término de archivo NO reactiva el pending file.
+    Un pedido sobre el archivo (con término de archivo) sí lo hace."""
+    reuse = ChatOrchestrator._can_reuse_pending_file
+    # registro manual de una operación puntual → NO reusa
+    assert reuse("anotame una venta de $1200") is False
+    assert reuse("registrá un gasto de $500 de luz") is False
+    # pedidos que sí refieren al archivo → reusa
+    assert reuse("importá y anotá los registros donde corresponde") is True
+    assert reuse("anotá los datos del archivo") is True
+    assert reuse("cargá esto") is True
+
+
+@pytest.mark.asyncio
+async def test_recall_skips_already_imported_file(db_session, tenant_with_imported_file):
+    """#1(a): _recall_pending_files filtra archivos que ya tienen imported_counts."""
+    tid, file_id = tenant_with_imported_file
+    conv_id = str(uuid.uuid4())
+    pending_payload = json.dumps(
+        {
+            "file_ids": [file_id],
+            "attachments": [{"file_id": file_id, "filename": "ventas.xlsx"}],
+            "ts": 1,
+        }
+    )
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=pending_payload)
+
+    orch = ChatOrchestrator.__new__(ChatOrchestrator)
+    recalled = await orch._recall_pending_files(conv_id, redis, db_session, tid)
+    assert recalled == []
+
+
+@pytest.mark.asyncio
+async def test_handle_does_not_reimport_already_imported_file(
+    db_session, tenant_with_imported_file
+):
+    """E2E del #1: tras importar, un turno de registro manual NO re-inyecta el archivo
+    ya importado (evita duplicar datos financieros)."""
+    tid, file_id = tenant_with_imported_file
+    conv_id = str(uuid.uuid4())
+    pending_payload = json.dumps(
+        {
+            "file_ids": [file_id],
+            "attachments": [{"file_id": file_id, "filename": "ventas.xlsx"}],
+            "ts": 1,
+        }
+    )
+
+    async def redis_get(key: str):
+        if key == ChatOrchestrator._pending_file_key(conv_id):
+            return pending_payload
+        return None
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=redis_get)
+    redis.setex = AsyncMock()
+
+    exec_resp = AgentResponse(
+        request_id="r1",
+        agent_name="agent_income",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        confidence=Confidence.HIGH,
+        message="Anoté la venta.",
+        result={"summary": "venta"},
+    )
+
+    captured_request: AgentRequest | None = None
+
+    async def execute(plan, request):
+        nonlocal captured_request
+        captured_request = request
+        return [exec_resp]
+
+    orch = ChatOrchestrator.__new__(ChatOrchestrator)
+    orch.client = AsyncMock()
+    # registro manual con monto puntual, en la misma conversación que el import previo
+    req = AgentRequest(
+        user_id=str(uuid.uuid4()),
+        business_id=str(tid),
+        message="anotame una venta de $1200",
+        conversation_id=conv_id,
+        attachments=[],
+    )
+
+    ceo_resp = AgentResponse(
+        request_id="r1",
+        agent_name="agent_ceo",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        confidence=Confidence.HIGH,
+        result={
+            "intent": "ingresar_venta",
+            "target_agent": "agent_income",
+            "plan": {
+                "plan_id": "p",
+                "intent": "ingresar_venta",
+                "tasks": [
+                    {
+                        "task_id": "t",
+                        "agent": "agent_income",
+                        "action_type": "REGISTER_SALE",
+                        "entities": {"amount": 1200},
+                        "depends_on": [],
+                        "approval_group": None,
+                    }
+                ],
+                "requires_synthesis": False,
+                "fallback_message": None,
+            },
+        },
+    )
+
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_exec_cls,
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
+        mock_exec_cls.return_value.execute = AsyncMock(side_effect=execute)
+        await orch.handle(req, db_session, redis, uuid.UUID(req.user_id), tid)
+
+    # El archivo ya importado NO se reinyecta en el turno de registro manual.
+    assert captured_request is not None
+    assert captured_request.attachments == []
+
+
+@pytest.mark.asyncio
+async def test_handle_reuses_pending_file_for_import_turn(db_session, tenant_with_product_file):
+    tid, file_id = tenant_with_product_file
+    conv_id = str(uuid.uuid4())
+    pending_payload = json.dumps(
+        {
+            "file_ids": [file_id],
+            "attachments": [{"file_id": file_id, "filename": "lista.xlsx"}],
+            "ts": 1,
+        }
+    )
+
+    async def redis_get(key: str):
+        if key == ChatOrchestrator._pending_file_key(conv_id):
+            return pending_payload
+        return None
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=redis_get)
+    redis.setex = AsyncMock()
+
+    exec_resp = AgentResponse(
+        request_id="r1",
+        agent_name="agent_income",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        confidence=Confidence.HIGH,
+        message="Preparé la importación del catálogo.",
+        result={"summary": "importar productos"},
+    )
+
+    captured_request: AgentRequest | None = None
+
+    async def execute(plan, request):
+        nonlocal captured_request
+        captured_request = request
+        return [exec_resp]
+
+    orch = ChatOrchestrator.__new__(ChatOrchestrator)
+    orch.client = AsyncMock()
+    req = AgentRequest(
+        user_id=str(uuid.uuid4()),
+        business_id=str(tid),
+        message="importa y anota los registros donde corresponde",
+        conversation_id=conv_id,
+        attachments=[],
+    )
+
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_exec_cls,
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(return_value=_ceo_unknown_response())
+        mock_exec_cls.return_value.execute = AsyncMock(side_effect=execute)
+        resp = await orch.handle(req, db_session, redis, uuid.UUID(req.user_id), tid)
+
+    assert resp.result.get("intent") == "importar_archivo_productos"
+    assert captured_request is not None
+    assert captured_request.attachments == [{"file_id": file_id, "filename": "lista.xlsx"}]
+
+
+@pytest.mark.asyncio
+async def test_handle_does_not_reuse_pending_file_when_topic_changes(
+    db_session,
+    tenant_with_product_file,
+):
+    tid, file_id = tenant_with_product_file
+    conv_id = str(uuid.uuid4())
+    pending_payload = json.dumps(
+        {
+            "file_ids": [file_id],
+            "attachments": [{"file_id": file_id, "filename": "lista.xlsx"}],
+            "ts": 1,
+        }
+    )
+
+    async def redis_get(key: str):
+        if key == ChatOrchestrator._pending_file_key(conv_id):
+            return pending_payload
+        return None
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=redis_get)
+    redis.setex = AsyncMock()
+
+    ceo_resp = AgentResponse(
+        request_id="r1",
+        agent_name="agent_ceo",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        confidence=Confidence.HIGH,
+        result={
+            "intent": "analizar_ventas",
+            "target_agent": "agent_income",
+            "plan": {
+                "plan_id": "p",
+                "intent": "analizar_ventas",
+                "tasks": [
+                    {
+                        "task_id": "t",
+                        "agent": "agent_income",
+                        "action_type": "ANALYZE_SALES_DATA",
+                        "entities": {},
+                        "depends_on": [],
+                        "approval_group": None,
+                    }
+                ],
+                "requires_synthesis": False,
+                "fallback_message": None,
+            },
+        },
+    )
+    exec_resp = AgentResponse(
+        request_id="r1",
+        agent_name="agent_income",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        confidence=Confidence.HIGH,
+        message="Ayer vendiste...",
+        result={"summary": "ventas"},
+    )
+
+    captured_request: AgentRequest | None = None
+
+    async def execute(plan, request):
+        nonlocal captured_request
+        captured_request = request
+        return [exec_resp]
+
+    orch = ChatOrchestrator.__new__(ChatOrchestrator)
+    orch.client = AsyncMock()
+    req = AgentRequest(
+        user_id=str(uuid.uuid4()),
+        business_id=str(tid),
+        message="cuánto vendí ayer",
+        conversation_id=conv_id,
+        attachments=[],
+    )
+
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_exec_cls,
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(return_value=ceo_resp)
+        mock_exec_cls.return_value.execute = AsyncMock(side_effect=execute)
+        await orch.handle(req, db_session, redis, uuid.UUID(req.user_id), tid)
+
+    assert captured_request is not None
+    assert captured_request.attachments == []
+
+
+@pytest.mark.asyncio
+async def test_handle_unknown_off_topic_does_not_offer_pending_file(
+    db_session,
+    tenant_with_product_file,
+):
+    tid, file_id = tenant_with_product_file
+    conv_id = str(uuid.uuid4())
+    pending_payload = json.dumps(
+        {
+            "file_ids": [file_id],
+            "attachments": [{"file_id": file_id, "filename": "lista.xlsx"}],
+            "ts": 1,
+        }
+    )
+
+    async def redis_get(key: str):
+        if key == ChatOrchestrator._pending_file_key(conv_id):
+            return pending_payload
+        return None
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=redis_get)
+    redis.setex = AsyncMock()
+
+    orch = ChatOrchestrator.__new__(ChatOrchestrator)
+    orch.client = AsyncMock()
+    req = AgentRequest(
+        user_id=str(uuid.uuid4()),
+        business_id=str(tid),
+        message="contame un chiste",
+        conversation_id=conv_id,
+        attachments=[],
+    )
+
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_exec_cls,
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(return_value=_ceo_unknown_response())
+        resp = await orch.handle(req, db_session, redis, uuid.UUID(req.user_id), tid)
+
+    assert resp.result.get("intent") == "out_of_scope"
+    assert req.attachments == []
+    mock_exec_cls.return_value.execute.assert_not_called()

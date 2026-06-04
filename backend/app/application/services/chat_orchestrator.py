@@ -14,7 +14,9 @@ Flujo:
 
 from __future__ import annotations
 
+import json
 import re
+import time
 import uuid
 from typing import Any
 
@@ -58,6 +60,47 @@ from app.persistence.models.file import (
 from app.persistence.models.tenant import Tenant
 
 logger = get_logger(__name__)
+
+_PENDING_FILE_TTL_SECONDS = 30 * 60
+_PENDING_FILE_KEY_PREFIX = "chat:pending_file:"
+_FILE_INTENT_PREFIXES = ("importar_archivo_",)
+_FILE_INTENTS: frozenset[str] = frozenset(
+    {
+        "analizar_archivo",
+        "analizar_precios",
+        "analizar_stock",
+        "pedir_aclaracion_sobre_archivo",
+    }
+)
+# Términos que reactivan un archivo pendiente cuando el turno actual no trae adjunto.
+# IMPORTANTE: se excluyen verbos ambiguos puros como "anota"/"registra" — son los
+# triggers del registro MANUAL de ventas/gastos ("anotame una venta de $1200"). Si los
+# incluyéramos, un registro manual con un pending file vivo secuestraría el archivo y
+# podría re-importarlo. Para esos verbos exigimos co-ocurrencia con un término de archivo
+# ("archivo", "esto", "planilla", etc.), que sí está en esta lista.
+_PENDING_FILE_REUSE_TERMS: frozenset[str] = frozenset(
+    {
+        "adjunto",
+        "archivo",
+        "csv",
+        "excel",
+        "esto",
+        "estos",
+        "importa",
+        "importar",
+        "importalo",
+        "importala",
+        "carga",
+        "cargar",
+        "cargalo",
+        "cargala",
+        "planilla",
+        "revisa",
+        "analiza",
+        "mira",
+        "chequea",
+    }
+)
 
 
 # ── Cortes determinísticos sin sub-agente (Sprint 17) ─────────────────────────
@@ -112,9 +155,44 @@ class ChatOrchestrator:
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
     ) -> AgentResponse:
+        # Cache de UploadedFile por request (evita recargar el mismo archivo en
+        # _build_attachment_meta / _rescue_unknown_intent / _load_file_context). La
+        # instancia de ChatOrchestrator es por-request (agent.py), así que es seguro.
+        self._file_cache: dict[str, UploadedFile] = {}
+
         # 1. Contexto del negocio
         business_name, business_type = await self._load_business_context(tenant_id, db)
         heuristics = HeuristicEngine.get(business_type)
+
+        current_attachments = list(request.attachments or [])
+        inherited_attachments: list[dict[str, str]] = []
+        if request.conversation_id:
+            if current_attachments:
+                await self._remember_pending_files(
+                    request.conversation_id,
+                    current_attachments,
+                    redis,
+                )
+            else:
+                inherited_attachments = await self._recall_pending_files(
+                    request.conversation_id, redis, db, tenant_id
+                )
+        should_offer_inherited_attachment = bool(
+            inherited_attachments
+            and not current_attachments
+            and self._can_reuse_pending_file(request.message)
+        )
+        effective_attachments: list[Any] = current_attachments or (
+            inherited_attachments if should_offer_inherited_attachment else []
+        )
+        inherited_attachment_available = bool(
+            inherited_attachments and should_offer_inherited_attachment
+        )
+        request.context["attachment_meta"] = await self._build_attachment_meta(
+            effective_attachments,
+            tenant_id,
+            db,
+        )
 
         # 1b. BusinessMemory — contexto acumulado del negocio (fail-silencioso)
         bm_data: dict[str, Any] = {}
@@ -131,13 +209,6 @@ class ChatOrchestrator:
             agent_memory_fragment = await am_svc.get_context_fragment(tenant_id)
         except Exception as exc:
             logger.warning("agent_memory_failed", tenant_id=str(tenant_id), error=str(exc))
-
-        # 1d. Archivos procesados — uploads confirmados del tenant (fail-silencioso)
-        file_context = ""
-        try:
-            file_context = await self._load_file_context(tenant_id, db, request.attachments)
-        except Exception as exc:
-            logger.warning("file_context_failed", tenant_id=str(tenant_id), error=str(exc))
 
         # 2. Historial conversacional
         conversation_ctx: dict[str, Any] = {}
@@ -212,7 +283,10 @@ class ChatOrchestrator:
             from app.application.agents.ceo.team_plan_builder import build_plan  # noqa: PLC0415
 
             rescued_intent, rescued_entities = await self._rescue_unknown_intent(
-                request, tenant_id, db
+                request,
+                tenant_id,
+                db,
+                effective_attachments=effective_attachments if effective_attachments else None,
             )
             if rescued_intent != ceo_intent:
                 logger.info(
@@ -226,6 +300,19 @@ class ChatOrchestrator:
                 plan = build_plan(rescued_intent, rescued_entities)
                 raw_plan = plan.model_dump()
                 ceo_target = plan.tasks[0].agent if plan.tasks else ceo_target
+
+        if inherited_attachment_available and self._is_file_intent(ceo_intent):
+            request.attachments = inherited_attachments
+        elif current_attachments:
+            request.attachments = current_attachments
+
+        # 3b-ter. Archivos procesados — solo incluir adjunto heredado si el intent sigue siendo
+        # de archivo; si el usuario cambió de tema, queda vivo en Redis pero no contamina el turno.
+        file_context = ""
+        try:
+            file_context = await self._load_file_context(tenant_id, db, request.attachments)
+        except Exception as exc:
+            logger.warning("file_context_failed", tenant_id=str(tenant_id), error=str(exc))
 
         # 3c. Cortes sin sub-agente: fuera de scope / pedido de aclaración ───────
         if ceo_intent in _NO_AGENT_INTENTS:
@@ -520,6 +607,7 @@ class ChatOrchestrator:
         request: AgentRequest,
         tenant_id: uuid.UUID,
         db: AsyncSession,
+        effective_attachments: list[Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Rescata el intent cuando el CEO devolvió `intent_desconocido` (Sprint 17).
 
@@ -540,7 +628,11 @@ class ChatOrchestrator:
 
         attachment_files: list[UploadedFile] = []
         try:
-            attachment_files = await self._load_attachment_files(request.attachments, tenant_id, db)
+            attachment_files = await self._load_attachment_files(
+                effective_attachments if effective_attachments is not None else request.attachments,
+                tenant_id,
+                db,
+            )
         except Exception as exc:
             logger.warning(
                 "intent_rescue_attachment_load_failed",
@@ -550,18 +642,14 @@ class ChatOrchestrator:
 
         has_attachment = bool(attachment_files)
 
-        # ── Capa 1: DataIntentExtractor — ¿el adjunto tiene datos importables? ──
+        # ── Capa 1: DataIntentExtractor — solo extrae tipo; IntentRescue decide import vs análisis.
         attachment_type: str | None = None
         extractor = DataIntentExtractor()
         for file in attachment_files:
             result = extractor.check_file_summary(file.parsed_summary_json or {})
             if result.has_data_intent:
                 attachment_type = result.intent_type
-                # Sprint 19: intents consolidados — un adjunto de productos es un
-                # análisis de lista de precios; el resto, análisis de archivo.
-                if result.intent_type == "product":
-                    return "analizar_precios", {"analysis_type": "lista"}
-                return "analizar_archivo", {}
+                break
 
         # ── Capa 2: IntentRescue — scoring semántico + fuzzy sobre el texto ────
         rescued_intent, rescued_entities = rescue_intent(
@@ -571,45 +659,198 @@ class ChatOrchestrator:
         )
         return rescued_intent, rescued_entities
 
+    async def _build_attachment_meta(
+        self,
+        attachments: list[Any] | None,
+        tenant_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> dict[str, Any]:
+        if not attachments:
+            return {"has_attachment": False, "attachment_type": None}
+        attachment_type: str | None = None
+        try:
+            from app.application.services.data_intent_extractor import (  # noqa: PLC0415
+                DataIntentExtractor,
+            )
+
+            files = await self._load_attachment_files(attachments, tenant_id, db)
+            extractor = DataIntentExtractor()
+            for file in files:
+                result = extractor.check_file_summary(file.parsed_summary_json or {})
+                if result.has_data_intent:
+                    attachment_type = result.intent_type
+                    break
+        except Exception as exc:
+            logger.warning("attachment_meta_failed", tenant_id=str(tenant_id), error=str(exc))
+        return {"has_attachment": bool(attachments), "attachment_type": attachment_type}
+
+    async def _remember_pending_files(
+        self,
+        conversation_id: str,
+        attachments: list[Any],
+        redis: Redis,
+    ) -> None:
+        normalized = self._normalize_attachments(attachments)
+        if not normalized:
+            return
+        payload = {
+            "file_ids": [item["file_id"] for item in normalized],
+            "attachments": normalized,
+            "ts": int(time.time()),
+        }
+        try:
+            await redis.setex(
+                self._pending_file_key(conversation_id),
+                _PENDING_FILE_TTL_SECONDS,
+                json.dumps(payload),
+            )
+        except Exception as exc:
+            logger.warning(
+                "pending_file_remember_failed",
+                conversation_id=conversation_id,
+                error=str(exc),
+            )
+
+    async def _recall_pending_files(
+        self,
+        conversation_id: str,
+        redis: Redis,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+    ) -> list[dict[str, str]]:
+        try:
+            raw = await redis.get(self._pending_file_key(conversation_id))
+        except Exception as exc:
+            logger.warning(
+                "pending_file_recall_failed",
+                conversation_id=conversation_id,
+                error=str(exc),
+            )
+            return []
+        if not raw:
+            return []
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        attachments = payload.get("attachments")
+        if isinstance(attachments, list):
+            recalled = self._normalize_attachments(attachments)
+        else:
+            file_ids = payload.get("file_ids")
+            recalled = (
+                [
+                    {"file_id": file_id, "filename": ""}
+                    for file_id in file_ids
+                    if isinstance(file_id, str) and file_id
+                ]
+                if isinstance(file_ids, list)
+                else []
+            )
+        if not recalled:
+            return []
+        # #1(a): no re-ofrecer archivos YA importados. Un chat upload nace con
+        # processing_status=DONE (parseo síncrono), así que ese campo no distingue
+        # "parseado" de "importado". El marcador real es `imported_counts` en el
+        # summary, que escribe pending_action_service al confirmar IMPORT_TABULAR_FILE.
+        return await self._filter_already_imported(recalled, tenant_id, db)
+
+    async def _filter_already_imported(
+        self,
+        attachments: list[dict[str, str]],
+        tenant_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> list[dict[str, str]]:
+        try:
+            files = await self._load_attachment_files(attachments, tenant_id, db)
+        except Exception as exc:
+            logger.warning(
+                "pending_file_import_filter_failed",
+                tenant_id=str(tenant_id),
+                error=str(exc),
+            )
+            return attachments
+        imported_ids = {
+            str(f.id)
+            for f in files
+            if isinstance(f.parsed_summary_json, dict)
+            and f.parsed_summary_json.get("imported_counts")
+        }
+        if not imported_ids:
+            return attachments
+        return [a for a in attachments if a.get("file_id") not in imported_ids]
+
+    @staticmethod
+    def _pending_file_key(conversation_id: str) -> str:
+        return f"{_PENDING_FILE_KEY_PREFIX}{conversation_id}"
+
+    @staticmethod
+    def _is_file_intent(intent: str | None) -> bool:
+        if not intent:
+            return False
+        return intent in _FILE_INTENTS or intent.startswith(_FILE_INTENT_PREFIXES)
+
+    @staticmethod
+    def _can_reuse_pending_file(message: str) -> bool:
+        try:
+            from app.application.agents.shared.intent_rescue import normalize  # noqa: PLC0415
+
+            normalized = normalize(message)
+        except Exception:
+            normalized = message.lower()
+        return any(term in normalized for term in _PENDING_FILE_REUSE_TERMS)
+
     async def _load_attachment_files(
         self,
         attachments: list[Any] | None,
         tenant_id: uuid.UUID,
         db: AsyncSession,
     ) -> list[UploadedFile]:
-        """Carga los UploadedFile adjuntos al mensaje actual (con tenant isolation)."""
+        """Carga los UploadedFile adjuntos al mensaje actual (con tenant isolation).
+
+        Usa un cache por-request (`self._file_cache`) para no re-consultar el mismo
+        archivo en cada paso del pipeline (#5). El cache lo inicializa `handle()`.
+        """
         attachment_ids = self._extract_attachment_ids(attachments or [])
         if not attachment_ids:
             return []
-        # Convertir a uuid.UUID — el tipo UUID requiere objetos, no strings (SQLite/PG)
-        uuid_ids: list[uuid.UUID] = []
-        for fid in attachment_ids:
-            try:
-                uuid_ids.append(uuid.UUID(fid))
-            except (ValueError, TypeError):
-                continue
-        if not uuid_ids:
-            return []
-        stmt = (
-            select(UploadedFile)
-            .where(
-                UploadedFile.tenant_id == tenant_id,
-                UploadedFile.id.in_(uuid_ids),
-            )
-            .order_by(desc(UploadedFile.created_at))
-        )
-        result = await db.execute(stmt)
-        loaded = list(result.scalars().all())
-        for _file in loaded:
-            if _file.tenant_id != tenant_id:
-                logger.error(
-                    "intent_rescue.tenant_isolation_violation",
-                    expected=str(tenant_id),
-                    found=str(_file.tenant_id),
-                    file_id=str(_file.id),
+
+        cache: dict[str, UploadedFile] = getattr(self, "_file_cache", {})
+        missing_ids = [fid for fid in attachment_ids if fid not in cache]
+
+        if missing_ids:
+            # Convertir a uuid.UUID — el tipo UUID requiere objetos, no strings (SQLite/PG)
+            uuid_ids: list[uuid.UUID] = []
+            for fid in missing_ids:
+                try:
+                    uuid_ids.append(uuid.UUID(fid))
+                except (ValueError, TypeError):
+                    continue
+            if uuid_ids:
+                stmt = (
+                    select(UploadedFile)
+                    .where(
+                        UploadedFile.tenant_id == tenant_id,
+                        UploadedFile.id.in_(uuid_ids),
+                    )
+                    .order_by(desc(UploadedFile.created_at))
                 )
-                return []  # fail-safe: nunca rescatar usando archivos de otro tenant
-        return loaded
+                result = await db.execute(stmt)
+                for _file in result.scalars().all():
+                    if _file.tenant_id != tenant_id:
+                        logger.error(
+                            "intent_rescue.tenant_isolation_violation",
+                            expected=str(tenant_id),
+                            found=str(_file.tenant_id),
+                            file_id=str(_file.id),
+                        )
+                        return []  # fail-safe: nunca usar archivos de otro tenant
+                    cache[str(_file.id)] = _file
+
+        # Devolver en el orden de los attachments pedidos, solo los que existen.
+        return [cache[fid] for fid in attachment_ids if fid in cache]
 
     async def _load_business_context(
         self, tenant_id: uuid.UUID, db: AsyncSession
@@ -732,19 +973,15 @@ class ChatOrchestrator:
 
     @staticmethod
     def _extract_attachment_ids(attachments: list[Any]) -> list[str]:
-        file_ids: list[str] = []
-        for attachment in attachments:
-            file_id = None
-            if isinstance(attachment, dict):
-                file_id = attachment.get("file_id")
-            else:
-                file_id = getattr(attachment, "file_id", None)
-            if isinstance(file_id, str) and file_id:
-                file_ids.append(file_id)
-        return file_ids
+        return [item["file_id"] for item in ChatOrchestrator._normalize_attachments(attachments)]
 
     @staticmethod
     def _build_turn_metadata(attachments: list[Any]) -> dict[str, Any] | None:
+        normalized = ChatOrchestrator._normalize_attachments(attachments)
+        return {"attachments": normalized} if normalized else None
+
+    @staticmethod
+    def _normalize_attachments(attachments: list[Any]) -> list[dict[str, str]]:
         normalized: list[dict[str, str]] = []
         for attachment in attachments:
             if isinstance(attachment, dict):
@@ -753,11 +990,13 @@ class ChatOrchestrator:
             else:
                 file_id = getattr(attachment, "file_id", None)
                 filename = getattr(attachment, "filename", None)
-            if isinstance(file_id, str) and isinstance(filename, str):
-                normalized.append({"file_id": file_id, "filename": filename})
-        return {"attachments": normalized} if normalized else None
-
-
+            if isinstance(file_id, str) and file_id:
+                item = {
+                    "file_id": file_id,
+                    "filename": filename if isinstance(filename, str) else "",
+                }
+                normalized.append(item)
+        return normalized
 
     def _render_file_lines(self, files: list[UploadedFile], heading: str) -> str:
         lines: list[str] = []

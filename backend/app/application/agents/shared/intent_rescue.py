@@ -20,8 +20,18 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 
-from rapidfuzz import fuzz
+try:
+    from rapidfuzz import fuzz
+except ModuleNotFoundError:
+
+    class _FallbackFuzz:
+        @staticmethod
+        def ratio(left: str, right: str) -> int:
+            return int(SequenceMatcher(None, left, right).ratio() * 100)
+
+    fuzz = _FallbackFuzz()
 
 # Umbral de similitud para fuzzy matching (tolera typos: "presios", "stok", "catologo")
 _FUZZ_THRESHOLD = 85
@@ -32,6 +42,17 @@ _VOSEO_MAP = {
     "analizame": "analiza",
     "analizá": "analiza",
     "analiza": "analiza",
+    "importá": "importa",
+    "importalo": "importa",
+    "importala": "importa",
+    "cargá": "carga",
+    "cargalo": "carga",
+    "cargala": "carga",
+    "anotá": "anota",
+    "registrá": "registra",
+    "subí": "subir",
+    "guardá": "guarda",
+    "ingresá": "ingresa",
     "mirame": "mira",
     "mirá": "mira",
     "miralo": "mira",
@@ -171,6 +192,24 @@ VERBS_NEGOCIO = frozenset(
         "cuanto gano",
     }
 )
+VERBS_IMPORTAR = frozenset(
+    {
+        "importa",
+        "importar",
+        "carga",
+        "cargar",
+        "subir",
+        "subi",
+        "anota",
+        "anotar",
+        "registra",
+        "registrar",
+        "guarda",
+        "guardar",
+        "ingresa",
+        "ingresar",
+    }
+)
 
 # Verbos que disparan análisis genérico (cualquiera de estos sets salvo NEGOCIO)
 _AMBIGUOUS_VERB_SETS = (
@@ -289,6 +328,18 @@ def _has_ambiguous_verb(normalized: str) -> bool:
     return any(_contains_any(normalized, vs) for vs in _AMBIGUOUS_VERB_SETS)
 
 
+def _has_import_verb(normalized: str) -> bool:
+    return _contains_any(normalized, VERBS_IMPORTAR)
+
+
+def _import_intent_for_attachment_type(attachment_type: str | None) -> str:
+    if attachment_type == "product":
+        return "importar_archivo_productos"
+    if attachment_type == "expense":
+        return "importar_archivo_gastos"
+    return "importar_archivo_ventas"
+
+
 # ── Resultado del rescate ─────────────────────────────────────────────────────
 # Devuelve (intent, entities) donde intent es del INTENT_CATALOG consolidado (o un
 # sentinela de aclaración / "out_of_scope") y entities lleva `analysis_type` cuando
@@ -316,9 +367,12 @@ def rescue_intent(
     """
     norm = normalize(message)
     verb = _has_ambiguous_verb(norm)
+    import_verb = _has_import_verb(norm)
 
     # ── Reglas con attachment (prioridad alta) ────────────────────────────────
     if has_attachment:
+        if import_verb:
+            return _import_intent_for_attachment_type(attachment_type), {}
         # 1-2. attachment de productos/precios → análisis de lista de precios
         if attachment_type == "product":
             return "analizar_precios", {"analysis_type": "lista"}
