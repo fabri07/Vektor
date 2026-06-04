@@ -38,7 +38,7 @@ def upgrade() -> None:
             "breakdown_by_method",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=False,
-            server_default="'{}'::jsonb",
+            server_default=sa.text("'{}'::jsonb"),
         ),
         sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("closed_by_user_id", postgresql.UUID(as_uuid=True), nullable=True),
