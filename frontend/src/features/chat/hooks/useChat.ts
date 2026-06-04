@@ -27,6 +27,8 @@ const MUTATING_ACTIONS = new Set([
   "REGISTER_CASH_OUTFLOW",
   "UPDATE_STOCK",
   "REGISTER_STOCK_LOSS",
+  "UPDATE_PRODUCT",
+  "IMPORT_TABULAR_FILE",
 ]);
 
 // Re-exportar para compatibilidad con importadores existentes

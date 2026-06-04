@@ -113,7 +113,7 @@ export function HealthConfigPanel() {
         </h3>
         <p className="mt-1 text-sm text-vektor-muted">
           Configurá los umbrales de margen bruto que Véktor usa para calcular la
-          dimensión "Márgenes" en tu score de salud. Los demás factores (caja,
+          dimensión &quot;Márgenes&quot; en tu score de salud. Los demás factores (caja,
           inventario, proveedores, crecimiento) siguen los benchmarks del rubro.{" "}
           {!config?.is_custom && (
             <span className="text-vektor-body">
