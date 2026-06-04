@@ -11,34 +11,15 @@ import { Modal } from "@/components/ui/Modal";
 import { salesService, type SaleEntryResponse } from "@/services/sales.service";
 import { productsService, type ProductResponse } from "@/services/products.service";
 import { useToastStore } from "@/stores/toastStore";
-
-type PeriodFilter = "month" | "week" | "prev_month";
-
-function getPeriodDates(filter: PeriodFilter): { from: string; to: string } {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const fmt = (d: Date) =>
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-
-  if (filter === "month") {
-    return {
-      from: fmt(new Date(now.getFullYear(), now.getMonth(), 1)),
-      to: fmt(now),
-    };
-  }
-  if (filter === "week") {
-    const day = now.getDay();
-    const diff = day === 0 ? -6 : 1 - day;
-    const monday = new Date(now);
-    monday.setDate(now.getDate() + diff);
-    return { from: fmt(monday), to: fmt(now) };
-  }
-  // prev_month
-  return {
-    from: fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
-    to: fmt(new Date(now.getFullYear(), now.getMonth(), 0)),
-  };
-}
+import { PeriodFilter } from "@/components/ui/PeriodFilter";
+import { CashCloseButton } from "@/features/cash/CashCloseButton";
+import {
+  type PeriodValue,
+  resolvePeriod,
+  resolvePreviousPeriod,
+  previousPeriodShortLabel,
+} from "@/lib/period";
+import { PAYMENT_LABELS } from "@/lib/payment";
 
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
@@ -49,14 +30,6 @@ function formatARS(value: number): string {
   }).format(value);
 }
 
-const PAYMENT_LABELS: Record<string, string> = {
-  cash: "Efectivo",
-  debit_card: "Débito",
-  credit_card: "Crédito",
-  transfer: "Transferencia",
-  qr: "QR",
-  other: "Otro",
-};
 
 function buildColumns(productById: Map<string, ProductResponse>) {
   return [
@@ -118,19 +91,22 @@ function buildColumns(productById: Map<string, ProductResponse>) {
   ];
 }
 
-const PERIOD_OPTIONS: { value: PeriodFilter; label: string }[] = [
-  { value: "month", label: "Este mes" },
-  { value: "week", label: "Semana actual" },
-  { value: "prev_month", label: "Mes anterior" },
-];
-
 export default function SalesPage() {
-  const [period, setPeriod] = useState<PeriodFilter>("month");
+  const [period, setPeriod] = useState<PeriodValue>({
+    kind: "preset",
+    preset: "this_month",
+  });
   const [editing, setEditing] = useState<SaleEntryResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
-  const { from, to } = getPeriodDates(period);
-  const prevDates = getPeriodDates("prev_month");
+  const { from, to } = resolvePeriod(period);
+  const prevDates = resolvePreviousPeriod(period);
+
+  const { data: dateRange = null } = useQuery({
+    queryKey: ["sales-date-range"],
+    queryFn: () => salesService.getDateRange(),
+    staleTime: 10 * 60 * 1000,
+  });
 
   const { data: entries = [], isLoading, isError } = useQuery({
     queryKey: ["sales-entries", from, to],
@@ -152,7 +128,6 @@ export default function SalesPage() {
         to_date: prevDates.to,
       }),
     staleTime: 5 * 60 * 1000,
-    enabled: period === "month",
   });
 
   const updateMutation = useMutation({
@@ -190,10 +165,10 @@ export default function SalesPage() {
 
   let variacionTrend: "up" | "down" | "neutral" = "neutral";
   let variacionLabel: string | undefined;
-  if (period === "month" && totalPrev > 0) {
+  if (totalPrev > 0) {
     const pct = ((totalActual - totalPrev) / totalPrev) * 100;
     variacionTrend = pct > 0 ? "up" : pct < 0 ? "down" : "neutral";
-    variacionLabel = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% vs mes ant.`;
+    variacionLabel = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% ${previousPeriodShortLabel(period)}`;
   }
 
   const sorted = [...entries].sort(
@@ -205,20 +180,10 @@ export default function SalesPage() {
 
   return (
     <PageWrapper title="Ventas">
-      {/* Period filter */}
-      <div className="flex items-center gap-3">
-        <label className="text-sm text-vk-text-muted">Período:</label>
-        <select
-          value={period}
-          onChange={(e) => setPeriod(e.target.value as PeriodFilter)}
-          className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
-        >
-          {PERIOD_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+      {/* Period filter + cierre de caja */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PeriodFilter value={period} onChange={setPeriod} availableRange={dateRange} />
+        <CashCloseButton />
       </div>
 
       {/* KPI skeleton */}

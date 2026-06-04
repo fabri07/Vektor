@@ -33,9 +33,15 @@ def _build_html(
     action_text: str | None,
     value_protected_ars: Decimal,
     dashboard_url: str,
+    cash_closes_count: int = 0,
+    cash_diff_ars: Decimal = Decimal("0"),
 ) -> str:
     def _format_ars(v: Decimal) -> str:
         return f"$ {int(v):,}".replace(",", ".")
+
+    def _format_signed_ars(v: Decimal) -> str:
+        sign = "+" if v >= 0 else "−"
+        return f"{sign}$ {abs(int(v)):,}".replace(",", ".")
 
     delta_html = ""
     if delta is not None and delta > 0:
@@ -79,6 +85,17 @@ def _build_html(
           </td>
         </tr>"""
 
+    cash_row = ""
+    if cash_closes_count > 0:
+        diff_color = "#10b981" if cash_diff_ars >= 0 else "#ef4444"
+        cash_row = f"""
+        <tr>
+          <td style="padding:12px 0;border-bottom:1px solid #f3f4f6;">
+            <p style="margin:0 0 4px 0;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;">Cierres de caja</p>
+            <p style="margin:0;font-size:14px;color:#374151;">{cash_closes_count} esta semana · Diferencia acumulada: <strong style="color:{diff_color};">{_format_signed_ars(cash_diff_ars)}</strong></p>
+          </td>
+        </tr>"""
+
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
@@ -115,6 +132,7 @@ def _build_html(
                 {risk_row}
                 {goal_row}
                 {action_row}
+                {cash_row}
                 <tr>
                   <td style="padding:12px 0;">
                     <p style="margin:0 0 4px 0;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;">Valor protegido acumulado</p>
@@ -162,6 +180,8 @@ def _build_plain(
     goal_text: str | None,
     action_text: str | None,
     value_protected_ars: Decimal,
+    cash_closes_count: int = 0,
+    cash_diff_ars: Decimal = Decimal("0"),
 ) -> str:
     delta_str = ""
     if delta is not None and delta > 0:
@@ -180,6 +200,13 @@ def _build_plain(
         lines.append(f"Meta activa: {goal_text}")
     if action_text:
         lines.append(f"Acción prioritaria: {action_text}")
+    if cash_closes_count > 0:
+        sign = "+" if cash_diff_ars >= 0 else "-"
+        diff_fmt = f"{sign}$ {abs(int(cash_diff_ars)):,}".replace(",", ".")
+        lines.append(
+            f"Cierres de caja: {cash_closes_count} esta semana · "
+            f"Diferencia acumulada: {diff_fmt}"
+        )
     lines.append(f"Valor protegido acumulado: $ {int(value_protected_ars):,}".replace(",", "."))
     return "\n".join(lines)
 
@@ -259,6 +286,29 @@ async def _gather_email_data(
             action_text = momentum.active_goal_json.get("action")
         value_protected_ars = momentum.estimated_value_protected_ars or Decimal("0")
 
+    # Cierres de caja de la semana (Sprint 20): cantidad + diferencia acumulada
+    from datetime import date as _date  # noqa: PLC0415
+    from datetime import timedelta as _timedelta  # noqa: PLC0415
+
+    from app.persistence.models.cash_close import CashClose  # noqa: PLC0415
+
+    today = _date.today()
+    week_start = today - _timedelta(days=today.weekday())  # lunes de esta semana
+    cash_result = await session.execute(
+        select(CashClose).where(
+            CashClose.tenant_id == tenant_id,
+            CashClose.close_date >= week_start,
+            CashClose.close_date <= today,
+        )
+    )
+    cash_closes = list(cash_result.scalars().all())
+    cash_closes_count = len(cash_closes)
+    cash_diff_ars = (
+        sum((c.difference_ars for c in cash_closes), Decimal("0"))
+        if cash_closes
+        else Decimal("0")
+    )
+
     # Owner email(s)
     users_result = await session.execute(
         select(User).where(
@@ -277,6 +327,8 @@ async def _gather_email_data(
         "goal_text": goal_text,
         "action_text": action_text,
         "value_protected_ars": value_protected_ars,
+        "cash_closes_count": cash_closes_count,
+        "cash_diff_ars": cash_diff_ars,
         "owner_users": owner_users,
         "tenant_id": str(tenant_id),
     }
@@ -331,6 +383,8 @@ async def _async_send(tenant_id: str) -> None:
             action_text=data["action_text"],
             value_protected_ars=data["value_protected_ars"],
             dashboard_url=dashboard_url,
+            cash_closes_count=data.get("cash_closes_count", 0),
+            cash_diff_ars=data.get("cash_diff_ars", Decimal("0")),
         )
         plain = _build_plain(
             business_name=data["business_name"],
@@ -340,6 +394,8 @@ async def _async_send(tenant_id: str) -> None:
             goal_text=data["goal_text"],
             action_text=data["action_text"],
             value_protected_ars=data["value_protected_ars"],
+            cash_closes_count=data.get("cash_closes_count", 0),
+            cash_diff_ars=data.get("cash_diff_ars", Decimal("0")),
         )
         subject = f"Tu resumen semanal — {data['business_name']} | Score: {data['score']}"
 

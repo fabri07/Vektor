@@ -6,6 +6,11 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.work_schedule_service import (
+    DEFAULT_CLOSE_HOUR,
+    DEFAULT_OPEN_HOUR,
+    DEFAULT_WORK_DAYS,
+)
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessSnapshot
 from app.persistence.repositories.business_profile_repository import (
@@ -94,6 +99,16 @@ class OnboardingService:
         bp.supplier_count_estimate = body.supplier_count_estimate
         bp.heuristic_profile_version = _HEURISTIC_PROFILE_BY_VERTICAL[body.vertical_code]
         bp.heuristics_version = "v1"
+
+        # Días y horarios laborales (Sprint 20): persistir lo enviado o defaults
+        # Lun-Sáb 09-18, para dejar la cuenta configurada desde el alta.
+        bp.work_days = body.work_days if body.work_days is not None else DEFAULT_WORK_DAYS
+        bp.work_open_hour = (
+            body.work_open_hour if body.work_open_hour is not None else DEFAULT_OPEN_HOUR
+        )
+        bp.work_close_hour = (
+            body.work_close_hour if body.work_close_hour is not None else DEFAULT_CLOSE_HOUR
+        )
         await self._repo.save(bp)
 
         # Step 5-6: calculate completeness and confidence

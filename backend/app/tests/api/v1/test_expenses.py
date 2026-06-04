@@ -118,6 +118,34 @@ class TestExpensesSummary:
 
 
 @pytest.mark.asyncio
+class TestExpensesDateRange:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_date_range_empty(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.get("/api/v1/expenses/date-range", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["min_date"] is None
+        assert data["max_date"] is None
+
+    async def test_date_range_with_data(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        old = {**_EXPENSE_PAYLOAD, "expense_date": "2024-02-10"}
+        recent = {**_EXPENSE_PAYLOAD, "expense_date": _TODAY}
+        await client.post("/api/v1/expenses", json=old, headers=auth_headers)
+        await client.post("/api/v1/expenses", json=recent, headers=auth_headers)
+        resp = await client.get("/api/v1/expenses/date-range", headers=auth_headers)
+        data = resp.json()
+        assert data["min_date"] == "2024-02-10"
+        assert data["max_date"] == _TODAY
+
+
+@pytest.mark.asyncio
 class TestExpensesTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

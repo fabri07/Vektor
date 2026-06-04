@@ -13,6 +13,7 @@ import { useToastStore } from "@/stores/toastStore";
 import { FieldDefinitionsPanel } from "@/features/settings/components/FieldDefinitionsPanel";
 import { HealthConfigPanel } from "@/features/settings/components/HealthConfigPanel";
 import { SchemaERDView } from "@/features/settings/components/SchemaERDView";
+import { WorkSchedulePanel } from "@/features/settings/components/WorkSchedulePanel";
 
 const AGENT_LABELS: Record<string, string> = {
   agent_calendar: "Calendar",
@@ -462,6 +463,7 @@ function GeneralTab() {
 const TABS = [
   { id: "general", label: "General" },
   { id: "salud", label: "Score de salud" },
+  { id: "horarios", label: "Horarios" },
   { id: "campos", label: "Campos" },
   { id: "diagrama", label: "Diagrama" },
 ] as const;
@@ -492,6 +494,7 @@ export default function SettingsPage() {
 
       {activeTab === "general" && <GeneralTab />}
       {activeTab === "salud" && <HealthConfigPanel />}
+      {activeTab === "horarios" && <WorkSchedulePanel />}
       {activeTab === "campos" && <FieldDefinitionsPanel />}
       {activeTab === "diagrama" && <SchemaERDView />}
     </PageWrapper>

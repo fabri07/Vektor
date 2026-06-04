@@ -62,6 +62,9 @@ export function OnboardingWizard() {
           product_count_estimate: state.formData.product_count_estimate,
           supplier_count_estimate: state.formData.supplier_count_estimate,
           main_concern: state.formData.main_concern,
+          work_days: state.formData.work_days,
+          work_open_hour: state.formData.work_open_hour,
+          work_close_hour: state.formData.work_close_hour,
         });
         setState((prev) => ({ ...prev, formSubmitted: true }));
       } catch {

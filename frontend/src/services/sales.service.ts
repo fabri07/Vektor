@@ -33,6 +33,11 @@ export interface SalesListParams {
   offset?: number;
 }
 
+export interface DateRangeResponse {
+  min_date: string | null;
+  max_date: string | null;
+}
+
 const PAGE_SIZE = 200;
 const MAX_PAGES = 25;
 
@@ -53,6 +58,11 @@ export const salesService = {
 
   async getSummary(): Promise<SaleSummaryResponse> {
     const res = await api.get<SaleSummaryResponse>("/sales/summary");
+    return res.data;
+  },
+
+  async getDateRange(): Promise<DateRangeResponse> {
+    const res = await api.get<DateRangeResponse>("/sales/date-range");
     return res.data;
   },
 

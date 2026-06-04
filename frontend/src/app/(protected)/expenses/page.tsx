@@ -11,25 +11,13 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
 import { useToastStore } from "@/stores/toastStore";
-
-type PeriodFilter = "month" | "prev_month";
-
-function getPeriodDates(filter: PeriodFilter): { from: string; to: string } {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const fmt = (d: Date) =>
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  if (filter === "month") {
-    return {
-      from: fmt(new Date(now.getFullYear(), now.getMonth(), 1)),
-      to: fmt(now),
-    };
-  }
-  return {
-    from: fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
-    to: fmt(new Date(now.getFullYear(), now.getMonth(), 0)),
-  };
-}
+import { PeriodFilter } from "@/components/ui/PeriodFilter";
+import {
+  type PeriodValue,
+  resolvePeriod,
+  resolvePreviousPeriod,
+  previousPeriodShortLabel,
+} from "@/lib/period";
 
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
@@ -121,20 +109,24 @@ const COLUMNS = [
   },
 ];
 
-const PERIOD_OPTIONS: { value: PeriodFilter; label: string }[] = [
-  { value: "month", label: "Este mes" },
-  { value: "prev_month", label: "Mes anterior" },
-];
-
 export default function ExpensesPage() {
-  const [period, setPeriod] = useState<PeriodFilter>("month");
+  const [period, setPeriod] = useState<PeriodValue>({
+    kind: "preset",
+    preset: "this_month",
+  });
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [editing, setEditing] = useState<ExpenseEntryResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
 
-  const { from, to } = getPeriodDates(period);
-  const prevDates = getPeriodDates("prev_month");
+  const { from, to } = resolvePeriod(period);
+  const prevDates = resolvePreviousPeriod(period);
+
+  const { data: dateRange = null } = useQuery({
+    queryKey: ["expenses-date-range"],
+    queryFn: () => expensesService.getDateRange(),
+    staleTime: 10 * 60 * 1000,
+  });
 
   const { data: entries = [], isLoading, isError } = useQuery({
     queryKey: ["expenses-entries", from, to],
@@ -150,7 +142,6 @@ export default function ExpensesPage() {
         to_date: prevDates.to,
       }),
     staleTime: 5 * 60 * 1000,
-    enabled: period === "month",
   });
 
   const updateMutation = useMutation({
@@ -198,11 +189,11 @@ export default function ExpensesPage() {
 
   let variacionTrend: "up" | "down" | "neutral" = "neutral";
   let variacionLabel: string | undefined;
-  if (period === "month" && totalPrev > 0) {
+  if (totalPrev > 0) {
     const pct = ((totalActual - totalPrev) / totalPrev) * 100;
     // For expenses, going up is "bad" (danger = down trend from a health perspective)
     variacionTrend = pct > 0 ? "down" : pct < 0 ? "up" : "neutral";
-    variacionLabel = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% vs mes ant.`;
+    variacionLabel = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% ${previousPeriodShortLabel(period)}`;
   }
 
   // Apply category filter
@@ -219,21 +210,8 @@ export default function ExpensesPage() {
   return (
     <PageWrapper title="Gastos">
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-vk-text-muted">Período:</label>
-          <select
-            value={period}
-            onChange={(e) => setPeriod(e.target.value as PeriodFilter)}
-            className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
-          >
-            {PERIOD_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
+      <div className="flex flex-col gap-3">
+        <PeriodFilter value={period} onChange={setPeriod} availableRange={dateRange} />
         <div className="flex items-center gap-2">
           <label className="text-sm text-vk-text-muted">Categoría:</label>
           <select

@@ -113,6 +113,13 @@ class SaleSummaryResponse(BaseModel):
     period_covered: str
 
 
+class DateRangeResponse(BaseModel):
+    """Rango de fechas con datos del tenant. None cuando no hay registros."""
+
+    min_date: date | None
+    max_date: date | None
+
+
 # ── Expenses ──────────────────────────────────────────────────────────────────
 
 EXPENSE_CATEGORIES = r"^(RENT|UTILITIES|PAYROLL|INVENTORY|MARKETING|OTHER)$"

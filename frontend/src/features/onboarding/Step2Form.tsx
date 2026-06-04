@@ -12,7 +12,25 @@ export interface Step2Data {
   product_count_estimate: number;
   supplier_count_estimate: number;
   main_concern: MainConcern;
+  work_days: number[];
+  work_open_hour: number;
+  work_close_hour: number;
 }
+
+// 0=lunes … 6=domingo (consistente con el backend)
+const DAY_LABELS: { value: number; label: string }[] = [
+  { value: 0, label: "Lun" },
+  { value: 1, label: "Mar" },
+  { value: 2, label: "Mié" },
+  { value: 3, label: "Jue" },
+  { value: 4, label: "Vie" },
+  { value: 5, label: "Sáb" },
+  { value: 6, label: "Dom" },
+];
+const DEFAULT_WORK_DAYS = [0, 1, 2, 3, 4, 5];
+const DEFAULT_OPEN_HOUR = 9;
+const DEFAULT_CLOSE_HOUR = 18;
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => h);
 
 interface Step2FormProps {
   initialData: Step2Data | null;
@@ -24,6 +42,7 @@ interface FormErrors {
   product_count_estimate?: string;
   supplier_count_estimate?: string;
   main_concern?: string;
+  work_schedule?: string;
 }
 
 const CONCERN_OPTIONS: { value: MainConcern; label: string }[] = [
@@ -117,7 +136,24 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
     supplier_count_estimate: String(initialData?.supplier_count_estimate ?? ""),
     main_concern: initialData?.main_concern ?? ("" as MainConcern | ""),
   });
+  const [workDays, setWorkDays] = useState<number[]>(
+    initialData?.work_days ?? DEFAULT_WORK_DAYS,
+  );
+  const [openHour, setOpenHour] = useState<number>(
+    initialData?.work_open_hour ?? DEFAULT_OPEN_HOUR,
+  );
+  const [closeHour, setCloseHour] = useState<number>(
+    initialData?.work_close_hour ?? DEFAULT_CLOSE_HOUR,
+  );
   const [errors, setErrors] = useState<FormErrors>({});
+
+  function toggleDay(day: number) {
+    setWorkDays((prev) =>
+      prev.includes(day)
+        ? prev.filter((d) => d !== day)
+        : [...prev, day].sort((a, b) => a - b),
+    );
+  }
 
   function set(key: keyof typeof fields) {
     return (v: string) => setFields((prev) => ({ ...prev, [key]: v }));
@@ -145,6 +181,12 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
       errs.main_concern = "Seleccioná una opción.";
     }
 
+    if (workDays.length === 0) {
+      errs.work_schedule = "Elegí al menos un día laboral.";
+    } else if (closeHour <= openHour) {
+      errs.work_schedule = "El horario de cierre debe ser posterior al de apertura.";
+    }
+
     setErrors(errs);
     if (Object.keys(errs).length > 0) return null;
 
@@ -158,6 +200,9 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
       product_count_estimate: productCount ?? 0,
       supplier_count_estimate: supplierCount ?? 0,
       main_concern: fields.main_concern as MainConcern,
+      work_days: workDays,
+      work_open_hour: openHour,
+      work_close_hour: closeHour,
     };
   }
 
@@ -271,6 +316,60 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
             <FieldError text={errors.main_concern} />
           )}
           <FieldHint text="Esto nos ayuda a personalizar los análisis para vos." />
+        </div>
+
+        <div>
+          <p className="mb-1 text-sm font-medium text-gray-800">
+            ¿Qué días y horario abrís?
+          </p>
+          <FieldHelper text="Lo usamos para recordarte el cierre de caja al final del día. Podés cambiarlo después en Configuración." />
+          <div className="mt-3 flex flex-wrap gap-2">
+            {DAY_LABELS.map((d) => {
+              const isSelected = workDays.includes(d.value);
+              return (
+                <button
+                  key={d.value}
+                  type="button"
+                  onClick={() => toggleDay(d.value)}
+                  className={[
+                    "rounded-lg border-2 px-3 py-2 text-sm font-medium transition-all duration-150",
+                    isSelected
+                      ? "border-vk-navy bg-vk-navy text-white"
+                      : "border-gray-200 bg-white text-gray-600 hover:border-gray-300",
+                  ].join(" ")}
+                >
+                  {d.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <label className="text-sm text-gray-600">Abre</label>
+            <select
+              value={openHour}
+              onChange={(e) => setOpenHour(Number(e.target.value))}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-vk-navy/20"
+            >
+              {HOUR_OPTIONS.map((h) => (
+                <option key={h} value={h}>
+                  {String(h).padStart(2, "0")}:00
+                </option>
+              ))}
+            </select>
+            <label className="text-sm text-gray-600">Cierra</label>
+            <select
+              value={closeHour}
+              onChange={(e) => setCloseHour(Number(e.target.value))}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-vk-navy/20"
+            >
+              {HOUR_OPTIONS.map((h) => (
+                <option key={h} value={h}>
+                  {String(h).padStart(2, "0")}:00
+                </option>
+              ))}
+            </select>
+          </div>
+          {errors.work_schedule && <FieldError text={errors.work_schedule} />}
         </div>
       </div>
 

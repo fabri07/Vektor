@@ -11,6 +11,7 @@ from app.persistence.models.business import (
     Insight,
     MomentumProfile,
 )
+from app.persistence.models.cash_close import CashClose
 from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.field_definitions import (
@@ -71,6 +72,7 @@ __all__ = [
     "AgentMemory",
     "GoogleMcpConnection",
     "ChatSessionLog",
+    "CashClose",
     "VerticalFieldDefinition",
     "TenantCustomFieldDefinition",
     "TenantFieldChangeLog",

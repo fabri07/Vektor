@@ -19,6 +19,7 @@ from app.schemas.common import MessageResponse
 from app.schemas.transaction import (
     BulkSaleRequest,
     CreateSaleRequest,
+    DateRangeResponse,
     SaleEntryResponse,
     SaleSummaryResponse,
     UpdateSaleRequest,
@@ -87,6 +88,20 @@ async def sales_summary(
         entry_count=count,
         period_covered=f"{from_date} al {to_date}",
     )
+
+
+@router.get(
+    "/date-range",
+    response_model=DateRangeResponse,
+    summary="First/last sale date for the tenant",
+)
+async def sales_date_range(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> DateRangeResponse:
+    repo = SaleRepository(session)
+    min_date, max_date = await repo.date_range(tenant.tenant_id)
+    return DateRangeResponse(min_date=min_date, max_date=max_date)
 
 
 @router.get("", response_model=list[SaleEntryResponse], summary="List sales entries")

@@ -9,6 +9,9 @@ export interface OnboardingSubmitPayload {
   product_count_estimate: number;
   supplier_count_estimate: number;
   main_concern: "MARGIN" | "STOCK" | "CASH";
+  work_days?: number[];
+  work_open_hour?: number;
+  work_close_hour?: number;
 }
 
 export interface OnboardingSubmitResult {

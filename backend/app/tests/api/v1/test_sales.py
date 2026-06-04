@@ -102,6 +102,41 @@ class TestSalesSummary:
 
 
 @pytest.mark.asyncio
+class TestSalesDateRange:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_date_range_empty(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.get("/api/v1/sales/date-range", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["min_date"] is None
+        assert data["max_date"] is None
+
+    async def test_date_range_with_data(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        old = {**_SINGLE_PAYLOAD, "transaction_date": "2024-01-15"}
+        recent = {**_SINGLE_PAYLOAD, "transaction_date": _TODAY}
+        await client.post("/api/v1/sales", json=old, headers=auth_headers)
+        await client.post("/api/v1/sales", json=recent, headers=auth_headers)
+        resp = await client.get("/api/v1/sales/date-range", headers=auth_headers)
+        data = resp.json()
+        assert data["min_date"] == "2024-01-15"
+        assert data["max_date"] == _TODAY
+
+    async def test_date_range_not_confused_with_sale_id(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        # /date-range no debe matchear la ruta dinámica /{sale_id}
+        resp = await client.get("/api/v1/sales/date-range", headers=auth_headers)
+        assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
 class TestSalesTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

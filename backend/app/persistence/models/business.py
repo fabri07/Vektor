@@ -63,6 +63,15 @@ class BusinessProfile(TimestampMixin, Base):
     # y weekly_report_hour de business_profiles
     weekly_report_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     weekly_report_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # ── Días y horarios laborales (Sprint 20) ─────────────────────────────────
+    # work_days: array de int 0-6 (0=lunes … 6=domingo), consistente con weekly_report_day.
+    # work_open_hour / work_close_hour: hora 0-23. NULL = no configurado → el service
+    # sirve defaults (Lun-Sáb 09-18). Nunca usar `or` con estos (0 y día 0 son válidos).
+    work_days: Mapped[list[int] | None] = mapped_column(PGJSONB, nullable=True)
+    work_open_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    work_close_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )

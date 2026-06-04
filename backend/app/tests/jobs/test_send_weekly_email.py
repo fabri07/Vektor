@@ -253,6 +253,95 @@ class TestEmailContent:
         data = await _gather_email_data(tenant.tenant_id, session)
         assert data is None
 
+    async def test_gather_without_cash_closes(
+        self,
+        session: AsyncSession,
+        tenant: Tenant,
+        owner_user: User,
+        health_score: HealthScoreSnapshot,
+    ) -> None:
+        data = await _gather_email_data(tenant.tenant_id, session)
+        assert data is not None
+        assert data["cash_closes_count"] == 0
+        assert data["cash_diff_ars"] == Decimal("0")
+
+    async def test_gather_with_cash_close_in_week(
+        self,
+        session: AsyncSession,
+        tenant: Tenant,
+        owner_user: User,
+        health_score: HealthScoreSnapshot,
+    ) -> None:
+        from datetime import date as _date  # noqa: PLC0415
+
+        from app.persistence.models.cash_close import CashClose  # noqa: PLC0415
+
+        # Cierre de hoy (siempre dentro de la semana actual y único por fecha).
+        today = _date.today()
+        session.add(
+            CashClose(
+                tenant_id=tenant.tenant_id,
+                close_date=today,
+                expected_total_ars=Decimal("1000.00"),
+                counted_total_ars=Decimal("500.00"),
+                difference_ars=Decimal("-500.00"),
+                breakdown_by_method={},
+            )
+        )
+        await session.commit()
+
+        data = await _gather_email_data(tenant.tenant_id, session)
+        assert data is not None
+        assert data["cash_closes_count"] == 1
+        assert data["cash_diff_ars"] == Decimal("-500.00")
+
+    async def test_html_includes_cash_closes_row(self) -> None:
+        html = _build_html(
+            business_name="Test",
+            score=70,
+            delta=None,
+            risk_title=None,
+            goal_text=None,
+            action_text=None,
+            value_protected_ars=Decimal("0"),
+            dashboard_url="https://example.com",
+            cash_closes_count=3,
+            cash_diff_ars=Decimal("-300"),
+        )
+        assert "Cierres de caja" in html
+        assert "3 esta semana" in html
+        assert "−$ 300" in html  # diferencia negativa con signo
+
+    async def test_html_omits_cash_row_when_no_closes(self) -> None:
+        html = _build_html(
+            business_name="Test",
+            score=70,
+            delta=None,
+            risk_title=None,
+            goal_text=None,
+            action_text=None,
+            value_protected_ars=Decimal("0"),
+            dashboard_url="https://example.com",
+            cash_closes_count=0,
+            cash_diff_ars=Decimal("0"),
+        )
+        assert "Cierres de caja" not in html
+
+    async def test_plain_includes_cash_closes(self) -> None:
+        plain = _build_plain(
+            business_name="Test",
+            score=70,
+            delta=None,
+            risk_title=None,
+            goal_text=None,
+            action_text=None,
+            value_protected_ars=Decimal("0"),
+            cash_closes_count=2,
+            cash_diff_ars=Decimal("150"),
+        )
+        assert "Cierres de caja: 2 esta semana" in plain
+        assert "+$ 150" in plain
+
 
 @pytest.mark.asyncio
 class TestSchedulerConfiguredCorrectly:

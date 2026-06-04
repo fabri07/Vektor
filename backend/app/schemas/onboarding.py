@@ -1,9 +1,11 @@
 """Pydantic schemas for onboarding endpoints."""
 
+from __future__ import annotations
+
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class OnboardingSubmitRequest(BaseModel):
@@ -15,6 +17,41 @@ class OnboardingSubmitRequest(BaseModel):
     product_count_estimate: int = Field(ge=0)
     supplier_count_estimate: int = Field(ge=0)
     main_concern: str = Field(pattern=r"^(MARGIN|STOCK|CASH)$")
+    # Días y horarios laborales (Sprint 20) — opcionales; si faltan, se usan defaults.
+    # Regla "todo o nada": o se envían los 3 (válidos) o ninguno. Evita que entre
+    # una configuración parcial/inválida al crear la cuenta (misma validación que
+    # WorkScheduleRequest en settings).
+    work_days: list[int] | None = Field(default=None)
+    work_open_hour: int | None = Field(default=None, ge=0, le=23)
+    work_close_hour: int | None = Field(default=None, ge=0, le=23)
+
+    @model_validator(mode="after")
+    def _validate_work_schedule(self) -> OnboardingSubmitRequest:
+        provided = [
+            self.work_days is not None,
+            self.work_open_hour is not None,
+            self.work_close_hour is not None,
+        ]
+        if not any(provided):
+            return self  # ninguno → se usan defaults en el service
+        if not all(provided):
+            raise ValueError(
+                "Enviá work_days, work_open_hour y work_close_hour juntos, o ninguno."
+            )
+        assert self.work_days is not None  # narrowing para mypy
+        if not self.work_days:
+            raise ValueError("work_days debe tener al menos un día.")
+        if any(d < 0 or d > 6 for d in self.work_days):
+            raise ValueError("work_days deben estar en 0-6 (0=lunes … 6=domingo).")
+        if len(set(self.work_days)) != len(self.work_days):
+            raise ValueError("work_days no puede tener días repetidos.")
+        if (
+            self.work_close_hour is not None
+            and self.work_open_hour is not None
+            and self.work_close_hour <= self.work_open_hour
+        ):
+            raise ValueError("work_close_hour debe ser mayor que work_open_hour.")
+        return self
 
 
 class OnboardingSubmitResponse(BaseModel):

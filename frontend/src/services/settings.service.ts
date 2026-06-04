@@ -6,6 +6,13 @@ export interface HealthConfig {
   is_custom: boolean;
 }
 
+export interface WorkSchedule {
+  work_days: number[];
+  work_open_hour: number;
+  work_close_hour: number;
+  is_default: boolean;
+}
+
 export const settingsService = {
   async getHealthConfig(): Promise<HealthConfig | null> {
     try {
@@ -38,5 +45,23 @@ export const settingsService = {
     } catch {
       return null;
     }
+  },
+
+  async getWorkSchedule(): Promise<WorkSchedule | null> {
+    try {
+      const res = await api.get<WorkSchedule>("/settings/work-schedule");
+      return res.data;
+    } catch {
+      return null;
+    }
+  },
+
+  async updateWorkSchedule(payload: {
+    work_days: number[];
+    work_open_hour: number;
+    work_close_hour: number;
+  }): Promise<WorkSchedule> {
+    const res = await api.patch<WorkSchedule>("/settings/work-schedule", payload);
+    return res.data;
   },
 };

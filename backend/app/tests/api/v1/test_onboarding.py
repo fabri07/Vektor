@@ -125,3 +125,71 @@ class TestOnboarding:
         assert after_data["completed"] is True
         assert after_data["vertical_code"] == "kiosco"
         assert after_data["data_completeness_score"] == 100
+
+
+class TestOnboardingWorkScheduleValidation:
+    """Validación de los campos de horario laboral en el onboarding (Sprint 20)."""
+
+    def test_no_schedule_fields_is_valid(self) -> None:
+        from app.schemas.onboarding import OnboardingSubmitRequest  # noqa: PLC0415
+
+        body = OnboardingSubmitRequest(**_ONBOARDING_PAYLOAD)
+        assert body.work_days is None
+
+    def test_all_three_valid(self) -> None:
+        from app.schemas.onboarding import OnboardingSubmitRequest  # noqa: PLC0415
+
+        body = OnboardingSubmitRequest(
+            **_ONBOARDING_PAYLOAD,
+            work_days=[0, 1, 2, 3, 4],
+            work_open_hour=9,
+            work_close_hour=18,
+        )
+        assert body.work_close_hour == 18
+
+    def test_partial_schedule_rejected(self) -> None:
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        from app.schemas.onboarding import OnboardingSubmitRequest  # noqa: PLC0415
+
+        with pytest.raises(ValidationError):
+            OnboardingSubmitRequest(**_ONBOARDING_PAYLOAD, work_open_hour=9)
+
+    def test_out_of_range_day_rejected(self) -> None:
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        from app.schemas.onboarding import OnboardingSubmitRequest  # noqa: PLC0415
+
+        with pytest.raises(ValidationError):
+            OnboardingSubmitRequest(
+                **_ONBOARDING_PAYLOAD,
+                work_days=[0, 7],
+                work_open_hour=9,
+                work_close_hour=18,
+            )
+
+    def test_duplicate_days_rejected(self) -> None:
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        from app.schemas.onboarding import OnboardingSubmitRequest  # noqa: PLC0415
+
+        with pytest.raises(ValidationError):
+            OnboardingSubmitRequest(
+                **_ONBOARDING_PAYLOAD,
+                work_days=[0, 0, 1],
+                work_open_hour=9,
+                work_close_hour=18,
+            )
+
+    def test_close_not_after_open_rejected(self) -> None:
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        from app.schemas.onboarding import OnboardingSubmitRequest  # noqa: PLC0415
+
+        with pytest.raises(ValidationError):
+            OnboardingSubmitRequest(
+                **_ONBOARDING_PAYLOAD,
+                work_days=[0, 1],
+                work_open_hour=18,
+                work_close_hour=9,
+            )

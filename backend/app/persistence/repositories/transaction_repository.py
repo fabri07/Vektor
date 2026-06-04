@@ -180,6 +180,23 @@ class SaleRepository:
             for row in result.all()
         ]
 
+    async def date_range(self, tenant_id: UUID) -> tuple[date | None, date | None]:
+        """Fecha de la primera y última venta no anulada del tenant.
+
+        Devuelve `(None, None)` si el tenant no tiene ventas — un negocio sin datos
+        no tiene "rango cero", tiene ausencia de rango (la UI lo trata como
+        "solo presets, sin navegación de años"). Nunca coercionar con `or`.
+        """
+        q = select(
+            func.min(SaleEntry.transaction_date),
+            func.max(SaleEntry.transaction_date),
+        ).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+        )
+        row = (await self._session.execute(q)).one()
+        return row[0], row[1]
+
     async def save(self, entry: SaleEntry) -> SaleEntry:
         self._session.add(entry)
         await self._session.flush()
@@ -423,6 +440,21 @@ class ExpenseRepository:
                 "amounts": amounts,
             }
         return stats
+
+    async def date_range(self, tenant_id: UUID) -> tuple[date | None, date | None]:
+        """Fecha del primer y último gasto no anulado del tenant.
+
+        Devuelve `(None, None)` si no hay gastos (ausencia de rango, no rango cero).
+        """
+        q = select(
+            func.min(ExpenseEntry.transaction_date),
+            func.max(ExpenseEntry.transaction_date),
+        ).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
+        )
+        row = (await self._session.execute(q)).one()
+        return row[0], row[1]
 
     async def save(self, entry: ExpenseEntry) -> ExpenseEntry:
         self._session.add(entry)

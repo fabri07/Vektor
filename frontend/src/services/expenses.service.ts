@@ -1,5 +1,6 @@
 import { api } from "@/lib/api";
 import type { ExpenseSummaryResponse } from "@/types/api";
+import type { DateRangeResponse } from "@/services/sales.service";
 
 export type { ExpenseSummaryResponse };
 
@@ -63,6 +64,11 @@ export const expensesService = {
 
   async getSummary(): Promise<ExpenseSummaryResponse> {
     const res = await api.get<ExpenseSummaryResponse>("/expenses/summary");
+    return res.data;
+  },
+
+  async getDateRange(): Promise<DateRangeResponse> {
+    const res = await api.get<DateRangeResponse>("/expenses/date-range");
     return res.data;
   },
 
