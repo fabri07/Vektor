@@ -26,7 +26,15 @@ shell: ## Open a shell in the backend container
 	$(DOCKER_COMPOSE) exec backend bash
 
 # ── Database & Migrations ─────────────────────────────────────────────────────
-migrate: ## Run pending Alembic migrations
+migrate: ## Run pending Alembic migrations (local Docker Postgres)
+	alembic upgrade head
+
+migrate-neon: ## Run pending Alembic migrations against Neon (production)
+	@if [ -z "$$DATABASE_URL_SYNC" ] && [ -z "$$DATABASE_URL" ]; then \
+		echo "ERROR: Exportá DATABASE_URL_SYNC o DATABASE_URL con la URL de Neon antes de correr."; \
+		echo "  export DATABASE_URL_SYNC='postgresql+psycopg2://user:pass@...neon.tech/vektor'"; \
+		exit 1; \
+	fi
 	alembic upgrade head
 
 migrate-down: ## Rollback last Alembic migration
