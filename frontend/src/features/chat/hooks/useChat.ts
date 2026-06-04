@@ -316,36 +316,52 @@ export function useChat() {
 
   const confirm = useCallback(
     async (pendingActionId: string) => {
-      const response = await confirmAction(pendingActionId);
       const msg = messages.find((m) => m.pendingActionId === pendingActionId);
-      if (msg) {
+      try {
+        const response = await confirmAction(pendingActionId);
+        if (msg) {
+          if (response.execution_status === "SUCCEEDED") {
+            updateMessage(msg.id, {
+              status: response.automation_offer ? "requires_approval" : "success",
+              content: response.automation_offer
+                ? msg.content + "\n✓ Confirmado y guardado.\n\n" + response.automation_offer.message
+                : msg.content + "\n✓ Confirmado y guardado.",
+              automationOffer: response.automation_offer,
+            });
+          } else if (response.execution_status === "REQUIRES_RECONNECT") {
+            updateMessage(msg.id, {
+              status: "requires_google_auth",
+              requiresGoogleAuth: true,
+              content:
+                msg.content +
+                "\nNecesito que conectes Google para completar esta acción desde Véktor.",
+            });
+          } else {
+            updateMessage(msg.id, {
+              status: "error",
+              content:
+                msg.content +
+                "\nNo se pudo completar la acción. Intente de nuevo.",
+            });
+          }
+        }
         if (response.execution_status === "SUCCEEDED") {
-          updateMessage(msg.id, {
-            status: response.automation_offer ? "requires_approval" : "success",
-            content: response.automation_offer
-              ? msg.content + "\n✓ Confirmado y guardado.\n\n" + response.automation_offer.message
-              : msg.content + "\n✓ Confirmado y guardado.",
-            automationOffer: response.automation_offer,
-          });
-        } else if (response.execution_status === "REQUIRES_RECONNECT") {
-          updateMessage(msg.id, {
-            status: "requires_google_auth",
-            requiresGoogleAuth: true,
-            content:
-              msg.content +
-              "\nNecesito que conectes Google para completar esta acción desde Véktor.",
-          });
-        } else {
+          await invalidateAffectedQueries(response.action_type);
+        }
+      } catch (err) {
+        // Error HTTP (4xx/5xx) — mostrar al usuario en vez de fallar silenciosamente
+        const axiosErr = err as AxiosError<{ detail?: string }>;
+        const detail =
+          axiosErr.response?.data?.detail ??
+          (axiosErr.response?.status === 410
+            ? "La acción venció. Enviá el mensaje de nuevo."
+            : "Error al confirmar. Intentá de nuevo.");
+        if (msg) {
           updateMessage(msg.id, {
             status: "error",
-            content:
-              msg.content +
-              "\nNo se pudo completar la acción externa. Podés reintentarlo cuando el servicio esté disponible.",
+            content: msg.content + `\n${detail}`,
           });
         }
-      }
-      if (response.execution_status === "SUCCEEDED") {
-        await invalidateAffectedQueries(response.action_type);
       }
     },
     [messages, updateMessage, invalidateAffectedQueries],
@@ -399,26 +415,33 @@ export function useChat() {
 
   const confirmGroup = useCallback(
     async (groupId: string) => {
-      const response = await confirmGroup_(groupId);
       const msg = messages.find((m) => m.approvalGroupId === groupId);
-      if (msg) {
-        const groupResult = {
-          groupExecutionStatus: response.group_execution_status,
-          tasks: response.tasks.map((t) => ({
-            action_id: t.action_id,
-            action_type: t.action_type,
-            execution_status: t.execution_status,
-          })),
-        };
-        updateMessage(msg.id, {
-          status: response.group_execution_status === "SUCCEEDED" ? "success" : "error",
-          groupResult,
-        });
-        // Invalidar queries para tasks que se ejecutaron con éxito
-        for (const task of response.tasks) {
-          if (task.execution_status === "SUCCEEDED") {
-            await invalidateAffectedQueries(task.action_type);
+      try {
+        const response = await confirmGroup_(groupId);
+        if (msg) {
+          const groupResult = {
+            groupExecutionStatus: response.group_execution_status,
+            tasks: response.tasks.map((t) => ({
+              action_id: t.action_id,
+              action_type: t.action_type,
+              execution_status: t.execution_status,
+            })),
+          };
+          updateMessage(msg.id, {
+            status: response.group_execution_status === "SUCCEEDED" ? "success" : "error",
+            groupResult,
+          });
+          for (const task of response.tasks) {
+            if (task.execution_status === "SUCCEEDED") {
+              await invalidateAffectedQueries(task.action_type);
+            }
           }
+        }
+      } catch (err) {
+        const axiosErr = err as AxiosError<{ detail?: string }>;
+        const detail = axiosErr.response?.data?.detail ?? "Error al confirmar el grupo. Intentá de nuevo.";
+        if (msg) {
+          updateMessage(msg.id, { status: "error", content: detail });
         }
       }
     },
