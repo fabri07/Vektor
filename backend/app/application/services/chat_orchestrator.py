@@ -279,19 +279,25 @@ class ChatOrchestrator:
         # Antes de cortar, intentamos rescatar el intent con dos capas determinísticas:
         #   1. DataIntentExtractor: ¿el adjunto tiene datos importables?
         #   2. IntentRescue: scoring semántico (verbo ambiguo + objeto + contexto)
-        if ceo_intent == "intent_desconocido":
+        # También rescatamos si el CEO devolvió pedir_aclaracion_sobre_archivo
+        # directamente con archivos adjuntos — el rescue puede resolver mejor.
+        _should_rescue = ceo_intent == "intent_desconocido" or (
+            ceo_intent == "pedir_aclaracion_sobre_archivo" and bool(effective_attachments)
+        )
+        if _should_rescue:
             from app.application.agents.ceo.team_plan_builder import build_plan  # noqa: PLC0415
 
+            _original_intent = ceo_intent
             rescued_intent, rescued_entities = await self._rescue_unknown_intent(
                 request,
                 tenant_id,
                 db,
                 effective_attachments=effective_attachments if effective_attachments else None,
             )
-            if rescued_intent != ceo_intent:
+            if rescued_intent != _original_intent:
                 logger.info(
                     "chat_orchestrator_intent_rescued",
-                    original="intent_desconocido",
+                    original=_original_intent,
                     rescued_intent=rescued_intent,
                     tenant_id=str(tenant_id),
                 )

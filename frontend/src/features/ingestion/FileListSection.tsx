@@ -5,9 +5,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, CheckCircle } from "lucide-react";
 import {
   ingestionService,
-  type ColumnAtRisk,
   type UploadedFileItem,
 } from "@/services/ingestion.service";
+import { ColumnMapperPanel } from "./ColumnMapperPanel";
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "Pendiente",
@@ -46,165 +46,6 @@ function hasActiveFiles(files: UploadedFileItem[]): boolean {
   );
 }
 
-function ConfirmPanel({ fileId, onDone }: { fileId: string; onDone: () => void }) {
-  const queryClient = useQueryClient();
-  const [confirmedFields, setConfirmedFields] = useState({
-    ventas: true,
-    gastos: true,
-    productos: true,
-  });
-  const [droppedColumns, setDroppedColumns] = useState<string[]>([]);
-
-  const { data, isLoading } = useQuery({
-    queryKey: ["ingestion-preview", fileId],
-    queryFn: () => ingestionService.getPreview(fileId),
-    retry: false,
-  });
-
-  const dropMutation = useMutation({
-    mutationFn: (cols: string[]) => ingestionService.dropColumns(fileId, cols),
-    onSuccess: (result) => {
-      setDroppedColumns((prev) => [...new Set([...prev, ...result.dropped_columns])]);
-      void queryClient.invalidateQueries({ queryKey: ["ingestion-preview", fileId] });
-    },
-  });
-
-  const cancelMutation = useMutation({
-    mutationFn: () => ingestionService.cancelFile(fileId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
-      onDone();
-    },
-  });
-
-  const confirmMutation = useMutation({
-    mutationFn: () => ingestionService.confirmFile(fileId, confirmedFields),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
-      onDone();
-    },
-  });
-
-  if (isLoading) {
-    return (
-      <div className="ml-2 mt-2 text-xs text-vk-text-muted">Cargando datos...</div>
-    );
-  }
-
-  const summary = data?.parsed_summary_json as Record<string, unknown> | null | undefined;
-  const headers = Array.isArray(summary?.headers) ? (summary.headers as string[]) : null;
-  const rows = Array.isArray(summary?.ventas_detectadas)
-    ? (summary.ventas_detectadas as Record<string, unknown>[]).slice(0, 5)
-    : null;
-  const columnsAtRisk: ColumnAtRisk[] = (data?.columns_at_risk ?? []).filter(
-    (c) => !droppedColumns.includes(c.column),
-  );
-
-  return (
-    <div className="ml-2 mt-3 rounded-lg border border-vk-warning/20 bg-vk-warning-bg p-4">
-      <p className="mb-3 text-sm font-medium text-vk-warning">
-        Datos detectados — seleccioná qué importar
-      </p>
-
-      {headers && rows && rows.length > 0 && (
-        <div className="mb-3 overflow-x-auto rounded border border-vk-border-w">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-vk-border-w bg-vk-bg-light">
-                {headers.slice(0, 6).map((h) => (
-                  <th key={h} className="px-2 py-1 text-left font-medium text-vk-text-muted">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={i} className="border-b border-vk-border-w/60">
-                  {headers.slice(0, 6).map((h) => (
-                    <td key={h} className="px-2 py-1 text-vk-text-secondary">
-                      {String(row[h] ?? "—")}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {summary && typeof summary.rows_processed === "number" && (
-            <p className="px-2 py-1 text-xs text-vk-text-muted">
-              {summary.rows_processed} filas en total
-            </p>
-          )}
-        </div>
-      )}
-
-      {columnsAtRisk.length > 0 && (
-        <div className="mb-3 rounded-lg border border-vk-danger/30 bg-vk-danger-bg p-3">
-          <p className="mb-2 text-xs font-medium text-vk-danger">
-            Columnas con datos incompletos (&gt;35% vacíos)
-          </p>
-          {columnsAtRisk.map((col) => (
-            <div key={col.column} className="mb-2 flex items-center justify-between gap-2 text-xs">
-              <span className="font-mono text-vk-text-secondary">
-                {col.column}{" "}
-                <span className="text-vk-danger">({Math.round(col.null_pct * 100)}% vacíos)</span>
-              </span>
-              <div className="flex gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => dropMutation.mutate([col.column])}
-                  disabled={dropMutation.isPending}
-                  className="rounded bg-vk-danger px-2 py-0.5 text-xs text-white hover:opacity-80 disabled:opacity-50"
-                >
-                  Eliminar columna
-                </button>
-                <button
-                  type="button"
-                  onClick={() => cancelMutation.mutate()}
-                  disabled={cancelMutation.isPending}
-                  className="rounded border border-vk-border-w px-2 py-0.5 text-xs text-vk-text-secondary hover:bg-vk-bg-light disabled:opacity-50"
-                >
-                  {cancelMutation.isPending ? "Cancelando..." : "Cancelar y completar datos"}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="mb-3 flex gap-4">
-        {(["ventas", "gastos", "productos"] as const).map((key) => (
-          <label key={key} className="flex cursor-pointer items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={confirmedFields[key]}
-              onChange={(e) =>
-                setConfirmedFields((prev) => ({ ...prev, [key]: e.target.checked }))
-              }
-              className="h-3.5 w-3.5 rounded border-vk-border-w accent-vk-blue"
-            />
-            <span className="text-xs capitalize text-vk-text-secondary">{key}</span>
-          </label>
-        ))}
-      </div>
-
-      {confirmMutation.isError && (
-        <p className="mb-2 text-xs text-vk-danger">
-          Error al confirmar. Intentá de nuevo.
-        </p>
-      )}
-
-      <button
-        onClick={() => confirmMutation.mutate()}
-        disabled={confirmMutation.isPending || !Object.values(confirmedFields).some(Boolean)}
-        className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"
-      >
-        <CheckCircle className="h-3.5 w-3.5" />
-        {confirmMutation.isPending ? "Confirmando..." : "Confirmar datos"}
-      </button>
-    </div>
-  );
-}
 
 export function FileListSection() {
   const queryClient = useQueryClient();
@@ -349,7 +190,7 @@ export function FileListSection() {
                     file.processing_status === "NEEDS_CONFIRMATION" && (
                       <tr>
                         <td colSpan={5} className="pb-3 pt-0">
-                          <ConfirmPanel
+                          <ColumnMapperPanel
                             fileId={file.id}
                             onDone={() => setExpandedId(null)}
                           />

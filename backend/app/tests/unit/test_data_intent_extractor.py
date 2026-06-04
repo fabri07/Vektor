@@ -55,6 +55,23 @@ def test_general_sin_filas_no_es_dato() -> None:
     assert result.confidence == "LOW"
 
 
+def test_general_con_ventas_detectadas_es_sale() -> None:
+    result = DataIntentExtractor().check_file_summary(
+        {"inferred_type": "general", "ventas_detectadas": [{"monto": "500"}]}
+    )
+    assert result.has_data_intent is True
+    assert result.intent_type == "sale"
+    assert result.confidence == "LOW"
+
+
+def test_general_con_stock_detectado_es_product() -> None:
+    result = DataIntentExtractor().check_file_summary(
+        {"inferred_type": "general", "stock_detectado": [{"nombre": "Coca Cola"}]}
+    )
+    assert result.has_data_intent is True
+    assert result.intent_type == "product"
+
+
 def test_confidence_propaga_del_summary() -> None:
     result = DataIntentExtractor().check_file_summary(
         {

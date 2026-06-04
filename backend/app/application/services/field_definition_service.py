@@ -122,6 +122,55 @@ async def get_merged_definitions(
     return result
 
 
+async def ensure_custom_field_exists(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    entity_type: str,
+    field_key: str,
+    label: str,
+) -> None:
+    """Crea una definición de campo personalizado si no existe. Sin commit — el caller lo maneja.
+
+    Usado en el flujo de confirmación de ingesta cuando el usuario mapea una columna
+    a custom_field:{key}, para que el campo aparezca en el ERD y en FieldDefinitionsPanel.
+    """
+    existing = (
+        await session.execute(
+            select(TenantCustomFieldDefinition).where(
+                TenantCustomFieldDefinition.tenant_id == tenant_id,
+                TenantCustomFieldDefinition.entity_type == entity_type,
+                TenantCustomFieldDefinition.field_key == field_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return
+
+    now = datetime.now(UTC)
+    session.add(
+        TenantCustomFieldDefinition(
+            id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
+            tenant_id=tenant_id,
+            entity_type=entity_type,
+            field_key=field_key,
+            override_label=label,
+            data_type="text",
+            is_enabled=True,
+            is_base_field=False,
+            display_order=0,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await session.flush()
+    log.info(
+        "custom_field_ensured",
+        tenant_id=str(tenant_id),
+        entity_type=entity_type,
+        field_key=field_key,
+    )
+
+
 async def create_custom_field(
     session: AsyncSession,
     tenant_id: uuid.UUID,

@@ -91,6 +91,7 @@ async def insert_confirmed_data(
     summary: dict[str, Any],
     confirmed_fields: dict[str, bool] | None = None,
     return_details: bool = False,
+    column_mappings: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -128,6 +129,51 @@ async def insert_confirmed_data(
         stock_col = _find_col(headers, _STOCK_COLS)
         sku_col = _find_col(headers, _SKU_COLS)
 
+        # Columnas extra (solo disponibles con column_mappings explícitos)
+        qty_col: str | None = None
+        notes_col: str | None = None
+        payment_col: str | None = None
+        category_col: str | None = None
+        custom_field_cols: dict[str, str] = {}
+
+        if column_mappings:
+            # Construir lookup: target_field → primer source_col que lo mapee
+            target_to_col: dict[str, str] = {}
+            for src_col, target in column_mappings.items():
+                if target == "ignore":
+                    continue
+                if target.startswith("custom_field:"):
+                    cf_key = target[len("custom_field:"):]
+                    custom_field_cols[cf_key] = src_col
+                else:
+                    if target not in target_to_col:
+                        target_to_col[target] = src_col
+
+            # Remapear columnas de fecha y monto usando el mapeo explícito
+            fecha_col = (
+                target_to_col.get("transaction_date")
+                or target_to_col.get("expense_date")
+                or fecha_col
+            )
+            if inferred_type != "stock" and "amount" in target_to_col:
+                venta_col = target_to_col["amount"]
+                gasto_col = target_to_col["amount"]
+            nombre_col = (
+                target_to_col.get("product_name")
+                or target_to_col.get("name")
+                or nombre_col
+            )
+            precio_col = target_to_col.get("sale_price_ars") or precio_col
+            costo_col = target_to_col.get("unit_cost_ars") or costo_col
+            stock_col = target_to_col.get("stock_units") or stock_col
+            sku_col = target_to_col.get("sku") or sku_col
+
+            # Campos extra solo disponibles con mapeo explícito
+            qty_col = target_to_col.get("quantity")
+            notes_col = target_to_col.get("notes")
+            payment_col = target_to_col.get("payment_method")
+            category_col = target_to_col.get("category")
+
         wants_ventas = bool(
             inferred_type != "stock"
             and confirmed_fields.get("ventas")
@@ -162,17 +208,50 @@ async def insert_confirmed_data(
                 assert venta_col is not None  # wants_ventas implica venta_col presente
                 amount = _parse_amount(row.get(venta_col))
                 if amount:
-                    session.add(
-                        SaleEntry(
-                            tenant_id=tenant_id,
-                            amount=amount,
-                            quantity=1,
-                            transaction_date=tx_date,
-                            payment_method="cash",
-                            notes="Importado desde archivo",
-                            provenance="REAL",
-                        )
+                    # Cantidad
+                    qty_raw = row.get(qty_col) if qty_col else None
+                    qty: int = 1
+                    if qty_raw not in (None, "", "None", "nan"):
+                        try:
+                            qty = int(float(str(qty_raw)))
+                        except (ValueError, TypeError):
+                            qty = 1
+
+                    # Notas
+                    notes_raw = row.get(notes_col) if notes_col else None
+                    notes_str = (
+                        str(notes_raw).strip()[:499]
+                        if notes_raw and str(notes_raw).strip() not in {"None", "nan", ""}
+                        else "Importado desde archivo"
                     )
+
+                    # Método de pago
+                    pay_raw = row.get(payment_col) if payment_col else None
+                    pay_str = (
+                        str(pay_raw).strip()[:50]
+                        if pay_raw and str(pay_raw).strip() not in {"None", "nan", ""}
+                        else "cash"
+                    )
+
+                    # Custom fields
+                    cf: dict[str, str] = {
+                        k: str(row.get(v, ""))
+                        for k, v in custom_field_cols.items()
+                        if row.get(v) is not None
+                    }
+
+                    entry = SaleEntry(
+                        tenant_id=tenant_id,
+                        amount=amount,
+                        quantity=qty,
+                        transaction_date=tx_date,
+                        payment_method=pay_str,
+                        notes=notes_str,
+                        provenance="REAL",
+                    )
+                    if cf:
+                        entry.custom_fields = cf
+                    session.add(entry)
                     counts["ventas"] += 1
 
             if wants_gastos:
@@ -180,22 +259,38 @@ async def insert_confirmed_data(
                 amount = _parse_amount(row.get(gasto_col))
                 if amount:
                     desc_raw = row.get(nombre_col) if nombre_col else None
+                    notes_raw = row.get(notes_col) if notes_col else None
                     desc = (
-                        str(desc_raw).strip()[:499]
-                        if desc_raw and str(desc_raw).strip() not in {"None", "nan", ""}
-                        else "Gasto importado"
+                        str(notes_raw or desc_raw or "").strip()[:499]
+                        or "Gasto importado"
                     )
-                    session.add(
-                        ExpenseEntry(
-                            tenant_id=tenant_id,
-                            amount=amount,
-                            category="importado",
-                            transaction_date=tx_date,
-                            description=desc,
-                            payment_method="transfer",
-                            provenance="REAL",
-                        )
+                    # Categoría
+                    cat_raw = row.get(category_col) if category_col else None
+                    cat_str = (
+                        str(cat_raw).strip()[:99]
+                        if cat_raw and str(cat_raw).strip() not in {"None", "nan", ""}
+                        else "importado"
                     )
+
+                    # Custom fields
+                    cf = {
+                        k: str(row.get(v, ""))
+                        for k, v in custom_field_cols.items()
+                        if row.get(v) is not None
+                    }
+
+                    expense = ExpenseEntry(
+                        tenant_id=tenant_id,
+                        amount=amount,
+                        category=cat_str,
+                        transaction_date=tx_date,
+                        description=desc,
+                        payment_method="transfer",
+                        provenance="REAL",
+                    )
+                    if cf:
+                        expense.custom_fields = cf
+                    session.add(expense)
                     counts["gastos"] += 1
 
         if wants_productos:
@@ -273,6 +368,11 @@ async def insert_confirmed_data(
                         )
                 else:
                     new_product_id = uuid.uuid4()
+                    cf_product: dict[str, str] = {
+                        k: str(row.get(v, ""))
+                        for k, v in custom_field_cols.items()
+                        if row.get(v) is not None
+                    }
                     new_product = Product(
                         id=new_product_id,
                         tenant_id=tenant_id,
@@ -284,6 +384,7 @@ async def insert_confirmed_data(
                         # NULL = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor
                         low_stock_threshold_units=None,
                         provenance="REAL",
+                        custom_fields=cf_product if cf_product else None,
                     )
                     session.add(new_product)
                     if return_details:

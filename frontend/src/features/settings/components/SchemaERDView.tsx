@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { ArrowRight, XCircle } from "lucide-react";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { ingestionService, type TenantColumnMapping } from "@/services/ingestion.service";
 import type { FieldDefinition } from "@/types/api";
 
 const ENTITY_CONFIG: Array<{
@@ -117,10 +119,52 @@ export function SchemaERDView() {
     queryFn: () => fieldDefinitionsService.getAll(),
   });
 
+  const { data: learnedMappings = [], refetch: refetchMappings } = useQuery({
+    queryKey: ["column-mappings-learned"],
+    queryFn: () => ingestionService.getLearnedMappings(),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => ingestionService.deleteLearnedMapping(id),
+    onSuccess: () => void refetchMappings(),
+  });
+
   const byEntity = fields.reduce<Record<string, FieldDefinition[]>>((acc, f) => {
     acc[f.entity_type] = [...(acc[f.entity_type] ?? []), f];
     return acc;
   }, {});
+
+  const mappingsByEntity = learnedMappings.reduce<Record<string, TenantColumnMapping[]>>(
+    (acc, m) => {
+      acc[m.entity_type] = [...(acc[m.entity_type] ?? []), m];
+      return acc;
+    },
+    {},
+  );
+
+  const ENTITY_LABELS: Record<string, string> = {
+    sale: "Ventas",
+    expense: "Gastos",
+    product: "Productos",
+  };
+
+  const TARGET_LABELS: Record<string, string> = {
+    amount: "Monto",
+    transaction_date: "Fecha venta",
+    expense_date: "Fecha gasto",
+    quantity: "Cantidad",
+    payment_method: "Método de pago",
+    product_name: "Nombre producto",
+    notes: "Notas",
+    sku: "SKU",
+    name: "Nombre",
+    sale_price_ars: "Precio venta",
+    unit_cost_ars: "Costo unitario",
+    stock_units: "Stock",
+    category: "Categoría",
+    description: "Descripción",
+    supplier_name: "Proveedor",
+  };
 
   return (
     <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
@@ -173,6 +217,55 @@ export function SchemaERDView() {
           Campos personalizados
         </div>
       </div>
+
+      {learnedMappings.length > 0 && (
+        <div className="mt-6 border-t border-vk-border-w pt-5">
+          <p className="mb-3 text-sm font-semibold text-vk-text-primary">
+            Aliases aprendidos
+          </p>
+          <p className="mb-4 text-xs text-vk-text-muted">
+            Columnas que Véktor reconoce automáticamente en futuros archivos.
+          </p>
+          <div className="space-y-4">
+            {Object.entries(mappingsByEntity).map(([entity, maps]) => (
+              <div key={entity}>
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-vk-text-secondary">
+                  {ENTITY_LABELS[entity] ?? entity}
+                </p>
+                <div className="space-y-1">
+                  {maps.map((m) => (
+                    <div
+                      key={m.id}
+                      className="flex items-center gap-2 rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-1.5"
+                    >
+                      <span className="font-mono text-xs text-vk-text-secondary">
+                        &ldquo;{m.source_column}&rdquo;
+                      </span>
+                      <ArrowRight className="h-3 w-3 shrink-0 text-vk-text-muted" />
+                      <span className="text-xs text-vk-text-primary">
+                        {TARGET_LABELS[m.target_field] ?? m.target_field}
+                      </span>
+                      <span className="ml-auto text-[10px] text-vk-text-muted">
+                        {m.confirmed_count} confirmación
+                        {m.confirmed_count !== 1 ? "es" : ""}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => deleteMutation.mutate(m.id)}
+                        disabled={deleteMutation.isPending}
+                        className="rounded p-0.5 text-vk-text-muted transition-colors hover:bg-vk-danger/10 hover:text-vk-danger disabled:opacity-50"
+                        title="Eliminar alias"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
+from app.application.services.column_mapping_service import REQUIRED_FIELDS, ColumnMappingService
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
 )
@@ -51,11 +52,13 @@ from app.persistence.models.user import User
 from app.persistence.repositories.file_repository import FileRepository
 from app.schemas.ingestion import (
     ColumnAtRisk,
+    ColumnMappingSuggestion,
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     DropColumnsRequest,
     FilePreviewResponse,
     FileStatusItem,
+    TenantColumnMappingResponse,
     UploadResponse,
 )
 
@@ -429,6 +432,93 @@ async def reprocess_file(
     return {"file_id": str(file_id), "status": "requeued"}
 
 
+@router.get(
+    "/files/{file_id}/column-mappings",
+    response_model=list[ColumnMappingSuggestion],
+    summary="Get column mapping suggestions for a file",
+)
+async def get_column_mappings(
+    file_id: uuid.UUID,
+    entity_type: str = Query(
+        default="sale",
+        description="Tipo de entidad: sale | expense | product",
+    ),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ColumnMappingSuggestion]:
+    if entity_type not in ("sale", "expense", "product", "inventory"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="entity_type debe ser: sale, expense, product o inventory.",
+        )
+
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    summary = record.parsed_summary_json or {}
+    headers: list[str] = summary.get("headers", [])
+
+    # Obtener sample rows desde el summary (intentar varias claves)
+    sample_rows: list[dict[str, Any]] = (
+        summary.get("preview_rows")
+        or summary.get("ventas_detectadas")
+        or summary.get("gastos_detectados")
+        or summary.get("stock_detectado")
+        or []
+    )
+
+    svc = ColumnMappingService(session)
+    raw_suggestions = await svc.suggest_mappings(
+        tenant.tenant_id, entity_type, headers, sample_rows
+    )
+    return [ColumnMappingSuggestion(**s) for s in raw_suggestions]
+
+
+@router.get(
+    "/column-mappings",
+    response_model=list[TenantColumnMappingResponse],
+    summary="List all learned column mappings for this tenant",
+)
+async def list_column_mappings(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[TenantColumnMappingResponse]:
+    svc = ColumnMappingService(session)
+    mappings = await svc.get_learned_mappings(tenant.tenant_id)
+    return [
+        TenantColumnMappingResponse(
+            id=m.id,
+            entity_type=m.entity_type,
+            source_column=m.source_column,
+            target_field=m.target_field,
+            confirmed_count=m.confirmed_count,
+            last_seen_at=m.last_seen_at,
+        )
+        for m in mappings
+    ]
+
+
+@router.delete(
+    "/column-mappings/{mapping_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a learned column mapping",
+)
+async def delete_column_mapping(
+    mapping_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    svc = ColumnMappingService(session)
+    found = await svc.delete_mapping(tenant.tenant_id, mapping_id)
+    if not found:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Mapeo no encontrado."
+        )
+    await session.commit()
+
+
 @router.post(
     "/files/{file_id}/confirm",
     response_model=ConfirmIngestionResponse,
@@ -454,17 +544,79 @@ async def confirm_file(
             ),
         )
 
+    # Derivar entity_type desde el summary para validación y aprendizaje
+    _inferred_type = (record.parsed_summary_json or {}).get("inferred_type", "general")
+    _entity_map = {"ventas": "sale", "gastos": "expense", "stock": "product"}
+    _entity_type = _entity_map.get(_inferred_type, "sale")
+
+    # Validar campos requeridos si se enviaron column_mappings explícitos
+    if body.column_mappings:
+        mapped_targets = {
+            m.target_field
+            for m in body.column_mappings
+            if m.target_field not in ("ignore",) and not m.target_field.startswith("custom_field:")
+        }
+        required = set(REQUIRED_FIELDS.get(_entity_type, []))
+
+        confirmed_entity = (
+            (body.confirmed_fields.get("ventas") and _entity_type == "sale")
+            or (body.confirmed_fields.get("gastos") and _entity_type == "expense")
+            or (body.confirmed_fields.get("productos") and _entity_type == "product")
+        )
+        if confirmed_entity:
+            missing = required - mapped_targets
+            if missing:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Campos requeridos sin mapear: {', '.join(sorted(missing))}",
+                )
+
+    # Crear definiciones de campos personalizados para mapeos custom_field:{key}
+    # — idempotente, sin commit propio; el commit final cierra la transacción completa.
+    if body.column_mappings:
+        from app.application.services.field_definition_service import (  # noqa: PLC0415
+            ensure_custom_field_exists,
+        )
+
+        for _mapping in body.column_mappings:
+            if _mapping.target_field.startswith("custom_field:"):
+                _field_key = _mapping.target_field[len("custom_field:"):]
+                await ensure_custom_field_exists(
+                    session,
+                    tenant.tenant_id,
+                    _entity_type,
+                    _field_key,
+                    _mapping.source_column,  # nombre de la columna como label inicial
+                )
+
     # Insert parsed rows into business tables, then mark done
     updated_summary = dict(record.parsed_summary_json or {})
     updated_summary["confirmed_fields"] = body.confirmed_fields
+
+    explicit_mappings: dict[str, str] | None = None
+    if body.column_mappings:
+        explicit_mappings = {m.source_column: m.target_field for m in body.column_mappings}
 
     counts = await insert_confirmed_data(
         session,
         tenant.tenant_id,
         updated_summary,
         body.confirmed_fields,
+        column_mappings=explicit_mappings,
     )
     updated_summary["imported_counts"] = counts
+
+    # Guardar aprendizaje de mapeos confirmados
+    if body.column_mappings:
+        mapping_svc = ColumnMappingService(session)
+        await mapping_svc.save_mappings(
+            tenant.tenant_id,
+            _entity_type,
+            [
+                {"source_column": m.source_column, "target_field": m.target_field}
+                for m in body.column_mappings
+            ],
+        )
 
     record.parsed_summary_json = updated_summary
     record.processing_status = PROCESSING_STATUS_DONE

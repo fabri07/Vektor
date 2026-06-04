@@ -373,23 +373,33 @@ def rescue_intent(
     if has_attachment:
         if import_verb:
             return _import_intent_for_attachment_type(attachment_type), {}
-        # 1-2. attachment de productos/precios → análisis de lista de precios
-        if attachment_type == "product":
-            return "analizar_precios", {"analysis_type": "lista"}
-        # 2. attachment de stock
-        if attachment_type == "stock":
-            return "analizar_stock", {}
-        # 3. attachment de ventas/gastos/mixto
-        if attachment_type in ("sale", "expense", "mixed"):
-            return "analizar_archivo", {}
         # 10. "que puedo hacer con esto" + attachment
         if "que puedo hacer" in norm or "que podes hacer" in norm:
             return "ayuda_plataforma", {"analysis_type": "explicar_datos"}
+        # 1. attachment de productos/precios: verbo analítico → análisis; sin verbo → importar
+        if attachment_type == "product":
+            if verb:
+                return "analizar_precios", {"analysis_type": "lista"}
+            return "importar_archivo_productos", {}
+        # 2. attachment de stock: verbo analítico → análisis; sin verbo → importar catálogo
+        if attachment_type == "stock":
+            if verb:
+                return "analizar_stock", {}
+            return "importar_archivo_productos", {}
+        # 3. attachment de ventas/gastos/mixto: verbo analítico → análisis; sin verbo → importar
+        if attachment_type == "expense":
+            if verb:
+                return "analizar_archivo", {}
+            return "importar_archivo_gastos", {}
+        if attachment_type in ("sale", "mixed"):
+            if verb:
+                return "analizar_archivo", {}
+            return "importar_archivo_ventas", {}
         # 4. attachment sin tipo claro + verbo ambiguo → análisis genérico
         if verb:
             return "analizar_archivo", {}
-        # 11. attachment pero sin señal clara → pedir aclaración sobre el archivo
-        return "pedir_aclaracion_sobre_archivo", {}
+        # 11. attachment sin tipo claro y sin señal → análisis genérico (mejor que preguntar)
+        return "analizar_archivo", {}
 
     # ── Reglas sin attachment: objeto de negocio detectado ────────────────────
     # 5. márgenes / rentabilidad

@@ -109,9 +109,9 @@ def test_fuzzy_typos():
     )
 
 
-def test_attachment_no_verb_no_type_asks_about_file():
-    # adjunto sin tipo ni verbo claro → pedir aclaración sobre el archivo
-    assert rescue_intent("xyz", True, None) == ("pedir_aclaracion_sobre_archivo", {})
+def test_attachment_no_verb_no_type_falls_back_to_analyze():
+    # adjunto sin tipo ni verbo → analizar_archivo (mejor que preguntar; el agente puede orientar)
+    assert rescue_intent("xyz", True, None) == ("analizar_archivo", {})
 
 
 def test_import_verbs_with_attachment_route_to_import_intents():

@@ -33,5 +33,10 @@ class DataIntentExtractor:
             return DataIntentResult(True, "product", confidence, "file")
         if has_ventas and has_gastos:
             return DataIntentResult(True, "mixed", confidence, "file")
+        # Archivos sin tipo inferido pero con datos (general) → tratar como ventas por defecto
+        if inferred == "general" and has_ventas:
+            return DataIntentResult(True, "sale", "LOW", "file")
+        if inferred == "general" and has_stock:
+            return DataIntentResult(True, "product", "LOW", "file")
 
         return DataIntentResult(False, None, "LOW", "file")

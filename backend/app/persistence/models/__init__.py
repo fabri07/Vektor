@@ -12,6 +12,7 @@ from app.persistence.models.business import (
     MomentumProfile,
 )
 from app.persistence.models.cash_close import CashClose
+from app.persistence.models.column_mapping import TenantColumnMapping
 from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.field_definitions import (
@@ -73,6 +74,7 @@ __all__ = [
     "GoogleMcpConnection",
     "ChatSessionLog",
     "CashClose",
+    "TenantColumnMapping",
     "VerticalFieldDefinition",
     "TenantCustomFieldDefinition",
     "TenantFieldChangeLog",

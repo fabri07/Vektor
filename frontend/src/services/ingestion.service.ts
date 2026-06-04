@@ -30,6 +30,30 @@ export interface ConfirmIngestionResult {
   message: string;
 }
 
+export interface ColumnMappingSuggestion {
+  source_column: string;
+  normalized_column: string;
+  sample_values: string[];
+  target_field: string | null;
+  confidence: number;
+  source: "tenant_history" | "heuristic" | "fuzzy" | "none";
+  status: "mapped" | "unmapped" | "required_missing";
+}
+
+export interface ColumnMapping {
+  source_column: string;
+  target_field: string; // campo canónico, "ignore", o "custom_field:{key}"
+}
+
+export interface TenantColumnMapping {
+  id: string;
+  entity_type: string;
+  source_column: string;
+  target_field: string;
+  confirmed_count: number;
+  last_seen_at: string;
+}
+
 export const ingestionService = {
   async upload(
     file: File,
@@ -76,13 +100,36 @@ export const ingestionService = {
     }
   },
 
+  async getColumnMappings(
+    fileId: string,
+    entityType: string = "sale",
+  ): Promise<ColumnMappingSuggestion[]> {
+    const res = await api.get<ColumnMappingSuggestion[]>(
+      `/ingestion/files/${fileId}/column-mappings?entity_type=${entityType}`,
+    );
+    return res.data;
+  },
+
+  async getLearnedMappings(): Promise<TenantColumnMapping[]> {
+    const res = await api.get<TenantColumnMapping[]>("/ingestion/column-mappings");
+    return res.data;
+  },
+
+  async deleteLearnedMapping(mappingId: string): Promise<void> {
+    await api.delete(`/ingestion/column-mappings/${mappingId}`);
+  },
+
   async confirmFile(
     fileId: string,
     confirmedFields: Record<string, boolean>,
+    columnMappings?: ColumnMapping[],
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
-      { confirmed_fields: confirmedFields },
+      {
+        confirmed_fields: confirmedFields,
+        column_mappings: columnMappings ?? [],
+      },
     );
     return res.data;
   },
