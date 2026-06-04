@@ -5,7 +5,8 @@ TTL de 10 minutos.
 
 Dos ejes de estado independientes:
   - `status`           → estado de aprobación del usuario (PENDING|APPROVED|REJECTED|EXPIRED)
-  - `execution_status` → estado de ejecución              (NOT_STARTED|IN_PROGRESS|SUCCEEDED|FAILED|REQUIRES_RECONNECT)
+  - `execution_status` → estado de ejecución
+      (NOT_STARTED|IN_PROGRESS|SUCCEEDED|FAILED|REQUIRES_RECONNECT)
 
 Ciclo de vida para acciones LOCALES (external_system=None):
   - create_pending_action() → status=PENDING, execution_status=NOT_STARTED
@@ -29,6 +30,7 @@ Ciclo de vida para acciones externas del agente:
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -52,7 +54,7 @@ class PendingAction(UUIDPrimaryKeyMixin, Base):
         nullable=False,
     )
     action_type: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict] = mapped_column(PGJSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False)
     risk_level: Mapped[str] = mapped_column(Text, nullable=False)
 
     # ── Estado de aprobación ──────────────────────────────────────────────────
@@ -63,19 +65,13 @@ class PendingAction(UUIDPrimaryKeyMixin, Base):
         nullable=False,
         default=lambda: datetime.now(UTC) + timedelta(minutes=10),
     )
-    approved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Alias histórico; para acciones locales sigue siendo el timestamp de ejecución
-    executed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # ── Estado de ejecución externa ───────────────────────────────────────────
     # NOT_STARTED | IN_PROGRESS | SUCCEEDED | FAILED | REQUIRES_RECONNECT
-    execution_status: Mapped[str] = mapped_column(
-        Text, nullable=False, default="NOT_STARTED"
-    )
+    execution_status: Mapped[str] = mapped_column(Text, nullable=False, default="NOT_STARTED")
     # Sistema externo al que apunta (GOOGLE_GMAIL, GOOGLE_DRIVE, GOOGLE_SHEETS…)
     external_system: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Clave de idempotencia: garantiza que la operación externa no se ejecute dos veces.
@@ -102,9 +98,9 @@ class PendingAction(UUIDPrimaryKeyMixin, Base):
     @property
     def is_retryable(self) -> bool:
         """True si la acción puede reintentarse (aprobada pero fallo de ejecución)."""
-        return (
-            self.status == "APPROVED"
-            and self.execution_status in ("FAILED", "REQUIRES_RECONNECT")
+        return self.status == "APPROVED" and self.execution_status in (
+            "FAILED",
+            "REQUIRES_RECONNECT",
         )
 
     @property

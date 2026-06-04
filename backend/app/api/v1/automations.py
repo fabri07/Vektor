@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -33,7 +34,7 @@ router = APIRouter()
 async def list_automations(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     stmt = (
         select(AgentAutomationRule)
         .where(
@@ -55,7 +56,7 @@ async def create_automation_from_pending_action(
     pending_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     if not get_settings().ENABLE_AGENT_AUTOMATIONS:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -93,7 +94,7 @@ async def update_automation(
     body: AutomationRuleUpdateRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     rule = await db.get(AgentAutomationRule, rule_id)
     if (
         rule is None
@@ -134,7 +135,7 @@ async def delete_automation(
     rule_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     rule = await db.get(AgentAutomationRule, rule_id)
     if (
         rule is None

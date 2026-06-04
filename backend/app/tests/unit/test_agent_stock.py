@@ -2,6 +2,7 @@
 
 import json
 import unittest.mock
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,7 +18,7 @@ def _make_request(message: str = "test") -> AgentRequest:
     )
 
 
-def _mock_llm_response(entities: dict) -> MagicMock:
+def _mock_llm_response(entities: dict[str, Any]) -> MagicMock:
     content_block = MagicMock()
     content_block.text = json.dumps(entities)
     response = MagicMock()
@@ -28,9 +29,7 @@ def _mock_llm_response(entities: dict) -> MagicMock:
 @pytest.mark.asyncio
 async def test_stockout_detected():
     """stock=0 con threshold=0 → detect_stockout devuelve True."""
-    with unittest.mock.patch(
-        "app.application.agents.stock.agent.anthropic.AsyncAnthropic"
-    ):
+    with unittest.mock.patch("app.application.agents.stock.agent.anthropic.AsyncAnthropic"):
         from app.application.agents.stock.agent import AgentStock
 
         agent = AgentStock()
@@ -42,9 +41,7 @@ async def test_stockout_detected():
 @pytest.mark.asyncio
 async def test_overstock_kiosco():
     """rotation_days=50 > threshold 42 (kiosco max=21 × 2) → overstock."""
-    with unittest.mock.patch(
-        "app.application.agents.stock.agent.anthropic.AsyncAnthropic"
-    ):
+    with unittest.mock.patch("app.application.agents.stock.agent.anthropic.AsyncAnthropic"):
         from app.application.agents.stock.agent import AgentStock
 
         agent = AgentStock()
@@ -56,9 +53,7 @@ async def test_overstock_kiosco():
 @pytest.mark.asyncio
 async def test_overstock_decoracion():
     """rotation_days=350 < threshold 360 (decoracion max=180 × 2) → NOT overstock."""
-    with unittest.mock.patch(
-        "app.application.agents.stock.agent.anthropic.AsyncAnthropic"
-    ):
+    with unittest.mock.patch("app.application.agents.stock.agent.anthropic.AsyncAnthropic"):
         from app.application.agents.stock.agent import AgentStock
 
         agent = AgentStock()
@@ -103,9 +98,7 @@ async def test_stock_loss_is_high_risk():
 
         agent = AgentStock()
         agent.client = mock_client
-        with unittest.mock.patch.object(
-            agent, "_resolve_product_id", return_value=("prod-1", [])
-        ):
+        with unittest.mock.patch.object(agent, "_resolve_product_id", return_value=("prod-1", [])):
             result = await agent.process(_make_request("merma de 3 unidades de leche"))
 
     assert result.risk_level == RiskLevel.HIGH
@@ -139,9 +132,7 @@ async def test_stock_adjustment_is_medium_risk():
 
         agent = AgentStock()
         agent.client = mock_client
-        with unittest.mock.patch.object(
-            agent, "_resolve_product_id", return_value=("prod-1", [])
-        ):
+        with unittest.mock.patch.object(agent, "_resolve_product_id", return_value=("prod-1", [])):
             result = await agent.process(_make_request("ajuste de inventario gaseosa +10"))
 
     assert result.risk_level == RiskLevel.MEDIUM
@@ -175,9 +166,7 @@ async def test_extraction_returns_negative_qty_for_loss():
 
         agent = AgentStock()
         agent.client = mock_client
-        with unittest.mock.patch.object(
-            agent, "_resolve_product_id", return_value=("prod-1", [])
-        ):
+        with unittest.mock.patch.object(agent, "_resolve_product_id", return_value=("prod-1", [])):
             result = await agent.process(_make_request("merma de 5 unidades de yogur"))
 
     assert result.result["structured_data"]["qty_change"] == -5

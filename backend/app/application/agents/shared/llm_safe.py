@@ -4,7 +4,7 @@ Uso:
     text, llm_call = await call_llm(
         client=self.client,
         source="agent_supplier",
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-6",
         system=system,
         messages=[...],
         max_tokens=600,
@@ -15,9 +15,14 @@ Uso:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 import anthropic
 
 from app.application.agents.shared.schemas import LLMCall
+
+if TYPE_CHECKING:
+    from anthropic.types import MessageParam
 from app.integrations.anthropic_client import AnthropicConfigurationError
 from app.observability.logger import get_logger
 
@@ -30,7 +35,7 @@ async def call_llm(
     source: str,
     model: str,
     system: str,
-    messages: list[dict],
+    messages: list[dict[str, Any]],
     max_tokens: int,
 ) -> tuple[str | None, LLMCall | None]:
     """Llama al LLM y devuelve (texto_respuesta, llm_call).
@@ -45,7 +50,7 @@ async def call_llm(
             model=model,
             max_tokens=max_tokens,
             system=system,
-            messages=messages,
+            messages=cast("list[MessageParam]", messages),
         )
         llm_call = LLMCall(
             source=source,
@@ -53,7 +58,9 @@ async def call_llm(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
         )
-        text = response.content[0].text.strip() if response.content else ""
+        # getattr (no isinstance) para tolerar bloques no-texto y mocks de tests
+        raw_text = getattr(response.content[0], "text", "") if response.content else ""
+        text = raw_text.strip() if isinstance(raw_text, str) else ""
         return text, llm_call
     except AnthropicConfigurationError:
         raise  # error de configuración → visible en el orquestador

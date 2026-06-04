@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from typing import Any
 
 from celery import shared_task
 
@@ -10,8 +11,8 @@ from app.observability.logger import get_logger, log_job
 logger = get_logger(__name__)
 
 
-@shared_task(name="events.stock_decreased", queue="default")
-def on_stock_decreased(payload: dict) -> None:
+@shared_task(name="events.stock_decreased", queue="default")  # type: ignore[misc]  # celery shared_task sin tipos
+def on_stock_decreased(payload: dict[str, Any]) -> None:
     """
     Reacts to STOCK_DECREASED event emitted by stock_service.decrement_stock().
     Triggers health score recalculation since stock levels affect scoring.
@@ -23,6 +24,7 @@ def on_stock_decreased(payload: dict) -> None:
             return
 
         from app.jobs.celery_app import celery_app  # noqa: PLC0415
+
         celery_app.send_task(
             "jobs.trigger_score_recalculation",
             args=[tenant_id, "event:stock_decreased"],
@@ -31,8 +33,8 @@ def on_stock_decreased(payload: dict) -> None:
         logger.info("on_stock_decreased: score recalculation queued", tenant_id=tenant_id)
 
 
-@shared_task(name="events.stock_alert_created", queue="default")
-def on_stock_alert_created(payload: dict) -> None:
+@shared_task(name="events.stock_alert_created", queue="default")  # type: ignore[misc]  # celery shared_task sin tipos
+def on_stock_alert_created(payload: dict[str, Any]) -> None:
     """
     Reacts to STOCK_ALERT_CREATED event (stockout risk detected).
     Logs the alert and triggers score recalculation.
@@ -52,6 +54,7 @@ def on_stock_alert_created(payload: dict) -> None:
 
         if tenant_id:
             from app.jobs.celery_app import celery_app  # noqa: PLC0415
+
             celery_app.send_task(
                 "jobs.trigger_score_recalculation",
                 args=[tenant_id, "event:stock_alert"],
@@ -59,8 +62,8 @@ def on_stock_alert_created(payload: dict) -> None:
             )
 
 
-@shared_task(name="events.stock_increased", queue="default")
-def on_stock_increased(payload: dict) -> None:
+@shared_task(name="events.stock_increased", queue="default")  # type: ignore[misc]  # celery shared_task sin tipos
+def on_stock_increased(payload: dict[str, Any]) -> None:
     """
     Reacts to STOCK_INCREASED event emitted by stock_service.increment_stock().
     Triggers score recalculation since restocking improves health metrics.
@@ -72,6 +75,7 @@ def on_stock_increased(payload: dict) -> None:
             return
 
         from app.jobs.celery_app import celery_app  # noqa: PLC0415
+
         celery_app.send_task(
             "jobs.trigger_score_recalculation",
             args=[tenant_id, "event:stock_increased"],
@@ -80,8 +84,8 @@ def on_stock_increased(payload: dict) -> None:
         logger.info("on_stock_increased: score recalculation queued", tenant_id=tenant_id)
 
 
-@shared_task(name="events.cash_health_updated", queue="default")
-def on_cash_health_updated(payload: dict) -> None:
+@shared_task(name="events.cash_health_updated", queue="default")  # type: ignore[misc]  # celery shared_task sin tipos
+def on_cash_health_updated(payload: dict[str, Any]) -> None:
     """
     Reacts to CASH_HEALTH_UPDATED event emitted by AgentCash.
     Triggers health score recalculation.
@@ -93,6 +97,7 @@ def on_cash_health_updated(payload: dict) -> None:
             return
 
         from app.jobs.celery_app import celery_app  # noqa: PLC0415
+
         celery_app.send_task(
             "jobs.trigger_score_recalculation",
             args=[tenant_id, "event:cash_health_updated"],
@@ -101,8 +106,8 @@ def on_cash_health_updated(payload: dict) -> None:
         logger.info("on_cash_health_updated: score recalculation queued", tenant_id=tenant_id)
 
 
-@shared_task(name="events.sale_recorded", queue="default")
-def on_sale_recorded(payload: dict) -> None:
+@shared_task(name="events.sale_recorded", queue="default")  # type: ignore[misc]  # celery shared_task sin tipos
+def on_sale_recorded(payload: dict[str, Any]) -> None:
     """
     Reacts to SALE_RECORDED event — decrements stock for every sold item.
     Runs synchronously via asyncio.run() since Celery workers have no event loop.

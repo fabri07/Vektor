@@ -13,9 +13,9 @@ from uuid import UUID, uuid4
 
 
 class BusinessSize(StrEnum):
-    MICRO = "micro"       # 1–5 empleados
-    SMALL = "small"       # 6–25 empleados
-    MEDIUM = "medium"     # 26–100 empleados
+    MICRO = "micro"  # 1–5 empleados
+    SMALL = "small"  # 6–25 empleados
+    MEDIUM = "medium"  # 26–100 empleados
 
 
 @dataclass
@@ -25,7 +25,7 @@ class BusinessProfile:
     tenant_id: UUID
     legal_name: str
     trade_name: str
-    cuit: str                        # Argentinian tax ID
+    cuit: str  # Argentinian tax ID
     vertical: str
     size: BusinessSize
     province: str

@@ -34,8 +34,9 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
-async def engine() -> AsyncEngine:
+async def engine() -> AsyncEngine:  # type: ignore[misc]  # test double / fixture
     eng = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -46,7 +47,7 @@ async def engine() -> AsyncEngine:
 
 
 @pytest_asyncio.fixture
-async def session(engine: AsyncEngine) -> AsyncSession:
+async def session(engine: AsyncEngine) -> AsyncSession:  # type: ignore[misc]  # test double / fixture
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         yield s
@@ -155,6 +156,7 @@ async def momentum(session: AsyncSession, tenant: Tenant) -> MomentumProfile:
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 class TestEmailContent:

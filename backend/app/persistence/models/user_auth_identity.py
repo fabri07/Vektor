@@ -43,9 +43,7 @@ class UserAuthIdentity(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
-    last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         ForeignKeyConstraint(

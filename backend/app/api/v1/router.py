@@ -5,8 +5,8 @@ from fastapi import APIRouter
 from app.api.v1 import (
     admin,
     agent,
-    automations,
     auth,
+    automations,
     business_profiles,
     expenses,
     fields,
@@ -14,8 +14,8 @@ from app.api.v1 import (
     forecast,
     health_scores,
     ingestion,
-    integrations,
     insights,
+    integrations,
     momentum,
     notifications,
     oauth,
@@ -42,13 +42,9 @@ api_router.include_router(
 api_router.include_router(sales.router, prefix="/sales", tags=["Sales"])
 api_router.include_router(expenses.router, prefix="/expenses", tags=["Expenses"])
 api_router.include_router(products.router, prefix="/products", tags=["Products"])
-api_router.include_router(
-    health_scores.router, prefix="/health-scores", tags=["Health Scores"]
-)
+api_router.include_router(health_scores.router, prefix="/health-scores", tags=["Health Scores"])
 api_router.include_router(insights.router, prefix="/insights", tags=["Insights"])
-api_router.include_router(
-    notifications.router, prefix="/notifications", tags=["Notifications"]
-)
+api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 api_router.include_router(files.router, prefix="/files", tags=["Files"])
 api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])

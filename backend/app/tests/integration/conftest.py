@@ -135,6 +135,7 @@ def fake_redis() -> FakeRedis:
 @pytest_asyncio.fixture
 async def client(session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     from app.main import limiter  # noqa: PLC0415
+
     limiter._storage.reset()
 
     app = create_app()
@@ -261,9 +262,9 @@ async def run_pipeline(
         3. Persist HealthScoreSnapshot + DecisionAuditLog
         4. Upsert MomentumProfile (best_score_ever)
     """
-    import app.jobs.recalculate_health_score as job_module  # noqa: PLC0415
     from sqlalchemy import select  # noqa: PLC0415
 
+    import app.jobs.recalculate_health_score as job_module  # noqa: PLC0415
     from app.heuristics.health_engine import calculate_health_score  # noqa: PLC0415
     from app.state.business_state_service import compute_business_state  # noqa: PLC0415
 

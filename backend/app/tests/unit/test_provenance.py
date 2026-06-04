@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories.product_repository import ProductRepository
 from app.persistence.repositories.transaction_repository import ExpenseRepository, SaleRepository
 
@@ -171,6 +171,7 @@ class TestProvenanceDoesNotControlTenantReads:
 class TestNoDataResponse:
     def test_no_data_response_shape(self) -> None:
         from app.schemas.health_score import NoDataResponse
+
         r = NoDataResponse()
         assert r.status == "NO_DATA"
         assert r.score is None
@@ -179,14 +180,17 @@ class TestNoDataResponse:
 
     def test_no_data_response_demo_flag(self) -> None:
         from app.schemas.health_score import NoDataResponse
+
         # Demo tenant sin snapshot → NoDataResponse con is_demo_data=True
         # (en la práctica demo siempre tiene snapshot, pero el schema lo soporta)
         r = NoDataResponse(is_demo_data=False)
         assert r.is_demo_data is False
 
     def test_health_score_v2_has_is_demo_data(self) -> None:
-        from app.schemas.health_score import HealthScoreV2Response
         import datetime
+
+        from app.schemas.health_score import HealthScoreV2Response
+
         r = HealthScoreV2Response(
             id=uuid.uuid4(),
             tenant_id=uuid.uuid4(),
@@ -211,6 +215,7 @@ class TestRejectedFileStatus:
             PROCESSING_STATUS_REJECTED,
             UploadedFile,
         )
+
         f = UploadedFile(
             tenant_id=uuid.uuid4(),
             original_filename="test.jpg",
@@ -226,10 +231,12 @@ class TestRejectedFileStatus:
 
     def test_score_level_no_data_exists(self) -> None:
         from app.domain.health_score import ScoreLevel
+
         assert ScoreLevel.NO_DATA == "NO_DATA"
 
     def test_needs_attention_no_data_is_false(self) -> None:
         """NO_DATA no debe ser considerado needs_attention (no hay datos, no hay riesgo)."""
         from app.domain.health_score import ScoreLevel
+
         # needs_attention checks CRITICAL and WARNING only
         assert ScoreLevel.NO_DATA not in (ScoreLevel.CRITICAL, ScoreLevel.WARNING)

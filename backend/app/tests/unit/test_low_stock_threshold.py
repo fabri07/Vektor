@@ -6,7 +6,6 @@ Reglas:
   > 0   = umbral configurado por el tenant
 """
 
-import pytest
 from decimal import Decimal
 from uuid import uuid4
 
@@ -32,6 +31,7 @@ def _make_product(stock_units: int, low_stock_threshold_units: int | None) -> Pr
 
 # ── effective_threshold ───────────────────────────────────────────────────────
 
+
 def test_effective_threshold_none_returns_default():
     assert effective_threshold(None) == DEFAULT_LOW_STOCK_THRESHOLD_UNITS
 
@@ -47,6 +47,7 @@ def test_effective_threshold_positive_returns_value():
 
 
 # ── ProductResponse.is_low_stock ─────────────────────────────────────────────
+
 
 def test_no_threshold_configured_stock_above_default_is_ok():
     # 10 unidades, sin threshold → effective = 5 → 10 > 5 → no es bajo

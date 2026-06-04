@@ -5,7 +5,7 @@ GET /api/v1/admin/metrics           — estadísticas de la plataforma
 GET /api/v1/admin/analytics/benchmarks — benchmarks por vertical (data moat)
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,16 +43,14 @@ async def get_admin_metrics(
     session: AsyncSession = Depends(get_db_session),
 ) -> AdminMetricsResponse:
     # 1. total_tenants
-    total_tenants: int = (
-        await session.scalar(select(func.count()).select_from(Tenant))
-    ) or 0
+    total_tenants: int = (await session.scalar(select(func.count()).select_from(Tenant))) or 0
 
     # 2. total_onboarding_completed
     total_onboarding: int = (
         await session.scalar(
-            select(func.count()).select_from(BusinessProfile).where(
-                BusinessProfile.onboarding_completed.is_(True)
-            )
+            select(func.count())
+            .select_from(BusinessProfile)
+            .where(BusinessProfile.onboarding_completed.is_(True))
         )
     ) or 0
 
@@ -89,10 +87,12 @@ async def get_admin_metrics(
     )
 
     # 5. jobs_last_24h
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = datetime.now(UTC) - timedelta(hours=24)
     job_success: int = (
         await session.scalar(
-            select(func.count()).select_from(UserActivityEvent).where(
+            select(func.count())
+            .select_from(UserActivityEvent)
+            .where(
                 UserActivityEvent.event_type == "JOB_SUCCESS",
                 UserActivityEvent.created_at >= cutoff,
             )
@@ -100,7 +100,9 @@ async def get_admin_metrics(
     ) or 0
     job_failed: int = (
         await session.scalar(
-            select(func.count()).select_from(UserActivityEvent).where(
+            select(func.count())
+            .select_from(UserActivityEvent)
+            .where(
                 UserActivityEvent.event_type == "JOB_FAILED",
                 UserActivityEvent.created_at >= cutoff,
             )
@@ -110,8 +112,9 @@ async def get_admin_metrics(
     # 6. tenants_by_vertical
     rows = (
         await session.execute(
-            select(BusinessProfile.vertical_code, func.count().label("cnt"))
-            .group_by(BusinessProfile.vertical_code)
+            select(BusinessProfile.vertical_code, func.count().label("cnt")).group_by(
+                BusinessProfile.vertical_code
+            )
         )
     ).all()
     tenants_by_vertical: dict[str, int] = {row.vertical_code: row.cnt for row in rows}
@@ -122,9 +125,7 @@ async def get_admin_metrics(
         avg_data_completeness_score=(
             round(float(avg_completeness), 2) if avg_completeness is not None else None
         ),
-        avg_health_score=(
-            round(float(avg_health), 2) if avg_health is not None else None
-        ),
+        avg_health_score=(round(float(avg_health), 2) if avg_health is not None else None),
         jobs_last_24h=JobStats(success=job_success, failed=job_failed),
         tenants_by_vertical=tenants_by_vertical,
     )
@@ -154,18 +155,18 @@ async def get_analytics_benchmarks(
     items = [
         VerticalBenchmarkItem(
             vertical_code=item["vertical_code"],
-            sample_count=item["sample_count"],  # type: ignore[arg-type]
-            avg_score=item.get("avg_score"),  # type: ignore[arg-type]
-            avg_margin_ratio=item.get("avg_margin_ratio"),  # type: ignore[arg-type]
-            p50_margin_ratio=item.get("p50_margin_ratio"),  # type: ignore[arg-type]
-            avg_data_completeness=item.get("avg_data_completeness"),  # type: ignore[arg-type]
-            benchmark_source=item["benchmark_source"],  # type: ignore[arg-type]
+            sample_count=item["sample_count"],
+            avg_score=item.get("avg_score"),
+            avg_margin_ratio=item.get("avg_margin_ratio"),
+            p50_margin_ratio=item.get("p50_margin_ratio"),
+            avg_data_completeness=item.get("avg_data_completeness"),
+            benchmark_source=item["benchmark_source"],
             benchmark=BenchmarkThresholds(
                 critical_below=item["benchmark"]["critical_below"],  # type: ignore[index]
                 warning_below=item["benchmark"]["warning_below"],  # type: ignore[index]
                 healthy_min=item["benchmark"]["healthy_min"],  # type: ignore[index]
                 healthy_max=item["benchmark"]["healthy_max"],  # type: ignore[index]
-                source=item["benchmark_source"],  # type: ignore[arg-type]
+                source=item["benchmark_source"],
             ),
         )
         for item in overview
@@ -174,6 +175,7 @@ async def get_analytics_benchmarks(
 
 
 # ── Data repair endpoints ─────────────────────────────────────────────────────
+
 
 @router.post(
     "/repairs/misclassified-product-imports/dry-run",

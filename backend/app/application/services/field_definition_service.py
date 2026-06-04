@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.observability.logger import get_logger
@@ -77,7 +77,9 @@ async def get_merged_definitions(
         entry: dict[str, Any] = {
             "field_key": base.field_key,
             "entity_type": base.entity_type,
-            "label": (override.override_label if override and override.override_label else base.label),
+            "label": (
+                override.override_label if override and override.override_label else base.label
+            ),
             "data_type": base.data_type,
             "enum_options": (
                 override.override_enum_options
@@ -102,17 +104,19 @@ async def get_merged_definitions(
             continue
         if not tenant_field.is_enabled:
             continue
-        result.append({
-            "field_key": tenant_field.field_key,
-            "entity_type": tenant_field.entity_type,
-            "label": tenant_field.override_label or tenant_field.field_key,
-            "data_type": tenant_field.data_type or "text",
-            "enum_options": tenant_field.override_enum_options,
-            "is_required": tenant_field.override_required or False,
-            "display_order": tenant_field.display_order,
-            "is_base_field": False,
-            "affects_scoring": False,
-        })
+        result.append(
+            {
+                "field_key": tenant_field.field_key,
+                "entity_type": tenant_field.entity_type,
+                "label": tenant_field.override_label or tenant_field.field_key,
+                "data_type": tenant_field.data_type or "text",
+                "enum_options": tenant_field.override_enum_options,
+                "is_required": tenant_field.override_required or False,
+                "display_order": tenant_field.display_order,
+                "is_base_field": False,
+                "affects_scoring": False,
+            }
+        )
 
     result.sort(key=lambda x: (x["entity_type"], x["display_order"]))
     return result
@@ -146,16 +150,18 @@ async def create_custom_field(
     session.add(field)
     await session.flush()
     new_state = _snapshot(field)
-    session.add(TenantFieldChangeLog(
-        tenant_id=tenant_id,
-        field_key=field_key,
-        entity_type=entity_type,
-        action="created",
-        previous_state=None,
-        new_state=new_state,
-        changed_by=user_id,
-        changed_at=now,
-    ))
+    session.add(
+        TenantFieldChangeLog(
+            tenant_id=tenant_id,
+            field_key=field_key,
+            entity_type=entity_type,
+            action="created",
+            previous_state=None,
+            new_state=new_state,
+            changed_by=user_id,
+            changed_at=now,
+        )
+    )
     await session.commit()
     log.info("custom_field_created", tenant_id=str(tenant_id), field_key=field_key)
     return field
@@ -208,16 +214,18 @@ async def toggle_field(
         field.updated_at = now
 
     await session.flush()
-    session.add(TenantFieldChangeLog(
-        tenant_id=tenant_id,
-        field_key=field_key,
-        entity_type=entity_type,
-        action="enabled" if enabled else "disabled",
-        previous_state=prev_state,
-        new_state=_snapshot(field),
-        changed_by=user_id,
-        changed_at=now,
-    ))
+    session.add(
+        TenantFieldChangeLog(
+            tenant_id=tenant_id,
+            field_key=field_key,
+            entity_type=entity_type,
+            action="enabled" if enabled else "disabled",
+            previous_state=prev_state,
+            new_state=_snapshot(field),
+            changed_by=user_id,
+            changed_at=now,
+        )
+    )
     await session.commit()
     return field
 
@@ -247,13 +255,15 @@ async def undo_last_change(
     prev = entry.previous_state
     now = datetime.now(UTC)
 
-    field = (await session.execute(
-        select(TenantCustomFieldDefinition).where(
-            TenantCustomFieldDefinition.tenant_id == tenant_id,
-            TenantCustomFieldDefinition.field_key == field_key,
-            TenantCustomFieldDefinition.entity_type == entity_type,
+    field = (
+        await session.execute(
+            select(TenantCustomFieldDefinition).where(
+                TenantCustomFieldDefinition.tenant_id == tenant_id,
+                TenantCustomFieldDefinition.field_key == field_key,
+                TenantCustomFieldDefinition.entity_type == entity_type,
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
 
     if field is None:
         return False
@@ -266,16 +276,18 @@ async def undo_last_change(
     field.display_order = prev.get("display_order", 0)
     field.updated_at = now
 
-    session.add(TenantFieldChangeLog(
-        tenant_id=tenant_id,
-        field_key=field_key,
-        entity_type=entity_type,
-        action="undo",
-        previous_state=current_state,
-        new_state=prev,
-        changed_by=user_id,
-        changed_at=now,
-    ))
+    session.add(
+        TenantFieldChangeLog(
+            tenant_id=tenant_id,
+            field_key=field_key,
+            entity_type=entity_type,
+            action="undo",
+            previous_state=current_state,
+            new_state=prev,
+            changed_by=user_id,
+            changed_at=now,
+        )
+    )
     await session.commit()
     log.info("field_undo", tenant_id=str(tenant_id), field_key=field_key)
     return True
@@ -293,25 +305,29 @@ async def update_custom_field(
     override_enum_options: list[dict[str, Any]] | None = None,
     display_order: int | None = None,
 ) -> TenantCustomFieldDefinition | None:
-    field = (await session.execute(
-        select(TenantCustomFieldDefinition).where(
-            TenantCustomFieldDefinition.tenant_id == tenant_id,
-            TenantCustomFieldDefinition.field_key == field_key,
-            TenantCustomFieldDefinition.entity_type == entity_type,
+    field = (
+        await session.execute(
+            select(TenantCustomFieldDefinition).where(
+                TenantCustomFieldDefinition.tenant_id == tenant_id,
+                TenantCustomFieldDefinition.field_key == field_key,
+                TenantCustomFieldDefinition.entity_type == entity_type,
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
 
     now = datetime.now(UTC)
 
     if field is None:
         # First-time customization of a base field — create override from vertical definition
-        base = (await session.execute(
-            select(VerticalFieldDefinition).where(
-                VerticalFieldDefinition.vertical_code == vertical_code,
-                VerticalFieldDefinition.field_key == field_key,
-                VerticalFieldDefinition.entity_type == entity_type,
+        base = (
+            await session.execute(
+                select(VerticalFieldDefinition).where(
+                    VerticalFieldDefinition.vertical_code == vertical_code,
+                    VerticalFieldDefinition.field_key == field_key,
+                    VerticalFieldDefinition.entity_type == entity_type,
+                )
             )
-        )).scalar_one_or_none()
+        ).scalar_one_or_none()
         if base is None:
             return None  # field not found anywhere
         field = TenantCustomFieldDefinition(
@@ -330,16 +346,18 @@ async def update_custom_field(
         )
         session.add(field)
         await session.flush()
-        session.add(TenantFieldChangeLog(
-            tenant_id=tenant_id,
-            field_key=field_key,
-            entity_type=entity_type,
-            action="created",
-            previous_state=None,
-            new_state=_snapshot(field),
-            changed_by=user_id,
-            changed_at=now,
-        ))
+        session.add(
+            TenantFieldChangeLog(
+                tenant_id=tenant_id,
+                field_key=field_key,
+                entity_type=entity_type,
+                action="created",
+                previous_state=None,
+                new_state=_snapshot(field),
+                changed_by=user_id,
+                changed_at=now,
+            )
+        )
         await session.commit()
         log.info("base_field_override_created", tenant_id=str(tenant_id), field_key=field_key)
         return field
@@ -356,16 +374,18 @@ async def update_custom_field(
         field.display_order = display_order
     field.updated_at = now
 
-    session.add(TenantFieldChangeLog(
-        tenant_id=tenant_id,
-        field_key=field_key,
-        entity_type=entity_type,
-        action="modified",
-        previous_state=prev_state,
-        new_state=_snapshot(field),
-        changed_by=user_id,
-        changed_at=now,
-    ))
+    session.add(
+        TenantFieldChangeLog(
+            tenant_id=tenant_id,
+            field_key=field_key,
+            entity_type=entity_type,
+            action="modified",
+            previous_state=prev_state,
+            new_state=_snapshot(field),
+            changed_by=user_id,
+            changed_at=now,
+        )
+    )
     await session.commit()
     log.info("custom_field_updated", tenant_id=str(tenant_id), field_key=field_key)
     return field

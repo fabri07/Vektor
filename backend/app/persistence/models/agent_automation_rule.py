@@ -6,6 +6,7 @@ execute without asking for approval again.
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Text, text
 from sqlalchemy.dialects.postgresql import UUID
@@ -49,7 +50,7 @@ class AgentAutomationRule(UUIDPrimaryKeyMixin, Base):
     action_type: Mapped[str] = mapped_column(Text, nullable=False)
     external_system: Mapped[str | None] = mapped_column(Text, nullable=True)
     rule_key: Mapped[str] = mapped_column(Text, nullable=False)
-    criteria: Mapped[dict] = mapped_column(PGJSONB, nullable=False, default=dict)
+    criteria: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     risk_level: Mapped[str] = mapped_column(Text, nullable=False)
     created_from_pending_action_id: Mapped[uuid.UUID | None] = mapped_column(

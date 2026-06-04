@@ -35,6 +35,7 @@ _REGISTER_PAYLOAD = {
 
 # ── Register ──────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestRegister:
     async def test_register_success(self, client: AsyncClient) -> None:
@@ -71,6 +72,7 @@ class TestRegister:
 
 # ── Login ─────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 class TestLogin:
     async def test_login_success(self, client: AsyncClient) -> None:
@@ -104,6 +106,7 @@ class TestLogin:
 
 
 # ── Me ────────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 class TestMe:
@@ -150,9 +153,7 @@ class TestMe:
 
 @pytest.mark.asyncio
 class TestForgotResetPassword:
-    async def test_forgot_password_unknown_email_returns_200(
-        self, client: AsyncClient
-    ) -> None:
+    async def test_forgot_password_unknown_email_returns_200(self, client: AsyncClient) -> None:
         response = await client.post(
             "/api/v1/auth/forgot-password",
             json={"email": "missing@example.com"},

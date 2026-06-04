@@ -2,12 +2,13 @@
 
 import json
 import unittest.mock
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.application.agents.shared.schemas import AgentRequest, Confidence, RiskLevel
 from app.application.agents.helper.agent import FALLBACK_RESPONSE
+from app.application.agents.shared.schemas import AgentRequest, Confidence, RiskLevel
 
 
 def _make_request(message: str = "test") -> AgentRequest:
@@ -18,7 +19,7 @@ def _make_request(message: str = "test") -> AgentRequest:
     )
 
 
-def _mock_llm_response(payload: dict) -> MagicMock:
+def _mock_llm_response(payload: dict[str, Any]) -> MagicMock:
     content_block = MagicMock()
     content_block.text = json.dumps(payload)
     response = MagicMock()
@@ -130,9 +131,7 @@ async def test_never_invents_features():
 
         agent = AgentHelper()
         agent.client = mock_client
-        result = await agent.process(
-            _make_request("¿puedo conectar Véktor con Mercado Libre?")
-        )
+        result = await agent.process(_make_request("¿puedo conectar Véktor con Mercado Libre?"))
 
     assert result.status == "success"
     assert result.result["summary"] == FALLBACK_RESPONSE
@@ -185,7 +184,7 @@ async def test_answer_does_not_modify_data():
         with unittest.mock.patch(
             "app.application.agents.helper.agent.json.loads",
             wraps=json.loads,
-        ) as mock_json:
+        ):
             from app.application.agents.helper.agent import AgentHelper
 
             agent = AgentHelper()

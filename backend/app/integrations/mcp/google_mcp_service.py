@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, Field
 
@@ -23,72 +23,79 @@ logger = get_logger(__name__)
 
 # Allowlist de herramientas por agente. En código fuente — no en DB.
 AGENT_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
-    "agent_supplier": frozenset({
-        "google.gmail.list_messages",
-        "google.gmail.get_message",
-        "google.gmail.create_draft",
-        "google.gmail.send_message",
-        "google.gmail.reply_message",
-        "google.drive.list_files",
-        "google.drive.read_file",
-        "google.drive.upload_file",
-    }),
-    "agent_cash": frozenset({
-        "google.sheets.read_range",
-        "google.sheets.append_rows",
-        "google.drive.list_files",
-        "google.drive.read_file",
-        "google.drive.upload_file",
-    }),
-    "agent_stock": frozenset({
-        "google.sheets.read_range",
-        "google.sheets.append_rows",
-        "google.drive.list_files",
-        "google.drive.read_file",
-        "google.drive.upload_file",
-    }),
-    "agent_health": frozenset({
-        "google.drive.list_files",
-        "google.drive.read_file",
-        "google.sheets.append_rows",
-        "google.docs.create_document",
-        "google.docs.append_content",
-    }),
+    "agent_supplier": frozenset(
+        {
+            "google.gmail.list_messages",
+            "google.gmail.get_message",
+            "google.gmail.create_draft",
+            "google.gmail.send_message",
+            "google.gmail.reply_message",
+            "google.drive.list_files",
+            "google.drive.read_file",
+            "google.drive.upload_file",
+        }
+    ),
+    "agent_stock": frozenset(
+        {
+            "google.sheets.read_range",
+            "google.sheets.append_rows",
+            "google.drive.list_files",
+            "google.drive.read_file",
+            "google.drive.upload_file",
+        }
+    ),
+    "agent_health": frozenset(
+        {
+            "google.drive.list_files",
+            "google.drive.read_file",
+            "google.sheets.append_rows",
+            "google.docs.create_document",
+            "google.docs.append_content",
+        }
+    ),
     # Stage 2: nuevos agentes
-    "agent_income": frozenset({
-        "google.sheets.read_range",
-        "google.sheets.append_rows",
-        "google.drive.list_files",
-        "google.drive.read_file",
-        "google.drive.upload_file",
-    }),
-    "agent_expense": frozenset({
-        "google.sheets.read_range",
-        "google.sheets.append_rows",
-        "google.drive.list_files",
-        "google.drive.read_file",
-    }),
-    "agent_google": frozenset({
-        "google.gmail.list_messages",
-        "google.gmail.get_message",
-        "google.gmail.create_draft",
-        "google.gmail.send_message",
-        "google.gmail.reply_message",
-        "google.calendar.list_events",
-        "google.calendar.create_event",
-        "google.sheets.read_range",
-        "google.sheets.append_rows",
-        "google.drive.upload_file",
-        "google.drive.list_files",
-        "google.drive.read_file",
-        "google.docs.create_document",
-        "google.docs.append_content",
-    }),
+    "agent_income": frozenset(
+        {
+            "google.sheets.read_range",
+            "google.sheets.append_rows",
+            "google.drive.list_files",
+            "google.drive.read_file",
+            "google.drive.upload_file",
+        }
+    ),
+    "agent_expense": frozenset(
+        {
+            "google.sheets.read_range",
+            "google.sheets.append_rows",
+            "google.drive.list_files",
+            "google.drive.read_file",
+        }
+    ),
+    "agent_google": frozenset(
+        {
+            "google.gmail.list_messages",
+            "google.gmail.get_message",
+            "google.gmail.create_draft",
+            "google.gmail.send_message",
+            "google.gmail.reply_message",
+            "google.calendar.list_events",
+            "google.calendar.create_event",
+            "google.sheets.read_range",
+            "google.sheets.append_rows",
+            "google.drive.upload_file",
+            "google.drive.list_files",
+            "google.drive.read_file",
+            "google.docs.create_document",
+            "google.docs.append_content",
+        }
+    ),
     "agent_helper": frozenset(),
     "agent_ceo": frozenset(),
-    "agent_stock_v2": frozenset({
-        "google.sheets.read_range",
-    }),
+    "agent_stock_v2": frozenset(
+        {
+            "google.sheets.read_range",
+        }
+    ),
 }
 
 # ── Schemas Pydantic de argumentos ────────────────────────────────────────────
@@ -226,7 +233,7 @@ class GoogleMcpService:
     async def list_gmail_messages(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
         args = _GmailListArgs(query=query, max_results=max_results).model_dump()
         result = await self._call("google.gmail.list_messages", args)
-        return result.get("messages", [])  # type: ignore[return-value]
+        return cast("list[dict[str, Any]]", result.get("messages", []))
 
     async def get_gmail_message(self, message_id: str) -> dict[str, Any]:
         args = _GmailGetArgs(message_id=message_id).model_dump()
@@ -270,7 +277,7 @@ class GoogleMcpService:
             time_min=time_min, time_max=time_max, max_results=max_results
         ).model_dump()
         result = await self._call("google.calendar.list_events", args)
-        return result.get("events", [])  # type: ignore[return-value]
+        return cast("list[dict[str, Any]]", result.get("events", []))
 
     async def create_calendar_event(
         self,
@@ -294,7 +301,7 @@ class GoogleMcpService:
     async def read_sheet_range(self, spreadsheet_id: str, range_name: str) -> list[list[Any]]:
         args = _SheetsReadArgs(spreadsheet_id=spreadsheet_id, range=range_name).model_dump()
         result = await self._call("google.sheets.read_range", args)
-        return result.get("values", [])  # type: ignore[return-value]
+        return cast("list[list[Any]]", result.get("values", []))
 
     async def append_sheet_rows(
         self, spreadsheet_id: str, range_name: str, rows: list[list[Any]]
@@ -331,7 +338,7 @@ class GoogleMcpService:
             folder_id=folder_id, query=query, max_results=max_results
         ).model_dump()
         result = await self._call("google.drive.list_files", args)
-        return result.get("files", [])  # type: ignore[return-value]
+        return cast("list[dict[str, Any]]", result.get("files", []))
 
     async def read_drive_file(self, file_id: str) -> dict[str, Any]:
         args = _DriveReadArgs(file_id=file_id).model_dump()

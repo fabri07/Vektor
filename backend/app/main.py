@@ -87,13 +87,9 @@ def create_app() -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; frame-ancestors 'none'"
-        )
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
         if settings.is_production:
-            response.headers["Strict-Transport-Security"] = (
-                "max-age=31536000; includeSubDomains"
-            )
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
     # ── Request logging ───────────────────────────────────────────────────────
@@ -137,10 +133,10 @@ def create_app() -> FastAPI:
     async def request_validation_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        body = None
+        body: str | None = None
         try:
-            body = await request.body()
-            body = body.decode("utf-8")[:500]
+            raw_body = await request.body()
+            body = raw_body.decode("utf-8")[:500]
         except Exception:
             pass
         logger.warning(
@@ -155,9 +151,7 @@ def create_app() -> FastAPI:
         )
 
     @app.exception_handler(ValidationError)
-    async def pydantic_validation_handler(
-        request: Request, exc: ValidationError
-    ) -> JSONResponse:
+    async def pydantic_validation_handler(request: Request, exc: ValidationError) -> JSONResponse:
         logger.warning(
             "request.validation_error",
             path=str(request.url.path),
@@ -169,9 +163,7 @@ def create_app() -> FastAPI:
         )
 
     @app.exception_handler(Exception)
-    async def unhandled_exception_handler(
-        request: Request, exc: Exception
-    ) -> JSONResponse:
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.error(
             "request.unhandled_exception",
             path=str(request.url.path),

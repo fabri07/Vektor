@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
+from typing import Any
 
-import pytest
-
-from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
+from app.heuristics.health_engine import calculate_health_score
 from app.heuristics.verticals.kiosco import BENCHMARK as KIOSCO_BENCHMARK
 from app.state.business_state_service import BusinessState, ProductSummary
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
 
 def _product(stock: int = 20, threshold: int = 5) -> ProductSummary:
     return ProductSummary(
@@ -34,7 +34,7 @@ def _state(
     cash_on_hand_est: Decimal = Decimal("6666.67"),
     prev_monthly_sales_est: Decimal = Decimal("0"),
     supplier_count: int = 4,
-    products: list | None = None,
+    products: list[Any] | None = None,
     completeness: float = 75.0,
     confidence: str = "MEDIUM",
 ) -> BusinessState:
@@ -44,7 +44,7 @@ def _state(
         vertical_code="kiosco",
         data_completeness_score=completeness,
         confidence_level=confidence,
-        ruleset=KIOSCO_BENCHMARK,
+        ruleset=KIOSCO_BENCHMARK,  # type: ignore[arg-type]  # test double / fixture
         monthly_sales_est=monthly_sales_est,
         monthly_inventory_cost_est=monthly_inventory_cost_est,
         monthly_fixed_expenses_est=monthly_fixed_expenses_est,
@@ -58,6 +58,7 @@ def _state(
 
 
 # ── Formula v2 regression ──────────────────────────────────────────────────────
+
 
 class TestFormulaV2Regression:
     def test_weights_sum_to_one(self) -> None:
@@ -134,6 +135,7 @@ class TestFormulaV2Regression:
 
 
 # ── Margin override via benchmark param ───────────────────────────────────────
+
 
 class TestMarginBenchmarkOverride:
     def test_custom_benchmark_affects_margin_score(self) -> None:

@@ -23,8 +23,8 @@ from app.application.agents.health.sub_calculator import ComponentScoresV2
 from app.application.agents.shared.heuristic_engine import CashHealthConfig, HeuristicConfig
 from app.application.agents.shared.schemas import AgentRequest
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _make_config(healthy_days_min: float = 10.0, warning_days_min: float = 7.0) -> HeuristicConfig:
     return HeuristicConfig(
@@ -84,10 +84,14 @@ def _make_scores_v2(
 
 # ── Tests de fórmula v1 (compat shim scorer.py) ───────────────────────────────
 
+
 def test_score_formula_correct():
     """components={100,100,100,100} → score=100.0"""
     components = ComponentScores(
-        cash_score=100.0, stock_score=100.0, supplier_score=100.0, discipline_score=100.0,
+        cash_score=100.0,
+        stock_score=100.0,
+        supplier_score=100.0,
+        discipline_score=100.0,
     )
     assert compute_health_score(components) == 100.0
 
@@ -95,7 +99,10 @@ def test_score_formula_correct():
 def test_score_weights():
     """cash_score=100, resto=0 → health_score=35.0 (peso del cash es 0.35 en fórmula v1)."""
     components = ComponentScores(
-        cash_score=100.0, stock_score=0.0, supplier_score=0.0, discipline_score=0.0,
+        cash_score=100.0,
+        stock_score=0.0,
+        supplier_score=0.0,
+        discipline_score=0.0,
     )
     assert compute_health_score(components) == pytest.approx(35.0, abs=0.001)
 
@@ -103,7 +110,10 @@ def test_score_weights():
 def test_score_weight_stock():
     """stock_score=100, resto=0 → health_score=30.0 (fórmula v1)."""
     components = ComponentScores(
-        cash_score=0.0, stock_score=100.0, supplier_score=0.0, discipline_score=0.0,
+        cash_score=0.0,
+        stock_score=100.0,
+        supplier_score=0.0,
+        discipline_score=0.0,
     )
     assert compute_health_score(components) == pytest.approx(30.0, abs=0.001)
 
@@ -111,7 +121,10 @@ def test_score_weight_stock():
 def test_score_weight_supplier():
     """supplier_score=100, resto=0 → health_score=15.0 (fórmula v1)."""
     components = ComponentScores(
-        cash_score=0.0, stock_score=0.0, supplier_score=100.0, discipline_score=0.0,
+        cash_score=0.0,
+        stock_score=0.0,
+        supplier_score=100.0,
+        discipline_score=0.0,
     )
     assert compute_health_score(components) == pytest.approx(15.0, abs=0.001)
 
@@ -119,7 +132,10 @@ def test_score_weight_supplier():
 def test_score_weight_discipline():
     """discipline_score=100, resto=0 → health_score=20.0 (fórmula v1)."""
     components = ComponentScores(
-        cash_score=0.0, stock_score=0.0, supplier_score=0.0, discipline_score=100.0,
+        cash_score=0.0,
+        stock_score=0.0,
+        supplier_score=0.0,
+        discipline_score=100.0,
     )
     assert compute_health_score(components) == pytest.approx(20.0, abs=0.001)
 
@@ -141,6 +157,7 @@ def test_score_is_deterministic():
 
 
 # ── Tests de componentes individuales ─────────────────────────────────────────
+
 
 def test_cash_component_critical():
     config = _make_config(healthy_days_min=10.0, warning_days_min=7.0)
@@ -202,9 +219,11 @@ def test_discipline_score_no_days():
 
 # ── Tests de alertas v2 (_build_alerts con ComponentScoresV2) ────────────────
 
+
 def test_alerts_are_top3():
     """_build_alerts siempre retorna máximo 3 alertas."""
     from app.application.agents.health.agent import AgentHealth
+
     agent = AgentHealth()
     scores = _make_scores_v2(cash=10, stock=20, supplier=100, margin=30, growth=20)
     alerts = agent._build_alerts(scores)
@@ -214,6 +233,7 @@ def test_alerts_are_top3():
 def test_alerts_cash_critical():
     """cash_score < 30 → alerta CRITICAL."""
     from app.application.agents.health.agent import AgentHealth
+
     agent = AgentHealth()
     scores = _make_scores_v2(cash=10, stock=100, supplier=100, margin=100, growth=100)
     alerts = agent._build_alerts(scores)
@@ -223,6 +243,7 @@ def test_alerts_cash_critical():
 def test_alerts_cash_warning():
     """cash_score entre 30 y 60 → alerta WARNING (no CRITICAL)."""
     from app.application.agents.health.agent import AgentHealth
+
     agent = AgentHealth()
     scores = _make_scores_v2(cash=45, stock=100, supplier=100, margin=100, growth=100)
     alerts = agent._build_alerts(scores)
@@ -234,6 +255,7 @@ def test_alerts_cash_warning():
 def test_alerts_growth_low():
     """growth_score < 40 → alerta INFO."""
     from app.application.agents.health.agent import AgentHealth
+
     agent = AgentHealth()
     scores = _make_scores_v2(cash=80, stock=80, supplier=80, margin=80, growth=30)
     alerts = agent._build_alerts(scores)
@@ -242,6 +264,7 @@ def test_alerts_growth_low():
 
 
 # ── Tests del cálculo — LLM no debe ser llamado ───────────────────────────────
+
 
 def test_llm_not_called_for_score():
     """El cálculo del score NO llama al cliente Anthropic."""
@@ -260,10 +283,12 @@ def test_llm_not_called_for_score():
 
 # ── Tests de process() ────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_process_no_db_returns_error():
     """Sin DB → status=error."""
     from app.application.agents.health.agent import AgentHealth
+
     agent = AgentHealth()  # sin DB
     result = await agent.process(_make_request())
     assert result.status == "error"
@@ -281,9 +306,13 @@ async def test_process_low_confidence_returns_clarification():
     mock_client = _mock_anthropic_client()
     agent.client = mock_client
 
-    with patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))):
-        with patch("app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)):
-            result = await agent.process(_make_request())
+    with (
+        patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))),
+        patch(
+            "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
+        ),
+    ):
+        result = await agent.process(_make_request())
 
     assert result.status == "requires_clarification"
     assert result.confidence == "LOW"
@@ -306,11 +335,15 @@ async def test_process_high_confidence_returns_success():
 
     high_scores = _make_scores_v2(total=72, confidence_level="HIGH", completeness=90.0)
 
-    with patch("app.application.agents.health.agent.EventBus.emit"):
-        with patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))):
-            with patch("app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)):
-                with patch("app.application.agents.health.agent.compute_scores", return_value=high_scores):
-                    result = await agent.process(_make_request())
+    with (
+        patch("app.application.agents.health.agent.EventBus.emit"),
+        patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))),
+        patch(
+            "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
+        ),
+        patch("app.application.agents.health.agent.compute_scores", return_value=high_scores),
+    ):
+        result = await agent.process(_make_request())
 
     assert result.status == "success"
     assert result.result["health_score"] == 72
@@ -334,11 +367,15 @@ async def test_process_emits_event_on_success():
     mock_state.vertical_code = "kiosco"
     high_scores = _make_scores_v2(total=72)
 
-    with patch("app.application.agents.health.agent.EventBus.emit") as mock_emit:
-        with patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))):
-            with patch("app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)):
-                with patch("app.application.agents.health.agent.compute_scores", return_value=high_scores):
-                    await agent.process(_make_request())
+    with (
+        patch("app.application.agents.health.agent.EventBus.emit") as mock_emit,
+        patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))),
+        patch(
+            "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
+        ),
+        patch("app.application.agents.health.agent.compute_scores", return_value=high_scores),
+    ):
+        await agent.process(_make_request())
 
     mock_emit.assert_called_once()
     assert mock_emit.call_args[0][0] == "HEALTH_SCORE_UPDATED"

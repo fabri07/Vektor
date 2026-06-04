@@ -1,6 +1,7 @@
 """Repository for SaleEntry and ExpenseEntry."""
 
 from datetime import date
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -80,7 +81,7 @@ class SaleRepository:
         tenant_id: UUID,
         from_date: date,
         to_date: date,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Ventas diarias agrupadas por método de pago."""
         q = (
             select(
@@ -103,6 +104,78 @@ class SaleRepository:
                 "date": str(row.transaction_date),
                 "payment_method": row.payment_method or "OTROS",
                 "total": float(row.total or 0),
+            }
+            for row in result.all()
+        ]
+
+    async def get_daily_velocity(
+        self,
+        tenant_id: UUID,
+        days: int = 30,
+    ) -> dict[str, float]:
+        """Velocidad de venta diaria por producto (unidades/día) en una ventana (Sprint 17).
+
+        Returns dict[product_id_str, float]: unidades vendidas / `days`. Solo incluye
+        ventas con `product_id` no nulo y no anuladas. Se usa para días de stock,
+        sobrestock y priorización de reposición.
+        """
+        from datetime import date as _date  # noqa: PLC0415
+        from datetime import timedelta as _timedelta
+
+        cutoff = _date.today() - _timedelta(days=days)
+        q = (
+            select(
+                SaleEntry.product_id,
+                func.sum(SaleEntry.quantity).label("units"),
+            )
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.product_id.isnot(None),
+                SaleEntry.transaction_date >= cutoff,
+            )
+            .group_by(SaleEntry.product_id)
+        )
+        result = await self._session.execute(q)
+        span = days if days > 0 else 1
+        return {str(row.product_id): round(float(row.units or 0) / span, 4) for row in result.all()}
+
+    async def get_sales_by_product(
+        self,
+        tenant_id: UUID,
+        from_date: date,
+        to_date: date,
+    ) -> list[dict[str, Any]]:
+        """Ventas agregadas por producto en un período (Sprint 17).
+
+        Agrupa por product_id sumando unidades y facturación. Solo ventas con
+        product_id no nulo y no anuladas. El cruce con costo/margen lo hace el agente.
+        Returns list[dict]: product_id, units, revenue, n_sales.
+        """
+        q = (
+            select(
+                SaleEntry.product_id,
+                func.sum(SaleEntry.quantity).label("units"),
+                func.sum(SaleEntry.amount).label("revenue"),
+                func.count(SaleEntry.id).label("n_sales"),
+            )
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.product_id.isnot(None),
+                SaleEntry.transaction_date >= from_date,
+                SaleEntry.transaction_date <= to_date,
+            )
+            .group_by(SaleEntry.product_id)
+            .order_by(func.sum(SaleEntry.amount).desc())
+        )
+        result = await self._session.execute(q)
+        return [
+            {
+                "product_id": str(row.product_id),
+                "units": int(row.units or 0),
+                "revenue": float(row.revenue or 0),
+                "n_sales": int(row.n_sales or 0),
             }
             for row in result.all()
         ]
@@ -196,14 +269,11 @@ class ExpenseRepository:
         tenant_id: UUID,
         from_date: date | None = None,
         to_date: date | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Gastos agrupados por categoría con totales y porcentaje."""
-        q = (
-            select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total"))
-            .where(
-                ExpenseEntry.tenant_id == tenant_id,
-                ExpenseEntry.voided_at.is_(None),
-            )
+        q = select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total")).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
@@ -218,9 +288,7 @@ class ExpenseRepository:
                 "category": r.category or "OTHER",
                 "total": float(r.total or 0),
                 "pct": (
-                    round(float(r.total or 0) / grand_total * 100, 1)
-                    if grand_total > 0
-                    else 0.0
+                    round(float(r.total or 0) / grand_total * 100, 1) if grand_total > 0 else 0.0
                 ),
             }
             for r in rows
@@ -232,16 +300,13 @@ class ExpenseRepository:
         from_date: date | None = None,
         to_date: date | None = None,
         limit: int = 5,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Top proveedores por gasto total."""
-        q = (
-            select(ExpenseEntry.supplier_name, func.sum(ExpenseEntry.amount).label("total"))
-            .where(
-                ExpenseEntry.tenant_id == tenant_id,
-                ExpenseEntry.voided_at.is_(None),
-                ExpenseEntry.supplier_name.isnot(None),
-                ExpenseEntry.supplier_name != "",
-            )
+        q = select(ExpenseEntry.supplier_name, func.sum(ExpenseEntry.amount).label("total")).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
+            ExpenseEntry.supplier_name.isnot(None),
+            ExpenseEntry.supplier_name != "",
         )
         if from_date:
             q = q.where(ExpenseEntry.transaction_date >= from_date)
@@ -273,9 +338,7 @@ class ExpenseRepository:
                 "supplier_name": r.supplier_name,
                 "total": float(r.total or 0),
                 "pct": (
-                    round(float(r.total or 0) / grand_total * 100, 1)
-                    if grand_total > 0
-                    else 0.0
+                    round(float(r.total or 0) / grand_total * 100, 1) if grand_total > 0 else 0.0
                 ),
             }
             for r in rows
@@ -286,7 +349,7 @@ class ExpenseRepository:
         tenant_id: UUID,
         from_date: date,
         to_date: date,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Gastos diarios agrupados por método de pago."""
         q = (
             select(
@@ -312,6 +375,54 @@ class ExpenseRepository:
             }
             for row in result.all()
         ]
+
+    async def get_expense_stats_by_category(
+        self,
+        tenant_id: UUID,
+        days: int = 90,
+    ) -> dict[str, dict[str, Any]]:
+        """Estadística de gastos por categoría en una ventana (Sprint 17).
+
+        Devuelve, por categoría: count, total, media, desvío estándar muestral y
+        el listado de montos. Alimenta la detección de gastos anómalos (media + 2σ)
+        y el análisis de costos fijos/variables. Solo gastos no anulados.
+
+        Returns dict[category, {count, total, mean, stddev, amounts: list[float]}].
+        """
+        from datetime import date as _date  # noqa: PLC0415
+        from datetime import timedelta as _timedelta
+        from statistics import pstdev  # noqa: PLC0415
+
+        cutoff = _date.today() - _timedelta(days=days)
+        q = select(
+            ExpenseEntry.category,
+            ExpenseEntry.amount,
+        ).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
+            ExpenseEntry.transaction_date >= cutoff,
+        )
+        result = await self._session.execute(q)
+        by_cat: dict[str, list[float]] = {}
+        for row in result.all():
+            cat = row.category or "OTHER"
+            by_cat.setdefault(cat, []).append(float(row.amount or 0))
+
+        stats: dict[str, dict[str, Any]] = {}
+        for cat, amounts in by_cat.items():
+            n = len(amounts)
+            total = sum(amounts)
+            mean = total / n if n else 0.0
+            # pstdev (poblacional) — robusto con n pequeño; con n==1 da 0.0
+            stddev = pstdev(amounts) if n > 1 else 0.0
+            stats[cat] = {
+                "count": n,
+                "total": round(total, 2),
+                "mean": round(mean, 2),
+                "stddev": round(stddev, 2),
+                "amounts": amounts,
+            }
+        return stats
 
     async def save(self, entry: ExpenseEntry) -> ExpenseEntry:
         self._session.add(entry)

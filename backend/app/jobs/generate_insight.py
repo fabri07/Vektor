@@ -83,6 +83,7 @@ def should_skip_insight(confidence_level: str | None, data_completeness: float) 
 
 # ── Main async implementation ─────────────────────────────────────────────────
 
+
 async def _run(tenant_id_str: str) -> None:
     from redis.asyncio import Redis  # noqa: PLC0415
     from sqlalchemy import select  # noqa: PLC0415
@@ -175,21 +176,24 @@ async def _run(tenant_id_str: str) -> None:
                                 "REGLAS: Usá los números dados. Máximo 3 párrafos. "
                                 "Priorizá las alertas urgentes. Español argentino, directo."
                             ),
-                            messages=[{
-                                "role": "user",
-                                "content": (
-                                    f"Negocio: {business_name}\n"
-                                    f"Score de salud: {float(snapshot.total_score):.0f}/100\n"
-                                    f"  - Liquidez/Caja: {snapshot.score_cash or 0}/100\n"
-                                    f"  - Inventario: {snapshot.score_stock or 0}/100\n"
-                                    f"  - Proveedores: {snapshot.score_supplier or 0}/100\n"
-                                    f"  - Margen comercial: {snapshot.score_margin or 0}/100\n"
-                                    f"Riesgo principal: {risk_code}\n"
-                                    f"Confianza de datos: {confidence}"
-                                ),
-                            }],
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        f"Negocio: {business_name}\n"
+                                        f"Score de salud: {float(snapshot.total_score):.0f}/100\n"
+                                        f"  - Liquidez/Caja: {snapshot.score_cash or 0}/100\n"
+                                        f"  - Inventario: {snapshot.score_stock or 0}/100\n"
+                                        f"  - Proveedores: {snapshot.score_supplier or 0}/100\n"
+                                        f"  - Margen comercial: {snapshot.score_margin or 0}/100\n"
+                                        f"Riesgo principal: {risk_code}\n"
+                                        f"Confianza de datos: {confidence}"
+                                    ),
+                                }
+                            ],
                         )
-                        narrative = _resp.content[0].text.strip()
+                        _raw = getattr(_resp.content[0], "text", "") if _resp.content else ""
+                        narrative = _raw.strip() if isinstance(_raw, str) else ""
                         if narrative:
                             description = narrative
                     except Exception as exc:
@@ -292,6 +296,7 @@ async def _run(tenant_id_str: str) -> None:
 
 
 # ── Celery task ───────────────────────────────────────────────────────────────
+
 
 @celery_app.task(  # type: ignore[misc]
     bind=True,

@@ -9,14 +9,13 @@ Endpoints:
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, get_current_user, require_role
+from app.api.v1.deps import get_current_user, require_role
 from app.application.services.health_config_service import (
     HealthConfigRequest,
     HealthConfigResponse,
     HealthConfigService,
 )
 from app.persistence.db.session import get_db_session
-from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 
 router = APIRouter()

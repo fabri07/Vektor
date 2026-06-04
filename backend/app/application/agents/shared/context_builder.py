@@ -3,7 +3,7 @@ CONTEXT_BUDGETS = {
     # Stage 2: nuevos agentes
     "agent_income": 3000,
     "agent_expense": 3000,
-    "agent_google": 3500,   # combina budget de calendar + sync
+    "agent_google": 3500,  # combina budget de calendar + sync
     # Agentes existentes
     "agent_stock": 3000,
     "agent_supplier": 3500,
@@ -26,7 +26,7 @@ CONTEXT_PRIORITY = [
 
 
 class ContextBuilder:
-    def __init__(self, agent_name: str):
+    def __init__(self, agent_name: str) -> None:
         self.budget = CONTEXT_BUDGETS.get(agent_name, 2000)
         self.parts: dict[str, str] = {}
 

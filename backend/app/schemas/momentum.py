@@ -1,7 +1,6 @@
 """Pydantic schemas for momentum engine endpoints."""
 
 from datetime import date, datetime
-from decimal import Decimal
 
 from pydantic import BaseModel
 

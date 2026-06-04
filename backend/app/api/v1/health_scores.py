@@ -1,6 +1,7 @@
 """Health score endpoints."""
 
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
@@ -40,7 +41,8 @@ async def get_current_score(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> HealthScoreResponse | NoDataResponse:
-    from sqlalchemy import func, select as sa_select  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
+    from sqlalchemy import select as sa_select
 
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
@@ -55,7 +57,9 @@ async def get_current_score(
             ExpenseEntry.tenant_id == tenant.tenant_id,
             ExpenseEntry.voided_at.is_(None),
         )
-        data_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
+        data_count = ((await session.scalar(ventas_q)) or 0) + (
+            (await session.scalar(gastos_q)) or 0
+        )
         if data_count == 0 and not tenant.is_demo:
             return NoDataResponse(is_demo_data=False)
         raise HTTPException(
@@ -160,7 +164,8 @@ async def get_latest_score(
     - NO_DATA: tenant real sin ventas ni gastos cargados.
     - is_demo_data=true: el snapshot pertenece a un tenant demo.
     """
-    from sqlalchemy import func, select as sa_select  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
+    from sqlalchemy import select as sa_select
 
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
@@ -177,7 +182,9 @@ async def get_latest_score(
             ExpenseEntry.tenant_id == tenant.tenant_id,
             ExpenseEntry.voided_at.is_(None),
         )
-        data_count = ((await session.scalar(ventas_q)) or 0) + ((await session.scalar(gastos_q)) or 0)
+        data_count = ((await session.scalar(ventas_q)) or 0) + (
+            (await session.scalar(gastos_q)) or 0
+        )
         if data_count == 0 and not tenant.is_demo:
             # Tenant real sin ningún dato cargado — estado nulo explícito.
             return NoDataResponse(is_demo_data=False)
@@ -191,7 +198,7 @@ async def get_latest_score(
         score_margin=snapshot.score_margin,
         score_stock=snapshot.score_stock,
         score_supplier=snapshot.score_supplier,
-        score_growth=snapshot.score_growth,      # None si es snapshot v1
+        score_growth=snapshot.score_growth,  # None si es snapshot v1
         primary_risk_code=snapshot.primary_risk_code or "",
         confidence_level=snapshot.confidence_level or "",
         data_completeness_score=float(snapshot.data_completeness_score or 0),
@@ -221,7 +228,7 @@ async def get_margin_history(
 
     result = []
     for snap in snapshots:
-        inputs: dict = snap.score_inputs_json or {}
+        inputs: dict[str, Any] = snap.score_inputs_json or {}
         revenue = float(str(inputs.get("monthly_sales_est") or 0))
         cogs = float(str(inputs.get("monthly_inventory_cost_est") or 0))
         fixed = float(str(inputs.get("monthly_fixed_expenses_est") or 0))
@@ -260,7 +267,7 @@ async def get_score_history_v2(
             score_margin=s.score_margin or 0,
             score_stock=s.score_stock or 0,
             score_supplier=s.score_supplier or 0,
-            score_growth=s.score_growth,          # None si es snapshot v1
+            score_growth=s.score_growth,  # None si es snapshot v1
             primary_risk_code=s.primary_risk_code or "",
             confidence_level=s.confidence_level or "",
             data_completeness_score=float(s.data_completeness_score or 0),
@@ -293,7 +300,10 @@ async def export_health_report(
     - format: 'pdf' (default) o 'docx'.
     - narrative: texto del análisis ejecutivo (max 4000 chars; opcional).
     """
-    from app.application.services.report_export_service import generate_docx, generate_pdf  # noqa: PLC0415
+    from app.application.services.report_export_service import (  # noqa: PLC0415
+        generate_docx,
+        generate_pdf,
+    )
 
     repo = HealthScoreRepository(session)
     snapshot = await repo.get_by_id(snapshot_id)

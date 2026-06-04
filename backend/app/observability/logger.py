@@ -110,7 +110,7 @@ def bind_request_context(
 def log_job(
     job_name: str,
     tenant_id: str | UUID | None = None,
-    logger: structlog.stdlib.BoundLogger | None = None,  # type: ignore[assignment]
+    logger: structlog.stdlib.BoundLogger | None = None,
 ) -> Generator[structlog.stdlib.BoundLogger, None, None]:
     """
     Context manager that logs job start/end with duration_ms and success/error.
@@ -127,7 +127,7 @@ def log_job(
     t0 = time.monotonic()
     bound.info("job.started")
     try:
-        yield bound  # type: ignore[misc]
+        yield bound
         duration_ms = int((time.monotonic() - t0) * 1000)
         bound.info("job.completed", duration_ms=duration_ms, success=True)
     except Exception as exc:

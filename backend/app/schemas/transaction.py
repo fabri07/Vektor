@@ -27,6 +27,7 @@ def _reject_nan_inf(v: Decimal | None, field_name: str = "amount") -> Decimal | 
 
 # ── Sales ─────────────────────────────────────────────────────────────────────
 
+
 class SaleEntryResponse(BaseModel):
     model_config = {"from_attributes": True}
 

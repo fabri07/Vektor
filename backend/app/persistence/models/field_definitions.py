@@ -1,4 +1,5 @@
-"""ORM models: vertical_field_definitions, tenant_custom_field_definitions, tenant_field_change_log."""
+"""ORM models: vertical_field_definitions, tenant_custom_field_definitions,
+tenant_field_change_log."""
 
 import uuid
 from datetime import datetime
@@ -35,7 +36,9 @@ class VerticalFieldDefinition(Base):
 class TenantCustomFieldDefinition(Base):
     __tablename__ = "tenant_custom_field_definitions"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "field_key", "entity_type", name="uq_tcfd_tenant_field_entity"),
+        UniqueConstraint(
+            "tenant_id", "field_key", "entity_type", name="uq_tcfd_tenant_field_entity"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -59,7 +62,9 @@ class TenantCustomFieldDefinition(Base):
     override_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
     override_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     override_enum_options: Mapped[list[Any] | None] = mapped_column(PGJSONB, nullable=True)
-    data_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # populated only for custom (non-base) fields
+    data_type: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )  # populated only for custom (non-base) fields
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_base_field: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

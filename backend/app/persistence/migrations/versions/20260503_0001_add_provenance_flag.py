@@ -16,7 +16,9 @@ Then backfills:
   - sales_entries/expense_entries/products SET provenance='DEMO'
     WHERE tenant_id IN (SELECT tenant_id FROM tenants WHERE is_demo=true)
 """
+
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "20260503_0001"

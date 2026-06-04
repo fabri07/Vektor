@@ -39,10 +39,11 @@ async def _register_and_token(client: AsyncClient) -> str:
         "/api/v1/auth/login",
         json={"email": _REGISTER_PAYLOAD["email"], "password": _REGISTER_PAYLOAD["password"]},
     )
-    return resp.json()["access_token"]
+    return resp.json()["access_token"]  # type: ignore[no-any-return]  # test double / fixture
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 class TestOnboarding:
@@ -64,14 +65,13 @@ class TestOnboarding:
         assert "confidence_level" in data
         assert data["message"] == "Procesando tu score..."
 
-    async def test_onboarding_calculates_completeness_correctly(
-        self, client: AsyncClient
-    ) -> None:
+    async def test_onboarding_calculates_completeness_correctly(self, client: AsyncClient) -> None:
         """Full payload (all fields > 0, products >= 5, suppliers >= 1) scores 100 HIGH."""
         token = await _register_and_token(client)
         headers = {"Authorization": f"Bearer {token}"}
 
-        # ventas(25) + mercaderia(20) + fijos(15) + caja(20) + productos>=5(10) + proveedores>=1(10) = 100
+        # ventas(25) + mercaderia(20) + fijos(15) + caja(20) + productos>=5(10) +
+        # proveedores>=1(10) = 100
         response = await client.post(
             "/api/v1/onboarding/submit",
             json=_ONBOARDING_PAYLOAD,
@@ -101,9 +101,7 @@ class TestOnboarding:
 
         assert response.status_code == 409
 
-    async def test_onboarding_status_before_and_after(
-        self, client: AsyncClient
-    ) -> None:
+    async def test_onboarding_status_before_and_after(self, client: AsyncClient) -> None:
         """GET /onboarding/status reflects completed=False before and True after submit."""
         token = await _register_and_token(client)
         headers = {"Authorization": f"Bearer {token}"}

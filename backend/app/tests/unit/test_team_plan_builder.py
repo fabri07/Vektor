@@ -1,7 +1,5 @@
 """Tests para team_plan_builder — contrato del catálogo de intents y construcción de planes."""
 
-import pytest
-
 from app.application.agents.ceo.team_plan_builder import (
     INTENT_CATALOG,
     INTENT_TO_ACTION_TYPE,
@@ -10,12 +8,14 @@ from app.application.agents.ceo.team_plan_builder import (
 )
 from app.application.agents.shared.schemas import ActionType, AgentTeamPlan
 
-
 # ── Catálogo ──────────────────────────────────────────────────────────────────
 
+
 def test_intent_catalog_size():
-    # 17 Stage 1 + 1 Stage 4 (generar_informe_con_export) = 18
-    assert len(INTENT_CATALOG) == 18
+    # Sprint 19: catálogo consolidado. 11 escritura + 2 informes + 3 google +
+    # 1 ayuda + 1 desconocido + 8 familias analíticas + 2 sentinels aclaración = 28.
+    # Las 35 variantes analíticas viejas ahora son valores de `analysis_type`.
+    assert len(INTENT_CATALOG) == 28
 
 
 def test_all_intents_have_agent_mapping():
@@ -38,6 +38,7 @@ def test_no_extra_mappings_vs_catalog():
 
 
 # ── build_plan — correctness ──────────────────────────────────────────────────
+
 
 def test_build_plan_ingresar_venta():
     plan = build_plan("ingresar_venta", {"monto": 1500})
@@ -166,6 +167,7 @@ def test_build_plan_entities_isolated():
 
 # ── Stage 4: generar_informe_con_export ───────────────────────────────────────
 
+
 def test_build_plan_generar_informe_con_export_dag():
     """Stage 4: informe + upload a Drive genera DAG de 2 tareas con dependencia."""
     plan = build_plan("generar_informe_con_export", {})
@@ -180,9 +182,57 @@ def test_build_plan_generar_informe_con_export_dag():
     assert plan.requires_synthesis is False
 
 
+# ── Sprint 19: resolver de analysis_type → _intent legacy ─────────────────────
+
+
+def test_analytic_intent_default_discriminator():
+    """Sin analysis_type, el intent analítico inyecta el _intent default de la familia."""
+    plan = build_plan("analizar_precios", {})
+    assert plan.tasks[0].action_type == ActionType.ANALYZE_PRICES
+    assert plan.tasks[0].agent == "agent_stock"
+    assert plan.tasks[0].entities["_intent"] == "analizar_margenes_productos"
+
+
+def test_analytic_intent_explicit_analysis_type():
+    """analysis_type válido se traduce al _intent legacy correcto."""
+    plan = build_plan("analizar_precios", {"analysis_type": "simulacion"})
+    assert plan.tasks[0].entities["_intent"] == "simular_actualizacion_precios"
+
+
+def test_analytic_intent_invalid_analysis_type_falls_to_default():
+    """analysis_type desconocido cae al default de la familia (no rompe)."""
+    plan = build_plan("analizar_stock", {"analysis_type": "no_existe"})
+    assert plan.tasks[0].entities["_intent"] == "analizar_stock"
+
+
+def test_analytic_families_cover_each_action_type():
+    """Cada familia analítica resuelve sus analysis_type a _intents legacy distintos."""
+    cases = {
+        "analizar_stock": ("quiebres", "detectar_quiebres_stock"),
+        "analizar_ventas": ("estrella", "detectar_productos_estrella"),
+        "analizar_gastos": ("punto_equilibrio", "calcular_punto_equilibrio"),
+        "analizar_proveedores": ("dependencia", "detectar_dependencia_proveedor"),
+        "proyectar_caja": ("what_if", "simular_escenario_financiero"),
+        "analizar_archivo": ("tipo", "detectar_tipo_archivo"),
+        "analizar_clientes": ("inactivos", "detectar_clientes_inactivos"),
+    }
+    for intent, (analysis_type, expected) in cases.items():
+        plan = build_plan(intent, {"analysis_type": analysis_type})
+        assert plan.tasks[0].entities["_intent"] == expected, intent
+
+
+def test_legacy_alias_still_routes_and_preserves_intent():
+    """Un key granular viejo (en vuelo) rutea al agente correcto e inyecta _intent tal cual."""
+    plan = build_plan("detectar_quiebres_stock", {})
+    assert plan.tasks[0].action_type == ActionType.ANALYZE_STOCK_DATA
+    assert plan.tasks[0].agent == "agent_stock"
+    assert plan.tasks[0].entities["_intent"] == "detectar_quiebres_stock"
+
+
 def test_build_plan_new_action_types_in_risk_engine():
     """Los 3 ActionTypes nuevos del Stage 4 están en el RiskEngine."""
     from app.application.agents.shared.risk_engine import RiskEngine
+
     assert RiskEngine.evaluate(ActionType.UPLOAD_TO_DRIVE) is not None
     assert RiskEngine.evaluate(ActionType.CREATE_GOOGLE_DOC) is not None
     assert RiskEngine.evaluate(ActionType.APPEND_TO_SHEET) is not None
@@ -191,4 +241,5 @@ def test_build_plan_new_action_types_in_risk_engine():
 def test_tool_broker_importable():
     """GoogleToolBroker se puede importar desde el módulo correcto."""
     from app.application.agents.google.tool_broker import GoogleToolBroker
+
     assert GoogleToolBroker is not None

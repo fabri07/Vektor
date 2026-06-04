@@ -18,9 +18,7 @@ from app.persistence.db.base import PGJSONB, Base
 class UserActivityEvent(Base):
     __tablename__ = "user_activity_events"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("tenants.tenant_id", ondelete="CASCADE"),

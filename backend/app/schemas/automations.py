@@ -1,5 +1,7 @@
 """Schemas for agent automation rules."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -9,7 +11,7 @@ class AutomationRuleResponse(BaseModel):
     action_type: str
     external_system: str | None
     rule_key: str
-    criteria: dict
+    criteria: dict[str, Any]
     enabled: bool
     risk_level: str
     created_from_pending_action_id: str | None

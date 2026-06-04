@@ -8,8 +8,10 @@ Contexto
 --------
 Migración ADDITIVE para la fórmula v2 del score de salud (Stage 5a).
 
-• score_growth IS NULL  → snapshot v1 (fórmula: cash×0.30 + margin×0.30 + stock×0.25 + supplier×0.15)
-• score_growth IS NOT NULL → snapshot v2 (fórmula: cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20)
+• score_growth IS NULL  → snapshot v1
+  (fórmula: cash×0.30 + margin×0.30 + stock×0.25 + supplier×0.15)
+• score_growth IS NOT NULL → snapshot v2
+  (fórmula: cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20)
 
 Nota sobre score_margin
 -----------------------
@@ -22,6 +24,7 @@ No se modifica ni renombra score_margin — su significado real nunca cambió.
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "20260615_0001"

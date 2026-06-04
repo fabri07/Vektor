@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid as _uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -73,8 +73,9 @@ _CASH_ALERTS_AVOIDED_ARS = Decimal("500")
 
 # ── Helper: current week boundaries (Monday–Sunday, UTC-3) ───────────────────
 
+
 def _current_week(ref: date | None = None) -> tuple[date, date]:
-    today = ref or datetime.now(tz=timezone.utc).date()
+    today = ref or datetime.now(tz=UTC).date()
     # weekday(): 0=Monday … 6=Sunday
     week_start = today - timedelta(days=today.weekday())
     week_end = week_start + timedelta(days=6)
@@ -90,6 +91,7 @@ def _previous_week(ref: date | None = None) -> tuple[date, date]:
 
 # ── Trend label ───────────────────────────────────────────────────────────────
 
+
 def compute_trend_label(delta: Decimal) -> str:
     if delta >= 3:
         return "improving"
@@ -100,22 +102,26 @@ def compute_trend_label(delta: Decimal) -> str:
 
 # ── Core async logic (extracted for testability) ──────────────────────────────
 
+
 async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # noqa: ANN401
     """All 5 momentum steps. `session` is an AsyncSession."""
     from sqlalchemy import func, select  # noqa: PLC0415
 
     from app.persistence.models.business import BusinessProfile, MomentumProfile  # noqa: PLC0415
     from app.persistence.models.notification import Notification  # noqa: PLC0415
-    from app.persistence.models.score import HealthScoreSnapshot, WeeklyScoreHistory  # noqa: PLC0415
+    from app.persistence.models.score import (  # noqa: PLC0415
+        HealthScoreSnapshot,
+        WeeklyScoreHistory,
+    )
 
-    now_utc = datetime.now(tz=timezone.utc)
+    now_utc = datetime.now(tz=UTC)
     today = now_utc.date()
 
     # ── 1. WEEKLY SNAPSHOT ────────────────────────────────────────────────────
 
     week_start, week_end = _current_week(today)
-    week_start_dt = datetime(week_start.year, week_start.month, week_start.day, tzinfo=timezone.utc)
-    week_end_dt = datetime(week_end.year, week_end.month, week_end.day, 23, 59, 59, tzinfo=timezone.utc)
+    week_start_dt = datetime(week_start.year, week_start.month, week_start.day, tzinfo=UTC)
+    week_end_dt = datetime(week_end.year, week_end.month, week_end.day, 23, 59, 59, tzinfo=UTC)
 
     scores_this_week_q = await session.execute(
         select(HealthScoreSnapshot.total_score)
@@ -150,14 +156,15 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
     # Previous week avg for delta
     prev_start, prev_end = _previous_week(today)
     prev_q = await session.execute(
-        select(WeeklyScoreHistory.avg_score)
-        .where(
+        select(WeeklyScoreHistory.avg_score).where(
             WeeklyScoreHistory.tenant_id == tenant_id,
             WeeklyScoreHistory.week_start == prev_start,
         )
     )
     prev_row = prev_q.scalar_one_or_none()
-    delta = (avg_score - prev_row).quantize(Decimal("0.01")) if prev_row is not None else Decimal("0")
+    delta = (
+        (avg_score - prev_row).quantize(Decimal("0.01")) if prev_row is not None else Decimal("0")
+    )
     trend_label = compute_trend_label(delta)
 
     # Upsert: check if row for this week already exists
@@ -289,7 +296,7 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
 
     # M3: score_margin >= 70 for 14 days continuously
     if latest is not None and (latest.score_margin or 0) >= 70:
-        cutoff_14 = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) - timedelta(days=14)
+        cutoff_14 = datetime(today.year, today.month, today.day, tzinfo=UTC) - timedelta(days=14)
         low_margin_q = await session.execute(
             select(func.count())
             .select_from(HealthScoreSnapshot)
@@ -304,7 +311,7 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
             _unlock("M3", "Score de margen ≥ 70 por 14 días")
 
     # M4: 14 days without primary_risk_code = STOCK_CRITICAL
-    cutoff_14 = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) - timedelta(days=14)
+    cutoff_14 = datetime(today.year, today.month, today.day, tzinfo=UTC) - timedelta(days=14)
     stock_critical_q = await session.execute(
         select(func.count())
         .select_from(HealthScoreSnapshot)
@@ -333,7 +340,7 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
     # margin_recovered = monthly_sales_est * (delta_margin / 100) * 0.30
     delta_margin = Decimal("0")
     if latest is not None:
-        cutoff_30 = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) - timedelta(days=30)
+        cutoff_30 = datetime(today.year, today.month, today.day, tzinfo=UTC) - timedelta(days=30)
         margin_30_q = await session.execute(
             select(HealthScoreSnapshot.score_margin)
             .where(
@@ -349,8 +356,9 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
 
     margin_recovered = Decimal("0")
     profile_q = await session.execute(
-        select(BusinessProfile.monthly_sales_estimate_ars)
-        .where(BusinessProfile.tenant_id == tenant_id)
+        select(BusinessProfile.monthly_sales_estimate_ars).where(
+            BusinessProfile.tenant_id == tenant_id
+        )
     )
     monthly_sales = profile_q.scalar_one_or_none()
     if monthly_sales and delta_margin > 0:
@@ -358,23 +366,19 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
 
     # cash_alerts_avoided: weeks in history without CASH_LOW in primary_risk_code
     all_weeks_q = await session.execute(
-        select(WeeklyScoreHistory.week_start)
-        .where(WeeklyScoreHistory.tenant_id == tenant_id)
+        select(WeeklyScoreHistory.week_start).where(WeeklyScoreHistory.tenant_id == tenant_id)
     )
     all_week_starts: list[date] = list(all_weeks_q.scalars().all())
 
     # Count distinct ISO weeks that had at least one CASH_LOW snapshot
     cash_low_dates_q = await session.execute(
-        select(HealthScoreSnapshot.created_at)
-        .where(
+        select(HealthScoreSnapshot.created_at).where(
             HealthScoreSnapshot.tenant_id == tenant_id,
             HealthScoreSnapshot.primary_risk_code == "CASH_LOW",
         )
     )
     cash_low_dates = list(cash_low_dates_q.scalars().all())
-    cash_low_week_count = len({
-        (d.isocalendar()[0], d.isocalendar()[1]) for d in cash_low_dates
-    })
+    cash_low_week_count = len({(d.isocalendar()[0], d.isocalendar()[1]) for d in cash_low_dates})
     cash_safe_weeks = max(0, len(all_week_starts) - cash_low_week_count)
     cash_alerts_avoided = Decimal(cash_safe_weeks) * _CASH_ALERTS_AVOIDED_ARS
 
@@ -418,7 +422,9 @@ def update_momentum_profile(tenant_id: str) -> None:
         from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
+        engine = create_async_engine(
+            s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args
+        )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
@@ -456,7 +462,9 @@ def update_momentum_all_tenants() -> None:
 
         from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
-        engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
+        engine = create_async_engine(
+            s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args
+        )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:

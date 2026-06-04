@@ -44,13 +44,11 @@ async def product(session: AsyncSession, tenant):
 
 
 @pytest.mark.asyncio
-async def test_sale_decrements_stock(session: AsyncSession, tenant, product):
+async def test_sale_decrements_stock(session: AsyncSession, tenant, product) -> None:
     """decrement_stock → inventory_balances decrementado correctamente."""
     from app.application.services.stock_service import decrement_stock
 
-    with unittest.mock.patch(
-        "app.application.services.stock_service.EventBus.emit"
-    ):
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
         movement = await decrement_stock(
             product_id=product.id,
             tenant_id=tenant.tenant_id,
@@ -74,13 +72,11 @@ async def test_sale_decrements_stock(session: AsyncSession, tenant, product):
 
 
 @pytest.mark.asyncio
-async def test_stock_loss_creates_audit_entry(session: AsyncSession, tenant, product, user):
+async def test_stock_loss_creates_audit_entry(session: AsyncSession, tenant, product, user) -> None:
     """register_stock_loss → entrada en decision_audit_log con decision_type=STOCK_LOSS."""
     from app.application.services.stock_service import register_stock_loss
 
-    with unittest.mock.patch(
-        "app.application.services.stock_service.EventBus.emit"
-    ):
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
         await register_stock_loss(
             product_id=product.id,
             tenant_id=tenant.tenant_id,

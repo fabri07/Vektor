@@ -45,9 +45,10 @@ def _async_database_url(raw_url: str) -> tuple[str, dict]:
     """
     parsed = urlsplit(raw_url)
     scheme = parsed.scheme
-    if scheme in {"postgresql", "postgres"}:
-        scheme = "postgresql+asyncpg"
-    elif scheme in {"postgresql+psycopg2", "postgresql+psycopg"}:
+    if scheme in {"postgresql", "postgres"} or scheme in {
+        "postgresql+psycopg2",
+        "postgresql+psycopg",
+    }:
         scheme = "postgresql+asyncpg"
 
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
@@ -55,9 +56,7 @@ def _async_database_url(raw_url: str) -> tuple[str, dict]:
     filtered_query = urlencode(
         [(k, v) for k, v in query_pairs if k not in {"sslmode", "channel_binding"}]
     )
-    normalized = urlunsplit(
-        (scheme, parsed.netloc, parsed.path, filtered_query, parsed.fragment)
-    )
+    normalized = urlunsplit((scheme, parsed.netloc, parsed.path, filtered_query, parsed.fragment))
     connect_args = {}
     if ssl_required:
         ssl_context = ssl.create_default_context()
@@ -103,7 +102,9 @@ async def seed_vertical(session: AsyncSession, vertical_code: str, entries: list
                 {
                     "label": entry["label"],
                     "dt": entry["data_type"],
-                    "eo": json.dumps(entry.get("enum_options")) if entry.get("enum_options") else None,
+                    "eo": json.dumps(entry.get("enum_options"))
+                    if entry.get("enum_options")
+                    else None,
                     "ir": entry.get("is_required", False),
                     "do_": entry.get("display_order", 0),
                     "cw": entry.get("context_weight", 0.0),
@@ -118,7 +119,8 @@ async def seed_vertical(session: AsyncSession, vertical_code: str, entries: list
                     "INSERT INTO vertical_field_definitions "
                     "(vertical_code, entity_type, field_key, label, data_type, enum_options, "
                     "is_required, display_order, context_weight, affects_scoring, created_at) "
-                    "VALUES (:vc, :et, :fk, :label, :dt, CAST(:eo AS jsonb), :ir, :do_, :cw, false, :now)"
+                    "VALUES (:vc, :et, :fk, :label, :dt, CAST(:eo AS jsonb), :ir, :do_, :cw, "
+                    "false, :now)"
                 ),
                 {
                     "vc": vertical_code,
@@ -126,7 +128,9 @@ async def seed_vertical(session: AsyncSession, vertical_code: str, entries: list
                     "fk": entry["field_key"],
                     "label": entry["label"],
                     "dt": entry["data_type"],
-                    "eo": json.dumps(entry.get("enum_options")) if entry.get("enum_options") else None,
+                    "eo": json.dumps(entry.get("enum_options"))
+                    if entry.get("enum_options")
+                    else None,
                     "ir": entry.get("is_required", False),
                     "do_": entry.get("display_order", 0),
                     "cw": entry.get("context_weight", 0.0),

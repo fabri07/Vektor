@@ -4,8 +4,10 @@ Responsabilidades:
   1. generate_start()        → genera state/nonce/PKCE, los guarda en Redis, devuelve auth URL
   2. handle_callback()       → valida state+PKCE, intercambia code, verifica id_token
                                guarda resultado en Redis, devuelve session_id para exchange
-  3. exchange_session()      → GETDEL del resultado (single-use), devuelve AuthResponse o LinkRequiredResponse
-  4. complete_link()         → GETDEL del pending_oauth_session, verifica password, vincula identidad
+  3. exchange_session()      → GETDEL del resultado (single-use),
+                               devuelve AuthResponse o LinkRequiredResponse
+  4. complete_link()         → GETDEL del pending_oauth_session,
+                               verifica password, vincula identidad
 
 Flujo completo:
   POST /start
@@ -52,7 +54,8 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import HTTPException, status
-from jose import JWTError, jwk, jwt as jose_jwt
+from jose import JWTError, jwk
+from jose import jwt as jose_jwt
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -83,9 +86,9 @@ _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 _GOOGLE_VALID_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 
-_STATE_TTL_SECONDS = 600    # 10 min — tiempo que el usuario tiene para completar el flujo OAuth
+_STATE_TTL_SECONDS = 600  # 10 min — tiempo que el usuario tiene para completar el flujo OAuth
 _EXCHANGE_TTL_SECONDS = 60  # 60 seg — ventana para que el frontend haga el exchange post-redirect
-_LINK_TTL_SECONDS = 600     # 10 min — tiempo para completar el link_required
+_LINK_TTL_SECONDS = 600  # 10 min — tiempo para completar el link_required
 
 # Cache en memoria del JWKS de Google (se invalida cada hora)
 _jwks_cache: dict[str, Any] | None = None
@@ -94,6 +97,7 @@ _JWKS_CACHE_TTL_SECONDS = 3600
 
 
 # ── PKCE helpers ──────────────────────────────────────────────────────────────
+
 
 def _generate_code_verifier() -> str:
     """43-128 chars URL-safe base64 sin padding (RFC 7636)."""
@@ -107,6 +111,7 @@ def _generate_code_challenge(verifier: str) -> str:
 
 
 # ── Google JWKS ───────────────────────────────────────────────────────────────
+
 
 async def _get_google_jwks(http: httpx.AsyncClient) -> dict[str, Any]:
     """Fetch Google's JWKS con cache en memoria de 1 hora."""
@@ -122,12 +127,14 @@ async def _get_google_jwks(http: httpx.AsyncClient) -> dict[str, Any]:
 
     resp = await http.get(_GOOGLE_JWKS_URL)
     resp.raise_for_status()
-    _jwks_cache = resp.json()
+    jwks: dict[str, Any] = resp.json()
+    _jwks_cache = jwks
     _jwks_cached_at = now
-    return _jwks_cache
+    return jwks
 
 
 # ── id_token verification ──────────────────────────────────────────────────────
+
 
 async def _verify_id_token(
     id_token: str,
@@ -142,7 +149,7 @@ async def _verify_id_token(
         header = jose_jwt.get_unverified_header(id_token)
     except JWTError as exc:
         logger.warning("oauth.id_token.bad_header", error=str(exc))
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_id_token")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_id_token") from exc
 
     kid = header.get("kid")
     if not kid:
@@ -152,7 +159,7 @@ async def _verify_id_token(
         jwks = await _get_google_jwks(http)
     except httpx.HTTPError as exc:
         logger.error("oauth.jwks.fetch_failed", error=str(exc))
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "google_unavailable")
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "google_unavailable") from exc
 
     key_data = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
     if key_data is None:
@@ -163,7 +170,7 @@ async def _verify_id_token(
             jwks = await _get_google_jwks(http)
         except httpx.HTTPError as exc:
             logger.error("oauth.jwks.retry_failed", error=str(exc))
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "google_unavailable")
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "google_unavailable") from exc
         key_data = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
 
     if key_data is None:
@@ -181,7 +188,7 @@ async def _verify_id_token(
         )
     except JWTError as exc:
         logger.warning("oauth.id_token.verify_failed", error=str(exc))
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_id_token")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_id_token") from exc
 
     # Verificar issuer
     if claims.get("iss") not in _GOOGLE_VALID_ISSUERS:
@@ -197,6 +204,7 @@ async def _verify_id_token(
 
 
 # ── Service ───────────────────────────────────────────────────────────────────
+
 
 class GoogleOAuthService:
     def __init__(
@@ -253,7 +261,7 @@ class GoogleOAuthService:
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
             "access_type": "offline",  # pedir refresh_token para servicios Google
-            "prompt": "consent",       # forzar pantalla de consentimiento para obtener refresh_token
+            "prompt": "consent",  # forzar pantalla de consentimiento para obtener refresh_token
         }
         authorization_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
 
@@ -300,10 +308,10 @@ class GoogleOAuthService:
                     "oauth.callback.token_exchange_failed",
                     status=exc.response.status_code,
                 )
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "token_exchange_failed")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "token_exchange_failed") from exc
             except httpx.HTTPError as exc:
                 logger.error("oauth.callback.google_unavailable", error=str(exc))
-                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "google_unavailable")
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "google_unavailable") from exc
 
             token_data = token_resp.json()
             id_token_str = token_data.get("id_token")
@@ -345,9 +353,7 @@ class GoogleOAuthService:
 
     # ── 3. Exchange ───────────────────────────────────────────────────────────
 
-    async def exchange_session(
-        self, session_id: str
-    ) -> AuthResponse | OAuthLinkRequiredResponse:
+    async def exchange_session(self, session_id: str) -> AuthResponse | OAuthLinkRequiredResponse:
         """GETDEL del resultado del callback. Single-use.
 
         Devuelve AuthResponse (login exitoso) o OAuthLinkRequiredResponse.
@@ -436,7 +442,7 @@ class GoogleOAuthService:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 "identity_already_linked_to_another_account",
-            )
+            ) from None
 
         # 4d. Actualizar last_login_at
         user.last_login_at = datetime.now(UTC)
@@ -498,11 +504,13 @@ class GoogleOAuthService:
             pending_session_id = secrets.token_urlsafe(32)
             await self._redis.set(
                 f"oauth:link:{pending_session_id}",
-                json.dumps({
-                    "provider": "google",
-                    "provider_subject": provider_subject,
-                    "provider_email": provider_email,
-                }),
+                json.dumps(
+                    {
+                        "provider": "google",
+                        "provider_subject": provider_subject,
+                        "provider_email": provider_email,
+                    }
+                ),
                 ex=_LINK_TTL_SECONDS,
             )
             logger.info(

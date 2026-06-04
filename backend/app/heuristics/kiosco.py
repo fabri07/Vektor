@@ -25,13 +25,13 @@ class KioscoHeuristicRuleSet(BaseHeuristicRuleSet):
                 excellent_above=Decimal("3.0"),
             ),
             profitability_thresholds=DimensionThresholds(
-                critical_below=Decimal("0.05"),   # 5% gross margin
-                warning_below=Decimal("0.12"),    # 12%
-                good_above=Decimal("0.20"),       # 20%
+                critical_below=Decimal("0.05"),  # 5% gross margin
+                warning_below=Decimal("0.12"),  # 12%
+                good_above=Decimal("0.20"),  # 20%
                 excellent_above=Decimal("0.30"),  # 30%
             ),
             cost_control_thresholds=DimensionThresholds(
-                critical_below=Decimal("0.60"),   # expenses/revenue ratio
+                critical_below=Decimal("0.60"),  # expenses/revenue ratio
                 warning_below=Decimal("0.75"),
                 good_above=Decimal("0.85"),
                 excellent_above=Decimal("0.92"),

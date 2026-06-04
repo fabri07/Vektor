@@ -9,17 +9,18 @@ Create Date: 2026-03-10 21:05:00
 from __future__ import annotations
 
 import json
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
+
 # revision identifiers, used by Alembic.
 revision: str = "20260310_0001"
-down_revision: Union[str, None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -415,14 +416,20 @@ def upgrade() -> None:
 
     # Indexes for tenant_id FK access patterns.
     op.create_index("ix_users_tenant_id", "users", ["tenant_id"], unique=False)
-    op.create_index("ix_business_snapshots_tenant_id", "business_snapshots", ["tenant_id"], unique=False)
+    op.create_index(
+        "ix_business_snapshots_tenant_id", "business_snapshots", ["tenant_id"], unique=False
+    )
     op.create_index("ix_products_tenant_id", "products", ["tenant_id"], unique=False)
     op.create_index("ix_expense_entries_tenant_id", "expense_entries", ["tenant_id"], unique=False)
     op.create_index("ix_insights_tenant_id", "insights", ["tenant_id"], unique=False)
-    op.create_index("ix_action_suggestions_tenant_id", "action_suggestions", ["tenant_id"], unique=False)
+    op.create_index(
+        "ix_action_suggestions_tenant_id", "action_suggestions", ["tenant_id"], unique=False
+    )
     op.create_index("ix_uploaded_files_tenant_id", "uploaded_files", ["tenant_id"], unique=False)
     op.create_index("ix_notifications_tenant_id", "notifications", ["tenant_id"], unique=False)
-    op.create_index("ix_user_activity_events_tenant_id", "user_activity_events", ["tenant_id"], unique=False)
+    op.create_index(
+        "ix_user_activity_events_tenant_id", "user_activity_events", ["tenant_id"], unique=False
+    )
     op.create_index("ix_stock_snapshots_tenant_id", "stock_snapshots", ["tenant_id"], unique=False)
 
     # Required composite indexes.

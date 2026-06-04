@@ -18,7 +18,8 @@ class GoogleIntegrationStatusResponse(BaseModel):
     mcp_enabled: bool
     mcp_server_configured: bool
     connection_flow_available: bool
-    connection_state: str  # DISCONNECTED | CONNECTING | CONNECTED | INSUFFICIENT_SCOPE | RECONNECT_REQUIRED | ERROR
+    # DISCONNECTED | CONNECTING | CONNECTED | INSUFFICIENT_SCOPE | RECONNECT_REQUIRED | ERROR
+    connection_state: str
     connected: bool
     scopes_granted: list[str]
     connected_at: str | None

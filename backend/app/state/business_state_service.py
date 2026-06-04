@@ -85,7 +85,7 @@ class BusinessState:
     tenant_id: UUID
     vertical_code: str
     data_completeness_score: float
-    confidence_level: str          # HIGH | MEDIUM | LOW
+    confidence_level: str  # HIGH | MEDIUM | LOW
     ruleset: VerticalRules
     monthly_sales_est: Decimal
     monthly_inventory_cost_est: Decimal
@@ -117,7 +117,10 @@ def _make_fingerprint(
     profile_updated_at: datetime,
     prev_sales_amount: str = "0",
 ) -> str:
-    raw = f"{sale_count}:{expense_count}:{product_count}:{profile_updated_at.isoformat()}:{prev_sales_amount}"
+    raw = (
+        f"{sale_count}:{expense_count}:{product_count}:"
+        f"{profile_updated_at.isoformat()}:{prev_sales_amount}"
+    )
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -361,13 +364,15 @@ async def compute_business_state(
     sold_units_by_product: dict[UUID, int] = {}
     if active_products:
         sold_units_result = await session.execute(
-            select(SaleEntry.product_id, func.coalesce(func.sum(SaleEntry.quantity), 0)).where(
+            select(SaleEntry.product_id, func.coalesce(func.sum(SaleEntry.quantity), 0))
+            .where(
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.transaction_date >= window_start,
                 SaleEntry.transaction_date <= window_end,
                 SaleEntry.product_id.isnot(None),
-            ).group_by(SaleEntry.product_id)
+            )
+            .group_by(SaleEntry.product_id)
         )
         sold_units_by_product = {
             product_id: int(total or 0)
@@ -395,10 +400,9 @@ async def compute_business_state(
     _profile_updated_at = profile.updated_at
     if _profile_updated_at.tzinfo is None:
         _profile_updated_at = _profile_updated_at.replace(tzinfo=UTC)
-    onboarding_recent = (
-        profile.onboarding_completed
-        and _profile_updated_at >= datetime.now(UTC) - timedelta(days=7)
-    )
+    onboarding_recent = profile.onboarding_completed and _profile_updated_at >= datetime.now(
+        UTC
+    ) - timedelta(days=7)
 
     onboarding_sales_est = profile.monthly_sales_estimate_ars or Decimal("0")
     if sale_count == 0:
@@ -411,22 +415,24 @@ async def compute_business_state(
         )
         projected_sales = real_sales * Decimal("30") / Decimal(max(days_with_data, 1))
         if sale_count < 10:
-            monthly_sales_est = (
-                onboarding_sales_est * Decimal("0.7")
-                + projected_sales * Decimal("0.3")
+            monthly_sales_est = onboarding_sales_est * Decimal("0.7") + projected_sales * Decimal(
+                "0.3"
             )
         else:
-            monthly_sales_est = (
-                onboarding_sales_est * Decimal("0.3")
-                + projected_sales * Decimal("0.7")
+            monthly_sales_est = onboarding_sales_est * Decimal("0.3") + projected_sales * Decimal(
+                "0.7"
             )
     else:
         monthly_sales_est = real_sales
-    monthly_inventory_cost_est = real_inventory_cost if real_inventory_cost > 0 else (
-        profile.monthly_inventory_spend_estimate_ars or Decimal("0")
+    monthly_inventory_cost_est = (
+        real_inventory_cost
+        if real_inventory_cost > 0
+        else (profile.monthly_inventory_spend_estimate_ars or Decimal("0"))
     )
-    monthly_fixed_expenses_est = real_fixed_expenses if real_fixed_expenses > 0 else (
-        profile.monthly_fixed_expenses_estimate_ars or Decimal("0")
+    monthly_fixed_expenses_est = (
+        real_fixed_expenses
+        if real_fixed_expenses > 0
+        else (profile.monthly_fixed_expenses_estimate_ars or Decimal("0"))
     )
     cash_on_hand_est = (
         profile.cash_on_hand_estimate_ars
@@ -434,11 +440,11 @@ async def compute_business_state(
         else Decimal("0")
     )
 
-    product_count = real_product_count if real_product_count > 0 else (
-        profile.product_count_estimate or 0
+    product_count = (
+        real_product_count if real_product_count > 0 else (profile.product_count_estimate or 0)
     )
-    supplier_count = real_supplier_count if real_supplier_count > 0 else (
-        profile.supplier_count_estimate or 0
+    supplier_count = (
+        real_supplier_count if real_supplier_count > 0 else (profile.supplier_count_estimate or 0)
     )
 
     # ── 7. Completeness scoring ──────────────────────────────────────────────

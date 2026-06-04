@@ -1,7 +1,7 @@
 """S3-compatible storage client (AWS S3 / MinIO / Cloudflare R2)."""
 
-from pathlib import Path
 import uuid
+from pathlib import Path
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -99,7 +99,7 @@ class S3Client:
 
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=key)
-            data: bytes = response["Body"].read()
+            data = response["Body"].read()
             logger.info("s3.downloaded", key=key, size=len(data))
             return data
         except (BotoCoreError, ClientError) as exc:

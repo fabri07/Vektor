@@ -8,7 +8,7 @@ POST   /ingestion/files/{file_id}/confirm  — confirm import (NEEDS_CONFIRMATIO
 """
 
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,7 +70,7 @@ MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 FileHint = Literal["ventas", "gastos", "stock", "general"]
 
 
-def _pick_job(mime: str) -> object:
+def _pick_job(mime: str) -> Any:
     """Return the Celery task to enqueue for a given MIME type."""
     if mime in _IMAGE_MIMES:
         return process_image_ocr
@@ -146,6 +146,7 @@ async def _process_file_sync(
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+
 @router.post(
     "/upload",
     response_model=UploadResponse,
@@ -208,7 +209,7 @@ async def upload_file(
     # is unavailable (beta: single Railway service without workers).
     job = _pick_job(detected_mime)
     try:
-        job.delay(str(saved.id), str(tenant.tenant_id), force)  # type: ignore[attr-defined]
+        job.delay(str(saved.id), str(tenant.tenant_id), force)
     except Exception:
         logger.warning(
             "ingestion.celery_unavailable",
@@ -283,7 +284,7 @@ async def drop_columns(
     body: DropColumnsRequest,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:
@@ -302,14 +303,18 @@ async def drop_columns(
     summary["headers"] = [h for h in summary.get("headers", []) if h not in columns_to_drop]
     summary["columns"] = summary["headers"]
     summary["columns_at_risk"] = [
-        c for c in summary.get("columns_at_risk", [])
-        if c.get("column") not in columns_to_drop
+        c for c in summary.get("columns_at_risk", []) if c.get("column") not in columns_to_drop
     ]
     summary["preview_rows"] = [
         {k: v for k, v in row.items() if k not in columns_to_drop}
         for row in summary.get("preview_rows", [])
     ]
-    for data_key in ("ventas_detectadas", "gastos_detectados", "productos_detectados", "stock_detectado"):
+    for data_key in (
+        "ventas_detectadas",
+        "gastos_detectados",
+        "productos_detectados",
+        "stock_detectado",
+    ):
         if isinstance(summary.get(data_key), list):
             summary[data_key] = [
                 {k: v for k, v in row.items() if k not in columns_to_drop}
@@ -333,13 +338,16 @@ async def drop_columns(
 
 @router.post(
     "/files/{file_id}/cancel",
-    summary="Cancel confirmation; mark file as NEEDS_COMPLETION so user can re-upload with complete data",
+    summary=(
+        "Cancel confirmation; mark file as NEEDS_COMPLETION so user can re-upload with complete "
+        "data"
+    ),
 )
 async def cancel_file_confirmation(
     file_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:
@@ -393,7 +401,7 @@ async def reprocess_file(
     file_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:

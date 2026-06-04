@@ -13,7 +13,8 @@ Estados:
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
@@ -21,14 +22,16 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
-VALID_STATUSES = frozenset({
-    "DISCONNECTED",
-    "CONNECTING",
-    "CONNECTED",
-    "INSUFFICIENT_SCOPE",
-    "RECONNECT_REQUIRED",
-    "ERROR",
-})
+VALID_STATUSES = frozenset(
+    {
+        "DISCONNECTED",
+        "CONNECTING",
+        "CONNECTED",
+        "INSUFFICIENT_SCOPE",
+        "RECONNECT_REQUIRED",
+        "ERROR",
+    }
+)
 
 
 class GoogleMcpConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -54,7 +57,7 @@ class GoogleMcpConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default="DISCONNECTED",
     )
-    scopes_granted: Mapped[list] = mapped_column(
+    scopes_granted: Mapped[list[Any]] = mapped_column(
         PGJSONB,
         nullable=False,
         default=list,

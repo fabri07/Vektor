@@ -2,12 +2,16 @@
 
 from datetime import date
 from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
 from httpx import AsyncClient
 
 from app.heuristics.insight_templates import render_insight
+
+if TYPE_CHECKING:
+    from app.persistence.models.score import HealthScoreSnapshot
 
 _TODAY = str(date.today())
 
@@ -34,12 +38,10 @@ class TestCashBreakdown:
         pass
 
     async def test_empty_response_structure(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """Sin datos, el endpoint retorna estructura válida con series vacías."""
-        resp = await client.get(
-            "/api/v1/insights/cash-breakdown?days=30", headers=auth_headers
-        )
+        resp = await client.get("/api/v1/insights/cash-breakdown?days=30", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert "dates" in data
@@ -49,14 +51,12 @@ class TestCashBreakdown:
         assert data["days"] == 30
 
     async def test_income_series_populated_after_sale(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """Al registrar una venta, income_series refleja el método de pago."""
         await client.post("/api/v1/sales", json=_SALE_PAYLOAD, headers=auth_headers)
 
-        resp = await client.get(
-            "/api/v1/insights/cash-breakdown?days=30", headers=auth_headers
-        )
+        resp = await client.get("/api/v1/insights/cash-breakdown?days=30", headers=auth_headers)
         data = resp.json()
         assert _TODAY in data["dates"]
         assert "cash" in data["income_series"]
@@ -64,20 +64,18 @@ class TestCashBreakdown:
         assert data["income_series"]["cash"][idx] == pytest.approx(5000.0)
 
     async def test_expense_series_populated_after_expense(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """Al registrar un gasto, expense_series refleja el método de pago."""
         await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
 
-        resp = await client.get(
-            "/api/v1/insights/cash-breakdown?days=30", headers=auth_headers
-        )
+        resp = await client.get("/api/v1/insights/cash-breakdown?days=30", headers=auth_headers)
         data = resp.json()
         assert _TODAY in data["dates"]
         assert len(data["expense_series"]) >= 1
 
     async def test_weekly_granularity(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """?granularity=weekly agrupa por semana — todas las fechas deben ser lunes."""
         await client.post("/api/v1/sales", json=_SALE_PAYLOAD, headers=auth_headers)
@@ -94,7 +92,7 @@ class TestCashBreakdown:
             assert parsed.weekday() == 0, f"{d} no es lunes"
 
     async def test_invalid_granularity_rejected(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         resp = await client.get(
             "/api/v1/insights/cash-breakdown?granularity=monthly", headers=auth_headers
@@ -108,16 +106,14 @@ class TestCashBreakdown:
 @pytest.mark.asyncio
 class TestMarginHistory:
     async def test_empty_when_no_snapshots(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        resp = await client.get(
-            "/api/v1/health-scores/margin-history", headers=auth_headers
-        )
+        resp = await client.get("/api/v1/health-scores/margin-history", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json() == []
 
     async def test_response_fields_present(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """Schema tiene todos los campos requeridos (puede estar vacío)."""
         resp = await client.get(
@@ -180,7 +176,9 @@ def test_cash_low_template_fallback():
 
 async def _create_snapshot(db_session, tenant_id, score_growth=70) -> "HealthScoreSnapshot":
     """Helper: inserta un snapshot mínimo para testear el export."""
-    from datetime import UTC, datetime as _dt  # noqa: PLC0415
+    from datetime import UTC  # noqa: PLC0415
+    from datetime import datetime as _dt
+
     from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
 
     now = _dt.now(UTC)
@@ -210,7 +208,7 @@ async def _create_snapshot(db_session, tenant_id, score_growth=70) -> "HealthSco
 @pytest.mark.asyncio
 class TestExportHealthReport:
     async def test_export_pdf_success(
-        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
         snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
         resp = await client.post(
@@ -224,7 +222,7 @@ class TestExportHealthReport:
         assert "attachment" in resp.headers["content-disposition"].lower()
 
     async def test_export_docx_success(
-        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
         snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
         resp = await client.post(
@@ -237,7 +235,7 @@ class TestExportHealthReport:
         assert resp.content[:4] == b"PK\x03\x04"
 
     async def test_export_invalid_format_rejected(
-        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
         snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
         resp = await client.post(
@@ -248,7 +246,7 @@ class TestExportHealthReport:
         assert resp.status_code == 422
 
     async def test_export_narrative_too_long_rejected(
-        self, client: AsyncClient, auth_headers: dict, sample_tenant, db_session
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
         snap = await _create_snapshot(db_session, sample_tenant.tenant_id)
         resp = await client.post(
@@ -261,7 +259,7 @@ class TestExportHealthReport:
     async def test_export_other_tenant_returns_404(
         self,
         client: AsyncClient,
-        auth_headers: dict,
+        auth_headers: dict[str, Any],
         sample_tenant,
         db_session,
     ) -> None:
@@ -284,7 +282,7 @@ class TestExportHealthReport:
         assert resp.status_code == 404
 
     async def test_export_nonexistent_snapshot_returns_404(
-        self, client: AsyncClient, auth_headers: dict
+        self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         import uuid as _uuid  # noqa: PLC0415
 

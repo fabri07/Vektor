@@ -49,9 +49,7 @@ class BusinessProfile(TimestampMixin, Base):
     monthly_fixed_expenses_estimate_ars: Mapped[Decimal | None] = mapped_column(
         Numeric(14, 2), nullable=True
     )
-    cash_on_hand_estimate_ars: Mapped[Decimal | None] = mapped_column(
-        Numeric(14, 2), nullable=True
-    )
+    cash_on_hand_estimate_ars: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     supplier_count_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
     product_count_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

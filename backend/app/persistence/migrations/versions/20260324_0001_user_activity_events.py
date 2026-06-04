@@ -7,16 +7,17 @@ Create Date: 2026-03-24 10:00:00
 
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
+
 revision: str = "20260324_0001"
-down_revision: Union[str, None] = "20260318_0001"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "20260318_0001"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def _table_exists(conn: sa.engine.Connection, table: str) -> bool:
@@ -32,9 +33,7 @@ def _table_exists(conn: sa.engine.Connection, table: str) -> bool:
 
 def _index_exists(conn: sa.engine.Connection, index: str) -> bool:
     result = conn.execute(
-        sa.text(
-            "SELECT 1 FROM pg_indexes WHERE indexname = :i"
-        ),
+        sa.text("SELECT 1 FROM pg_indexes WHERE indexname = :i"),
         {"i": index},
     )
     return result.fetchone() is not None
@@ -52,12 +51,8 @@ def upgrade() -> None:
             sa.Column("event_type", sa.Text(), nullable=False),
             sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-            sa.ForeignKeyConstraint(
-                ["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"
-            ),
-            sa.ForeignKeyConstraint(
-                ["user_id"], ["users.user_id"], ondelete="SET NULL"
-            ),
+            sa.ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(["user_id"], ["users.user_id"], ondelete="SET NULL"),
             sa.PrimaryKeyConstraint("id"),
         )
 

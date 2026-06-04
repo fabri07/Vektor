@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -32,7 +33,7 @@ async def _make_uploaded_file(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     user_id: uuid.UUID,
-    parsed_summary_json: dict,
+    parsed_summary_json: dict[str, Any],
     created_at: datetime | None = None,
 ) -> UploadedFile:
     f = UploadedFile(
@@ -82,8 +83,9 @@ async def _make_import_sale(
 
 # ── Test: dry-run persiste run pero no modifica SaleEntry ─────────────────────
 
+
 @pytest.mark.asyncio
-async def test_dry_run_persists_run_without_voiding(session: AsyncSession, tenant, user):
+async def test_dry_run_persists_run_without_voiding(session: AsyncSession, tenant, user) -> None:
     now = datetime.now(UTC)
     product_summary = {
         "has_fecha": True,
@@ -97,12 +99,10 @@ async def test_dry_run_persists_run_without_voiding(session: AsyncSession, tenan
         "preview_rows": [{"nombre": "Coca-Cola 600ml", "precio": "500"}],
         "file_type": "spreadsheet",
     }
-    uploaded_file = await _make_uploaded_file(
+    await _make_uploaded_file(
         session, tenant.tenant_id, user.user_id, product_summary, created_at=now
     )
-    sale = await _make_import_sale(
-        session, tenant.tenant_id, Decimal("500"), created_at=now
-    )
+    sale = await _make_import_sale(session, tenant.tenant_id, Decimal("500"), created_at=now)
     await session.flush()
 
     from app.application.services.data_repair_service import apply_repair
@@ -135,8 +135,9 @@ async def test_dry_run_persists_run_without_voiding(session: AsyncSession, tenan
 
 # ── Test: apply anula ventas y crea productos ─────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_apply_voids_sales_and_creates_products(session: AsyncSession, tenant, user):
+async def test_apply_voids_sales_and_creates_products(session: AsyncSession, tenant, user) -> None:
     now = datetime.now(UTC)
     product_summary = {
         "has_fecha": False,
@@ -150,12 +151,10 @@ async def test_apply_voids_sales_and_creates_products(session: AsyncSession, ten
         "preview_rows": [{"nombre": "Agua Mineral 1.5L", "precio": "300"}],
         "file_type": "spreadsheet",
     }
-    uploaded_file = await _make_uploaded_file(
+    await _make_uploaded_file(
         session, tenant.tenant_id, user.user_id, product_summary, created_at=now
     )
-    sale = await _make_import_sale(
-        session, tenant.tenant_id, Decimal("300"), created_at=now
-    )
+    sale = await _make_import_sale(session, tenant.tenant_id, Decimal("300"), created_at=now)
     await session.flush()
 
     from app.application.services.data_repair_service import apply_repair
@@ -185,8 +184,9 @@ async def test_apply_voids_sales_and_creates_products(session: AsyncSession, ten
 
 # ── Test: list_by_tenant no devuelve ventas anuladas ─────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_voided_sales_excluded_from_list(session: AsyncSession, tenant, user):
+async def test_voided_sales_excluded_from_list(session: AsyncSession, tenant, user) -> None:
     """SaleEntry con voided_at seteado no debe aparecer en SaleRepository.list_by_tenant."""
     now = datetime.now(UTC)
     product_summary = {
@@ -236,9 +236,13 @@ async def test_voided_sales_excluded_from_list(session: AsyncSession, tenant, us
 
 # ── Test: source_run_id aplica exactamente el plan del dry-run ───────────────
 
+
 @pytest.mark.asyncio
-async def test_apply_with_source_run_id_marks_dry_run_applied(session: AsyncSession, tenant, user):
-    """apply con source_run_id → dry-run previo marcado APPLIED, solo voidea las ventas planificadas."""
+async def test_apply_with_source_run_id_marks_dry_run_applied(
+    session: AsyncSession, tenant, user
+) -> None:
+    """apply con source_run_id → dry-run previo marcado APPLIED,
+    solo voidea las ventas planificadas."""
     now = datetime.now(UTC)
     product_summary = {
         "has_fecha": False,
@@ -288,8 +292,11 @@ async def test_apply_with_source_run_id_marks_dry_run_applied(session: AsyncSess
 
 # ── Test: normalización bidireccional evita duplicados ───────────────────────
 
+
 @pytest.mark.asyncio
-async def test_normalization_prevents_duplicate_with_hyphen_variant(session: AsyncSession, tenant, user):
+async def test_normalization_prevents_duplicate_with_hyphen_variant(
+    session: AsyncSession, tenant, user
+) -> None:
     """'Coca Cola' importado cuando existe 'Coca-Cola' → UPDATE, no CREATE duplicado."""
     now = datetime.now(UTC)
 
@@ -345,8 +352,9 @@ async def test_normalization_prevents_duplicate_with_hyphen_variant(session: Asy
 
 # ── Test: run idempotente ─────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_apply_twice_is_idempotent(session: AsyncSession, tenant, user):
+async def test_apply_twice_is_idempotent(session: AsyncSession, tenant, user) -> None:
     """Correr apply dos veces no duplica productos ni anula dos veces."""
     now = datetime.now(UTC)
     product_summary = {

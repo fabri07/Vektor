@@ -5,13 +5,20 @@ Un correo pasa si AL MENOS UNA de las tres condiciones se cumple.
 Si ninguna se cumple → GMAIL_SKIPPED y se registra en audit_log.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from app.application.services.supplier_service import get_approved_senders
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def gmail_preflight_check(
-    metadata: dict,
+    metadata: dict[str, Any],
     business_id: str,
-    db=None,
+    db: AsyncSession | None = None,
     user_requested: bool = False,
 ) -> bool:
     """
@@ -38,17 +45,14 @@ async def gmail_preflight_check(
         return True
 
     # Condición 3: usuario lo solicitó explícitamente
-    if user_requested:
-        return True
-
-    return False  # → GMAIL_SKIPPED
+    return bool(user_requested)  # True → enviar; False → GMAIL_SKIPPED
 
 
 async def preflight_and_log(
-    metadata: dict,
+    metadata: dict[str, Any],
     business_id: str,
-    db,
-    audit_logger,
+    db: AsyncSession,
+    audit_logger: Any,
     user_requested: bool = False,
 ) -> bool:
     """Versión con audit logging automático."""

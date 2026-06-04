@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import io
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
-
-import pytest
 
 from app.application.services.report_export_service import (
     _sanitize_narrative,
@@ -32,7 +28,7 @@ def _make_snapshot(
     snap.tenant_id = uuid.uuid4()
     snap.total_score = Decimal(str(score_total))
     snap.level = "good"
-    snap.dimensions = []
+    snap.dimensions = []  # type: ignore[assignment]  # test double / fixture
     snap.triggered_by = "test"
     snap.snapshot_date = datetime(2026, 5, 28, 10, 0, 0)
     snap.created_at = datetime(2026, 5, 28, 10, 0, 0)

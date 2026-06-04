@@ -1,9 +1,8 @@
 """Tests para deterministic_finance — cálculos financieros sin LLM."""
 
 import uuid
-from datetime import date, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,7 +14,9 @@ from app.application.services.deterministic_finance import (
 )
 
 
-def _fake_session(ventas_sum: Decimal = Decimal("0"), gastos_sum: Decimal = Decimal("0"), count: int = 0) -> AsyncMock:
+def _fake_session(
+    ventas_sum: Decimal = Decimal("0"), gastos_sum: Decimal = Decimal("0"), count: int = 0
+) -> AsyncMock:
     """Returns an AsyncSession mock that responds to scalar() calls in order."""
     session = AsyncMock()
     # scalar() calls:
@@ -104,10 +105,14 @@ class TestFinancialSummary:
         session = AsyncMock()
         # All queries return 0
         session.scalar.side_effect = [
-            Decimal("0"), Decimal("0"),  # flujo_neto
-            Decimal("0"), Decimal("0"),  # margen (reutiliza flujo_neto)
-            0, Decimal("0"),             # ticket_promedio
-            0, Decimal("0"),             # rotacion
+            Decimal("0"),
+            Decimal("0"),  # flujo_neto
+            Decimal("0"),
+            Decimal("0"),  # margen (reutiliza flujo_neto)
+            0,
+            Decimal("0"),  # ticket_promedio
+            0,
+            Decimal("0"),  # rotacion
         ]
         result = await get_financial_summary(tenant_id, session)
         assert result["estado"] == "SIN_DATOS"
@@ -119,10 +124,14 @@ class TestFinancialSummary:
         session = AsyncMock()
         # ventas 100k, gastos 40k → flujo positivo → no SIN_DATOS
         session.scalar.side_effect = [
-            Decimal("100000"), Decimal("40000"),  # flujo_neto
-            Decimal("100000"), Decimal("40000"),  # margen
-            5, Decimal("100000"),                  # ticket
-            10, Decimal("100000"),                 # rotacion stock
+            Decimal("100000"),
+            Decimal("40000"),  # flujo_neto
+            Decimal("100000"),
+            Decimal("40000"),  # margen
+            5,
+            Decimal("100000"),  # ticket
+            10,
+            Decimal("100000"),  # rotacion stock
         ]
         result = await get_financial_summary(tenant_id, session)
         assert result["estado"] == "OK"
@@ -133,10 +142,14 @@ class TestFinancialSummary:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
         session.scalar.side_effect = [
-            Decimal("50000"), Decimal("10000"),
-            Decimal("50000"), Decimal("10000"),
-            4, Decimal("50000"),
-            20, Decimal("50000"),
+            Decimal("50000"),
+            Decimal("10000"),
+            Decimal("50000"),
+            Decimal("10000"),
+            4,
+            Decimal("50000"),
+            20,
+            Decimal("50000"),
         ]
         result = await get_financial_summary(tenant_id, session)
         assert result["estado"] == "OK"

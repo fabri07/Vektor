@@ -9,7 +9,10 @@ Every decision is logged to decision_audit_log.
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -133,11 +136,14 @@ def _build_dimensions(
     if state.prev_monthly_sales_est > 0:
         growth_pct = float(
             (state.monthly_sales_est - state.prev_monthly_sales_est)
-            / state.prev_monthly_sales_est * 100
+            / state.prev_monthly_sales_est
+            * 100
         )
         growth_explanation = f"Ventas {growth_pct:+.1f}% vs período anterior (30 días previos)."
     else:
-        growth_explanation = "Sin historial del período anterior; crecimiento calculado como neutro."
+        growth_explanation = (
+            "Sin historial del período anterior; crecimiento calculado como neutro."
+        )
 
     return [
         {
@@ -201,7 +207,9 @@ class HealthScoreService:
         redis = _NullRedis()
 
         # ── 1. Business State Layer ───────────────────────────────────────────
-        state = await compute_business_state(tenant_id, self._session, redis)
+        state = await compute_business_state(
+            tenant_id, self._session, cast("Redis", redis)
+        )
 
         # ── 2a. Tenant override de margen (tiene prioridad sobre data-driven) ──
         tenant_benchmark = await get_margin_benchmark(tenant_id, self._session)
@@ -242,7 +250,11 @@ class HealthScoreService:
         margin_ratio = 0.0
         if state.monthly_sales_est > 0:
             margin_ratio = float(
-                (state.monthly_sales_est - state.monthly_inventory_cost_est - state.monthly_fixed_expenses_est)
+                (
+                    state.monthly_sales_est
+                    - state.monthly_inventory_cost_est
+                    - state.monthly_fixed_expenses_est
+                )
                 / state.monthly_sales_est
             )
         cash_ratio = 0.0
@@ -251,7 +263,8 @@ class HealthScoreService:
         low_stock_pct = 0.0
         if state.products:
             below = sum(
-                1 for p in state.products
+                1
+                for p in state.products
                 if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
             )
             low_stock_pct = below / len(state.products)

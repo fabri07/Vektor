@@ -55,9 +55,8 @@ def _extract_amounts_from_text(text: str) -> dict[str, Any]:
 
 # ── Shared async helpers ──────────────────────────────────────────────────────
 
-async def _load_and_lock(
-    session: Any, file_id: str, tenant_id: str
-) -> Any:
+
+async def _load_and_lock(session: Any, file_id: str, tenant_id: str) -> Any:
     """Load UploadedFile and set status=PROCESSING. Returns the ORM object."""
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -148,6 +147,7 @@ async def _apply_validation_gate(
 
 # ── Celery tasks ──────────────────────────────────────────────────────────────
 
+
 @celery_app.task(  # type: ignore[misc]
     name="jobs.process_spreadsheet",
     queue="ingestion",
@@ -186,7 +186,13 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
 
                 # Validation gate — REJECTED if confidence too low or schema invalid
                 validated_summary = await _apply_validation_gate(
-                    factory, file_id, tenant_id, summary, t0, "jobs.process_spreadsheet", force=force
+                    factory,
+                    file_id,
+                    tenant_id,
+                    summary,
+                    t0,
+                    "jobs.process_spreadsheet",
+                    force=force,
                 )
                 if validated_summary is None:
                     return  # REJECTED — already persisted
@@ -283,7 +289,13 @@ def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> 
 
                 # Validation gate
                 validated_summary = await _apply_validation_gate(
-                    factory, file_id, tenant_id, summary, t0, "jobs.process_text_document", force=force
+                    factory,
+                    file_id,
+                    tenant_id,
+                    summary,
+                    t0,
+                    "jobs.process_text_document",
+                    force=force,
                 )
                 if validated_summary is None:
                     return

@@ -3,7 +3,7 @@
 import uuid
 from typing import Any
 
-from sqlalchemy import BigInteger, ForeignKey, String, Text
+from sqlalchemy import BigInteger, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,7 +37,9 @@ class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     s3_key: Mapped[str] = mapped_column(String(1000), nullable=False)
     content_type: Mapped[str] = mapped_column(String(100), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    purpose: Mapped[str] = mapped_column(String(50), nullable=False)  # file_hint: ventas|gastos|stock|general
+    purpose: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # file_hint: ventas|gastos|stock|general
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="uploaded")
 
     # ── Ingestion pipeline fields ─────────────────────────────────────────────

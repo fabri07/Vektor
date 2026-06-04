@@ -9,7 +9,7 @@ NUNCA como texto narrativo.
 import json
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, cast
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -96,7 +96,7 @@ class HeuristicConfig(BaseModel):
 
 class HeuristicEngine:
     @staticmethod
-    def _load_default(business_type: str) -> dict:
+    def _load_default(business_type: str) -> dict[str, Any]:
         filename = BUSINESS_TYPE_FILES.get(business_type.lower())
         if not filename:
             # Fallback a kiosco si el rubro no se reconoce
@@ -104,10 +104,10 @@ class HeuristicEngine:
         path = DATA_DIR / filename
         if not path.exists():
             raise FileNotFoundError(f"Archivo de heurística no encontrado: {path}")
-        return json.loads(path.read_text())
+        return cast("dict[str, Any]", json.loads(path.read_text()))
 
     @staticmethod
-    def get(business_type: str, business_id: Optional[str] = None) -> HeuristicConfig:
+    def get(business_type: str, business_id: str | None = None) -> HeuristicConfig:
         """
         Versión síncrona — usa solo los defaults del rubro.
         Para aplicar overrides por negocio usar get_async().

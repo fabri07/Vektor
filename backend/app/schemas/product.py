@@ -29,21 +29,19 @@ class ProductResponse(BaseModel):
     deactivated_at: datetime | None = None
     deactivation_reason: str | None = None
 
-    @computed_field  # type: ignore[misc]
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def margin_pct(self) -> float | None:
         if self.unit_cost_ars is None or self.sale_price_ars == 0:
             return None
-        return float(
-            (self.sale_price_ars - self.unit_cost_ars) / self.sale_price_ars * 100
-        )
+        return float((self.sale_price_ars - self.unit_cost_ars) / self.sale_price_ars * 100)
 
-    @computed_field  # type: ignore[misc]
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def is_low_stock(self) -> bool:
         return self.stock_units <= effective_threshold(self.low_stock_threshold_units)
 
-    @computed_field  # type: ignore[misc]
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def stock_status(self) -> str:
         """Estado canónico del producto: in_stock | low_stock | out_of_stock.

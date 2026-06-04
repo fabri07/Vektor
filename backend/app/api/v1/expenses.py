@@ -147,9 +147,7 @@ async def create_expense(
     return saved
 
 
-@router.get(
-    "/{expense_id}", response_model=ExpenseEntryResponse, summary="Get expense by ID"
-)
+@router.get("/{expense_id}", response_model=ExpenseEntryResponse, summary="Get expense by ID")
 async def get_expense(
     expense_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
@@ -162,9 +160,7 @@ async def get_expense(
     return entry
 
 
-@router.patch(
-    "/{expense_id}", response_model=ExpenseEntryResponse, summary="Update an expense"
-)
+@router.patch("/{expense_id}", response_model=ExpenseEntryResponse, summary="Update an expense")
 async def update_expense(
     expense_id: UUID,
     body: UpdateExpenseRequest,
@@ -206,9 +202,7 @@ async def update_expense(
     return saved
 
 
-@router.delete(
-    "/{expense_id}", response_model=MessageResponse, summary="Delete an expense entry"
-)
+@router.delete("/{expense_id}", response_model=MessageResponse, summary="Delete an expense entry")
 async def delete_expense(
     expense_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),

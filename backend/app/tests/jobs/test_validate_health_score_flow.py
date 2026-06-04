@@ -18,7 +18,12 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.persistence.db.base import Base
 from app.persistence.models.audit import DecisionAuditLog
@@ -41,7 +46,9 @@ class FakeRedis:
     async def get(self, key: str) -> str | None:
         return self._store.get(key)
 
-    async def set(self, key: str, value: str, *, nx: bool = False, ex: int | None = None) -> bool | None:
+    async def set(
+        self, key: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> bool | None:
         if nx and key in self._store:
             return None
         self._store[key] = value
@@ -55,7 +62,7 @@ class FakeRedis:
 
 
 @pytest_asyncio.fixture
-async def engine() -> AsyncEngine:
+async def engine() -> AsyncEngine:  # type: ignore[misc]  # test double / fixture
     eng = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -66,7 +73,7 @@ async def engine() -> AsyncEngine:
 
 
 @pytest_asyncio.fixture
-async def session(engine: AsyncEngine) -> AsyncSession:
+async def session(engine: AsyncEngine) -> AsyncSession:  # type: ignore[misc]  # test double / fixture
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         yield s
@@ -114,21 +121,22 @@ async def kiosco_profile(session: AsyncSession, tenant: Tenant) -> BusinessProfi
 
 
 def _make_run(session: AsyncSession, redis: FakeRedis):
+    from sqlalchemy import select
+
     import app.jobs.recalculate_health_score as job_module
-    from app.state.business_state_service import compute_business_state
     from app.heuristics.health_engine import calculate_health_score
     from app.persistence.models.audit import DecisionAuditLog
     from app.persistence.models.business import MomentumProfile
     from app.persistence.models.score import HealthScoreSnapshot
-    from sqlalchemy import select
+    from app.state.business_state_service import compute_business_state
 
     async def _run(tenant_id_str: str) -> None:
-        import uuid as _uuid, time
+        import uuid as _uuid
         from datetime import UTC, datetime
         from decimal import Decimal
 
         tenant_id = _uuid.UUID(tenant_id_str)
-        state = await compute_business_state(tenant_id, session, redis)
+        state = await compute_business_state(tenant_id, session, redis)  # type: ignore[arg-type]  # test double / fixture
         result = calculate_health_score(state)
         now = datetime.now(UTC)
 
@@ -177,14 +185,16 @@ def _make_run(session: AsyncSession, redis: FakeRedis):
         )
         momentum = mp_res.scalar_one_or_none()
         if momentum is None:
-            session.add(MomentumProfile(
-                tenant_id=tenant_id,
-                best_score_ever=result.score_total,
-                best_score_date=now.date(),
-                milestones_json=[],
-                improving_streak_weeks=0,
-                updated_at=now,
-            ))
+            session.add(
+                MomentumProfile(
+                    tenant_id=tenant_id,
+                    best_score_ever=result.score_total,
+                    best_score_date=now.date(),
+                    milestones_json=[],
+                    improving_streak_weeks=0,
+                    updated_at=now,
+                )
+            )
         await session.commit()
 
     return _run
@@ -214,7 +224,12 @@ async def test_validate_job_persists_score(
     assert snap.score_supplier is not None, "score_supplier debe estar persistido"
     assert 0 <= int(snap.total_score) <= 100, f"score_total fuera de rango: {snap.total_score}"
     assert snap.heuristic_version == "v1"
-    assert snap.primary_risk_code in {"CASH_LOW", "MARGIN_LOW", "STOCK_CRITICAL", "SUPPLIER_DEPENDENCY"}
+    assert snap.primary_risk_code in {
+        "CASH_LOW",
+        "MARGIN_LOW",
+        "STOCK_CRITICAL",
+        "SUPPLIER_DEPENDENCY",
+    }
 
 
 # ── Validation 2: decision_audit_log tiene una entrada ────────────────────────
@@ -275,11 +290,13 @@ async def test_validate_latest_endpoint(
     session.add(user)
     await session.commit()
 
-    token = create_access_token({
-        "sub": str(user.user_id),
-        "tenant_id": str(tenant.tenant_id),
-        "role_code": "OWNER",
-    })
+    token = create_access_token(
+        {
+            "sub": str(user.user_id),
+            "tenant_id": str(tenant.tenant_id),
+            "role_code": "OWNER",
+        }
+    )
     headers = {"Authorization": f"Bearer {token}"}
 
     # 3. Levantar la app con override de sesión
@@ -296,7 +313,9 @@ async def test_validate_latest_endpoint(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/health-scores/latest", headers=headers)
 
-    assert response.status_code == 200, f"Esperaba 200, obtuve {response.status_code}: {response.text}"
+    assert (
+        response.status_code == 200
+    ), f"Esperaba 200, obtuve {response.status_code}: {response.text}"
     data = response.json()
 
     assert "score_total" in data, "Falta score_total en la respuesta"
@@ -323,6 +342,7 @@ async def test_validate_no_duplicate_snapshots(
     garantizando que un segundo job no crearía un snapshot duplicado.
     """
     from unittest.mock import MagicMock, patch
+
     from app.jobs.trigger_recalculation import maybe_trigger_recalculation
 
     redis = FakeRedis()
@@ -346,6 +366,6 @@ async def test_validate_no_duplicate_snapshots(
         select(HealthScoreSnapshot).where(HealthScoreSnapshot.tenant_id == tenant.tenant_id)
     )
     snapshots = result.scalars().all()
-    assert len(snapshots) == 0, (
-        "No debe haber snapshots en DB porque ambos jobs fueron mockeados / bloqueados"
-    )
+    assert (
+        len(snapshots) == 0
+    ), "No debe haber snapshots en DB porque ambos jobs fueron mockeados / bloqueados"

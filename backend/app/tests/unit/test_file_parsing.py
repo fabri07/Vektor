@@ -75,6 +75,7 @@ def test_detect_supported_mime_rejects_unknown_binary() -> None:
 
 # --- infer_spreadsheet_type ---
 
+
 def test_product_csv_with_date_and_price_classified_as_stock() -> None:
     """Bug regression: fecha + nombre + precio → stock, no ventas."""
     result = infer_spreadsheet_type(
@@ -107,10 +108,10 @@ def test_descripcion_col_alone_does_not_trigger_stock() -> None:
         has_fecha=True,
         has_venta=True,
         has_gasto=False,
-        has_producto=True,   # descripcion está en PRODUCTO_COLS pero no en NOMBRE_COLS/CATALOGO_COLS
+        has_producto=True,  # descripcion está en PRODUCTO_COLS pero no en NOMBRE_COLS/CATALOGO_COLS
         has_precio_ambiguo=False,
         has_catalogo_fuerte=False,
-        has_nombre=False,    # sin nombre/producto explícito
+        has_nombre=False,  # sin nombre/producto explícito
     )
     assert result == "ventas"
 
@@ -168,9 +169,7 @@ def test_sale_csv_ambiguous_price_without_product_classified_as_ventas() -> None
 def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) -> None:
     """CSV con columnas fecha+nombre+precio → inferred_type='stock' (bug regression end-to-end)."""
     product_csv = (
-        b"fecha,nombre,precio\n"
-        b"2024-01-15,Coca-Cola 600ml,500\n"
-        b"2024-01-15,Agua 1.5L,300\n"
+        b"fecha,nombre,precio\n" b"2024-01-15,Coca-Cola 600ml,500\n" b"2024-01-15,Agua 1.5L,300\n"
     )
     summary = parse_uploaded_content(product_csv, "text/csv", "productos.csv")
     assert summary["inferred_type"] == "stock"

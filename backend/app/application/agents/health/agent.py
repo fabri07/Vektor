@@ -15,17 +15,19 @@ GUARDRAILS:
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
 from app.application.agents.base import BaseAgent
 from app.application.agents.health.sub_calculator import ComponentScoresV2, compute_scores
 from app.application.agents.health.sub_collector import collect
 from app.application.agents.health.sub_narrator import generate
-from app.application.services.health_config_service import get_margin_benchmark
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.schemas import (
     AgentRequest,
@@ -33,16 +35,20 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
+from app.application.services.health_config_service import get_margin_benchmark
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
+
 
 # Redis stub mínimo para sub_collector cuando no hay Redis real disponible
 class _NullRedis:
     async def get(self, _key: str) -> None:
         return None
 
-    async def set(self, _key: str, _value: str, *, nx: bool = False, ex: int | None = None) -> bool | None:
+    async def set(
+        self, _key: str, _value: str, *, nx: bool = False, ex: int | None = None
+    ) -> bool | None:
         return True if not nx else True
 
     async def aclose(self) -> None:
@@ -85,7 +91,9 @@ class AgentHealth(BaseAgent):
     def _suggest_actions(self, scores: ComponentScoresV2) -> list[str]:
         suggestions: list[str] = []
         if scores.cash_score < 60:
-            suggestions.append("Revisá tu cobertura de caja — considerá adelantar cobros pendientes.")
+            suggestions.append(
+                "Revisá tu cobertura de caja — considerá adelantar cobros pendientes."
+            )
         if scores.stock_score < 60:
             suggestions.append("Hay productos con quiebre — generá un pedido a tus proveedores.")
         if scores.margin_score < 50:
@@ -105,12 +113,22 @@ class AgentHealth(BaseAgent):
                 result={"error": "AgentHealth requiere acceso a base de datos."},
             )
 
+        # ── Sprint 17: flujo de caja / escenarios (SIMULATE_SCENARIO) ─────────
+        from app.application.agents.shared.schemas import ActionType  # noqa: PLC0415
+
+        action_type = getattr(task, "action_type", None)
+        analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+        if action_type == ActionType.SIMULATE_SCENARIO:
+            return await self._handle_cashflow_scenario(request, analysis_intent)
+
         business_name, _vertical = await self._load_business_meta(request.business_id)
 
         # ── 1. Recolectar estado de negocio ───────────────────────────────────
         try:
-            state = await collect(request.business_id, self._db, self._redis)
-        except ValueError as exc:
+            state = await collect(
+                request.business_id, self._db, cast("Redis", self._redis)
+            )
+        except ValueError:
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
@@ -118,7 +136,10 @@ class AgentHealth(BaseAgent):
                 risk_level=RiskLevel.LOW,
                 confidence="LOW",
                 result={"summary": "No se encontró perfil de negocio configurado."},
-                question="Para generar el informe necesito que completes el perfil de tu negocio. ¿Querés hacerlo ahora?",
+                question=(
+                    "Para generar el informe necesito que completes el perfil de tu negocio. "
+                    "¿Querés hacerlo ahora?"
+                ),
             )
 
         # ── 2. ValidationGate — datos insuficientes → empty state ────────────
@@ -178,16 +199,269 @@ class AgentHealth(BaseAgent):
             usage=UsageSummary(calls=[narrator_call]),
         )
 
+    # ── Sprint 17: flujo de caja y escenarios (read-only, determinístico) ─────
+
+    def _analysis_response(
+        self,
+        request: AgentRequest,
+        summary: str,
+        message: str,
+        structured: dict[str, Any] | None = None,
+        confidence: str = "HIGH",
+    ) -> AgentResponse:
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=confidence,
+            message=message,
+            result={"summary": summary, "structured_data": structured or {}, "analysis": True},
+        )
+
+    async def _handle_cashflow_scenario(
+        self, request: AgentRequest, intent: str | None
+    ) -> AgentResponse:
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            return self._analysis_response(
+                request,
+                "caja_sin_datos",
+                "No pude identificar tu negocio.",
+            )
+
+        # ── simular_escenario_financiero → DeterministicFinance ───────────────
+        if intent == "simular_escenario_financiero":
+            return await self._handle_financial_simulation(request, tenant_id)
+
+        # ── proyectar_caja / alertar_falta_liquidez → ForecastService ─────────
+        from app.application.services.forecast_service import get_forecast  # noqa: PLC0415
+
+        assert self._db is not None  # AgentHealth.process garantiza _db no-None
+        try:
+            forecast = await get_forecast(tenant_id, self._db, cast("Redis", self._redis))
+        except Exception:
+            return self._analysis_response(
+                request,
+                "forecast_error",
+                "No pude calcular la proyección de caja en este momento. Intentá de nuevo "
+                "en un rato.",
+                confidence="LOW",
+            )
+
+        if forecast.confidence == "LOW" or not forecast.points:
+            return self._analysis_response(
+                request,
+                "forecast_sin_datos",
+                "Todavía no tengo suficiente historial de ventas y gastos para proyectar tu "
+                "caja con confianza. Cargá al menos unas semanas de movimientos y vuelvo a "
+                "calcular.",
+                confidence="LOW",
+            )
+
+        net_total = round(sum(p.net for p in forecast.points), 2)
+        horizon = forecast.horizon_days
+        # Días hasta saldo acumulado negativo (alerta de liquidez)
+        running = 0.0
+        first_negative_day: int | None = None
+        for i, p in enumerate(forecast.points, start=1):
+            running += p.net
+            if running < 0 and first_negative_day is None:
+                first_negative_day = i
+
+        if intent == "alertar_falta_liquidez":
+            vertical = await self._vertical_code(tenant_id)
+            from app.application.agents.shared.heuristic_engine import (  # noqa: PLC0415
+                HeuristicEngine,
+            )
+
+            critical_days = HeuristicEngine.get(vertical).cash_health.critical_days_below
+            if first_negative_day is not None and first_negative_day <= horizon:
+                msg = (
+                    f"⚠ Alerta de liquidez: con la tendencia actual, tu caja se pondría "
+                    f"negativa alrededor del día {first_negative_day}. "
+                    "Conviene adelantar cobros o postergar gastos no esenciales."
+                )
+                return self._analysis_response(
+                    request,
+                    "alertar_falta_liquidez",
+                    msg,
+                    {
+                        "first_negative_day": first_negative_day,
+                        "horizon_days": horizon,
+                        "net_total": net_total,
+                        "critical_days_threshold": critical_days,
+                        "risk_code": "CASH_LOW",
+                    },
+                    confidence=forecast.confidence,
+                )
+            return self._analysis_response(
+                request,
+                "liquidez_ok",
+                f"No veo riesgo de quedarte sin caja en los próximos {horizon} días. "
+                f"Tu flujo neto proyectado es ${net_total:,.0f}.",
+                {"horizon_days": horizon, "net_total": net_total},
+                confidence=forecast.confidence,
+            )
+
+        # ── proyectar_caja (default) ──────────────────────────────────────────
+        signo = "positivo" if net_total >= 0 else "negativo"
+        lines = [
+            f"Proyección de caja a {horizon} días (confianza {forecast.confidence.lower()}):",
+            f"Flujo neto estimado: ${net_total:,.0f} ({signo}).",
+        ]
+        if first_negative_day is not None:
+            lines.append(
+                f"⚠ Ojo: el saldo acumulado se pondría negativo cerca del día {first_negative_day}."
+            )
+        else:
+            lines.append("El saldo acumulado se mantiene positivo en todo el horizonte.")
+        return self._analysis_response(
+            request,
+            "proyectar_caja",
+            "\n".join(lines),
+            {
+                "horizon_days": horizon,
+                "net_total": net_total,
+                "tier": forecast.tier,
+                "first_negative_day": first_negative_day,
+            },
+            confidence=forecast.confidence,
+        )
+
+    async def _handle_financial_simulation(
+        self, request: AgentRequest, tenant_id: uuid.UUID
+    ) -> AgentResponse:
+        """Simula un escenario what-if sobre ventas/gastos (cambio_pct) en memoria."""
+        from app.application.services.deterministic_finance import (  # noqa: PLC0415
+            calcular_flujo_neto_30d,
+        )
+
+        variable, cambio_pct = self._extract_scenario(request.message)
+        assert self._db is not None  # AgentHealth.process garantiza _db no-None
+        flujo = await calcular_flujo_neto_30d(tenant_id, self._db)
+        ventas = float(flujo["total_ventas"])
+        gastos = float(flujo["total_gastos"])
+        if ventas == 0 and gastos == 0:
+            return self._analysis_response(
+                request,
+                "simulacion_sin_datos",
+                "No tengo ventas ni gastos cargados en los últimos 30 días para simular un "
+                "escenario. Cargá tus movimientos y vuelvo a intentar.",
+                confidence="LOW",
+            )
+        if cambio_pct is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence="MEDIUM",
+                question=(
+                    "¿Qué escenario querés simular? Por ejemplo: 'qué pasa si vendo 20% menos' "
+                    "o 'si los gastos suben 15%'."
+                ),
+                result={"summary": "Falta el cambio porcentual a simular."},
+            )
+
+        base_neto = ventas - gastos
+        if variable == "gastos":
+            new_gastos = gastos * (1 + cambio_pct / 100.0)
+            new_neto = ventas - new_gastos
+            detalle = f"gastos {'+' if cambio_pct >= 0 else ''}{cambio_pct:.0f}%"
+        else:  # default: ventas
+            new_ventas = ventas * (1 + cambio_pct / 100.0)
+            new_neto = new_ventas - gastos
+            detalle = f"ventas {'+' if cambio_pct >= 0 else ''}{cambio_pct:.0f}%"
+
+        lines = [
+            f"Simulación ({detalle}, base últimos 30 días):",
+            f"Flujo neto actual: ${base_neto:,.0f} → escenario: ${new_neto:,.0f}.",
+        ]
+        if base_neto >= 0 and new_neto < 0:
+            lines.append("⚠ En ese escenario tu flujo pasaría a ser negativo.")
+        lines.append("Es una simulación: no modifiqué ningún dato real.")
+        return self._analysis_response(
+            request,
+            "simular_escenario_financiero",
+            "\n".join(lines),
+            {
+                "variable": variable,
+                "cambio_pct": cambio_pct,
+                "neto_actual": round(base_neto, 2),
+                "neto_simulado": round(new_neto, 2),
+            },
+        )
+
+    @staticmethod
+    def _extract_scenario(message: str) -> tuple[str, float | None]:
+        """Extrae (variable, cambio_pct) del mensaje. variable ∈ {'ventas','gastos'}."""
+        import re  # noqa: PLC0415
+
+        low = message.lower()
+        variable = (
+            "gastos" if any(w in low for w in ("gasto", "gastos", "costo", "costos")) else "ventas"
+        )
+        m = re.search(r"(\d{1,3}(?:[.,]\d+)?)\s*(?:%|por\s*ciento|porciento)", low)
+        if not m:
+            return variable, None
+        try:
+            pct = float(m.group(1).replace(",", "."))
+        except ValueError:
+            return variable, None
+        # Signo: "menos", "baja", "cae", "reduzco" → negativo
+        if any(
+            w in low
+            for w in ("menos", "baja", "bajan", "cae", "caen", "reduzco", "reducir", "menor")
+        ):
+            pct = -pct
+        return variable, pct
+
+    async def _vertical_code(self, tenant_id: uuid.UUID) -> str:
+        if self._db is None:
+            return "kiosco_almacen"
+        try:
+            result = await self._db.execute(
+                select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+            )
+            return result.scalar_one_or_none() or "kiosco_almacen"
+        except Exception:
+            return "kiosco_almacen"
+
     def _build_alerts(self, scores: ComponentScoresV2) -> list[dict[str, str]]:
         alerts: list[dict[str, str]] = []
         if scores.cash_score < 30:
-            alerts.append({"type": "CRITICAL", "message": "Cobertura de caja crítica", "component": "cash"})
+            alerts.append(
+                {"type": "CRITICAL", "message": "Cobertura de caja crítica", "component": "cash"}
+            )
         elif scores.cash_score < 60:
-            alerts.append({"type": "WARNING", "message": "Cobertura de caja baja", "component": "cash"})
+            alerts.append(
+                {"type": "WARNING", "message": "Cobertura de caja baja", "component": "cash"}
+            )
         if scores.stock_score < 50:
-            alerts.append({"type": "WARNING", "message": "Varios productos con quiebre de stock", "component": "stock"})
+            alerts.append(
+                {
+                    "type": "WARNING",
+                    "message": "Varios productos con quiebre de stock",
+                    "component": "stock",
+                }
+            )
         if scores.margin_score < 40:
-            alerts.append({"type": "WARNING", "message": "Margen por debajo del umbral crítico", "component": "margin"})
+            alerts.append(
+                {
+                    "type": "WARNING",
+                    "message": "Margen por debajo del umbral crítico",
+                    "component": "margin",
+                }
+            )
         if scores.growth_score < 40:
-            alerts.append({"type": "INFO", "message": "Ventas en caída vs período anterior", "component": "growth"})
+            alerts.append(
+                {
+                    "type": "INFO",
+                    "message": "Ventas en caída vs período anterior",
+                    "component": "growth",
+                }
+            )
         return alerts[:3]

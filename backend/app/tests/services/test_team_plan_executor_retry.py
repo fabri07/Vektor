@@ -12,9 +12,8 @@ from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
     AgentTask,
-    AgentTeamPlan,
 )
-from app.application.services.team_plan_executor import TeamPlanExecutor, _EXTERNAL_ACTION_TYPES
+from app.application.services.team_plan_executor import _EXTERNAL_ACTION_TYPES, TeamPlanExecutor
 
 
 def _make_task(action_type: str, agent: str = "agent_google") -> AgentTask:
@@ -84,12 +83,15 @@ class TestRetryOnExternalTask:
 
         mock_agent.process = flaky_process
 
-        with patch(
-            "app.application.services.team_plan_executor.get_sub_agent",
-            return_value=mock_agent,
-        ), patch(
-            "app.application.services.team_plan_executor.async_session_factory",
-        ) as mock_factory:
+        with (
+            patch(
+                "app.application.services.team_plan_executor.get_sub_agent",
+                return_value=mock_agent,
+            ),
+            patch(
+                "app.application.services.team_plan_executor.async_session_factory",
+            ) as mock_factory,
+        ):
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("asyncio.sleep", new=AsyncMock()):
@@ -119,12 +121,15 @@ class TestRetryOnExternalTask:
 
         mock_agent.process = always_fails
 
-        with patch(
-            "app.application.services.team_plan_executor.get_sub_agent",
-            return_value=mock_agent,
-        ), patch(
-            "app.application.services.team_plan_executor.async_session_factory",
-        ) as mock_factory:
+        with (
+            patch(
+                "app.application.services.team_plan_executor.get_sub_agent",
+                return_value=mock_agent,
+            ),
+            patch(
+                "app.application.services.team_plan_executor.async_session_factory",
+            ) as mock_factory,
+        ):
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("asyncio.sleep", new=AsyncMock()):
@@ -147,12 +152,15 @@ class TestRetryOnExternalTask:
         mock_agent = MagicMock()
         mock_agent.process = AsyncMock(side_effect=ConnectionError("always fails"))
 
-        with patch(
-            "app.application.services.team_plan_executor.get_sub_agent",
-            return_value=mock_agent,
-        ), patch(
-            "app.application.services.team_plan_executor.async_session_factory",
-        ) as mock_factory:
+        with (
+            patch(
+                "app.application.services.team_plan_executor.get_sub_agent",
+                return_value=mock_agent,
+            ),
+            patch(
+                "app.application.services.team_plan_executor.async_session_factory",
+            ) as mock_factory,
+        ):
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("asyncio.sleep", new=AsyncMock()):

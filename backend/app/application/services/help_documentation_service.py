@@ -19,19 +19,51 @@ import yaml
 _MANUAL_PATH = Path(__file__).parent.parent.parent.parent / "docs" / "vektor_user_manual.yaml"
 
 # Verbos en pasado/imperativo que indican acción real de negocio (no pregunta sobre cómo usarla)
-_BUSINESS_ACTION_VERBS = frozenset({
-    "vendí", "vendi", "cobré", "cobre", "pagué", "pague",
-    "compré", "compre", "gasté", "gaste",
-    "ingresé", "ingrese", "registré", "registre",
-    "registrá", "registra", "anotá", "anota", "ajustá", "ajusta",
-})
+_BUSINESS_ACTION_VERBS = frozenset(
+    {
+        "vendí",
+        "vendi",
+        "cobré",
+        "cobre",
+        "pagué",
+        "pague",
+        "compré",
+        "compre",
+        "gasté",
+        "gaste",
+        "ingresé",
+        "ingrese",
+        "registré",
+        "registre",
+        "registrá",
+        "registra",
+        "anotá",
+        "anota",
+        "ajustá",
+        "ajusta",
+    }
+)
 
 # Palabras que indican que la pregunta es sobre cómo usar la plataforma — anulan la heurística
-_PLATFORM_QUESTION_MARKERS = frozenset({
-    "cómo", "como", "qué", "que", "dónde", "donde",
-    "cuándo", "cuando", "puedo", "puede", "sirve",
-    "función", "funcion", "funciona", "ayuda",
-})
+_PLATFORM_QUESTION_MARKERS = frozenset(
+    {
+        "cómo",
+        "como",
+        "qué",
+        "que",
+        "dónde",
+        "donde",
+        "cuándo",
+        "cuando",
+        "puedo",
+        "puede",
+        "sirve",
+        "función",
+        "funcion",
+        "funciona",
+        "ayuda",
+    }
+)
 
 
 @dataclass

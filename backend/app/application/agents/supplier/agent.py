@@ -53,6 +53,12 @@ class AgentSupplier(BaseAgent):
         return self._client
 
     async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
+        # ── Sprint 17: análisis de proveedores read-only ─────────────────────
+        action_type = getattr(task, "action_type", None)
+        analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+        if action_type == ActionType.ANALYZE_SUPPLIER_DATA:
+            return await self._handle_supplier_analysis(request, analysis_intent)
+
         message = request.message.lower()
         intent = self._classify_intent(message)
 
@@ -97,7 +103,10 @@ class AgentSupplier(BaseAgent):
                 risk_level=RiskLevel.LOW,
                 confidence=Confidence.HIGH,
                 requires_approval=False,
-                question="Para armar el email necesito: ¿A qué proveedor querés enviarlo y qué necesitás pedirle o comunicarle?",
+                question=(
+                    "Para armar el email necesito: ¿A qué proveedor querés enviarlo y qué "
+                    "necesitás pedirle o comunicarle?"
+                ),
                 result={
                     "action_type": ActionType.CREATE_SUPPLIER_DRAFT,
                     "summary": "Necesito más datos para generar el email.",
@@ -158,7 +167,7 @@ class AgentSupplier(BaseAgent):
             },
         )
 
-    async def _generate_email_draft(self, message: str) -> tuple[dict, LLMCall | None]:
+    async def _generate_email_draft(self, message: str) -> tuple[dict[str, Any], LLMCall | None]:
         system = (
             "Sos el asistente de Véktor. Analizá el mensaje del usuario y generá un email "
             "formal en español rioplatense para un proveedor.\n\n"
@@ -178,10 +187,10 @@ class AgentSupplier(BaseAgent):
         raw, llm_call = await call_llm(
             client=self.client,
             source="agent_supplier",
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(message)}],
-            max_tokens=600,
+            max_tokens=1200,
         )
         if raw is None:
             return {"has_enough_info": False}, None
@@ -252,7 +261,7 @@ class AgentSupplier(BaseAgent):
         if product_id and qty:
             summary += f" Actualiza stock +{qty} unidades."
 
-        payload: dict = {
+        payload: dict[str, Any] = {
             "amount": amount,
             "category": "compra_proveedor",
             "description": f"Compra a {supplier}" + (f" — {product_name}" if product_name else ""),
@@ -281,8 +290,11 @@ class AgentSupplier(BaseAgent):
             usage=usage,
         )
 
-    async def _extract_purchase_entities(self, message: str) -> tuple[dict, LLMCall | None]:
+    async def _extract_purchase_entities(
+        self, message: str
+    ) -> tuple[dict[str, Any], LLMCall | None]:
         from datetime import date  # noqa: PLC0415
+
         today = date.today().isoformat()
         system = (
             f"Hoy es {today}. Extraé datos de una compra a un proveedor.\n"
@@ -296,52 +308,384 @@ class AgentSupplier(BaseAgent):
             '  "unit_cost": "<costo unitario en string o null>",\n'
             '  "transaction_date": "<fecha ISO 8601 o fecha de hoy>"\n'
             "}\n\n"
-            "Si no podés identificar el monto total, devolvé {\"error\": \"No pude identificar el monto. "
-            "Indicame cuánto pagaste en total.\"}."
+            'Si no podés identificar el monto total, devolvé {"error": "No pude identificar el '
+            "monto. "
+            'Indicame cuánto pagaste en total."}.'
         )
         raw, llm_call = await call_llm(
             client=self.client,
             source="agent_supplier",
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             system=system,
             messages=[{"role": "user", "content": wrap_user_input(message)}],
-            max_tokens=300,
+            max_tokens=800,
         )
         if raw is None:
-            return {"error": "No pude interpretar la compra. Indicame el monto y el producto."}, None
+            return {
+                "error": "No pude interpretar la compra. Indicame el monto y el producto."
+            }, None
         try:
             return json.loads(raw), llm_call
         except Exception:
             logger.warning("agent_supplier.purchase_json_parse_failed", raw=raw[:200])
-            return {"error": "No pude interpretar la compra. Indicame el monto y el producto."}, llm_call
+            return {
+                "error": "No pude interpretar la compra. Indicame el monto y el producto."
+            }, llm_call
+
+    # ── Sprint 17: análisis de proveedores (read-only, determinístico) ────────
+
+    def _analysis_response(
+        self,
+        request: AgentRequest,
+        summary: str,
+        message: str,
+        structured: dict[str, Any] | None = None,
+        confidence: Confidence = Confidence.HIGH,
+    ) -> AgentResponse:
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=confidence,
+            message=message,
+            result={"summary": summary, "structured_data": structured or {}, "analysis": True},
+        )
+
+    async def _supplier_totals(self, tenant_id: uuid.UUID, days: int = 90) -> list[dict[str, Any]]:
+        """Agrega gasto por proveedor en una ventana: total, count, last_date, pct."""
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        cutoff = date.today() - timedelta(days=days)
+        assert self._session is not None  # garantizado por _handle_supplier_analysis
+        rows = await self._session.execute(
+            select(ExpenseEntry).where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.transaction_date >= cutoff,
+                ExpenseEntry.supplier_name.isnot(None),
+                ExpenseEntry.supplier_name != "",
+                ExpenseEntry.voided_at.is_(None),
+            )
+        )
+        expenses = list(rows.scalars().all())
+        suppliers: dict[str, dict[str, Any]] = {}
+        for e in expenses:
+            name = (e.supplier_name or "").strip()
+            if not name:
+                continue
+            slot = suppliers.setdefault(
+                name, {"total": Decimal(0), "count": 0, "last_date": e.transaction_date}
+            )
+            slot["total"] += e.amount
+            slot["count"] += 1
+            if e.transaction_date > slot["last_date"]:
+                slot["last_date"] = e.transaction_date
+        grand_total = float(sum(s["total"] for s in suppliers.values())) or 0.0
+        out = [
+            {
+                "name": name,
+                "total": float(s["total"]),
+                "count": s["count"],
+                "last_purchase": str(s["last_date"]),
+                "days_since": (date.today() - s["last_date"]).days,
+                "pct": round(float(s["total"]) / grand_total * 100, 1) if grand_total > 0 else 0.0,
+            }
+            for name, s in suppliers.items()
+        ]
+        out.sort(key=lambda r: r["total"], reverse=True)
+        return out
+
+    async def _handle_supplier_analysis(
+        self, request: AgentRequest, intent: str | None
+    ) -> AgentResponse:
+        if self._session is None:
+            return self._analysis_response(
+                request,
+                "proveedores_sin_datos",
+                "Necesito acceso a tus gastos para analizar proveedores.",
+            )
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            return self._analysis_response(
+                request,
+                "proveedores_sin_datos",
+                "No pude identificar tu negocio.",
+            )
+
+        # ── comparar_precios_proveedores → comparación de 2 adjuntos ──────────
+        if intent == "comparar_precios_proveedores":
+            return await self._handle_supplier_price_comparison(request)
+
+        suppliers = await self._supplier_totals(tenant_id, days=90)
+        if not suppliers:
+            return self._analysis_response(
+                request,
+                "proveedores_ninguno",
+                "No tengo gastos con proveedor registrados en los últimos 90 días. "
+                "Cuando registres compras con el nombre del proveedor, te muestro el ranking "
+                "y tu dependencia de cada uno.",
+            )
+
+        # ── detectar_dependencia_proveedor ────────────────────────────────────
+        if intent == "detectar_dependencia_proveedor":
+            top = suppliers[0]
+            if top["pct"] > 50:
+                msg = (
+                    f"⚠ Dependés fuertemente de {top['name']}: representa el {top['pct']:.0f}% "
+                    f"de tu gasto con proveedores (${top['total']:,.0f} en 90 días). "
+                    "Una interrupción de este proveedor te afectaría mucho — conviene tener "
+                    "una alternativa identificada."
+                )
+                return self._analysis_response(
+                    request,
+                    "detectar_dependencia_proveedor",
+                    msg,
+                    {
+                        "risk_code": "SUPPLIER_DEPENDENCY",
+                        "top_supplier": top,
+                        "suppliers": suppliers,
+                    },
+                )
+            return self._analysis_response(
+                request,
+                "dependencia_baja",
+                f"Tu proveedor principal ({top['name']}) concentra el {top['pct']:.0f}% del "
+                "gasto, por debajo del 50%. No veo una dependencia riesgosa: tu abastecimiento "
+                "está razonablemente diversificado.",
+                {"top_supplier": top, "suppliers": suppliers},
+            )
+
+        # ── preparar_pedido_sugerido ──────────────────────────────────────────
+        if intent == "preparar_pedido_sugerido":
+            critical = await self._critical_stock_for_order(tenant_id)
+            if not critical:
+                return self._analysis_response(
+                    request,
+                    "pedido_sin_quiebres",
+                    "No tenés productos en quiebre que requieran un pedido ahora. "
+                    "Tu stock está cubierto.",
+                    {"suppliers": suppliers[:5]},
+                )
+            main_supplier = suppliers[0]["name"] if suppliers else "tu proveedor habitual"
+            lines = [
+                f"Sugerencia de pedido para {main_supplier} (proveedor más frecuente):",
+            ]
+            for p in critical[:10]:
+                lines.append(f"- {p['name']}: {p['stock']} u. en stock")
+            lines.append(
+                "Revisá las cantidades y, si querés, te armo el borrador de email al proveedor."
+            )
+            return self._analysis_response(
+                request,
+                "preparar_pedido_sugerido",
+                "\n".join(lines),
+                {"critical_products": critical, "suggested_supplier": main_supplier},
+            )
+
+        # ── analizar_proveedores (default) ────────────────────────────────────
+        total = sum(s["total"] for s in suppliers)
+        lines = [f"Tenés {len(suppliers)} proveedores activos (90 días), ${total:,.0f} en compras:"]
+        for s in suppliers[:6]:
+            lines.append(
+                f"- {s['name']}: ${s['total']:,.0f} ({s['pct']:.0f}%), última compra hace "
+                f"{s['days_since']} días"
+            )
+        return self._analysis_response(
+            request,
+            "analizar_proveedores",
+            "\n".join(lines),
+            {"suppliers": suppliers},
+        )
+
+    async def _critical_stock_for_order(self, tenant_id: uuid.UUID) -> list[dict[str, Any]]:
+        from app.domain.product import effective_threshold  # noqa: PLC0415
+        from app.persistence.models.product import Product  # noqa: PLC0415
+
+        assert self._session is not None  # garantizado por _handle_supplier_analysis
+        rows = await self._session.execute(
+            select(Product).where(
+                Product.tenant_id == tenant_id,
+                Product.is_active.is_(True),
+            )
+        )
+        products = list(rows.scalars().all())
+        critical = [
+            p for p in products if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
+        ]
+        critical.sort(key=lambda p: p.stock_units)
+        return [{"name": p.name, "stock": p.stock_units} for p in critical]
+
+    async def _handle_supplier_price_comparison(self, request: AgentRequest) -> AgentResponse:
+        from app.application.agents.shared import analytics  # noqa: PLC0415
+        from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+        summaries: list[dict[str, Any]] = []
+        for attachment in request.attachments or []:
+            file_id = attachment.get("file_id") if isinstance(attachment, dict) else None
+            if not file_id:
+                continue
+            try:
+                file_uuid = uuid.UUID(str(file_id))
+                tenant_uuid = uuid.UUID(str(request.business_id))
+            except (ValueError, TypeError):
+                continue
+            assert self._session is not None  # garantizado por _handle_supplier_analysis
+            res = await self._session.execute(
+                select(UploadedFile).where(
+                    UploadedFile.id == file_uuid, UploadedFile.tenant_id == tenant_uuid
+                )
+            )
+            f = res.scalar_one_or_none()
+            if f is not None and isinstance(f.parsed_summary_json, dict):
+                summaries.append(f.parsed_summary_json)
+
+        if len(summaries) < 2:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.MEDIUM,
+                question=(
+                    "Para comparar proveedores necesito dos listas de precios adjuntas "
+                    "(una por proveedor). Subí ambas y las comparo producto por producto."
+                ),
+                result={"summary": "Faltan dos listas de proveedores para comparar."},
+            )
+
+        from app.application.agents.shared.analytics import parse_money  # noqa: PLC0415
+
+        def _price_map(summary: dict[str, Any]) -> dict[str, float]:
+            for key in ("stock_detectado", "ventas_detectadas", "gastos_detectados"):
+                rows = summary.get(key)
+                if isinstance(rows, list) and rows:
+                    out: dict[str, float] = {}
+                    for r in rows:
+                        if not isinstance(r, dict):
+                            continue
+                        lowered = {str(k).strip().lower(): v for k, v in r.items()}
+                        name = next(
+                            (
+                                str(lowered[k])
+                                for k in ("nombre", "producto", "name", "descripcion")
+                                if lowered.get(k)
+                            ),
+                            None,
+                        )
+                        price_raw = next(
+                            (
+                                lowered[k]
+                                for k in ("precio", "price", "costo", "importe", "valor")
+                                if lowered.get(k) is not None
+                            ),
+                            None,
+                        )
+                        if not name:
+                            continue
+                        price = parse_money(price_raw)
+                        if price is None:
+                            continue
+                        out[name.strip().lower()] = price
+                    return out
+            return {}
+
+        map_a = _price_map(summaries[0])
+        map_b = _price_map(summaries[1])
+        diff = analytics.diff_price_lists(map_a, map_b)
+        if not diff:
+            return self._analysis_response(
+                request,
+                "comparar_proveedores_sin_match",
+                "No encontré productos en común entre las dos listas. Verificá que los "
+                "nombres coincidan para poder compararlos.",
+            )
+        a_cheaper = [d for d in diff if d["delta_abs"] > 0]  # B más caro → A conviene
+        lines = [f"Comparé {len(diff)} productos en común entre los dos proveedores."]
+        if a_cheaper:
+            lines.append(
+                f"En {len(a_cheaper)} productos, la primera lista es más barata. " "Ejemplos:"
+            )
+            for d in sorted(a_cheaper, key=lambda x: x["delta_abs"], reverse=True)[:6]:
+                lines.append(
+                    f"- {d['key']}: ${d['old_price']:.0f} vs ${d['new_price']:.0f} "
+                    f"(diferencia ${d['delta_abs']:.0f})"
+                )
+        return self._analysis_response(
+            request,
+            "comparar_precios_proveedores",
+            "\n".join(lines),
+            {"diff": diff},
+        )
 
     def _classify_intent(self, message: str) -> str:
         inbox_keywords = (
-            "clasificar", "revisar inbox", "revisar gmail", "mensajes recibidos", "bandeja",
-            "llegó mail", "llegó email", "llegó un mail", "llegó correo",
-            "recibí mail", "recibí email", "recibí un correo", "recibí un mail",
+            "clasificar",
+            "revisar inbox",
+            "revisar gmail",
+            "mensajes recibidos",
+            "bandeja",
+            "llegó mail",
+            "llegó email",
+            "llegó un mail",
+            "llegó correo",
+            "recibí mail",
+            "recibí email",
+            "recibí un correo",
+            "recibí un mail",
         )
         draft_keywords = (
-            "borrador", "redact", "escribi", "enviá",
-            "enviar mail", "enviar email", "enviar un mail", "enviar un email",
-            "mandar correo", "mandar mail", "mandar un mail", "mandar un email",
-            "quiero enviar", "quiero mandar",
-            "escribir mail", "escribir email", "redactar",
-            "email a ", "mail a ", "un mail a", "un email a",
-            "podés enviar", "puedes enviar", "podés mandar", "puedes mandar",
+            "borrador",
+            "redact",
+            "escribi",
+            "enviá",
+            "enviar mail",
+            "enviar email",
+            "enviar un mail",
+            "enviar un email",
+            "mandar correo",
+            "mandar mail",
+            "mandar un mail",
+            "mandar un email",
+            "quiero enviar",
+            "quiero mandar",
+            "escribir mail",
+            "escribir email",
+            "redactar",
+            "email a ",
+            "mail a ",
+            "un mail a",
+            "un email a",
+            "podés enviar",
+            "puedes enviar",
+            "podés mandar",
+            "puedes mandar",
         )
         # Frases analíticas: se evalúan ANTES que purchase_keywords porque "compré"
         # está en ambas y las consultas como "a quién le compré más" son más específicas.
         query_keywords = (
-            "qué proveedores", "proveedores tengo", "a quién le compré", "a quien le compré",
-            "proveedores principales", "cuánto le compré", "cuánto les compré",
-            "últimas compras por proveedor", "mis proveedores", "análisis de proveedores",
-            "proveedores del mes", "proveedores del año",
+            "qué proveedores",
+            "proveedores tengo",
+            "a quién le compré",
+            "a quien le compré",
+            "proveedores principales",
+            "cuánto le compré",
+            "cuánto les compré",
+            "últimas compras por proveedor",
+            "mis proveedores",
+            "análisis de proveedores",
+            "proveedores del mes",
+            "proveedores del año",
         )
         # Frases de registro/mutación: verbos de acción concretos.
         purchase_keywords = (
-            "registrar compra", "registrá compra", "factura de", "proveedor cobró",
-            "me mandaron factura", "quiero registrar",
+            "registrar compra",
+            "registrá compra",
+            "factura de",
+            "proveedor cobró",
+            "me mandaron factura",
+            "quiero registrar",
         )
 
         if any(kw in message for kw in inbox_keywords):
@@ -385,6 +729,7 @@ class AgentSupplier(BaseAgent):
         period_days = 90
         cutoff = date.today() - timedelta(days=period_days)
 
+        assert self._session is not None  # garantizado por _handle_supplier_analysis
         rows = await self._session.execute(
             select(ExpenseEntry).where(
                 ExpenseEntry.tenant_id == tenant_id,
@@ -407,7 +752,10 @@ class AgentSupplier(BaseAgent):
                 result={
                     "summary": "SIN_PROVEEDORES",
                     "period_days": period_days,
-                    "message": f"No hay gastos con proveedor registrados en los últimos {period_days} días.",
+                    "message": (
+                        f"No hay gastos con proveedor registrados en los últimos {period_days} "
+                        f"días."
+                    ),
                 },
             )
 

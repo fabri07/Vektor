@@ -2,10 +2,14 @@
 y para AgentGoogle con task dispatch (Stage 2).
 """
 
+import json
+from decimal import Decimal
+from typing import Any
+from unittest.mock import MagicMock
+
 import pytest
 
-from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTask, RiskLevel
-
+from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTask
 
 _TENANT = "00000000-0000-0000-0000-000000000001"
 _USER = "00000000-0000-0000-0000-000000000002"
@@ -15,15 +19,18 @@ def _req(message: str) -> AgentRequest:
     return AgentRequest(user_id=_USER, business_id=_TENANT, message=message)
 
 
-def _task(action_type: ActionType, entities: dict | None = None) -> AgentTask:
+def _task(action_type: ActionType, entities: dict[str, Any] | None = None) -> AgentTask:
     return AgentTask(
-        agent="agent_income" if "INFLOW" in str(action_type) or "SALE" in str(action_type) else "agent_expense",
+        agent="agent_income"
+        if "INFLOW" in str(action_type) or "SALE" in str(action_type)
+        else "agent_expense",
         action_type=action_type,
         entities=entities or {},
     )
 
 
 # ── AgentIncome — REGISTER_CASH_INFLOW ───────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_income_cash_inflow_with_amount_in_message():
@@ -46,11 +53,14 @@ async def test_income_cash_inflow_from_task_entities():
     from app.application.agents.income.agent import AgentIncome
 
     agent = AgentIncome()
-    task = _task(ActionType.REGISTER_CASH_INFLOW, {
-        "amount": "8000",
-        "payment_method": "transfer",
-        "description": "Cobro deuda cliente X",
-    })
+    task = _task(
+        ActionType.REGISTER_CASH_INFLOW,
+        {
+            "amount": "8000",
+            "payment_method": "transfer",
+            "description": "Cobro deuda cliente X",
+        },
+    )
     result = await agent.process(_req("cobré lo de Juan"), task=task)
 
     assert result.status == "requires_approval"
@@ -98,6 +108,7 @@ async def test_income_register_sale_with_entity_injection():
 
 # ── AgentExpense — REGISTER_CASH_OUTFLOW ─────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_expense_cash_outflow_with_amount_in_message():
     """Pago salida con monto en mensaje → requires_approval con REGISTER_CASH_OUTFLOW."""
@@ -111,6 +122,7 @@ async def test_expense_cash_outflow_with_amount_in_message():
     assert result.result["action_type"] == ActionType.REGISTER_CASH_OUTFLOW
     assert result.agent_name == "agent_expense"
     from decimal import Decimal
+
     assert Decimal(result.result["structured_data"]["amount"]) > 0
 
 
@@ -120,11 +132,14 @@ async def test_expense_cash_outflow_from_task_entities():
     from app.application.agents.expense.agent import AgentExpense
 
     agent = AgentExpense()
-    task = _task(ActionType.REGISTER_CASH_OUTFLOW, {
-        "amount": "50000",
-        "description": "Pago proveedor Mayorista",
-        "payment_method": "transfer",
-    })
+    task = _task(
+        ActionType.REGISTER_CASH_OUTFLOW,
+        {
+            "amount": "50000",
+            "description": "Pago proveedor Mayorista",
+            "payment_method": "transfer",
+        },
+    )
     result = await agent.process(_req("pagué al mayorista"), task=task)
 
     assert result.status == "requires_approval"
@@ -173,6 +188,7 @@ async def test_expense_outflow_is_requires_approval_not_auto_execute():
 
 # ── AgentGoogle — dispatch con task ──────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_google_no_gateway_returns_auth_required():
     """AgentGoogle sin gateway → requires_google_auth (calendar handler)."""
@@ -209,12 +225,8 @@ async def test_google_without_task_defaults_to_sync_path():
 
 # ── Helpers internos de los tests ─────────────────────────────────────────────
 
-from decimal import Decimal
-from unittest.mock import MagicMock
-import json
 
-
-def _llm_resp(entities: dict) -> MagicMock:
+def _llm_resp(entities: dict[str, Any]) -> MagicMock:
     cb = MagicMock()
     cb.text = json.dumps(entities)
     r = MagicMock()

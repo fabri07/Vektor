@@ -4,13 +4,15 @@ Revision ID: 20260421_0001
 Revises: 20260406_0002
 Create Date: 2026-04-21 00:00:00.000000
 """
+
 from __future__ import annotations
 
 import uuid
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "20260421_0001"
 down_revision = "20260406_0002"
@@ -31,13 +33,9 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
-        sa.ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "tenant_id", "fingerprint", name="uq_operation_fingerprints_tenant_fp"
-        ),
+        sa.UniqueConstraint("tenant_id", "fingerprint", name="uq_operation_fingerprints_tenant_fp"),
     )
     op.create_index(
         "ix_op_fp_tenant_executed",
@@ -87,25 +85,19 @@ def upgrade() -> None:
             server_default=sa.text("'[]'::jsonb"),
         ),
         sa.Column("llm_context_summary", sa.Text(), nullable=True),
-        sa.Column(
-            "llm_context_updated_at", sa.TIMESTAMP(timezone=True), nullable=True
-        ),
+        sa.Column("llm_context_updated_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column(
             "updated_at",
             sa.TIMESTAMP(timezone=True),
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
-        sa.ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("tenant_id"),
     )
 
 
 def downgrade() -> None:
     op.drop_table("business_memory")
-    op.drop_index(
-        "ix_op_fp_tenant_executed", table_name="operation_fingerprints"
-    )
+    op.drop_index("ix_op_fp_tenant_executed", table_name="operation_fingerprints")
     op.drop_table("operation_fingerprints")

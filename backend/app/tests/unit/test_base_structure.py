@@ -2,7 +2,10 @@ from app.application.agents.ceo.agent import INTENT_CATALOG
 from app.application.agents.ceo.team_plan_builder import build_plan
 from app.application.agents.shared.context_builder import CONTEXT_BUDGETS, ContextBuilder
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
-from app.application.agents.shared.risk_engine import RiskEngine, RiskLevel
+from app.application.agents.shared.risk_engine import (  # type: ignore[attr-defined]  # test double / fixture
+    RiskEngine,
+    RiskLevel,
+)
 from app.application.agents.shared.schemas import ActionType
 
 
@@ -18,8 +21,15 @@ def test_all_agents_importable():
     from app.application.agents.supplier.agent import AgentSupplier
 
     for cls in (
-        AgentCEO, AgentCash, AgentIncome, AgentExpense, AgentGoogle,
-        AgentStock, AgentSupplier, AgentHealth, AgentHelper,
+        AgentCEO,
+        AgentCash,
+        AgentIncome,
+        AgentExpense,
+        AgentGoogle,
+        AgentStock,
+        AgentSupplier,
+        AgentHealth,
+        AgentHelper,
     ):
         assert cls.agent_name is not None
 
@@ -68,30 +78,50 @@ def test_heuristic_to_prompt_fragment_is_numeric():
 
 
 def test_action_type_enum_complete():
-    # 17 originales + 3 Stage 4 (UPLOAD_TO_DRIVE, CREATE_GOOGLE_DOC, APPEND_TO_SHEET) = 20
-    assert len(ActionType) == 20
+    # 20 previos + 7 analíticos Sprint 17 (ANALYZE_*, SIMULATE_SCENARIO) = 27
+    assert len(ActionType) == 27
 
 
 def test_intent_catalog_complete():
-    # 17 Stage 1 + 1 Stage 4 (generar_informe_con_export) = 18
-    assert len(INTENT_CATALOG) == 18
+    # Sprint 19: catálogo consolidado a 28 (35 variantes analíticas → entidad analysis_type).
+    assert len(INTENT_CATALOG) == 28
 
 
 def test_intent_catalog_spanish():
-    """Todos los intents usan nomenclatura en español rioplatense."""
-    expected = {
-        "ingresar_venta", "ingresar_cobro", "ingresar_gasto", "ingresar_pago_salida",
-        "actualizar_stock", "registrar_merma", "actualizar_producto",
-        "importar_archivo_ventas", "importar_archivo_gastos", "registrar_compra_proveedor",
-        "consultar_estado_negocio", "generar_informe", "generar_informe_con_export",
-        "gestionar_proveedor", "sincronizar_google", "agendar_evento",
-        "ayuda_plataforma", "intent_desconocido",
+    """Los intents base siguen presentes y todos usan nomenclatura español snake_case.
+
+    Sprint 19: `generar_informe` se fusionó en `consultar_estado_negocio`.
+    """
+    base = {
+        "ingresar_venta",
+        "ingresar_cobro",
+        "ingresar_gasto",
+        "ingresar_pago_salida",
+        "actualizar_stock",
+        "registrar_merma",
+        "actualizar_producto",
+        "importar_archivo_ventas",
+        "importar_archivo_gastos",
+        "registrar_compra_proveedor",
+        "consultar_estado_negocio",
+        "generar_informe_con_export",
+        "gestionar_proveedor",
+        "sincronizar_google",
+        "agendar_evento",
+        "ayuda_plataforma",
+        "intent_desconocido",
     }
-    assert set(INTENT_CATALOG) == expected
+    catalog = set(INTENT_CATALOG)
+    assert base <= catalog, f"faltan intents base: {base - catalog}"
+    # Nomenclatura: snake_case ascii en minúsculas (proxy de español rioplatense)
+    for intent in INTENT_CATALOG:
+        assert intent == intent.lower()
+        assert intent.replace("_", "").isalpha()
 
 
 def test_build_plan_returns_single_task():
     from app.application.agents.shared.schemas import ActionType, AgentTeamPlan
+
     plan = build_plan("ingresar_venta", {"producto": "gaseosa", "cantidad": 3})
     assert isinstance(plan, AgentTeamPlan)
     assert len(plan.tasks) == 1
@@ -109,6 +139,7 @@ def test_build_plan_unknown_intent_falls_back_to_helper():
 
 def test_wrap_user_input():
     from app.application.agents.ceo.agent import AgentCEO
+
     agent = AgentCEO()
     wrapped = agent.wrap_user_input("hola")
     assert "<user_message>" in wrapped

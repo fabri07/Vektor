@@ -29,15 +29,11 @@ class UserRepository:
 
     async def get_by_email_any_tenant(self, email: str) -> User | None:
         """Used during login — email must be unique globally per tenant."""
-        result = await self._session.execute(
-            select(User).where(User.email == email.lower())
-        )
+        result = await self._session.execute(select(User).where(User.email == email.lower()))
         return result.scalar_one_or_none()
 
     async def list_by_tenant(self, tenant_id: UUID) -> list[User]:
-        result = await self._session.execute(
-            select(User).where(User.tenant_id == tenant_id)
-        )
+        result = await self._session.execute(select(User).where(User.tenant_id == tenant_id))
         return list(result.scalars().all())
 
     async def save(self, user: User) -> User:

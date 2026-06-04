@@ -9,13 +9,23 @@ por AgentGoogle. Los aliases agent_calendar y agent_sync ya no existen.
 
 from __future__ import annotations
 
+import uuid
+from typing import TYPE_CHECKING, Any
+
 from app.application.agents.base import BaseAgent
 from app.observability.logger import get_logger
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.config.settings import Settings
+    from app.integrations.mcp.http_gateway import HttpMcpGateway
 
 logger = get_logger(__name__)
 
 
-def _make_gateway(settings, user_id):
+def _make_gateway(settings: Settings, user_id: Any | None) -> HttpMcpGateway | None:
     """Helper para construir HttpMcpGateway condicionalmente."""
     from app.integrations.mcp.http_gateway import HttpMcpGateway  # noqa: PLC0415
 
@@ -28,10 +38,10 @@ def _make_gateway(settings, user_id):
 
 def get_sub_agent(
     name: str,
-    db=None,
-    redis=None,
-    user_id=None,
-    tenant_id=None,
+    db: AsyncSession | None = None,
+    redis: Redis | None = None,
+    user_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> BaseAgent | None:
     # ── Agentes nuevos (Stage 2) ──────────────────────────────────────────────
     if name == "agent_income":
@@ -75,6 +85,11 @@ def get_sub_agent(
         from app.application.agents.helper.agent import AgentHelper  # noqa: PLC0415
 
         return AgentHelper()
+
+    if name == "agent_chat":
+        from app.application.agents.chat.agent import AgentChat  # noqa: PLC0415
+
+        return AgentChat()
 
     # ── Alias deprecado (Stage 2a) ────────────────────────────────────────────
     if name == "agent_cash":

@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.ceo.agent import AgentCEO
 from app.application.agents.ceo.synthesis import synthesize_team_results
+from app.application.agents.chat.agent import AgentChat
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.agents.shared.schemas import (
     AgentRequest,
@@ -34,8 +35,6 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
-from app.application.services.team_plan_executor import TeamPlanExecutor
-from app.application.security.prompt_defense import wrap_user_input
 from app.application.services.agent_memory_service import AgentMemoryService
 from app.application.services.business_memory_service import BusinessMemoryService
 from app.application.services.conversation_service import ConversationService
@@ -44,6 +43,7 @@ from app.application.services.file_parsing import (
     summary_columns,
     summary_row_count,
 )
+from app.application.services.team_plan_executor import TeamPlanExecutor
 from app.integrations.anthropic_client import (
     AnthropicConfigurationError,
     get_anthropic_async_client,
@@ -60,9 +60,49 @@ from app.persistence.models.tenant import Tenant
 logger = get_logger(__name__)
 
 
+# ── Cortes determinísticos sin sub-agente (Sprint 17) ─────────────────────────
+# Intents que el ChatOrchestrator resuelve directamente, sin despachar a un
+# sub-agente ni gastar tokens de LLM. Son los tres cortes determinísticos:
+#   - out_of_scope / intent_desconocido → fuera del scope de Véktor (ajuste #1)
+#   - pedir_aclaracion_sobre_archivo    → hay adjunto pero la intención es ambigua
+#   - pedir_aclaracion_negocio          → suena a negocio pero no se pudo precisar
+_NO_AGENT_INTENTS: frozenset[str] = frozenset(
+    {
+        "out_of_scope",
+        "intent_desconocido",
+        "pedir_aclaracion_sobre_archivo",
+        "pedir_aclaracion_negocio",
+    }
+)
+
+_OUT_OF_SCOPE_MESSAGE = (
+    "Véktor está especializado en la salud financiera de tu negocio. "
+    "Este tema queda fuera de mis competencias. "
+    "Si tenés dudas sobre ventas, gastos, stock o cómo usar la plataforma, "
+    "con gusto te ayudo."
+)
+_ACLARACION_ARCHIVO_MESSAGE = (
+    "Vi que adjuntaste un archivo, pero no estoy seguro de qué querés que haga con él. "
+    "¿Querés que lo analice, lo importe, o que revise precios, márgenes o stock? "
+    "Decime un poco más y lo resuelvo."
+)
+_ACLARACION_NEGOCIO_MESSAGE = (
+    "No estoy seguro de qué querés hacer. ¿Me podés dar un poco más de detalle? "
+    "Puedo ayudarte con ventas, gastos, stock, precios, márgenes, proveedores o flujo de caja."
+)
+
+_NO_AGENT_MESSAGES: dict[str, str] = {
+    "out_of_scope": _OUT_OF_SCOPE_MESSAGE,
+    "intent_desconocido": _OUT_OF_SCOPE_MESSAGE,
+    "pedir_aclaracion_sobre_archivo": _ACLARACION_ARCHIVO_MESSAGE,
+    "pedir_aclaracion_negocio": _ACLARACION_NEGOCIO_MESSAGE,
+}
+
+
 class ChatOrchestrator:
     def __init__(self) -> None:
-        self.client = get_anthropic_async_client()
+        self.client: Any = get_anthropic_async_client()
+        self._agent_chat = AgentChat()
 
     async def handle(
         self,
@@ -77,7 +117,7 @@ class ChatOrchestrator:
         heuristics = HeuristicEngine.get(business_type)
 
         # 1b. BusinessMemory — contexto acumulado del negocio (fail-silencioso)
-        bm_data: dict = {}
+        bm_data: dict[str, Any] = {}
         try:
             bm_svc = BusinessMemoryService(db=db, redis=redis)
             bm_data = await bm_svc.get(tenant_id)
@@ -100,7 +140,7 @@ class ChatOrchestrator:
             logger.warning("file_context_failed", tenant_id=str(tenant_id), error=str(exc))
 
         # 2. Historial conversacional
-        conversation_ctx: dict = {}
+        conversation_ctx: dict[str, Any] = {}
         if request.conversation_id:
             svc = ConversationService(redis, db)
             conversation_ctx = await svc.get_context(request.conversation_id)
@@ -134,11 +174,15 @@ class ChatOrchestrator:
         ceo_target: str | None = ceo_response.result.get("target_agent")
 
         # 3b. Reconstruir el plan tipado desde el dict del CEO
-        raw_plan: dict | None = ceo_response.result.get("plan")
+        raw_plan: dict[str, Any] | None = ceo_response.result.get("plan")
         plan: AgentTeamPlan | None = None
         if raw_plan:
             try:
-                from app.application.agents.shared.schemas import AgentTask, ActionType  # noqa: PLC0415
+                from app.application.agents.shared.schemas import (  # noqa: PLC0415
+                    ActionType,
+                    AgentTask,
+                )
+
                 tasks = [
                     AgentTask(
                         task_id=td.get("task_id", ""),
@@ -160,10 +204,38 @@ class ChatOrchestrator:
             except Exception as exc:
                 logger.warning("chat_orchestrator_plan_parse_failed", error=str(exc))
 
-        # 3c. out_of_scope / intent_desconocido — cortar sin sub-agente ni LLM adicional
-        if ceo_intent in ("out_of_scope", "intent_desconocido"):
-            _oos_result: dict = {
-                "summary": "Consulta fuera del scope de Véktor.",
+        # 3b-bis. Rescate de intent ambiguo (Sprint 17, Stages 0 + 0.5) ──────────
+        # Antes de cortar, intentamos rescatar el intent con dos capas determinísticas:
+        #   1. DataIntentExtractor: ¿el adjunto tiene datos importables?
+        #   2. IntentRescue: scoring semántico (verbo ambiguo + objeto + contexto)
+        if ceo_intent == "intent_desconocido":
+            from app.application.agents.ceo.team_plan_builder import build_plan  # noqa: PLC0415
+
+            rescued_intent, rescued_entities = await self._rescue_unknown_intent(
+                request, tenant_id, db
+            )
+            if rescued_intent != ceo_intent:
+                logger.info(
+                    "chat_orchestrator_intent_rescued",
+                    original="intent_desconocido",
+                    rescued_intent=rescued_intent,
+                    tenant_id=str(tenant_id),
+                )
+            ceo_intent = rescued_intent
+            if rescued_intent not in _NO_AGENT_INTENTS:
+                plan = build_plan(rescued_intent, rescued_entities)
+                raw_plan = plan.model_dump()
+                ceo_target = plan.tasks[0].agent if plan.tasks else ceo_target
+
+        # 3c. Cortes sin sub-agente: fuera de scope / pedido de aclaración ───────
+        if ceo_intent in _NO_AGENT_INTENTS:
+            _summary = (
+                "Consulta fuera del scope de Véktor."
+                if ceo_intent in ("out_of_scope", "intent_desconocido")
+                else "Se solicita aclaración al usuario."
+            )
+            _oos_result: dict[str, Any] = {
+                "summary": _summary,
                 "intent": ceo_intent,
                 "target_agent": ceo_target,
             }
@@ -176,12 +248,7 @@ class ChatOrchestrator:
                 risk_level=ceo_response.risk_level,
                 confidence=ceo_response.confidence,
                 requires_approval=False,
-                message=(
-                    "Véktor está especializado en la salud financiera de tu negocio. "
-                    "Este tema queda fuera de mis competencias. "
-                    "Si tenés dudas sobre ventas, gastos, stock o cómo usar la plataforma, "
-                    "con gusto te ayudo."
-                ),
+                message=_NO_AGENT_MESSAGES[ceo_intent],
                 result=_oos_result,
                 usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
             )
@@ -194,7 +261,8 @@ class ChatOrchestrator:
         # 4. Ejecutar plan via TeamPlanExecutor (single-task y multi-task)
         if plan is None or not plan.tasks:
             # Fallback defensivo: si no hay plan válido, crear uno single-task helper
-            from app.application.agents.shared.schemas import AgentTask, ActionType  # noqa: PLC0415
+            from app.application.agents.shared.schemas import ActionType, AgentTask  # noqa: PLC0415
+
             plan = AgentTeamPlan(
                 plan_id="",
                 intent=ceo_intent or "intent_desconocido",
@@ -244,7 +312,9 @@ class ChatOrchestrator:
                     logger.warning("chat_orchestrator_synthesis_failed", error=str(exc))
                     agent_response.message = agent_response.result.get("summary") or "Procesado."
             elif not any_approval and not agent_response.message:
-                agent_response.message = agent_response.result.get("summary") or "Operaciones completadas."
+                agent_response.message = (
+                    agent_response.result.get("summary") or "Operaciones completadas."
+                )
 
             agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
             if request.conversation_id:
@@ -281,18 +351,18 @@ class ChatOrchestrator:
             if agent_response.message:
                 agent_response.message = self._strip_markdown(agent_response.message)
             else:
-                # success / requires_clarification → LLM Haiku genera texto rico
+                # success / requires_clarification → AgentChat genera texto rico con Sonnet
                 try:
-                    agent_response.message, orch_call = await self._generate_rich_response(
-                        request,
-                        agent_response,
-                        business_name,
-                        business_type,
-                        heuristics,
-                        conversation_ctx,
-                        bm_data,
-                        agent_memory_fragment,
-                        file_context,
+                    agent_response.message, orch_call = await self._agent_chat.generate_response(
+                        request=request,
+                        agent_response=agent_response,
+                        business_name=business_name,
+                        business_type=business_type,
+                        heuristics=heuristics,
+                        conversation_ctx=conversation_ctx,
+                        bm_data=bm_data,
+                        agent_memory_fragment=agent_memory_fragment,
+                        file_context=file_context,
                         tenant_id=tenant_id,
                         db=db,
                         redis=redis,
@@ -345,17 +415,17 @@ class ChatOrchestrator:
         all_llm_calls: list[LLMCall],
         ceo_intent: str | None,
         ceo_target: str | None,
-        raw_plan: dict | None,
+        raw_plan: dict[str, Any] | None,
     ) -> AgentResponse:
         """Combina las respuestas de un plan multi-task en una sola AgentResponse.
 
         Para planes con requires_approval: status=requires_approval, embeds task_responses.
         Para planes exitosos: status=success con message vacío (synthesis lo llena luego).
         """
-        _RISK_ORDER = {str(RiskLevel.LOW): 0, str(RiskLevel.MEDIUM): 1, str(RiskLevel.HIGH): 2}
+        _risk_order = {str(RiskLevel.LOW): 0, str(RiskLevel.MEDIUM): 1, str(RiskLevel.HIGH): 2}
         max_risk = max(
             task_responses,
-            key=lambda r: _RISK_ORDER.get(str(r.risk_level), 0),
+            key=lambda r: _risk_order.get(str(r.risk_level), 0),
             default=task_responses[0],
         ).risk_level
 
@@ -401,7 +471,7 @@ class ChatOrchestrator:
 
         merged_summary = "\n".join(task_summaries)
 
-        merged_result: dict = {
+        merged_result: dict[str, Any] = {
             "intent": ceo_intent,
             "target_agent": ceo_target,
             "plan": raw_plan,
@@ -445,6 +515,102 @@ class ChatOrchestrator:
 
     # ─────────────────────────────────────────────────────────────────────────
 
+    async def _rescue_unknown_intent(
+        self,
+        request: AgentRequest,
+        tenant_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> tuple[str, dict[str, Any]]:
+        """Rescata el intent cuando el CEO devolvió `intent_desconocido` (Sprint 17).
+
+        Dos capas determinísticas, sin LLM ni tokens:
+          1. DataIntentExtractor sobre los adjuntos ya parseados → ¿datos importables?
+          2. IntentRescue.rescue_intent() → scoring semántico (verbo + objeto + contexto)
+
+        Returns:
+            (intent, entities). Si nada matchea devuelve un intent de aclaración
+            (`pedir_aclaracion_sobre_archivo` / `pedir_aclaracion_negocio`) o
+            `out_of_scope` — todos en `_NO_AGENT_INTENTS`. Fail-safe: ante cualquier
+            error de DB, cae a un rescate basado solo en el texto del mensaje.
+        """
+        from app.application.agents.shared.intent_rescue import rescue_intent  # noqa: PLC0415
+        from app.application.services.data_intent_extractor import (  # noqa: PLC0415
+            DataIntentExtractor,
+        )
+
+        attachment_files: list[UploadedFile] = []
+        try:
+            attachment_files = await self._load_attachment_files(request.attachments, tenant_id, db)
+        except Exception as exc:
+            logger.warning(
+                "intent_rescue_attachment_load_failed",
+                tenant_id=str(tenant_id),
+                error=str(exc),
+            )
+
+        has_attachment = bool(attachment_files)
+
+        # ── Capa 1: DataIntentExtractor — ¿el adjunto tiene datos importables? ──
+        attachment_type: str | None = None
+        extractor = DataIntentExtractor()
+        for file in attachment_files:
+            result = extractor.check_file_summary(file.parsed_summary_json or {})
+            if result.has_data_intent:
+                attachment_type = result.intent_type
+                # Sprint 19: intents consolidados — un adjunto de productos es un
+                # análisis de lista de precios; el resto, análisis de archivo.
+                if result.intent_type == "product":
+                    return "analizar_precios", {"analysis_type": "lista"}
+                return "analizar_archivo", {}
+
+        # ── Capa 2: IntentRescue — scoring semántico + fuzzy sobre el texto ────
+        rescued_intent, rescued_entities = rescue_intent(
+            request.message,
+            has_attachment=has_attachment,
+            attachment_type=attachment_type,
+        )
+        return rescued_intent, rescued_entities
+
+    async def _load_attachment_files(
+        self,
+        attachments: list[Any] | None,
+        tenant_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> list[UploadedFile]:
+        """Carga los UploadedFile adjuntos al mensaje actual (con tenant isolation)."""
+        attachment_ids = self._extract_attachment_ids(attachments or [])
+        if not attachment_ids:
+            return []
+        # Convertir a uuid.UUID — el tipo UUID requiere objetos, no strings (SQLite/PG)
+        uuid_ids: list[uuid.UUID] = []
+        for fid in attachment_ids:
+            try:
+                uuid_ids.append(uuid.UUID(fid))
+            except (ValueError, TypeError):
+                continue
+        if not uuid_ids:
+            return []
+        stmt = (
+            select(UploadedFile)
+            .where(
+                UploadedFile.tenant_id == tenant_id,
+                UploadedFile.id.in_(uuid_ids),
+            )
+            .order_by(desc(UploadedFile.created_at))
+        )
+        result = await db.execute(stmt)
+        loaded = list(result.scalars().all())
+        for _file in loaded:
+            if _file.tenant_id != tenant_id:
+                logger.error(
+                    "intent_rescue.tenant_isolation_violation",
+                    expected=str(tenant_id),
+                    found=str(_file.tenant_id),
+                    file_id=str(_file.id),
+                )
+                return []  # fail-safe: nunca rescatar usando archivos de otro tenant
+        return loaded
+
     async def _load_business_context(
         self, tenant_id: uuid.UUID, db: AsyncSession
     ) -> tuple[str, str]:
@@ -458,172 +624,6 @@ class ChatOrchestrator:
 
         return business_name, business_type
 
-    async def _generate_rich_response(
-        self,
-        request: AgentRequest,
-        agent_response: AgentResponse,
-        business_name: str,
-        business_type: str,
-        heuristics: object,
-        conversation_ctx: dict,
-        bm_data: dict | None = None,
-        agent_memory_fragment: str = "",
-        file_context: str = "",
-        tenant_id: uuid.UUID | None = None,
-        db: AsyncSession | None = None,
-        redis: Redis | None = None,
-    ) -> tuple[str, LLMCall]:
-        turns = conversation_ctx.get("turns", [])
-        history = (
-            "\n".join(self._format_history_turn(t) for t in turns[-4:])
-            or "Sin historial previo."
-        )
-
-        from app.application.agents.shared.heuristic_engine import HeuristicConfig  # noqa: PLC0415
-        heuristic_fragment = (
-            heuristics.to_prompt_fragment()
-            if isinstance(heuristics, HeuristicConfig)
-            else ""
-        )
-
-        # Datos financieros determinísticos del tenant actual — null-safe
-        memory_fragment = ""
-        try:
-            from app.application.services.deterministic_finance import (  # noqa: PLC0415
-                get_financial_summary,
-            )
-            fin_data = await get_financial_summary(tenant_id, db)
-            if fin_data.get("estado") == "SIN_DATOS":
-                memory_fragment = (
-                    "\n\nDatos del negocio: SIN_DATOS. "
-                    "INSTRUCCIÓN CRÍTICA: NO INVENTES NÚMEROS. "
-                    "Indicá al usuario que debe cargar sus datos de ventas y gastos para ver análisis."
-                )
-            else:
-                flujo = fin_data.get("flujo_neto_30d", {})
-                margen = fin_data.get("margen", {})
-                ticket = fin_data.get("ticket_promedio", {})
-                lines: list[str] = ["\n\nDatos financieros del negocio (últimos 30 días):"]
-                if flujo:
-                    lines.append(
-                        f"  Ventas: ${flujo.get('total_ventas', 0)} | "
-                        f"Gastos: ${flujo.get('total_gastos', 0)} | "
-                        f"Flujo neto: ${flujo.get('flujo_neto', 0)}"
-                    )
-                if not margen.get("sin_datos"):
-                    lines.append(f"  Margen bruto: {margen.get('margen_pct', 0)}%")
-                if not ticket.get("sin_datos"):
-                    lines.append(
-                        f"  Ticket promedio: ${ticket.get('ticket_promedio', 0)} "
-                        f"({ticket.get('n_transacciones', 0)} transacciones)"
-                    )
-                memory_fragment = "\n".join(lines)
-        except Exception as exc:
-            logger.warning("deterministic_finance_failed", tenant_id=str(tenant_id), error=str(exc))
-            # Fail-closed: no fallback a BusinessMemory porque podría estar desactualizado.
-            memory_fragment = (
-                "\n\nDatos del negocio: SIN_DATOS (error temporal). "
-                "INSTRUCCIÓN CRÍTICA: NO INVENTES NÚMEROS. "
-                "Indicá al usuario que intente nuevamente."
-            )
-
-        try:
-            if tenant_id is not None and db is not None and redis is not None:
-                from app.application.services.chat_memory_service import (  # noqa: PLC0415
-                    ChatMemoryService,
-                )
-
-                session_ctx = await ChatMemoryService().get_session_context_cached(
-                    db,
-                    redis,
-                    tenant_id,
-                )
-                memory_fragment += "\n\n" + self._render_session_memory(session_ctx)
-        except Exception as exc:
-            logger.warning("chat_session_memory_failed", tenant_id=str(tenant_id), error=str(exc))
-            memory_fragment += (
-                "\n\nHISTORIAL DE CARGAS: No disponible temporalmente. "
-                "No inventes información histórica."
-            )
-
-        # Fragmento de AgentMemory: patrones aprendidos del negocio
-        agent_mem_section = f"\n\n{agent_memory_fragment}" if agent_memory_fragment else ""
-
-        # Archivos procesados: datos cargados por el usuario (márgenes, costos, etc.)
-        file_section = (
-            f"\n\nArchivos de referencia cargados por el usuario:\n{file_context}"
-            if file_context
-            else ""
-        )
-
-        action_type = agent_response.result.get("action_type", "")
-        action_executed = bool(agent_response.result.get("auto_executed")) or bool(
-            agent_response.result.get("pending_action_id")
-        )
-        action_ctx = f"Acción determinada: {action_type}\n\n" if action_type else ""
-
-        no_action_rule = (
-            "REGLA CRÍTICA: No se ejecutó ninguna operación en esta respuesta. "
-            "NO afirmes que registraste, eliminaste, corregiste ni modificaste ningún dato. "
-            "Respondé solo con información o con instrucciones para que el usuario tome acción.\n\n"
-            if not action_type
-            else (
-                "REGLA CRÍTICA: Esta operación AÚN NO se ejecutó — el usuario debe confirmarla primero. "
-                "NO digas que ya fue registrada ni realizada.\n\n"
-                if not action_executed
-                else ""
-            )
-        )
-
-        system = (
-            f"Sos el asistente financiero de Véktor para {business_name} ({business_type}).\n\n"
-            "CAPACIDADES DE VÉKTOR: registro de ventas, gastos, compras y movimientos de caja; "
-            "modificar productos (precio, costo, umbral de stock, activar/desactivar, renombrar); "
-            "ajustar stock e inventario; preparar borradores de email a proveedores (Gmail); "
-            "clasificar mensajes recibidos de proveedores; "
-            "crear y consultar eventos en Google Calendar; sincronizar con Google Sheets y Docs.\n\n"
-            "FUENTE DE VERDAD — REGLA CRÍTICA: Véktor es el único lugar donde se modifican los "
-            "datos del negocio. NUNCA sugerirle al usuario que vaya a Google Sheets ni ningún "
-            "servicio externo a modificar datos. Google Drive/Sheets se usa únicamente para "
-            "importar datos externos hacia Véktor o generar copias opcionales de exportación — "
-            "nunca como fuente de modificación.\n\n"
-            f"{no_action_rule}"
-            f"{action_ctx}"
-            f"{heuristic_fragment}"
-            f"{memory_fragment}"
-            f"{agent_mem_section}"
-            f"{file_section}\n\n"
-            "MISIÓN: Generá una respuesta conversacional, clara y accionable "
-            "basada en los resultados del análisis.\n\n"
-            "REGLAS:\n"
-            "- NUNCA respondas 'Listo.' ni frases genéricas vacías.\n"
-            "- Si hay datos numéricos, interpretálos en contexto del negocio.\n"
-            "- Si hay alertas o sugerencias, destacalas con claridad.\n"
-            "- Si el estado es 'requires_clarification', reformulá la pregunta amigablemente.\n"
-            "- Máximo 3 párrafos cortos. Tono directo, español rioplatense.\n"
-            "- NO uses formato markdown (sin **, sin __, sin #, sin - listas). Solo texto plano.\n"
-            f"\nHistorial reciente:\n{history}"
-        )
-        user_content = (
-            f"Mensaje del usuario: {wrap_user_input(request.message)}\n\n"
-            f"Resultado del análisis:\n{self._format_agent_result(agent_response)}"
-        )
-
-        response = await self.client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=400,
-            system=system,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        orch_call = LLMCall(
-            source="orchestrator",
-            model="claude-haiku-4-5-20251001",
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-        )
-        raw = response.content[0].text.strip() if response.content else "Procesado."
-        return self._strip_markdown(raw), orch_call
-
     @staticmethod
     def _strip_markdown(text: str) -> str:
         text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
@@ -632,65 +632,6 @@ class ChatOrchestrator:
         text = re.sub(r"_(.+?)_", r"\1", text, flags=re.DOTALL)
         text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
         return text
-
-    def _format_agent_result(self, agent_response: AgentResponse) -> str:
-        result = agent_response.result
-        lines: list[str] = []
-        # Nota: auto_executed y pending_action_id se setean en la capa HTTP
-        # DESPUÉS de que orchestrator.handle() retorna, por lo que aquí son
-        # siempre None/False. El estado se comunica al Haiku vía no_action_rule
-        # en el system prompt, que sí tiene la información disponible.
-
-        if s := result.get("summary"):
-            lines.append(f"Resumen: {s}")
-        if s := result.get("health_score"):
-            lines.append(f"Score de salud: {s}/100")
-        if (comps := result.get("components")) and isinstance(comps, dict):
-            for k, v in comps.items():
-                lines.append(
-                    f"  {k}: {v:.0f}/100" if isinstance(v, float) else f"  {k}: {v}"
-                )
-        if (alerts := result.get("alerts")) and isinstance(alerts, list):
-            for a in alerts[:3]:
-                if isinstance(a, dict):
-                    lines.append(f"Alerta: {a.get('message', '')}")
-        if q := agent_response.question:
-            lines.append(f"Pregunta pendiente: {q}")
-
-        # Datos estructurados de la operación (truncados)
-        structured = (
-            result.get("structured_data")
-            or result.get("entities")
-            or result.get("payload")
-        )
-        if isinstance(structured, dict):
-            relevant = {
-                k: v for k, v in structured.items()
-                if k not in ("conversation_id", "mode", "email_mode") and v is not None
-            }
-            if relevant:
-                lines.append(f"Datos de la operación: {str(relevant)[:300]}")
-
-        return "\n".join(lines) or str(result)[:300]
-
-    @staticmethod
-    def _render_session_memory(ctx: dict[str, Any]) -> str:
-        if not ctx.get("historial_disponible"):
-            return (
-                "HISTORIAL DE CARGAS: El usuario no tiene cargas previas registradas. "
-                "No inventes información histórica."
-            )
-        ultima = ctx.get("ultima_carga") or {}
-        descripcion = ultima.get("descripcion") or "carga registrada"
-        registros = ultima.get("registros", 0)
-        fecha = str(ultima.get("fecha") or "")[:10] or "fecha desconocida"
-        total = ctx.get("total_cargas_registradas", 0)
-        return (
-            "HISTORIAL DE CARGAS:\n"
-            f"Última carga: {descripcion} ({registros} registros, {fecha})\n"
-            f"Total cargas registradas: {total}\n"
-            "No repitas preguntas sobre datos ya cargados."
-        )
 
     async def _load_file_context(
         self,
@@ -752,9 +693,7 @@ class ChatOrchestrator:
         )
         result = await db.execute(stmt)
         recent_files = [
-            file
-            for file in result.scalars().all()
-            if str(file.id) not in set(attachment_ids)
+            file for file in result.scalars().all() if str(file.id) not in set(attachment_ids)
         ]
         recent_lines = self._render_file_lines(
             recent_files,
@@ -818,19 +757,7 @@ class ChatOrchestrator:
                 normalized.append({"file_id": file_id, "filename": filename})
         return {"attachments": normalized} if normalized else None
 
-    @staticmethod
-    def _format_history_turn(turn: dict[str, Any]) -> str:
-        content = str(turn.get("content", ""))
-        attachments = turn.get("attachments")
-        if isinstance(attachments, list) and attachments:
-            names = [
-                str(item.get("filename"))
-                for item in attachments
-                if isinstance(item, dict) and item.get("filename")
-            ]
-            if names:
-                return f"{turn['role'].upper()}: {content} [adjuntos: {', '.join(names)}]"
-        return f"{turn['role'].upper()}: {content}"
+
 
     def _render_file_lines(self, files: list[UploadedFile], heading: str) -> str:
         lines: list[str] = []

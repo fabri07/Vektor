@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,7 +27,7 @@ def _mock_llm_intent_response(intent: str) -> MagicMock:
     return response
 
 
-def _mock_llm_entities_response(entities: dict) -> MagicMock:
+def _mock_llm_entities_response(entities: dict[str, Any]) -> MagicMock:
     content_block = MagicMock()
     content_block.text = json.dumps(entities)
     response = MagicMock()
@@ -108,9 +109,7 @@ async def test_stock_query_fallback_on_llm_error():
 
     mock_client = MagicMock()
     # LLM falla en la clasificación de intent (primera llamada)
-    mock_client.messages.create = AsyncMock(
-        side_effect=RuntimeError("LLM unavailable")
-    )
+    mock_client.messages.create = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
 
     agent = AgentStock()
     agent.client = mock_client

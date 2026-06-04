@@ -7,8 +7,9 @@ debe marcar el archivo como REJECTED, nunca llegar al agente.
 
 from __future__ import annotations
 
+import contextlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -23,8 +24,10 @@ _AMOUNT_CEILING = Decimal("50_000_000")  # 50M ARS — por encima es sospechoso 
 @dataclass
 class ValidationResult:
     passed: bool
-    rejection_reason: str | None = None   # None si passed=True
-    corrected_summary: dict | None = None  # None si not passed; dict con warnings si passed con correcciones
+    rejection_reason: str | None = None  # None si passed=True
+    corrected_summary: dict[str, Any] | None = (
+        None  # None si not passed; dict con warnings si passed con correcciones
+    )
 
 
 def _extract_amounts(summary: dict[str, Any]) -> list[Decimal]:
@@ -39,10 +42,8 @@ def _extract_amounts(summary: dict[str, Any]) -> list[Decimal]:
         for entry in summary.get("ventas_detectadas", []) + summary.get("gastos_detectados", []):
             for raw in entry.get("montos", []):
                 cleaned = re.sub(r"[$\s.]", "", str(raw)).replace(",", ".")
-                try:
+                with contextlib.suppress(InvalidOperation):
                     amounts.append(Decimal(cleaned))
-                except InvalidOperation:
-                    pass
         return amounts
 
     for row in rows:
@@ -67,7 +68,8 @@ def _extract_dates(summary: dict[str, Any]) -> tuple[list[date], int]:
     """
     Extrae fechas parseables del summary.
     Retorna (fechas_validas, total_valores_fecha) para detectar "todas inválidas".
-    total_valores_fecha > 0 y fechas_validas == [] significa que había fechas pero ninguna parseable.
+    total_valores_fecha > 0 y fechas_validas == [] significa que había fechas
+    pero ninguna parseable.
     """
     valid_dates: list[date] = []
     total_date_values = 0

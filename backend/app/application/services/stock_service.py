@@ -63,20 +63,26 @@ async def decrement_stock(
     db.add(movement)
     await db.flush()
 
-    EventBus.emit("STOCK_DECREASED", {
-        "tenant_id": str(tenant_id),
-        "product_id": str(product_id),
-        "qty": qty,
-        "source_event_id": source_event_id,
-    })
-
-    if balance.current_qty <= effective_threshold(product.low_stock_threshold_units):
-        EventBus.emit("STOCK_ALERT_CREATED", {
+    EventBus.emit(
+        "STOCK_DECREASED",
+        {
             "tenant_id": str(tenant_id),
             "product_id": str(product_id),
-            "alert_type": "stockout_risk",
-            "current_qty": balance.current_qty,
-        })
+            "qty": qty,
+            "source_event_id": source_event_id,
+        },
+    )
+
+    if balance.current_qty <= effective_threshold(product.low_stock_threshold_units):
+        EventBus.emit(
+            "STOCK_ALERT_CREATED",
+            {
+                "tenant_id": str(tenant_id),
+                "product_id": str(product_id),
+                "alert_type": "stockout_risk",
+                "current_qty": balance.current_qty,
+            },
+        )
 
     return movement
 
@@ -107,11 +113,14 @@ async def increment_stock(
     db.add(movement)
     await db.flush()
 
-    EventBus.emit("STOCK_INCREASED", {
-        "tenant_id": str(tenant_id),
-        "product_id": str(product_id),
-        "qty": qty,
-    })
+    EventBus.emit(
+        "STOCK_INCREASED",
+        {
+            "tenant_id": str(tenant_id),
+            "product_id": str(product_id),
+            "qty": qty,
+        },
+    )
 
     return movement
 
@@ -171,15 +180,12 @@ async def get_low_stock_products(
         select(Product)
         .join(
             InventoryBalance,
-            (InventoryBalance.product_id == Product.id)
-            & (InventoryBalance.tenant_id == tenant_id),
+            (InventoryBalance.product_id == Product.id) & (InventoryBalance.tenant_id == tenant_id),
         )
         .where(
             Product.tenant_id == tenant_id,
             Product.is_active.is_(True),
-            InventoryBalance.current_qty <= func.coalesce(
-                Product.low_stock_threshold_units, 5
-            ),
+            InventoryBalance.current_qty <= func.coalesce(Product.low_stock_threshold_units, 5),
         )
     )
     return list(result.scalars().all())
@@ -197,8 +203,7 @@ async def get_overstock_products(
         select(Product, InventoryBalance)
         .join(
             InventoryBalance,
-            (InventoryBalance.product_id == Product.id)
-            & (InventoryBalance.tenant_id == tenant_id),
+            (InventoryBalance.product_id == Product.id) & (InventoryBalance.tenant_id == tenant_id),
         )
         .where(
             Product.tenant_id == tenant_id,

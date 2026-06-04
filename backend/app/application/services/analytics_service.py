@@ -68,9 +68,7 @@ class AnalyticsService:
         except Exception:
             logger.warning("analytics.record_event_failed", exc_info=True)
 
-    async def get_data_driven_benchmark(
-        self, vertical_code: str
-    ) -> MarginBenchmark | None:
+    async def get_data_driven_benchmark(self, vertical_code: str) -> MarginBenchmark | None:
         """Devuelve benchmark estadístico si hay >= 5 muestras. None = usar estático."""
         return await self._repo.compute_margin_benchmark(vertical_code)
 
@@ -88,20 +86,22 @@ class AnalyticsService:
             stats = await self._repo.get_vertical_stats(code)
             active_bm = data_bm if data_bm is not None else static_bm
 
-            result.append({
-                "vertical_code": code,
-                "sample_count": stats.get("sample_count", 0),
-                "avg_score": stats.get("avg_score"),
-                "avg_margin_ratio": stats.get("avg_margin"),
-                "p50_margin_ratio": stats.get("p50_margin"),
-                "avg_data_completeness": stats.get("avg_completeness"),
-                "benchmark_source": "data_driven" if data_bm is not None else "static",
-                "benchmark": {
-                    "critical_below": active_bm.critical_below,
-                    "warning_below": active_bm.warning_below,
-                    "healthy_min": active_bm.healthy_min,
-                    "healthy_max": active_bm.healthy_max,
-                },
-            })
+            result.append(
+                {
+                    "vertical_code": code,
+                    "sample_count": stats.get("sample_count", 0),
+                    "avg_score": stats.get("avg_score"),
+                    "avg_margin_ratio": stats.get("avg_margin"),
+                    "p50_margin_ratio": stats.get("p50_margin"),
+                    "avg_data_completeness": stats.get("avg_completeness"),
+                    "benchmark_source": "data_driven" if data_bm is not None else "static",
+                    "benchmark": {
+                        "critical_below": active_bm.critical_below,
+                        "warning_below": active_bm.warning_below,
+                        "healthy_min": active_bm.healthy_min,
+                        "healthy_max": active_bm.healthy_max,
+                    },
+                }
+            )
 
         return result
