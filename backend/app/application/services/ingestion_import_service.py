@@ -36,10 +36,25 @@ _NOMBRE_COLS: set[str] = {
     "concepto",
     "detalle",
 }
-_PRECIO_VENTA_COLS: set[str] = {"precio_venta", "precio", "price", "p_venta"}
-_COSTO_COLS: set[str] = {"costo", "cost", "precio_costo", "p_costo"}
-_STOCK_COLS: set[str] = {"stock", "cantidad", "inventario", "units", "qty", "existencia"}
+_PRECIO_VENTA_COLS: set[str] = {
+    "precio_venta", "precio", "price", "p_venta",
+    "precio_unitario",  # common in Argentine business files
+    "precio_unit",
+}
+_COSTO_COLS: set[str] = {
+    "costo", "cost", "precio_costo", "p_costo",
+    "costo_unitario",  # common in purchase sheets
+    "costo_unit",
+}
+_STOCK_COLS: set[str] = {
+    "stock", "cantidad", "inventario", "units", "qty", "existencia", "stock_actual",
+}
 _SKU_COLS: set[str] = {"sku", "codigo", "código", "code", "ref", "id_producto"}
+
+# Columnas de monto de venta ampliadas para archivos multi-hoja
+_VENTA_AMOUNT_COLS: set[str] = _VENTA_COLS | {"total", "importe_total", "precio_unitario"}
+# Columnas de monto de gasto ampliadas
+_GASTO_AMOUNT_COLS: set[str] = _GASTO_COLS | {"monto", "total", "importe"}
 
 
 def _parse_amount(raw: Any) -> Decimal | None:
@@ -111,6 +126,21 @@ async def insert_confirmed_data(
 
     if file_type == "spreadsheet":
         inferred_type = summary.get("inferred_type", "general")
+
+        # ── Archivos multi-hoja: delegar a helper que procesa cada tipo por separado ──
+        if inferred_type == "mixed" or summary.get("multi_sheet"):
+            return await _insert_multisheet_data(
+                session=session,
+                tenant_id=tenant_id,
+                summary=summary,
+                confirmed_fields=confirmed_fields,
+                today=today,
+                return_details=return_details,
+                product_details=product_details,
+                counts=counts,
+                column_mappings=column_mappings,
+            )
+
         rows: list[dict[str, Any]]
         if inferred_type == "stock":
             rows = summary.get("stock_detectado", [])
@@ -121,8 +151,9 @@ async def insert_confirmed_data(
 
         headers = list(rows[0].keys())
         fecha_col = _find_col(headers, _FECHA_COLS)
-        venta_col = _find_col(headers, _VENTA_COLS)
-        gasto_col = _find_col(headers, _GASTO_COLS)
+        # Usar set ampliado para columnas de monto (ej: "precio_unitario", "total")
+        venta_col = _find_col(headers, _VENTA_AMOUNT_COLS)
+        gasto_col = _find_col(headers, _GASTO_AMOUNT_COLS)
         nombre_col = _find_col(headers, _NOMBRE_COLS)
         precio_col = _find_col(headers, _PRECIO_VENTA_COLS)
         costo_col = _find_col(headers, _COSTO_COLS)
@@ -438,6 +469,203 @@ async def insert_confirmed_data(
                             )
                         )
                         counts["gastos"] += 1
+
+    await session.flush()
+    if return_details:
+        counts["product_details"] = product_details
+    return counts
+
+
+_PAGO_COLS: set[str] = {"forma_pago", "metodo_pago", "payment_method", "medio_pago", "pago"}
+_CATEGORIA_COLS: set[str] = {"categoria", "category", "rubro", "tipo"}
+_CANTIDAD_COLS: set[str] = {"cantidad", "qty", "units", "unidades", "cant"}
+
+# Monto de venta: preferimos "total" (precio_unitario × cantidad) sobre "precio_unitario"
+_VENTA_TOTAL_COLS: set[str] = {"total", "importe_total", "total_venta", "monto_total"}
+
+
+def _clean_str(val: Any, max_len: int = 99) -> str | None:
+    """Convierte a string limpio o None si es nulo/nan."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s[:max_len] if s and s.lower() not in {"none", "nan", ""} else None
+
+
+async def _insert_multisheet_data(
+    *,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+    confirmed_fields: dict[str, bool] | None,
+    today: date,
+    return_details: bool,
+    product_details: list[dict[str, Any]],
+    counts: dict[str, Any],
+    column_mappings: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Importa datos de un archivo multi-hoja procesando cada tipo por separado.
+
+    Sin límite de filas: importa todo lo que hay en cada array del summary.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.persistence.models.product import Product  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    confirmed_fields = confirmed_fields or {}
+
+    # ── Ventas ────────────────────────────────────────────────────────────────
+    if confirmed_fields.get("ventas"):
+        ventas_rows: list[dict[str, Any]] = summary.get("ventas_detectadas", [])
+        if ventas_rows:
+            headers = list(ventas_rows[0].keys())
+            fecha_col = _find_col(headers, _FECHA_COLS)
+            # Preferencia: "total" (suma real) > "precio_unitario" (precio por unidad)
+            amount_col = (
+                _find_col(headers, _VENTA_TOTAL_COLS)
+                or _find_col(headers, _VENTA_AMOUNT_COLS)
+            )
+            nombre_col = _find_col(headers, _NOMBRE_COLS)
+            pago_col = _find_col(headers, _PAGO_COLS)
+            qty_col = _find_col(headers, _CANTIDAD_COLS)
+            for row in ventas_rows:
+                raw_date = row.get(fecha_col) if fecha_col else None
+                tx_date = _parse_date(raw_date) if fecha_col else today
+                if tx_date is None:
+                    tx_date = today
+                if not amount_col:
+                    continue
+                amount = _parse_amount(row.get(amount_col))
+                if not amount:
+                    continue
+                # Cantidad vendida
+                qty: int = 1
+                qty_raw = row.get(qty_col) if qty_col else None
+                if qty_raw not in (None, "", "None", "nan"):
+                    try:
+                        qty = max(1, int(float(str(qty_raw))))
+                    except (ValueError, TypeError):
+                        qty = 1
+                # Descripción desde nombre del producto
+                notes = _clean_str(row.get(nombre_col) if nombre_col else None, 499)
+                # Método de pago
+                pay = _clean_str(row.get(pago_col) if pago_col else None, 30)
+                session.add(
+                    SaleEntry(
+                        tenant_id=tenant_id,
+                        amount=amount,
+                        quantity=qty,
+                        transaction_date=tx_date,
+                        payment_method=pay or "cash",
+                        notes=notes or "Importado desde archivo",
+                        provenance="REAL",
+                    )
+                )
+                counts["ventas"] += 1
+
+    # ── Gastos ────────────────────────────────────────────────────────────────
+    if confirmed_fields.get("gastos"):
+        gastos_rows: list[dict[str, Any]] = summary.get("gastos_detectados", [])
+        if gastos_rows:
+            headers = list(gastos_rows[0].keys())
+            fecha_col = _find_col(headers, _FECHA_COLS)
+            amount_col = (
+                _find_col(headers, _VENTA_TOTAL_COLS)  # "total" también en compras
+                or _find_col(headers, _GASTO_AMOUNT_COLS)
+            )
+            nombre_col = _find_col(headers, _NOMBRE_COLS)
+            pago_col = _find_col(headers, _PAGO_COLS)
+            cat_col = _find_col(headers, _CATEGORIA_COLS)
+            for row in gastos_rows:
+                raw_date = row.get(fecha_col) if fecha_col else None
+                tx_date = _parse_date(raw_date) if fecha_col else today
+                if tx_date is None:
+                    tx_date = today
+                if not amount_col:
+                    continue
+                amount = _parse_amount(row.get(amount_col))
+                if not amount:
+                    continue
+                desc = _clean_str(row.get(nombre_col) if nombre_col else None, 499)
+                pay = _clean_str(row.get(pago_col) if pago_col else None, 30)
+                cat = _clean_str(row.get(cat_col) if cat_col else None, 50)
+                session.add(
+                    ExpenseEntry(
+                        tenant_id=tenant_id,
+                        amount=amount,
+                        category=cat or "importado",
+                        transaction_date=tx_date,
+                        description=desc or "Gasto importado",
+                        payment_method=pay or "transfer",
+                        provenance="REAL",
+                    )
+                )
+                counts["gastos"] += 1
+
+    # ── Productos / Stock ─────────────────────────────────────────────────────
+    if confirmed_fields.get("productos"):
+        stock_rows: list[dict[str, Any]] = summary.get("stock_detectado", [])
+        if stock_rows:
+            headers = list(stock_rows[0].keys())
+            nombre_col = _find_col(headers, _NOMBRE_COLS)
+            precio_col = _find_col(headers, _PRECIO_VENTA_COLS)
+            costo_col = _find_col(headers, _COSTO_COLS)
+            stock_col = _find_col(headers, _STOCK_COLS)
+            sku_col = _find_col(headers, _SKU_COLS)
+            cat_col = _find_col(headers, _CATEGORIA_COLS)
+            if nombre_col:
+                for row in stock_rows:
+                    name = _clean_str(row.get(nombre_col), 299)
+                    if not name:
+                        continue
+                    price = _parse_amount(row.get(precio_col)) if precio_col else None
+                    cost = _parse_amount(row.get(costo_col)) if costo_col else None
+                    try:
+                        stock_raw = row.get(stock_col) if stock_col else None
+                        stock_val = (
+                            int(float(str(stock_raw)))
+                            if stock_raw not in (None, "", "None", "nan")
+                            else 0
+                        )
+                    except (ValueError, TypeError):
+                        stock_val = 0
+                    sku = _clean_str(row.get(sku_col) if sku_col else None, 99)
+                    cat = _clean_str(row.get(cat_col) if cat_col else None, 99)
+                    result = await session.execute(
+                        select(Product).where(
+                            Product.tenant_id == tenant_id,
+                            func.lower(func.trim(Product.name)) == name.lower(),
+                        )
+                    )
+                    existing = result.scalar_one_or_none()
+                    if existing:
+                        if price:
+                            existing.sale_price_ars = price
+                        if cost:
+                            existing.unit_cost_ars = cost
+                        if stock_val > 0:
+                            existing.stock_units = stock_val
+                        if sku:
+                            existing.sku = sku
+                        if cat and not existing.category:
+                            existing.category = cat
+                    else:
+                        session.add(
+                            Product(
+                                id=uuid.uuid4(),
+                                tenant_id=tenant_id,
+                                name=name,
+                                sku=sku,
+                                sale_price_ars=price or Decimal("0"),
+                                unit_cost_ars=cost,
+                                stock_units=stock_val,
+                                category=cat,
+                                low_stock_threshold_units=None,
+                                provenance="REAL",
+                            )
+                        )
+                    counts["productos"] += 1
 
     await session.flush()
     if return_details:

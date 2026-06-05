@@ -534,10 +534,113 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
         _store_rows_by_type(summary, all_dicts[:50], analysis.get("inferred_type", "general"))
         return summary
 
+    import unicodedata  # noqa: PLC0415
+
     import openpyxl  # noqa: PLC0415
+
+    # Sin límite de filas: se importan todas las filas del archivo.
+    # JSONB de Neon soporta hasta ~255 MB; un archivo típico de PYME es < 5 MB.
+    _max_rows_per_type = None  # None = sin límite
+
+    def _classify_sheet(name: str) -> str:
+        """Clasifica una pestaña de xlsx por nombre → 'ventas'|'gastos'|'stock'|'unknown'."""
+        norm = unicodedata.normalize("NFD", name.lower().strip())
+        norm = "".join(c for c in norm if unicodedata.category(c) != "Mn")
+        if any(k in norm for k in ["venta", "ingreso", "cobro", "sale"]):
+            return "ventas"
+        if any(k in norm for k in ["gasto", "egreso", "operativo", "expense"]):
+            return "gastos"
+        if any(k in norm for k in ["compra", "mercaderia", "purchase", "proveedor"]):
+            return "gastos"  # compras se tratan como gastos
+        if any(k in norm for k in ["producto", "inventario", "catalogo", "stock", "item"]):
+            return "stock"
+        return "unknown"
 
     workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     try:
+        sheet_names = workbook.sheetnames
+        is_multisheet = len(sheet_names) > 1
+
+        if is_multisheet:
+            # ── Multi-hoja: combinar datos de cada pestaña por tipo ──────────
+            all_ventas: list[dict[str, Any]] = []
+            all_gastos: list[dict[str, Any]] = []
+            all_stock: list[dict[str, Any]] = []
+            primary_headers: list[str] = []
+            total_rows = 0
+
+            for sheet_name in sheet_names:
+                ws = workbook[sheet_name]
+                rows = list(ws.iter_rows(values_only=True))
+                if len(rows) < 2:
+                    continue
+
+                headers = [
+                    str(c) if c is not None else f"col_{i}"
+                    for i, c in enumerate(rows[0])
+                ]
+                data_rows = [list(row) for row in rows[1:]]
+                if not data_rows:
+                    continue
+
+                dicts = rows_to_dicts(headers, data_rows)
+                if not primary_headers:
+                    primary_headers = headers
+
+                total_rows += len(data_rows)
+
+                sheet_type = _classify_sheet(sheet_name)
+                if sheet_type == "unknown":
+                    # Fallback: inferir por columnas
+                    sheet_type = analyze_headers(headers).get("inferred_type", "general")
+
+                if sheet_type == "ventas":
+                    all_ventas.extend(dicts)
+                elif sheet_type == "gastos":
+                    all_gastos.extend(dicts)
+                elif sheet_type == "stock":
+                    all_stock.extend(dicts)
+                # Pestañas "general" o desconocidas se ignoran
+
+            has_ventas = bool(all_ventas)
+            has_gastos = bool(all_gastos)
+            has_stock = bool(all_stock)
+
+            if has_ventas and has_gastos and has_stock or has_ventas and has_gastos:
+                inferred_type = "mixed"
+            elif has_ventas:
+                inferred_type = "ventas"
+            elif has_gastos:
+                inferred_type = "gastos"
+            elif has_stock:
+                inferred_type = "stock"
+            else:
+                inferred_type = "general"
+
+            preview = (all_ventas or all_gastos or all_stock)[:10]
+
+            summary.update(
+                {
+                    "multi_sheet": True,
+                    "sheet_names": sheet_names,
+                    "inferred_type": inferred_type,
+                    "confidence": "HIGH" if (has_ventas or has_gastos or has_stock) else "LOW",
+                    "has_venta": has_ventas,
+                    "has_gasto": has_gastos,
+                    "has_producto": has_stock,
+                    "headers": primary_headers,
+                    "columns": primary_headers,
+                    "row_count": total_rows,
+                    "rows_processed": total_rows,
+                    "ventas_detectadas": all_ventas,
+                    "gastos_detectados": all_gastos,
+                    "stock_detectado": all_stock,
+                    "preview_rows": preview,
+                }
+            )
+            return summary
+
+        # ── Una sola hoja: comportamiento original (con límite ampliado) ─────
         worksheet = workbook.active
         all_rows = list(worksheet.iter_rows(values_only=True))
         if not all_rows:
@@ -575,7 +678,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             summary["warnings"].append(
                 f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
             )
-        _store_rows_by_type(summary, all_dicts[:50], analysis.get("inferred_type", "general"))
+        inferred = analysis.get("inferred_type", "general")
+        _store_rows_by_type(summary, all_dicts, inferred)
         return summary
     finally:
         workbook.close()
