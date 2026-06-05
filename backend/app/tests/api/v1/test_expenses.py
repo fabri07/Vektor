@@ -26,7 +26,8 @@ class TestExpensesCRUD:
         resp = await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
         assert resp.status_code == 201
         data = resp.json()
-        assert data["amount"] == "15000.00"
+        # amount se serializa como número (no string) para que el frontend sume sin NaN.
+        assert data["amount"] == 15000.0
         assert data["category"] == "RENT"
         assert data["transaction_date"] == _TODAY
 
@@ -68,7 +69,7 @@ class TestExpensesCRUD:
             headers=auth_headers,
         )
         assert resp.status_code == 200
-        assert resp.json()["amount"] == "18000.00"
+        assert resp.json()["amount"] == 18000.0
 
     async def test_delete_expense(self, client: AsyncClient, auth_headers: dict[str, Any]) -> None:
         create_resp = await client.post(

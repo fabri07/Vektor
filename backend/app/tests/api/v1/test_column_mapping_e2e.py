@@ -11,7 +11,9 @@ Cubre:
 
 from __future__ import annotations
 
+import unittest.mock
 import uuid
+from datetime import UTC
 from decimal import Decimal
 from typing import Any
 
@@ -29,7 +31,6 @@ from app.persistence.models.file import (
 )
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
-
 
 # ── Fixture: archivo con headers y datos ─────────────────────────────────────
 
@@ -87,8 +88,14 @@ async def product_file(db_session: AsyncSession, sample_tenant: Tenant) -> Uploa
         inferred_type="stock",
         headers=["Nombre", "Precio Venta", "Costo", "SKU", "Unidades"],
         rows=[
-            {"Nombre": "Coca Cola 500ml", "Precio Venta": "1200", "Costo": "800", "SKU": "CC500", "Unidades": "50"},
-            {"Nombre": "Sprite 500ml", "Precio Venta": "1100", "Costo": "750", "SKU": "SP500", "Unidades": "30"},
+            {
+                "Nombre": "Coca Cola 500ml", "Precio Venta": "1200",
+                "Costo": "800", "SKU": "CC500", "Unidades": "50",
+            },
+            {
+                "Nombre": "Sprite 500ml", "Precio Venta": "1100",
+                "Costo": "750", "SKU": "SP500", "Unidades": "30",
+            },
         ],
     )
     db_session.add(record)
@@ -183,9 +190,6 @@ class TestGetColumnMappings:
 # ── Tests: POST /confirm con column_mappings ──────────────────────────────────
 
 
-import unittest.mock
-
-
 @pytest.fixture
 def mock_score_trigger_e2e():
     from app.application.services.score_trigger_service import trigger_score_recalculation
@@ -242,7 +246,7 @@ class TestConfirmWithColumnMappings:
         db_session: AsyncSession,
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
-        """Después de confirmar con mappings, el aprendizaje se persiste en tenant_column_mappings."""
+        """Tras confirmar con mappings, el aprendizaje se persiste en tenant_column_mappings."""
         from app.persistence.models.column_mapping import TenantColumnMapping  # noqa: PLC0415
 
         await client.post(
@@ -485,12 +489,13 @@ class TestLearnedMappings:
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
         """Un tenant no ve los mapeos aprendidos de otro tenant."""
+        from datetime import datetime  # noqa: PLC0415
+
         from app.persistence.models.column_mapping import TenantColumnMapping  # noqa: PLC0415
-        from datetime import datetime, timezone  # noqa: PLC0415
 
         # Insertar mapeo de otro tenant directamente en DB
         other_tenant_id = uuid.uuid4()
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         db_session.add(
             TenantColumnMapping(
                 id=uuid.uuid4(),
@@ -509,3 +514,296 @@ class TestLearnedMappings:
         response = await client.get("/api/v1/ingestion/column-mappings", headers=auth_headers)
         assert response.status_code == 200
         assert response.json() == []
+
+
+# ── Tests: confirm multi-contexto (mapeo por hoja, Fase 1) ────────────────────
+
+
+def _make_multisheet_file(tenant_id: uuid.UUID) -> UploadedFile:
+    """Archivo multi-hoja con dos contextos (ventas + gastos) y marcadores __context__."""
+    ventas = [{"Fecha": "2024-01-15", "Valor": "5400", "__context__": "sheet:Ventas"}]
+    gastos = [{"Fecha": "2024-01-15", "Importe": "12000", "__context__": "sheet:Gastos"}]
+    return UploadedFile(
+        tenant_id=tenant_id,
+        uploaded_by=None,
+        original_filename="mixto.xlsx",
+        s3_key=f"uploads/{tenant_id}/uuid/mixto.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=2048,
+        purpose="mixed",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json={
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "confidence": "HIGH",
+            "headers": ["Fecha", "Valor"],
+            "mapping_contexts": [
+                {
+                    "context_id": "sheet:Ventas",
+                    "label": "Ventas",
+                    "source_kind": "sheet",
+                    "entity_type": "sale",
+                    "headers": ["Fecha", "Valor"],
+                    "fields": None,
+                    "preview_rows": [{"Fecha": "2024-01-15", "Valor": "5400"}],
+                    "row_count": 1,
+                },
+                {
+                    "context_id": "sheet:Gastos",
+                    "label": "Gastos",
+                    "source_kind": "sheet",
+                    "entity_type": "expense",
+                    "headers": ["Fecha", "Importe"],
+                    "fields": None,
+                    "preview_rows": [{"Fecha": "2024-01-15", "Importe": "12000"}],
+                    "row_count": 1,
+                },
+            ],
+            "ventas_detectadas": ventas,
+            "gastos_detectados": gastos,
+            "stock_detectado": [],
+            "row_count": 2,
+        },
+    )
+
+
+@pytest_asyncio.fixture
+async def multisheet_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    record = _make_multisheet_file(sample_tenant.tenant_id)
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+@pytest.mark.asyncio
+class TestConfirmWithContextMappings:
+    async def test_get_mappings_by_context_uses_sheet_headers_and_entity(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        multisheet_file: UploadedFile,
+    ) -> None:
+        """GET con context_id usa los headers/entity_type de esa hoja."""
+        resp = await client.get(
+            f"/api/v1/ingestion/files/{multisheet_file.id}/column-mappings"
+            "?entity_type=sale&context_id=sheet:Gastos",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        cols = {s["source_column"] for s in data}
+        assert cols == {"Fecha", "Importe"}  # headers de la hoja Gastos, no de Ventas
+        assert all(s["context_id"] == "sheet:Gastos" for s in data)
+
+    async def test_context_qualified_confirm_imports_both_sheets(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        multisheet_file: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger_e2e: unittest.mock.MagicMock,
+    ) -> None:
+        """Confirm con mapeos cualificados por contexto importa cada hoja con su mapeo."""
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        resp = await client.post(
+            f"/api/v1/ingestion/files/{multisheet_file.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "column_mappings": [
+                    {
+                        "source_column": "Valor",
+                        "target_field": "amount",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
+                    {
+                        "source_column": "Fecha",
+                        "target_field": "transaction_date",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
+                    {
+                        "source_column": "Importe",
+                        "target_field": "amount",
+                        "context_id": "sheet:Gastos",
+                        "entity_type": "expense",
+                    },
+                    {
+                        "source_column": "Fecha",
+                        "target_field": "expense_date",
+                        "context_id": "sheet:Gastos",
+                        "entity_type": "expense",
+                    },
+                ],
+                "context_confirmed": {"sheet:Ventas": True, "sheet:Gastos": True},
+            },
+        )
+        assert resp.status_code == 200
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == multisheet_file.tenant_id)
+            )
+        ).scalars().all()
+        expenses = (
+            await db_session.execute(
+                select(ExpenseEntry).where(ExpenseEntry.tenant_id == multisheet_file.tenant_id)
+            )
+        ).scalars().all()
+        assert len(sales) == 1
+        assert sales[0].amount == Decimal("5400")
+        assert len(expenses) == 1
+        assert expenses[0].amount == Decimal("12000")
+
+    async def test_context_confirmed_false_excludes_sheet(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        multisheet_file: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger_e2e: unittest.mock.MagicMock,
+    ) -> None:
+        """context_confirmed=False para una hoja → no se importa."""
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        resp = await client.post(
+            f"/api/v1/ingestion/files/{multisheet_file.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "column_mappings": [
+                    {
+                        "source_column": "Valor",
+                        "target_field": "amount",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
+                    {
+                        "source_column": "Fecha",
+                        "target_field": "transaction_date",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
+                ],
+                "context_confirmed": {"sheet:Ventas": True, "sheet:Gastos": False},
+            },
+        )
+        assert resp.status_code == 200
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == multisheet_file.tenant_id)
+            )
+        ).scalars().all()
+        expenses = (
+            await db_session.execute(
+                select(ExpenseEntry).where(ExpenseEntry.tenant_id == multisheet_file.tenant_id)
+            )
+        ).scalars().all()
+        assert len(sales) == 1
+        assert len(expenses) == 0
+
+    async def test_entity_type_derived_from_context_not_payload(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        multisheet_file: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger_e2e: unittest.mock.MagicMock,
+    ) -> None:
+        """Con context_id, el entity_type se deriva del contexto del summary, NO del
+        payload. Acá el payload miente (entity_type='sale' para la hoja Gastos): la
+        validación de requeridos y el aprendizaje deben usar 'expense' del contexto.
+        Si se usara el payload, faltaría transaction_date y daría 422."""
+        from app.persistence.models.column_mapping import TenantColumnMapping  # noqa: PLC0415
+
+        resp = await client.post(
+            f"/api/v1/ingestion/files/{multisheet_file.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "column_mappings": [
+                    {
+                        "source_column": "Importe",
+                        "target_field": "amount",
+                        "context_id": "sheet:Gastos",
+                        "entity_type": "sale",  # ← payload incorrecto a propósito
+                    },
+                    {
+                        "source_column": "Fecha",
+                        "target_field": "expense_date",
+                        "context_id": "sheet:Gastos",
+                        "entity_type": "sale",  # ← payload incorrecto a propósito
+                    },
+                ],
+                "context_confirmed": {"sheet:Ventas": False, "sheet:Gastos": True},
+            },
+        )
+        assert resp.status_code == 200  # validó con requeridos de expense, no de sale
+        learned = (
+            await db_session.execute(
+                select(TenantColumnMapping).where(
+                    TenantColumnMapping.tenant_id == multisheet_file.tenant_id
+                )
+            )
+        ).scalars().all()
+        # Aprendido bajo 'expense' (contexto), no 'sale' (payload).
+        assert {m.entity_type for m in learned} == {"expense"}
+
+    async def test_context_mappings_learned_per_entity_type(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        multisheet_file: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger_e2e: unittest.mock.MagicMock,
+    ) -> None:
+        """El aprendizaje se guarda bajo el entity_type de cada contexto."""
+        from app.persistence.models.column_mapping import TenantColumnMapping  # noqa: PLC0415
+
+        await client.post(
+            f"/api/v1/ingestion/files/{multisheet_file.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "column_mappings": [
+                    {
+                        "source_column": "Valor",
+                        "target_field": "amount",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
+                    {
+                        "source_column": "Fecha",
+                        "target_field": "transaction_date",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
+                    {
+                        "source_column": "Importe",
+                        "target_field": "amount",
+                        "context_id": "sheet:Gastos",
+                        "entity_type": "expense",
+                    },
+                    {
+                        "source_column": "Fecha",
+                        "target_field": "expense_date",
+                        "context_id": "sheet:Gastos",
+                        "entity_type": "expense",
+                    },
+                ],
+                "context_confirmed": {"sheet:Ventas": True, "sheet:Gastos": True},
+            },
+        )
+        learned = (
+            await db_session.execute(
+                select(TenantColumnMapping).where(
+                    TenantColumnMapping.tenant_id == multisheet_file.tenant_id
+                )
+            )
+        ).scalars().all()
+        by_entity = {(m.entity_type, m.source_column): m.target_field for m in learned}
+        assert by_entity.get(("sale", "valor")) == "amount"
+        assert by_entity.get(("expense", "importe")) == "amount"

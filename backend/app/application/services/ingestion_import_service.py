@@ -100,6 +100,41 @@ def _find_col(headers: list[str], keywords: set[str]) -> str | None:
     return None
 
 
+def _row_val(row: dict[str, Any], keywords: set[str]) -> Any:
+    """Devuelve el valor de la primera columna de *esta* fila cuyo nombre matchea.
+
+    A diferencia de `_find_col` (que resuelve una columna fija para todo el
+    bucket a partir de la primera fila), esto resuelve por fila. Necesario en
+    archivos multi-hoja donde varias hojas del mismo tipo pueden tener esquemas
+    de columnas distintos: sin esto, las filas de la segunda hoja se descartaban
+    en silencio porque la columna detectada no existía en sus keys.
+    """
+    for key, val in row.items():
+        norm = key.lower().strip().replace(" ", "_")
+        if any(k in norm for k in keywords):
+            return val
+    return None
+
+
+def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Desde un mapeo explícito source_col→target, resuelve columnas por target canónico.
+
+    Devuelve (target_to_col, custom_field_cols): el primero mapea campo canónico
+    (amount, transaction_date, name, sale_price_ars, ...) → source_col; el segundo
+    mapea cf_key → source_col para los targets `custom_field:{key}`. Ignora "ignore".
+    """
+    target_to_col: dict[str, str] = {}
+    custom_field_cols: dict[str, str] = {}
+    for src_col, target in mapping.items():
+        if target == "ignore":
+            continue
+        if target.startswith("custom_field:"):
+            custom_field_cols[target[len("custom_field:"):]] = src_col
+        elif target not in target_to_col:
+            target_to_col[target] = src_col
+    return target_to_col, custom_field_cols
+
+
 async def insert_confirmed_data(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -107,6 +142,9 @@ async def insert_confirmed_data(
     confirmed_fields: dict[str, bool] | None = None,
     return_details: bool = False,
     column_mappings: dict[str, str] | None = None,
+    context_mappings: dict[str, dict[str, str]] | None = None,
+    context_confirmed: dict[str, bool] | None = None,
+    context_entity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -139,6 +177,8 @@ async def insert_confirmed_data(
                 product_details=product_details,
                 counts=counts,
                 column_mappings=column_mappings,
+                context_mappings=context_mappings,
+                context_confirmed=context_confirmed,
             )
 
         rows: list[dict[str, Any]]
@@ -434,41 +474,85 @@ async def insert_confirmed_data(
                 counts["productos"] += 1
 
     else:
-        if confirmed_fields.get("ventas"):
-            for entry in summary.get("ventas_detectadas", []):
-                for m in entry.get("montos", []):
-                    amount = _parse_amount(m)
-                    if amount:
-                        session.add(
-                            SaleEntry(
-                                tenant_id=tenant_id,
-                                amount=amount,
-                                quantity=1,
-                                transaction_date=today,
-                                payment_method="cash",
-                                notes=str(entry.get("linea", ""))[:499],
-                                provenance="REAL",
-                            )
-                        )
-                        counts["ventas"] += 1
+        # ── Documentos de texto/imagen: inserción por línea (montos detectados) ──
+        def _add_text_sale(entry: dict[str, Any]) -> None:
+            for m in entry.get("montos", []):
+                amount = _parse_amount(m)
+                if not amount:
+                    continue
+                session.add(
+                    SaleEntry(
+                        tenant_id=tenant_id,
+                        amount=amount,
+                        quantity=1,
+                        transaction_date=today,
+                        payment_method="cash",
+                        notes=str(entry.get("linea", ""))[:499] or "Importado desde archivo",
+                        provenance="REAL",
+                    )
+                )
+                counts["ventas"] += 1
 
-        if confirmed_fields.get("gastos"):
-            for entry in summary.get("gastos_detectados", []):
-                for m in entry.get("montos", []):
-                    amount = _parse_amount(m)
-                    if amount:
-                        session.add(
-                            ExpenseEntry(
-                                tenant_id=tenant_id,
-                                amount=amount,
-                                category="importado",
-                                transaction_date=today,
-                                description=str(entry.get("linea", ""))[:499] or "Gasto importado",
-                                payment_method="transfer",
-                                provenance="REAL",
-                            )
-                        )
-                        counts["gastos"] += 1
+        def _add_text_expense(entry: dict[str, Any]) -> None:
+            for m in entry.get("montos", []):
+                amount = _parse_amount(m)
+                if not amount:
+                    continue
+                session.add(
+                    ExpenseEntry(
+                        tenant_id=tenant_id,
+                        amount=amount,
+                        category="importado",
+                        transaction_date=today,
+                        description=str(entry.get("linea", ""))[:499] or "Gasto importado",
+                        payment_method="transfer",
+                        provenance="REAL",
+                    )
+                )
+                counts["gastos"] += 1
+
+        text_contexts = summary.get("mapping_contexts")
+        if text_contexts:
+            # Path por contexto: cada grupo detectado se incluye/excluye y puede
+            # reasignarse a otro entity_type (context_entity).
+            override = context_entity or {}
+            text_bucket = {
+                "sale": "ventas_detectadas",
+                "expense": "gastos_detectados",
+                "product": "stock_detectado",
+            }
+            for ctx in text_contexts:
+                ctx_id = ctx.get("context_id")
+                base_entity = ctx.get("entity_type")
+                entity = override.get(ctx_id or "") or base_entity
+                if entity not in ("sale", "expense"):
+                    continue  # producto desde una línea de texto no es insertable
+                # Inclusión: por contexto, o legacy por tipo según el entity efectivo.
+                if context_confirmed:
+                    if not context_confirmed.get(ctx_id):
+                        continue
+                elif not confirmed_fields.get(
+                    "ventas" if entity == "sale" else "gastos"
+                ):
+                    continue
+                rows = [
+                    r
+                    for r in summary.get(text_bucket.get(base_entity or "", ""), [])
+                    if r.get("__context__") == ctx_id
+                ]
+                for text_row in rows:
+                    if entity == "sale":
+                        _add_text_sale(text_row)
+                    else:
+                        _add_text_expense(text_row)
+        else:
+            # Legacy: documentos viejos sin mapping_contexts.
+            if confirmed_fields.get("ventas"):
+                for text_row in summary.get("ventas_detectadas", []):
+                    _add_text_sale(text_row)
+            if confirmed_fields.get("gastos"):
+                for text_row in summary.get("gastos_detectados", []):
+                    _add_text_expense(text_row)
 
     await session.flush()
     if return_details:
@@ -503,10 +587,17 @@ async def _insert_multisheet_data(
     product_details: list[dict[str, Any]],
     counts: dict[str, Any],
     column_mappings: dict[str, str] | None,
+    context_mappings: dict[str, dict[str, str]] | None = None,
+    context_confirmed: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
-    """Importa datos de un archivo multi-hoja procesando cada tipo por separado.
+    """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
-    Sin límite de filas: importa todo lo que hay en cada array del summary.
+    Si el summary tiene `mapping_contexts`, itera por contexto: filtra filas por el
+    marcador `__context__`, respeta la inclusión (`context_confirmed` o, en su
+    defecto, `confirmed_fields` por tipo), y aplica el mapeo explícito de ese
+    contexto (`context_mappings[context_id]`) con fallback a detección por keyword
+    (`_row_val`). Si no hay `mapping_contexts` (summaries viejos), cae al path
+    legacy por tipo con detección por keyword. Sin límite de filas.
     """
     from sqlalchemy import func, select  # noqa: PLC0415
 
@@ -514,161 +605,201 @@ async def _insert_multisheet_data(
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
     confirmed_fields = confirmed_fields or {}
+    context_mappings = context_mappings or {}
+    _flush_every = 500  # enviar a DB en batches para no acumular en memoria
 
-    # ── Ventas ────────────────────────────────────────────────────────────────
-    if confirmed_fields.get("ventas"):
-        ventas_rows: list[dict[str, Any]] = summary.get("ventas_detectadas", [])
-        if ventas_rows:
-            headers = list(ventas_rows[0].keys())
-            fecha_col = _find_col(headers, _FECHA_COLS)
-            # Preferencia: "total" (suma real) > "precio_unitario" (precio por unidad)
-            amount_col = (
-                _find_col(headers, _VENTA_TOTAL_COLS)
-                or _find_col(headers, _VENTA_AMOUNT_COLS)
+    def _val(row: dict[str, Any], col: str | None, keywords: set[str]) -> Any:
+        # Columna explícita (mapeo) si existe; si no, detección por keyword.
+        if col:
+            return row.get(col)
+        return _row_val(row, keywords)
+
+    def _custom_fields(row: dict[str, Any], cf_cols: dict[str, str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for cf_key, src in cf_cols.items():
+            v = row.get(src)
+            if v is not None and str(v).strip().lower() not in {"", "none", "nan"}:
+                out[cf_key] = str(v)
+        return out
+
+    def _add_sale(row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]) -> None:
+        amount_col = cols.get("amount")
+        amount = (
+            _parse_amount(row.get(amount_col))
+            if amount_col
+            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))
+            or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
+        )
+        if not amount:
+            return
+        raw_date = _val(row, cols.get("transaction_date") or cols.get("expense_date"), _FECHA_COLS)
+        tx_date = _parse_date(raw_date) if raw_date is not None else today
+        if tx_date is None:
+            tx_date = today
+        qty: int = 1
+        qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
+        if qty_raw not in (None, "", "None", "nan"):
+            try:
+                qty = max(1, int(float(str(qty_raw))))
+            except (ValueError, TypeError):
+                qty = 1
+        _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
+        notes = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
+        pay = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
+        entry = SaleEntry(
+            tenant_id=tenant_id,
+            amount=amount,
+            quantity=qty,
+            transaction_date=tx_date,
+            payment_method=pay or "cash",
+            notes=notes or "Importado desde archivo",
+            provenance="REAL",
+        )
+        cf = _custom_fields(row, cf_cols)
+        if cf:
+            entry.custom_fields = cf
+        session.add(entry)
+        counts["ventas"] += 1
+
+    def _add_expense(row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]) -> None:
+        amount_col = cols.get("amount")
+        amount = (
+            _parse_amount(row.get(amount_col))
+            if amount_col
+            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))  # "total" también en compras
+            or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
+        )
+        if not amount:
+            return
+        raw_date = _val(row, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS)
+        tx_date = _parse_date(raw_date) if raw_date is not None else today
+        if tx_date is None:
+            tx_date = today
+        _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
+        desc = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
+        pay = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
+        cat = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 50)
+        expense = ExpenseEntry(
+            tenant_id=tenant_id,
+            amount=amount,
+            category=cat or "importado",
+            transaction_date=tx_date,
+            description=desc or "Gasto importado",
+            payment_method=pay or "transfer",
+            provenance="REAL",
+        )
+        cf = _custom_fields(row, cf_cols)
+        if cf:
+            expense.custom_fields = cf
+        session.add(expense)
+        counts["gastos"] += 1
+
+    async def _add_product(
+        row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
+    ) -> None:
+        _name_col = cols.get("name") or cols.get("product_name")
+        name = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 299)
+        if not name:
+            return
+        price = _parse_amount(_val(row, cols.get("sale_price_ars"), _PRECIO_VENTA_COLS))
+        cost = _parse_amount(_val(row, cols.get("unit_cost_ars"), _COSTO_COLS))
+        try:
+            stock_raw = _val(row, cols.get("stock_units"), _STOCK_COLS)
+            stock_val = (
+                int(float(str(stock_raw)))
+                if stock_raw not in (None, "", "None", "nan")
+                else 0
             )
-            nombre_col = _find_col(headers, _NOMBRE_COLS)
-            pago_col = _find_col(headers, _PAGO_COLS)
-            qty_col = _find_col(headers, _CANTIDAD_COLS)
-            _flush_every = 500  # enviar a DB en batches para no acumular en memoria
-            for _i, row in enumerate(ventas_rows):
-                raw_date = row.get(fecha_col) if fecha_col else None
-                tx_date = _parse_date(raw_date) if fecha_col else today
-                if tx_date is None:
-                    tx_date = today
-                if not amount_col:
-                    continue
-                amount = _parse_amount(row.get(amount_col))
-                if not amount:
-                    continue
-                # Cantidad vendida
-                qty: int = 1
-                qty_raw = row.get(qty_col) if qty_col else None
-                if qty_raw not in (None, "", "None", "nan"):
-                    try:
-                        qty = max(1, int(float(str(qty_raw))))
-                    except (ValueError, TypeError):
-                        qty = 1
-                # Descripción desde nombre del producto
-                notes = _clean_str(row.get(nombre_col) if nombre_col else None, 499)
-                # Método de pago
-                pay = _clean_str(row.get(pago_col) if pago_col else None, 30)
-                session.add(
-                    SaleEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        quantity=qty,
-                        transaction_date=tx_date,
-                        payment_method=pay or "cash",
-                        notes=notes or "Importado desde archivo",
-                        provenance="REAL",
-                    )
+        except (ValueError, TypeError):
+            stock_val = 0
+        sku = _clean_str(_val(row, cols.get("sku"), _SKU_COLS), 99)
+        cat = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 99)
+        result = await session.execute(
+            select(Product).where(
+                Product.tenant_id == tenant_id,
+                func.lower(func.trim(Product.name)) == name.lower(),
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            if price:
+                existing.sale_price_ars = price
+            if cost:
+                existing.unit_cost_ars = cost
+            if stock_val > 0:
+                existing.stock_units = stock_val
+            if sku:
+                existing.sku = sku
+            if cat and not existing.category:
+                existing.category = cat
+        else:
+            cf = _custom_fields(row, cf_cols)
+            session.add(
+                Product(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    name=name,
+                    sku=sku,
+                    sale_price_ars=price or Decimal("0"),
+                    unit_cost_ars=cost,
+                    stock_units=stock_val,
+                    category=cat,
+                    low_stock_threshold_units=None,
+                    provenance="REAL",
+                    custom_fields=cf or None,
                 )
-                counts["ventas"] += 1
+            )
+        counts["productos"] += 1
+
+    entity_bucket = {
+        "sale": "ventas_detectadas",
+        "expense": "gastos_detectados",
+        "product": "stock_detectado",
+    }
+    entity_confirm_key = {"sale": "ventas", "expense": "gastos", "product": "productos"}
+
+    contexts = summary.get("mapping_contexts")
+    if contexts:
+        # ── Path por contexto (hoja/grupo) ──────────────────────────────────────
+        for ctx in contexts:
+            entity = ctx.get("entity_type")
+            if entity not in entity_bucket:
+                continue
+            ctx_id = ctx.get("context_id")
+            # Inclusión: por contexto si vino context_confirmed; si no, por tipo (legacy)
+            if context_confirmed:
+                if not context_confirmed.get(ctx_id):
+                    continue
+            elif not confirmed_fields.get(entity_confirm_key[entity]):
+                continue
+            bucket = summary.get(entity_bucket[entity], [])
+            rows = [r for r in bucket if r.get("__context__") == ctx_id]
+            if not rows:
+                continue
+            mapping = context_mappings.get(ctx_id or "", {})
+            cols, cf_cols = _resolve_target_cols(mapping) if mapping else ({}, {})
+            for _i, row in enumerate(rows):
+                if entity == "sale":
+                    _add_sale(row, cols, cf_cols)
+                elif entity == "expense":
+                    _add_expense(row, cols, cf_cols)
+                else:
+                    await _add_product(row, cols, cf_cols)
                 if (_i + 1) % _flush_every == 0:
-                    await session.flush()  # vaciar buffer → evita OOM en archivos grandes
-
-    # ── Gastos ────────────────────────────────────────────────────────────────
-    if confirmed_fields.get("gastos"):
-        gastos_rows: list[dict[str, Any]] = summary.get("gastos_detectados", [])
-        if gastos_rows:
-            headers = list(gastos_rows[0].keys())
-            fecha_col = _find_col(headers, _FECHA_COLS)
-            amount_col = (
-                _find_col(headers, _VENTA_TOTAL_COLS)  # "total" también en compras
-                or _find_col(headers, _GASTO_AMOUNT_COLS)
-            )
-            nombre_col = _find_col(headers, _NOMBRE_COLS)
-            pago_col = _find_col(headers, _PAGO_COLS)
-            cat_col = _find_col(headers, _CATEGORIA_COLS)
-            for row in gastos_rows:
-                raw_date = row.get(fecha_col) if fecha_col else None
-                tx_date = _parse_date(raw_date) if fecha_col else today
-                if tx_date is None:
-                    tx_date = today
-                if not amount_col:
-                    continue
-                amount = _parse_amount(row.get(amount_col))
-                if not amount:
-                    continue
-                desc = _clean_str(row.get(nombre_col) if nombre_col else None, 499)
-                pay = _clean_str(row.get(pago_col) if pago_col else None, 30)
-                cat = _clean_str(row.get(cat_col) if cat_col else None, 50)
-                session.add(
-                    ExpenseEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        category=cat or "importado",
-                        transaction_date=tx_date,
-                        description=desc or "Gasto importado",
-                        payment_method=pay or "transfer",
-                        provenance="REAL",
-                    )
-                )
-                counts["gastos"] += 1
-
-    # ── Productos / Stock ─────────────────────────────────────────────────────
-    if confirmed_fields.get("productos"):
-        stock_rows: list[dict[str, Any]] = summary.get("stock_detectado", [])
-        if stock_rows:
-            headers = list(stock_rows[0].keys())
-            nombre_col = _find_col(headers, _NOMBRE_COLS)
-            precio_col = _find_col(headers, _PRECIO_VENTA_COLS)
-            costo_col = _find_col(headers, _COSTO_COLS)
-            stock_col = _find_col(headers, _STOCK_COLS)
-            sku_col = _find_col(headers, _SKU_COLS)
-            cat_col = _find_col(headers, _CATEGORIA_COLS)
-            if nombre_col:
-                for row in stock_rows:
-                    name = _clean_str(row.get(nombre_col), 299)
-                    if not name:
-                        continue
-                    price = _parse_amount(row.get(precio_col)) if precio_col else None
-                    cost = _parse_amount(row.get(costo_col)) if costo_col else None
-                    try:
-                        stock_raw = row.get(stock_col) if stock_col else None
-                        stock_val = (
-                            int(float(str(stock_raw)))
-                            if stock_raw not in (None, "", "None", "nan")
-                            else 0
-                        )
-                    except (ValueError, TypeError):
-                        stock_val = 0
-                    sku = _clean_str(row.get(sku_col) if sku_col else None, 99)
-                    cat = _clean_str(row.get(cat_col) if cat_col else None, 99)
-                    result = await session.execute(
-                        select(Product).where(
-                            Product.tenant_id == tenant_id,
-                            func.lower(func.trim(Product.name)) == name.lower(),
-                        )
-                    )
-                    existing = result.scalar_one_or_none()
-                    if existing:
-                        if price:
-                            existing.sale_price_ars = price
-                        if cost:
-                            existing.unit_cost_ars = cost
-                        if stock_val > 0:
-                            existing.stock_units = stock_val
-                        if sku:
-                            existing.sku = sku
-                        if cat and not existing.category:
-                            existing.category = cat
-                    else:
-                        session.add(
-                            Product(
-                                id=uuid.uuid4(),
-                                tenant_id=tenant_id,
-                                name=name,
-                                sku=sku,
-                                sale_price_ars=price or Decimal("0"),
-                                unit_cost_ars=cost,
-                                stock_units=stock_val,
-                                category=cat,
-                                low_stock_threshold_units=None,
-                                provenance="REAL",
-                            )
-                        )
-                    counts["productos"] += 1
+                    await session.flush()
+    else:
+        # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
+        if confirmed_fields.get("ventas"):
+            for _i, row in enumerate(summary.get("ventas_detectadas", [])):
+                _add_sale(row, {}, {})
+                if (_i + 1) % _flush_every == 0:
+                    await session.flush()
+        if confirmed_fields.get("gastos"):
+            for row in summary.get("gastos_detectados", []):
+                _add_expense(row, {}, {})
+        if confirmed_fields.get("productos"):
+            for row in summary.get("stock_detectado", []):
+                await _add_product(row, {}, {})
 
     await session.flush()
     if return_details:

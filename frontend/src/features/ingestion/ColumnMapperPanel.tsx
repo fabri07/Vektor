@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle, AlertCircle, XCircle, ArrowRight } from "lucide-react";
 import {
   ingestionService,
-  type ColumnMappingSuggestion,
   type ColumnMapping,
+  type ColumnMappingSuggestion,
+  type MappingContext,
 } from "@/services/ingestion.service";
 
 // Campos canónicos por entity_type (para los selects del panel derecho)
@@ -192,6 +193,355 @@ function UnmappedModal({
   );
 }
 
+// Status efectivo de una columna: si hay target local → mapped; "ignore" → unmapped;
+// si no hay target → status del backend (captura required_missing).
+function effectiveStatus(
+  s: ColumnMappingSuggestion,
+  target: string,
+): ColumnMappingSuggestion["status"] {
+  if (target === "ignore") return "unmapped";
+  if (target) return "mapped";
+  return s.status;
+}
+
+// ── Mapeo multi-contexto (multi-hoja): una sección por hoja/grupo ──────────────
+
+function SheetMapperSection({
+  fileId,
+  context,
+  included,
+  entity,
+  onIncludeChange,
+  onMappingsChange,
+  onEntityChange,
+}: {
+  fileId: string;
+  context: MappingContext;
+  included: boolean;
+  entity: string;
+  onIncludeChange: (ctxId: string, included: boolean) => void;
+  onMappingsChange: (ctxId: string, mappings: Record<string, string>) => void;
+  onEntityChange: (ctxId: string, entity: string) => void;
+}) {
+  // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
+  const isText = context.headers == null;
+  const [mappings, setMappings] = useState<Record<string, string>>({});
+  const [initialized, setInitialized] = useState(false);
+  // Columna que está creando un custom field + su key en edición.
+  const [customFor, setCustomFor] = useState<string | null>(null);
+  const [customKey, setCustomKey] = useState("");
+
+  function selectTarget(col: string, value: string) {
+    if (value === "__custom__") {
+      setCustomFor(col);
+      setCustomKey("");
+      return;
+    }
+    setCustomFor((c) => (c === col ? null : c));
+    setMappings((p) => ({ ...p, [col]: value }));
+  }
+
+  function commitCustom(col: string) {
+    const key = customKey.trim().toLowerCase().replace(/\s+/g, "_");
+    if (key) setMappings((p) => ({ ...p, [col]: `custom_field:${key}` }));
+    setCustomFor(null);
+    setCustomKey("");
+  }
+
+  const { data: suggestions = [], isLoading } = useQuery({
+    queryKey: ["column-mappings", fileId, context.context_id],
+    queryFn: () =>
+      ingestionService.getColumnMappings(fileId, entity, context.context_id),
+    enabled: included && !isText,
+  });
+
+  // Inicializar mapeos desde sugerencias (una vez).
+  useEffect(() => {
+    if (suggestions.length > 0 && !initialized) {
+      const initial: Record<string, string> = {};
+      for (const s of suggestions) {
+        if (s.target_field) initial[s.source_column] = s.target_field;
+      }
+      setMappings(initial);
+      setInitialized(true);
+    }
+  }, [suggestions, initialized]);
+
+  // Reportar mapeos al padre cuando cambian (vacío en texto/imagen).
+  useEffect(() => {
+    onMappingsChange(context.context_id, mappings);
+  }, [mappings, context.context_id, onMappingsChange]);
+
+  const fields = CANONICAL_FIELDS[entity] ?? [];
+  const reqMissing = suggestions.some(
+    (s) => effectiveStatus(s, mappings[s.source_column] ?? "") === "required_missing",
+  );
+  const previewLines = context.preview_rows
+    .map((r) => String(r.linea ?? Object.values(r)[0] ?? ""))
+    .filter(Boolean)
+    .slice(0, 6);
+
+  return (
+    <div
+      className={`rounded-lg border bg-vk-surface-w ${
+        included ? "border-vk-border-w" : "border-vk-border-w/40 opacity-60"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-vk-border-w bg-vk-bg-light px-3 py-2">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={included}
+            onChange={(e) => onIncludeChange(context.context_id, e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-vk-border-w accent-vk-blue"
+          />
+          <span className="text-sm font-semibold text-vk-text-primary">{context.label}</span>
+        </label>
+        {isText ? (
+          // Reasignable: el clasificador de texto puede equivocarse.
+          <select
+            value={entity}
+            onChange={(e) => onEntityChange(context.context_id, e.target.value)}
+            className="rounded border border-vk-border-w bg-vk-bg-light px-2 py-0.5 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"
+          >
+            <option value="sale">Ventas</option>
+            <option value="expense">Gastos</option>
+          </select>
+        ) : (
+          <span className="rounded-full bg-vk-info-bg px-2 py-0.5 text-[10px] font-medium text-vk-blue">
+            {ENTITY_TYPE_LABELS[entity] ?? entity} · {context.row_count} fila
+            {context.row_count !== 1 ? "s" : ""}
+          </span>
+        )}
+      </div>
+
+      {included &&
+        (isText ? (
+          <div className="p-2">
+            <p className="mb-1 px-1 text-[10px] uppercase tracking-wide text-vk-text-muted">
+              {context.row_count} línea{context.row_count !== 1 ? "s" : ""} detectada
+              {context.row_count !== 1 ? "s" : ""}
+            </p>
+            <div className="space-y-0.5">
+              {previewLines.map((line, i) => (
+                <p
+                  key={i}
+                  className="truncate rounded bg-vk-bg-light/60 px-2 py-1 text-[11px] text-vk-text-secondary"
+                  title={line}
+                >
+                  {line}
+                </p>
+              ))}
+            </div>
+          </div>
+        ) : isLoading ? (
+          <div className="px-3 py-3 text-xs text-vk-text-muted">Analizando columnas...</div>
+        ) : (
+          <div className="p-2">
+            {reqMissing && (
+              <div className="mb-2 flex items-center gap-2 rounded border border-vk-danger/30 bg-vk-danger-bg px-2 py-1 text-[11px] text-vk-danger">
+                <XCircle className="h-3 w-3 shrink-0" />
+                Campos obligatorios sin mapear (en rojo).
+              </div>
+            )}
+            {suggestions.map((s) => {
+              const target = mappings[s.source_column] ?? "";
+              const eff = effectiveStatus(s, target);
+              const isCustom = target.startsWith("custom_field:");
+              return (
+                <div
+                  key={s.source_column}
+                  className={`grid grid-cols-2 items-start gap-2 px-1 py-1.5 ${
+                    eff === "required_missing" ? "bg-vk-danger/5" : ""
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-2 pt-1">
+                    <StatusDot status={eff} />
+                    <span
+                      className="truncate font-mono text-xs text-vk-text-primary"
+                      title={s.source_column}
+                    >
+                      {s.source_column}
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <select
+                      value={customFor === s.source_column ? "__custom__" : target}
+                      onChange={(e) => selectTarget(s.source_column, e.target.value)}
+                      className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"
+                    >
+                      <option value="">Sin mapear</option>
+                      <option value="ignore">— Ignorar —</option>
+                      {fields.map((f) => (
+                        <option key={f.value} value={f.value}>
+                          {f.label}
+                        </option>
+                      ))}
+                      {isCustom && <option value={target}>{target}</option>}
+                      <option value="__custom__">+ Campo personalizado…</option>
+                    </select>
+                    {customFor === s.source_column && (
+                      <div className="flex gap-1">
+                        <input
+                          type="text"
+                          autoFocus
+                          value={customKey}
+                          onChange={(e) => setCustomKey(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") commitCustom(s.source_column);
+                          }}
+                          placeholder="nombre_del_campo"
+                          className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary placeholder:text-vk-text-muted focus:border-vk-blue focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => commitCustom(s.source_column)}
+                          disabled={!customKey.trim()}
+                          className="shrink-0 rounded bg-vk-blue px-2 py-1 text-[11px] font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50"
+                        >
+                          OK
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+    </div>
+  );
+}
+
+function MultiContextMapper({
+  fileId,
+  contexts,
+  onDone,
+}: {
+  fileId: string;
+  contexts: MappingContext[];
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [included, setIncluded] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(contexts.map((c) => [c.context_id, true])),
+  );
+  // entity_type efectivo por contexto (reasignable en texto/imagen).
+  const [entityByCtx, setEntityByCtx] = useState<Record<string, string>>(() =>
+    Object.fromEntries(contexts.map((c) => [c.context_id, c.entity_type ?? "sale"])),
+  );
+  const mappingsRef = useRef<Record<string, Record<string, string>>>({});
+
+  const handleIncludeChange = useCallback((ctxId: string, inc: boolean) => {
+    setIncluded((prev) => ({ ...prev, [ctxId]: inc }));
+  }, []);
+
+  const handleEntityChange = useCallback((ctxId: string, ent: string) => {
+    setEntityByCtx((prev) => ({ ...prev, [ctxId]: ent }));
+  }, []);
+
+  const handleMappingsChange = useCallback(
+    (ctxId: string, mappings: Record<string, string>) => {
+      mappingsRef.current[ctxId] = mappings;
+    },
+    [],
+  );
+
+  const confirmMutation = useMutation({
+    mutationFn: () => {
+      const columnMappings: ColumnMapping[] = [];
+      const contextEntity: Record<string, string> = {};
+      for (const ctx of contexts) {
+        if (!included[ctx.context_id]) continue;
+        const ent = entityByCtx[ctx.context_id] ?? ctx.entity_type ?? "sale";
+        // Override de tipo solo para texto/imagen (sin headers).
+        if (ctx.headers == null) contextEntity[ctx.context_id] = ent;
+        const m = mappingsRef.current[ctx.context_id] ?? {};
+        for (const [src, target] of Object.entries(m)) {
+          if (!target) continue;
+          columnMappings.push({
+            source_column: src,
+            target_field: target,
+            context_id: ctx.context_id,
+            entity_type: ent,
+          });
+        }
+      }
+      return ingestionService.confirmFile(fileId, {}, columnMappings, included, contextEntity);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
+      void queryClient.invalidateQueries({ queryKey: ["column-mappings-learned"] });
+      onDone();
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: () => ingestionService.cancelFile(fileId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
+      onDone();
+    },
+  });
+
+  const anyIncluded = Object.values(included).some(Boolean);
+  const errDetail = (
+    confirmMutation.error as { response?: { data?: { detail?: string } } } | null
+  )?.response?.data?.detail;
+
+  return (
+    <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
+      <div className="mb-3">
+        <p className="text-sm font-semibold text-vk-text-primary">Mapeo por hoja</p>
+        <p className="mt-0.5 text-xs text-vk-text-muted">
+          {contexts.length} hojas detectadas. Revisá el mapeo de cada una y elegí cuáles importar.
+        </p>
+      </div>
+
+      <div className="space-y-3">
+        {contexts.map((ctx) => (
+          <SheetMapperSection
+            key={ctx.context_id}
+            fileId={fileId}
+            context={ctx}
+            included={included[ctx.context_id] ?? false}
+            entity={entityByCtx[ctx.context_id] ?? ctx.entity_type ?? "sale"}
+            onIncludeChange={handleIncludeChange}
+            onMappingsChange={handleMappingsChange}
+            onEntityChange={handleEntityChange}
+          />
+        ))}
+      </div>
+
+      {confirmMutation.isError && (
+        <p className="mt-3 text-xs text-vk-danger">
+          {errDetail ?? "Error al confirmar. Revisá los campos requeridos de cada hoja."}
+        </p>
+      )}
+
+      <div className="mt-4 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => confirmMutation.mutate()}
+          disabled={confirmMutation.isPending || !anyIncluded}
+          className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"
+        >
+          <CheckCircle className="h-3.5 w-3.5" />
+          {confirmMutation.isPending ? "Confirmando..." : "Confirmar importación"}
+        </button>
+        <button
+          type="button"
+          onClick={() => cancelMutation.mutate()}
+          disabled={cancelMutation.isPending}
+          className="rounded-lg border border-vk-border-w px-3 py-1.5 text-xs text-vk-text-secondary hover:bg-vk-bg-light disabled:opacity-50 transition-colors"
+        >
+          Cancelar
+        </button>
+      </div>
+    </div>
+  );
+}
+
 interface ColumnMapperPanelProps {
   fileId: string;
   onDone: () => void;
@@ -226,10 +576,22 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   };
   const entityType = INFERRED_TO_ENTITY[_inferredType] ?? "sale";
 
+  // Multi-contexto: se usa el mapeo por contexto cuando hay >1 contexto (multi-hoja)
+  // o cuando el único contexto NO es una tabla (texto/imagen). Una sola tabla
+  // (csv / xlsx 1 hoja) sigue por el flujo legacy (mapeo plano → insert single-sheet).
+  const contexts = (
+    Array.isArray(summary?.mapping_contexts) ? summary.mapping_contexts : []
+  ) as MappingContext[];
+  const isMultiContext =
+    contexts.length > 1 ||
+    (contexts.length === 1 && contexts[0]?.source_kind !== "table");
+
   const { data: suggestions = [], isLoading: loadingSuggestions } = useQuery({
     queryKey: ["column-mappings", fileId, entityType],
     queryFn: () => ingestionService.getColumnMappings(fileId, entityType),
-    enabled: !!fileId && !!preview,  // esperar a tener el preview para conocer entityType
+    // Esperar al preview para conocer entityType; no correr en multi-hoja (cada
+    // sección maneja su propia query).
+    enabled: !!fileId && !!preview && !isMultiContext,
   });
 
   // Inicializar mappings desde sugerencias cuando cargan
@@ -337,6 +699,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   ).slice(0, 10);
 
   const allHeaders = suggestions.map((s) => s.source_column);
+
+  // Multi-hoja: delegar al mapeo por contexto (todos los hooks ya se ejecutaron).
+  if (isMultiContext) {
+    return <MultiContextMapper fileId={fileId} contexts={contexts} onDone={onDone} />;
+  }
 
   return (
     <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">

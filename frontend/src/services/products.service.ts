@@ -33,6 +33,7 @@ export interface ProductResponse {
   margin_pct: number | null;
   is_low_stock: boolean;
   stock_status: "in_stock" | "low_stock" | "out_of_stock";
+  custom_fields?: Record<string, unknown>;
 }
 
 export interface ProductsListParams {

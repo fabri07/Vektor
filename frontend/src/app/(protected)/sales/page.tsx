@@ -10,6 +10,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { salesService, type SaleEntryResponse } from "@/services/sales.service";
 import { productsService, type ProductResponse } from "@/services/products.service";
+import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { buildCustomFieldColumns } from "@/lib/customFields";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import { CashCloseButton } from "@/features/cash/CashCloseButton";
@@ -120,6 +122,12 @@ export default function SalesPage() {
     staleTime: 2 * 60 * 1000,
   });
 
+  const { data: fieldDefs = [] } = useQuery({
+    queryKey: ["field-definitions", "sale"],
+    queryFn: () => fieldDefinitionsService.getAll("sale"),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const { data: prevEntries = [] } = useQuery({
     queryKey: ["sales-entries-prev", prevDates.from, prevDates.to],
     queryFn: () =>
@@ -159,8 +167,8 @@ export default function SalesPage() {
     onError: () => toast("No se pudo anular la venta.", "error"),
   });
 
-  const totalActual = entries.reduce((s, e) => s + e.amount, 0);
-  const totalPrev = prevEntries.reduce((s, e) => s + e.amount, 0);
+  const totalActual = entries.reduce((s, e) => s + Number(e.amount), 0);
+  const totalPrev = prevEntries.reduce((s, e) => s + Number(e.amount), 0);
   const ticketPromedio = entries.length > 0 ? totalActual / entries.length : 0;
 
   let variacionTrend: "up" | "down" | "neutral" = "neutral";
@@ -176,7 +184,10 @@ export default function SalesPage() {
       new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime(),
   );
   const productById = new Map(products.map((product) => [product.id, product]));
-  const columns = buildColumns(productById);
+  const columns = [
+    ...buildColumns(productById),
+    ...buildCustomFieldColumns<SaleEntryResponse>(fieldDefs),
+  ];
 
   return (
     <PageWrapper title="Ventas">

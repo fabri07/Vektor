@@ -10,6 +10,8 @@ import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
+import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { buildCustomFieldColumns } from "@/lib/customFields";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import {
@@ -134,6 +136,12 @@ export default function ExpensesPage() {
     staleTime: 60 * 1000,
   });
 
+  const { data: fieldDefs = [] } = useQuery({
+    queryKey: ["field-definitions", "expense"],
+    queryFn: () => fieldDefinitionsService.getAll("expense"),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const { data: prevEntries = [] } = useQuery({
     queryKey: ["expenses-entries-prev", prevDates.from, prevDates.to],
     queryFn: () =>
@@ -174,12 +182,12 @@ export default function ExpensesPage() {
   });
 
   // KPI calculations
-  const totalActual = entries.reduce((s, e) => s + e.amount, 0);
-  const totalPrev = prevEntries.reduce((s, e) => s + e.amount, 0);
+  const totalActual = entries.reduce((s, e) => s + Number(e.amount), 0);
+  const totalPrev = prevEntries.reduce((s, e) => s + Number(e.amount), 0);
 
   // Top category
   const categoryTotals = entries.reduce<Record<string, number>>((acc, e) => {
-    acc[e.category] = (acc[e.category] ?? 0) + e.amount;
+    acc[e.category] = (acc[e.category] ?? 0) + Number(e.amount);
     return acc;
   }, {});
   const topCat = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0];
@@ -270,7 +278,7 @@ export default function ExpensesPage() {
         />
       ) : (
         <SmartTable
-          columns={COLUMNS}
+          columns={[...COLUMNS, ...buildCustomFieldColumns<ExpenseEntryResponse>(fieldDefs)]}
           data={sorted}
           exportFilename="vektor-gastos"
           renderActions={(row) => (

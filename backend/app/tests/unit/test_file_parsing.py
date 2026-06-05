@@ -185,3 +185,120 @@ def test_sale_csv_with_descripcion_stays_ventas() -> None:
     )
     summary = parse_uploaded_content(sales_csv, "text/csv", "ventas.csv")
     assert summary["inferred_type"] == "ventas"
+
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _build_multisheet_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
+    """Construye un xlsx en memoria con varias hojas. sheets = {nombre: filas}."""
+    import io as _io
+
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)  # sacar la hoja por defecto vacía
+    for name, rows in sheets.items():
+        ws = wb.create_sheet(title=name)
+        for row in rows:
+            ws.append(row)
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_multisheet_compras_routed_to_stock_not_gastos() -> None:
+    """Regresión: una hoja 'Compras Mercadería' debe ir a stock (inventario), no a gastos.
+
+    Antes, _classify_sheet ruteaba 'compra'/'mercaderia' a gastos, por lo que las
+    compras nunca llegaban a productos.
+    """
+    content = _build_multisheet_xlsx(
+        {
+            "Ventas": [
+                ["fecha", "total", "producto", "cantidad"],
+                ["2024-01-15", "5400", "Gomitas", "2"],
+            ],
+            "Gastos Operativos": [
+                ["fecha", "monto", "categoria", "descripcion"],
+                ["2024-01-15", "12000", "alquiler", "Alquiler local"],
+            ],
+            "Compras Mercadería": [
+                ["producto", "costo_unitario", "cantidad"],
+                ["Coca-Cola 600ml", "800", "24"],
+            ],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "mixto.xlsx")
+
+    assert summary.get("multi_sheet") is True
+    # Ventas → ventas_detectadas; Gastos operativos → gastos_detectados;
+    # Compras → stock_detectado (NO gastos).
+    assert len(summary["ventas_detectadas"]) == 1
+    assert len(summary["gastos_detectados"]) == 1
+    assert len(summary["stock_detectado"]) == 1
+    assert summary["stock_detectado"][0]["producto"] == "Coca-Cola 600ml"
+    # La compra no debe haber caído en gastos.
+    assert all(
+        "Coca-Cola" not in str(r.values()) for r in summary["gastos_detectados"]
+    )
+
+
+def test_multisheet_exposes_mapping_contexts() -> None:
+    """Multi-hoja expone un mapping_context por pestaña con entity_type + headers,
+    y cada fila detectada lleva el marcador __context__."""
+    content = _build_multisheet_xlsx(
+        {
+            "Ventas": [["fecha", "total", "producto"], ["2024-01-15", "5400", "Gomitas"]],
+            "Gastos Operativos": [
+                ["fecha", "monto", "categoria"],
+                ["2024-01-15", "12000", "alquiler"],
+            ],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "mixto.xlsx")
+
+    contexts = summary["mapping_contexts"]
+    assert len(contexts) == 2
+    by_id = {c["context_id"]: c for c in contexts}
+    assert by_id["sheet:Ventas"]["entity_type"] == "sale"
+    assert by_id["sheet:Ventas"]["source_kind"] == "sheet"
+    assert by_id["sheet:Ventas"]["headers"] == ["fecha", "total", "producto"]
+    assert by_id["sheet:Gastos Operativos"]["entity_type"] == "expense"
+
+    # Cada fila detectada tiene el marcador de contexto.
+    assert summary["ventas_detectadas"][0]["__context__"] == "sheet:Ventas"
+    assert summary["gastos_detectados"][0]["__context__"] == "sheet:Gastos Operativos"
+    # El preview global no lo expone.
+    assert all("__context__" not in r for r in summary["preview_rows"])
+
+
+def test_csv_exposes_single_table_context() -> None:
+    """CSV expone un único mapping_context 'table' con su entity_type inferido."""
+    sales_csv = b"fecha,monto,descripcion\n2024-01-15,50000,Venta del dia\n"
+    summary = parse_uploaded_content(sales_csv, "text/csv", "ventas.csv")
+    contexts = summary["mapping_contexts"]
+    assert len(contexts) == 1
+    assert contexts[0]["context_id"] == "table"
+    assert contexts[0]["source_kind"] == "table"
+    assert contexts[0]["entity_type"] == "sale"
+    assert contexts[0]["headers"] == ["fecha", "monto", "descripcion"]
+
+
+def test_build_text_contexts_groups_without_headers() -> None:
+    """Documentos de texto: contexts por grupo, headers=None, filas marcadas."""
+    from app.application.services.file_parsing import _build_text_contexts
+
+    detected = {
+        "ventas_detectadas": [{"linea": "Venta 5000", "montos": ["5000"]}],
+        "gastos_detectados": [{"linea": "Pago luz 3000", "montos": ["3000"]}],
+        "stock_detectado": [],
+    }
+    contexts = _build_text_contexts(detected, "text_group")
+    assert {c["context_id"] for c in contexts} == {"text:sale", "text:expense"}
+    sale_ctx = next(c for c in contexts if c["context_id"] == "text:sale")
+    assert sale_ctx["headers"] is None  # texto no tiene columnas
+    assert sale_ctx["source_kind"] == "text_group"
+    assert "linea" in sale_ctx["fields"]
+    # Las filas quedan marcadas con __context__; el preview no lo expone.
+    assert detected["ventas_detectadas"][0]["__context__"] == "text:sale"
+    assert all("__context__" not in r for r in sale_ctx["preview_rows"])

@@ -23,6 +23,7 @@ export interface SaleEntryResponse {
   transaction_date: string;
   payment_method: string;
   notes: string | null;
+  custom_fields?: Record<string, unknown>;
   created_at: string;
 }
 

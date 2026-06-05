@@ -38,11 +38,26 @@ export interface ColumnMappingSuggestion {
   confidence: number;
   source: "tenant_history" | "heuristic" | "fuzzy" | "none";
   status: "mapped" | "unmapped" | "required_missing";
+  context_id?: string | null;
 }
 
 export interface ColumnMapping {
   source_column: string;
   target_field: string; // campo canónico, "ignore", o "custom_field:{key}"
+  context_id?: string | null;
+  entity_type?: string | null;
+}
+
+/** Contexto de mapeo: una hoja/tabla/grupo detectado dentro de un archivo. */
+export interface MappingContext {
+  context_id: string;
+  label: string;
+  source_kind: "sheet" | "table" | "text_group" | "ocr_group";
+  entity_type: "sale" | "expense" | "product" | null;
+  headers: string[] | null;
+  fields: string[] | null;
+  preview_rows: Record<string, unknown>[];
+  row_count: number;
 }
 
 export interface TenantColumnMapping {
@@ -103,9 +118,12 @@ export const ingestionService = {
   async getColumnMappings(
     fileId: string,
     entityType: string = "sale",
+    contextId?: string,
   ): Promise<ColumnMappingSuggestion[]> {
+    const params = new URLSearchParams({ entity_type: entityType });
+    if (contextId) params.set("context_id", contextId);
     const res = await api.get<ColumnMappingSuggestion[]>(
-      `/ingestion/files/${fileId}/column-mappings?entity_type=${entityType}`,
+      `/ingestion/files/${fileId}/column-mappings?${params.toString()}`,
     );
     return res.data;
   },
@@ -123,12 +141,16 @@ export const ingestionService = {
     fileId: string,
     confirmedFields: Record<string, boolean>,
     columnMappings?: ColumnMapping[],
+    contextConfirmed?: Record<string, boolean>,
+    contextEntity?: Record<string, string>,
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
       {
         confirmed_fields: confirmedFields,
         column_mappings: columnMappings ?? [],
+        context_confirmed: contextConfirmed ?? {},
+        context_entity: contextEntity ?? {},
       },
     );
     return res.data;

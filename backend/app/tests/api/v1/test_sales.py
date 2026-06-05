@@ -45,7 +45,8 @@ class TestSalesBulk:
         assert resp.status_code == 201
         data = resp.json()
         assert len(data) == 1
-        assert data[0]["amount"] == "50000.00"
+        # amount se serializa como número (no string) para que el frontend sume sin NaN.
+        assert data[0]["amount"] == 50000.0
         assert data[0]["transaction_date"] == _TODAY
 
     async def test_bulk_with_entries_creates_multiple_records(
@@ -58,8 +59,8 @@ class TestSalesBulk:
         data = resp.json()
         assert len(data) == 2
         amounts = {d["amount"] for d in data}
-        assert "1000.00" in amounts
-        assert "2000.00" in amounts
+        assert 1000.0 in amounts
+        assert 2000.0 in amounts
 
     async def test_bulk_invalid_period_type(
         self, client: AsyncClient, auth_headers: dict[str, Any]

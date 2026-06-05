@@ -145,7 +145,7 @@ export function buildCashBreakdown(entries: SaleEntryResponse[]): {
   total: number;
   rows: CashMethodRow[];
 } {
-  const total = entries.reduce((sum, entry) => sum + entry.amount, 0);
+  const total = entries.reduce((sum, entry) => sum + Number(entry.amount), 0);
 
   if (entries.length === 0 || total === 0) {
     return { total: 0, rows: [] };
@@ -158,7 +158,7 @@ export function buildCashBreakdown(entries: SaleEntryResponse[]): {
 
   for (const entry of entries) {
     const method = normalizePaymentMethod(entry.payment_method);
-    buckets[method] += entry.amount;
+    buckets[method] += Number(entry.amount);
   }
 
   const rows = PAYMENT_METHODS.map((method) => ({
@@ -249,7 +249,7 @@ export function buildSupplierSummaries(expenses: ExpenseEntryResponse[]): Suppli
     const supplier = expense.supplier_name?.trim();
     if (!supplier) continue;
     const current = suppliers.get(supplier) ?? { total: 0, count: 0, lastDate: null };
-    current.total += expense.amount;
+    current.total += Number(expense.amount);
     current.count += 1;
     if (!current.lastDate || new Date(expense.transaction_date) > new Date(current.lastDate)) {
       current.lastDate = expense.transaction_date;
@@ -308,22 +308,22 @@ export function buildLineSeries(
     if (metric === "ventas") {
       value = sales
         .filter((entry) => sameDay(entry.transaction_date, date))
-        .reduce((sum, entry) => sum + entry.amount, 0);
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
     } else if (metric === "caja") {
       const salesTotal = sales
         .filter((entry) => sameDay(entry.transaction_date, date))
-        .reduce((sum, entry) => sum + entry.amount, 0);
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
       const expensesTotal = expenses
         .filter((entry) => sameDay(entry.transaction_date, date))
-        .reduce((sum, entry) => sum + entry.amount, 0);
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
       value = previous + salesTotal - expensesTotal;
     } else if (metric === "margen") {
       const dayRevenue = sales
         .filter((entry) => sameDay(entry.transaction_date, date))
-        .reduce((sum, entry) => sum + entry.amount, 0);
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
       const dayCost = expenses
         .filter((entry) => sameDay(entry.transaction_date, date))
-        .reduce((sum, entry) => sum + entry.amount, 0);
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
       // null cuando no hay ventas: el chart muestra un gap real en vez de interpolar
       value = dayRevenue > 0 ? ((dayRevenue - dayCost) / dayRevenue) * 100 : null;
     } else {
@@ -368,22 +368,22 @@ export function buildComparisonSeries(
   if (compareBy === "categoria") {
     for (const sale of sales) {
       const category = productMap.get(sale.product_id ?? "")?.category || "Sin categoría";
-      buckets.set(category, (buckets.get(category) ?? 0) + sale.amount);
+      buckets.set(category, (buckets.get(category) ?? 0) + Number(sale.amount));
     }
   } else if (compareBy === "proveedor") {
     for (const expense of expenses) {
       const supplier = expense.supplier_name?.trim() || "Sin proveedor";
-      buckets.set(supplier, (buckets.get(supplier) ?? 0) + expense.amount);
+      buckets.set(supplier, (buckets.get(supplier) ?? 0) + Number(expense.amount));
     }
   } else if (compareBy === "metodo") {
     for (const sale of sales) {
       const method = normalizePaymentMethod(sale.payment_method);
-      buckets.set(method, (buckets.get(method) ?? 0) + sale.amount);
+      buckets.set(method, (buckets.get(method) ?? 0) + Number(sale.amount));
     }
   } else {
     for (const sale of sales) {
       const weekday = WEEKDAY_LABELS[new Date(sale.transaction_date).getDay()] ?? "—";
-      buckets.set(weekday, (buckets.get(weekday) ?? 0) + sale.amount);
+      buckets.set(weekday, (buckets.get(weekday) ?? 0) + Number(sale.amount));
     }
   }
 
@@ -425,7 +425,7 @@ export function buildDistributionSeries(
 
   for (const sale of sales) {
     const category = productMap.get(sale.product_id ?? "")?.category || "Sin categoría";
-    buckets.set(category, (buckets.get(category) ?? 0) + sale.amount);
+    buckets.set(category, (buckets.get(category) ?? 0) + Number(sale.amount));
   }
 
   return [...buckets.entries()].map(([name, value]) => ({ name, value }));

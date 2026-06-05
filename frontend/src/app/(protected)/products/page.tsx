@@ -11,6 +11,8 @@ import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { productsService, type ProductResponse } from "@/services/products.service";
+import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { buildCustomFieldColumns } from "@/lib/customFields";
 import { useToastStore } from "@/stores/toastStore";
 
 type StockFilter = "all" | "in_stock" | "low_stock" | "out_of_stock";
@@ -138,6 +140,16 @@ export default function ProductsPage() {
     staleTime: 2 * 60 * 1000,
   });
 
+  const { data: fieldDefs = [] } = useQuery({
+    queryKey: ["field-definitions", "product"],
+    queryFn: () => fieldDefinitionsService.getAll("product"),
+    staleTime: 5 * 60 * 1000,
+  });
+  const columns = [
+    ...COLUMNS,
+    ...buildCustomFieldColumns<Record<string, unknown>>(fieldDefs),
+  ];
+
   const updateMutation = useMutation({
     mutationFn: (payload: ProductResponse) =>
       productsService.updateProduct(payload.id, {
@@ -262,7 +274,7 @@ export default function ProductsPage() {
         />
       ) : (
         <SmartTable
-          columns={COLUMNS}
+          columns={columns}
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-productos"
           renderActions={(row) => {

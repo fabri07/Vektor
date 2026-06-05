@@ -8,6 +8,7 @@ POST   /ingestion/files/{file_id}/confirm  — confirm import (NEEDS_CONFIRMATIO
 """
 
 import uuid
+from collections import defaultdict
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -52,6 +53,7 @@ from app.persistence.models.user import User
 from app.persistence.repositories.file_repository import FileRepository
 from app.schemas.ingestion import (
     ColumnAtRisk,
+    ColumnMapping,
     ColumnMappingSuggestion,
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
@@ -443,6 +445,11 @@ async def get_column_mappings(
         default="sale",
         description="Tipo de entidad: sale | expense | product",
     ),
+    context_id: str | None = Query(
+        default=None,
+        description="Contexto (hoja/tabla) en archivos multi-contexto. Si se da, "
+        "se usan sus headers/preview y su entity_type (se ignora el param entity_type).",
+    ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ColumnMappingSuggestion]:
@@ -458,22 +465,46 @@ async def get_column_mappings(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
     summary = record.parsed_summary_json or {}
-    headers: list[str] = summary.get("headers", [])
 
-    # Obtener sample rows desde el summary (intentar varias claves)
-    sample_rows: list[dict[str, Any]] = (
-        summary.get("preview_rows")
-        or summary.get("ventas_detectadas")
-        or summary.get("gastos_detectados")
-        or summary.get("stock_detectado")
-        or []
-    )
+    # Resolver headers/sample_rows/entity_type por contexto si se pidió uno.
+    resolved_entity = entity_type
+    if context_id:
+        ctx = next(
+            (
+                c
+                for c in summary.get("mapping_contexts", [])
+                if c.get("context_id") == context_id
+            ),
+            None,
+        )
+        if ctx is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Contexto '{context_id}' no encontrado en el archivo.",
+            )
+        # Sin headers (texto/imagen): no hay columnas que mapear.
+        if not ctx.get("headers"):
+            return []
+        headers = ctx["headers"]
+        sample_rows = ctx.get("preview_rows") or []
+        resolved_entity = ctx.get("entity_type") or entity_type
+    else:
+        headers = summary.get("headers", [])
+        sample_rows = (
+            summary.get("preview_rows")
+            or summary.get("ventas_detectadas")
+            or summary.get("gastos_detectados")
+            or summary.get("stock_detectado")
+            or []
+        )
 
     svc = ColumnMappingService(session)
     raw_suggestions = await svc.suggest_mappings(
-        tenant.tenant_id, entity_type, headers, sample_rows
+        tenant.tenant_id, resolved_entity, headers, sample_rows
     )
-    return [ColumnMappingSuggestion(**s) for s in raw_suggestions]
+    return [
+        ColumnMappingSuggestion(**{**s, "context_id": context_id}) for s in raw_suggestions
+    ]
 
 
 @router.get(
@@ -549,27 +580,79 @@ async def confirm_file(
     _entity_map = {"ventas": "sale", "gastos": "expense", "stock": "product"}
     _entity_type = _entity_map.get(_inferred_type, "sale")
 
-    # Validar campos requeridos si se enviaron column_mappings explícitos
-    if body.column_mappings:
-        mapped_targets = {
-            m.target_field
-            for m in body.column_mappings
-            if m.target_field not in ("ignore",) and not m.target_field.startswith("custom_field:")
-        }
-        required = set(REQUIRED_FIELDS.get(_entity_type, []))
+    # ── Separar mapeos planos (legacy single-context) de los cualificados por contexto ──
+    _summary_for_ctx = record.parsed_summary_json or {}
+    _context_entity: dict[str, str] = {
+        ctx["context_id"]: ctx["entity_type"]
+        for ctx in _summary_for_ctx.get("mapping_contexts", [])
+        if ctx.get("context_id") and ctx.get("entity_type")
+    }
+    _flat_mappings = [m for m in body.column_mappings if m.context_id is None]
+    _ctx_mappings = [m for m in body.column_mappings if m.context_id is not None]
 
+    def _entity_for(mapping: ColumnMapping) -> str:
+        # Con context_id, el entity_type se deriva del contexto del summary
+        # (autoritativo, igual que la inserción en _insert_multisheet_data). El del
+        # payload es solo fallback para que validación/aprendizaje/custom fields
+        # queden bajo la misma entidad que realmente se importa.
+        if mapping.context_id:
+            return (
+                _context_entity.get(mapping.context_id)
+                or mapping.entity_type
+                or _entity_type
+            )
+        return mapping.entity_type or _entity_type
+
+    def _context_included(context_id: str, entity_type: str) -> bool:
+        if body.context_confirmed:
+            return bool(body.context_confirmed.get(context_id, False))
+        # Legacy: sin context_confirmed, gating por tipo vía confirmed_fields
+        return bool(
+            (entity_type == "sale" and body.confirmed_fields.get("ventas"))
+            or (entity_type == "expense" and body.confirmed_fields.get("gastos"))
+            or (entity_type == "product" and body.confirmed_fields.get("productos"))
+        )
+
+    def _missing_required(entity_type: str, mappings: list[ColumnMapping]) -> set[str]:
+        mapped = {
+            m.target_field
+            for m in mappings
+            if m.target_field != "ignore" and not m.target_field.startswith("custom_field:")
+        }
+        return set(REQUIRED_FIELDS.get(entity_type, [])) - mapped
+
+    # Validación de requeridos — plano (legacy)
+    if _flat_mappings:
         confirmed_entity = (
             (body.confirmed_fields.get("ventas") and _entity_type == "sale")
             or (body.confirmed_fields.get("gastos") and _entity_type == "expense")
             or (body.confirmed_fields.get("productos") and _entity_type == "product")
         )
         if confirmed_entity:
-            missing = required - mapped_targets
+            missing = _missing_required(_entity_type, _flat_mappings)
             if missing:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"Campos requeridos sin mapear: {', '.join(sorted(missing))}",
                 )
+
+    # Validación de requeridos — por contexto (multi-hoja), solo contextos incluidos
+    if _ctx_mappings:
+        _ctx_groups: dict[str, list[ColumnMapping]] = defaultdict(list)
+        for m in _ctx_mappings:
+            _ctx_groups[m.context_id or ""].append(m)
+        for _cid, _ms in _ctx_groups.items():
+            _ent = _entity_for(_ms[0])
+            if _context_included(_cid, _ent):
+                missing = _missing_required(_ent, _ms)
+                if missing:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"[{_cid}] Campos requeridos sin mapear: "
+                            f"{', '.join(sorted(missing))}"
+                        ),
+                    )
 
     # Crear definiciones de campos personalizados para mapeos custom_field:{key}
     # — idempotente, sin commit propio; el commit final cierra la transacción completa.
@@ -584,7 +667,7 @@ async def confirm_file(
                 await ensure_custom_field_exists(
                     session,
                     tenant.tenant_id,
-                    _entity_type,
+                    _entity_for(_mapping),
                     _field_key,
                     _mapping.source_column,  # nombre de la columna como label inicial
                 )
@@ -594,8 +677,15 @@ async def confirm_file(
     updated_summary["confirmed_fields"] = body.confirmed_fields
 
     explicit_mappings: dict[str, str] | None = None
-    if body.column_mappings:
-        explicit_mappings = {m.source_column: m.target_field for m in body.column_mappings}
+    if _flat_mappings:
+        explicit_mappings = {m.source_column: m.target_field for m in _flat_mappings}
+
+    context_mappings: dict[str, dict[str, str]] | None = None
+    if _ctx_mappings:
+        _cm: dict[str, dict[str, str]] = defaultdict(dict)
+        for m in _ctx_mappings:
+            _cm[m.context_id or ""][m.source_column] = m.target_field
+        context_mappings = dict(_cm)
 
     counts = await insert_confirmed_data(
         session,
@@ -603,6 +693,9 @@ async def confirm_file(
         updated_summary,
         body.confirmed_fields,
         column_mappings=explicit_mappings,
+        context_mappings=context_mappings,
+        context_confirmed=body.context_confirmed or None,
+        context_entity=body.context_entity or None,
     )
 
     # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
@@ -617,21 +710,21 @@ async def confirm_file(
             "gastos_detectados",
             "stock_detectado",
             "preview_rows",
+            "mapping_contexts",
         )
     }
     compact_summary["imported_counts"] = counts
 
-    # Guardar aprendizaje de mapeos confirmados
+    # Guardar aprendizaje de mapeos confirmados — agrupado por entity_type del contexto
     if body.column_mappings:
         mapping_svc = ColumnMappingService(session)
-        await mapping_svc.save_mappings(
-            tenant.tenant_id,
-            _entity_type,
-            [
+        _learn: dict[str, list[dict[str, str]]] = defaultdict(list)
+        for m in body.column_mappings:
+            _learn[_entity_for(m)].append(
                 {"source_column": m.source_column, "target_field": m.target_field}
-                for m in body.column_mappings
-            ],
-        )
+            )
+        for _ent, _confirmed in _learn.items():
+            await mapping_svc.save_mappings(tenant.tenant_id, _ent, _confirmed)
 
     record.parsed_summary_json = compact_summary
     record.processing_status = PROCESSING_STATUS_DONE

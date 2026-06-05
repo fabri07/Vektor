@@ -479,6 +479,77 @@ def _store_rows_by_type(
         summary["gastos_detectados"] = []
 
 
+# Mapeo tipo-inferido / clasificación-de-hoja → entity_type del ColumnMapper.
+_TYPE_TO_ENTITY: dict[str, str] = {
+    "ventas": "sale",
+    "gastos": "expense",
+    "stock": "product",
+}
+
+
+def _build_table_context(
+    inferred_type: str,
+    headers: list[str],
+    preview_rows: list[dict[str, Any]],
+    row_count: int,
+) -> dict[str, Any]:
+    """Construye un único mapping_context para archivos de una tabla (csv / xlsx 1 hoja)."""
+    return {
+        "context_id": "table",
+        "label": "Tabla",
+        "source_kind": "table",
+        "entity_type": _TYPE_TO_ENTITY.get(inferred_type),
+        "headers": list(headers),
+        "fields": None,
+        "preview_rows": preview_rows,
+        "row_count": row_count,
+    }
+
+
+def _build_text_contexts(
+    detected: dict[str, list[dict[str, Any]]], source_kind: str
+) -> list[dict[str, Any]]:
+    """Construye mapping_contexts por grupo detectado en documentos de texto/imagen.
+
+    Estos documentos NO tienen columnas: el "mapeo" es asignar cada grupo de líneas
+    detectadas (ventas/gastos/stock) a un entity_type. Marca cada fila con
+    `__context__` para separarla en la inserción. `headers=None` señala al frontend
+    que muestre preview de líneas + selector de tipo, sin dropdowns de columna.
+    """
+    # Solo ventas y gastos: una línea de texto (`{linea, montos}`) no alcanza para
+    # formar un producto, así que NO se emite contexto para stock_detectado. Esas
+    # filas quedan en el summary pero no son importables (igual que el path legacy,
+    # que nunca insertó stock desde texto).
+    groups = [
+        ("ventas_detectadas", "sale", "Ventas detectadas"),
+        ("gastos_detectados", "expense", "Gastos detectados"),
+    ]
+    contexts: list[dict[str, Any]] = []
+    for key, entity, label in groups:
+        rows = detected.get(key) or []
+        if not rows:
+            continue
+        ctx_id = f"text:{entity}"
+        for r in rows:
+            r["__context__"] = ctx_id
+        fields = sorted({k for r in rows for k in r if not k.startswith("__")})
+        contexts.append(
+            {
+                "context_id": ctx_id,
+                "label": label,
+                "source_kind": source_kind,
+                "entity_type": entity,
+                "headers": None,
+                "fields": fields,
+                "preview_rows": [
+                    {k: v for k, v in r.items() if not k.startswith("__")} for r in rows[:10]
+                ],
+                "row_count": len(rows),
+            }
+        )
+    return contexts
+
+
 def parse_uploaded_content(content: bytes, mime: str, filename: str) -> dict[str, Any]:
     """Parse uploaded file bytes into a summary compatible with chat and ingestion."""
     if mime in SPREADSHEET_MIMES:
@@ -531,7 +602,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             summary["warnings"].append(
                 f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
             )
-        _store_rows_by_type(summary, all_dicts[:50], analysis.get("inferred_type", "general"))
+        csv_inferred = analysis.get("inferred_type", "general")
+        _store_rows_by_type(summary, all_dicts[:50], csv_inferred)
+        summary["mapping_contexts"] = [
+            _build_table_context(csv_inferred, headers, preview_rows, len(data_rows))
+        ]
         return summary
 
     import unicodedata  # noqa: PLC0415
@@ -548,10 +623,13 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
         norm = "".join(c for c in norm if unicodedata.category(c) != "Mn")
         if any(k in norm for k in ["venta", "ingreso", "cobro", "sale"]):
             return "ventas"
-        if any(k in norm for k in ["gasto", "egreso", "operativo", "expense"]):
+        # Compras de mercadería son ingreso de inventario → productos/stock,
+        # NO gasto. (Va antes que la regla de gastos para que "compras a
+        # proveedores" se rutee a stock por el match de "compra".)
+        if any(k in norm for k in ["compra", "mercaderia", "purchase"]):
+            return "stock"
+        if any(k in norm for k in ["gasto", "egreso", "operativo", "expense", "proveedor"]):
             return "gastos"
-        if any(k in norm for k in ["compra", "mercaderia", "purchase", "proveedor"]):
-            return "gastos"  # compras se tratan como gastos
         if any(k in norm for k in ["producto", "inventario", "catalogo", "stock", "item"]):
             return "stock"
         return "unknown"
@@ -567,6 +645,7 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             all_gastos: list[dict[str, Any]] = []
             all_stock: list[dict[str, Any]] = []
             primary_headers: list[str] = []
+            contexts: list[dict[str, Any]] = []
             total_rows = 0
 
             for sheet_name in sheet_names:
@@ -594,13 +673,33 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     # Fallback: inferir por columnas
                     sheet_type = analyze_headers(headers).get("inferred_type", "general")
 
+                entity = _TYPE_TO_ENTITY.get(sheet_type)
+                if entity is None:
+                    # Pestaña "general"/desconocida sin tipo importable: se ignora.
+                    continue
+
+                context_id = f"sheet:{sheet_name}"
+                contexts.append(
+                    {
+                        "context_id": context_id,
+                        "label": sheet_name,
+                        "source_kind": "sheet",
+                        "entity_type": entity,
+                        "headers": headers,
+                        "fields": None,
+                        "preview_rows": dicts[:10],
+                        "row_count": len(dicts),
+                    }
+                )
+                # Marcador de origen: permite separar filas por contexto en la inserción
+                # cuando varias hojas comparten tipo. Se ignora en el mapeo por keyword.
+                marked = [{**d, "__context__": context_id} for d in dicts]
                 if sheet_type == "ventas":
-                    all_ventas.extend(dicts)
+                    all_ventas.extend(marked)
                 elif sheet_type == "gastos":
-                    all_gastos.extend(dicts)
+                    all_gastos.extend(marked)
                 elif sheet_type == "stock":
-                    all_stock.extend(dicts)
-                # Pestañas "general" o desconocidas se ignoran
+                    all_stock.extend(marked)
 
             has_ventas = bool(all_ventas)
             has_gastos = bool(all_gastos)
@@ -617,7 +716,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             else:
                 inferred_type = "general"
 
-            preview = (all_ventas or all_gastos or all_stock)[:10]
+            # Preview global desde los contexts (sin el marcador __context__).
+            preview: list[dict[str, Any]] = []
+            for _ctx in contexts:
+                preview.extend(_ctx["preview_rows"])
+            preview = preview[:10]
 
             summary.update(
                 {
@@ -636,6 +739,7 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     "gastos_detectados": all_gastos,
                     "stock_detectado": all_stock,
                     "preview_rows": preview,
+                    "mapping_contexts": contexts,
                 }
             )
             return summary
@@ -680,6 +784,9 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             )
         inferred = analysis.get("inferred_type", "general")
         _store_rows_by_type(summary, all_dicts, inferred)
+        summary["mapping_contexts"] = [
+            _build_table_context(inferred, headers, preview_rows, len(data_rows))
+        ]
         return summary
     finally:
         workbook.close()
@@ -689,7 +796,8 @@ def _parse_document(content: bytes, mime: str, filename: str) -> dict[str, Any]:
     source_format = infer_source_format(filename, mime)
     raw_text = extract_document_text(content, mime, filename)
     detected = extract_amounts_from_text(raw_text)
-    preview_rows = _preview_from_detected_rows(detected)
+    preview_rows = _preview_from_detected_rows(detected)  # limpio (antes de marcar)
+    contexts = _build_text_contexts(detected, "text_group")  # marca filas con __context__
     row_count = len([line for line in raw_text.splitlines() if line.strip()])
     return {
         "file_type": "text",
@@ -700,6 +808,7 @@ def _parse_document(content: bytes, mime: str, filename: str) -> dict[str, Any]:
         "preview_rows": preview_rows,
         "raw_text_preview": raw_text[:1200],
         "warnings": [],
+        "mapping_contexts": contexts,
         **detected,
     }
 
@@ -727,12 +836,15 @@ def _parse_image(content: bytes, mime: str, filename: str) -> dict[str, Any]:
             )
 
         detected = extract_amounts_from_text(raw_text)
+        preview_rows = _preview_from_detected_rows(detected)  # limpio (antes de marcar)
+        contexts = _build_text_contexts(detected, "ocr_group")  # marca filas con __context__
         summary.update(
             {
                 "raw_text_preview": raw_text[:1200],
                 "row_count": len([line for line in raw_text.splitlines() if line.strip()]),
                 "columns": [],
-                "preview_rows": _preview_from_detected_rows(detected),
+                "preview_rows": preview_rows,
+                "mapping_contexts": contexts,
                 **detected,
             }
         )

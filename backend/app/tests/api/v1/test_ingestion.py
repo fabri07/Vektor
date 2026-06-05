@@ -15,7 +15,7 @@ Mocks:
 import io
 import unittest.mock
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -31,7 +31,8 @@ from app.persistence.models.file import (
     UploadedFile,
 )
 from app.persistence.models.tenant import Tenant
-from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.product import Product
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -570,6 +571,120 @@ async def test_parse_date_fallback_logs_debug(
             {"raw": "fecha rara", "row_index": 0},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_multisheet_heterogeneous_schemas_no_silent_drop(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Regresión: filas de hojas del mismo tipo con columnas distintas no se descartan.
+
+    Antes, _insert_multisheet_data resolvía la columna de monto desde
+    `rows[0].keys()` (solo la primera fila). Las filas de una segunda hoja con
+    otro esquema (ej. 'total' en vez de 'monto') no encontraban su columna y se
+    perdían en silencio. Con resolución por fila, ambas deben insertarse.
+    """
+    import app.application.services.ingestion_import_service as importer
+
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_gasto": True,
+        "gastos_detectados": [
+            # Hoja A: columna de monto = "monto", con categoría
+            {"fecha": "2024-01-15", "monto": "12000", "categoria": "alquiler"},
+            # Hoja B: columna de monto = "total", esquema distinto
+            {"fecha": "2024-01-16", "total": "3500", "descripcion": "Servicios"},
+        ],
+    }
+
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"gastos": True},
+    )
+
+    assert counts["gastos"] == 2
+    result = await db_session.execute(select(ExpenseEntry))
+    amounts = sorted(e.amount for e in result.scalars().all())
+    assert amounts == [Decimal("3500"), Decimal("12000")]
+
+
+@pytest.mark.asyncio
+async def test_multisheet_compras_inserted_as_products(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Una hoja de compras ruteada a stock crea productos con su costo."""
+    import app.application.services.ingestion_import_service as importer
+
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_producto": True,
+        "stock_detectado": [
+            {"producto": "Coca-Cola 600ml", "costo_unitario": "800", "cantidad": "24"},
+        ],
+    }
+
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"productos": True},
+    )
+
+    assert counts["productos"] == 1
+    result = await db_session.execute(select(Product))
+    prod = result.scalar_one()
+    assert prod.name == "Coca-Cola 600ml"
+    assert prod.unit_cost_ars == Decimal("800")
+    assert prod.stock_units == 24
+
+
+def test_sale_response_serializes_amount_as_number() -> None:
+    """Regresión NaN: amount debe serializarse como número, no string.
+
+    El frontend tipa amount como `number` y hace reduce(sum). Con string, la
+    concatenación de montos decimales producía `$ NaN` en los totales.
+    """
+    from app.schemas.transaction import ExpenseEntryResponse, SaleEntryResponse
+
+    sale = SaleEntryResponse(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        product_id=None,
+        amount=Decimal("5400.50"),
+        quantity=1,
+        transaction_date=date(2024, 1, 15),
+        payment_method="cash",
+        notes=None,
+        created_at=datetime(2024, 1, 15, 12, 0, 0),
+    )
+    dumped = sale.model_dump(mode="json")
+    assert isinstance(dumped["amount"], (int, float))
+    assert dumped["amount"] == 5400.5
+
+    expense = ExpenseEntryResponse(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        amount=Decimal("12000.00"),
+        category="alquiler",
+        transaction_date=date(2024, 1, 15),
+        description="Alquiler",
+        is_recurring=False,
+        payment_method="transfer",
+        supplier_name=None,
+        notes=None,
+        created_at=datetime(2024, 1, 15, 12, 0, 0),
+    )
+    dumped_e = expense.model_dump(mode="json")
+    assert isinstance(dumped_e["amount"], (int, float))
+    assert dumped_e["amount"] == 12000.0
 
 
 # ── Worker unit tests ─────────────────────────────────────────────────────────

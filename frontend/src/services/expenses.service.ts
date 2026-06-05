@@ -28,6 +28,7 @@ export interface ExpenseEntryResponse {
   payment_method: string;
   supplier_name: string | null;
   notes: string | null;
+  custom_fields?: Record<string, unknown>;
   created_at: string;
 }
 

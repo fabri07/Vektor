@@ -54,11 +54,16 @@ class ColumnMappingSuggestion(BaseModel):
     confidence: float
     source: Literal["tenant_history", "heuristic", "fuzzy", "none"]
     status: Literal["mapped", "unmapped", "required_missing"]
+    # Contexto al que pertenece la sugerencia (hoja/tabla). None = archivo de un solo contexto.
+    context_id: str | None = None
 
 
 class ColumnMapping(BaseModel):
     source_column: str
     target_field: str  # campo canónico, "ignore", o "custom_field:{key}"
+    # Mapeo cualificado por contexto (multi-hoja / multi-grupo). None = mapeo plano legacy.
+    context_id: str | None = None
+    entity_type: str | None = None  # entity_type del contexto (sale|expense|product)
 
 
 class TenantColumnMappingResponse(BaseModel):
@@ -84,7 +89,22 @@ class ConfirmIngestionRequest(BaseModel):
         default_factory=list,
         description=(
             "Mapeo explícito de columnas del archivo a campos canónicos del dominio. "
-            "Si se omite, el sistema usa heurísticas automáticas."
+            "Si se omite, el sistema usa heurísticas automáticas. En archivos multi-contexto "
+            "(multi-hoja), cada ColumnMapping lleva su context_id + entity_type."
+        ),
+    )
+    context_confirmed: dict[str, bool] = Field(
+        default_factory=dict,
+        description=(
+            "Inclusión por contexto (sheet/grupo) en archivos multi-contexto: "
+            "{context_id: incluir}. Vacío = se usa confirmed_fields por tipo (legacy)."
+        ),
+    )
+    context_entity: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Override de entity_type por contexto en documentos de texto/imagen: "
+            "{context_id: sale|expense}. Permite reasignar un grupo detectado."
         ),
     )
 

@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
 _MAX_AMOUNT = Decimal("999999999")
@@ -41,6 +41,13 @@ class SaleEntryResponse(BaseModel):
     notes: str | None
     custom_fields: dict[str, Any] = {}
     created_at: datetime
+
+    @field_serializer("amount")
+    def _serialize_amount(self, v: Decimal) -> float:
+        # El frontend tipa `amount` como `number` y hace aritmética (reduce sum).
+        # Serializar Decimal como número evita la concatenación de strings que
+        # producía `$ NaN` en totales con montos decimales.
+        return float(v)
 
 
 class CreateSaleRequest(BaseModel):
@@ -140,6 +147,12 @@ class ExpenseEntryResponse(BaseModel):
     notes: str | None
     custom_fields: dict[str, Any] = {}
     created_at: datetime
+
+    @field_serializer("amount")
+    def _serialize_amount(self, v: Decimal) -> float:
+        # Ver nota en SaleEntryResponse._serialize_amount: número, no string,
+        # para que el frontend pueda sumar sin producir NaN.
+        return float(v)
 
 
 class CreateExpenseRequest(BaseModel):
