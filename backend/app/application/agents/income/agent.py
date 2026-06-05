@@ -217,9 +217,6 @@ class AgentIncome(BaseAgent):
 
         from sqlalchemy import select  # noqa: PLC0415
 
-        from app.application.services.data_intent_extractor import (
-            DataIntentExtractor,  # noqa: PLC0415
-        )
         from app.persistence.models.file import UploadedFile  # noqa: PLC0415
 
         for attachment in request.attachments:
@@ -240,30 +237,80 @@ class AgentIncome(BaseAgent):
             uploaded_file = result.scalar_one_or_none()
             if uploaded_file is None or not isinstance(uploaded_file.parsed_summary_json, dict):
                 continue
-            pre_check = DataIntentExtractor().check_file_summary(uploaded_file.parsed_summary_json)
-            if not pre_check.has_data_intent:
-                continue
-            rows = uploaded_file.parsed_summary_json.get("rows_processed", 0)
+
+            summary_json = uploaded_file.parsed_summary_json
+            filename = uploaded_file.original_filename
+
+            # Detectar qué tipos de datos hay en el archivo directamente desde los arrays
+            ventas_rows = summary_json.get("ventas_detectadas") or []
+            gastos_rows = summary_json.get("gastos_detectados") or []
+            stock_rows = summary_json.get("stock_detectado") or []
+            is_multisheet = bool(summary_json.get("multi_sheet"))
+
+            has_ventas = bool(ventas_rows)
+            has_gastos = bool(gastos_rows)
+            has_stock = bool(stock_rows)
+
+            # Si ningún tipo de dato es reconocible → pedir aclaración al usuario
+            if not has_ventas and not has_gastos and not has_stock:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=self.agent_name,
+                    status="requires_clarification",
+                    risk_level=RiskLevel.LOW,
+                    requires_approval=False,
+                    confidence="LOW",
+                    question=(
+                        f"Adjuntaste «{filename}», pero no pude detectar el tipo de datos. "
+                        "¿Qué contiene? Por ejemplo: ventas, gastos, productos u otro tipo."
+                    ),
+                    result={"summary": "Archivo sin tipo de datos detectado", "alerts": []},
+                )
+
+            # Construir confirmed_fields incluyendo TODO lo que hay en el archivo
+            confirmed_fields = {
+                "ventas": has_ventas,
+                "gastos": has_gastos,
+                "productos": has_stock,
+            }
+
+            # Construir resumen descriptivo con conteos reales por tipo
+            parts: list[str] = []
+            if has_ventas:
+                parts.append(f"{len(ventas_rows):,} venta(s)".replace(",", "."))
+            if has_gastos:
+                parts.append(f"{len(gastos_rows):,} gasto(s)".replace(",", "."))
+            if has_stock:
+                parts.append(f"{len(stock_rows):,} producto(s)".replace(",", "."))
+
+            if is_multisheet and summary_json.get("sheet_names"):
+                sheets = ", ".join(f"«{s}»" for s in summary_json["sheet_names"])
+                summary_text = (
+                    f"Importar desde {filename} ({sheets}):\n"
+                    + " · ".join(parts)
+                )
+            else:
+                total = summary_json.get("rows_processed", len(ventas_rows) + len(gastos_rows))
+                summary_text = f"Importar {total:,} registros desde {filename}.".replace(",", ".")
+
+            inferred = summary_json.get("inferred_type", "general")
+            confidence_val = summary_json.get("confidence", "MEDIUM")
+
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
                 status="requires_approval",
                 risk_level=RiskLevel.MEDIUM,
                 requires_approval=True,
-                confidence=Confidence(pre_check.confidence),
+                confidence=Confidence(confidence_val),
                 result={
-                    "summary": (
-                        f"Importar {rows} registros desde " f"{uploaded_file.original_filename}."
-                    ),
+                    "summary": summary_text,
                     "action_type": ActionType.IMPORT_TABULAR_FILE,
                     "structured_data": {
                         "source": "uploaded_file",
                         "file_id": str(uploaded_file.id),
-                        "confirmed_fields": {
-                            "ventas": pre_check.intent_type in ("sale", "mixed"),
-                            "gastos": pre_check.intent_type in ("expense", "mixed"),
-                            "productos": pre_check.intent_type == "product",
-                        },
+                        "confirmed_fields": confirmed_fields,
+                        "inferred_type": inferred,
                     },
                     "alerts": [],
                 },
