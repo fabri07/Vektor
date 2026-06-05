@@ -604,7 +604,22 @@ async def confirm_file(
         body.confirmed_fields,
         column_mappings=explicit_mappings,
     )
-    updated_summary["imported_counts"] = counts
+
+    # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
+    # Para archivos grandes (multi-hoja o muchas filas) el JSONB puede pesar 10+ MB;
+    # guardar solo metadata compacta evita un UPDATE lento en Neon.
+    compact_summary: dict[str, Any] = {
+        k: v
+        for k, v in updated_summary.items()
+        if k
+        not in (
+            "ventas_detectadas",
+            "gastos_detectados",
+            "stock_detectado",
+            "preview_rows",
+        )
+    }
+    compact_summary["imported_counts"] = counts
 
     # Guardar aprendizaje de mapeos confirmados
     if body.column_mappings:
@@ -618,7 +633,7 @@ async def confirm_file(
             ],
         )
 
-    record.parsed_summary_json = updated_summary
+    record.parsed_summary_json = compact_summary
     record.processing_status = PROCESSING_STATUS_DONE
     await repo.save(record)
 

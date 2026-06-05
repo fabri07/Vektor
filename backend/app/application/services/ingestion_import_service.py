@@ -529,7 +529,8 @@ async def _insert_multisheet_data(
             nombre_col = _find_col(headers, _NOMBRE_COLS)
             pago_col = _find_col(headers, _PAGO_COLS)
             qty_col = _find_col(headers, _CANTIDAD_COLS)
-            for row in ventas_rows:
+            _flush_every = 500  # enviar a DB en batches para no acumular en memoria
+            for _i, row in enumerate(ventas_rows):
                 raw_date = row.get(fecha_col) if fecha_col else None
                 tx_date = _parse_date(raw_date) if fecha_col else today
                 if tx_date is None:
@@ -563,6 +564,8 @@ async def _insert_multisheet_data(
                     )
                 )
                 counts["ventas"] += 1
+                if (_i + 1) % _flush_every == 0:
+                    await session.flush()  # vaciar buffer → evita OOM en archivos grandes
 
     # ── Gastos ────────────────────────────────────────────────────────────────
     if confirmed_fields.get("gastos"):
