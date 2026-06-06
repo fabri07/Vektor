@@ -47,7 +47,8 @@ class TestSalesBulk:
         assert len(data) == 1
         # amount se serializa como número (no string) para que el frontend sume sin NaN.
         assert data[0]["amount"] == 50000.0
-        assert data[0]["transaction_date"] == _TODAY
+        # transaction_date ahora es datetime ISO ("YYYY-MM-DDThh:mm:ss"); chequear la fecha.
+        assert data[0]["transaction_date"].startswith(_TODAY)
 
     async def test_bulk_with_entries_creates_multiple_records(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -128,6 +129,29 @@ class TestSalesDateRange:
         data = resp.json()
         assert data["min_date"] == "2024-01-15"
         assert data["max_date"] == _TODAY
+
+    async def test_afternoon_sale_included_in_same_day_range(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Regresión: una venta de la tarde (23:30) se incluye en un rango to_date=hoy.
+
+        Con transaction_date como DATETIME, `<= to_date` (medianoche) la excluiría;
+        el filtro usa func.date() para preservar la semántica por día.
+        """
+        afternoon = {**_SINGLE_PAYLOAD, "transaction_date": f"{_TODAY}T23:30:00"}
+        await client.post("/api/v1/sales", json=afternoon, headers=auth_headers)
+        resp = await client.get(
+            f"/api/v1/sales?from_date={_TODAY}&to_date={_TODAY}", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["transaction_date"].startswith(_TODAY)
+        # El summary (count_by_date_range) también debe contarla.
+        summary = await client.get(
+            f"/api/v1/sales/summary?from_date={_TODAY}&to_date={_TODAY}", headers=auth_headers
+        )
+        assert summary.json()["entry_count"] == 1
 
     async def test_date_range_not_confused_with_sale_id(
         self, client: AsyncClient, auth_headers: dict[str, Any]

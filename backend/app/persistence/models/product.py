@@ -42,6 +42,8 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Integer, nullable=True, default=None
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Fecha de alta / adquisición editable (NULL = no informada; el frontend cae a created_at).
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict

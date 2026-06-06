@@ -34,6 +34,36 @@ class TestProductsCRUD:
         assert "margin_pct" in data
         assert abs(data["margin_pct"] - 46.67) < 0.1
         assert data["is_low_stock"] is False
+        # acquired_at por defecto None; created_at siempre presente.
+        assert data["acquired_at"] is None
+        assert data["created_at"] is not None
+
+    async def test_create_and_update_acquired_at(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """La fecha de alta (acquired_at) se persiste al crear y al editar."""
+        payload = {**_PRODUCT_PAYLOAD, "acquired_at": "2026-01-10T09:30:00"}
+        resp = await client.post("/api/v1/products", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        assert resp.json()["acquired_at"].startswith("2026-01-10T09:30")
+        product_id = resp.json()["id"]
+
+        patch = await client.patch(
+            f"/api/v1/products/{product_id}",
+            json={"acquired_at": "2026-02-15T14:00:00"},
+            headers=auth_headers,
+        )
+        assert patch.status_code == 200
+        assert patch.json()["acquired_at"].startswith("2026-02-15T14:00")
+
+        # Borrar acquired_at: enviar null debe limpiarlo (no quedar el valor previo).
+        cleared = await client.patch(
+            f"/api/v1/products/{product_id}",
+            json={"acquired_at": None},
+            headers=auth_headers,
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["acquired_at"] is None
 
     async def test_list_products(self, client: AsyncClient, auth_headers: dict[str, Any]) -> None:
         await client.post("/api/v1/products", json=_PRODUCT_PAYLOAD, headers=auth_headers)

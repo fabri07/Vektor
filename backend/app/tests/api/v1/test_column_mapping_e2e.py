@@ -232,7 +232,8 @@ class TestConfirmWithColumnMappings:
         )
         sales = result.scalars().all()
         assert len(sales) == 2
-        dates = {str(s.transaction_date) for s in sales}
+        # transaction_date ahora es datetime (medianoche al importar solo fecha).
+        dates = {s.transaction_date.date().isoformat() for s in sales}
         assert "2024-01-15" in dates
         assert "2024-01-16" in dates
         amounts = {s.amount for s in sales}

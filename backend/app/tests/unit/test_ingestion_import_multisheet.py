@@ -17,9 +17,27 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.application.services.ingestion_import_service import (
+    _parse_date,
+    insert_confirmed_data,
+)
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+
+
+def test_parse_date_handles_datetime_and_date_formats() -> None:
+    """_parse_date conserva la hora cuando el archivo la trae; si solo hay fecha,
+    queda a medianoche."""
+    from datetime import datetime
+
+    assert _parse_date("2026-06-05T14:30:00") == datetime(2026, 6, 5, 14, 30, 0)
+    assert _parse_date("2026-06-05 14:30:00") == datetime(2026, 6, 5, 14, 30, 0)
+    assert _parse_date("05/06/2026 14:30") == datetime(2026, 6, 5, 14, 30, 0)
+    # Solo fecha → medianoche.
+    assert _parse_date("2026-06-05") == datetime(2026, 6, 5, 0, 0, 0)
+    assert _parse_date("05/06/2026") == datetime(2026, 6, 5, 0, 0, 0)
+    assert _parse_date("basura") is None
+    assert _parse_date(None) is None
 
 
 def _multisheet_summary() -> dict[str, Any]:

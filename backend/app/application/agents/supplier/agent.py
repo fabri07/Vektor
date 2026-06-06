@@ -387,8 +387,8 @@ class AgentSupplier(BaseAgent):
                 "name": name,
                 "total": float(s["total"]),
                 "count": s["count"],
-                "last_purchase": str(s["last_date"]),
-                "days_since": (date.today() - s["last_date"]).days,
+                "last_purchase": str(s["last_date"].date()),
+                "days_since": (date.today() - s["last_date"].date()).days,
                 "pct": round(float(s["total"]) / grand_total * 100, 1) if grand_total > 0 else 0.0,
             }
             for name, s in suppliers.items()
@@ -782,7 +782,7 @@ class AgentSupplier(BaseAgent):
                 "name": name,
                 "total": float(data["total"]),
                 "count": data["count"],
-                "last_purchase": str(data["last_date"]),
+                "last_purchase": str(data["last_date"].date()),
             }
             for name, data in top
         ]

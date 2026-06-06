@@ -6,7 +6,7 @@ Every write triggers a score recalculation for the tenant.
 """
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -40,7 +40,7 @@ class SaleEntry:
     tenant_id: UUID
     amount: Decimal
     quantity: int
-    transaction_date: date
+    transaction_date: datetime
     payment_method: PaymentMethod
     product_id: UUID | None = None
     notes: str | None = None
@@ -66,7 +66,7 @@ class ExpenseEntry:
     tenant_id: UUID
     amount: Decimal
     category: ExpenseCategory
-    transaction_date: date
+    transaction_date: datetime
     description: str
     is_recurring: bool = False
     payment_method: PaymentMethod = PaymentMethod.TRANSFER

@@ -60,15 +60,22 @@ def _normalize_expense_category(value: str | None) -> str:
     return _EXPENSE_CATEGORY_MAP.get(normalized, str(value).strip().upper())
 
 
-def _coerce_transaction_date(value: object) -> date:
-    if isinstance(value, date):
+def _coerce_transaction_date(value: object) -> datetime:
+    # transaction_date es timestamp: si viene solo fecha, queda a medianoche; si no
+    # viene nada, se usa el momento actual (captura la hora del registro en vivo).
+    if isinstance(value, datetime):
         return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
     if isinstance(value, str):
         try:
-            return date.fromisoformat(value)
+            return datetime.fromisoformat(value)
         except ValueError:
-            return date.today()
-    return date.today()
+            try:
+                return datetime.combine(date.fromisoformat(value), datetime.min.time())
+            except ValueError:
+                return datetime.now()
+    return datetime.now()
 
 
 async def save_sale(
@@ -136,7 +143,7 @@ async def save_cash_inflow(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
         quantity=1,
-        transaction_date=date.today(),
+        transaction_date=datetime.now(),
         payment_method="inflow",
         notes=entities.get("notes") or entities.get("linked_sale_id"),
         provenance="REAL",

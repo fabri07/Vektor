@@ -10,6 +10,7 @@ export interface CreateProductPayload {
   category?: string | null;
   sku?: string | null;
   description?: string | null;
+  acquired_at?: string | null;
 }
 
 export type UpdateProductPayload = Partial<CreateProductPayload> & {
@@ -34,6 +35,8 @@ export interface ProductResponse {
   is_low_stock: boolean;
   stock_status: "in_stock" | "low_stock" | "out_of_stock";
   custom_fields?: Record<string, unknown>;
+  acquired_at?: string | null;
+  created_at?: string;
 }
 
 export interface ProductsListParams {

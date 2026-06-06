@@ -6,6 +6,7 @@ Reglas:
   > 0   = umbral configurado por el tenant
 """
 
+from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -26,6 +27,7 @@ def _make_product(stock_units: int, low_stock_threshold_units: int | None) -> Pr
         stock_units=stock_units,
         low_stock_threshold_units=low_stock_threshold_units,
         is_active=True,
+        created_at=datetime(2026, 1, 1, 12, 0, 0),
     )
 
 

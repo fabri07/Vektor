@@ -281,7 +281,7 @@ async def compute_business_state(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= window_start,
-            SaleEntry.transaction_date <= window_end,
+            func.date(SaleEntry.transaction_date) <= window_end,
         )
     )
     sale_sum_row = sale_sum_result.one()
@@ -298,7 +298,7 @@ async def compute_business_state(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= prev_window_start,
-            SaleEntry.transaction_date <= prev_window_end,
+            func.date(SaleEntry.transaction_date) <= prev_window_end,
         )
     )
     prev_real_sales: Decimal = Decimal(str(prev_sale_result.scalar_one() or 0))
@@ -310,7 +310,7 @@ async def compute_business_state(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
-            ExpenseEntry.transaction_date <= window_end,
+            func.date(ExpenseEntry.transaction_date) <= window_end,
             ExpenseEntry.category == "mercaderia",
         )
     )
@@ -323,7 +323,7 @@ async def compute_business_state(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
-            ExpenseEntry.transaction_date <= window_end,
+            func.date(ExpenseEntry.transaction_date) <= window_end,
             ExpenseEntry.is_recurring.is_(True),
         )
     )
@@ -336,7 +336,7 @@ async def compute_business_state(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
-            ExpenseEntry.transaction_date <= window_end,
+            func.date(ExpenseEntry.transaction_date) <= window_end,
         )
     )
     expense_count: int = int(expense_count_result.scalar_one() or 0)
@@ -369,7 +369,7 @@ async def compute_business_state(
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.transaction_date >= window_start,
-                SaleEntry.transaction_date <= window_end,
+                func.date(SaleEntry.transaction_date) <= window_end,
                 SaleEntry.product_id.isnot(None),
             )
             .group_by(SaleEntry.product_id)

@@ -1,14 +1,13 @@
 """ORM models: sales_entries, expense_entries, products."""
 
 import uuid
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -39,7 +38,7 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    transaction_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="cash")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
@@ -84,7 +83,7 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
-    transaction_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     description: Mapped[str] = mapped_column(String(500), nullable=False)
     is_recurring: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="transfer")

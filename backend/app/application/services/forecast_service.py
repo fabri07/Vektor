@@ -82,34 +82,38 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
     today = date.today()
     window_start = today - timedelta(days=180)
 
-    # Agregados diarios de ingresos
+    # Agregados DIARIOS: agrupar por func.date() para no fragmentar por hora/minuto
+    # ahora que transaction_date es un timestamp.
+    income_day = func.date(SaleEntry.transaction_date).label("day")
     income_q = (
-        select(SaleEntry.transaction_date, func.sum(SaleEntry.amount).label("total"))
+        select(income_day, func.sum(SaleEntry.amount).label("total"))
         .where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= window_start,
         )
-        .group_by(SaleEntry.transaction_date)
+        .group_by(income_day)
     )
     income_rows = (await db.execute(income_q)).all()
 
-    # Agregados diarios de egresos
+    expense_day = func.date(ExpenseEntry.transaction_date).label("day")
     expense_q = (
-        select(ExpenseEntry.transaction_date, func.sum(ExpenseEntry.amount).label("total"))
+        select(expense_day, func.sum(ExpenseEntry.amount).label("total"))
         .where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
         )
-        .group_by(ExpenseEntry.transaction_date)
+        .group_by(expense_day)
     )
     expense_rows = (await db.execute(expense_q)).all()
 
-    daily_income: dict[date, float] = {r.transaction_date: float(r.total or 0) for r in income_rows}
-    daily_expense: dict[date, float] = {
-        r.transaction_date: float(r.total or 0) for r in expense_rows
-    }
+    # func.date() devuelve date (Postgres) o str 'YYYY-MM-DD' (SQLite); normalizar a date.
+    def _day(v: object) -> date:
+        return date.fromisoformat(str(v)[:10])
+
+    daily_income: dict[date, float] = {_day(r.day): float(r.total or 0) for r in income_rows}
+    daily_expense: dict[date, float] = {_day(r.day): float(r.total or 0) for r in expense_rows}
 
     all_dates = sorted(set(list(daily_income.keys()) + list(daily_expense.keys())))
 

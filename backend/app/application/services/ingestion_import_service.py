@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -80,13 +80,31 @@ def _parse_amount(raw: Any) -> Decimal | None:
         return None
 
 
-def _parse_date(raw: Any) -> date | None:
+def _parse_date(raw: Any) -> datetime | None:
+    # transaction_date es timestamp: se intenta primero con hora (ISO o dd/mm con
+    # hora) y, si no, solo fecha (queda a medianoche).
     if raw is None:
         return None
     s = str(raw).strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d", "%m/%d/%Y"):
+    if not s:
+        return None
+    # ISO 8601: "2026-06-05T14:30:00", "2026-06-05 14:30:00", "2026-06-05".
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        pass
+    formats = (
+        # con hora (probar antes que las de solo fecha)
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
+        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M",
+        # solo fecha
+        "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d", "%m/%d/%Y",
+    )
+    for fmt in formats:
         try:
-            return datetime.strptime(s, fmt).date()
+            return datetime.strptime(s, fmt)
         except ValueError:
             continue
     return None
@@ -157,7 +175,8 @@ async def insert_confirmed_data(
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
     confirmed_fields = confirmed_fields or _default_confirmed_fields(summary)
-    today = date.today()
+    # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
+    today = datetime.now()
     counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0}
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
@@ -582,7 +601,7 @@ async def _insert_multisheet_data(
     tenant_id: uuid.UUID,
     summary: dict[str, Any],
     confirmed_fields: dict[str, bool] | None,
-    today: date,
+    today: datetime,
     return_details: bool,
     product_details: list[dict[str, Any]],
     counts: dict[str, Any],

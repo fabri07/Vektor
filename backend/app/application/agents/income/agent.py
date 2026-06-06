@@ -51,7 +51,8 @@ _MONETARY_RE = re.compile(
 class SaleEntity(BaseModel):
     amount: Decimal
     transaction_date: str = Field(
-        default_factory=lambda: __import__("datetime").date.today().isoformat()
+        # datetime ISO: captura la hora del registro en vivo (no solo la fecha).
+        default_factory=lambda: __import__("datetime").datetime.now().isoformat()
     )
     payment_status: str
     payment_method: str | None = None
@@ -513,7 +514,7 @@ class AgentIncome(BaseAgent):
         entities: dict[str, Any] = {
             "amount": str(amount),
             "transaction_date": pre_entities.get(
-                "transaction_date", __import__("datetime").date.today().isoformat()
+                "transaction_date", __import__("datetime").datetime.now().isoformat()
             ),
             "description": pre_entities.get("description", "Cobro registrado"),
             "payment_method": pre_entities.get("payment_method"),

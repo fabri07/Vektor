@@ -1,6 +1,6 @@
 """Repository for SaleEntry and ExpenseEntry."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -8,6 +8,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+
+
+def _as_date(value: datetime | date | None) -> date | None:
+    """Normaliza un timestamp (o date) a `date` para los rangos de la UI."""
+    if value is None:
+        return None
+    return value.date() if isinstance(value, datetime) else value
 
 
 class SaleRepository:
@@ -37,9 +44,9 @@ class SaleRepository:
             SaleEntry.voided_at.is_(None),
         )
         if from_date:
-            q = q.where(SaleEntry.transaction_date >= from_date)
+            q = q.where(func.date(SaleEntry.transaction_date) >= from_date)
         if to_date:
-            q = q.where(SaleEntry.transaction_date <= to_date)
+            q = q.where(func.date(SaleEntry.transaction_date) <= to_date)
         q = q.order_by(SaleEntry.transaction_date.desc()).limit(limit).offset(offset)
         result = await self._session.execute(q)
         return list(result.scalars().all())
@@ -55,9 +62,9 @@ class SaleRepository:
             SaleEntry.voided_at.is_(None),
         )
         if from_date:
-            q = q.where(SaleEntry.transaction_date >= from_date)
+            q = q.where(func.date(SaleEntry.transaction_date) >= from_date)
         if to_date:
-            q = q.where(SaleEntry.transaction_date <= to_date)
+            q = q.where(func.date(SaleEntry.transaction_date) <= to_date)
         result = await self._session.execute(q)
         return float(result.scalar_one() or 0)
 
@@ -70,8 +77,8 @@ class SaleRepository:
         q = select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.voided_at.is_(None),
-            SaleEntry.transaction_date >= from_date,
-            SaleEntry.transaction_date <= to_date,
+            func.date(SaleEntry.transaction_date) >= from_date,
+            func.date(SaleEntry.transaction_date) <= to_date,
         )
         result = await self._session.execute(q)
         return int(result.scalar_one() or 0)
@@ -83,25 +90,26 @@ class SaleRepository:
         to_date: date,
     ) -> list[dict[str, Any]]:
         """Ventas diarias agrupadas por método de pago."""
+        day = func.date(SaleEntry.transaction_date).label("day")
         q = (
             select(
-                SaleEntry.transaction_date,
+                day,
                 SaleEntry.payment_method,
                 func.sum(SaleEntry.amount).label("total"),
             )
             .where(
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
-                SaleEntry.transaction_date >= from_date,
-                SaleEntry.transaction_date <= to_date,
+                func.date(SaleEntry.transaction_date) >= from_date,
+                func.date(SaleEntry.transaction_date) <= to_date,
             )
-            .group_by(SaleEntry.transaction_date, SaleEntry.payment_method)
-            .order_by(SaleEntry.transaction_date)
+            .group_by(day, SaleEntry.payment_method)
+            .order_by(day)
         )
         result = await self._session.execute(q)
         return [
             {
-                "date": str(row.transaction_date),
+                "date": str(row.day),
                 "payment_method": row.payment_method or "OTROS",
                 "total": float(row.total or 0),
             }
@@ -163,8 +171,8 @@ class SaleRepository:
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.product_id.isnot(None),
-                SaleEntry.transaction_date >= from_date,
-                SaleEntry.transaction_date <= to_date,
+                func.date(SaleEntry.transaction_date) >= from_date,
+                func.date(SaleEntry.transaction_date) <= to_date,
             )
             .group_by(SaleEntry.product_id)
             .order_by(func.sum(SaleEntry.amount).desc())
@@ -195,7 +203,7 @@ class SaleRepository:
             SaleEntry.voided_at.is_(None),
         )
         row = (await self._session.execute(q)).one()
-        return row[0], row[1]
+        return _as_date(row[0]), _as_date(row[1])
 
     async def save(self, entry: SaleEntry) -> SaleEntry:
         self._session.add(entry)
@@ -240,9 +248,9 @@ class ExpenseRepository:
             ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
-            q = q.where(ExpenseEntry.transaction_date >= from_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
         if to_date:
-            q = q.where(ExpenseEntry.transaction_date <= to_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
         if category:
             q = q.where(ExpenseEntry.category == category)
         q = q.order_by(ExpenseEntry.transaction_date.desc()).limit(limit).offset(offset)
@@ -260,9 +268,9 @@ class ExpenseRepository:
             ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
-            q = q.where(ExpenseEntry.transaction_date >= from_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
         if to_date:
-            q = q.where(ExpenseEntry.transaction_date <= to_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
         result = await self._session.execute(q)
         return float(result.scalar_one() or 0)
 
@@ -275,8 +283,8 @@ class ExpenseRepository:
         q = select(func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
-            ExpenseEntry.transaction_date >= from_date,
-            ExpenseEntry.transaction_date <= to_date,
+            func.date(ExpenseEntry.transaction_date) >= from_date,
+            func.date(ExpenseEntry.transaction_date) <= to_date,
         )
         result = await self._session.execute(q)
         return int(result.scalar_one() or 0)
@@ -293,9 +301,9 @@ class ExpenseRepository:
             ExpenseEntry.voided_at.is_(None),
         )
         if from_date:
-            q = q.where(ExpenseEntry.transaction_date >= from_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
         if to_date:
-            q = q.where(ExpenseEntry.transaction_date <= to_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
         q = q.group_by(ExpenseEntry.category).order_by(func.sum(ExpenseEntry.amount).desc())
         result = await self._session.execute(q)
         rows = result.all()
@@ -326,9 +334,9 @@ class ExpenseRepository:
             ExpenseEntry.supplier_name != "",
         )
         if from_date:
-            q = q.where(ExpenseEntry.transaction_date >= from_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
         if to_date:
-            q = q.where(ExpenseEntry.transaction_date <= to_date)
+            q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
         q = (
             q.group_by(ExpenseEntry.supplier_name)
             .order_by(func.sum(ExpenseEntry.amount).desc())
@@ -344,9 +352,9 @@ class ExpenseRepository:
             ExpenseEntry.supplier_name != "",
         )
         if from_date:
-            total_q = total_q.where(ExpenseEntry.transaction_date >= from_date)
+            total_q = total_q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
         if to_date:
-            total_q = total_q.where(ExpenseEntry.transaction_date <= to_date)
+            total_q = total_q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
         total_result = await self._session.execute(total_q)
         grand_total = float(total_result.scalar_one() or 0)
 
@@ -368,25 +376,26 @@ class ExpenseRepository:
         to_date: date,
     ) -> list[dict[str, Any]]:
         """Gastos diarios agrupados por método de pago."""
+        day = func.date(ExpenseEntry.transaction_date).label("day")
         q = (
             select(
-                ExpenseEntry.transaction_date,
+                day,
                 ExpenseEntry.payment_method,
                 func.sum(ExpenseEntry.amount).label("total"),
             )
             .where(
                 ExpenseEntry.tenant_id == tenant_id,
                 ExpenseEntry.voided_at.is_(None),
-                ExpenseEntry.transaction_date >= from_date,
-                ExpenseEntry.transaction_date <= to_date,
+                func.date(ExpenseEntry.transaction_date) >= from_date,
+                func.date(ExpenseEntry.transaction_date) <= to_date,
             )
-            .group_by(ExpenseEntry.transaction_date, ExpenseEntry.payment_method)
-            .order_by(ExpenseEntry.transaction_date)
+            .group_by(day, ExpenseEntry.payment_method)
+            .order_by(day)
         )
         result = await self._session.execute(q)
         return [
             {
-                "date": str(row.transaction_date),
+                "date": str(row.day),
                 "payment_method": row.payment_method or "OTROS",
                 "total": float(row.total or 0),
             }
@@ -454,7 +463,7 @@ class ExpenseRepository:
             ExpenseEntry.voided_at.is_(None),
         )
         row = (await self._session.execute(q)).one()
-        return row[0], row[1]
+        return _as_date(row[0]), _as_date(row[1])
 
     async def save(self, entry: ExpenseEntry) -> ExpenseEntry:
         self._session.add(entry)

@@ -118,7 +118,9 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
   const hasTransactionData = sales.length > 0 || expenses.length > 0;
 
   const [lineMetric, setLineMetric] = useState("caja");
-  const [granularity, setGranularity] = useState<"daily" | "weekly" | "monthly">("daily");
+  const [granularity, setGranularity] = useState<"hourly" | "daily" | "weekly" | "monthly">(
+    "daily",
+  );
   const [compareBy, setCompareBy] = useState("categoria");
   const [distribution, setDistribution] = useState("ventasCategoria");
 
@@ -163,6 +165,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
             />
             <div className="inline-flex rounded-full border border-vektor-border bg-vektor-surface p-1">
               {[
+                { value: "hourly", label: "Hoy (horas)" },
                 { value: "daily", label: "Diario" },
                 { value: "weekly", label: "Semanal" },
                 { value: "monthly", label: "Mensual" },
@@ -170,7 +173,9 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
                 <button
                   key={option.value}
                   type="button"
-                  onClick={() => setGranularity(option.value as "daily" | "weekly" | "monthly")}
+                  onClick={() =>
+                    setGranularity(option.value as "hourly" | "daily" | "weekly" | "monthly")
+                  }
                   className={[
                     "rounded-full px-3 py-1.5 text-xs font-medium",
                     granularity === option.value

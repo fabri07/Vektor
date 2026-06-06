@@ -26,6 +26,9 @@ class ProductResponse(BaseModel):
     low_stock_threshold_units: int | None
     is_active: bool
     custom_fields: dict[str, Any] = {}
+    # Fecha de alta editable; el frontend cae a created_at cuando es None.
+    acquired_at: datetime | None = None
+    created_at: datetime
     deactivated_at: datetime | None = None
     deactivation_reason: str | None = None
 
@@ -63,6 +66,7 @@ class CreateProductRequest(BaseModel):
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
+    acquired_at: datetime | None = Field(default=None, description="Fecha/hora de alta")
     custom_fields: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -75,4 +79,5 @@ class UpdateProductRequest(BaseModel):
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
     is_active: bool | None = None
+    acquired_at: datetime | None = None
     custom_fields: dict[str, Any] | None = None

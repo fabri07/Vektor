@@ -12,6 +12,7 @@ import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildCustomFieldColumns } from "@/lib/customFields";
+import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import {
@@ -53,15 +54,10 @@ const ALL_CATEGORIES = Object.keys(CATEGORY_LABELS);
 const COLUMNS = [
   {
     key: "transaction_date",
-    header: "Fecha",
+    header: "Fecha y hora",
     hideable: true,
-    render: (v: unknown) =>
-      new Date(String(v) + "T00:00:00").toLocaleDateString("es-AR", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      }),
-    csvValue: (v: unknown) => String(v),
+    render: (v: unknown) => formatDateTime(v),
+    csvValue: (v: unknown) => formatDateTime(v),
   },
   {
     key: "category",
@@ -335,7 +331,7 @@ function ExpenseEditModal({
     <Modal isOpen={!!expense} onClose={onClose} title="Editar gasto" size="lg">
       <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onSave(form); }}>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Fecha<input className="rounded border border-vk-border-w px-3 py-2" type="date" value={form.transaction_date} onChange={(e) => set("transaction_date", e.target.value)} /></label>
+          <label className="grid gap-1 text-sm text-vk-text-secondary">Fecha y hora<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} /></label>
           <label className="grid gap-1 text-sm text-vk-text-secondary">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
         </div>
         <label className="grid gap-1 text-sm text-vk-text-secondary">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} /></label>

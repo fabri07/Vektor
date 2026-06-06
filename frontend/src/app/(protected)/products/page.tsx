@@ -13,6 +13,7 @@ import { Modal } from "@/components/ui/Modal";
 import { productsService, type ProductResponse } from "@/services/products.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildCustomFieldColumns } from "@/lib/customFields";
+import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
 type StockFilter = "all" | "in_stock" | "low_stock" | "out_of_stock";
@@ -117,6 +118,16 @@ const COLUMNS = [
     csvValue: (_: unknown, row: Record<string, unknown>) =>
       getStockCsvLabel(row as unknown as ProductResponse),
   },
+  {
+    key: "_acquired",
+    header: "Fecha de alta",
+    hideable: true,
+    defaultVisible: false,
+    render: (_: unknown, row: Record<string, unknown>) =>
+      formatDateTime(row.acquired_at ?? row.created_at),
+    csvValue: (_: unknown, row: Record<string, unknown>) =>
+      formatDateTime(row.acquired_at ?? row.created_at),
+  },
 ];
 
 export default function ProductsPage() {
@@ -162,6 +173,7 @@ export default function ProductsPage() {
         stock_units: Number(payload.stock_units),
         // null = no configurado (usa default 5 del servidor); 0 = umbral explícito
         low_stock_threshold_units: payload.low_stock_threshold_units == null ? null : Number(payload.low_stock_threshold_units),
+        acquired_at: payload.acquired_at ?? null,
       }),
     onSuccess: async () => {
       setEditing(null);
@@ -347,6 +359,7 @@ function ProductEditModal({
           <label className="grid gap-1 text-sm text-vk-text-secondary">Umbral mínimo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} placeholder="5 (default)" value={form.low_stock_threshold_units ?? ""} onChange={(e) => set("low_stock_threshold_units", e.target.value === "" ? null : Number(e.target.value))} /></label>
         </div>
         <label className="grid gap-1 text-sm text-vk-text-secondary">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
+        <label className="grid gap-1 text-sm text-vk-text-secondary">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
           <button type="submit" disabled={saving} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>

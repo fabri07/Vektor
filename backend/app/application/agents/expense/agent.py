@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import uuid
 from calendar import monthrange
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -122,7 +122,8 @@ class AgentExpense(BaseAgent):
             last_day = monthrange(year, month)[1]
             return date(year, month, min(today.day, last_day)).isoformat()
 
-        return today.isoformat()
+        # Sin fecha explícita en el mensaje: ahora (captura la hora del registro).
+        return datetime.now().isoformat()
 
     def _month_from_spanish(self, value: str) -> int:
         month_map = {

@@ -36,7 +36,7 @@ class SaleEntryResponse(BaseModel):
     product_id: UUID | None
     amount: Decimal
     quantity: int
-    transaction_date: date
+    transaction_date: datetime
     payment_method: str
     notes: str | None
     custom_fields: dict[str, Any] = {}
@@ -53,7 +53,7 @@ class SaleEntryResponse(BaseModel):
 class CreateSaleRequest(BaseModel):
     amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     quantity: int = Field(ge=1, default=1)
-    transaction_date: date
+    transaction_date: datetime
     payment_method: str = Field(
         pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$", default="cash"
     )
@@ -68,8 +68,9 @@ class CreateSaleRequest(BaseModel):
 
     @field_validator("transaction_date")
     @classmethod
-    def transaction_date_not_future(cls, v: date) -> date:
-        if v > date.today():
+    def transaction_date_not_future(cls, v: datetime) -> datetime:
+        # Compara solo la fecha: se permite registrar hoy a cualquier hora.
+        if v.date() > date.today():
             raise ValueError("transaction_date cannot be in the future.")
         return v
 
@@ -77,7 +78,7 @@ class CreateSaleRequest(BaseModel):
 class UpdateSaleRequest(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     quantity: int | None = Field(default=None, ge=1)
-    transaction_date: date | None = None
+    transaction_date: datetime | None = None
     payment_method: str | None = Field(
         default=None,
         pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$",
@@ -88,8 +89,8 @@ class UpdateSaleRequest(BaseModel):
 
     @field_validator("transaction_date")
     @classmethod
-    def transaction_date_not_future(cls, v: date | None) -> date | None:
-        if v is not None and v > date.today():
+    def transaction_date_not_future(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.date() > date.today():
             raise ValueError("transaction_date cannot be in the future.")
         return v
 
@@ -139,7 +140,7 @@ class ExpenseEntryResponse(BaseModel):
     tenant_id: UUID
     amount: Decimal
     category: str
-    transaction_date: date
+    transaction_date: datetime
     description: str
     is_recurring: bool
     payment_method: str
@@ -158,7 +159,7 @@ class ExpenseEntryResponse(BaseModel):
 class CreateExpenseRequest(BaseModel):
     amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     category: str = Field(pattern=EXPENSE_CATEGORIES)
-    expense_date: date
+    expense_date: datetime
     notes: str | None = Field(default=None, max_length=1000)
     description: str = Field(default="", max_length=500)
     is_recurring: bool = False
@@ -176,8 +177,8 @@ class CreateExpenseRequest(BaseModel):
 
     @field_validator("expense_date")
     @classmethod
-    def expense_date_not_future(cls, v: date) -> date:
-        if v > date.today():
+    def expense_date_not_future(cls, v: datetime) -> datetime:
+        if v.date() > date.today():
             raise ValueError("expense_date cannot be in the future.")
         return v
 
@@ -185,7 +186,7 @@ class CreateExpenseRequest(BaseModel):
 class UpdateExpenseRequest(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     category: str | None = Field(default=None, pattern=EXPENSE_CATEGORIES)
-    expense_date: date | None = None
+    expense_date: datetime | None = None
     description: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None
     supplier_name: str | None = Field(default=None, max_length=300)
@@ -194,8 +195,8 @@ class UpdateExpenseRequest(BaseModel):
 
     @field_validator("expense_date")
     @classmethod
-    def expense_date_not_future(cls, v: date | None) -> date | None:
-        if v is not None and v > date.today():
+    def expense_date_not_future(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.date() > date.today():
             raise ValueError("expense_date cannot be in the future.")
         return v
 

@@ -10,12 +10,14 @@ import { productsService } from "@/services/products.service";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-function todayStr(): string {
+// "YYYY-MM-DDTHH:mm" en hora local, para inputs datetime-local (captura la hora real).
+function nowStr(): string {
   const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ function emptySaleForm(): SaleForm {
   return {
     amount: "",
     quantity: "1",
-    transaction_date: todayStr(),
+    transaction_date: nowStr(),
     payment_method: "cash",
     notes: "",
   };
@@ -146,9 +148,9 @@ function SaleTab({ onToast }: { onToast: (t: ToastState) => void }) {
 
       <div className="grid grid-cols-2 gap-4">
         <Input
-          label="Fecha"
-          type="date"
-          max={todayStr()}
+          label="Fecha y hora"
+          type="datetime-local"
+          max={nowStr()}
           value={form.transaction_date}
           onChange={set("transaction_date")}
           error={errors.transaction_date}
@@ -209,7 +211,7 @@ function emptyExpenseForm(): ExpenseForm {
   return {
     amount: "",
     category: "OTHER",
-    expense_date: todayStr(),
+    expense_date: nowStr(),
     description: "",
     is_recurring: false,
   };
@@ -298,9 +300,9 @@ function ExpenseTab({ onToast }: { onToast: (t: ToastState) => void }) {
 
       <div className="grid grid-cols-2 gap-4">
         <Input
-          label="Fecha"
-          type="date"
-          max={todayStr()}
+          label="Fecha y hora"
+          type="datetime-local"
+          max={nowStr()}
           value={form.expense_date}
           onChange={set("expense_date")}
           error={errors.expense_date}

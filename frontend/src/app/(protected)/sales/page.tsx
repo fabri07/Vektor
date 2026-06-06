@@ -12,6 +12,7 @@ import { salesService, type SaleEntryResponse } from "@/services/sales.service";
 import { productsService, type ProductResponse } from "@/services/products.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildCustomFieldColumns } from "@/lib/customFields";
+import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import { CashCloseButton } from "@/features/cash/CashCloseButton";
@@ -37,15 +38,10 @@ function buildColumns(productById: Map<string, ProductResponse>) {
   return [
   {
     key: "transaction_date",
-    header: "Fecha",
+    header: "Fecha y hora",
     hideable: true,
-    render: (v: unknown) =>
-      new Date(String(v) + "T00:00:00").toLocaleDateString("es-AR", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      }),
-    csvValue: (v: unknown) => String(v),
+    render: (v: unknown) => formatDateTime(v),
+    csvValue: (v: unknown) => formatDateTime(v),
   },
   {
     key: "notes",
@@ -334,8 +330,8 @@ function SaleEditModal({
       >
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vk-text-secondary">
-            Fecha
-            <input className="rounded border border-vk-border-w px-3 py-2" type="date" value={form.transaction_date} onChange={(e) => set("transaction_date", e.target.value)} />
+            Fecha y hora
+            <input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} />
           </label>
           <label className="grid gap-1 text-sm text-vk-text-secondary">
             Medio de pago

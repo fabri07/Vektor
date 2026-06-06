@@ -127,7 +127,10 @@ async def update_product(
     if not product:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
     before = _product_snapshot(product)
-    for field, value in body.model_dump(exclude_none=True).items():
+    # exclude_unset (no exclude_none): aplica solo los campos enviados por el cliente,
+    # permitiendo limpiar opcionales a null (ej. borrar acquired_at). Los campos no
+    # enviados quedan intactos.
+    for field, value in body.model_dump(exclude_unset=True).items():
         setattr(product, field, value)
     saved = await repo.save(product)
     _audit_data_change(

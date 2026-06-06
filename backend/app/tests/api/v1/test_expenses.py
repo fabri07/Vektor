@@ -29,7 +29,8 @@ class TestExpensesCRUD:
         # amount se serializa como número (no string) para que el frontend sume sin NaN.
         assert data["amount"] == 15000.0
         assert data["category"] == "RENT"
-        assert data["transaction_date"] == _TODAY
+        # transaction_date ahora es datetime ISO; chequear solo la parte de fecha.
+        assert data["transaction_date"].startswith(_TODAY)
 
     async def test_invalid_category_rejected(
         self, client: AsyncClient, auth_headers: dict[str, Any]

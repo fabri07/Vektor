@@ -288,16 +288,34 @@ function sameDay(date: string, target: Date): boolean {
   return parsed.toDateString() === target.toDateString();
 }
 
+// Vista intradía: 24 buckets horarios del día de hoy.
+function hourlyRange(): Date[] {
+  const base = new Date();
+  return Array.from({ length: 24 }, (_, hour) => {
+    const value = new Date(base);
+    value.setHours(hour, 0, 0, 0);
+    return value;
+  });
+}
+
+function sameHour(date: string, target: Date): boolean {
+  const parsed = new Date(date);
+  return parsed.toDateString() === target.toDateString() && parsed.getHours() === target.getHours();
+}
+
 export function buildLineSeries(
   metric: LineMetricOption["value"],
   sales: SaleEntryResponse[],
   expenses: ExpenseEntryResponse[],
   products: ProductResponse[],
-  granularity: "daily" | "weekly" | "monthly",
+  granularity: "hourly" | "daily" | "weekly" | "monthly",
   scoreHistory?: HealthScoreV2Response[],
 ): Array<{ label: string; value: number | null; change: number }> {
-  const points = granularity === "daily" ? 14 : granularity === "weekly" ? 10 : 6;
-  const dates = dateRange(points);
+  const isHourly = granularity === "hourly";
+  const dates = isHourly
+    ? hourlyRange()
+    : dateRange(granularity === "daily" ? 14 : granularity === "weekly" ? 10 : 6);
+  const match = isHourly ? sameHour : sameDay;
   const totalStock = products.reduce((sum, product) => sum + product.stock_units, 0);
 
   let previous = 0;
@@ -307,22 +325,22 @@ export function buildLineSeries(
 
     if (metric === "ventas") {
       value = sales
-        .filter((entry) => sameDay(entry.transaction_date, date))
+        .filter((entry) => match(entry.transaction_date, date))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
     } else if (metric === "caja") {
       const salesTotal = sales
-        .filter((entry) => sameDay(entry.transaction_date, date))
+        .filter((entry) => match(entry.transaction_date, date))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       const expensesTotal = expenses
-        .filter((entry) => sameDay(entry.transaction_date, date))
+        .filter((entry) => match(entry.transaction_date, date))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       value = previous + salesTotal - expensesTotal;
     } else if (metric === "margen") {
       const dayRevenue = sales
-        .filter((entry) => sameDay(entry.transaction_date, date))
+        .filter((entry) => match(entry.transaction_date, date))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       const dayCost = expenses
-        .filter((entry) => sameDay(entry.transaction_date, date))
+        .filter((entry) => match(entry.transaction_date, date))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       // null cuando no hay ventas: el chart muestra un gap real en vez de interpolar
       value = dayRevenue > 0 ? ((dayRevenue - dayCost) / dayRevenue) * 100 : null;
@@ -346,8 +364,9 @@ export function buildLineSeries(
     previous = value ?? previous;
 
     return {
-      label:
-        granularity === "monthly"
+      label: isHourly
+        ? `${String(date.getHours()).padStart(2, "0")}:00`
+        : granularity === "monthly"
           ? date.toLocaleDateString("es-AR", { month: "short" })
           : date.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" }),
       value,

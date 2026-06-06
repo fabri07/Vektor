@@ -564,7 +564,7 @@ async def test_parse_date_fallback_logs_debug(
     result = await db_session.execute(select(SaleEntry))
     sale = result.scalar_one()
     assert sale.amount == Decimal("100")
-    assert sale.transaction_date == date.today()
+    assert sale.transaction_date.date() == date.today()
     assert capture.debug_events == [
         (
             "ingestion.parse.date_fallback_today",
