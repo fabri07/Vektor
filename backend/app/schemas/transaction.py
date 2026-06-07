@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_serializer, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
 _MAX_AMOUNT = Decimal("999999999")
@@ -140,6 +140,9 @@ class ExpenseEntryResponse(BaseModel):
     tenant_id: UUID
     amount: Decimal
     category: str
+    # Etiqueta libre cuando category == OTHER (guardada en custom_fields["category_label"]).
+    # La categoría canónica sigue siendo OTHER → reportes/agregaciones no se rompen.
+    category_label: str | None = None
     transaction_date: datetime
     description: str
     is_recurring: bool
@@ -155,10 +158,20 @@ class ExpenseEntryResponse(BaseModel):
         # para que el frontend pueda sumar sin producir NaN.
         return float(v)
 
+    @model_validator(mode="after")
+    def _extract_category_label(self) -> "ExpenseEntryResponse":
+        if self.category_label is None and isinstance(self.custom_fields, dict):
+            label = self.custom_fields.get("category_label")
+            if isinstance(label, str) and label.strip():
+                self.category_label = label.strip()
+        return self
+
 
 class CreateExpenseRequest(BaseModel):
     amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     category: str = Field(pattern=EXPENSE_CATEGORIES)
+    # Solo se usa cuando category == OTHER: nombre personalizado de la categoría.
+    category_label: str | None = Field(default=None, max_length=50)
     expense_date: datetime
     notes: str | None = Field(default=None, max_length=1000)
     description: str = Field(default="", max_length=500)
@@ -186,6 +199,7 @@ class CreateExpenseRequest(BaseModel):
 class UpdateExpenseRequest(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     category: str | None = Field(default=None, pattern=EXPENSE_CATEGORIES)
+    category_label: str | None = Field(default=None, max_length=50)
     expense_date: datetime | None = None
     description: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None

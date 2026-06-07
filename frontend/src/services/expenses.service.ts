@@ -7,6 +7,8 @@ export type { ExpenseSummaryResponse };
 export interface CreateExpensePayload {
   amount: number;
   category: string;
+  /** Nombre personalizado cuando category === "OTHER". */
+  category_label?: string;
   expense_date: string; // YYYY-MM-DD
   description?: string;
   is_recurring?: boolean;
@@ -22,6 +24,8 @@ export interface ExpenseEntryResponse {
   tenant_id: string;
   amount: number;
   category: string;
+  /** Nombre personalizado cuando category === "OTHER" (si el usuario lo cargó). */
+  category_label?: string | null;
   transaction_date: string;
   description: string;
   is_recurring: boolean;
