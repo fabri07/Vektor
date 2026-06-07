@@ -350,16 +350,19 @@ async def insert_confirmed_data(
             payment_col = target_to_col.get("payment_method")
             category_col = target_to_col.get("category")
 
+        # FASE 3: en archivos ambiguos ("general") se honra la confirmación EXPLÍCITA del
+        # usuario (no se requiere la señal auto-detectada). Para tipos ya inferidos se
+        # mantiene la guardia original.
         wants_ventas = bool(
             inferred_type != "stock"
             and confirmed_fields.get("ventas")
-            and (summary.get("has_venta") or inferred_type == "ventas")
+            and (summary.get("has_venta") or inferred_type in ("ventas", "general"))
             and venta_col
         )
         wants_gastos = bool(
             inferred_type != "stock"
             and confirmed_fields.get("gastos")
-            and (summary.get("has_gasto") or inferred_type == "gastos")
+            and (summary.get("has_gasto") or inferred_type in ("gastos", "general"))
             and gasto_col
         )
         wants_productos = bool(

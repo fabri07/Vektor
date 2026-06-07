@@ -144,8 +144,8 @@ def _build_multisheet_with_unclassified() -> bytes:
     ventas.append(["fecha", "monto"])
     ventas.append(["2026-01-15", "50000"])
     resumen = wb.create_sheet("Resumen")  # nombre + headers no clasificables
-    resumen.append(["Concepto", "Detalle", "Observaciones"])
-    resumen.append(["Total mes", "ok", "sin novedad"])
+    resumen.append(["Titulo", "Observaciones", "Estado"])
+    resumen.append(["Total mes", "sin novedad", "ok"])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

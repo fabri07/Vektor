@@ -98,6 +98,27 @@ FECHA_COLS = {"fecha", "date", "dia", "mes", "periodo"}
 MERCADERIA_COLS = {"mercaderia", "mercadería", "insumo", "insumos", "reposicion", "reposición"}
 CANTIDAD_COLS = {"cantidad", "unidades", "unidad", "qty", "cant"}
 
+# FASE 3: clasificación CONTEXTUAL venta vs gasto. Las columnas de dinero genéricas
+# (monto/importe/total/precio/valor) son NEUTRALES — aparecen en cualquier documento
+# financiero y no deben favorecer ventas por sí solas. El tipo se decide por señales
+# FUERTES de contexto (scoring), y ante empate/ausencia → "general" (el usuario confirma).
+MONEY_COLS = {"monto", "importe", "total", "precio", "valor", "monto_total", "importe_total"}
+# Señales fuertes de venta (cliente, ticket, factura emitida, cobro, caja, medio de pago).
+VENTA_SIGNAL_COLS = {
+    "venta", "ventas", "vendido", "vendida", "ingreso", "ingresos", "facturacion",
+    "facturación", "factura_emitida", "ticket", "cliente", "consumidor", "cobro",
+    "cobrado", "caja", "medio_pago", "metodo_pago", "método_pago", "forma_pago",
+    "fecha_venta",
+}
+# Señales fuertes de gasto/egreso (proveedor, categoría, concepto, servicio, etc.).
+# Nota: "pago" suelto NO se incluye — colisiona con "metodo/medio_pago" (señal de venta).
+GASTO_SIGNAL_COLS = {
+    "gasto", "gastos", "egreso", "egresos", "proveedor", "categoria", "categoría",
+    "rubro", "concepto", "servicio", "alquiler", "sueldo", "salario", "impuesto",
+    "honorarios", "mantenimiento", "comision", "comisión", "flete", "logistica",
+    "logística", "factura_recibida", "compra", "costo", "deuda",
+}
+
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
 GASTO_CTX = {"gasto", "compra", "pago", "factura", "proveedor", "egreso", "gaste"}
 STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia", "mercadería"}
@@ -323,8 +344,11 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     normalized = [h.lower().strip().replace(" ", "_") for h in headers]
 
     has_fecha = any(any(k in col for k in FECHA_COLS) for col in normalized)
-    has_venta = any(any(k in col for k in VENTA_COLS) for col in normalized)
-    has_gasto = any(any(k in col for k in GASTO_COLS) for col in normalized)
+    # FASE 3: venta/gasto por señales FUERTES de contexto (no por columna de dinero).
+    venta_score = sum(any(k in col for k in VENTA_SIGNAL_COLS) for col in normalized)
+    gasto_score = sum(any(k in col for k in GASTO_SIGNAL_COLS) for col in normalized)
+    has_venta = venta_score > 0
+    has_gasto = gasto_score > 0
     has_producto = any(any(k in col for k in PRODUCTO_COLS) for col in normalized)
     # Señal fuerte de catálogo: sku/codigo/inventario/articulo/item — inequívocamente no transacción
     has_catalogo_fuerte = any(any(k in col for k in CATALOGO_COLS) for col in normalized)
@@ -347,6 +371,8 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_nombre=has_nombre,
         has_mercaderia=has_mercaderia,
         has_cantidad=has_cantidad,
+        venta_score=venta_score,
+        gasto_score=gasto_score,
     )
 
     has_catalogo_signal = has_catalogo_fuerte or has_nombre
@@ -373,6 +399,8 @@ def infer_spreadsheet_type(
     has_nombre: bool = False,
     has_mercaderia: bool = False,
     has_cantidad: bool = False,
+    venta_score: int = 0,
+    gasto_score: int = 0,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
@@ -413,23 +441,21 @@ def infer_spreadsheet_type(
     if has_nombre:
         return "stock"
 
-    # Sin señales de catálogo: transacciones de venta con fecha explícita
-    if has_venta and has_fecha:
-        return "ventas"
-
-    # Sin señales de catálogo: transacciones de gasto con fecha explícita
-    if has_gasto and has_fecha:
-        return "gastos"
-
-    # Solo precio ambiguo sin catálogo ni fecha → asumimos venta
-    if has_precio_ambiguo and not has_producto:
-        return "ventas"
-
-    # Fallbacks por señales sueltas
-    if has_venta:
-        return "ventas"
+    # FASE 3: discriminación venta vs gasto por CONTEXTO (scoring de señales fuertes).
+    # Las columnas de dinero genéricas (monto/importe/total) NO cuentan acá. Empate de
+    # señales o ausencia total → "general" (ambiguo): el usuario confirma el tipo, no se
+    # importa como venta en silencio.
+    if has_venta and has_gasto:
+        if gasto_score > venta_score:
+            return "gastos"
+        if venta_score > gasto_score:
+            return "ventas"
+        return "general"  # señales de ambos, empate → ambiguo
     if has_gasto:
         return "gastos"
+    if has_venta:
+        return "ventas"
+    # Sin señales fuertes de contexto (solo dinero/fecha/descripción) → ambiguo.
     return "general"
 
 
