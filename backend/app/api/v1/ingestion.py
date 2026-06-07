@@ -7,14 +7,18 @@ GET    /ingestion/files/{file_id}/preview   — get parsed_summary_json
 POST   /ingestion/files/{file_id}/confirm  — confirm import (NEEDS_CONFIRMATION only)
 """
 
+import hashlib
+import time
 import uuid
 from collections import defaultdict
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user
+from app.application.services import pipeline_event_service
 from app.application.services.column_mapping_service import REQUIRED_FIELDS, ColumnMappingService
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
@@ -36,7 +40,7 @@ from app.jobs.ingestion_worker import (
     process_text_document,
 )
 from app.main import limiter
-from app.observability.logger import get_logger
+from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
@@ -47,6 +51,12 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_PROCESSING,
     PROCESSING_STATUS_REJECTED,
     UploadedFile,
+)
+from app.persistence.models.pipeline_event import (
+    STAGE_CONFIRM,
+    STAGE_PARSE,
+    STAGE_UPLOAD,
+    STAGE_VALIDATE,
 )
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -101,6 +111,8 @@ async def _process_file_sync(
     """
     from app.application.services.validation_gate import ValidationGate  # noqa: PLC0415
 
+    trace_id = record.trace_id or record.id
+    bind_request_context(trace_id=trace_id)
     repo = FileRepository(session)
     try:
         record.processing_status = PROCESSING_STATUS_PROCESSING
@@ -109,7 +121,19 @@ async def _process_file_sync(
 
         s3 = S3Client()
         content = await s3.download(record.s3_key)
+        _t0 = time.monotonic()
         summary = parse_uploaded_content(content, record.content_type, record.original_filename)
+        await pipeline_event_service.emit_event(
+            session,
+            trace_id=trace_id,
+            tenant_id=record.tenant_id,
+            stage=STAGE_PARSE,
+            file_id=record.id,
+            rows_in=summary.get("row_count"),
+            confidence=summary.get("confidence"),
+            latency_ms=int((time.monotonic() - _t0) * 1000),
+            detail={"file_type": summary.get("file_type"), "warnings": summary.get("warnings")},
+        )
 
         gate = ValidationGate()
         gate_result = gate.validate(summary, force=force)
@@ -119,6 +143,15 @@ async def _process_file_sync(
             record.rejection_reason = gate_result.rejection_reason
             record.parsed_summary_json = summary
             await repo.save(record)
+            await pipeline_event_service.emit_event(
+                session,
+                trace_id=trace_id,
+                tenant_id=record.tenant_id,
+                stage=STAGE_VALIDATE,
+                file_id=record.id,
+                rows_rejected=summary.get("row_count"),
+                detail={"passed": False, "reason": gate_result.rejection_reason},
+            )
             logger.info(
                 "ingestion.sync_fallback.rejected",
                 file_id=str(record.id),
@@ -130,6 +163,16 @@ async def _process_file_sync(
         record.parsed_summary_json = final_summary
         record.processing_status = PROCESSING_STATUS_NEEDS_CONFIRMATION
         await repo.save(record)
+        await pipeline_event_service.emit_event(
+            session,
+            trace_id=trace_id,
+            tenant_id=record.tenant_id,
+            stage=STAGE_VALIDATE,
+            file_id=record.id,
+            rows_out=final_summary.get("row_count"),
+            confidence=final_summary.get("confidence"),
+            detail={"passed": True},
+        )
 
         logger.info(
             "ingestion.sync_fallback.done",
@@ -192,6 +235,11 @@ async def upload_file(
     s3 = S3Client()
     stored_key = await s3.upload_to_key(content=content, key=s3_key, content_type=detected_mime)
 
+    # FASE 0: trazabilidad (trace_id agrupa el ciclo de vida) + hash para dedup.
+    trace_id = uuid.uuid4()
+    content_hash = hashlib.sha256(content).hexdigest()
+    bind_request_context(trace_id=trace_id)
+
     record = UploadedFile(
         tenant_id=tenant.tenant_id,
         uploaded_by=current_user.user_id,
@@ -202,9 +250,26 @@ async def upload_file(
         purpose=file_hint,
         status="uploaded",
         processing_status=PROCESSING_STATUS_PENDING,
+        trace_id=trace_id,
+        content_hash=content_hash,
     )
     repo = FileRepository(session)
     saved = await repo.save(record)
+
+    await pipeline_event_service.emit_event(
+        session,
+        trace_id=trace_id,
+        tenant_id=tenant.tenant_id,
+        stage=STAGE_UPLOAD,
+        file_id=saved.id,
+        detail={
+            "filename": filename,
+            "content_type": detected_mime,
+            "size_bytes": len(content),
+            "file_hint": file_hint,
+            "content_hash": content_hash,
+        },
+    )
 
     if get_settings().USE_LOCAL_FALLBACK:
         await _process_file_sync(saved, session, force=force)
@@ -387,13 +452,10 @@ async def delete_file(
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
-    try:
-        s3 = S3Client()
-        await s3.delete(record.s3_key)
-    except Exception as exc:
-        logger.warning("ingestion.delete.s3_failed", file_id=str(file_id), error=str(exc))
-
-    await repo.delete(record)
+    # FASE 0: soft delete — el crudo en R2 se preserva (input para ML + respaldo).
+    # El archivo deja de aparecer en la UI pero el registro y el objeto persisten.
+    record.deleted_at = datetime.now(UTC)
+    await repo.save(record)
     await session.commit()
 
 
@@ -687,6 +749,9 @@ async def confirm_file(
             _cm[m.context_id or ""][m.source_column] = m.target_field
         context_mappings = dict(_cm)
 
+    _trace_id = record.trace_id or record.id
+    bind_request_context(trace_id=_trace_id)
+    _t0 = time.monotonic()
     counts = await insert_confirmed_data(
         session,
         tenant.tenant_id,
@@ -697,6 +762,7 @@ async def confirm_file(
         context_confirmed=body.context_confirmed or None,
         context_entity=body.context_entity or None,
     )
+    _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
 
     # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
     # Para archivos grandes (multi-hoja o muchas filas) el JSONB puede pesar 10+ MB;
@@ -729,6 +795,17 @@ async def confirm_file(
     record.parsed_summary_json = compact_summary
     record.processing_status = PROCESSING_STATUS_DONE
     await repo.save(record)
+
+    await pipeline_event_service.emit_event(
+        session,
+        trace_id=_trace_id,
+        tenant_id=tenant.tenant_id,
+        stage=STAGE_CONFIRM,
+        file_id=file_id,
+        rows_out=counts["ventas"] + counts["gastos"] + counts["productos"],
+        latency_ms=_confirm_latency_ms,
+        detail={"imported_counts": counts, "confirmed_fields": body.confirmed_fields},
+    )
 
     logger.info(
         "ingestion.confirm.done",

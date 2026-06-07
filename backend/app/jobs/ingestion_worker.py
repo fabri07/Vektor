@@ -24,6 +24,7 @@ import time
 import uuid as _uuid
 from typing import Any
 
+from app.application.services import pipeline_event_service
 from app.application.services.file_parsing import (
     analyze_headers,
     extract_amounts_from_text,
@@ -31,7 +32,7 @@ from app.application.services.file_parsing import (
 )
 from app.application.services.validation_gate import ValidationGate
 from app.jobs.celery_app import celery_app
-from app.observability.logger import get_logger, log_job
+from app.observability.logger import bind_request_context, get_logger, log_job
 from app.observability.metrics import track_job_event
 from app.persistence.models.file import (
     PROCESSING_STATUS_FAILED,
@@ -39,6 +40,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_PROCESSING,
     PROCESSING_STATUS_REJECTED,
 )
+from app.persistence.models.pipeline_event import STAGE_VALIDATE
 
 logger = get_logger(__name__)
 
@@ -71,6 +73,9 @@ async def _load_and_lock(session: Any, file_id: str, tenant_id: str) -> Any:
     record = result.scalar_one_or_none()
     if record is None:
         raise ValueError(f"UploadedFile {file_id} not found for tenant {tenant_id}")
+    # FASE 0: bindear trace_id del record (los contextvars no cruzan el boundary de Celery).
+    if record.trace_id is not None:
+        bind_request_context(trace_id=record.trace_id)
     record.processing_status = PROCESSING_STATUS_PROCESSING
     await session.flush()
     return record
@@ -81,10 +86,23 @@ async def _save_result(
     record: Any,
     summary: dict[str, Any],
     processing_status: str,
+    *,
+    emit_stage: str | None = None,
 ) -> None:
     record.parsed_summary_json = summary
     record.processing_status = processing_status
     await session.flush()
+    if emit_stage is not None:
+        await pipeline_event_service.emit_event(
+            session,
+            trace_id=record.trace_id or record.id,
+            tenant_id=record.tenant_id,
+            stage=emit_stage,
+            file_id=record.id,
+            rows_out=summary.get("row_count") or summary.get("rows_processed"),
+            confidence=summary.get("confidence"),
+            detail={"passed": True, "file_type": summary.get("file_type")},
+        )
 
 
 def _build_async_session(database_url: str) -> Any:
@@ -125,6 +143,15 @@ async def _apply_validation_gate(
             record.processing_status = PROCESSING_STATUS_REJECTED
             record.rejection_reason = result.rejection_reason
             record.parsed_summary_json = summary
+            await pipeline_event_service.emit_event(
+                session,
+                trace_id=record.trace_id or record.id,
+                tenant_id=record.tenant_id,
+                stage=STAGE_VALIDATE,
+                file_id=record.id,
+                rows_rejected=summary.get("row_count"),
+                detail={"passed": False, "reason": result.rejection_reason},
+            )
             await track_job_event(
                 session,
                 task_name,
@@ -204,6 +231,7 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
                         result_record,
                         validated_summary,
                         PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                        emit_stage=STAGE_VALIDATE,
                     )
                     await track_job_event(
                         session,
@@ -307,6 +335,7 @@ def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> 
                         result_record,
                         validated_summary,
                         PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                        emit_stage=STAGE_VALIDATE,
                     )
                     await track_job_event(
                         session,
@@ -411,6 +440,7 @@ def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None
                         result_record,
                         validated_summary,
                         PROCESSING_STATUS_NEEDS_CONFIRMATION,
+                        emit_stage=STAGE_VALIDATE,
                     )
                     await track_job_event(
                         session,
