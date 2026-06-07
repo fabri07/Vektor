@@ -116,6 +116,11 @@ _NOMBRE_COLS: set[str] = {
     "name",
     "concepto",
     "detalle",
+    # FASE 3: columnas de compra de mercadería sirven como nombre del producto.
+    "mercaderia",
+    "mercadería",
+    "insumo",
+    "insumos",
 }
 _PRECIO_VENTA_COLS: set[str] = {
     "precio_venta", "precio", "price", "p_venta",

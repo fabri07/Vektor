@@ -93,6 +93,11 @@ NOMBRE_COLS = {"producto", "nombre"}
 PRODUCTO_COLS = CATALOGO_COLS | NOMBRE_COLS | {"stock", "descripcion"}
 FECHA_COLS = {"fecha", "date", "dia", "mes", "periodo"}
 
+# FASE 3: señales de compra de mercadería/insumos para reventa (→ inventario, no gasto).
+# Conservador: solo se rerutea a stock si HAY mercadería Y una columna de cantidad.
+MERCADERIA_COLS = {"mercaderia", "mercadería", "insumo", "insumos", "reposicion", "reposición"}
+CANTIDAD_COLS = {"cantidad", "unidades", "unidad", "qty", "cant"}
+
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
 GASTO_CTX = {"gasto", "compra", "pago", "factura", "proveedor", "egreso", "gaste"}
 STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia", "mercadería"}
@@ -325,6 +330,9 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     has_catalogo_fuerte = any(any(k in col for k in CATALOGO_COLS) for col in normalized)
     # Señal de nombre: producto/nombre — puede aparecer en ventas/gastos también
     has_nombre = any(any(k in col for k in NOMBRE_COLS) for col in normalized)
+    # FASE 3: señales de compra de mercadería + cantidad (inventario para reventa)
+    has_mercaderia = any(any(k in col for k in MERCADERIA_COLS) for col in normalized)
+    has_cantidad = any(any(k in col for k in CANTIDAD_COLS) for col in normalized)
 
     # Señales ambiguas: "precio" / "total" solos pueden ser precio de catálogo
     has_precio_ambiguo = any(col in ("precio", "total", "price", "valor") for col in normalized)
@@ -337,6 +345,8 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_precio_ambiguo=has_precio_ambiguo,
         has_catalogo_fuerte=has_catalogo_fuerte,
         has_nombre=has_nombre,
+        has_mercaderia=has_mercaderia,
+        has_cantidad=has_cantidad,
     )
 
     has_catalogo_signal = has_catalogo_fuerte or has_nombre
@@ -361,10 +371,13 @@ def infer_spreadsheet_type(
     has_precio_ambiguo: bool = False,
     has_catalogo_fuerte: bool = False,
     has_nombre: bool = False,
+    has_mercaderia: bool = False,
+    has_cantidad: bool = False,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
     Reglas (en orden de prioridad):
+    0. Compra de mercadería/insumos + cantidad → inventario (FASE 3, conservador).
     1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
     2. Señal de nombre/producto sin venta explícita → stock.
     3. Señal de nombre/producto sin fecha → stock (lista de precios, catálogo).
@@ -372,6 +385,12 @@ def infer_spreadsheet_type(
     5. Sin señales de catálogo: fecha + venta → ventas; fecha + gasto → gastos.
     6. Fallbacks por señales sueltas.
     """
+    # FASE 3: compra de mercadería/insumos para reventa CON columna de cantidad →
+    # inventario, NO gasto corriente. Conservador: requiere AMBAS señales para no
+    # absorber "compra de servicios/alquiler" (sin columnas de inventario).
+    if has_mercaderia and has_cantidad:
+        return "stock"
+
     # Señal fuerte (sku, inventario, articulo, codigo, item) → inequívocamente catálogo
     if has_catalogo_fuerte:
         return "stock"
