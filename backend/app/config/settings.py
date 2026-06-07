@@ -192,6 +192,9 @@ class Settings(BaseSettings):
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
     ENABLE_EMAIL_VERIFICATION: bool = True
     ENABLE_AGENT_AUTOMATIONS: bool = False
+    # FASE 2: 4ª capa de mapeo de columnas con LLM (fallback ante baja confianza).
+    # Default False — opt-in: requiere ANTHROPIC_API_KEY y consume tokens.
+    ENABLE_LLM_COLUMN_MAPPING: bool = False
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
 
     # Auth social

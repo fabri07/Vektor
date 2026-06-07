@@ -252,6 +252,10 @@ class ColumnMappingService:
                 }
             )
 
+        # FASE 2: 4ª capa LLM (fallback). Solo para columnas con baja confianza
+        # determinística. Una sola llamada batch; fail-silent (flag/key/errores).
+        await self._apply_llm_fallback(entity_type, suggestions)
+
         # Segunda pasada: detectar required_missing
         mapped_targets = {
             s["target_field"] for s in suggestions if s["status"] == "mapped"
@@ -273,6 +277,43 @@ class ColumnMappingService:
                             break
 
         return suggestions
+
+    async def _apply_llm_fallback(
+        self, entity_type: str, suggestions: list[dict[str, Any]]
+    ) -> None:
+        """FASE 2: mejora las sugerencias de baja confianza con el LLM (in-place)."""
+        from app.application.services.llm_column_mapper import (  # noqa: PLC0415
+            LLM_MAPPING_THRESHOLD,
+            suggest_with_llm,
+        )
+
+        low_conf = [s for s in suggestions if s["confidence"] < LLM_MAPPING_THRESHOLD]
+        if not low_conf:
+            return
+        valid_fields = CANONICAL_FIELDS.get(entity_type, {})
+        if not valid_fields:
+            return
+
+        llm_result = await suggest_with_llm(
+            entity_type,
+            [{"header": s["source_column"], "sample_values": s["sample_values"]} for s in low_conf],
+            valid_fields,
+        )
+        if not llm_result:
+            return
+
+        for s in low_conf:
+            hit = llm_result.get(s["source_column"])
+            if not hit:
+                continue
+            target = hit["target_field"]
+            conf = hit["confidence"]
+            # Solo pisar si el LLM aporta un mapeo usable y MÁS confiable que lo actual.
+            if target != "ignore" and conf > s["confidence"]:
+                s["target_field"] = target
+                s["confidence"] = round(conf, 3)
+                s["source"] = "llm"
+                s["status"] = "mapped"
 
     async def save_mappings(
         self,
