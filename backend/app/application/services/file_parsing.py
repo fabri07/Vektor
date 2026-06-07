@@ -411,10 +411,79 @@ def infer_spreadsheet_type(
 
 
 def rows_to_dicts(headers: list[str], rows: list[list[Any]]) -> list[dict[str, Any]]:
-    return [
-        {h: (str(v) if v is not None else None) for h, v in zip(headers, row, strict=False)}
-        for row in rows
-    ]
+    """Mapea filas a dicts por header, tolerante a filas irregulares.
+
+    Si una fila tiene menos celdas que headers, las faltantes quedan None
+    (no se descartan en silencio como hacía `zip(strict=False)`). Filas None y
+    celdas extra (más allá de los headers) se ignoran.
+    """
+    out: list[dict[str, Any]] = []
+    n = len(headers)
+    for row in rows:
+        cells = list(row) if row is not None else []
+        out.append(
+            {
+                headers[i]: (str(cells[i]) if i < len(cells) and cells[i] is not None else None)
+                for i in range(n)
+            }
+        )
+    return out
+
+
+def _detect_header_row(rows: list[list[Any]], *, max_scan: int = 15) -> int:
+    """Detecta el índice de la fila de encabezado, saltando títulos/filas vacías.
+
+    Real-world: planillas exportadas suelen tener un título ("Ventas Junio") y/o
+    filas en blanco arriba del encabezado real. Heurística: la primera fila con
+    ≥2 celdas no vacías, mayoría de texto (no números), y cuya fila siguiente
+    tenga una cantidad de celdas no vacías comparable (datos). Si ninguna
+    califica, devuelve 0 (comportamiento previo).
+    """
+
+    def _nonempty(row: list[Any]) -> list[Any]:
+        return [c for c in (row or []) if c is not None and str(c).strip() != ""]
+
+    def _is_number(v: Any) -> bool:
+        s = str(v).strip().replace(".", "").replace(",", "").replace("$", "").replace("%", "")
+        return s.isdigit()
+
+    limit = min(len(rows), max_scan)
+    for i in range(limit):
+        non_empty = _nonempty(rows[i])
+        if len(non_empty) < 2:
+            continue  # título o fila casi vacía
+        numeric_ratio = sum(1 for c in non_empty if _is_number(c)) / len(non_empty)
+        if numeric_ratio > 0.5:
+            continue  # parece una fila de datos, no encabezados
+        # La fila siguiente debería tener datos (≥1 celda no vacía).
+        if i + 1 < len(rows) and len(_nonempty(rows[i + 1])) >= 1:
+            return i
+        if i + 1 >= len(rows):
+            return i
+    return 0
+
+
+def _decode_text_bytes(content: bytes) -> str:
+    """Decodifica bytes de CSV/texto probando encodings comunes (UTF-8 BOM, latin-1, cp1252)."""
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return content.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _sniff_delimiter(sample: str) -> str:
+    """Detecta el delimitador de un CSV (`,` `;` tab `|`). Default `,` si no puede."""
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        return dialect.delimiter
+    except csv.Error:
+        # Heurística simple: el candidato más frecuente en la primera línea.
+        first_line = sample.splitlines()[0] if sample.splitlines() else ""
+        counts = {d: first_line.count(d) for d in (";", ",", "\t", "|")}
+        best = max(counts, key=lambda d: counts[d])
+        return best if counts[best] > 0 else ","
 
 
 def classify_line(line: str) -> str:
@@ -463,9 +532,10 @@ def _store_rows_by_type(
 ) -> None:
     """Almacena las filas en la clave correcta según el tipo inferido.
 
-    El campo `ventas_detectadas` siempre se rellena para compatibilidad con
-    `_insert_confirmed_data`, que lo usa como fuente de filas independientemente
-    del tipo. La clave específica sirve para que el agente y la UI sepan qué son.
+    Cada bucket recibe filas SOLO si corresponde a su tipo. `insert_confirmed_data`
+    ya cae a `gastos_detectados` cuando `ventas_detectadas` está vacío, así que NO
+    hace falta contaminar `ventas_detectadas` con filas de gastos (eso causaba
+    riesgo de doble conteo venta+gasto).
     """
     if inferred_type == "stock":
         summary["stock_detectado"] = rows
@@ -473,10 +543,12 @@ def _store_rows_by_type(
         summary["gastos_detectados"] = []
     elif inferred_type == "gastos":
         summary["gastos_detectados"] = rows
-        summary["ventas_detectadas"] = rows  # backward compat para _insert_confirmed_data
+        summary["ventas_detectadas"] = []
+        summary["stock_detectado"] = []
     else:
         summary["ventas_detectadas"] = rows
         summary["gastos_detectados"] = []
+        summary["stock_detectado"] = []
 
 
 # Mapeo tipo-inferido / clasificación-de-hoja → entity_type del ColumnMapper.
@@ -568,9 +640,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
     }
 
     if mime == "text/csv":
-        text = content.decode("utf-8", errors="replace")
-        reader = csv.reader(io.StringIO(text))
-        rows = list(reader)
+        # Encoding robusto (UTF-8 BOM, latin-1, cp1252) + delimitador auto (, ; \t |).
+        text = _decode_text_bytes(content)
+        delimiter = _sniff_delimiter(text[:8192])
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        rows = [r for r in reader if any((c or "").strip() for c in r)]  # descarta filas vacías
         if not rows:
             summary.update(
                 {
@@ -584,14 +658,17 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             )
             return summary
 
-        headers = rows[0]
-        data_rows = rows[1:]
+        # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
+        hdr_idx = _detect_header_row(rows)
+        headers = rows[hdr_idx]
+        data_rows = rows[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
         preview_rows = all_dicts[:10]
         null_stats = compute_column_null_stats(all_dicts)
         at_risk = flag_columns_at_risk(null_stats)
         summary.update(analysis)
+        summary["delimiter"] = delimiter
         summary["headers"] = headers
         summary["rows_processed"] = len(data_rows)
         summary["row_count"] = len(data_rows)
@@ -603,7 +680,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                 f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
             )
         csv_inferred = analysis.get("inferred_type", "general")
-        _store_rows_by_type(summary, all_dicts[:50], csv_inferred)
+        # Sin truncamiento: todas las filas se guardan (el [:50] previo perdía datos).
+        _store_rows_by_type(summary, all_dicts, csv_inferred)
         summary["mapping_contexts"] = [
             _build_table_context(csv_inferred, headers, preview_rows, len(data_rows))
         ]
@@ -650,15 +728,17 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
 
             for sheet_name in sheet_names:
                 ws = workbook[sheet_name]
-                rows = list(ws.iter_rows(values_only=True))
+                rows = [list(r) for r in ws.iter_rows(values_only=True)]
                 if len(rows) < 2:
                     continue
 
+                # Detecta la fila de encabezado real de la hoja.
+                hdr_idx = _detect_header_row(rows)
                 headers = [
                     str(c) if c is not None else f"col_{i}"
-                    for i, c in enumerate(rows[0])
+                    for i, c in enumerate(rows[hdr_idx])
                 ]
-                data_rows = [list(row) for row in rows[1:]]
+                data_rows = rows[hdr_idx + 1 :]
                 if not data_rows:
                     continue
 
@@ -761,11 +841,14 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             )
             return summary
 
+        # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
+        _all = [list(r) for r in all_rows]
+        hdr_idx = _detect_header_row(_all)
         headers = [
             str(cell) if cell is not None else f"col_{index}"
-            for index, cell in enumerate(all_rows[0])
+            for index, cell in enumerate(_all[hdr_idx])
         ]
-        data_rows = [list(row) for row in all_rows[1:]]
+        data_rows = _all[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
         preview_rows = all_dicts[:10]
