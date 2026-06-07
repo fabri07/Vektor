@@ -24,7 +24,11 @@ from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+# Límite de seguridad (anti-DOS). Archivos > 16MB se rechazan con error claro.
+# El manejo de archivos más grandes (streaming / re-arquitectura) queda para más
+# adelante; con este techo el JSONB de uploaded_files no se acerca al límite de Neon.
+MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024  # 16 MB
+MAX_FILE_SIZE_LABEL = "16 MB"
 
 SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
 
@@ -754,11 +758,31 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     sheet_type = analyze_headers(headers).get("inferred_type", "general")
 
                 entity = _TYPE_TO_ENTITY.get(sheet_type)
+                context_id = f"sheet:{sheet_name}"
                 if entity is None:
-                    # Pestaña "general"/desconocida sin tipo importable: se ignora.
+                    # Hoja no clasificable: NO se descarta en silencio. Se preserva como
+                    # contexto `unclassified` (entity_type=None) con warning, para que el
+                    # usuario la vea y la reclasifique manualmente. El insert salta los
+                    # contextos sin entidad, así que no se importa hasta que se asigne tipo.
+                    contexts.append(
+                        {
+                            "context_id": context_id,
+                            "label": sheet_name,
+                            "source_kind": "sheet",
+                            "entity_type": None,
+                            "headers": headers,
+                            "fields": None,
+                            "preview_rows": dicts[:10],
+                            "row_count": len(dicts),
+                            "unclassified": True,
+                        }
+                    )
+                    summary["warnings"].append(
+                        f"La hoja '{sheet_name}' no se pudo clasificar automáticamente. "
+                        "Revisala y asignale un tipo manualmente si querés importarla."
+                    )
                     continue
 
-                context_id = f"sheet:{sheet_name}"
                 contexts.append(
                     {
                         "context_id": context_id,

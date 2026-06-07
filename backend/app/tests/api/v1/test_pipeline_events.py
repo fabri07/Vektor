@@ -10,6 +10,7 @@ Verifica:
 Nota: get_stats usa percentile_cont (Postgres-only) — no se testea en SQLite.
 """
 
+import hashlib
 import unittest.mock
 import uuid
 from typing import Any
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import pipeline_event_service
 from app.persistence.models.file import (
+    PROCESSING_STATUS_DONE,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     UploadedFile,
 )
@@ -85,6 +87,55 @@ class TestUploadEmitsEvent:
         ).scalar_one()
         assert record.trace_id == ev.trace_id
         assert record.content_hash == ev.detail["content_hash"]
+
+
+@pytest.mark.asyncio
+class TestReuploadDedup:
+    async def test_reupload_of_imported_file_warns(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        xlsx_bytes: bytes,
+    ) -> None:
+        from app.jobs.ingestion_worker import process_spreadsheet
+
+        # Un archivo ya importado (DONE) con el hash del contenido que vamos a subir.
+        prior = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas_enero.xlsx",
+            s3_key="uploads/test/uuid/ventas_enero.xlsx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            size_bytes=len(xlsx_bytes),
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+            content_hash=hashlib.sha256(xlsx_bytes).hexdigest(),
+        )
+        db_session.add(prior)
+        await db_session.commit()
+
+        with (
+            unittest.mock.patch(
+                "app.api.v1.ingestion.S3Client.upload_to_key",
+                new_callable=unittest.mock.AsyncMock,
+                return_value="uploads/fake/uuid/ventas.xlsx",
+            ),
+            unittest.mock.patch.object(process_spreadsheet, "delay"),
+        ):
+            response = await client.post(
+                "/api/v1/ingestion/upload",
+                headers=auth_headers,
+                files={"file": ("ventas.xlsx", xlsx_bytes, "application/octet-stream")},
+            )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["duplicate_of"] == str(prior.id)
+        assert data["warning"] and "importado" in data["warning"].lower()
 
 
 @pytest.mark.asyncio

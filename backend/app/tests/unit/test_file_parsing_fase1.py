@@ -101,12 +101,12 @@ def test_csv_with_bom_clean_first_header() -> None:
 
 def test_csv_with_title_row_detects_real_headers() -> None:
     csv = (
-        "Reporte de Ventas - Junio\n"
-        "\n"
-        "fecha,monto,descripcion\n"
-        "2026-01-15,50000,Venta\n"
-        "2026-01-16,35000,Venta"
-    ).encode()
+        b"Reporte de Ventas - Junio\n"
+        b"\n"
+        b"fecha,monto,descripcion\n"
+        b"2026-01-15,50000,Venta\n"
+        b"2026-01-16,35000,Venta"
+    )
     summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
     assert summary["columns"] == ["fecha", "monto", "descripcion"]
     assert summary["row_count"] == 2
@@ -127,3 +127,42 @@ def test_gastos_csv_does_not_contaminate_ventas_bucket() -> None:
     assert summary["inferred_type"] == "gastos"
     assert summary["gastos_detectados"]  # tiene gastos
     assert summary["ventas_detectadas"] == []  # NO contamina ventas
+
+
+# ── Multi-hoja: preservación de hojas no clasificables ────────────────────────
+
+
+def _build_multisheet_with_unclassified() -> bytes:
+    import io
+
+    import pytest
+
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ventas = wb.active
+    ventas.title = "Ventas"
+    ventas.append(["fecha", "monto"])
+    ventas.append(["2026-01-15", "50000"])
+    resumen = wb.create_sheet("Resumen")  # nombre + headers no clasificables
+    resumen.append(["Concepto", "Detalle", "Observaciones"])
+    resumen.append(["Total mes", "ok", "sin novedad"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_multisheet_unclassified_sheet_preserved_with_warning() -> None:
+    content = _build_multisheet_with_unclassified()
+    summary = parse_uploaded_content(content, _XLSX_MIME, "mixto.xlsx")
+    contexts = summary["mapping_contexts"]
+    by_label = {c["label"]: c for c in contexts}
+
+    # La hoja clasificable entra normal.
+    assert by_label["Ventas"]["entity_type"] == "sale"
+
+    # La hoja "Resumen" NO se descarta: queda como contexto unclassified + warning.
+    assert "Resumen" in by_label
+    assert by_label["Resumen"]["entity_type"] is None
+    assert by_label["Resumen"]["unclassified"] is True
+    assert by_label["Resumen"]["row_count"] == 1
+    assert any("Resumen" in w for w in summary["warnings"])

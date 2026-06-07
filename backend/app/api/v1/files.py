@@ -58,7 +58,7 @@ async def upload_file(
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File exceeds maximum size of 10 MB.",
+            detail="File exceeds maximum size of 16 MB.",
         )
 
     filename = sanitize_filename(file.filename or "upload")

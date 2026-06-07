@@ -129,6 +129,12 @@ async def confirmed_file(
         parsed_summary_json={
             "confidence": "HIGH",
             "file_type": "spreadsheet",
+            # Campos que el parser real siempre setea (necesarios para que la
+            # heurística legacy reconozca el tipo y monto e inserte filas).
+            "inferred_type": "ventas",
+            "has_venta": True,
+            "has_fecha": True,
+            "row_count": 1,
             "ventas_detectadas": [
                 {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
             ],
@@ -262,9 +268,8 @@ class TestUploadEndpoint:
         client: AsyncClient,
         auth_headers: dict[str, Any],
     ) -> None:
-        # 11 MB of zeros (no valid magic bytes → will also fail MIME check first)
-        # Use xlsx magic bytes prefix + junk to get past MIME detection
-        big_content = b"PK\x03\x04" + b"\x00" * (11 * 1024 * 1024)
+        # 17 MB (> 16 MB cap). xlsx magic bytes prefix + junk to get past MIME detection.
+        big_content = b"PK\x03\x04" + b"\x00" * (17 * 1024 * 1024)
         response = await client.post(
             "/api/v1/ingestion/upload",
             headers=auth_headers,

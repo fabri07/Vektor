@@ -28,6 +28,31 @@ class FileRepository(BaseRepository[UploadedFile]):
         result = await self._session.execute(q)
         return result.scalar_one_or_none()
 
+    async def find_imported_by_content_hash(
+        self,
+        tenant_id: UUID,
+        content_hash: str,
+        exclude_id: UUID | None = None,
+    ) -> UploadedFile | None:
+        """Busca un archivo YA importado (DONE) con el mismo contenido (dedup de re-upload).
+
+        Solo considera archivos no soft-deleted. Sirve para avisar al usuario que el
+        archivo ya fue importado antes y evitar duplicar datos sin querer.
+        """
+        from app.persistence.models.file import PROCESSING_STATUS_DONE  # noqa: PLC0415
+
+        q = select(UploadedFile).where(
+            UploadedFile.tenant_id == tenant_id,
+            UploadedFile.content_hash == content_hash,
+            UploadedFile.processing_status == PROCESSING_STATUS_DONE,
+            UploadedFile.deleted_at.is_(None),
+        )
+        if exclude_id is not None:
+            q = q.where(UploadedFile.id != exclude_id)
+        q = q.order_by(UploadedFile.created_at.desc()).limit(1)
+        result = await self._session.execute(q)
+        return result.scalar_one_or_none()
+
     async def list_by_tenant_filtered(
         self,
         tenant_id: UUID,

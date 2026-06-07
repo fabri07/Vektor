@@ -24,12 +24,14 @@ from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
 )
 from app.application.services.file_parsing import (
-    SPREADSHEET_MIMES as _SPREADSHEET_MIMES,
-)
-from app.application.services.file_parsing import (
+    MAX_FILE_SIZE_BYTES,
+    MAX_FILE_SIZE_LABEL,
     detect_supported_mime,
     parse_uploaded_content,
     sanitize_filename,
+)
+from app.application.services.file_parsing import (
+    SPREADSHEET_MIMES as _SPREADSHEET_MIMES,
 )
 from app.application.services.ingestion_import_service import insert_confirmed_data
 from app.config.settings import get_settings
@@ -79,8 +81,7 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+# MAX_FILE_SIZE_BYTES / MAX_FILE_SIZE_LABEL: única fuente de verdad en file_parsing.
 
 FileHint = Literal["ventas", "gastos", "stock", "general"]
 
@@ -216,7 +217,10 @@ async def upload_file(
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="El archivo supera el tamaño máximo de 10 MB.",
+            detail=(
+                f"El archivo supera el tamaño máximo de {MAX_FILE_SIZE_LABEL}. "
+                "Dividilo en archivos más chicos e importalos por separado."
+            ),
         )
 
     filename = sanitize_filename(file.filename or "upload")
@@ -271,9 +275,23 @@ async def upload_file(
         },
     )
 
+    # Dedup de re-upload: avisar (no bloquear) si este contenido ya fue importado.
+    _dup = await repo.find_imported_by_content_hash(
+        tenant.tenant_id, content_hash, exclude_id=saved.id
+    )
+    dup_of = _dup.id if _dup else None
+    dup_warning = (
+        f"Este archivo ya fue importado antes ('{_dup.original_filename}'). "
+        "Si confirmás, podrías duplicar los datos."
+        if _dup
+        else None
+    )
+
     if get_settings().USE_LOCAL_FALLBACK:
         await _process_file_sync(saved, session, force=force)
-        return UploadResponse(file_id=saved.id, status="PROCESSING")
+        return UploadResponse(
+            file_id=saved.id, status="PROCESSING", duplicate_of=dup_of, warning=dup_warning
+        )
 
     # Enqueue parsing job — fall back to sync processing if Celery/Redis
     # is unavailable (beta: single Railway service without workers).
@@ -287,9 +305,13 @@ async def upload_file(
             msg="Celery/Redis no disponible, procesando archivo de forma síncrona.",
         )
         await _process_file_sync(saved, session, force=force)
-        return UploadResponse(file_id=saved.id, status="PROCESSING")
+        return UploadResponse(
+            file_id=saved.id, status="PROCESSING", duplicate_of=dup_of, warning=dup_warning
+        )
 
-    return UploadResponse(file_id=saved.id, status="PROCESSING")
+    return UploadResponse(
+        file_id=saved.id, status="PROCESSING", duplicate_of=dup_of, warning=dup_warning
+    )
 
 
 @router.get(
@@ -763,6 +785,34 @@ async def confirm_file(
         context_entity=body.context_entity or None,
     )
     _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
+
+    # Falla explícita ante inserción vacía con datos presentes: si el archivo tenía
+    # filas y el usuario confirmó algún tipo pero NO se insertó nada (el fallback por
+    # keyword no encontró las columnas requeridas), cortamos con 422 en vez de
+    # responder "Datos confirmados" en silencio. El rollback de get_db_session deja
+    # el archivo en NEEDS_CONFIRMATION para reintentar con mapeo manual.
+    _total_inserted = counts["ventas"] + counts["gastos"] + counts["productos"]
+    _had_rows = bool(updated_summary.get("row_count")) or any(
+        updated_summary.get(k)
+        for k in ("ventas_detectadas", "gastos_detectados", "stock_detectado")
+    )
+    _confirmed_any = any((body.confirmed_fields or {}).values()) or any(
+        (body.context_confirmed or {}).values()
+    )
+    if _total_inserted == 0 and _had_rows and _confirmed_any:
+        logger.warning(
+            "ingestion.confirm.zero_inserted",
+            file_id=str(file_id),
+            row_count=updated_summary.get("row_count"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "No se importó ninguna fila: no se detectaron automáticamente las "
+                "columnas requeridas (fecha / monto / nombre) para el tipo confirmado. "
+                "Mapeá las columnas manualmente o revisá el tipo de datos del archivo."
+            ),
+        )
 
     # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
     # Para archivos grandes (multi-hoja o muchas filas) el JSONB puede pesar 10+ MB;
