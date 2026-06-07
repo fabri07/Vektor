@@ -24,6 +24,55 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
 
 
+# ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
+
+
+async def _load_product_index(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID | None]]:
+    """Carga el catálogo del tenant UNA vez para vincular transacciones en memoria.
+
+    Evita N queries (una por fila). Devuelve `(by_sku, by_name)`:
+    - `by_sku[sku_lower] = product_id`
+    - `by_name[norm_name] = product_id` o `None` si el nombre normalizado es
+      ambiguo (varios productos lo comparten → no se vincula).
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    result = await session.execute(
+        select(Product.id, Product.name, Product.sku).where(Product.tenant_id == tenant_id)
+    )
+    by_sku: dict[str, uuid.UUID] = {}
+    by_name: dict[str, uuid.UUID | None] = {}
+    for pid, pname, psku in result.all():
+        if psku:
+            by_sku[str(psku).strip().lower()] = pid
+        norm = _normalize_name(pname or "")
+        if norm:
+            by_name[norm] = pid if norm not in by_name else None  # None = ambiguo
+    return by_sku, by_name
+
+
+def _resolve_product(
+    by_sku: dict[str, uuid.UUID],
+    by_name: dict[str, uuid.UUID | None],
+    name: str | None,
+    sku: str | None,
+) -> uuid.UUID | None:
+    """Resuelve product_id desde el índice en memoria. SKU exacto gana; luego nombre."""
+    if sku:
+        hit = by_sku.get(str(sku).strip().lower())
+        if hit:
+            return hit
+    if name:
+        norm = _normalize_name(str(name))
+        if norm:
+            return by_name.get(norm)  # None si no existe o es ambiguo
+    return None
+
+
 _NOMBRE_COLS: set[str] = {
     "producto",
     "descripcion",
@@ -282,6 +331,14 @@ async def insert_confirmed_data(
             and nombre_col
         )
 
+        # FASE 3: índice de catálogo en memoria para vincular ventas a producto
+        # (ExpenseEntry no tiene product_id todavía → solo ventas).
+        _by_sku, _by_name = (
+            await _load_product_index(session, tenant_id)
+            if wants_ventas and (nombre_col or sku_col)
+            else ({}, {})
+        )
+
         for row_index, row in enumerate(rows):
             raw_date = row.get(fecha_col) if fecha_col else None
             tx_date = _parse_date(raw_date) if fecha_col else None
@@ -341,6 +398,13 @@ async def insert_confirmed_data(
                     )
                     if cf:
                         entry.custom_fields = cf
+                    # FASE 3: vincular al producto del catálogo (por SKU/nombre de la fila).
+                    entry.product_id = _resolve_product(
+                        _by_sku,
+                        _by_name,
+                        row.get(nombre_col) if nombre_col else None,
+                        row.get(sku_col) if sku_col else None,
+                    )
                     session.add(entry)
                     counts["ventas"] += 1
 
@@ -627,6 +691,9 @@ async def _insert_multisheet_data(
     context_mappings = context_mappings or {}
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
 
+    # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
+    _by_sku, _by_name = await _load_product_index(session, tenant_id)
+
     def _val(row: dict[str, Any], col: str | None, keywords: set[str]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
         if col:
@@ -677,6 +744,13 @@ async def _insert_multisheet_data(
         cf = _custom_fields(row, cf_cols)
         if cf:
             entry.custom_fields = cf
+        # FASE 3: vincular al producto del catálogo.
+        entry.product_id = _resolve_product(
+            _by_sku,
+            _by_name,
+            _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
+            _val(row, cols.get("sku"), _SKU_COLS),
+        )
         session.add(entry)
         counts["ventas"] += 1
 
