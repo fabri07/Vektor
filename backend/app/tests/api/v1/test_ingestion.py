@@ -30,9 +30,9 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     UploadedFile,
 )
+from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
-from app.persistence.models.product import Product
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -666,7 +666,7 @@ def test_sale_response_serializes_amount_as_number() -> None:
         created_at=datetime(2024, 1, 15, 12, 0, 0),
     )
     dumped = sale.model_dump(mode="json")
-    assert isinstance(dumped["amount"], (int, float))
+    assert isinstance(dumped["amount"], int | float)
     assert dumped["amount"] == 5400.5
 
     expense = ExpenseEntryResponse(
@@ -683,7 +683,7 @@ def test_sale_response_serializes_amount_as_number() -> None:
         created_at=datetime(2024, 1, 15, 12, 0, 0),
     )
     dumped_e = expense.model_dump(mode="json")
-    assert isinstance(dumped_e["amount"], (int, float))
+    assert isinstance(dumped_e["amount"], int | float)
     assert dumped_e["amount"] == 12000.0
 
 

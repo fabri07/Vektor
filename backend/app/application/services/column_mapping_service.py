@@ -151,7 +151,7 @@ def _heuristic_match(normalized: str, entity_type: str) -> str | None:
 def _fuzzy_match(normalized: str, entity_type: str) -> tuple[str | None, float]:
     """Similitud fuzzy entre nombre normalizado y keywords. Retorna (target_field, ratio)."""
     try:
-        from rapidfuzz import fuzz  # type: ignore[import]
+        from rapidfuzz import fuzz
     except ImportError:
         return None, 0.0
 
@@ -345,7 +345,7 @@ class ColumnMappingService:
             .where(TenantColumnMapping.tenant_id == tenant_id)
             .order_by(TenantColumnMapping.entity_type, TenantColumnMapping.source_column)
         )
-        return result.scalars().all()
+        return list(result.scalars().all())
 
     async def delete_mapping(
         self, tenant_id: uuid.UUID, mapping_id: uuid.UUID
