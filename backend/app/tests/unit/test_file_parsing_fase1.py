@@ -11,6 +11,8 @@ Cubre los bugs detectados en la auditoría:
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.application.services.file_parsing import (
     _decode_text_bytes,
     _detect_header_row,
@@ -76,7 +78,7 @@ def test_rows_to_dicts_pads_ragged_rows() -> None:
 
 def test_rows_to_dicts_ignores_none_row_and_extra_cells() -> None:
     headers = ["a", "b"]
-    rows = [None, [1, 2, 3, 4]]  # type: ignore[list-item]
+    rows: list[Any] = [None, [1, 2, 3, 4]]  # fila None + celdas extra
     result = rows_to_dicts(headers, rows)
     assert result[0] == {"a": None, "b": None}
     assert result[1] == {"a": "1", "b": "2"}  # celdas extra ignoradas

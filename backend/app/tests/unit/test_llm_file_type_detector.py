@@ -131,9 +131,8 @@ async def test_maybe_detect_updates_and_emits() -> None:
             "detect_file_type",
             new=AsyncMock(return_value=("ventas", 0.9, "model-x")),
         ),
-        unittest.mock.patch.object(
-            llm_file_type_detector.pipeline_event_service,
-            "emit_event",
+        unittest.mock.patch(
+            "app.application.services.pipeline_event_service.emit_event",
             new=AsyncMock(),
         ) as emit,
     ):
@@ -165,9 +164,8 @@ async def test_maybe_detect_no_result_keeps_general_and_no_emit() -> None:
             "detect_file_type",
             new=AsyncMock(return_value=(None, 0.0, "model-x")),
         ),
-        unittest.mock.patch.object(
-            llm_file_type_detector.pipeline_event_service,
-            "emit_event",
+        unittest.mock.patch(
+            "app.application.services.pipeline_event_service.emit_event",
             new=AsyncMock(),
         ) as emit,
     ):
