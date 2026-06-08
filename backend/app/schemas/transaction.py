@@ -138,6 +138,8 @@ class ExpenseEntryResponse(BaseModel):
 
     id: UUID
     tenant_id: UUID
+    # FASE 3 (B1): vínculo opcional al producto del catálogo (compras de mercadería).
+    product_id: UUID | None = None
     amount: Decimal
     category: str
     # Etiqueta libre cuando category == OTHER (guardada en custom_fields["category_label"]).

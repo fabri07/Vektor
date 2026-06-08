@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import app.application.services.ingestion_import_service as importer
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
-from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 
 async def _make_product(
@@ -147,3 +147,72 @@ async def test_quantity_summed_does_not_break_linking(
     sales = (await db_session.execute(select(SaleEntry))).scalars().all()
     assert len(sales) == 2
     assert all(s.product_id == product.id for s in sales)
+
+
+# ── FASE 3 (B1): vínculo de producto en GASTOS (compras de mercadería) ────────
+
+
+@pytest.mark.asyncio
+async def test_expense_linked_to_product_by_sku(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    product = await _make_product(
+        db_session, sample_tenant.tenant_id, "Insumo limpieza", sku="INS-1"
+    )
+
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "has_gasto": True,
+        "gastos_detectados": [
+            {"fecha": "2024-01-15", "gasto": "500", "producto": "otra cosa", "sku": "INS-1"},
+        ],
+    }
+    await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"gastos": True}
+    )
+
+    expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
+    assert expense.product_id == product.id  # SKU exacto gana
+
+
+@pytest.mark.asyncio
+async def test_expense_linked_to_product_by_normalized_name(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    product = await _make_product(db_session, sample_tenant.tenant_id, "Harina 000")
+
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "has_gasto": True,
+        "gastos_detectados": [
+            {"fecha": "2024-01-15", "gasto": "800", "producto": "Harina-000"},
+        ],
+    }
+    await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"gastos": True}
+    )
+
+    expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
+    assert expense.product_id == product.id  # match por nombre normalizado (guion ≈ espacio)
+
+
+@pytest.mark.asyncio
+async def test_expense_unknown_product_leaves_product_id_none(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "has_gasto": True,
+        "gastos_detectados": [
+            {"fecha": "2024-01-15", "gasto": "500", "producto": "No existe"},
+        ],
+    }
+    await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"gastos": True}
+    )
+
+    expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
+    assert expense.product_id is None

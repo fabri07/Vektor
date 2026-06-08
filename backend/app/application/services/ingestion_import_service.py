@@ -371,11 +371,11 @@ async def insert_confirmed_data(
             and nombre_col
         )
 
-        # FASE 3: índice de catálogo en memoria para vincular ventas a producto
-        # (ExpenseEntry no tiene product_id todavía → solo ventas).
+        # FASE 3: índice de catálogo en memoria para vincular ventas y gastos
+        # (B1) al producto. Una sola carga; vacío si no hay columnas de nombre/sku.
         _by_sku, _by_name = (
             await _load_product_index(session, tenant_id)
-            if wants_ventas and (nombre_col or sku_col)
+            if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
             else ({}, {})
         )
 
@@ -484,6 +484,13 @@ async def insert_confirmed_data(
                     )
                     if cf:
                         expense.custom_fields = cf
+                    # FASE 3 (B1): vincular el gasto al producto del catálogo.
+                    expense.product_id = _resolve_product(
+                        _by_sku,
+                        _by_name,
+                        str(row.get(nombre_col)) if nombre_col else None,
+                        str(row.get(sku_col)) if sku_col else None,
+                    )
                     session.add(expense)
                     counts["gastos"] += 1
 
@@ -838,6 +845,13 @@ async def _insert_multisheet_data(
         cf = _custom_fields(row, cf_cols)
         if cf:
             expense.custom_fields = cf
+        # FASE 3 (B1): vincular el gasto al producto del catálogo (compra de mercadería).
+        expense.product_id = _resolve_product(
+            _by_sku,
+            _by_name,
+            _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
+            _val(row, cols.get("sku"), _SKU_COLS),
+        )
         session.add(expense)
         counts["gastos"] += 1
 
