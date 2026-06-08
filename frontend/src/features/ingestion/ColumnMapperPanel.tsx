@@ -48,8 +48,23 @@ const SOURCE_LABELS: Record<string, string> = {
   tenant_history: "Historial",
   heuristic: "Heurística",
   fuzzy: "Similar",
+  llm: "IA",
   none: "—",
 };
+
+// FASE 2 (A2)/A3: color de la confianza del mapeo (verde alto / ámbar medio / rojo bajo).
+function confidenceColor(confidence: number): string {
+  if (confidence >= 0.75) return "text-vk-success";
+  if (confidence >= 0.5) return "text-vk-warning";
+  return "text-vk-danger";
+}
+
+// Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
+const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "gastos" | "productos" }> = [
+  { value: "ventas", label: "Ventas", field: "ventas" },
+  { value: "gastos", label: "Gastos", field: "gastos" },
+  { value: "stock", label: "Productos / Stock", field: "productos" },
+];
 
 function StatusDot({ status }: { status: ColumnMappingSuggestion["status"] }) {
   if (status === "mapped") {
@@ -558,6 +573,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const [unmappedQueue, setUnmappedQueue] = useState<string[]>([]);
   const [showUnmappedModal, setShowUnmappedModal] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  // A3: cuando el tipo quedó ambiguo ("general"), el usuario elige el propósito aquí.
+  const [purpose, setPurpose] = useState<string>("");
 
   const { data: preview } = useQuery({
     queryKey: ["ingestion-preview", fileId],
@@ -574,7 +591,24 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     gastos: "expense",
     stock: "product",
   };
-  const entityType = INFERRED_TO_ENTITY[_inferredType] ?? "sale";
+  // A3: archivo ambiguo ("general") → el tipo efectivo es el propósito elegido.
+  const isAmbiguous = _inferredType === "general";
+  const effectiveInferred = isAmbiguous ? purpose : _inferredType;
+  const needsPurpose = isAmbiguous && !purpose;
+  const entityType = INFERRED_TO_ENTITY[effectiveInferred] ?? "sale";
+  // columns_at_risk (Sprint 14): hasta ahora no se renderizaban en el panel.
+  const columnsAtRisk = preview?.columns_at_risk ?? [];
+
+  function choosePurpose(value: string) {
+    setPurpose(value);
+    const opt = PURPOSE_OPTIONS.find((o) => o.value === value);
+    if (opt) {
+      setConfirmedFields({ ventas: false, gastos: false, productos: false, [opt.field]: true });
+    }
+    // Re-inicializar el mapeo con el nuevo schema de entidad.
+    setInitialized(false);
+    setMappings({});
+  }
 
   // Multi-contexto: se usa el mapeo por contexto cuando hay >1 contexto (multi-hoja)
   // o cuando el único contexto NO es una tabla (texto/imagen). Una sola tabla
@@ -590,8 +624,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     queryKey: ["column-mappings", fileId, entityType],
     queryFn: () => ingestionService.getColumnMappings(fileId, entityType),
     // Esperar al preview para conocer entityType; no correr en multi-hoja (cada
-    // sección maneja su propia query).
-    enabled: !!fileId && !!preview && !isMultiContext,
+    // sección maneja su propia query) ni hasta que se elija propósito si es ambiguo.
+    enabled: !!fileId && !!preview && !isMultiContext && !needsPurpose,
   });
 
   // Inicializar mappings desde sugerencias cuando cargan
@@ -651,6 +685,16 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const hasRequiredMissing = suggestions.some(
     (s) => computeEffectiveStatus(s, getMappingForColumn(s.source_column)) === "required_missing",
   );
+
+  // A3: columnas que merecen revisión antes de confirmar — requeridas sin mapear,
+  // sin mapear, o mapeadas con baja confianza (<50%). Las ignoradas a propósito no.
+  const needsAttention = suggestions.filter((s) => {
+    const t = getMappingForColumn(s.source_column);
+    if (t === "ignore") return false;
+    const eff = computeEffectiveStatus(s, t);
+    if (eff === "required_missing" || eff === "unmapped") return true;
+    return eff === "mapped" && s.confidence < 0.5;
+  });
 
   function handleConfirmClick() {
     const unmapped = getUnmappedColumns();
@@ -721,8 +765,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             )}
           </p>
         </div>
-        {/* Selector de tipo (ventas/gastos/productos) */}
-        <div className="flex gap-2">
+        {/* Selector de tipo (ventas/gastos/productos). En archivos ambiguos lo
+            reemplaza el selector de propósito del bloque "Revisá antes de confirmar". */}
+        <div className={`flex gap-2 ${isAmbiguous ? "hidden" : ""}`}>
           {(["ventas", "gastos", "productos"] as const).map((key) => (
             <label key={key} className="flex cursor-pointer items-center gap-1.5">
               <input
@@ -741,7 +786,104 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         </div>
       </div>
 
-      {loadingSuggestions ? (
+      {/* A3: bloque consolidado "Revisá antes de confirmar" */}
+      {(isAmbiguous || columnsAtRisk.length > 0 || needsAttention.length > 0) && (
+        <div className="mb-4 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 p-3">
+          <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-vk-text-primary">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-vk-warning" />
+            Revisá antes de confirmar
+          </p>
+
+          {/* Selector de propósito cuando el tipo es ambiguo ("general") */}
+          {isAmbiguous && (
+            <div className="mb-3">
+              <p className="mb-1 text-[11px] text-vk-text-secondary">
+                No pudimos determinar si este archivo es de ventas, gastos o productos.
+                Elegí el tipo:
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {PURPOSE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => choosePurpose(opt.value)}
+                    className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
+                      purpose === opt.value
+                        ? "border-vk-blue bg-vk-info-bg text-vk-blue"
+                        : "border-vk-border-w text-vk-text-secondary hover:bg-vk-bg-light"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Columnas con muchos datos vacíos (columns_at_risk, Sprint 14) */}
+          {columnsAtRisk.length > 0 && (
+            <div className="mb-3">
+              <p className="mb-1 text-[11px] text-vk-text-secondary">
+                Columnas con muchos datos vacíos:
+              </p>
+              <ul className="space-y-0.5">
+                {columnsAtRisk.map((c) => (
+                  <li key={c.column} className="flex items-center gap-1.5 text-[11px] text-vk-text-muted">
+                    <XCircle className="h-3 w-3 shrink-0 text-vk-warning" />
+                    <span className="font-mono text-vk-text-secondary">{c.column}</span>
+                    <span>· {Math.round(c.null_pct)}% vacío — {c.recommendation}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Columnas que necesitan atención, editables inline */}
+          {needsAttention.length > 0 && (
+            <div>
+              <p className="mb-1 text-[11px] text-vk-text-secondary">
+                Columnas a revisar ({needsAttention.length}):
+              </p>
+              <div className="space-y-1">
+                {needsAttention.map((s) => {
+                  const target = getMappingForColumn(s.source_column);
+                  const eff = computeEffectiveStatus(s, target);
+                  return (
+                    <div key={s.source_column} className="flex items-center gap-2">
+                      <StatusDot status={eff} />
+                      <span
+                        className="w-32 shrink-0 truncate font-mono text-[11px] text-vk-text-primary"
+                        title={s.source_column}
+                      >
+                        {s.source_column}
+                      </span>
+                      <select
+                        value={target}
+                        onChange={(e) => setMappingForColumn(s.source_column, e.target.value)}
+                        className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none"
+                      >
+                        <option value="">Sin mapear</option>
+                        <option value="ignore">— Ignorar —</option>
+                        {fields.map((f) => (
+                          <option key={f.value} value={f.value}>
+                            {f.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {needsPurpose ? (
+        <div className="py-4 text-xs text-vk-text-muted">
+          Elegí el tipo de archivo arriba para ver el mapeo de columnas.
+        </div>
+      ) : loadingSuggestions ? (
         <div className="flex items-center gap-2 py-4 text-xs text-vk-text-muted">
           <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-vk-border-w border-t-vk-blue" />
           Analizando columnas...
@@ -820,7 +962,10 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                     </div>
                     {isMapped && s.source !== "none" && (
                       <p className="mt-0.5 pl-5 text-[10px] text-vk-text-muted">
-                        {SOURCE_LABELS[s.source] ?? s.source} · {Math.round(s.confidence * 100)}%
+                        {SOURCE_LABELS[s.source] ?? s.source} ·{" "}
+                        <span className={confidenceColor(s.confidence)}>
+                          {Math.round(s.confidence * 100)}%
+                        </span>
                       </p>
                     )}
                   </div>
@@ -890,7 +1035,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           disabled={
             confirmMutation.isPending ||
             !Object.values(confirmedFields).some(Boolean) ||
-            hasRequiredMissing
+            hasRequiredMissing ||
+            needsPurpose
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"
         >

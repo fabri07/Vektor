@@ -36,7 +36,8 @@ export interface ColumnMappingSuggestion {
   sample_values: string[];
   target_field: string | null;
   confidence: number;
-  source: "tenant_history" | "heuristic" | "fuzzy" | "none";
+  // FASE 2 (A2): "llm" = la 4ª capa LLM desambiguó esta columna.
+  source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none";
   status: "mapped" | "unmapped" | "required_missing";
   context_id?: string | null;
 }
