@@ -73,24 +73,38 @@ def _resolve_product(
     return None
 
 
-def _record_stock_movement(
+async def _record_stock_movement(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     product_id: uuid.UUID,
     qty: int,
     unit_cost: Decimal | None,
     movement_type: str,
+    final_qty: int,
 ) -> None:
-    """FASE 3: registra un InventoryMovement (audit insert-only) por el import.
+    """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
+    `InventoryBalance` por el import, dentro de la misma transacción.
 
-    NO toca `Product.stock_units` (lo setea el import; es la representación canónica
-    que lee la UI) ni `InventoryBalance`. Solo construye el historial de movimientos
-    de inventario, que antes quedaba vacío al importar (el import seteaba stock
-    directo sin dejar rastro). `qty>0` = ingreso (purchase), `qty<0` = ajuste.
+    `Product.stock_units` sigue siendo la representación canónica que lee la UI; el
+    import la setea. Esta función:
+      1. Inserta el movimiento de inventario (historial, antes vacío al importar).
+      2. Sincroniza `InventoryBalance.current_qty`: `+= qty` (delta) si el balance
+         existe; lo crea en `final_qty` (el stock total tras el import) si no, para
+         mantenerlo consistente con `Product.stock_units`.
+
+    NO hace flush ni emite EventBus por fila (a diferencia de
+    `stock_service.increment_stock`): en un import masivo eso sería caro/ruidoso;
+    todo entra en el commit batch del import. `qty>0` = ingreso, `qty<0` = ajuste.
+    `qty==0` → no-op (ni movimiento ni balance).
     """
     if qty == 0:
         return
-    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.inventory import (  # noqa: PLC0415
+        InventoryBalance,
+        InventoryMovement,
+    )
 
     session.add(
         InventoryMovement(
@@ -103,6 +117,26 @@ def _record_stock_movement(
             reason="Importado desde archivo",
         )
     )
+
+    balance = (
+        await session.execute(
+            select(InventoryBalance).where(
+                InventoryBalance.product_id == product_id,
+                InventoryBalance.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if balance is None:
+        session.add(
+            InventoryBalance(
+                tenant_id=tenant_id,
+                product_id=product_id,
+                current_qty=final_qty,
+                reserved_qty=0,
+            )
+        )
+    else:
+        balance.current_qty += qty
 
 
 _NOMBRE_COLS: set[str] = {
@@ -553,14 +587,15 @@ async def insert_confirmed_data(
                     if stock_val > 0:
                         _delta = stock_val - existing.stock_units
                         existing.stock_units = stock_val
-                        # FASE 3: audit del cambio de stock por import.
-                        _record_stock_movement(
+                        # FASE 3: audit del cambio de stock + sync de balance.
+                        await _record_stock_movement(
                             session,
                             tenant_id,
                             existing.id,
                             _delta,
                             cost,
                             "purchase" if _delta > 0 else "adjustment",
+                            stock_val,
                         )
                     if sku:
                         existing.sku = sku
@@ -601,9 +636,9 @@ async def insert_confirmed_data(
                         custom_fields=cf_product if cf_product else None,
                     )
                     session.add(new_product)
-                    # FASE 3: audit del ingreso inicial de stock (si trae stock).
-                    _record_stock_movement(
-                        session, tenant_id, new_product_id, stock_val, cost, "purchase"
+                    # FASE 3: audit del ingreso inicial de stock + balance (si trae stock).
+                    await _record_stock_movement(
+                        session, tenant_id, new_product_id, stock_val, cost, "purchase", stock_val
                     )
                     if return_details:
                         product_details.append(
@@ -893,13 +928,14 @@ async def _insert_multisheet_data(
             if stock_val > 0:
                 _delta = stock_val - existing.stock_units
                 existing.stock_units = stock_val
-                _record_stock_movement(
+                await _record_stock_movement(
                     session,
                     tenant_id,
                     existing.id,
                     _delta,
                     cost,
                     "purchase" if _delta > 0 else "adjustment",
+                    stock_val,
                 )
             if sku:
                 existing.sku = sku
@@ -926,7 +962,9 @@ async def _insert_multisheet_data(
                     custom_fields=cf or None,
                 )
             )
-            _record_stock_movement(session, tenant_id, _new_id, stock_val, cost, "purchase")
+            await _record_stock_movement(
+                session, tenant_id, _new_id, stock_val, cost, "purchase", stock_val
+            )
         counts["productos"] += 1
 
     entity_bucket = {
