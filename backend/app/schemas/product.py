@@ -25,6 +25,8 @@ class ProductResponse(BaseModel):
     # NULL = no configurado (usa DEFAULT_LOW_STOCK_THRESHOLD_UNITS); 0 = umbral explícito
     low_stock_threshold_units: int | None
     is_active: bool
+    # FASE 3 (B2): producto auto-creado por import al que le faltan precio/costo.
+    requires_completion: bool = False
     custom_fields: dict[str, Any] = {}
     # Fecha de alta editable; el frontend cae a created_at cuando es None.
     acquired_at: datetime | None = None

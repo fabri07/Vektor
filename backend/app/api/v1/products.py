@@ -132,6 +132,15 @@ async def update_product(
     # enviados quedan intactos.
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(product, field, value)
+    # FASE 3 (B2): si el producto estaba marcado para completar y ya tiene precio
+    # y costo, se considera completo (cierra el ciclo del auto-creado por import).
+    if (
+        product.requires_completion
+        and product.sale_price_ars
+        and product.sale_price_ars > 0
+        and product.unit_cost_ars is not None
+    ):
+        product.requires_completion = False
     saved = await repo.save(product)
     _audit_data_change(
         session,

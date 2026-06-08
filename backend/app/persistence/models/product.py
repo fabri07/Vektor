@@ -42,6 +42,11 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Integer, nullable=True, default=None
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # FASE 3 (B2): producto auto-creado por un import al que le faltan datos clave
+    # (precio o costo). El usuario debe completarlo. False = producto completo.
+    requires_completion: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
     # Fecha de alta / adquisición editable (NULL = no informada; el frontend cae a created_at).
     acquired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")

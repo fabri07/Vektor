@@ -66,8 +66,14 @@ const COLUMNS = [
     key: "name",
     header: "Producto",
     hideable: true,
-    render: (v: unknown) => (
-      <span className="font-medium text-vk-text-primary">{String(v)}</span>
+    render: (v: unknown, row: Record<string, unknown>) => (
+      <span className="flex items-center gap-2">
+        <span className="font-medium text-vk-text-primary">{String(v)}</span>
+        {/* FASE 3 (B2): producto auto-creado por import al que le faltan precio/costo. */}
+        {(row as unknown as ProductResponse).requires_completion ? (
+          <Badge variant="warning">Completar datos</Badge>
+        ) : null}
+      </span>
     ),
     csvValue: (v: unknown) => String(v ?? ""),
   },

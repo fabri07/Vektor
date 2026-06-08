@@ -588,13 +588,16 @@ async def insert_confirmed_data(
                         id=new_product_id,
                         tenant_id=tenant_id,
                         name=name,
-                        sku=sku,
+                        # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                         sale_price_ars=price or Decimal("0"),
+                        sku=sku,
                         unit_cost_ars=cost,
                         stock_units=stock_val,
                         # NULL = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor
                         low_stock_threshold_units=None,
                         provenance="REAL",
+                        # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
+                        requires_completion=not price or not cost,
                         custom_fields=cf_product if cf_product else None,
                     )
                     session.add(new_product)
@@ -911,12 +914,15 @@ async def _insert_multisheet_data(
                     tenant_id=tenant_id,
                     name=name,
                     sku=sku,
+                    # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                     sale_price_ars=price or Decimal("0"),
                     unit_cost_ars=cost,
                     stock_units=stock_val,
                     category=cat,
                     low_stock_threshold_units=None,
                     provenance="REAL",
+                    # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
+                    requires_completion=not price or not cost,
                     custom_fields=cf or None,
                 )
             )
