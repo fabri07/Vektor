@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle, AlertCircle, XCircle, ArrowRight } from "lucide-react";
 import {
   ingestionService,
+  type ColumnAtRisk,
   type ColumnMapping,
   type ColumnMappingSuggestion,
   type MappingContext,
@@ -57,6 +58,27 @@ function confidenceColor(confidence: number): string {
   if (confidence >= 0.75) return "text-vk-success";
   if (confidence >= 0.5) return "text-vk-warning";
   return "text-vk-danger";
+}
+
+// A3: lista reutilizable de columnas con muchos datos vacíos (columns_at_risk).
+function ColumnsAtRiskList({ items }: { items: ColumnAtRisk[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <p className="mb-1 text-[11px] text-vk-text-secondary">
+        Columnas con muchos datos vacíos:
+      </p>
+      <ul className="space-y-0.5">
+        {items.map((c) => (
+          <li key={c.column} className="flex items-center gap-1.5 text-[11px] text-vk-text-muted">
+            <XCircle className="h-3 w-3 shrink-0 text-vk-warning" />
+            <span className="font-mono text-vk-text-secondary">{c.column}</span>
+            <span>· {Math.round(c.null_pct)}% vacío — {c.recommendation}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
@@ -418,6 +440,15 @@ function SheetMapperSection({
                         </button>
                       </div>
                     )}
+                    {/* A3: source + confidence (mismo criterio que el flujo single). */}
+                    {eff === "mapped" && s.source !== "none" && (
+                      <p className="text-[10px] text-vk-text-muted">
+                        {SOURCE_LABELS[s.source] ?? s.source} ·{" "}
+                        <span className={confidenceColor(s.confidence)}>
+                          {Math.round(s.confidence * 100)}%
+                        </span>
+                      </p>
+                    )}
                   </div>
                 </div>
               );
@@ -431,10 +462,12 @@ function SheetMapperSection({
 function MultiContextMapper({
   fileId,
   contexts,
+  columnsAtRisk,
   onDone,
 }: {
   fileId: string;
   contexts: MappingContext[];
+  columnsAtRisk: ColumnAtRisk[];
   onDone: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -512,6 +545,17 @@ function MultiContextMapper({
           {contexts.length} hojas detectadas. Revisá el mapeo de cada una y elegí cuáles importar.
         </p>
       </div>
+
+      {/* A3: bloque "Revisá antes de confirmar" — columns_at_risk también en multi-hoja. */}
+      {columnsAtRisk.length > 0 && (
+        <div className="mb-3 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 p-3">
+          <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-vk-text-primary">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-vk-warning" />
+            Revisá antes de confirmar
+          </p>
+          <ColumnsAtRiskList items={columnsAtRisk} />
+        </div>
+      )}
 
       <div className="space-y-3">
         {contexts.map((ctx) => (
@@ -746,7 +790,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
 
   // Multi-hoja: delegar al mapeo por contexto (todos los hooks ya se ejecutaron).
   if (isMultiContext) {
-    return <MultiContextMapper fileId={fileId} contexts={contexts} onDone={onDone} />;
+    return (
+      <MultiContextMapper
+        fileId={fileId}
+        contexts={contexts}
+        columnsAtRisk={columnsAtRisk}
+        onDone={onDone}
+      />
+    );
   }
 
   return (
@@ -823,18 +874,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           {/* Columnas con muchos datos vacíos (columns_at_risk, Sprint 14) */}
           {columnsAtRisk.length > 0 && (
             <div className="mb-3">
-              <p className="mb-1 text-[11px] text-vk-text-secondary">
-                Columnas con muchos datos vacíos:
-              </p>
-              <ul className="space-y-0.5">
-                {columnsAtRisk.map((c) => (
-                  <li key={c.column} className="flex items-center gap-1.5 text-[11px] text-vk-text-muted">
-                    <XCircle className="h-3 w-3 shrink-0 text-vk-warning" />
-                    <span className="font-mono text-vk-text-secondary">{c.column}</span>
-                    <span>· {Math.round(c.null_pct)}% vacío — {c.recommendation}</span>
-                  </li>
-                ))}
-              </ul>
+              <ColumnsAtRiskList items={columnsAtRisk} />
             </div>
           )}
 

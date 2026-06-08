@@ -22,6 +22,8 @@ export type UpdateExpensePayload = Partial<CreateExpensePayload>;
 export interface ExpenseEntryResponse {
   id: string;
   tenant_id: string;
+  // FASE 3 (B1): vínculo opcional al producto del catálogo (compras de mercadería).
+  product_id?: string | null;
   amount: number;
   category: string;
   /** Nombre personalizado cuando category === "OTHER" (si el usuario lo cargó). */
