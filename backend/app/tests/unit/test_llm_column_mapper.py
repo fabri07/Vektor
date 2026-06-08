@@ -118,3 +118,75 @@ async def test_llm_ignore_does_not_override() -> None:
     rara = suggestions[0]
     assert rara["source"] != "llm"  # "ignore" no pisa el resultado determinístico
     assert rara["status"] == "unmapped"
+
+
+# ── FASE 2 (A2): traza de la decisión LLM en pipeline_events ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_emits_mapping_event_when_trace_present() -> None:
+    db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=mock_result)
+    svc = ColumnMappingService(db)
+
+    async def _fake_llm(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
+        return {"ColRara99": {"target_field": "amount", "confidence": 0.88}}
+
+    from app.application.services import pipeline_event_service
+
+    with (
+        unittest.mock.patch.object(
+            llm_column_mapper, "suggest_with_llm", side_effect=_fake_llm
+        ),
+        unittest.mock.patch.object(
+            pipeline_event_service, "emit_event", new=AsyncMock()
+        ) as emit,
+    ):
+        await svc.suggest_mappings(
+            uuid.uuid4(),
+            "sale",
+            ["ColRara99"],
+            [{"ColRara99": "1500"}],
+            trace_id=uuid.uuid4(),
+            file_id=uuid.uuid4(),
+        )
+
+    emit.assert_awaited_once()
+    _, kwargs = emit.call_args
+    assert kwargs["stage"] == "mapping"
+    assert kwargs["detail"]["type"] == "column_mapping"
+    decision = kwargs["detail"]["decisions"][0]
+    assert decision["column"] == "ColRara99"
+    assert decision["overwritten"] is True
+    assert decision["source_before"] != "llm"
+    assert decision["source_after"] == "llm"
+    assert decision["llm_target"] == "amount"
+
+
+@pytest.mark.asyncio
+async def test_no_emission_when_trace_missing() -> None:
+    db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=mock_result)
+    svc = ColumnMappingService(db)
+
+    async def _fake_llm(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
+        return {"ColRara99": {"target_field": "amount", "confidence": 0.88}}
+
+    from app.application.services import pipeline_event_service
+
+    with (
+        unittest.mock.patch.object(
+            llm_column_mapper, "suggest_with_llm", side_effect=_fake_llm
+        ),
+        unittest.mock.patch.object(
+            pipeline_event_service, "emit_event", new=AsyncMock()
+        ) as emit,
+    ):
+        # Sin trace_id/file_id → NO emite (callers sin contexto de traza).
+        await svc.suggest_mappings(uuid.uuid4(), "sale", ["ColRara99"], [{"ColRara99": "1500"}])
+
+    emit.assert_not_awaited()

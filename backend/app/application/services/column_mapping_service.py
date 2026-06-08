@@ -179,8 +179,16 @@ class ColumnMappingService:
         entity_type: str,
         headers: list[str],
         sample_rows: list[dict[str, Any]],
+        *,
+        trace_id: uuid.UUID | str | None = None,
+        file_id: uuid.UUID | str | None = None,
     ) -> list[dict[str, Any]]:
-        """Genera sugerencias de mapeo para los headers del archivo."""
+        """Genera sugerencias de mapeo para los headers del archivo.
+
+        FASE 2 (A2): si `trace_id` y `file_id` están presentes, la decisión de la
+        4ª capa LLM se traza en pipeline_events (stage="mapping"). Los parámetros
+        son keyword-only y opcionales para no romper los callers existentes.
+        """
         from app.persistence.models.column_mapping import TenantColumnMapping  # noqa: PLC0415
 
         # Cargar historial del tenant para este entity_type
@@ -254,7 +262,13 @@ class ColumnMappingService:
 
         # FASE 2: 4ª capa LLM (fallback). Solo para columnas con baja confianza
         # determinística. Una sola llamada batch; fail-silent (flag/key/errores).
-        await self._apply_llm_fallback(entity_type, suggestions)
+        await self._apply_llm_fallback(
+            entity_type,
+            suggestions,
+            tenant_id=tenant_id,
+            trace_id=trace_id,
+            file_id=file_id,
+        )
 
         # Segunda pasada: detectar required_missing
         mapped_targets = {
@@ -279,9 +293,20 @@ class ColumnMappingService:
         return suggestions
 
     async def _apply_llm_fallback(
-        self, entity_type: str, suggestions: list[dict[str, Any]]
+        self,
+        entity_type: str,
+        suggestions: list[dict[str, Any]],
+        *,
+        tenant_id: uuid.UUID | None = None,
+        trace_id: uuid.UUID | str | None = None,
+        file_id: uuid.UUID | str | None = None,
     ) -> None:
-        """FASE 2: mejora las sugerencias de baja confianza con el LLM (in-place)."""
+        """FASE 2: mejora las sugerencias de baja confianza con el LLM (in-place).
+
+        Si `trace_id`/`file_id` están presentes, emite un pipeline_event con la
+        traza antes/después de cada columna evaluada (qué decidió lo determinístico,
+        qué decidió el LLM, y si lo pisó).
+        """
         from app.application.services.llm_column_mapper import (  # noqa: PLC0415
             LLM_MAPPING_THRESHOLD,
             suggest_with_llm,
@@ -294,6 +319,16 @@ class ColumnMappingService:
         if not valid_fields:
             return
 
+        # Snapshot "antes" (la decisión determinística) para auditar qué pisó el LLM.
+        before = {
+            s["source_column"]: {
+                "target_field": s["target_field"],
+                "confidence": s["confidence"],
+                "source": s["source"],
+            }
+            for s in low_conf
+        }
+
         llm_result = await suggest_with_llm(
             entity_type,
             [{"header": s["source_column"], "sample_values": s["sample_values"]} for s in low_conf],
@@ -302,18 +337,77 @@ class ColumnMappingService:
         if not llm_result:
             return
 
+        decisions: list[dict[str, Any]] = []
         for s in low_conf:
             hit = llm_result.get(s["source_column"])
-            if not hit:
-                continue
-            target = hit["target_field"]
-            conf = hit["confidence"]
-            # Solo pisar si el LLM aporta un mapeo usable y MÁS confiable que lo actual.
-            if target != "ignore" and conf > s["confidence"]:
-                s["target_field"] = target
-                s["confidence"] = round(conf, 3)
-                s["source"] = "llm"
-                s["status"] = "mapped"
+            prev = before[s["source_column"]]
+            overwritten = False
+            if hit:
+                target = hit["target_field"]
+                conf = hit["confidence"]
+                # Solo pisar si el LLM aporta un mapeo usable y MÁS confiable.
+                if target != "ignore" and conf > s["confidence"]:
+                    s["target_field"] = target
+                    s["confidence"] = round(conf, 3)
+                    s["source"] = "llm"
+                    s["status"] = "mapped"
+                    overwritten = True
+            decisions.append(
+                {
+                    "column": s["source_column"],
+                    "deterministic_target": prev["target_field"],
+                    "deterministic_confidence": prev["confidence"],
+                    "source_before": prev["source"],
+                    "llm_target": hit["target_field"] if hit else None,
+                    "llm_confidence": hit["confidence"] if hit else None,
+                    "source_after": s["source"],
+                    "final_target": s["target_field"],
+                    "final_confidence": s["confidence"],
+                    "overwritten": overwritten,
+                }
+            )
+
+        await self._emit_mapping_event(
+            tenant_id=tenant_id,
+            trace_id=trace_id,
+            file_id=file_id,
+            entity_type=entity_type,
+            decisions=decisions,
+        )
+
+    async def _emit_mapping_event(
+        self,
+        *,
+        tenant_id: uuid.UUID | None,
+        trace_id: uuid.UUID | str | None,
+        file_id: uuid.UUID | str | None,
+        entity_type: str,
+        decisions: list[dict[str, Any]],
+    ) -> None:
+        """Traza la decisión del LLM de mapeo en pipeline_events (fail-silent).
+
+        No emite si falta `trace_id`/`file_id`/`tenant_id` (callers que no pasan
+        contexto de traza, p.ej. tests unitarios del mapeo)."""
+        if trace_id is None or file_id is None or tenant_id is None:
+            return
+        from app.application.services import pipeline_event_service  # noqa: PLC0415
+        from app.persistence.models.pipeline_event import STAGE_MAPPING  # noqa: PLC0415
+
+        overwritten_count = sum(1 for d in decisions if d["overwritten"])
+        await pipeline_event_service.emit_event(
+            self.db,
+            trace_id=trace_id,
+            tenant_id=tenant_id,
+            stage=STAGE_MAPPING,
+            file_id=file_id,
+            detail={
+                "type": "column_mapping",
+                "entity_type": entity_type,
+                "columns_evaluated": len(decisions),
+                "columns_overwritten": overwritten_count,
+                "decisions": decisions,
+            },
+        )
 
     async def save_mappings(
         self,

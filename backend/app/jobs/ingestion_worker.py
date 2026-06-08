@@ -30,6 +30,7 @@ from app.application.services.file_parsing import (
     extract_amounts_from_text,
     parse_uploaded_content,
 )
+from app.application.services.llm_file_type_detector import maybe_detect_file_type
 from app.application.services.validation_gate import ValidationGate
 from app.jobs.celery_app import celery_app
 from app.observability.logger import bind_request_context, get_logger, log_job
@@ -226,6 +227,15 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
 
                 async with factory() as session:
                     result_record = await _load_and_lock(session, file_id, tenant_id)
+                    # FASE 2 (A1): si el tipo quedó ambiguo ("general"), el LLM lo
+                    # desambigua por contenido (fail-silent, solo si el flag está on).
+                    await maybe_detect_file_type(
+                        session,
+                        validated_summary,
+                        trace_id=result_record.trace_id or result_record.id,
+                        tenant_id=result_record.tenant_id,
+                        file_id=result_record.id,
+                    )
                     await _save_result(
                         session,
                         result_record,

@@ -34,6 +34,7 @@ from app.application.services.file_parsing import (
     SPREADSHEET_MIMES as _SPREADSHEET_MIMES,
 )
 from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.application.services.llm_file_type_detector import maybe_detect_file_type
 from app.config.settings import get_settings
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
@@ -161,6 +162,15 @@ async def _process_file_sync(
             return
 
         final_summary = gate_result.corrected_summary if gate_result.corrected_summary else summary
+        # FASE 2 (A1): desambiguar el tipo por contenido si quedó "general"
+        # (fail-silent, solo si ENABLE_LLM_FILE_TYPE_DETECTION está on).
+        await maybe_detect_file_type(
+            session,
+            final_summary,
+            trace_id=trace_id,
+            tenant_id=record.tenant_id,
+            file_id=record.id,
+        )
         record.parsed_summary_json = final_summary
         record.processing_status = PROCESSING_STATUS_NEEDS_CONFIRMATION
         await repo.save(record)
@@ -584,7 +594,13 @@ async def get_column_mappings(
 
     svc = ColumnMappingService(session)
     raw_suggestions = await svc.suggest_mappings(
-        tenant.tenant_id, resolved_entity, headers, sample_rows
+        tenant.tenant_id,
+        resolved_entity,
+        headers,
+        sample_rows,
+        # FASE 2 (A2): traza la decisión de la 4ª capa LLM en pipeline_events.
+        trace_id=record.trace_id or record.id,
+        file_id=record.id,
     )
     return [
         ColumnMappingSuggestion(**{**s, "context_id": context_id}) for s in raw_suggestions

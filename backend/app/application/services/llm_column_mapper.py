@@ -21,7 +21,8 @@ from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
-_MODEL = "claude-sonnet-4-6"
+# Modelo por defecto si no hay settings.LLM_INGESTION_MODEL (configurable por env).
+_DEFAULT_MODEL = "claude-sonnet-4-6"
 # Umbral: columnas con confianza determinística < esto van al LLM.
 LLM_MAPPING_THRESHOLD = 0.5
 
@@ -103,6 +104,7 @@ async def suggest_with_llm(
     settings = get_settings()
     if not getattr(settings, "ENABLE_LLM_COLUMN_MAPPING", False):
         return {}
+    model = getattr(settings, "LLM_INGESTION_MODEL", _DEFAULT_MODEL)
 
     try:
         import anthropic  # noqa: PLC0415
@@ -113,7 +115,7 @@ async def suggest_with_llm(
 
         client = get_anthropic_async_client(anthropic.AsyncAnthropic)
         response = await client.messages.create(
-            model=_MODEL,
+            model=model,
             max_tokens=600,
             system=_SYSTEM_PROMPT,
             messages=[

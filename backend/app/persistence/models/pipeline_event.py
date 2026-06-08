@@ -23,9 +23,20 @@ STAGE_VALIDATE = "validate"
 STAGE_CONFIRM = "confirm"
 STAGE_PERSIST = "persist"
 STAGE_REJECT = "reject"
+# FASE 2: decisiones de las capas LLM de ingestión (mapeo de columnas + tipo de
+# archivo). Agrupa la traza de "qué decidió el LLM y si pisó lo determinístico".
+STAGE_MAPPING = "mapping"
 
 PIPELINE_STAGES = frozenset(
-    {STAGE_UPLOAD, STAGE_PARSE, STAGE_VALIDATE, STAGE_CONFIRM, STAGE_PERSIST, STAGE_REJECT}
+    {
+        STAGE_UPLOAD,
+        STAGE_PARSE,
+        STAGE_VALIDATE,
+        STAGE_CONFIRM,
+        STAGE_PERSIST,
+        STAGE_REJECT,
+        STAGE_MAPPING,
+    }
 )
 
 
