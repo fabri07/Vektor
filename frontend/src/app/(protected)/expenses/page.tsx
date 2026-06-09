@@ -27,6 +27,15 @@ import {
   CATEGORY_VARIANTS,
 } from "@/lib/expenseCategories";
 
+function formatRangeDate(value: string | null): string {
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString("es-AR", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
     style: "currency",
@@ -256,11 +265,28 @@ export default function ExpensesPage() {
           Error al cargar los gastos. Recargá la página.
         </p>
       ) : !isLoading && filtered.length === 0 ? (
-        <EmptyState
-          title="Sin gastos en este período"
-          description="Registrá tus gastos usando el chat."
-          action={{ label: "Ir al chat", href: "/chat" }}
-        />
+        entries.length === 0 && dateRange?.max_date ? (
+          // Hay gastos registrados pero fuera del período seleccionado: avisar
+          // en vez de mostrar un vacío engañoso (típico tras importar histórico).
+          <EmptyState
+            title="Sin gastos en este período"
+            description={`Tenés gastos registrados entre ${formatRangeDate(dateRange.min_date)} y ${formatRangeDate(dateRange.max_date)}, fuera del período seleccionado.`}
+            action={{
+              label: "Ver período con datos",
+              onClick: () =>
+                setPeriod({
+                  kind: "year",
+                  year: new Date(dateRange.max_date as string).getFullYear(),
+                }),
+            }}
+          />
+        ) : (
+          <EmptyState
+            title="Sin gastos en este período"
+            description="Registrá tus gastos usando el chat."
+            action={{ label: "Ir al chat", href: "/chat" }}
+          />
+        )
       ) : (
         <SmartTable
           columns={[...COLUMNS, ...buildCustomFieldColumns<ExpenseEntryResponse>(fieldDefs)]}
