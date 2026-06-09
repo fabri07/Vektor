@@ -14,6 +14,7 @@ import {
   Upload,
   Settings,
   Plug,
+  TrendingUp,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -32,6 +33,7 @@ const NAV_ITEMS = [
   { label: "Ventas",        href: "/sales",      icon: ShoppingCart },
   { label: "Gastos",        href: "/expenses",   icon: Receipt },
   { label: "Productos",     href: "/products",   icon: Package },
+  { label: "Resumen económico", href: "/resumen-economico", icon: TrendingUp },
   { label: "Cargar datos",  href: "/ingestion",  icon: Upload },
   { label: "Aplicaciones",  href: "/apps",       icon: Plug },
 ];
