@@ -32,3 +32,25 @@ class ConnectStartResponse(BaseModel):
     auth_url: str
     required_scopes: list[str]
     state: str
+
+
+# FASE 5: diagnóstico de la integración Google MCP (SUPERADMIN).
+
+
+class McpDiagnosticCheck(BaseModel):
+    check: str
+    ok: bool
+    severity: str  # "error" | "warning" | "info"
+    detail: str
+
+
+class McpDiagnosticTenantConnection(BaseModel):
+    status: str
+    last_error_code: str | None
+    scopes_granted: list[str]
+
+
+class GoogleMcpDiagnosticsResponse(BaseModel):
+    overall_ok: bool
+    checks: list[McpDiagnosticCheck]
+    tenant_connection: McpDiagnosticTenantConnection | None
