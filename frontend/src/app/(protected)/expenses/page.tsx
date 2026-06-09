@@ -21,6 +21,11 @@ import {
   resolvePreviousPeriod,
   previousPeriodShortLabel,
 } from "@/lib/period";
+import {
+  ALL_CATEGORIES,
+  CATEGORY_LABELS,
+  CATEGORY_VARIANTS,
+} from "@/lib/expenseCategories";
 
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
@@ -30,26 +35,6 @@ function formatARS(value: number): string {
     maximumFractionDigits: 0,
   }).format(value);
 }
-
-const CATEGORY_LABELS: Record<string, string> = {
-  RENT: "Alquiler",
-  UTILITIES: "Servicios",
-  PAYROLL: "Sueldos",
-  INVENTORY: "Inventario",
-  MARKETING: "Marketing",
-  OTHER: "Otros",
-};
-
-const CATEGORY_VARIANTS: Record<string, "default" | "info" | "warning" | "danger" | "success"> = {
-  RENT: "info",
-  UTILITIES: "warning",
-  PAYROLL: "danger",
-  INVENTORY: "success",
-  MARKETING: "info",
-  OTHER: "default",
-};
-
-const ALL_CATEGORIES = Object.keys(CATEGORY_LABELS);
 
 const COLUMNS = [
   {

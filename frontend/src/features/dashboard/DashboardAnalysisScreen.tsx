@@ -22,6 +22,7 @@ import {
 import { Select } from "@/components/ui/Select";
 import { Tooltip } from "@/components/ui/Tooltip";
 import type { ExpenseEntryResponse } from "@/services/expenses.service";
+import { CATEGORY_LABELS } from "@/lib/expenseCategories";
 import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
 import {
@@ -345,16 +346,6 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
 }
 
 // ── Breakdown panels ─────────────────────────────────────────────────────────
-
-const CATEGORY_LABELS: Record<string, string> = {
-  RENT: "Alquiler",
-  UTILITIES: "Servicios",
-  PAYROLL: "Sueldos",
-  INVENTORY: "Inventario",
-  MARKETING: "Marketing",
-  OTHER: "Otros",
-  compra_proveedor: "Compras",
-};
 
 function BreakdownPanels() {
   const { data, isLoading } = useQuery<BusinessBreakdownResponse>({
