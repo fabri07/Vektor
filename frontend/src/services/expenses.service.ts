@@ -28,6 +28,8 @@ export interface ExpenseEntryResponse {
   category: string;
   /** Nombre personalizado cuando category === "OTHER" (si el usuario lo cargó). */
   category_label?: string | null;
+  /** OPEX = gasto operativo; COGS = compra de mercadería. */
+  expense_type?: "OPEX" | "COGS";
   transaction_date: string;
   description: string;
   is_recurring: boolean;
@@ -42,6 +44,7 @@ export interface ExpensesListParams {
   from_date?: string;
   to_date?: string;
   category?: string;
+  expense_type?: "OPEX" | "COGS";
   limit?: number;
   offset?: number;
 }

@@ -369,6 +369,31 @@ function BreakdownPanels() {
 
   return (
     <>
+      {/* Inversión en mercadería: balance compra → stock (FASE D) */}
+      <PanelFrame
+        title="Inversión en mercadería"
+        tooltip="Lo que salió de caja en compras de mercadería (COGS) del período y el valor actual del stock. El gasto operativo (OPEX) se muestra como referencia."
+      >
+        <ul className="space-y-4 py-2">
+          <li className="flex items-center justify-between text-sm">
+            <span className="text-vk-text-primary">Salida de caja en mercadería</span>
+            <span className="font-medium text-vk-text-primary">
+              {formatARS(data.cogs_total)}
+            </span>
+          </li>
+          <li className="flex items-center justify-between text-sm">
+            <span className="text-vk-text-primary">Valor actual del stock</span>
+            <span className="font-medium text-vk-text-primary">
+              {formatARS(data.stock_value_total)}
+            </span>
+          </li>
+          <li className="flex items-center justify-between border-t border-vk-border-w pt-3 text-sm">
+            <span className="text-vk-text-muted">Gastos operativos del período</span>
+            <span className="text-vk-text-muted">{formatARS(data.opex_total)}</span>
+          </li>
+        </ul>
+      </PanelFrame>
+
       {/* Gastos por categoría */}
       <PanelFrame
         title="Gastos por categoría"

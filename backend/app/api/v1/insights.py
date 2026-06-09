@@ -198,6 +198,11 @@ class BusinessBreakdownResponse(BaseModel):
     low_stock_count: int
     no_rotation_count: int
     total_products: int
+    # FASE D: desglose contable del período — OPEX (operativo) vs COGS
+    # (compras de mercadería) + valor de stock actual (stock × costo unitario).
+    opex_total: float = 0.0
+    cogs_total: float = 0.0
+    stock_value_total: float = 0.0
 
 
 @router.get(
@@ -221,6 +226,25 @@ async def get_business_breakdown(
     top_suppliers = await expense_repo.top_suppliers(
         tenant.tenant_id, from_date=from_date, to_date=today, limit=5
     )
+    # FASE D: balance mercadería — salida de caja (COGS) vs valor del stock.
+    type_totals = await expense_repo.totals_by_expense_type(
+        tenant.tenant_id, from_date=from_date, to_date=today
+    )
+    stock_value_result = await session.execute(
+        select(
+            func.coalesce(
+                func.sum(
+                    func.coalesce(Product.stock_units, 0)
+                    * func.coalesce(Product.unit_cost_ars, 0)
+                ),
+                0,
+            )
+        ).where(
+            Product.tenant_id == tenant.tenant_id,
+            Product.is_active.is_(True),
+        )
+    )
+    stock_value_total = float(stock_value_result.scalar_one() or 0)
 
     # Total de productos activos (COUNT, sin cargar registros)
     total_result = await session.execute(
@@ -282,6 +306,9 @@ async def get_business_breakdown(
         period_days=days,
         from_date=from_date.isoformat(),
         to_date=today.isoformat(),
+        opex_total=type_totals["OPEX"],
+        cogs_total=type_totals["COGS"],
+        stock_value_total=stock_value_total,
         expenses_by_category=[CategoryBreakdownItem(**item) for item in expenses_by_cat],
         top_suppliers=[SupplierBreakdownItem(**item) for item in top_suppliers],
         low_stock_products=[

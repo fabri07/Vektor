@@ -79,6 +79,18 @@ const COLUMNS = [
     csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
+    key: "expense_type",
+    header: "Tipo",
+    hideable: true,
+    render: (v: unknown) =>
+      v === "COGS" ? (
+        <Badge variant="success">Mercadería</Badge>
+      ) : (
+        <Badge variant="default">Operativo</Badge>
+      ),
+    csvValue: (v: unknown) => (v === "COGS" ? "Mercadería" : "Operativo"),
+  },
+  {
     key: "supplier_name",
     header: "Proveedor",
     hideable: true,
@@ -111,6 +123,7 @@ export default function ExpensesPage() {
     preset: "this_month",
   });
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "OPEX" | "COGS">("all");
   const [editing, setEditing] = useState<ExpenseEntryResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
@@ -198,11 +211,12 @@ export default function ExpensesPage() {
     variacionLabel = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% ${previousPeriodShortLabel(period)}`;
   }
 
-  // Apply category filter
-  const filtered =
-    categoryFilter === "all"
-      ? entries
-      : entries.filter((e) => e.category === categoryFilter);
+  // Apply category + type filters
+  const filtered = entries.filter(
+    (e) =>
+      (categoryFilter === "all" || e.category === categoryFilter) &&
+      (typeFilter === "all" || (e.expense_type ?? "OPEX") === typeFilter),
+  );
 
   const sorted = [...filtered].sort(
     (a, b) =>
@@ -227,6 +241,16 @@ export default function ExpensesPage() {
                 {CATEGORY_LABELS[cat] ?? cat}
               </option>
             ))}
+          </select>
+          <label className="ml-3 text-sm text-vk-text-muted">Tipo:</label>
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as "all" | "OPEX" | "COGS")}
+            className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+          >
+            <option value="all">Todos</option>
+            <option value="OPEX">Operativos</option>
+            <option value="COGS">Mercadería</option>
           </select>
         </div>
       </div>

@@ -240,6 +240,7 @@ class ExpenseRepository:
         from_date: date | None = None,
         to_date: date | None = None,
         category: str | None = None,
+        expense_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[ExpenseEntry]:
@@ -253,6 +254,8 @@ class ExpenseRepository:
             q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
         if category:
             q = q.where(ExpenseEntry.category == category)
+        if expense_type:
+            q = q.where(ExpenseEntry.expense_type == expense_type)
         q = q.order_by(ExpenseEntry.transaction_date.desc()).limit(limit).offset(offset)
         result = await self._session.execute(q)
         return list(result.scalars().all())
@@ -294,6 +297,7 @@ class ExpenseRepository:
         tenant_id: UUID,
         from_date: date | None = None,
         to_date: date | None = None,
+        expense_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Gastos agrupados por categoría con totales y porcentaje."""
         q = select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total")).where(
@@ -304,6 +308,8 @@ class ExpenseRepository:
             q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
         if to_date:
             q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
+        if expense_type:
+            q = q.where(ExpenseEntry.expense_type == expense_type)
         q = q.group_by(ExpenseEntry.category).order_by(func.sum(ExpenseEntry.amount).desc())
         result = await self._session.execute(q)
         rows = result.all()
@@ -318,6 +324,30 @@ class ExpenseRepository:
             }
             for r in rows
         ]
+
+    async def totals_by_expense_type(
+        self,
+        tenant_id: UUID,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> dict[str, float]:
+        """Totales del período por tipo: {'OPEX': x, 'COGS': y} (0.0 si no hay)."""
+        q = select(
+            ExpenseEntry.expense_type, func.sum(ExpenseEntry.amount).label("total")
+        ).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
+        )
+        if from_date:
+            q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
+        if to_date:
+            q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
+        q = q.group_by(ExpenseEntry.expense_type)
+        result = await self._session.execute(q)
+        totals = {"OPEX": 0.0, "COGS": 0.0}
+        for row in result.all():
+            totals[str(row.expense_type)] = float(row.total or 0)
+        return totals
 
     async def top_suppliers(
         self,
