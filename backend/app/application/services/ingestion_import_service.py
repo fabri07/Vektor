@@ -181,6 +181,44 @@ async def _record_stock_movement(
         balance.current_qty += qty
 
 
+async def _apply_purchase_to_stock(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    expense: Any,
+    qty_raw: Any,
+    unit_cost: Decimal | None,
+) -> None:
+    """FASE D: una compra de mercadería importada suma stock.
+
+    Gate doble contra falsos positivos / doble conteo:
+      - el gasto debe tener producto del catálogo resuelto (`product_id`); y
+      - la fila debe traer una columna de cantidad con valor > 0.
+    A diferencia del import de productos (que SETEA stock absoluto), acá se
+    INCREMENTA: `Product.stock_units += qty` + movimiento de inventario + sync
+    de balance, igual que `stock_service.increment_stock` pero sin flush por
+    fila (batch del import).
+    """
+    if expense.product_id is None:
+        return
+    try:
+        qty = int(float(str(qty_raw))) if qty_raw not in (None, "", "None", "nan") else 0
+    except (ValueError, TypeError):
+        return
+    if qty <= 0:
+        return
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    product = await session.get(Product, expense.product_id)
+    if product is None or product.tenant_id != tenant_id:
+        return
+    product.stock_units += qty
+    if unit_cost is not None:
+        product.unit_cost_ars = unit_cost
+    await _record_stock_movement(
+        session, tenant_id, product.id, qty, unit_cost, "purchase", product.stock_units
+    )
+
+
 _NOMBRE_COLS: set[str] = {
     "producto",
     "descripcion",
@@ -603,6 +641,24 @@ async def insert_confirmed_data(
                         str(row.get(nombre_col)) if nombre_col else None,
                         str(row.get(sku_col)) if sku_col else None,
                     )
+                    # FASE D: COGS si la fila es compra de mercadería (producto
+                    # del catálogo o categoría INVENTORY); además suma stock si
+                    # trae cantidad explícita.
+                    expense.expense_type = (
+                        "COGS"
+                        if (expense.product_id is not None or cat_code == "INVENTORY")
+                        else "OPEX"
+                    )
+                    exp_qty_raw = (
+                        row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
+                    )
+                    await _apply_purchase_to_stock(
+                        session,
+                        tenant_id,
+                        expense,
+                        exp_qty_raw,
+                        _parse_amount(row.get(costo_col)) if costo_col else None,
+                    )
                     session.add(expense)
                     counts["gastos"] += 1
 
@@ -951,7 +1007,9 @@ async def _insert_multisheet_data(
         session.add(entry)
         counts["ventas"] += 1
 
-    def _add_expense(row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]) -> None:
+    async def _add_expense(
+        row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
+    ) -> None:
         amount_col = cols.get("amount")
         amount = (
             _parse_amount(row.get(amount_col))
@@ -993,6 +1051,17 @@ async def _insert_multisheet_data(
             _by_name,
             _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
             _val(row, cols.get("sku"), _SKU_COLS),
+        )
+        # FASE D: discriminador COGS/OPEX + stock desde compras con cantidad.
+        expense.expense_type = (
+            "COGS" if (expense.product_id is not None or cat_code == "INVENTORY") else "OPEX"
+        )
+        await _apply_purchase_to_stock(
+            session,
+            tenant_id,
+            expense,
+            _val(row, cols.get("quantity"), _CANTIDAD_COLS),
+            _parse_amount(_val(row, cols.get("unit_cost_ars"), _COSTO_COLS)),
         )
         session.add(expense)
         counts["gastos"] += 1
@@ -1102,7 +1171,7 @@ async def _insert_multisheet_data(
                 if entity == "sale":
                     _add_sale(row, cols, cf_cols)
                 elif entity == "expense":
-                    _add_expense(row, cols, cf_cols)
+                    await _add_expense(row, cols, cf_cols)
                 else:
                     await _add_product(row, cols, cf_cols)
                 if (_i + 1) % _flush_every == 0:
@@ -1116,7 +1185,7 @@ async def _insert_multisheet_data(
                     await session.flush()
         if confirmed_fields.get("gastos"):
             for row in summary.get("gastos_detectados", []):
-                _add_expense(row, {}, {})
+                await _add_expense(row, {}, {})
         if confirmed_fields.get("productos"):
             for row in summary.get("stock_detectado", []):
                 await _add_product(row, {}, {})

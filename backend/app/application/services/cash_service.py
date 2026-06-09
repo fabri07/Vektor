@@ -151,10 +151,13 @@ async def save_expense(
 ) -> ExpenseEntry:
     """Registra un gasto en expense_entries."""
     category, category_label = normalize_expense_category(entities.get("category"))
+    expense_type_raw = entities.get("expense_type")
+    expense_type = expense_type_raw if expense_type_raw in ("OPEX", "COGS") else "OPEX"
     expense = ExpenseEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
         category=category,
+        expense_type=expense_type,
         transaction_date=_coerce_transaction_date(
             entities.get("transaction_date") or entities.get("date")
         ),

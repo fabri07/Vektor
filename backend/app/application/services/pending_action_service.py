@@ -268,7 +268,9 @@ async def execute_pending_action(
             )
 
     elif action.action_type == ActionType.REGISTER_PURCHASE:
-        purchase_payload = {**payload, "category": "compra_proveedor"}
+        # Compra de mercadería: categoría canónica + COGS (muere el literal
+        # "compra_proveedor", que quedaba fuera del catálogo).
+        purchase_payload = {**payload, "category": "INVENTORY", "expense_type": "COGS"}
         await cash_service.save_expense(purchase_payload, action.tenant_id, db)
 
         product_id_str = payload.get("product_id")

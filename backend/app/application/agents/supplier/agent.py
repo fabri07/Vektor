@@ -263,7 +263,8 @@ class AgentSupplier(BaseAgent):
 
         payload: dict[str, Any] = {
             "amount": amount,
-            "category": "compra_proveedor",
+            "category": "INVENTORY",
+            "expense_type": "COGS",
             "description": f"Compra a {supplier}" + (f" — {product_name}" if product_name else ""),
             "transaction_date": entities.get("transaction_date", ""),
             "notes": request.message,
