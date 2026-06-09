@@ -46,7 +46,14 @@ def check_nonempty_import(
     Compartida por el endpoint de ingestión (→ 422) y el camino de chat
     (IMPORT_TABULAR_FILE → la pending action queda FAILED con mensaje visible).
     """
-    total_inserted = counts.get("ventas", 0) + counts.get("gastos", 0) + counts.get("productos", 0)
+    total_inserted = (
+        counts.get("ventas", 0)
+        + counts.get("gastos", 0)
+        + counts.get("productos", 0)
+        # Filas derivadas a la bandeja "Otros" cuentan como procesadas: el
+        # usuario las va a ver en /otros, no es un import silenciosamente vacío.
+        + counts.get("otros", 0)
+    )
     had_rows = bool(summary.get("row_count")) or any(
         summary.get(k) for k in ("ventas_detectadas", "gastos_detectados", "stock_detectado")
     )
@@ -65,6 +72,46 @@ def check_nonempty_import(
 def _normalize_name(name: str) -> str:
     """Normaliza nombre de producto para comparación: lower, sin guiones, espacios únicos."""
     return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
+
+
+def _capture_unclassified(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    rows: list[dict[str, Any]],
+    headers: list[str] | None,
+    source: str,
+    uploaded_file_id: uuid.UUID | None,
+    context_label: str | None = None,
+    suggested_entity: str | None = None,
+) -> int:
+    """FASE F: persiste filas no clasificadas en la bandeja "Otros".
+
+    Nada se descarta en silencio: lo que no se pudo (o no se quiso) clasificar
+    como venta/gasto/producto queda en ``unclassified_records`` con estado
+    PENDING para que el tenant lo importe o descarte desde /otros.
+    """
+    from app.persistence.models.unclassified_record import (  # noqa: PLC0415
+        UnclassifiedRecord,
+    )
+
+    count = 0
+    for row in rows:
+        row_data = {k: v for k, v in row.items() if k != "__context__"}
+        if not row_data:
+            continue
+        session.add(
+            UnclassifiedRecord(
+                tenant_id=tenant_id,
+                uploaded_file_id=uploaded_file_id,
+                source=source,
+                context_label=(context_label or None),
+                headers=list(headers) if headers else None,
+                row_data={k: ("" if v is None else str(v)) for k, v in row_data.items()},
+                suggested_entity=suggested_entity,
+            )
+        )
+        count += 1
+    return count
 
 
 async def _load_business_type(session: AsyncSession, tenant_id: uuid.UUID) -> str | None:
@@ -394,11 +441,17 @@ async def insert_confirmed_data(
     context_mappings: dict[str, dict[str, str]] | None = None,
     context_confirmed: dict[str, bool] | None = None,
     context_entity: dict[str, str] | None = None,
+    source: str = "ingestion",
+    uploaded_file_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
     When return_details=True, also returns product_details list with per-row
     action ('CREATED'|'UPDATED'), product_id, name, before/after snapshots.
+
+    FASE F: las filas de `otros_detectados` que el usuario NO reasigna a un tipo
+    importable se persisten en `unclassified_records` (bandeja "Otros") con
+    ``source``/``uploaded_file_id`` — `counts["otros"]` las cuenta.
     """
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -408,7 +461,7 @@ async def insert_confirmed_data(
     confirmed_fields = confirmed_fields or _default_confirmed_fields(summary)
     # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
     today = datetime.now()
-    counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0}
+    counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0, "otros": 0}
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
 
@@ -429,13 +482,22 @@ async def insert_confirmed_data(
                 column_mappings=column_mappings,
                 context_mappings=context_mappings,
                 context_confirmed=context_confirmed,
+                context_entity=context_entity,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
             )
 
         rows: list[dict[str, Any]]
+        rows_from_otros = False
         if inferred_type == "stock":
             rows = summary.get("stock_detectado", [])
         else:
             rows = summary.get("ventas_detectadas", []) or summary.get("gastos_detectados", [])
+            if not rows:
+                # FASE F: archivos ambiguos ("general") viven en otros_detectados;
+                # la confirmación explícita del usuario sigue pudiendo importarlos.
+                rows = summary.get("otros_detectados", [])
+                rows_from_otros = bool(rows)
         if not rows:
             return counts
 
@@ -823,6 +885,19 @@ async def insert_confirmed_data(
                         )
                 counts["productos"] += 1
 
+        # FASE F: filas ambiguas (otros_detectados) que el usuario NO reasignó a
+        # ningún tipo importable → bandeja "Otros" en vez de descartarse.
+        if rows_from_otros and not (wants_ventas or wants_gastos or wants_productos):
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows,
+                headers,
+                source,
+                uploaded_file_id,
+                context_label="Tabla sin clasificar",
+            )
+
     else:
         # ── Documentos de texto/imagen: inserción por línea (montos detectados) ──
         def _add_text_sale(entry: dict[str, Any]) -> None:
@@ -959,6 +1034,9 @@ async def _insert_multisheet_data(
     column_mappings: dict[str, str] | None,
     context_mappings: dict[str, dict[str, str]] | None = None,
     context_confirmed: dict[str, bool] | None = None,
+    context_entity: dict[str, str] | None = None,
+    source: str = "ingestion",
+    uploaded_file_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -1194,17 +1272,39 @@ async def _insert_multisheet_data(
     if contexts:
         # ── Path por contexto (hoja/grupo) ──────────────────────────────────────
         for ctx in contexts:
-            entity = ctx.get("entity_type")
-            if entity not in entity_bucket:
-                continue
             ctx_id = ctx.get("context_id")
+            base_entity = ctx.get("entity_type")
+            # FASE F: el usuario puede reasignar una hoja no clasificada a un
+            # tipo importable (context_entity), igual que en documentos de texto.
+            entity = (context_entity or {}).get(ctx_id or "") or base_entity
+            if entity not in entity_bucket:
+                # Hoja no clasificada y no reasignada → bandeja "Otros".
+                otros_rows = [
+                    r
+                    for r in summary.get("otros_detectados", [])
+                    if r.get("__context__") == ctx_id
+                ]
+                if otros_rows:
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        otros_rows,
+                        ctx.get("headers"),
+                        source,
+                        uploaded_file_id,
+                        context_label=str(ctx.get("label") or ctx_id or ""),
+                    )
+                continue
             # Inclusión: por contexto si vino context_confirmed; si no, por tipo (legacy)
             if context_confirmed:
                 if not context_confirmed.get(ctx_id):
                     continue
             elif not confirmed_fields.get(entity_confirm_key[entity]):
                 continue
-            bucket = summary.get(entity_bucket[entity], [])
+            # Las filas viven en el bucket del tipo ORIGINAL de la hoja (o en
+            # otros_detectados si era no clasificada y fue reasignada).
+            bucket_key = entity_bucket.get(base_entity or "", "otros_detectados")
+            bucket = summary.get(bucket_key, [])
             rows = [r for r in bucket if r.get("__context__") == ctx_id]
             if not rows:
                 continue

@@ -803,6 +803,8 @@ async def confirm_file(
         context_mappings=context_mappings,
         context_confirmed=body.context_confirmed or None,
         context_entity=body.context_entity or None,
+        source="ingestion",
+        uploaded_file_id=file_id,
     )
     _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
 

@@ -434,6 +434,8 @@ async def execute_pending_action(
                 tenant_id=action.tenant_id,
                 summary=summary,
                 confirmed_fields=confirmed_fields,
+                source="chat",
+                uploaded_file_id=uploaded_file.id,
             )
             # Import vacío con datos presentes → falla visible (la pending action
             # queda FAILED y el archivo NO se marca DONE).
@@ -460,6 +462,7 @@ async def execute_pending_action(
                 tenant_id=action.tenant_id,
                 summary=summary,
                 confirmed_fields=confirmed_fields,
+                source="chat",
             )
             check_nonempty_import(counts, summary, confirmed_fields)
             source = payload.get("source") or "tabular"

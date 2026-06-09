@@ -585,6 +585,11 @@ def _store_rows_by_type(
     ya cae a `gastos_detectados` cuando `ventas_detectadas` está vacío, así que NO
     hace falta contaminar `ventas_detectadas` con filas de gastos (eso causaba
     riesgo de doble conteo venta+gasto).
+
+    FASE F: el tipo ambiguo ("general") va a `otros_detectados` — nunca más datos
+    ambiguos al bucket de ventas por default. El usuario los reasigna al confirmar
+    (la inserción legacy también lee este bucket) o quedan en la bandeja "Otros"
+    (`unclassified_records`).
     """
     if inferred_type == "stock":
         summary["stock_detectado"] = rows
@@ -594,8 +599,13 @@ def _store_rows_by_type(
         summary["gastos_detectados"] = rows
         summary["ventas_detectadas"] = []
         summary["stock_detectado"] = []
-    else:
+    elif inferred_type == "ventas":
         summary["ventas_detectadas"] = rows
+        summary["gastos_detectados"] = []
+        summary["stock_detectado"] = []
+    else:
+        summary["otros_detectados"] = rows
+        summary["ventas_detectadas"] = []
         summary["gastos_detectados"] = []
         summary["stock_detectado"] = []
 
@@ -821,6 +831,12 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                             "row_count": len(dicts),
                             "unclassified": True,
                         }
+                    )
+                    # FASE F: las filas completas se preservan en otros_detectados
+                    # (antes solo quedaban las 10 de preview) → al confirmar, lo no
+                    # reclasificado va a la bandeja "Otros" (unclassified_records).
+                    summary.setdefault("otros_detectados", []).extend(
+                        {**d, "__context__": context_id} for d in dicts
                     )
                     summary["warnings"].append(
                         f"La hoja '{sheet_name}' no se pudo clasificar automáticamente. "
