@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user, require_role
+from app.application.services.mcp_diagnostics_service import run_google_mcp_diagnostics
 from app.config.settings import get_settings
 from app.integrations.mcp.exceptions import McpToolUnavailableError
 from app.observability.logger import get_logger
@@ -26,6 +27,7 @@ from app.schemas.integrations import (
     ConnectStartResponse,
     GoogleAppStatus,
     GoogleIntegrationStatusResponse,
+    GoogleMcpDiagnosticsResponse,
 )
 
 router = APIRouter()
@@ -371,3 +373,24 @@ async def google_disconnect(
         user_id=str(current_user.user_id),
     )
     return {"ok": True}
+
+
+@router.get(
+    "/google/diagnostics",
+    response_model=GoogleMcpDiagnosticsResponse,
+    summary="Diagnóstico de la integración Google MCP (SUPERADMIN)",
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+)
+async def google_mcp_diagnostics(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> GoogleMcpDiagnosticsResponse:
+    """FASE 5: chequea config + conectividad de Google MCP y reporta qué falta.
+
+    No expone secretos. Lo no verificable desde el backend (redirect URI en Google
+    Cloud, app verification) se reporta como hint informativo.
+    """
+    data = await run_google_mcp_diagnostics(
+        db, current_user.tenant_id, current_user.user_id
+    )
+    return GoogleMcpDiagnosticsResponse(**data)
