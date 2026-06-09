@@ -9,6 +9,7 @@ from app.api.v1 import (
     automations,
     business_profiles,
     cash_closes,
+    economic_summary,
     expenses,
     fields,
     files,
@@ -46,6 +47,9 @@ api_router.include_router(cash_closes.router, prefix="/cash-closes", tags=["Cash
 api_router.include_router(products.router, prefix="/products", tags=["Products"])
 api_router.include_router(health_scores.router, prefix="/health-scores", tags=["Health Scores"])
 api_router.include_router(insights.router, prefix="/insights", tags=["Insights"])
+api_router.include_router(
+    economic_summary.router, prefix="/economic-summary", tags=["Economic Summary"]
+)
 api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 api_router.include_router(files.router, prefix="/files", tags=["Files"])
 api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
