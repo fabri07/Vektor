@@ -148,6 +148,8 @@ class ExpenseEntryResponse(BaseModel):
     # Etiqueta libre cuando category == OTHER (guardada en custom_fields["category_label"]).
     # La categoría canónica sigue siendo OTHER → reportes/agregaciones no se rompen.
     category_label: str | None = None
+    # OPEX = gasto operativo; COGS = compra de mercadería.
+    expense_type: str = "OPEX"
     transaction_date: datetime
     description: str
     is_recurring: bool
@@ -177,6 +179,7 @@ class CreateExpenseRequest(BaseModel):
     category: str = Field(pattern=EXPENSE_CATEGORIES)
     # Solo se usa cuando category == OTHER: nombre personalizado de la categoría.
     category_label: str | None = Field(default=None, max_length=50)
+    expense_type: str = Field(default="OPEX", pattern=r"^(OPEX|COGS)$")
     expense_date: datetime
     notes: str | None = Field(default=None, max_length=1000)
     description: str = Field(default="", max_length=500)
@@ -205,6 +208,7 @@ class UpdateExpenseRequest(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     category: str | None = Field(default=None, pattern=EXPENSE_CATEGORIES)
     category_label: str | None = Field(default=None, max_length=50)
+    expense_type: str | None = Field(default=None, pattern=r"^(OPEX|COGS)$")
     expense_date: datetime | None = None
     description: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None
