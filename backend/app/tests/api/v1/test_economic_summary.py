@@ -134,6 +134,29 @@ async def test_products_without_cost_reported_not_valued(
 
 
 @pytest.mark.asyncio
+async def test_product_without_cost_and_zero_stock_is_ignored(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Producto activo sin costo y stock 0, sin movimientos → no activa has_data."""
+    await _add_product(db_session, sample_tenant.tenant_id, "Sin costo ni stock", 0, None)
+    await db_session.commit()
+
+    resp = await client.get(
+        "/api/v1/economic-summary",
+        params={"from_date": _FROM, "to_date": _TO},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["missing_cost_count"] == 0
+    assert data["missing_cost_stock_units"] == 0
+    assert data["has_data"] is False
+
+
+@pytest.mark.asyncio
 async def test_from_after_to_returns_422(
     client: AsyncClient, auth_headers: dict[str, Any]
 ) -> None:

@@ -15,7 +15,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.product import Product
@@ -32,17 +32,14 @@ async def _stock_valuation(
 
     Devuelve (stock_value_ars, missing_cost_count, missing_cost_stock_units).
     Productos con `unit_cost_ars` NULL no suman al valor (no se inventa el costo);
-    se cuentan aparte junto con sus unidades, para que el usuario sepa qué falta.
+    se cuentan aparte SOLO si tienen `stock_units > 0` (un producto sin costo y sin
+    stock no es "dato cargado" valuable → no debe activar has_data ni missing_cost).
     """
+    _missing = and_(Product.unit_cost_ars.is_(None), Product.stock_units > 0)
     stmt = select(
         func.coalesce(func.sum(Product.stock_units * Product.unit_cost_ars), 0),
-        func.coalesce(
-            func.sum(case((Product.unit_cost_ars.is_(None), 1), else_=0)), 0
-        ),
-        func.coalesce(
-            func.sum(case((Product.unit_cost_ars.is_(None), Product.stock_units), else_=0)),
-            0,
-        ),
+        func.coalesce(func.sum(case((_missing, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((_missing, Product.stock_units), else_=0)), 0),
     ).where(
         Product.tenant_id == tenant_id,
         Product.is_active.is_(True),
