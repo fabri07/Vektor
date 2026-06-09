@@ -79,7 +79,9 @@ async def run_google_mcp_diagnostics(
         _check(
             "shared_secret_configured",
             secret_ok,
-            "warning",
+            # error (no warning): vacío bloquea la integración igual que el flag o la URL
+            # (el MCP server rechaza toda llamada con 401 sin el secret).
+            "error",
             "MCP_SERVER_SHARED_SECRET presente (no se expone)."
             if secret_ok
             else "MCP_SERVER_SHARED_SECRET vacío: el MCP server rechaza las llamadas con 401.",

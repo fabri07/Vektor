@@ -40,6 +40,24 @@ Respuesta: `{ overall_ok, checks[], tenant_connection }`. Cada check trae
 - `refresh_failed` — el refresh token se revocó/expiró. Desconectar y reconectar desde `/apps`.
 - `http_401` / `mcp_auth_required` — `MCP_SERVER_SHARED_SECRET` distinto entre backend y MCP.
 
+## Env vars exactas a revisar (Railway)
+
+**Backend (`vektor-api`):**
+- `ENABLE_GOOGLE_MCP_TOOLS=true`
+- `MCP_SERVER_URL=https://<mcp-server>`
+- `MCP_SERVER_SHARED_SECRET=<secreto>`
+
+**MCP server (`vektor-mcp`):**
+- `MCP_SERVER_SHARED_SECRET=<secreto>` — **idéntico** al del backend
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_MCP_OAUTH_REDIRECT_URI=https://<mcp-server>/auth/callback`
+
+**Google Cloud Console (Credentials → OAuth client):**
+- Authorized redirect URI **exactamente igual** a `GOOGLE_MCP_OAUTH_REDIRECT_URI`
+  (mismo esquema, host y path; sin barra final de más).
+- Scopes habilitados en la pantalla de consentimiento; app verificada o la cuenta
+  de prueba agregada como tester.
+
 ## Orden de diagnóstico recomendado
 
 1. Correr `/integrations/google/diagnostics`. Resolver primero los `severity=error`.

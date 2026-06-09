@@ -107,6 +107,42 @@ async def test_all_checks_pass_when_configured(
 
 
 @pytest.mark.asyncio
+async def test_empty_secret_is_error(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP_SERVER_SHARED_SECRET vacío bloquea la integración → error + overall_ok False."""
+    headers = await _superadmin_headers(db_session, sample_tenant)
+    s = get_settings()
+    monkeypatch.setattr(s, "ENABLE_GOOGLE_MCP_TOOLS", True)
+    monkeypatch.setattr(s, "MCP_SERVER_URL", "http://mcp.test")
+    monkeypatch.setattr(s, "MCP_SERVER_SHARED_SECRET", "")
+
+    with (
+        unittest.mock.patch.object(
+            mcp_diagnostics_service,
+            "_check_reachable",
+            new=AsyncMock(return_value=(True, "ok")),
+        ),
+        unittest.mock.patch.object(
+            mcp_diagnostics_service,
+            "_check_auth",
+            new=AsyncMock(return_value=(True, "ok")),
+        ),
+    ):
+        resp = await client.get(_DIAG, headers=headers)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    secret_check = next(c for c in data["checks"] if c["check"] == "shared_secret_configured")
+    assert secret_check["ok"] is False
+    assert secret_check["severity"] == "error"
+    assert data["overall_ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_secret_mismatch_reported(
     client: AsyncClient,
     db_session: AsyncSession,
