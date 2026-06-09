@@ -18,7 +18,6 @@ import os
 import sys
 
 import asyncpg
-
 from diag_account import normalize_dsn, p
 
 

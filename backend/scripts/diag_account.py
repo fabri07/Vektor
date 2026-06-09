@@ -12,7 +12,7 @@ import json
 import os
 import ssl
 import sys
-from urllib.parse import urlparse, parse_qs, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 import asyncpg
 
@@ -81,10 +81,11 @@ async def run(conn: asyncpg.Connection, email: str) -> None:
         )
         if t:
             print(f"\n  TENANT {tid}: " + ", ".join(
-                f"{k}={t[k]}" for k in t.keys() if k not in ("tenant_id",)
+                f"{k}={t[k]}" for k in t if k not in ("tenant_id",)
             )[:400])
         bp = await conn.fetchrow(
-            "SELECT business_type, business_name FROM business_profiles WHERE tenant_id=$1 LIMIT 1",
+            "SELECT business_type, business_name FROM business_profiles "
+            "WHERE tenant_id=$1 LIMIT 1",
             tid,
         )
         if bp:
@@ -122,9 +123,12 @@ async def run(conn: asyncpg.Connection, email: str) -> None:
                         for bucket in ("ventas", "gastos", "productos", "stock_detectado",
                                        "sales", "expenses", "products"):
                             if bucket in s and isinstance(s[bucket], list):
-                                print(f"       {bucket}: {len(s[bucket])} filas"
-                                      + (f"  ej={json.dumps(s[bucket][0], ensure_ascii=False)[:200]}"
-                                         if s[bucket] else ""))
+                                ej = (
+                                    f"  ej={json.dumps(s[bucket][0], ensure_ascii=False)[:200]}"
+                                    if s[bucket]
+                                    else ""
+                                )
+                                print(f"       {bucket}: {len(s[bucket])} filas{ej}")
                         for meta in ("columns_at_risk", "columns", "row_count", "sheets",
                                      "detected_type", "inferred_type", "__context__",
                                      "mapping_contexts", "warnings", "error"):
