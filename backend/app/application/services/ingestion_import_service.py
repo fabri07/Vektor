@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
@@ -18,6 +19,46 @@ from app.domain.expense_categories import normalize_expense_category
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class EmptyImportError(Exception):
+    """Se confirmó un import con datos presentes pero no se insertó ninguna fila."""
+
+    user_message = (
+        "No se importó ninguna fila: no se detectaron automáticamente las "
+        "columnas requeridas (fecha / monto / nombre) para el tipo confirmado. "
+        "Mapeá las columnas manualmente o revisá el tipo de datos del archivo."
+    )
+
+
+def check_nonempty_import(
+    counts: dict[str, Any],
+    summary: dict[str, Any],
+    confirmed_fields: dict[str, bool] | None,
+    context_confirmed: dict[str, bool] | None = None,
+) -> None:
+    """Falla explícita ante inserción vacía con datos presentes.
+
+    Si el archivo tenía filas y el usuario confirmó algún tipo pero NO se insertó
+    nada (el fallback por keyword no encontró las columnas requeridas), lanza
+    ``EmptyImportError`` en vez de dejar pasar un import silenciosamente vacío.
+    Compartida por el endpoint de ingestión (→ 422) y el camino de chat
+    (IMPORT_TABULAR_FILE → la pending action queda FAILED con mensaje visible).
+    """
+    total_inserted = counts.get("ventas", 0) + counts.get("gastos", 0) + counts.get("productos", 0)
+    had_rows = bool(summary.get("row_count")) or any(
+        summary.get(k) for k in ("ventas_detectadas", "gastos_detectados", "stock_detectado")
+    )
+    confirmed_any = any((confirmed_fields or {}).values()) or any(
+        (context_confirmed or {}).values()
+    )
+    if total_inserted == 0 and had_rows and confirmed_any:
+        logger.warning(
+            "ingestion.import.zero_inserted",
+            row_count=summary.get("row_count"),
+            confirmed_fields=confirmed_fields,
+        )
+        raise EmptyImportError(EmptyImportError.user_message)
 
 
 def _normalize_name(name: str) -> str:
@@ -363,6 +404,7 @@ async def insert_confirmed_data(
         notes_col: str | None = None
         payment_col: str | None = None
         category_col: str | None = None
+        recurring_col: str | None = None
         custom_field_cols: dict[str, str] = {}
 
         if column_mappings:
@@ -402,6 +444,7 @@ async def insert_confirmed_data(
             notes_col = target_to_col.get("notes")
             payment_col = target_to_col.get("payment_method")
             category_col = target_to_col.get("category")
+            recurring_col = target_to_col.get("is_recurring")
 
         # FASE 3: en archivos ambiguos ("general") se honra la confirmación EXPLÍCITA del
         # usuario (no se requiere la señal auto-detectada). Para tipos ya inferidos se
@@ -520,6 +563,18 @@ async def insert_confirmed_data(
                     )
                     cat_code, cat_label = normalize_expense_category(_clean_str(cat_raw))
 
+                    # Método de pago real del archivo (antes hardcodeado "transfer").
+                    exp_pay_raw = _clean_str(
+                        row.get(payment_col) if payment_col else _row_val(row, _PAGO_COLS),
+                        30,
+                    )
+                    exp_pay = (
+                        normalize_payment_method(exp_pay_raw) if exp_pay_raw else "transfer"
+                    )
+                    recurring = _parse_bool_es(
+                        row.get(recurring_col) if recurring_col else _row_val(row, _RECURRENTE_COLS)
+                    )
+
                     # Custom fields
                     cf = {
                         k: str(row.get(v, ""))
@@ -535,7 +590,8 @@ async def insert_confirmed_data(
                         category=cat_code,
                         transaction_date=tx_date,
                         description=desc,
-                        payment_method="transfer",
+                        is_recurring=recurring if recurring is not None else False,
+                        payment_method=exp_pay,
                         provenance="REAL",
                     )
                     if cf:
@@ -768,6 +824,24 @@ _PAGO_COLS: set[str] = {"forma_pago", "metodo_pago", "payment_method", "medio_pa
 # Tupla = prioridad: "categoria" debe ganar siempre sobre "tipo" (un CSV con
 # columnas `categoria` Y `tipo` debe tomar la categoría de `categoria`).
 _CATEGORIA_COLS: tuple[str, ...] = ("categoria", "category", "rubro", "tipo")
+_RECURRENTE_COLS: set[str] = {"recurrente", "recurring", "es_fijo", "frecuencia"}
+
+_TRUTHY_ES = {"si", "sí", "true", "1", "x", "verdadero", "fijo", "yes"}
+_FALSY_ES = {"no", "false", "0", "variable", ""}
+
+
+def _parse_bool_es(raw: Any) -> bool | None:
+    """Parsea booleanos es-AR de archivos ('Sí'/'fijo'/'True'/'1'). None si es ambiguo."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    s = str(raw).strip().lower()
+    if s in _TRUTHY_ES:
+        return True
+    if s in _FALSY_ES or s in {"none", "nan"}:
+        return False
+    return None
 _CANTIDAD_COLS: set[str] = {"cantidad", "qty", "units", "unidades", "cant"}
 
 # Monto de venta: preferimos "total" (precio_unitario × cantidad) sobre "precio_unitario"
@@ -893,16 +967,19 @@ async def _insert_multisheet_data(
             tx_date = today
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         desc = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
-        pay = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
+        pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
+        pay = normalize_payment_method(pay_raw) if pay_raw else "transfer"
         cat_raw = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 99)
         cat_code, cat_label = normalize_expense_category(cat_raw)
+        recurring = _parse_bool_es(_val(row, cols.get("is_recurring"), _RECURRENTE_COLS))
         expense = ExpenseEntry(
             tenant_id=tenant_id,
             amount=amount,
             category=cat_code,
             transaction_date=tx_date,
             description=desc or "Gasto importado",
-            payment_method=pay or "transfer",
+            is_recurring=recurring if recurring is not None else False,
+            payment_method=pay,
             provenance="REAL",
         )
         cf = _custom_fields(row, cf_cols)

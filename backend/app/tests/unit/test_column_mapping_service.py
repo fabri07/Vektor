@@ -41,6 +41,22 @@ def test_heuristic_match_expense() -> None:
     assert _heuristic_match("proveedor", "expense") == "supplier_name"
 
 
+def test_heuristic_match_expense_payment_method_not_amount() -> None:
+    """Regresión: `forma_pago` debe ir a payment_method, no a amount por el
+    substring 'pago' (el match exacto / keyword más largo gana)."""
+    assert _heuristic_match("forma_pago", "expense") == "payment_method"
+    assert _heuristic_match("forma_de_pago", "expense") == "payment_method"
+    assert _heuristic_match("metodo_pago", "expense") == "payment_method"
+    assert _heuristic_match("medio_de_pago", "expense") == "payment_method"
+    # 'pago' a secas sigue siendo monto (pagos = egresos)
+    assert _heuristic_match("pago", "expense") == "amount"
+
+
+def test_heuristic_match_expense_is_recurring() -> None:
+    assert _heuristic_match("recurrente", "expense") == "is_recurring"
+    assert _heuristic_match("recurring", "expense") == "is_recurring"
+
+
 def test_heuristic_match_product() -> None:
     assert _heuristic_match("sku", "product") == "sku"
     assert _heuristic_match("nombre", "product") == "name"

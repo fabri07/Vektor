@@ -26,7 +26,10 @@ import app.application.services.stock_service as stock_service
 from app.application.agents.shared.schemas import ActionType
 from app.application.services.automation_service import determine_external_system
 from app.application.services.chat_memory_service import ChatMemoryService
-from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.application.services.ingestion_import_service import (
+    check_nonempty_import,
+    insert_confirmed_data,
+)
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
@@ -430,6 +433,9 @@ async def execute_pending_action(
                 summary=summary,
                 confirmed_fields=confirmed_fields,
             )
+            # Import vacío con datos presentes → falla visible (la pending action
+            # queda FAILED y el archivo NO se marca DONE).
+            check_nonempty_import(counts, summary, confirmed_fields)
             uploaded_file.processing_status = PROCESSING_STATUS_DONE
             uploaded_file.parsed_summary_json = {
                 **summary,
@@ -453,6 +459,7 @@ async def execute_pending_action(
                 summary=summary,
                 confirmed_fields=confirmed_fields,
             )
+            check_nonempty_import(counts, summary, confirmed_fields)
             source = payload.get("source") or "tabular"
             description = f"Importado desde {source}: {counts}"
             entity_type = summary.get("inferred_type")

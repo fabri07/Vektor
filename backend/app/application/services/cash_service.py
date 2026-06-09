@@ -22,6 +22,10 @@ _PAYMENT_METHOD_MAP = {
     "debit_card": "debit_card",
     "debito": "debit_card",
     "débito": "debit_card",
+    # Débito automático (servicios/seguros): sale de la cuenta bancaria.
+    "debito_automatico": "transfer",
+    "debito automatico": "transfer",
+    "débito automático": "transfer",
     "credit_card": "credit_card",
     "credito": "credit_card",
     "crédito": "credit_card",
@@ -29,10 +33,15 @@ _PAYMENT_METHOD_MAP = {
 }
 
 
-def _normalize_payment_method(value: str | None) -> str:
+def normalize_payment_method(value: str | None) -> str:
+    """Texto libre → código canónico de método de pago; sin match → 'other'."""
     if not value:
         return "other"
     return _PAYMENT_METHOD_MAP.get(str(value).strip().lower(), "other")
+
+
+# Alias interno legacy.
+_normalize_payment_method = normalize_payment_method
 
 
 

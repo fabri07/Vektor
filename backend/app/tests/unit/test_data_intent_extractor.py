@@ -64,6 +64,17 @@ def test_general_con_ventas_detectadas_es_sale() -> None:
     assert result.confidence == "LOW"
 
 
+def test_general_con_gastos_detectados_es_expense() -> None:
+    # Gap histórico: general + solo gastos devolvía has_data_intent=False
+    # y el agente ni siquiera ofrecía importar el archivo.
+    result = DataIntentExtractor().check_file_summary(
+        {"inferred_type": "general", "gastos_detectados": [{"monto": "500"}]}
+    )
+    assert result.has_data_intent is True
+    assert result.intent_type == "expense"
+    assert result.confidence == "LOW"
+
+
 def test_general_con_stock_detectado_es_product() -> None:
     result = DataIntentExtractor().check_file_summary(
         {"inferred_type": "general", "stock_detectado": [{"nombre": "Coca Cola"}]}
