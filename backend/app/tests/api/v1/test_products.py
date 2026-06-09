@@ -117,6 +117,45 @@ class TestProductsCRUD:
         # stock=5 <= threshold=10 → is_low_stock=True
         assert data["is_low_stock"] is True
 
+    async def test_patch_completing_data_clears_requires_completion(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: Any,
+        sample_tenant: Any,
+    ) -> None:
+        """FASE 3 (B2): un producto auto-creado incompleto se completa vía PATCH."""
+        import uuid
+        from decimal import Decimal
+
+        from app.persistence.models.product import Product
+
+        product = Product(
+            id=uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            name="Auto-creado sin costo",
+            sale_price_ars=Decimal("2500"),
+            unit_cost_ars=None,
+            stock_units=5,
+            provenance="REAL",
+            requires_completion=True,
+        )
+        db_session.add(product)
+        await db_session.commit()
+
+        # Antes: el flag está activo en la respuesta.
+        before = await client.get(f"/api/v1/products/{product.id}", headers=auth_headers)
+        assert before.json()["requires_completion"] is True
+
+        # PATCH que completa el costo → el flag se limpia.
+        resp = await client.patch(
+            f"/api/v1/products/{product.id}",
+            json={"unit_cost_ars": "1500.00"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["requires_completion"] is False
+
     async def test_soft_delete_product(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:

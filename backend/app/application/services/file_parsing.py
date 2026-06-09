@@ -24,7 +24,11 @@ from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+# Límite de seguridad (anti-DOS). Archivos > 16MB se rechazan con error claro.
+# El manejo de archivos más grandes (streaming / re-arquitectura) queda para más
+# adelante; con este techo el JSONB de uploaded_files no se acerca al límite de Neon.
+MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024  # 16 MB
+MAX_FILE_SIZE_LABEL = "16 MB"
 
 SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
 
@@ -88,6 +92,32 @@ NOMBRE_COLS = {"producto", "nombre"}
 # PRODUCTO_COLS = unión para retrocompatibilidad con código que ya lo usa
 PRODUCTO_COLS = CATALOGO_COLS | NOMBRE_COLS | {"stock", "descripcion"}
 FECHA_COLS = {"fecha", "date", "dia", "mes", "periodo"}
+
+# FASE 3: señales de compra de mercadería/insumos para reventa (→ inventario, no gasto).
+# Conservador: solo se rerutea a stock si HAY mercadería Y una columna de cantidad.
+MERCADERIA_COLS = {"mercaderia", "mercadería", "insumo", "insumos", "reposicion", "reposición"}
+CANTIDAD_COLS = {"cantidad", "unidades", "unidad", "qty", "cant"}
+
+# FASE 3: clasificación CONTEXTUAL venta vs gasto. Las columnas de dinero genéricas
+# (monto/importe/total/precio/valor) son NEUTRALES — aparecen en cualquier documento
+# financiero y no deben favorecer ventas por sí solas. El tipo se decide por señales
+# FUERTES de contexto (scoring), y ante empate/ausencia → "general" (el usuario confirma).
+MONEY_COLS = {"monto", "importe", "total", "precio", "valor", "monto_total", "importe_total"}
+# Señales fuertes de venta (cliente, ticket, factura emitida, cobro, caja, medio de pago).
+VENTA_SIGNAL_COLS = {
+    "venta", "ventas", "vendido", "vendida", "ingreso", "ingresos", "facturacion",
+    "facturación", "factura_emitida", "ticket", "cliente", "consumidor", "cobro",
+    "cobrado", "caja", "medio_pago", "metodo_pago", "método_pago", "forma_pago",
+    "fecha_venta",
+}
+# Señales fuertes de gasto/egreso (proveedor, categoría, concepto, servicio, etc.).
+# Nota: "pago" suelto NO se incluye — colisiona con "metodo/medio_pago" (señal de venta).
+GASTO_SIGNAL_COLS = {
+    "gasto", "gastos", "egreso", "egresos", "proveedor", "categoria", "categoría",
+    "rubro", "concepto", "servicio", "alquiler", "sueldo", "salario", "impuesto",
+    "honorarios", "mantenimiento", "comision", "comisión", "flete", "logistica",
+    "logística", "factura_recibida", "compra", "costo", "deuda",
+}
 
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
 GASTO_CTX = {"gasto", "compra", "pago", "factura", "proveedor", "egreso", "gaste"}
@@ -314,13 +344,19 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     normalized = [h.lower().strip().replace(" ", "_") for h in headers]
 
     has_fecha = any(any(k in col for k in FECHA_COLS) for col in normalized)
-    has_venta = any(any(k in col for k in VENTA_COLS) for col in normalized)
-    has_gasto = any(any(k in col for k in GASTO_COLS) for col in normalized)
+    # FASE 3: venta/gasto por señales FUERTES de contexto (no por columna de dinero).
+    venta_score = sum(any(k in col for k in VENTA_SIGNAL_COLS) for col in normalized)
+    gasto_score = sum(any(k in col for k in GASTO_SIGNAL_COLS) for col in normalized)
+    has_venta = venta_score > 0
+    has_gasto = gasto_score > 0
     has_producto = any(any(k in col for k in PRODUCTO_COLS) for col in normalized)
     # Señal fuerte de catálogo: sku/codigo/inventario/articulo/item — inequívocamente no transacción
     has_catalogo_fuerte = any(any(k in col for k in CATALOGO_COLS) for col in normalized)
     # Señal de nombre: producto/nombre — puede aparecer en ventas/gastos también
     has_nombre = any(any(k in col for k in NOMBRE_COLS) for col in normalized)
+    # FASE 3: señales de compra de mercadería + cantidad (inventario para reventa)
+    has_mercaderia = any(any(k in col for k in MERCADERIA_COLS) for col in normalized)
+    has_cantidad = any(any(k in col for k in CANTIDAD_COLS) for col in normalized)
 
     # Señales ambiguas: "precio" / "total" solos pueden ser precio de catálogo
     has_precio_ambiguo = any(col in ("precio", "total", "price", "valor") for col in normalized)
@@ -333,6 +369,10 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_precio_ambiguo=has_precio_ambiguo,
         has_catalogo_fuerte=has_catalogo_fuerte,
         has_nombre=has_nombre,
+        has_mercaderia=has_mercaderia,
+        has_cantidad=has_cantidad,
+        venta_score=venta_score,
+        gasto_score=gasto_score,
     )
 
     has_catalogo_signal = has_catalogo_fuerte or has_nombre
@@ -357,10 +397,15 @@ def infer_spreadsheet_type(
     has_precio_ambiguo: bool = False,
     has_catalogo_fuerte: bool = False,
     has_nombre: bool = False,
+    has_mercaderia: bool = False,
+    has_cantidad: bool = False,
+    venta_score: int = 0,
+    gasto_score: int = 0,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
     Reglas (en orden de prioridad):
+    0. Compra de mercadería/insumos + cantidad → inventario (FASE 3, conservador).
     1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
     2. Señal de nombre/producto sin venta explícita → stock.
     3. Señal de nombre/producto sin fecha → stock (lista de precios, catálogo).
@@ -368,6 +413,12 @@ def infer_spreadsheet_type(
     5. Sin señales de catálogo: fecha + venta → ventas; fecha + gasto → gastos.
     6. Fallbacks por señales sueltas.
     """
+    # FASE 3: compra de mercadería/insumos para reventa CON columna de cantidad →
+    # inventario, NO gasto corriente. Conservador: requiere AMBAS señales para no
+    # absorber "compra de servicios/alquiler" (sin columnas de inventario).
+    if has_mercaderia and has_cantidad:
+        return "stock"
+
     # Señal fuerte (sku, inventario, articulo, codigo, item) → inequívocamente catálogo
     if has_catalogo_fuerte:
         return "stock"
@@ -390,31 +441,98 @@ def infer_spreadsheet_type(
     if has_nombre:
         return "stock"
 
-    # Sin señales de catálogo: transacciones de venta con fecha explícita
-    if has_venta and has_fecha:
-        return "ventas"
-
-    # Sin señales de catálogo: transacciones de gasto con fecha explícita
-    if has_gasto and has_fecha:
-        return "gastos"
-
-    # Solo precio ambiguo sin catálogo ni fecha → asumimos venta
-    if has_precio_ambiguo and not has_producto:
-        return "ventas"
-
-    # Fallbacks por señales sueltas
-    if has_venta:
-        return "ventas"
+    # FASE 3: discriminación venta vs gasto por CONTEXTO (scoring de señales fuertes).
+    # Las columnas de dinero genéricas (monto/importe/total) NO cuentan acá. Empate de
+    # señales o ausencia total → "general" (ambiguo): el usuario confirma el tipo, no se
+    # importa como venta en silencio.
+    if has_venta and has_gasto:
+        if gasto_score > venta_score:
+            return "gastos"
+        if venta_score > gasto_score:
+            return "ventas"
+        return "general"  # señales de ambos, empate → ambiguo
     if has_gasto:
         return "gastos"
+    if has_venta:
+        return "ventas"
+    # Sin señales fuertes de contexto (solo dinero/fecha/descripción) → ambiguo.
     return "general"
 
 
 def rows_to_dicts(headers: list[str], rows: list[list[Any]]) -> list[dict[str, Any]]:
-    return [
-        {h: (str(v) if v is not None else None) for h, v in zip(headers, row, strict=False)}
-        for row in rows
-    ]
+    """Mapea filas a dicts por header, tolerante a filas irregulares.
+
+    Si una fila tiene menos celdas que headers, las faltantes quedan None
+    (no se descartan en silencio como hacía `zip(strict=False)`). Filas None y
+    celdas extra (más allá de los headers) se ignoran.
+    """
+    out: list[dict[str, Any]] = []
+    n = len(headers)
+    for row in rows:
+        cells = list(row) if row is not None else []
+        out.append(
+            {
+                headers[i]: (str(cells[i]) if i < len(cells) and cells[i] is not None else None)
+                for i in range(n)
+            }
+        )
+    return out
+
+
+def _detect_header_row(rows: list[list[Any]], *, max_scan: int = 15) -> int:
+    """Detecta el índice de la fila de encabezado, saltando títulos/filas vacías.
+
+    Real-world: planillas exportadas suelen tener un título ("Ventas Junio") y/o
+    filas en blanco arriba del encabezado real. Heurística: la primera fila con
+    ≥2 celdas no vacías, mayoría de texto (no números), y cuya fila siguiente
+    tenga una cantidad de celdas no vacías comparable (datos). Si ninguna
+    califica, devuelve 0 (comportamiento previo).
+    """
+
+    def _nonempty(row: list[Any]) -> list[Any]:
+        return [c for c in (row or []) if c is not None and str(c).strip() != ""]
+
+    def _is_number(v: Any) -> bool:
+        s = str(v).strip().replace(".", "").replace(",", "").replace("$", "").replace("%", "")
+        return s.isdigit()
+
+    limit = min(len(rows), max_scan)
+    for i in range(limit):
+        non_empty = _nonempty(rows[i])
+        if len(non_empty) < 2:
+            continue  # título o fila casi vacía
+        numeric_ratio = sum(1 for c in non_empty if _is_number(c)) / len(non_empty)
+        if numeric_ratio > 0.5:
+            continue  # parece una fila de datos, no encabezados
+        # La fila siguiente debería tener datos (≥1 celda no vacía).
+        if i + 1 < len(rows) and len(_nonempty(rows[i + 1])) >= 1:
+            return i
+        if i + 1 >= len(rows):
+            return i
+    return 0
+
+
+def _decode_text_bytes(content: bytes) -> str:
+    """Decodifica bytes de CSV/texto probando encodings comunes (UTF-8 BOM, latin-1, cp1252)."""
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return content.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _sniff_delimiter(sample: str) -> str:
+    """Detecta el delimitador de un CSV (`,` `;` tab `|`). Default `,` si no puede."""
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        return dialect.delimiter
+    except csv.Error:
+        # Heurística simple: el candidato más frecuente en la primera línea.
+        first_line = sample.splitlines()[0] if sample.splitlines() else ""
+        counts = {d: first_line.count(d) for d in (";", ",", "\t", "|")}
+        best = max(counts, key=lambda d: counts[d])
+        return best if counts[best] > 0 else ","
 
 
 def classify_line(line: str) -> str:
@@ -463,9 +581,10 @@ def _store_rows_by_type(
 ) -> None:
     """Almacena las filas en la clave correcta según el tipo inferido.
 
-    El campo `ventas_detectadas` siempre se rellena para compatibilidad con
-    `_insert_confirmed_data`, que lo usa como fuente de filas independientemente
-    del tipo. La clave específica sirve para que el agente y la UI sepan qué son.
+    Cada bucket recibe filas SOLO si corresponde a su tipo. `insert_confirmed_data`
+    ya cae a `gastos_detectados` cuando `ventas_detectadas` está vacío, así que NO
+    hace falta contaminar `ventas_detectadas` con filas de gastos (eso causaba
+    riesgo de doble conteo venta+gasto).
     """
     if inferred_type == "stock":
         summary["stock_detectado"] = rows
@@ -473,10 +592,12 @@ def _store_rows_by_type(
         summary["gastos_detectados"] = []
     elif inferred_type == "gastos":
         summary["gastos_detectados"] = rows
-        summary["ventas_detectadas"] = rows  # backward compat para _insert_confirmed_data
+        summary["ventas_detectadas"] = []
+        summary["stock_detectado"] = []
     else:
         summary["ventas_detectadas"] = rows
         summary["gastos_detectados"] = []
+        summary["stock_detectado"] = []
 
 
 # Mapeo tipo-inferido / clasificación-de-hoja → entity_type del ColumnMapper.
@@ -568,9 +689,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
     }
 
     if mime == "text/csv":
-        text = content.decode("utf-8", errors="replace")
-        reader = csv.reader(io.StringIO(text))
-        rows = list(reader)
+        # Encoding robusto (UTF-8 BOM, latin-1, cp1252) + delimitador auto (, ; \t |).
+        text = _decode_text_bytes(content)
+        delimiter = _sniff_delimiter(text[:8192])
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        rows = [r for r in reader if any((c or "").strip() for c in r)]  # descarta filas vacías
         if not rows:
             summary.update(
                 {
@@ -584,14 +707,17 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             )
             return summary
 
-        headers = rows[0]
-        data_rows = rows[1:]
+        # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
+        hdr_idx = _detect_header_row(rows)
+        headers = rows[hdr_idx]
+        data_rows = rows[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
         preview_rows = all_dicts[:10]
         null_stats = compute_column_null_stats(all_dicts)
         at_risk = flag_columns_at_risk(null_stats)
         summary.update(analysis)
+        summary["delimiter"] = delimiter
         summary["headers"] = headers
         summary["rows_processed"] = len(data_rows)
         summary["row_count"] = len(data_rows)
@@ -603,7 +729,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                 f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
             )
         csv_inferred = analysis.get("inferred_type", "general")
-        _store_rows_by_type(summary, all_dicts[:50], csv_inferred)
+        # Sin truncamiento: todas las filas se guardan (el [:50] previo perdía datos).
+        _store_rows_by_type(summary, all_dicts, csv_inferred)
         summary["mapping_contexts"] = [
             _build_table_context(csv_inferred, headers, preview_rows, len(data_rows))
         ]
@@ -650,15 +777,17 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
 
             for sheet_name in sheet_names:
                 ws = workbook[sheet_name]
-                rows = list(ws.iter_rows(values_only=True))
+                rows = [list(r) for r in ws.iter_rows(values_only=True)]
                 if len(rows) < 2:
                     continue
 
+                # Detecta la fila de encabezado real de la hoja.
+                hdr_idx = _detect_header_row(rows)
                 headers = [
                     str(c) if c is not None else f"col_{i}"
-                    for i, c in enumerate(rows[0])
+                    for i, c in enumerate(rows[hdr_idx])
                 ]
-                data_rows = [list(row) for row in rows[1:]]
+                data_rows = rows[hdr_idx + 1 :]
                 if not data_rows:
                     continue
 
@@ -674,11 +803,31 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     sheet_type = analyze_headers(headers).get("inferred_type", "general")
 
                 entity = _TYPE_TO_ENTITY.get(sheet_type)
+                context_id = f"sheet:{sheet_name}"
                 if entity is None:
-                    # Pestaña "general"/desconocida sin tipo importable: se ignora.
+                    # Hoja no clasificable: NO se descarta en silencio. Se preserva como
+                    # contexto `unclassified` (entity_type=None) con warning, para que el
+                    # usuario la vea y la reclasifique manualmente. El insert salta los
+                    # contextos sin entidad, así que no se importa hasta que se asigne tipo.
+                    contexts.append(
+                        {
+                            "context_id": context_id,
+                            "label": sheet_name,
+                            "source_kind": "sheet",
+                            "entity_type": None,
+                            "headers": headers,
+                            "fields": None,
+                            "preview_rows": dicts[:10],
+                            "row_count": len(dicts),
+                            "unclassified": True,
+                        }
+                    )
+                    summary["warnings"].append(
+                        f"La hoja '{sheet_name}' no se pudo clasificar automáticamente. "
+                        "Revisala y asignale un tipo manualmente si querés importarla."
+                    )
                     continue
 
-                context_id = f"sheet:{sheet_name}"
                 contexts.append(
                     {
                         "context_id": context_id,
@@ -761,11 +910,14 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             )
             return summary
 
+        # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
+        _all = [list(r) for r in all_rows]
+        hdr_idx = _detect_header_row(_all)
         headers = [
             str(cell) if cell is not None else f"col_{index}"
-            for index, cell in enumerate(all_rows[0])
+            for index, cell in enumerate(_all[hdr_idx])
         ]
-        data_rows = [list(row) for row in all_rows[1:]]
+        data_rows = _all[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
         preview_rows = all_dicts[:10]

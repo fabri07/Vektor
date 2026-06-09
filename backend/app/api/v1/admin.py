@@ -270,3 +270,41 @@ async def get_repair_run_items(
     )
     items = list(result.scalars().all())
     return [DataRepairItemResponse.model_validate(item) for item in items]
+
+
+# ── FASE 0: observabilidad del pipeline de ingestión ──────────────────────────
+
+
+@router.get(
+    "/pipeline/stats",
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Throughput, tasa de rechazo y latencia P95 del pipeline por stage (SUPERADMIN)",
+)
+async def get_pipeline_stats(
+    since: str | None = Query(
+        default=None, description="ISO date/datetime; default = últimos 7 días"
+    ),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    from app.application.services import pipeline_event_service  # noqa: PLC0415
+
+    since_value = since or (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    stages = await pipeline_event_service.get_stats(db, since_value)
+    return {"since": since_value, "stages": stages}
+
+
+@router.get(
+    "/pipeline/trace/{trace_id}",
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Ciclo completo (upload→parse→validate→confirm) de un upload (SUPERADMIN)",
+)
+async def get_pipeline_trace(
+    trace_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    from app.application.services import pipeline_event_service  # noqa: PLC0415
+
+    events = await pipeline_event_service.get_trace(db, trace_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="trace_id no encontrado.")
+    return {"trace_id": str(trace_id), "events": events}

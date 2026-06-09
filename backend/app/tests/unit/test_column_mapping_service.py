@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -156,7 +157,7 @@ async def test_suggest_mappings_sample_values() -> None:
 
     svc = ColumnMappingService(db)
     headers = ["Monto"]
-    sample_rows = [
+    sample_rows: list[dict[str, Any]] = [
         {"Monto": "100"}, {"Monto": None}, {"Monto": "200"},
         {"Monto": "300"}, {"Monto": "400"}, {"Monto": "500"}, {"Monto": "600"},
     ]
@@ -202,7 +203,7 @@ async def test_save_mappings_increments_count_on_same_target() -> None:
     existing = MagicMock()
     existing.target_field = "amount"
     existing.confirmed_count = 3
-    existing.last_seen_at = datetime.now(tz=timezone.utc)
+    existing.last_seen_at = datetime.now(tz=UTC)
 
     mock_result = MagicMock()
     mock_result.scalar_one_or_none.return_value = existing
@@ -225,7 +226,7 @@ async def test_save_mappings_resets_count_on_changed_target() -> None:
     existing = MagicMock()
     existing.target_field = "notes"  # target anterior
     existing.confirmed_count = 7
-    existing.last_seen_at = datetime.now(tz=timezone.utc)
+    existing.last_seen_at = datetime.now(tz=UTC)
 
     mock_result = MagicMock()
     mock_result.scalar_one_or_none.return_value = existing

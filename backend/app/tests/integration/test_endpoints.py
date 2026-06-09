@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
-from app.application.agents.shared.schemas import AgentResponse, RiskLevel
+from app.application.agents.shared.schemas import AgentResponse, LLMCall, RiskLevel
 from app.integrations.mcp.exceptions import McpToolAuthError
 from app.main import create_app
 from app.persistence.db.redis_client import get_redis
@@ -167,6 +167,23 @@ def _mock_low_risk_response(request_id: str) -> AgentResponse:
     )
 
 
+def _mock_agent_chat() -> AsyncMock:
+    """AgentChat mockeado (Sprint 18): genera la respuesta rica sin tocar Anthropic.
+
+    Los flujos success/requires_clarification delegan la respuesta a AgentChat, que
+    construye su propio cliente Anthropic. Sin esto, en CI (sin ANTHROPIC_API_KEY)
+    el orchestrator captura AnthropicConfigurationError y degrada el status a 'error'.
+    """
+    chat = AsyncMock()
+    chat.generate_response = AsyncMock(
+        return_value=(
+            "Listo.",
+            LLMCall(source="agent_chat", model="test", input_tokens=0, output_tokens=0),
+        )
+    )
+    return chat
+
+
 def _mock_anthropic_overload_error() -> anthropic.InternalServerError:
     request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
     response = httpx.Response(status_code=529, request=request)
@@ -273,6 +290,7 @@ async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSes
         patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
         patch(f"{orchestrator}.ConversationService") as mock_conv,
         patch(f"{orchestrator}.get_anthropic_async_client"),
+        patch(f"{orchestrator}.AgentChat", return_value=_mock_agent_chat()),
     ):
         mock_ceo.return_value.process = AsyncMock(
             side_effect=lambda req: _make_ceo_plan_response(
@@ -640,6 +658,7 @@ async def test_wf02_requires_clarification_no_pending(auth_client, session: Asyn
         patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
         patch(f"{orchestrator}.ConversationService") as mock_conv,
         patch(f"{orchestrator}.get_anthropic_async_client") as mock_anthropic_factory,
+        patch(f"{orchestrator}.AgentChat", return_value=_mock_agent_chat()),
     ):
         mock_ceo.return_value.process = AsyncMock(
             side_effect=lambda req: _make_ceo_plan_response(

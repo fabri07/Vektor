@@ -373,18 +373,22 @@ class TestConfirmWithColumnMappings:
         sale_file: UploadedFile,
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
-        """Sin column_mappings → usa heurística legacy. El endpoint no falla aunque
-        la heurística no reconozca las columnas no-estándar del archivo de test."""
+        """Sin column_mappings y con columnas no-estándar ("P. Unitario") que la
+        heurística legacy no reconoce → FASE 1: falla explícita (422), no inserta 0
+        en silencio. El archivo queda en NEEDS_CONFIRMATION para reintentar con mapeo."""
         response = await client.post(
             f"/api/v1/ingestion/files/{sale_file.id}/confirm",
             headers=auth_headers,
             json={"confirmed_fields": {"ventas": True, "gastos": False}},
         )
-        # La heurística legacy no reconoce "P. Unitario" como monto de venta
-        # (no está en VENTA_COLS), pero el endpoint NO debe crashear — devuelve 200.
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == PROCESSING_STATUS_DONE
+        assert response.status_code == 422
+        assert "columnas" in response.json()["detail"].lower()
+
+        # El archivo NO quedó DONE: sigue pendiente de confirmación (rollback).
+        preview = await client.get(
+            f"/api/v1/ingestion/files/{sale_file.id}/preview", headers=auth_headers
+        )
+        assert preview.json()["processing_status"] == PROCESSING_STATUS_NEEDS_CONFIRMATION
 
 
 # ── Tests: GET/DELETE /ingestion/column-mappings ──────────────────────────────

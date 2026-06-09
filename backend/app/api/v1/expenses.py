@@ -29,6 +29,25 @@ router = APIRouter()
 VOID_REASON_MANUAL = "MANUAL_ADMIN_VOID"
 
 
+def _apply_category_label(
+    custom_fields: dict[str, object] | None,
+    category: str | None,
+    label: str | None,
+) -> dict[str, object]:
+    """FASE 3.1: guarda/limpia el label de categoría "Otro" en custom_fields.
+
+    Si category == OTHER y hay label (trim, ≤50) → custom_fields["category_label"].
+    Si la categoría no es OTHER → se quita el label (evita labels huérfanos).
+    """
+    cf: dict[str, object] = dict(custom_fields or {})
+    if category == "OTHER":
+        if label and label.strip():
+            cf["category_label"] = label.strip()[:50]
+    else:
+        cf.pop("category_label", None)
+    return cf
+
+
 def _expense_snapshot(entry: ExpenseEntry) -> dict[str, object]:
     return {
         "id": str(entry.id),
@@ -145,6 +164,9 @@ async def create_expense(
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
+    # FASE 3.1: categoría "Otro" editable — el label libre va a custom_fields;
+    # category sigue siendo OTHER (reportes/agregaciones intactos).
+    custom_fields = _apply_category_label(body.custom_fields, body.category, body.category_label)
     entry = ExpenseEntry(
         tenant_id=tenant.tenant_id,
         amount=body.amount,
@@ -155,7 +177,7 @@ async def create_expense(
         payment_method=body.payment_method,
         supplier_name=body.supplier_name,
         notes=body.notes,
-        custom_fields=body.custom_fields,
+        custom_fields=custom_fields,
     )
     saved = await repo.save(entry)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_created")
@@ -204,6 +226,11 @@ async def update_expense(
         entry.notes = body.notes
     if body.custom_fields is not None:
         entry.custom_fields = body.custom_fields
+    # FASE 3.1: re-aplicar label de "Otro" si cambió la categoría o el label.
+    if body.category_label is not None or body.category is not None:
+        entry.custom_fields = _apply_category_label(
+            entry.custom_fields, entry.category, body.category_label
+        )
     saved = await repo.save(entry)
     _audit_data_change(
         session,

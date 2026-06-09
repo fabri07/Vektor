@@ -202,6 +202,7 @@ const EXPENSE_CATEGORIES = [
 interface ExpenseForm {
   amount: string;
   category: string;
+  category_label: string;
   expense_date: string;
   description: string;
   is_recurring: boolean;
@@ -211,6 +212,7 @@ function emptyExpenseForm(): ExpenseForm {
   return {
     amount: "",
     category: "OTHER",
+    category_label: "",
     expense_date: nowStr(),
     description: "",
     is_recurring: false,
@@ -263,6 +265,10 @@ function ExpenseTab({ onToast }: { onToast: (t: ToastState) => void }) {
     mutation.mutate({
       amount: parseFloat(form.amount),
       category: form.category,
+      // Solo se envía el nombre personalizado cuando la categoría es "Otro".
+      ...(form.category === "OTHER" && form.category_label.trim()
+        ? { category_label: form.category_label.trim() }
+        : {}),
       expense_date: form.expense_date,
       description: form.description || "",
       is_recurring: form.is_recurring,
@@ -297,6 +303,16 @@ function ExpenseTab({ onToast }: { onToast: (t: ToastState) => void }) {
           </select>
         </div>
       </div>
+
+      {form.category === "OTHER" && (
+        <Input
+          label="Nombre de la categoría (opcional)"
+          placeholder="Ej: Limpieza, Veterinaria, Combustible…"
+          maxLength={50}
+          value={form.category_label}
+          onChange={set("category_label")}
+        />
+      )}
 
       <div className="grid grid-cols-2 gap-4">
         <Input

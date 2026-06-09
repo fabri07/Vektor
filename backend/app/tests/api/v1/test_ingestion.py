@@ -30,9 +30,9 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     UploadedFile,
 )
+from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
-from app.persistence.models.product import Product
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -129,6 +129,12 @@ async def confirmed_file(
         parsed_summary_json={
             "confidence": "HIGH",
             "file_type": "spreadsheet",
+            # Campos que el parser real siempre setea (necesarios para que la
+            # heurística legacy reconozca el tipo y monto e inserte filas).
+            "inferred_type": "ventas",
+            "has_venta": True,
+            "has_fecha": True,
+            "row_count": 1,
             "ventas_detectadas": [
                 {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
             ],
@@ -262,9 +268,8 @@ class TestUploadEndpoint:
         client: AsyncClient,
         auth_headers: dict[str, Any],
     ) -> None:
-        # 11 MB of zeros (no valid magic bytes → will also fail MIME check first)
-        # Use xlsx magic bytes prefix + junk to get past MIME detection
-        big_content = b"PK\x03\x04" + b"\x00" * (11 * 1024 * 1024)
+        # 17 MB (> 16 MB cap). xlsx magic bytes prefix + junk to get past MIME detection.
+        big_content = b"PK\x03\x04" + b"\x00" * (17 * 1024 * 1024)
         response = await client.post(
             "/api/v1/ingestion/upload",
             headers=auth_headers,
@@ -666,7 +671,7 @@ def test_sale_response_serializes_amount_as_number() -> None:
         created_at=datetime(2024, 1, 15, 12, 0, 0),
     )
     dumped = sale.model_dump(mode="json")
-    assert isinstance(dumped["amount"], (int, float))
+    assert isinstance(dumped["amount"], int | float)
     assert dumped["amount"] == 5400.5
 
     expense = ExpenseEntryResponse(
@@ -683,7 +688,7 @@ def test_sale_response_serializes_amount_as_number() -> None:
         created_at=datetime(2024, 1, 15, 12, 0, 0),
     )
     dumped_e = expense.model_dump(mode="json")
-    assert isinstance(dumped_e["amount"], (int, float))
+    assert isinstance(dumped_e["amount"], int | float)
     assert dumped_e["amount"] == 12000.0
 
 

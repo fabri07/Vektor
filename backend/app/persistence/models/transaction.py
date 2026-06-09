@@ -81,6 +81,14 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         index=True,
     )
+    # FASE 3 (B1): vínculo opcional al producto del catálogo (compras de
+    # mercadería/insumos). NULL si no se resolvió o es ambiguo. SET NULL al
+    # borrar el producto: el gasto histórico se conserva.
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)

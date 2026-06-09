@@ -31,7 +31,7 @@ except ModuleNotFoundError:
         def ratio(left: str, right: str) -> int:
             return int(SequenceMatcher(None, left, right).ratio() * 100)
 
-    fuzz = _FallbackFuzz()
+    fuzz = _FallbackFuzz()  # type: ignore[assignment]
 
 # Umbral de similitud para fuzzy matching (tolera typos: "presios", "stok", "catologo")
 _FUZZ_THRESHOLD = 85

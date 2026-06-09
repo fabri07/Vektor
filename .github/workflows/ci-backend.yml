@@ -72,6 +72,11 @@ jobs:
           SMTP_USER: ""
           SMTP_PASSWORD: ""
           SMTP_FROM_EMAIL: "test@vektor.app"
+          # En test no hay servicio de email: el validator de Settings exige
+          # RESEND_API_KEY/SMTP_PASSWORD si la verificación está activa. Desactivarla
+          # acá evita que el conftest falle al instanciar Settings (sin esto el CI
+          # rompe al cargar conftest, no por los tests).
+          ENABLE_EMAIL_VERIFICATION: "false"
         run: |
           pytest \
             --cov=app \

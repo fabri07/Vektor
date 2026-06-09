@@ -192,6 +192,16 @@ class Settings(BaseSettings):
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
     ENABLE_EMAIL_VERIFICATION: bool = True
     ENABLE_AGENT_AUTOMATIONS: bool = False
+    # FASE 2: 4ª capa de mapeo de columnas con LLM (fallback ante baja confianza).
+    # Default False — opt-in: requiere ANTHROPIC_API_KEY y consume tokens.
+    ENABLE_LLM_COLUMN_MAPPING: bool = False
+    # FASE 2 (A1): detección de propósito del archivo por contenido con LLM.
+    # Corre SOLO cuando la inferencia determinística queda "general" (ambigua).
+    # Default False — opt-in: requiere ANTHROPIC_API_KEY y consume tokens.
+    ENABLE_LLM_FILE_TYPE_DETECTION: bool = False
+    # Modelo LLM para las capas de ingestión (mapeo de columnas + detección de tipo).
+    # Configurable por env para no hardcodear el id del modelo en el código.
+    LLM_INGESTION_MODEL: str = "claude-sonnet-4-6"
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
 
     # Auth social

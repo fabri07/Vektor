@@ -63,15 +63,19 @@ const COLUMNS = [
     key: "category",
     header: "Categoría",
     hideable: true,
-    render: (v: unknown) => {
+    render: (v: unknown, row: ExpenseEntryResponse) => {
       const cat = String(v);
-      return (
-        <Badge variant={CATEGORY_VARIANTS[cat] ?? "default"}>
-          {CATEGORY_LABELS[cat] ?? cat}
-        </Badge>
-      );
+      // Si es "Otro" y hay nombre personalizado, mostrarlo en vez de "Otro".
+      const text =
+        cat === "OTHER" && row.category_label
+          ? row.category_label
+          : (CATEGORY_LABELS[cat] ?? cat);
+      return <Badge variant={CATEGORY_VARIANTS[cat] ?? "default"}>{text}</Badge>;
     },
-    csvValue: (v: unknown) => CATEGORY_LABELS[String(v)] ?? String(v),
+    csvValue: (v: unknown, row: ExpenseEntryResponse) =>
+      String(v) === "OTHER" && row.category_label
+        ? row.category_label
+        : (CATEGORY_LABELS[String(v)] ?? String(v)),
   },
   {
     key: "description",

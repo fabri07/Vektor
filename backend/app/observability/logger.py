@@ -91,17 +91,24 @@ def bind_request_context(
     *,
     tenant_id: UUID | str | None = None,
     user_id: UUID | str | None = None,
+    trace_id: UUID | str | None = None,
 ) -> None:
     """
-    Bind tenant_id and user_id into the structlog contextvars for the current
-    request. Call this from the auth dependency once the user is resolved.
+    Bind tenant_id, user_id and (optionally) trace_id into the structlog
+    contextvars for the current request. Call from the auth dependency once the
+    user is resolved, or pass trace_id explicitly to group a pipeline lifecycle.
     All subsequent log calls within the same request will include these fields.
+
+    Note: contextvars do NOT cross the Celery boundary — the ingestion worker
+    must bind trace_id explicitly from its task parameter.
     """
     ctx: dict[str, Any] = {}
     if tenant_id is not None:
         ctx["tenant_id"] = str(tenant_id)
     if user_id is not None:
         ctx["user_id"] = str(user_id)
+    if trace_id is not None:
+        ctx["trace_id"] = str(trace_id)
     if ctx:
         structlog.contextvars.bind_contextvars(**ctx)
 

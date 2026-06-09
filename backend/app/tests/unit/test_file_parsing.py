@@ -154,8 +154,9 @@ def test_sale_csv_without_product_classified_as_ventas() -> None:
     assert result == "ventas"
 
 
-def test_sale_csv_ambiguous_price_without_product_classified_as_ventas() -> None:
-    """Solo precio ambiguo sin producto ni fecha → ventas (fallback)."""
+def test_ambiguous_price_without_strong_signal_is_general() -> None:
+    """FASE 3: solo precio/dinero sin señal fuerte de venta/gasto → ambiguo (general),
+    NO venta silenciosa. El usuario confirma el tipo."""
     result = infer_spreadsheet_type(
         has_fecha=False,
         has_venta=False,
@@ -163,7 +164,7 @@ def test_sale_csv_ambiguous_price_without_product_classified_as_ventas() -> None
         has_producto=False,
         has_precio_ambiguo=True,
     )
-    assert result == "ventas"
+    assert result == "general"
 
 
 def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) -> None:
@@ -176,14 +177,22 @@ def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) ->
     assert summary["confidence"] == "MEDIUM"
 
 
-def test_sale_csv_with_descripcion_stays_ventas() -> None:
-    """CSV fecha+monto+descripcion (ventas reales) → no regresión: sigue siendo ventas."""
-    sales_csv = (
+def test_csv_fecha_monto_descripcion_is_ambiguous() -> None:
+    """FASE 3: fecha+monto+descripcion (sin señal fuerte de venta NI gasto) → ambiguo
+    ('general'). 'monto' es dinero genérico y no decide el tipo solo; el usuario confirma."""
+    csv = (
         b"fecha,monto,descripcion\n"
-        b"2024-01-15,50000,Venta del dia\n"
-        b"2024-01-16,35000,Venta tarde\n"
+        b"2024-01-15,50000,Pago varios\n"
+        b"2024-01-16,35000,Otro\n"
     )
-    summary = parse_uploaded_content(sales_csv, "text/csv", "ventas.csv")
+    summary = parse_uploaded_content(csv, "text/csv", "doc.csv")
+    assert summary["inferred_type"] == "general"
+
+
+def test_csv_with_strong_venta_signal_is_ventas() -> None:
+    """fecha+cliente+monto (señal fuerte de venta) → ventas."""
+    csv = b"fecha,cliente,monto\n2024-01-15,Juan,50000\n"
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
     assert summary["inferred_type"] == "ventas"
 
 
@@ -274,14 +283,14 @@ def test_multisheet_exposes_mapping_contexts() -> None:
 
 def test_csv_exposes_single_table_context() -> None:
     """CSV expone un único mapping_context 'table' con su entity_type inferido."""
-    sales_csv = b"fecha,monto,descripcion\n2024-01-15,50000,Venta del dia\n"
+    sales_csv = b"fecha,venta,cliente\n2024-01-15,50000,Juan\n"
     summary = parse_uploaded_content(sales_csv, "text/csv", "ventas.csv")
     contexts = summary["mapping_contexts"]
     assert len(contexts) == 1
     assert contexts[0]["context_id"] == "table"
     assert contexts[0]["source_kind"] == "table"
     assert contexts[0]["entity_type"] == "sale"
-    assert contexts[0]["headers"] == ["fecha", "monto", "descripcion"]
+    assert contexts[0]["headers"] == ["fecha", "venta", "cliente"]
 
 
 def test_build_text_contexts_groups_without_headers() -> None:

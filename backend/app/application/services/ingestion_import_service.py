@@ -24,6 +24,121 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
 
 
+# ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
+
+
+async def _load_product_index(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID | None]]:
+    """Carga el catálogo del tenant UNA vez para vincular transacciones en memoria.
+
+    Evita N queries (una por fila). Devuelve `(by_sku, by_name)`:
+    - `by_sku[sku_lower] = product_id`
+    - `by_name[norm_name] = product_id` o `None` si el nombre normalizado es
+      ambiguo (varios productos lo comparten → no se vincula).
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    result = await session.execute(
+        select(Product.id, Product.name, Product.sku).where(Product.tenant_id == tenant_id)
+    )
+    by_sku: dict[str, uuid.UUID] = {}
+    by_name: dict[str, uuid.UUID | None] = {}
+    for pid, pname, psku in result.all():
+        if psku:
+            by_sku[str(psku).strip().lower()] = pid
+        norm = _normalize_name(pname or "")
+        if norm:
+            by_name[norm] = pid if norm not in by_name else None  # None = ambiguo
+    return by_sku, by_name
+
+
+def _resolve_product(
+    by_sku: dict[str, uuid.UUID],
+    by_name: dict[str, uuid.UUID | None],
+    name: str | None,
+    sku: str | None,
+) -> uuid.UUID | None:
+    """Resuelve product_id desde el índice en memoria. SKU exacto gana; luego nombre."""
+    if sku:
+        hit = by_sku.get(str(sku).strip().lower())
+        if hit:
+            return hit
+    if name:
+        norm = _normalize_name(str(name))
+        if norm:
+            return by_name.get(norm)  # None si no existe o es ambiguo
+    return None
+
+
+async def _record_stock_movement(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_id: uuid.UUID,
+    qty: int,
+    unit_cost: Decimal | None,
+    movement_type: str,
+    final_qty: int,
+) -> None:
+    """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
+    `InventoryBalance` por el import, dentro de la misma transacción.
+
+    `Product.stock_units` sigue siendo la representación canónica que lee la UI; el
+    import la setea. Esta función:
+      1. Inserta el movimiento de inventario (historial, antes vacío al importar).
+      2. Sincroniza `InventoryBalance.current_qty`: `+= qty` (delta) si el balance
+         existe; lo crea en `final_qty` (el stock total tras el import) si no, para
+         mantenerlo consistente con `Product.stock_units`.
+
+    NO hace flush ni emite EventBus por fila (a diferencia de
+    `stock_service.increment_stock`): en un import masivo eso sería caro/ruidoso;
+    todo entra en el commit batch del import. `qty>0` = ingreso, `qty<0` = ajuste.
+    `qty==0` → no-op (ni movimiento ni balance).
+    """
+    if qty == 0:
+        return
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.inventory import (  # noqa: PLC0415
+        InventoryBalance,
+        InventoryMovement,
+    )
+
+    session.add(
+        InventoryMovement(
+            tenant_id=tenant_id,
+            product_id=product_id,
+            movement_type=movement_type,
+            qty=qty,
+            unit_cost=unit_cost,
+            source_event_id="import",
+            reason="Importado desde archivo",
+        )
+    )
+
+    balance = (
+        await session.execute(
+            select(InventoryBalance).where(
+                InventoryBalance.product_id == product_id,
+                InventoryBalance.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if balance is None:
+        session.add(
+            InventoryBalance(
+                tenant_id=tenant_id,
+                product_id=product_id,
+                current_qty=final_qty,
+                reserved_qty=0,
+            )
+        )
+    else:
+        balance.current_qty += qty
+
+
 _NOMBRE_COLS: set[str] = {
     "producto",
     "descripcion",
@@ -35,6 +150,11 @@ _NOMBRE_COLS: set[str] = {
     "name",
     "concepto",
     "detalle",
+    # FASE 3: columnas de compra de mercadería sirven como nombre del producto.
+    "mercaderia",
+    "mercadería",
+    "insumo",
+    "insumos",
 }
 _PRECIO_VENTA_COLS: set[str] = {
     "precio_venta", "precio", "price", "p_venta",
@@ -264,22 +384,33 @@ async def insert_confirmed_data(
             payment_col = target_to_col.get("payment_method")
             category_col = target_to_col.get("category")
 
+        # FASE 3: en archivos ambiguos ("general") se honra la confirmación EXPLÍCITA del
+        # usuario (no se requiere la señal auto-detectada). Para tipos ya inferidos se
+        # mantiene la guardia original.
         wants_ventas = bool(
             inferred_type != "stock"
             and confirmed_fields.get("ventas")
-            and (summary.get("has_venta") or inferred_type == "ventas")
+            and (summary.get("has_venta") or inferred_type in ("ventas", "general"))
             and venta_col
         )
         wants_gastos = bool(
             inferred_type != "stock"
             and confirmed_fields.get("gastos")
-            and (summary.get("has_gasto") or inferred_type == "gastos")
+            and (summary.get("has_gasto") or inferred_type in ("gastos", "general"))
             and gasto_col
         )
         wants_productos = bool(
             confirmed_fields.get("productos")
             and (summary.get("has_producto") or inferred_type == "stock")
             and nombre_col
+        )
+
+        # FASE 3: índice de catálogo en memoria para vincular ventas y gastos
+        # (B1) al producto. Una sola carga; vacío si no hay columnas de nombre/sku.
+        _by_sku, _by_name = (
+            await _load_product_index(session, tenant_id)
+            if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
+            else ({}, {})
         )
 
         for row_index, row in enumerate(rows):
@@ -341,6 +472,13 @@ async def insert_confirmed_data(
                     )
                     if cf:
                         entry.custom_fields = cf
+                    # FASE 3: vincular al producto del catálogo (por SKU/nombre de la fila).
+                    entry.product_id = _resolve_product(
+                        _by_sku,
+                        _by_name,
+                        row.get(nombre_col) if nombre_col else None,
+                        row.get(sku_col) if sku_col else None,
+                    )
                     session.add(entry)
                     counts["ventas"] += 1
 
@@ -380,6 +518,13 @@ async def insert_confirmed_data(
                     )
                     if cf:
                         expense.custom_fields = cf
+                    # FASE 3 (B1): vincular el gasto al producto del catálogo.
+                    expense.product_id = _resolve_product(
+                        _by_sku,
+                        _by_name,
+                        str(row.get(nombre_col)) if nombre_col else None,
+                        str(row.get(sku_col)) if sku_col else None,
+                    )
                     session.add(expense)
                     counts["gastos"] += 1
 
@@ -440,7 +585,18 @@ async def insert_confirmed_data(
                     if cost:
                         existing.unit_cost_ars = cost
                     if stock_val > 0:
+                        _delta = stock_val - existing.stock_units
                         existing.stock_units = stock_val
+                        # FASE 3: audit del cambio de stock + sync de balance.
+                        await _record_stock_movement(
+                            session,
+                            tenant_id,
+                            existing.id,
+                            _delta,
+                            cost,
+                            "purchase" if _delta > 0 else "adjustment",
+                            stock_val,
+                        )
                     if sku:
                         existing.sku = sku
                     if return_details:
@@ -467,16 +623,23 @@ async def insert_confirmed_data(
                         id=new_product_id,
                         tenant_id=tenant_id,
                         name=name,
-                        sku=sku,
+                        # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                         sale_price_ars=price or Decimal("0"),
+                        sku=sku,
                         unit_cost_ars=cost,
                         stock_units=stock_val,
                         # NULL = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor
                         low_stock_threshold_units=None,
                         provenance="REAL",
+                        # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
+                        requires_completion=not price or not cost,
                         custom_fields=cf_product if cf_product else None,
                     )
                     session.add(new_product)
+                    # FASE 3: audit del ingreso inicial de stock + balance (si trae stock).
+                    await _record_stock_movement(
+                        session, tenant_id, new_product_id, stock_val, cost, "purchase", stock_val
+                    )
                     if return_details:
                         product_details.append(
                             {
@@ -627,6 +790,9 @@ async def _insert_multisheet_data(
     context_mappings = context_mappings or {}
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
 
+    # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
+    _by_sku, _by_name = await _load_product_index(session, tenant_id)
+
     def _val(row: dict[str, Any], col: str | None, keywords: set[str]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
         if col:
@@ -677,6 +843,13 @@ async def _insert_multisheet_data(
         cf = _custom_fields(row, cf_cols)
         if cf:
             entry.custom_fields = cf
+        # FASE 3: vincular al producto del catálogo.
+        entry.product_id = _resolve_product(
+            _by_sku,
+            _by_name,
+            _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
+            _val(row, cols.get("sku"), _SKU_COLS),
+        )
         session.add(entry)
         counts["ventas"] += 1
 
@@ -710,6 +883,13 @@ async def _insert_multisheet_data(
         cf = _custom_fields(row, cf_cols)
         if cf:
             expense.custom_fields = cf
+        # FASE 3 (B1): vincular el gasto al producto del catálogo (compra de mercadería).
+        expense.product_id = _resolve_product(
+            _by_sku,
+            _by_name,
+            _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
+            _val(row, cols.get("sku"), _SKU_COLS),
+        )
         session.add(expense)
         counts["gastos"] += 1
 
@@ -746,27 +926,44 @@ async def _insert_multisheet_data(
             if cost:
                 existing.unit_cost_ars = cost
             if stock_val > 0:
+                _delta = stock_val - existing.stock_units
                 existing.stock_units = stock_val
+                await _record_stock_movement(
+                    session,
+                    tenant_id,
+                    existing.id,
+                    _delta,
+                    cost,
+                    "purchase" if _delta > 0 else "adjustment",
+                    stock_val,
+                )
             if sku:
                 existing.sku = sku
             if cat and not existing.category:
                 existing.category = cat
         else:
             cf = _custom_fields(row, cf_cols)
+            _new_id = uuid.uuid4()
             session.add(
                 Product(
-                    id=uuid.uuid4(),
+                    id=_new_id,
                     tenant_id=tenant_id,
                     name=name,
                     sku=sku,
+                    # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                     sale_price_ars=price or Decimal("0"),
                     unit_cost_ars=cost,
                     stock_units=stock_val,
                     category=cat,
                     low_stock_threshold_units=None,
                     provenance="REAL",
+                    # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
+                    requires_completion=not price or not cost,
                     custom_fields=cf or None,
                 )
+            )
+            await _record_stock_movement(
+                session, tenant_id, _new_id, stock_val, cost, "purchase", stock_val
             )
         counts["productos"] += 1
 

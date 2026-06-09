@@ -31,6 +31,8 @@ export interface ProductResponse {
   // 0   = umbral explícito: solo sin-stock aplica
   low_stock_threshold_units: number | null;
   is_active: boolean;
+  // FASE 3 (B2): producto auto-creado por import al que le faltan precio/costo.
+  requires_completion?: boolean;
   margin_pct: number | null;
   is_low_stock: boolean;
   stock_status: "in_stock" | "low_stock" | "out_of_stock";

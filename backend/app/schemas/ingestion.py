@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field
 class UploadResponse(BaseModel):
     file_id: UUID
     status: str  # always "PROCESSING" immediately after upload
+    # Dedup de re-upload: id de un archivo YA importado con el mismo contenido (si existe).
+    duplicate_of: UUID | None = None
+    warning: str | None = None
 
 
 class FileStatusItem(BaseModel):

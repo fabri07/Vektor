@@ -233,3 +233,62 @@ class TestExpensesRBAC:
         expense_id = create_resp.json()["id"]
         resp = await client.delete(f"/api/v1/expenses/{expense_id}", headers=viewer_headers)
         assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+class TestExpenseCategoryLabel:
+    """FASE 3.1: categoría 'Otro' (OTHER) con label personalizado editable."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_other_with_label_persists_and_returns(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        payload = {**_EXPENSE_PAYLOAD, "category": "OTHER", "category_label": "Limpieza"}
+        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["category"] == "OTHER"  # canónica intacta (reportes)
+        assert data["category_label"] == "Limpieza"
+        assert data["custom_fields"]["category_label"] == "Limpieza"
+
+    async def test_other_without_label_has_no_label(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        payload = {**_EXPENSE_PAYLOAD, "category": "OTHER"}
+        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        assert resp.json()["category_label"] is None
+
+    async def test_label_ignored_when_category_not_other(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        payload = {**_EXPENSE_PAYLOAD, "category": "RENT", "category_label": "No deberia"}
+        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        assert resp.json()["category_label"] is None
+
+    async def test_label_blank_is_not_stored(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        payload = {**_EXPENSE_PAYLOAD, "category": "OTHER", "category_label": "   "}
+        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        assert resp.json()["category_label"] is None
+
+    async def test_update_away_from_other_clears_label(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        create = await client.post(
+            "/api/v1/expenses",
+            json={**_EXPENSE_PAYLOAD, "category": "OTHER", "category_label": "Veterinaria"},
+            headers=auth_headers,
+        )
+        eid = create.json()["id"]
+        upd = await client.patch(
+            f"/api/v1/expenses/{eid}", json={"category": "RENT"}, headers=auth_headers
+        )
+        assert upd.status_code == 200
+        assert upd.json()["category_label"] is None

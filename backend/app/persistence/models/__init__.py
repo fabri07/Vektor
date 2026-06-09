@@ -12,8 +12,8 @@ from app.persistence.models.business import (
     MomentumProfile,
 )
 from app.persistence.models.cash_close import CashClose
-from app.persistence.models.column_mapping import TenantColumnMapping
 from app.persistence.models.chat_session_log import ChatSessionLog
+from app.persistence.models.column_mapping import TenantColumnMapping
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.field_definitions import (
     TenantCustomFieldDefinition,
@@ -27,6 +27,7 @@ from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.memory import AgentMemory, BusinessMemory, OperationFingerprint
 from app.persistence.models.notification import Notification
 from app.persistence.models.pending_action import PendingAction
+from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.score import (
@@ -80,4 +81,5 @@ __all__ = [
     "TenantFieldChangeLog",
     "DataRepairRun",
     "DataRepairItem",
+    "PipelineEvent",
 ]

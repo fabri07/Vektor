@@ -1,9 +1,10 @@
 """ORM model: uploaded_files."""
 
 import uuid
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, ForeignKey, String
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +49,16 @@ class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     parsed_summary_json: Mapped[Any] = mapped_column(PGJSONB, nullable=True, default=None)
     rejection_reason: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
+
+    # ── FASE 0: trazabilidad + preservación ───────────────────────────────────
+    # Agrupa los eventos del pipeline de este upload en pipeline_events.
+    trace_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # SHA-256 del contenido crudo — dedup de re-upload (FASE 1).
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    # Soft delete: el crudo en R2 se preserva aunque el usuario "borre" el archivo.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
 
     def __repr__(self) -> str:
         return (
