@@ -6,10 +6,17 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.api.v1.deps import get_current_tenant, require_role
 from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.domain.product_categories import (
+    normalize_product_category,
+    product_category_catalog,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -20,6 +27,13 @@ from app.schemas.product import CreateProductRequest, ProductResponse, UpdatePro
 router = APIRouter()
 
 DEACTIVATION_REASON_MANUAL = "MANUAL_ADMIN_VOID"
+
+
+async def _tenant_business_type(session: AsyncSession, tenant_id: UUID) -> str | None:
+    result = await session.execute(
+        select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()
 
 
 def _product_snapshot(product: Product) -> dict[str, object]:
@@ -82,6 +96,18 @@ async def list_products(
     )
 
 
+@router.get(
+    "/categories",
+    summary="Catálogo de categorías de producto del vertical del tenant",
+)
+async def list_product_categories(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[dict[str, str]]:
+    business_type = await _tenant_business_type(session, tenant.tenant_id)
+    return product_category_catalog(business_type)
+
+
 @router.post(
     "",
     response_model=ProductResponse,
@@ -95,7 +121,18 @@ async def create_product(
     session: AsyncSession = Depends(get_db_session),
 ) -> Product:
     repo = ProductRepository(session)
-    product = Product(tenant_id=tenant.tenant_id, **body.model_dump())
+    data = body.model_dump()
+    # FASE E: normalizar categoría libre al catálogo del vertical.
+    if data.get("category"):
+        business_type = await _tenant_business_type(session, tenant.tenant_id)
+        code, label = normalize_product_category(data["category"], business_type)
+        data["category"] = code
+        if label:
+            data["custom_fields"] = {
+                **(data.get("custom_fields") or {}),
+                "category_label": label,
+            }
+    product = Product(tenant_id=tenant.tenant_id, **data)
     saved = await repo.save(product)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "product_created")
     return saved
@@ -130,7 +167,18 @@ async def update_product(
     # exclude_unset (no exclude_none): aplica solo los campos enviados por el cliente,
     # permitiendo limpiar opcionales a null (ej. borrar acquired_at). Los campos no
     # enviados quedan intactos.
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    # FASE E: normalizar categoría libre al catálogo del vertical.
+    if updates.get("category"):
+        business_type = await _tenant_business_type(session, tenant.tenant_id)
+        code, label = normalize_product_category(updates["category"], business_type)
+        updates["category"] = code
+        if label:
+            updates["custom_fields"] = {
+                **(updates.get("custom_fields") or product.custom_fields or {}),
+                "category_label": label,
+            }
+    for field, value in updates.items():
         setattr(product, field, value)
     # FASE 3 (B2): si el producto estaba marcado para completar y ya tiene precio
     # y costo, se considera completo (cierra el ciclo del auto-creado por import).

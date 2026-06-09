@@ -16,6 +16,7 @@ from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
 from app.domain.expense_categories import normalize_expense_category
+from app.domain.product_categories import normalize_product_category
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +65,18 @@ def check_nonempty_import(
 def _normalize_name(name: str) -> str:
     """Normaliza nombre de producto para comparación: lower, sin guiones, espacios únicos."""
     return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
+
+
+async def _load_business_type(session: AsyncSession, tenant_id: uuid.UUID) -> str | None:
+    """Vertical del tenant para normalizar categorías de producto (1 query por import)."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+
+    result = await session.execute(
+        select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()
 
 
 # ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
@@ -512,6 +525,10 @@ async def insert_confirmed_data(
             if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
             else ({}, {})
         )
+        # FASE E: vertical del tenant para normalizar categorías de producto.
+        _business_type = (
+            await _load_business_type(session, tenant_id) if wants_productos else None
+        )
 
         for row_index, row in enumerate(rows):
             raw_date = row.get(fecha_col) if fecha_col else None
@@ -685,6 +702,18 @@ async def insert_confirmed_data(
                     if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"}
                     else None
                 )
+                # FASE E: categoría canónica del vertical (antes se ignoraba en
+                # este path). Sin columna de categoría → None (sin categoría).
+                prod_cat_raw = _clean_str(
+                    row.get(category_col) if category_col else _row_val(row, _CATEGORIA_COLS),
+                    99,
+                )
+                prod_cat: str | None = None
+                prod_cat_label: str | None = None
+                if prod_cat_raw:
+                    prod_cat, prod_cat_label = normalize_product_category(
+                        prod_cat_raw, _business_type
+                    )
 
                 # Buscar por nombre normalizado: primero exacto case-insensitive,
                 # después normalización Python completa (cubre "Coca-Cola" vs "Coca Cola"
@@ -733,6 +762,8 @@ async def insert_confirmed_data(
                         )
                     if sku:
                         existing.sku = sku
+                    if prod_cat and not existing.category:
+                        existing.category = prod_cat
                     if return_details:
                         product_details.append(
                             {
@@ -753,6 +784,8 @@ async def insert_confirmed_data(
                         for k, v in custom_field_cols.items()
                         if row.get(v) is not None
                     }
+                    if prod_cat_label:
+                        cf_product = {**cf_product, "category_label": prod_cat_label}
                     new_product = Product(
                         id=new_product_id,
                         tenant_id=tenant_id,
@@ -762,6 +795,7 @@ async def insert_confirmed_data(
                         sku=sku,
                         unit_cost_ars=cost,
                         stock_units=stock_val,
+                        category=prod_cat,
                         # NULL = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor
                         low_stock_threshold_units=None,
                         provenance="REAL",
@@ -946,6 +980,8 @@ async def _insert_multisheet_data(
 
     # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
     _by_sku, _by_name = await _load_product_index(session, tenant_id)
+    # FASE E: vertical del tenant para normalizar categorías de producto.
+    _business_type = await _load_business_type(session, tenant_id)
 
     def _val(row: dict[str, Any], col: str | None, keywords: set[str] | tuple[str, ...]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
@@ -1085,7 +1121,12 @@ async def _insert_multisheet_data(
         except (ValueError, TypeError):
             stock_val = 0
         sku = _clean_str(_val(row, cols.get("sku"), _SKU_COLS), 99)
-        cat = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 99)
+        # FASE E: categoría canónica del vertical; sin columna → None.
+        cat_raw = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 99)
+        cat: str | None = None
+        cat_label: str | None = None
+        if cat_raw:
+            cat, cat_label = normalize_product_category(cat_raw, _business_type)
         result = await session.execute(
             select(Product).where(
                 Product.tenant_id == tenant_id,
@@ -1116,6 +1157,8 @@ async def _insert_multisheet_data(
                 existing.category = cat
         else:
             cf = _custom_fields(row, cf_cols)
+            if cat_label:
+                cf = {**cf, "category_label": cat_label}
             _new_id = uuid.uuid4()
             session.add(
                 Product(

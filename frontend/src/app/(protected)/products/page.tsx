@@ -10,7 +10,11 @@ import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
-import { productsService, type ProductResponse } from "@/services/products.service";
+import {
+  productsService,
+  type ProductCategoryOption,
+  type ProductResponse,
+} from "@/services/products.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildCustomFieldColumns } from "@/lib/customFields";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
@@ -61,6 +65,21 @@ const STOCK_FILTER_OPTIONS: { value: StockFilter; label: string }[] = [
   { value: "out_of_stock", label: "Sin stock" },
 ];
 
+/** Label visible de la categoría: código canónico → label del catálogo;
+ * OTHER con nombre custom → ese nombre; sin categoría → "—". */
+function categoryDisplay(
+  product: ProductResponse,
+  catalogLabels: Record<string, string>,
+): string {
+  const cat = (product.category ?? "").trim();
+  if (!cat) return "—";
+  if (cat === "OTHER") {
+    const label = product.custom_fields?.category_label;
+    if (typeof label === "string" && label.trim()) return label.trim();
+  }
+  return catalogLabels[cat] ?? cat;
+}
+
 const COLUMNS = [
   {
     key: "name",
@@ -82,13 +101,6 @@ const COLUMNS = [
     header: "SKU",
     hideable: true,
     defaultVisible: false,
-    render: (v: unknown) => String(v ?? "").trim() || "—",
-    csvValue: (v: unknown) => String(v ?? "").trim(),
-  },
-  {
-    key: "category",
-    header: "Categoría",
-    hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
     csvValue: (v: unknown) => String(v ?? "").trim(),
   },
@@ -147,6 +159,7 @@ export default function ProductsPage() {
     return "all";
   };
   const [stockFilter, setStockFilter] = useState<StockFilter>(resolveFilter(rawFilter));
+  const [categoryFilter, setCategoryFilter] = useState("all");
   const [editing, setEditing] = useState<ProductResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
@@ -157,13 +170,32 @@ export default function ProductsPage() {
     staleTime: 2 * 60 * 1000,
   });
 
+  // FASE E: catálogo de categorías del vertical del tenant.
+  const { data: categories = [] } = useQuery({
+    queryKey: ["product-categories"],
+    queryFn: () => productsService.getCategories(),
+    staleTime: 30 * 60 * 1000,
+  });
+  const catalogLabels = Object.fromEntries(categories.map((c) => [c.code, c.label]));
+
   const { data: fieldDefs = [] } = useQuery({
     queryKey: ["field-definitions", "product"],
     queryFn: () => fieldDefinitionsService.getAll("product"),
     staleTime: 5 * 60 * 1000,
   });
+  const categoryColumn = {
+    key: "category",
+    header: "Categoría",
+    hideable: true,
+    render: (_: unknown, row: Record<string, unknown>) =>
+      categoryDisplay(row as unknown as ProductResponse, catalogLabels),
+    csvValue: (_: unknown, row: Record<string, unknown>) =>
+      categoryDisplay(row as unknown as ProductResponse, catalogLabels),
+  };
   const columns = [
-    ...COLUMNS,
+    ...COLUMNS.slice(0, 2),
+    categoryColumn,
+    ...COLUMNS.slice(2),
     ...buildCustomFieldColumns<Record<string, unknown>>(fieldDefs),
   ];
 
@@ -207,13 +239,15 @@ export default function ProductsPage() {
     0,
   );
 
-  // Apply filter usando stock_status del backend, con fallback al cálculo local
+  // Apply filters: stock_status del backend (fallback local) + categoría canónica
   const filtered = products.filter((p) => {
     const status = p.stock_status ?? (
       p.stock_units === 0 ? "out_of_stock" : p.is_low_stock ? "low_stock" : "in_stock"
     );
-    if (stockFilter === "all") return true;
-    return status === stockFilter;
+    if (stockFilter !== "all" && status !== stockFilter) return false;
+    if (categoryFilter === "none") return !(p.category ?? "").trim();
+    if (categoryFilter !== "all" && p.category !== categoryFilter) return false;
+    return true;
   });
 
   // Add _status key for the table (unused by render, just for key lookup)
@@ -236,6 +270,20 @@ export default function ProductsPage() {
               {o.label}
             </option>
           ))}
+        </select>
+        <label className="ml-3 text-sm text-vk-text-muted">Categoría:</label>
+        <select
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value)}
+          className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+        >
+          <option value="all">Todas</option>
+          {categories.map((c) => (
+            <option key={c.code} value={c.code}>
+              {c.label}
+            </option>
+          ))}
+          <option value="none">Sin categoría</option>
         </select>
       </div>
 
@@ -321,6 +369,7 @@ export default function ProductsPage() {
       )}
       <ProductEditModal
         product={editing}
+        categories={categories}
         saving={updateMutation.isPending}
         onClose={() => setEditing(null)}
         onSave={(product) => updateMutation.mutate(product)}
@@ -331,11 +380,13 @@ export default function ProductsPage() {
 
 function ProductEditModal({
   product,
+  categories,
   saving,
   onClose,
   onSave,
 }: {
   product: ProductResponse | null;
+  categories: ProductCategoryOption[];
   saving: boolean;
   onClose: () => void;
   onSave: (product: ProductResponse) => void;
@@ -354,7 +405,24 @@ function ProductEditModal({
         <label className="grid gap-1 text-sm text-vk-text-secondary">Producto<input className="rounded border border-vk-border-w px-3 py-2" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vk-text-secondary">SKU<input className="rounded border border-vk-border-w px-3 py-2" value={form.sku ?? ""} onChange={(e) => set("sku", e.target.value || null)} /></label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Categoría<input className="rounded border border-vk-border-w px-3 py-2" value={form.category ?? ""} onChange={(e) => set("category", e.target.value || null)} /></label>
+          <label className="grid gap-1 text-sm text-vk-text-secondary">Categoría
+            <select
+              className="rounded border border-vk-border-w px-3 py-2"
+              value={form.category ?? ""}
+              onChange={(e) => set("category", e.target.value || null)}
+            >
+              <option value="">Sin categoría</option>
+              {categories.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.label}
+                </option>
+              ))}
+              {/* Valor actual fuera del catálogo (legacy/raw): conservarlo como opción */}
+              {form.category && !categories.some((c) => c.code === form.category) ? (
+                <option value={form.category}>{form.category}</option>
+              ) : null}
+            </select>
+          </label>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vk-text-secondary">Precio<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>

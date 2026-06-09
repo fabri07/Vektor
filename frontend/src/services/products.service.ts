@@ -47,6 +47,12 @@ export interface ProductsListParams {
   offset?: number;
 }
 
+/** Categoría canónica del catálogo del vertical del tenant. */
+export interface ProductCategoryOption {
+  code: string;
+  label: string;
+}
+
 const PAGE_SIZE = 200;
 const MAX_PAGES = 25;
 
@@ -63,6 +69,11 @@ export const productsService = {
 
   async deleteProduct(id: string): Promise<void> {
     await api.delete(`/products/${id}`);
+  },
+
+  async getCategories(): Promise<ProductCategoryOption[]> {
+    const res = await api.get<ProductCategoryOption[]>("/products/categories");
+    return res.data;
   },
 
   async getProducts(params?: ProductsListParams): Promise<ProductResponse[]> {
