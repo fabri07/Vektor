@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
+from app.domain.expense_categories import EXPENSE_CATEGORIES_PATTERN
+
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
 _MAX_AMOUNT = Decimal("999999999")
 
@@ -130,7 +132,8 @@ class DateRangeResponse(BaseModel):
 
 # ── Expenses ──────────────────────────────────────────────────────────────────
 
-EXPENSE_CATEGORIES = r"^(RENT|UTILITIES|PAYROLL|INVENTORY|MARKETING|OTHER)$"
+# Catálogo canónico definido en domain/expense_categories.py (single source of truth).
+EXPENSE_CATEGORIES = EXPENSE_CATEGORIES_PATTERN
 
 
 class ExpenseEntryResponse(BaseModel):

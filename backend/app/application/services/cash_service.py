@@ -7,30 +7,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.expense_categories import normalize_expense_category
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 logger = get_logger(__name__)
-
-_EXPENSE_CATEGORY_MAP = {
-    "rent": "RENT",
-    "alquiler": "RENT",
-    "utilities": "UTILITIES",
-    "servicios": "UTILITIES",
-    "service": "UTILITIES",
-    "payroll": "PAYROLL",
-    "sueldos": "PAYROLL",
-    "inventario": "INVENTORY",
-    "inventory": "INVENTORY",
-    "mercaderia": "INVENTORY",
-    "mercadería": "INVENTORY",
-    "stock": "INVENTORY",
-    "marketing": "MARKETING",
-    "publicidad": "MARKETING",
-    "other": "OTHER",
-    "otros": "OTHER",
-}
 
 _PAYMENT_METHOD_MAP = {
     "cash": "cash",
@@ -53,11 +35,6 @@ def _normalize_payment_method(value: str | None) -> str:
     return _PAYMENT_METHOD_MAP.get(str(value).strip().lower(), "other")
 
 
-def _normalize_expense_category(value: str | None) -> str:
-    if not value:
-        return "OTHER"
-    normalized = str(value).strip().lower()
-    return _EXPENSE_CATEGORY_MAP.get(normalized, str(value).strip().upper())
 
 
 def _coerce_transaction_date(value: object) -> datetime:
@@ -164,10 +141,11 @@ async def save_expense(
     db: AsyncSession,
 ) -> ExpenseEntry:
     """Registra un gasto en expense_entries."""
+    category, category_label = normalize_expense_category(entities.get("category"))
     expense = ExpenseEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
-        category=_normalize_expense_category(entities.get("category")),
+        category=category,
         transaction_date=_coerce_transaction_date(
             entities.get("transaction_date") or entities.get("date")
         ),
@@ -178,6 +156,11 @@ async def save_expense(
         notes=entities.get("notes"),
         provenance="REAL",
     )
+    if category_label:
+        expense.custom_fields = {
+            **(expense.custom_fields or {}),
+            "category_label": category_label,
+        }
     db.add(expense)
     await db.flush()
     logger.info(

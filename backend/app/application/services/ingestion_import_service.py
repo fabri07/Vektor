@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
+from app.domain.expense_categories import normalize_expense_category
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -230,7 +231,17 @@ def _parse_date(raw: Any) -> datetime | None:
     return None
 
 
-def _find_col(headers: list[str], keywords: set[str]) -> str | None:
+def _find_col(headers: list[str], keywords: set[str] | tuple[str, ...]) -> str | None:
+    """Si `keywords` es tupla, se respeta su orden como PRIORIDAD (el primer
+    keyword que matchee alguna columna gana, sin importar el orden de headers).
+    Con set, gana la primera columna en orden de archivo (comportamiento legacy).
+    """
+    if isinstance(keywords, tuple):
+        for k in keywords:
+            for h in headers:
+                if k in h.lower().strip().replace(" ", "_"):
+                    return h
+        return None
     for h in headers:
         norm = h.lower().strip().replace(" ", "_")
         if any(k in norm for k in keywords):
@@ -238,7 +249,7 @@ def _find_col(headers: list[str], keywords: set[str]) -> str | None:
     return None
 
 
-def _row_val(row: dict[str, Any], keywords: set[str]) -> Any:
+def _row_val(row: dict[str, Any], keywords: set[str] | tuple[str, ...]) -> Any:
     """Devuelve el valor de la primera columna de *esta* fila cuyo nombre matchea.
 
     A diferencia de `_find_col` (que resuelve una columna fija para todo el
@@ -246,7 +257,15 @@ def _row_val(row: dict[str, Any], keywords: set[str]) -> Any:
     archivos multi-hoja donde varias hojas del mismo tipo pueden tener esquemas
     de columnas distintos: sin esto, las filas de la segunda hoja se descartaban
     en silencio porque la columna detectada no existía en sus keys.
+
+    Con tupla, el orden de keywords es prioridad (ver `_find_col`).
     """
+    if isinstance(keywords, tuple):
+        for k in keywords:
+            for key, val in row.items():
+                if k in key.lower().strip().replace(" ", "_"):
+                    return val
+        return None
     for key, val in row.items():
         norm = key.lower().strip().replace(" ", "_")
         if any(k in norm for k in keywords):
@@ -492,13 +511,14 @@ async def insert_confirmed_data(
                         str(notes_raw or desc_raw or "").strip()[:499]
                         or "Gasto importado"
                     )
-                    # Categoría
-                    cat_raw = row.get(category_col) if category_col else None
-                    cat_str = (
-                        str(cat_raw).strip()[:99]
-                        if cat_raw and str(cat_raw).strip() not in {"None", "nan", ""}
-                        else "importado"
+                    # Categoría: columna mapeada explícita o detección por keyword
+                    # (antes, sin mapeo explícito todo caía a "importado").
+                    cat_raw = (
+                        row.get(category_col)
+                        if category_col
+                        else _row_val(row, _CATEGORIA_COLS)
                     )
+                    cat_code, cat_label = normalize_expense_category(_clean_str(cat_raw))
 
                     # Custom fields
                     cf = {
@@ -506,11 +526,13 @@ async def insert_confirmed_data(
                         for k, v in custom_field_cols.items()
                         if row.get(v) is not None
                     }
+                    if cat_label:
+                        cf = {**cf, "category_label": cat_label}
 
                     expense = ExpenseEntry(
                         tenant_id=tenant_id,
                         amount=amount,
-                        category=cat_str,
+                        category=cat_code,
                         transaction_date=tx_date,
                         description=desc,
                         payment_method="transfer",
@@ -684,7 +706,7 @@ async def insert_confirmed_data(
                     ExpenseEntry(
                         tenant_id=tenant_id,
                         amount=amount,
-                        category="importado",
+                        category="OTHER",
                         transaction_date=today,
                         description=str(entry.get("linea", ""))[:499] or "Gasto importado",
                         payment_method="transfer",
@@ -743,7 +765,9 @@ async def insert_confirmed_data(
 
 
 _PAGO_COLS: set[str] = {"forma_pago", "metodo_pago", "payment_method", "medio_pago", "pago"}
-_CATEGORIA_COLS: set[str] = {"categoria", "category", "rubro", "tipo"}
+# Tupla = prioridad: "categoria" debe ganar siempre sobre "tipo" (un CSV con
+# columnas `categoria` Y `tipo` debe tomar la categoría de `categoria`).
+_CATEGORIA_COLS: tuple[str, ...] = ("categoria", "category", "rubro", "tipo")
 _CANTIDAD_COLS: set[str] = {"cantidad", "qty", "units", "unidades", "cant"}
 
 # Monto de venta: preferimos "total" (precio_unitario × cantidad) sobre "precio_unitario"
@@ -793,7 +817,7 @@ async def _insert_multisheet_data(
     # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
     _by_sku, _by_name = await _load_product_index(session, tenant_id)
 
-    def _val(row: dict[str, Any], col: str | None, keywords: set[str]) -> Any:
+    def _val(row: dict[str, Any], col: str | None, keywords: set[str] | tuple[str, ...]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
         if col:
             return row.get(col)
@@ -870,17 +894,20 @@ async def _insert_multisheet_data(
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         desc = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
         pay = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
-        cat = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 50)
+        cat_raw = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 99)
+        cat_code, cat_label = normalize_expense_category(cat_raw)
         expense = ExpenseEntry(
             tenant_id=tenant_id,
             amount=amount,
-            category=cat or "importado",
+            category=cat_code,
             transaction_date=tx_date,
             description=desc or "Gasto importado",
             payment_method=pay or "transfer",
             provenance="REAL",
         )
         cf = _custom_fields(row, cf_cols)
+        if cat_label:
+            cf = {**cf, "category_label": cat_label}
         if cf:
             expense.custom_fields = cf
         # FASE 3 (B1): vincular el gasto al producto del catálogo (compra de mercadería).

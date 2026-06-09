@@ -26,6 +26,10 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
+from app.domain.expense_categories import (
+    EXPENSE_CATEGORY_LABELS_ES,
+    normalize_expense_category,
+)
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -70,25 +74,23 @@ class AgentExpense(BaseAgent):
         return "other"
 
     def _extract_expense_category(self, message: str) -> tuple[str, str]:
+        # Primero el normalizador canónico (aliases es-AR del catálogo completo,
+        # matching por palabra completa sobre el mensaje).
+        code, _ = normalize_expense_category(message)
+        if code != "OTHER":
+            return code, EXPENSE_CATEGORY_LABELS_ES[code]
+        # Red de keywords coloquiales que no son nombres de categoría.
         message_lower = message.lower()
         category_rules = (
-            ("RENT", ("alquiler", "renta"), "Alquiler"),
-            ("UTILITIES", ("luz", "gas", "internet", "agua", "servicio"), "Servicios"),
-            (
-                "PAYROLL",
-                ("sueldo", "sueldos", "empleado", "personal", "nomina", "nómina"),
-                "Sueldos",
-            ),
-            (
-                "INVENTORY",
-                ("mercadería", "mercaderia", "stock", "proveedor", "compra"),
-                "Mercadería / stock",
-            ),
-            ("MARKETING", ("marketing", "publicidad", "anuncio", "ads"), "Marketing"),
+            ("RENT", ("renta",), ),
+            ("UTILITIES", ("servicio",), ),
+            ("PAYROLL", ("empleado", "personal", "nomina", "nómina"), ),
+            ("INVENTORY", ("proveedor", "compra"), ),
+            ("MARKETING", ("anuncio", "ads"), ),
         )
-        for canonical, keywords, label in category_rules:
+        for canonical, keywords in category_rules:
             if any(keyword in message_lower for keyword in keywords):
-                return canonical, label
+                return canonical, EXPENSE_CATEGORY_LABELS_ES[canonical]
         return "OTHER", "Gasto"
 
     def _extract_transaction_date(self, message: str) -> str:
