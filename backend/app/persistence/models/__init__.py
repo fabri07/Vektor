@@ -37,6 +37,7 @@ from app.persistence.models.score import (
 )
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 from app.persistence.models.user import User
 from app.persistence.models.user_auth_identity import UserAuthIdentity
 
@@ -62,6 +63,7 @@ __all__ = [
     "Insight",
     "ActionSuggestion",
     "DecisionAuditLog",
+    "UnclassifiedRecord",
     "UploadedFile",
     "Notification",
     "EmailVerificationToken",
