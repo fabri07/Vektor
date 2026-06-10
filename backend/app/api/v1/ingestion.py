@@ -836,6 +836,7 @@ async def confirm_file(
             "ventas_detectadas",
             "gastos_detectados",
             "stock_detectado",
+            "otros_detectados",
             "preview_rows",
             "mapping_contexts",
         )

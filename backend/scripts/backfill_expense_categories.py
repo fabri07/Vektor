@@ -32,6 +32,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from _db import async_engine_config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -43,21 +44,6 @@ from app.domain.product_categories import (  # noqa: E402
     PRODUCT_CATEGORY_LABELS,
     normalize_product_category,
 )
-
-
-def _engine_url() -> str:
-    raw = os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_URL_SYNC")
-    if not raw:
-        print("ERROR: exportá DATABASE_URL antes de correr.")
-        sys.exit(2)
-    url = raw.strip()
-    if "+asyncpg" not in url:
-        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    # asyncpg no acepta sslmode/channel_binding en la URL
-    for param in ("sslmode=require&", "&sslmode=require", "?sslmode=require",
-                  "channel_binding=require&", "&channel_binding=require"):
-        url = url.replace(param, "?" if param.startswith("?") else "")
-    return url
 
 
 async def _tenant_ids(session: AsyncSession, tenant: str | None) -> list[uuid.UUID]:
@@ -186,7 +172,8 @@ async def main() -> None:
         print("ERROR: --apply requiere --tenant <uuid> o --all explícito.")
         sys.exit(2)
 
-    engine = create_async_engine(_engine_url(), connect_args={"ssl": "require"})
+    url, connect_args = async_engine_config()
+    engine = create_async_engine(url, connect_args=connect_args)
     async with AsyncSession(engine) as session:
         tids = await _tenant_ids(session, args.tenant)
         mode = "APPLY" if args.apply else "DRY-RUN"

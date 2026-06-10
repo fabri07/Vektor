@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.expense_categories import normalize_expense_category
+from app.domain.expense_categories import infer_expense_type, normalize_expense_category
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -151,8 +151,14 @@ async def save_expense(
 ) -> ExpenseEntry:
     """Registra un gasto en expense_entries."""
     category, category_label = normalize_expense_category(entities.get("category"))
-    expense_type_raw = entities.get("expense_type")
-    expense_type = expense_type_raw if expense_type_raw in ("OPEX", "COGS") else "OPEX"
+    # Discriminador canónico: COGS si es mercadería (INVENTORY o producto
+    # vinculado), igual que en los caminos de import — antes el mismo gasto de
+    # mercadería quedaba OPEX por chat y COGS por archivo.
+    expense_type = infer_expense_type(
+        category,
+        product_id=entities.get("product_id"),
+        explicit=entities.get("expense_type"),
+    )
     expense = ExpenseEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),

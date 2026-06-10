@@ -16,6 +16,16 @@ export function formatDateTime(value: unknown): string {
   return `${datePart} ${timePart}`;
 }
 
+/**
+ * Parsea un string date-only "YYYY-MM-DD" como fecha LOCAL.
+ * `new Date("YYYY-MM-DD")` interpreta medianoche UTC: en UTC-3 el día (y en el
+ * borde de año, el año) retrocede uno al formatear/leer en hora local.
+ */
+export function parseDateOnly(value: string): Date {
+  const [y, m, d] = value.slice(0, 10).split("-").map(Number);
+  return new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1);
+}
+
 /** Valor para un <input type="datetime-local"> (YYYY-MM-DDTHH:mm) en hora local. */
 export function toDatetimeLocal(value?: string | Date | null): string {
   const d = value ? new Date(value) : new Date();

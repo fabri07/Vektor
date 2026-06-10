@@ -12,7 +12,7 @@ import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildCustomFieldColumns } from "@/lib/customFields";
-import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
+import { formatDateTime, parseDateOnly, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import {
@@ -25,11 +25,14 @@ import {
   ALL_CATEGORIES,
   CATEGORY_LABELS,
   CATEGORY_VARIANTS,
+  categoryDisplay,
 } from "@/lib/expenseCategories";
 
 function formatRangeDate(value: string | null): string {
   if (!value) return "—";
-  return new Date(value).toLocaleDateString("es-AR", {
+  // parseDateOnly: "YYYY-MM-DD" como fecha local (new Date() lo tomaría UTC
+  // y en UTC-3 mostraría el día anterior).
+  return parseDateOnly(value).toLocaleDateString("es-AR", {
     day: "numeric",
     month: "short",
     year: "numeric",
@@ -59,17 +62,14 @@ const COLUMNS = [
     hideable: true,
     render: (v: unknown, row: ExpenseEntryResponse) => {
       const cat = String(v);
-      // Si es "Otro" y hay nombre personalizado, mostrarlo en vez de "Otro".
-      const text =
-        cat === "OTHER" && row.category_label
-          ? row.category_label
-          : (CATEGORY_LABELS[cat] ?? cat);
-      return <Badge variant={CATEGORY_VARIANTS[cat] ?? "default"}>{text}</Badge>;
+      return (
+        <Badge variant={CATEGORY_VARIANTS[cat] ?? "default"}>
+          {categoryDisplay(cat, row.category_label)}
+        </Badge>
+      );
     },
     csvValue: (v: unknown, row: ExpenseEntryResponse) =>
-      String(v) === "OTHER" && row.category_label
-        ? row.category_label
-        : (CATEGORY_LABELS[String(v)] ?? String(v)),
+      categoryDisplay(String(v), row.category_label),
   },
   {
     key: "description",
@@ -199,7 +199,7 @@ export default function ExpensesPage() {
   }, {});
   const topCat = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0];
   const topCatLabel = topCat
-    ? `${CATEGORY_LABELS[topCat[0]] ?? topCat[0]}: ${formatARS(topCat[1])}`
+    ? `${categoryDisplay(topCat[0])}: ${formatARS(topCat[1])}`
     : "—";
 
   let variacionTrend: "up" | "down" | "neutral" = "neutral";
@@ -300,7 +300,7 @@ export default function ExpensesPage() {
               onClick: () =>
                 setPeriod({
                   kind: "year",
-                  year: new Date(dateRange.max_date as string).getFullYear(),
+                  year: parseDateOnly(dateRange.max_date as string).getFullYear(),
                 }),
             }}
           />

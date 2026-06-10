@@ -231,3 +231,20 @@ def normalize_expense_category(raw: str | None) -> tuple[str, str | None]:
     preservar el texto original en ``custom_fields["category_label"]``.
     """
     return _normalizer.normalize(raw)
+
+
+def infer_expense_type(
+    category: str,
+    product_id: object | None = None,
+    explicit: str | None = None,
+) -> str:
+    """Discriminador contable único: OPEX (operativo) vs COGS (mercadería).
+
+    Regla canónica para TODOS los caminos de escritura (chat, import,
+    REGISTER_PURCHASE, reclasificación): un valor explícito válido gana;
+    si no, es COGS cuando hay producto del catálogo vinculado o la
+    categoría es INVENTORY.
+    """
+    if explicit in ("OPEX", "COGS"):
+        return explicit
+    return "COGS" if (product_id is not None or category == "INVENTORY") else "OPEX"

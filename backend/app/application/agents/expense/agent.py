@@ -203,6 +203,18 @@ class AgentExpense(BaseAgent):
             if not pre_check.has_data_intent:
                 continue
             rows = uploaded_file.parsed_summary_json.get("rows_processed", 0)
+            # FASE F: archivo ambiguo ("unclassified") ruteado a este agente →
+            # el usuario habló de gastos: se importa como gastos, con
+            # consentimiento explícito en el summary de la aprobación.
+            is_unclassified = pre_check.intent_type == "unclassified"
+            summary_text = (
+                f"Importar {rows} registros desde {uploaded_file.original_filename}."
+            )
+            if is_unclassified:
+                summary_text = (
+                    f"Importar {rows} registros desde {uploaded_file.original_filename} "
+                    "(tipo no detectado automáticamente — se cargarán como GASTOS)."
+                )
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
@@ -211,16 +223,15 @@ class AgentExpense(BaseAgent):
                 requires_approval=True,
                 confidence=Confidence(pre_check.confidence),
                 result={
-                    "summary": (
-                        f"Importar {rows} registros desde " f"{uploaded_file.original_filename}."
-                    ),
+                    "summary": summary_text,
                     "action_type": ActionType.IMPORT_TABULAR_FILE,
                     "structured_data": {
                         "source": "uploaded_file",
                         "file_id": str(uploaded_file.id),
                         "confirmed_fields": {
                             "ventas": pre_check.intent_type in ("sale", "mixed"),
-                            "gastos": pre_check.intent_type in ("expense", "mixed"),
+                            "gastos": pre_check.intent_type in ("expense", "mixed")
+                            or is_unclassified,
                             "productos": pre_check.intent_type == "product",
                         },
                     },

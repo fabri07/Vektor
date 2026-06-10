@@ -20,8 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
 from app.api.v1.expenses import _apply_category_label
+from app.api.v1.products import _tenant_business_type
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.expense_categories import normalize_expense_category
+from app.domain.product_categories import normalize_product_category
 from app.persistence.db.session import get_db_session
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -184,7 +186,18 @@ async def reclassify_record(
             label = "gasto"
         else:
             prod_req = CreateProductRequest(**body.fields)
-            session.add(Product(tenant_id=tenant.tenant_id, **prod_req.model_dump()))
+            data = prod_req.model_dump()
+            # Misma normalización que POST /products (catálogo del vertical).
+            if data.get("category"):
+                business_type = await _tenant_business_type(session, tenant.tenant_id)
+                code_p, label_p = normalize_product_category(data["category"], business_type)
+                data["category"] = code_p
+                if label_p:
+                    data["custom_fields"] = {
+                        **(data.get("custom_fields") or {}),
+                        "category_label": label_p,
+                    }
+            session.add(Product(tenant_id=tenant.tenant_id, **data))
             label = "producto"
     except ValidationError as exc:
         raise HTTPException(

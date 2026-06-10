@@ -559,7 +559,13 @@ class AgentSupplier(BaseAgent):
         from app.application.agents.shared.analytics import parse_money  # noqa: PLC0415
 
         def _price_map(summary: dict[str, Any]) -> dict[str, float]:
-            for key in ("stock_detectado", "ventas_detectadas", "gastos_detectados"):
+            _buckets = (
+                "stock_detectado",
+                "ventas_detectadas",
+                "gastos_detectados",
+                "otros_detectados",
+            )
+            for key in _buckets:
                 rows = summary.get(key)
                 if isinstance(rows, list) and rows:
                     out: dict[str, float] = {}

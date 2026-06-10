@@ -55,6 +55,17 @@ def test_general_sin_filas_no_es_dato() -> None:
     assert result.confidence == "LOW"
 
 
+def test_general_con_otros_detectados_es_unclassified() -> None:
+    # FASE F: los archivos ambiguos viven en otros_detectados; hay datos
+    # importables y el tipo lo decide el agente al que el CEO ruteó el mensaje.
+    result = DataIntentExtractor().check_file_summary(
+        {"inferred_type": "general", "otros_detectados": [{"monto": "500"}]}
+    )
+    assert result.has_data_intent is True
+    assert result.intent_type == "unclassified"
+    assert result.confidence == "LOW"
+
+
 def test_general_con_ventas_detectadas_es_sale() -> None:
     result = DataIntentExtractor().check_file_summary(
         {"inferred_type": "general", "ventas_detectadas": [{"monto": "500"}]}

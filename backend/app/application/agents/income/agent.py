@@ -246,14 +246,17 @@ class AgentIncome(BaseAgent):
             ventas_rows = summary_json.get("ventas_detectadas") or []
             gastos_rows = summary_json.get("gastos_detectados") or []
             stock_rows = summary_json.get("stock_detectado") or []
+            # FASE F: archivos ambiguos ("general") viven en otros_detectados.
+            otros_rows = summary_json.get("otros_detectados") or []
             is_multisheet = bool(summary_json.get("multi_sheet"))
 
             has_ventas = bool(ventas_rows)
             has_gastos = bool(gastos_rows)
             has_stock = bool(stock_rows)
+            has_otros = bool(otros_rows)
 
             # Si ningún tipo de dato es reconocible → pedir aclaración al usuario
-            if not has_ventas and not has_gastos and not has_stock:
+            if not has_ventas and not has_gastos and not has_stock and not has_otros:
                 return AgentResponse(
                     request_id=request.request_id,
                     agent_name=self.agent_name,
@@ -268,9 +271,13 @@ class AgentIncome(BaseAgent):
                     result={"summary": "Archivo sin tipo de datos detectado", "alerts": []},
                 )
 
-            # Construir confirmed_fields incluyendo TODO lo que hay en el archivo
+            # Construir confirmed_fields incluyendo TODO lo que hay en el archivo.
+            # Archivo SOLO ambiguo ruteado a este agente: el usuario habló de
+            # ventas → se importa como ventas, con consentimiento explícito en
+            # el summary de la aprobación.
+            only_otros = has_otros and not (has_ventas or has_gastos or has_stock)
             confirmed_fields = {
-                "ventas": has_ventas,
+                "ventas": has_ventas or only_otros,
                 "gastos": has_gastos,
                 "productos": has_stock,
             }
@@ -283,6 +290,11 @@ class AgentIncome(BaseAgent):
                 parts.append(f"{len(gastos_rows):,} gasto(s)".replace(",", "."))
             if has_stock:
                 parts.append(f"{len(stock_rows):,} producto(s)".replace(",", "."))
+            if only_otros:
+                parts.append(
+                    f"{len(otros_rows):,} fila(s) sin tipo detectado — "
+                    "se cargarán como VENTAS".replace(",", ".")
+                )
 
             if is_multisheet and summary_json.get("sheet_names"):
                 sheets = ", ".join(f"«{s}»" for s in summary_json["sheet_names"])

@@ -53,19 +53,31 @@ function rowPreview(record: UnclassifiedRecordResponse): string {
     .join(" · ");
 }
 
+const PAGE_SIZE = 50;
+
 export default function OtrosPage() {
   const [reclassifying, setReclassifying] = useState<UnclassifiedRecordResponse | null>(null);
+  const [page, setPage] = useState(0);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
 
   const { data: records = [], isLoading, isError } = useQuery({
-    queryKey: ["others-pending"],
-    queryFn: () => othersService.getPending(),
+    queryKey: ["others-pending", page],
+    queryFn: () => othersService.getPending(page * PAGE_SIZE, PAGE_SIZE),
     staleTime: 60 * 1000,
   });
 
+  const { data: pendingTotal = 0 } = useQuery({
+    queryKey: ["others-pending-count"],
+    queryFn: () => othersService.getPendingCount(),
+    staleTime: 60 * 1000,
+  });
+
+  const totalPages = Math.max(1, Math.ceil(pendingTotal / PAGE_SIZE));
+
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["others-pending"] });
+    await queryClient.invalidateQueries({ queryKey: ["others-pending-count"] });
   };
 
   const dismissMutation = useMutation({
@@ -114,6 +126,11 @@ export default function OtrosPage() {
           description="Todo lo que Véktor no pueda clasificar automáticamente va a aparecer acá."
         />
       ) : (
+        <>
+        <p className="text-xs text-vk-text-muted">
+          {pendingTotal} registro(s) pendiente(s)
+          {totalPages > 1 ? ` — página ${page + 1} de ${totalPages}` : ""}
+        </p>
         <ul className="space-y-3">
           {records.map((record) => (
             <li
@@ -156,6 +173,27 @@ export default function OtrosPage() {
             </li>
           ))}
         </ul>
+        {totalPages > 1 ? (
+          <div className="flex items-center justify-center gap-3 pt-2">
+            <button
+              type="button"
+              disabled={page === 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+            >
+              ← Anterior
+            </button>
+            <button
+              type="button"
+              disabled={page + 1 >= totalPages}
+              onClick={() => setPage((p) => p + 1)}
+              className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+            >
+              Siguiente →
+            </button>
+          </div>
+        ) : null}
+        </>
       )}
 
       <ReclassifyModal

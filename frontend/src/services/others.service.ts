@@ -21,9 +21,9 @@ export interface ReclassifyPayload {
 }
 
 export const othersService = {
-  async getPending(): Promise<UnclassifiedRecordResponse[]> {
+  async getPending(offset = 0, limit = 50): Promise<UnclassifiedRecordResponse[]> {
     const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
-      params: { status: "PENDING", limit: 500 },
+      params: { status: "PENDING", limit, offset },
     });
     return res.data;
   },

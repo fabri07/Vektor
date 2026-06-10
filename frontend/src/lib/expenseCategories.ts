@@ -40,8 +40,19 @@ export const CATEGORY_VARIANTS: Record<string, BadgeVariant> = {
 
 export const ALL_CATEGORIES = Object.keys(CATEGORY_LABELS);
 
+/**
+ * Literales viejos que pueden existir en datos previos al deploy del catálogo
+ * canónico, hasta que corra el backfill. NO van al dropdown (no son códigos
+ * seleccionables), solo evitan mostrar el código crudo en badges/desgloses.
+ */
+export const LEGACY_CATEGORY_LABELS: Record<string, string> = {
+  compra_proveedor: "Compras",
+  salida_caja: "Salida de caja",
+  importado: "Otros",
+};
+
 /** Label visible para una categoría: canónica → label; OTHER con nombre custom → ese nombre. */
 export function categoryDisplay(category: string, categoryLabel?: string | null): string {
   if (category === "OTHER" && categoryLabel) return categoryLabel;
-  return CATEGORY_LABELS[category] ?? category;
+  return CATEGORY_LABELS[category] ?? LEGACY_CATEGORY_LABELS[category] ?? category;
 }

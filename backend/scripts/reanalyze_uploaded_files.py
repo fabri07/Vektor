@@ -39,6 +39,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from _db import async_engine_config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -64,20 +65,6 @@ _BUCKET_CONFIRM_KEY = {
     "gastos_detectados": "gastos",
     "stock_detectado": "productos",
 }
-
-
-def _engine_url() -> str:
-    raw = os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_URL_SYNC")
-    if not raw:
-        print("ERROR: exportá DATABASE_URL antes de correr.")
-        sys.exit(2)
-    url = raw.strip()
-    if "+asyncpg" not in url:
-        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    for param in ("sslmode=require&", "&sslmode=require", "?sslmode=require",
-                  "channel_binding=require&", "&channel_binding=require"):
-        url = url.replace(param, "?" if param.startswith("?") else "")
-    return url
 
 
 async def _existing_tx_keys(session: AsyncSession, tid: uuid.UUID) -> set[tuple[str, str]]:
@@ -233,7 +220,8 @@ async def main() -> None:
         print("ERROR: indicá --tenant <uuid> (piloto) o --all-active.")
         sys.exit(2)
 
-    engine = create_async_engine(_engine_url(), connect_args={"ssl": "require"})
+    url, connect_args = async_engine_config()
+    engine = create_async_engine(url, connect_args=connect_args)
     s3 = S3Client()
     async with AsyncSession(engine) as session:
         if args.tenant:

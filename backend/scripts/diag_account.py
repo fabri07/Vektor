@@ -10,31 +10,12 @@ ONLY runs SELECT statements. No writes. Safe against production.
 import asyncio
 import json
 import os
-import ssl
 import sys
-from urllib.parse import parse_qs, urlparse, urlunparse
 
 import asyncpg
+from _db import normalize_dsn
 
-
-def normalize_dsn(raw: str) -> tuple[str, ssl.SSLContext | bool]:
-    """Strip SQLAlchemy driver suffix and pull out sslmode for asyncpg."""
-    dsn = raw.strip()
-    for suffix in ("+asyncpg", "+psycopg2", "+psycopg"):
-        dsn = dsn.replace(suffix, "")
-    parsed = urlparse(dsn)
-    params = parse_qs(parsed.query)
-    sslmode = (params.pop("sslmode", ["require"]) or ["require"])[0]
-    # rebuild query without sslmode/channel_binding (asyncpg rejects unknown kwargs in DSN)
-    params.pop("channel_binding", None)
-    new_query = "&".join(f"{k}={v[0]}" for k, v in params.items())
-    clean = urlunparse(parsed._replace(query=new_query))
-    if sslmode in ("disable", "allow"):
-        return clean, False
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return clean, ctx
+__all__ = ["normalize_dsn", "p"]
 
 
 def p(title: str) -> None:

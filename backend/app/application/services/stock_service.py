@@ -52,6 +52,10 @@ async def decrement_stock(
 
     balance = await _get_or_create_balance(product, tenant_id, db)
     balance.current_qty -= qty
+    # Mantener Product.stock_units (lo que lee la UI) en sync también al vender:
+    # sin esto, las compras subían el stock visible pero las ventas nunca lo
+    # bajaban y stock_units inflaba monotónicamente.
+    product.stock_units = max(0, product.stock_units - qty)
 
     movement = InventoryMovement(
         tenant_id=tenant_id,
