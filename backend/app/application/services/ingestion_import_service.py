@@ -11,17 +11,125 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
+from app.domain.expense_categories import infer_expense_type, normalize_expense_category
+from app.domain.product_categories import normalize_product_category
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
 
+class EmptyImportError(Exception):
+    """Se confirmó un import con datos presentes pero no se insertó ninguna fila."""
+
+    user_message = (
+        "No se importó ninguna fila: no se detectaron automáticamente las "
+        "columnas requeridas (fecha / monto / nombre) para el tipo confirmado. "
+        "Mapeá las columnas manualmente o revisá el tipo de datos del archivo."
+    )
+
+
+def check_nonempty_import(
+    counts: dict[str, Any],
+    summary: dict[str, Any],
+    confirmed_fields: dict[str, bool] | None,
+    context_confirmed: dict[str, bool] | None = None,
+) -> None:
+    """Falla explícita ante inserción vacía con datos presentes.
+
+    Si el archivo tenía filas y el usuario confirmó algún tipo pero NO se insertó
+    nada (el fallback por keyword no encontró las columnas requeridas), lanza
+    ``EmptyImportError`` en vez de dejar pasar un import silenciosamente vacío.
+    Compartida por el endpoint de ingestión (→ 422) y el camino de chat
+    (IMPORT_TABULAR_FILE → la pending action queda FAILED con mensaje visible).
+    """
+    # NOTA: counts["otros"] NO cuenta como insertado. Si el usuario confirmó un
+    # tipo y ese tipo importó 0 filas, hay que cortar con error (y el rollback
+    # descarta también lo capturado a "Otros") para que pueda reintentar con
+    # mapeo manual — si "otros" sumara, una hoja no clasificable taparía la
+    # pérdida silenciosa de los datos confirmados.
+    total_inserted = (
+        counts.get("ventas", 0) + counts.get("gastos", 0) + counts.get("productos", 0)
+    )
+    had_rows = bool(summary.get("row_count")) or any(
+        summary.get(k)
+        for k in (
+            "ventas_detectadas",
+            "gastos_detectados",
+            "stock_detectado",
+            "otros_detectados",
+        )
+    )
+    confirmed_any = any((confirmed_fields or {}).values()) or any(
+        (context_confirmed or {}).values()
+    )
+    if total_inserted == 0 and had_rows and confirmed_any:
+        logger.warning(
+            "ingestion.import.zero_inserted",
+            row_count=summary.get("row_count"),
+            confirmed_fields=confirmed_fields,
+        )
+        raise EmptyImportError(EmptyImportError.user_message)
+
+
 def _normalize_name(name: str) -> str:
     """Normaliza nombre de producto para comparación: lower, sin guiones, espacios únicos."""
     return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
+
+
+def _capture_unclassified(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    rows: list[dict[str, Any]],
+    headers: list[str] | None,
+    source: str,
+    uploaded_file_id: uuid.UUID | None,
+    context_label: str | None = None,
+    suggested_entity: str | None = None,
+) -> int:
+    """FASE F: persiste filas no clasificadas en la bandeja "Otros".
+
+    Nada se descarta en silencio: lo que no se pudo (o no se quiso) clasificar
+    como venta/gasto/producto queda en ``unclassified_records`` con estado
+    PENDING para que el tenant lo importe o descarte desde /otros.
+    """
+    from app.persistence.models.unclassified_record import (  # noqa: PLC0415
+        UnclassifiedRecord,
+    )
+
+    count = 0
+    for row in rows:
+        row_data = {k: v for k, v in row.items() if k != "__context__"}
+        if not row_data:
+            continue
+        session.add(
+            UnclassifiedRecord(
+                tenant_id=tenant_id,
+                uploaded_file_id=uploaded_file_id,
+                source=source,
+                context_label=(context_label or None),
+                headers=list(headers) if headers else None,
+                row_data={k: ("" if v is None else str(v)) for k, v in row_data.items()},
+                suggested_entity=suggested_entity,
+            )
+        )
+        count += 1
+    return count
+
+
+async def _load_business_type(session: AsyncSession, tenant_id: uuid.UUID) -> str | None:
+    """Vertical del tenant para normalizar categorías de producto (1 query por import)."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+
+    result = await session.execute(
+        select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()
 
 
 # ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
@@ -73,6 +181,24 @@ def _resolve_product(
     return None
 
 
+async def _load_balance_index(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> dict[uuid.UUID, Any]:
+    """Carga TODOS los InventoryBalance del tenant en una query (batch).
+
+    Evita un SELECT por fila en imports con movimientos de stock: el balance
+    se busca/actualiza en memoria y los nuevos se registran en el índice.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.inventory import InventoryBalance  # noqa: PLC0415
+
+    result = await session.execute(
+        select(InventoryBalance).where(InventoryBalance.tenant_id == tenant_id)
+    )
+    return {b.product_id: b for b in result.scalars().all()}
+
+
 async def _record_stock_movement(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -81,6 +207,7 @@ async def _record_stock_movement(
     unit_cost: Decimal | None,
     movement_type: str,
     final_qty: int,
+    balance_index: dict[uuid.UUID, Any] | None = None,
 ) -> None:
     """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
     `InventoryBalance` por el import, dentro de la misma transacción.
@@ -118,25 +245,75 @@ async def _record_stock_movement(
         )
     )
 
-    balance = (
-        await session.execute(
-            select(InventoryBalance).where(
-                InventoryBalance.product_id == product_id,
-                InventoryBalance.tenant_id == tenant_id,
+    if balance_index is not None:
+        balance = balance_index.get(product_id)
+    else:
+        balance = (
+            await session.execute(
+                select(InventoryBalance).where(
+                    InventoryBalance.product_id == product_id,
+                    InventoryBalance.tenant_id == tenant_id,
+                )
             )
-        )
-    ).scalar_one_or_none()
+        ).scalar_one_or_none()
     if balance is None:
-        session.add(
-            InventoryBalance(
-                tenant_id=tenant_id,
-                product_id=product_id,
-                current_qty=final_qty,
-                reserved_qty=0,
-            )
+        new_balance = InventoryBalance(
+            tenant_id=tenant_id,
+            product_id=product_id,
+            current_qty=final_qty,
+            reserved_qty=0,
         )
+        session.add(new_balance)
+        if balance_index is not None:
+            balance_index[product_id] = new_balance
     else:
         balance.current_qty += qty
+
+
+async def _apply_purchase_to_stock(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    expense: Any,
+    qty_raw: Any,
+    unit_cost: Decimal | None,
+    balance_index: dict[uuid.UUID, Any] | None = None,
+) -> None:
+    """FASE D: una compra de mercadería importada suma stock.
+
+    Gate doble contra falsos positivos / doble conteo:
+      - el gasto debe tener producto del catálogo resuelto (`product_id`); y
+      - la fila debe traer una columna de cantidad con valor > 0.
+    A diferencia del import de productos (que SETEA stock absoluto), acá se
+    INCREMENTA: `Product.stock_units += qty` + movimiento de inventario + sync
+    de balance, igual que `stock_service.increment_stock` pero sin flush por
+    fila (batch del import).
+    """
+    if expense.product_id is None:
+        return
+    try:
+        qty = int(float(str(qty_raw))) if qty_raw not in (None, "", "None", "nan") else 0
+    except (ValueError, TypeError):
+        return
+    if qty <= 0:
+        return
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    product = await session.get(Product, expense.product_id)
+    if product is None or product.tenant_id != tenant_id:
+        return
+    product.stock_units += qty
+    if unit_cost is not None:
+        product.unit_cost_ars = unit_cost
+    await _record_stock_movement(
+        session,
+        tenant_id,
+        product.id,
+        qty,
+        unit_cost,
+        "purchase",
+        product.stock_units,
+        balance_index=balance_index,
+    )
 
 
 _NOMBRE_COLS: set[str] = {
@@ -165,6 +342,12 @@ _COSTO_COLS: set[str] = {
     "costo", "cost", "precio_costo", "p_costo",
     "costo_unitario",  # common in purchase sheets
     "costo_unit",
+}
+# Solo nombres INEQUÍVOCOS de costo unitario: "costo" a secas suele ser el
+# total de la línea en archivos de gastos (también matchea _GASTO_COLS) y no
+# debe escribirse como unit_cost del producto.
+_COSTO_UNITARIO_COLS: set[str] = {
+    "costo_unitario", "costo_unit", "precio_costo", "p_costo", "unit_cost",
 }
 _STOCK_COLS: set[str] = {
     "stock", "cantidad", "inventario", "units", "qty", "existencia", "stock_actual",
@@ -230,7 +413,17 @@ def _parse_date(raw: Any) -> datetime | None:
     return None
 
 
-def _find_col(headers: list[str], keywords: set[str]) -> str | None:
+def _find_col(headers: list[str], keywords: set[str] | tuple[str, ...]) -> str | None:
+    """Si `keywords` es tupla, se respeta su orden como PRIORIDAD (el primer
+    keyword que matchee alguna columna gana, sin importar el orden de headers).
+    Con set, gana la primera columna en orden de archivo (comportamiento legacy).
+    """
+    if isinstance(keywords, tuple):
+        for k in keywords:
+            for h in headers:
+                if k in h.lower().strip().replace(" ", "_"):
+                    return h
+        return None
     for h in headers:
         norm = h.lower().strip().replace(" ", "_")
         if any(k in norm for k in keywords):
@@ -238,7 +431,41 @@ def _find_col(headers: list[str], keywords: set[str]) -> str | None:
     return None
 
 
-def _row_val(row: dict[str, Any], keywords: set[str]) -> Any:
+def _row_col(row: dict[str, Any], keywords: set[str] | tuple[str, ...]) -> str | None:
+    """Como `_row_val` pero devuelve el NOMBRE de la columna que matchea.
+
+    Necesario cuando hay que comparar identidad de columnas (ej: no usar la
+    misma columna como monto del gasto Y costo unitario del producto).
+    """
+    if isinstance(keywords, tuple):
+        for k in keywords:
+            for key in row:
+                if k in key.lower().strip().replace(" ", "_"):
+                    return key
+        return None
+    for key in row:
+        norm = key.lower().strip().replace(" ", "_")
+        if any(k in norm for k in keywords):
+            return key
+    return None
+
+
+def _row_val_categoria(row: dict[str, Any]) -> Any:
+    """Valor de la columna de categoría por keyword, salteando columnas de pago.
+
+    El keyword 'tipo' matchearía 'tipo_pago' por substring y la categoría
+    terminaría siendo el método de pago — una columna de pago nunca es la
+    categoría del gasto.
+    """
+    for k in _CATEGORIA_COLS:
+        for key, val in row.items():
+            norm = key.lower().strip().replace(" ", "_")
+            if k in norm and "pago" not in norm and "payment" not in norm:
+                return val
+    return None
+
+
+def _row_val(row: dict[str, Any], keywords: set[str] | tuple[str, ...]) -> Any:
     """Devuelve el valor de la primera columna de *esta* fila cuyo nombre matchea.
 
     A diferencia de `_find_col` (que resuelve una columna fija para todo el
@@ -246,7 +473,15 @@ def _row_val(row: dict[str, Any], keywords: set[str]) -> Any:
     archivos multi-hoja donde varias hojas del mismo tipo pueden tener esquemas
     de columnas distintos: sin esto, las filas de la segunda hoja se descartaban
     en silencio porque la columna detectada no existía en sus keys.
+
+    Con tupla, el orden de keywords es prioridad (ver `_find_col`).
     """
+    if isinstance(keywords, tuple):
+        for k in keywords:
+            for key, val in row.items():
+                if k in key.lower().strip().replace(" ", "_"):
+                    return val
+        return None
     for key, val in row.items():
         norm = key.lower().strip().replace(" ", "_")
         if any(k in norm for k in keywords):
@@ -283,21 +518,27 @@ async def insert_confirmed_data(
     context_mappings: dict[str, dict[str, str]] | None = None,
     context_confirmed: dict[str, bool] | None = None,
     context_entity: dict[str, str] | None = None,
+    source: str = "ingestion",
+    uploaded_file_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
     When return_details=True, also returns product_details list with per-row
     action ('CREATED'|'UPDATED'), product_id, name, before/after snapshots.
+
+    FASE F: las filas de `otros_detectados` que el usuario NO reasigna a un tipo
+    importable se persisten en `unclassified_records` (bandeja "Otros") con
+    ``source``/``uploaded_file_id`` — `counts["otros"]` las cuenta.
     """
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
-    confirmed_fields = confirmed_fields or _default_confirmed_fields(summary)
+    confirmed_fields = confirmed_fields or default_confirmed_fields(summary)
     # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
     today = datetime.now()
-    counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0}
+    counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0, "otros": 0}
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
 
@@ -318,13 +559,22 @@ async def insert_confirmed_data(
                 column_mappings=column_mappings,
                 context_mappings=context_mappings,
                 context_confirmed=context_confirmed,
+                context_entity=context_entity,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
             )
 
         rows: list[dict[str, Any]]
+        rows_from_otros = False
         if inferred_type == "stock":
             rows = summary.get("stock_detectado", [])
         else:
             rows = summary.get("ventas_detectadas", []) or summary.get("gastos_detectados", [])
+            if not rows:
+                # FASE F: archivos ambiguos ("general") viven en otros_detectados;
+                # la confirmación explícita del usuario sigue pudiendo importarlos.
+                rows = summary.get("otros_detectados", [])
+                rows_from_otros = bool(rows)
         if not rows:
             return counts
 
@@ -344,6 +594,7 @@ async def insert_confirmed_data(
         notes_col: str | None = None
         payment_col: str | None = None
         category_col: str | None = None
+        recurring_col: str | None = None
         custom_field_cols: dict[str, str] = {}
 
         if column_mappings:
@@ -383,6 +634,7 @@ async def insert_confirmed_data(
             notes_col = target_to_col.get("notes")
             payment_col = target_to_col.get("payment_method")
             category_col = target_to_col.get("category")
+            recurring_col = target_to_col.get("is_recurring")
 
         # FASE 3: en archivos ambiguos ("general") se honra la confirmación EXPLÍCITA del
         # usuario (no se requiere la señal auto-detectada). Para tipos ya inferidos se
@@ -411,6 +663,17 @@ async def insert_confirmed_data(
             await _load_product_index(session, tenant_id)
             if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
             else ({}, {})
+        )
+        # FASE E: vertical del tenant para normalizar categorías de producto.
+        _business_type = (
+            await _load_business_type(session, tenant_id) if wants_productos else None
+        )
+        # Batch: balances del tenant en una query (evita un SELECT por fila
+        # en los movimientos de stock del import).
+        _balance_index: dict[uuid.UUID, Any] | None = (
+            await _load_balance_index(session, tenant_id)
+            if (wants_productos or wants_gastos)
+            else None
         )
 
         for row_index, row in enumerate(rows):
@@ -492,12 +755,26 @@ async def insert_confirmed_data(
                         str(notes_raw or desc_raw or "").strip()[:499]
                         or "Gasto importado"
                     )
-                    # Categoría
-                    cat_raw = row.get(category_col) if category_col else None
-                    cat_str = (
-                        str(cat_raw).strip()[:99]
-                        if cat_raw and str(cat_raw).strip() not in {"None", "nan", ""}
-                        else "importado"
+                    # Categoría: columna mapeada explícita o detección por keyword
+                    # (antes, sin mapeo explícito todo caía a "importado").
+                    # _row_val_categoria saltea columnas de pago (tipo_pago ≠ categoría).
+                    cat_raw = (
+                        row.get(category_col)
+                        if category_col
+                        else _row_val_categoria(row)
+                    )
+                    cat_code, cat_label = normalize_expense_category(_clean_str(cat_raw))
+
+                    # Método de pago real del archivo (antes hardcodeado "transfer").
+                    exp_pay_raw = _clean_str(
+                        row.get(payment_col) if payment_col else _row_val(row, _PAGO_COLS),
+                        30,
+                    )
+                    exp_pay = (
+                        normalize_payment_method(exp_pay_raw) if exp_pay_raw else "transfer"
+                    )
+                    recurring = _parse_bool_es(
+                        row.get(recurring_col) if recurring_col else _row_val(row, _RECURRENTE_COLS)
                     )
 
                     # Custom fields
@@ -506,14 +783,17 @@ async def insert_confirmed_data(
                         for k, v in custom_field_cols.items()
                         if row.get(v) is not None
                     }
+                    if cat_label:
+                        cf = {**cf, "category_label": cat_label}
 
                     expense = ExpenseEntry(
                         tenant_id=tenant_id,
                         amount=amount,
-                        category=cat_str,
+                        category=cat_code,
                         transaction_date=tx_date,
                         description=desc,
-                        payment_method="transfer",
+                        is_recurring=recurring if recurring is not None else False,
+                        payment_method=exp_pay,
                         provenance="REAL",
                     )
                     if cf:
@@ -524,6 +804,36 @@ async def insert_confirmed_data(
                         _by_name,
                         str(row.get(nombre_col)) if nombre_col else None,
                         str(row.get(sku_col)) if sku_col else None,
+                    )
+                    # FASE D: COGS si la fila es compra de mercadería (producto
+                    # del catálogo o categoría INVENTORY); además suma stock si
+                    # trae cantidad explícita.
+                    expense.expense_type = infer_expense_type(
+                        cat_code, product_id=expense.product_id
+                    )
+                    exp_qty_raw = (
+                        row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
+                    )
+                    # Costo unitario: solo de una columna inequívoca y DISTINTA
+                    # de la del monto — "costo" suele ser el total de la línea y
+                    # escribirlo como unit_cost corrompería el margen.
+                    exp_cost_col = (
+                        target_to_col.get("unit_cost_ars")
+                        if column_mappings
+                        else _find_col(headers, _COSTO_UNITARIO_COLS)
+                    )
+                    exp_unit_cost = (
+                        _parse_amount(row.get(exp_cost_col))
+                        if exp_cost_col and exp_cost_col != gasto_col
+                        else None
+                    )
+                    await _apply_purchase_to_stock(
+                        session,
+                        tenant_id,
+                        expense,
+                        exp_qty_raw,
+                        exp_unit_cost,
+                        balance_index=_balance_index,
                     )
                     session.add(expense)
                     counts["gastos"] += 1
@@ -551,6 +861,18 @@ async def insert_confirmed_data(
                     if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"}
                     else None
                 )
+                # FASE E: categoría canónica del vertical (antes se ignoraba en
+                # este path). Sin columna de categoría → None (sin categoría).
+                prod_cat_raw = _clean_str(
+                    row.get(category_col) if category_col else _row_val_categoria(row),
+                    99,
+                )
+                prod_cat: str | None = None
+                prod_cat_label: str | None = None
+                if prod_cat_raw:
+                    prod_cat, prod_cat_label = normalize_product_category(
+                        prod_cat_raw, _business_type
+                    )
 
                 # Buscar por nombre normalizado: primero exacto case-insensitive,
                 # después normalización Python completa (cubre "Coca-Cola" vs "Coca Cola"
@@ -596,9 +918,12 @@ async def insert_confirmed_data(
                             cost,
                             "purchase" if _delta > 0 else "adjustment",
                             stock_val,
+                            balance_index=_balance_index,
                         )
                     if sku:
                         existing.sku = sku
+                    if prod_cat and not existing.category:
+                        existing.category = prod_cat
                     if return_details:
                         product_details.append(
                             {
@@ -619,6 +944,8 @@ async def insert_confirmed_data(
                         for k, v in custom_field_cols.items()
                         if row.get(v) is not None
                     }
+                    if prod_cat_label:
+                        cf_product = {**cf_product, "category_label": prod_cat_label}
                     new_product = Product(
                         id=new_product_id,
                         tenant_id=tenant_id,
@@ -628,6 +955,7 @@ async def insert_confirmed_data(
                         sku=sku,
                         unit_cost_ars=cost,
                         stock_units=stock_val,
+                        category=prod_cat,
                         # NULL = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor
                         low_stock_threshold_units=None,
                         provenance="REAL",
@@ -638,7 +966,14 @@ async def insert_confirmed_data(
                     session.add(new_product)
                     # FASE 3: audit del ingreso inicial de stock + balance (si trae stock).
                     await _record_stock_movement(
-                        session, tenant_id, new_product_id, stock_val, cost, "purchase", stock_val
+                        session,
+                        tenant_id,
+                        new_product_id,
+                        stock_val,
+                        cost,
+                        "purchase",
+                        stock_val,
+                        balance_index=_balance_index,
                     )
                     if return_details:
                         product_details.append(
@@ -654,6 +989,19 @@ async def insert_confirmed_data(
                             }
                         )
                 counts["productos"] += 1
+
+        # FASE F: filas ambiguas (otros_detectados) que el usuario NO reasignó a
+        # ningún tipo importable → bandeja "Otros" en vez de descartarse.
+        if rows_from_otros and not (wants_ventas or wants_gastos or wants_productos):
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows,
+                headers,
+                source,
+                uploaded_file_id,
+                context_label="Tabla sin clasificar",
+            )
 
     else:
         # ── Documentos de texto/imagen: inserción por línea (montos detectados) ──
@@ -684,7 +1032,7 @@ async def insert_confirmed_data(
                     ExpenseEntry(
                         tenant_id=tenant_id,
                         amount=amount,
-                        category="importado",
+                        category="OTHER",
                         transaction_date=today,
                         description=str(entry.get("linea", ""))[:499] or "Gasto importado",
                         payment_method="transfer",
@@ -743,7 +1091,27 @@ async def insert_confirmed_data(
 
 
 _PAGO_COLS: set[str] = {"forma_pago", "metodo_pago", "payment_method", "medio_pago", "pago"}
-_CATEGORIA_COLS: set[str] = {"categoria", "category", "rubro", "tipo"}
+# Tupla = prioridad: "categoria" debe ganar siempre sobre "tipo" (un CSV con
+# columnas `categoria` Y `tipo` debe tomar la categoría de `categoria`).
+_CATEGORIA_COLS: tuple[str, ...] = ("categoria", "category", "rubro", "tipo")
+_RECURRENTE_COLS: set[str] = {"recurrente", "recurring", "es_fijo", "frecuencia"}
+
+_TRUTHY_ES = {"si", "sí", "true", "1", "x", "verdadero", "fijo", "yes"}
+_FALSY_ES = {"no", "false", "0", "variable", ""}
+
+
+def _parse_bool_es(raw: Any) -> bool | None:
+    """Parsea booleanos es-AR de archivos ('Sí'/'fijo'/'True'/'1'). None si es ambiguo."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    s = str(raw).strip().lower()
+    if s in _TRUTHY_ES:
+        return True
+    if s in _FALSY_ES or s in {"none", "nan"}:
+        return False
+    return None
 _CANTIDAD_COLS: set[str] = {"cantidad", "qty", "units", "unidades", "cant"}
 
 # Monto de venta: preferimos "total" (precio_unitario × cantidad) sobre "precio_unitario"
@@ -771,6 +1139,9 @@ async def _insert_multisheet_data(
     column_mappings: dict[str, str] | None,
     context_mappings: dict[str, dict[str, str]] | None = None,
     context_confirmed: dict[str, bool] | None = None,
+    context_entity: dict[str, str] | None = None,
+    source: str = "ingestion",
+    uploaded_file_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -792,8 +1163,12 @@ async def _insert_multisheet_data(
 
     # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
     _by_sku, _by_name = await _load_product_index(session, tenant_id)
+    # FASE E: vertical del tenant para normalizar categorías de producto.
+    _business_type = await _load_business_type(session, tenant_id)
+    # Batch: balances en una query (evita un SELECT por fila en movimientos).
+    _balance_index = await _load_balance_index(session, tenant_id)
 
-    def _val(row: dict[str, Any], col: str | None, keywords: set[str]) -> Any:
+    def _val(row: dict[str, Any], col: str | None, keywords: set[str] | tuple[str, ...]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
         if col:
             return row.get(col)
@@ -853,7 +1228,9 @@ async def _insert_multisheet_data(
         session.add(entry)
         counts["ventas"] += 1
 
-    def _add_expense(row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]) -> None:
+    async def _add_expense(
+        row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
+    ) -> None:
         amount_col = cols.get("amount")
         amount = (
             _parse_amount(row.get(amount_col))
@@ -869,18 +1246,28 @@ async def _insert_multisheet_data(
             tx_date = today
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         desc = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
-        pay = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
-        cat = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 50)
+        pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
+        pay = normalize_payment_method(pay_raw) if pay_raw else "transfer"
+        # _row_val_categoria saltea columnas de pago (tipo_pago ≠ categoría).
+        cat_raw = _clean_str(
+            row.get(cols["category"]) if cols.get("category") else _row_val_categoria(row),
+            99,
+        )
+        cat_code, cat_label = normalize_expense_category(cat_raw)
+        recurring = _parse_bool_es(_val(row, cols.get("is_recurring"), _RECURRENTE_COLS))
         expense = ExpenseEntry(
             tenant_id=tenant_id,
             amount=amount,
-            category=cat or "importado",
+            category=cat_code,
             transaction_date=tx_date,
             description=desc or "Gasto importado",
-            payment_method=pay or "transfer",
+            is_recurring=recurring if recurring is not None else False,
+            payment_method=pay,
             provenance="REAL",
         )
         cf = _custom_fields(row, cf_cols)
+        if cat_label:
+            cf = {**cf, "category_label": cat_label}
         if cf:
             expense.custom_fields = cf
         # FASE 3 (B1): vincular el gasto al producto del catálogo (compra de mercadería).
@@ -889,6 +1276,27 @@ async def _insert_multisheet_data(
             _by_name,
             _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
             _val(row, cols.get("sku"), _SKU_COLS),
+        )
+        # FASE D: discriminador COGS/OPEX + stock desde compras con cantidad.
+        expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
+        # Costo unitario: columna inequívoca y DISTINTA de la del monto ("costo"
+        # a secas suele ser el total de la línea — no es unit_cost).
+        _amount_src = (
+            amount_col
+            or _row_col(row, _VENTA_TOTAL_COLS)
+            or _row_col(row, _GASTO_AMOUNT_COLS)
+        )
+        _uc_col = cols.get("unit_cost_ars") or _row_col(row, _COSTO_UNITARIO_COLS)
+        unit_cost = (
+            _parse_amount(row.get(_uc_col)) if _uc_col and _uc_col != _amount_src else None
+        )
+        await _apply_purchase_to_stock(
+            session,
+            tenant_id,
+            expense,
+            _val(row, cols.get("quantity"), _CANTIDAD_COLS),
+            unit_cost,
+            balance_index=_balance_index,
         )
         session.add(expense)
         counts["gastos"] += 1
@@ -912,7 +1320,15 @@ async def _insert_multisheet_data(
         except (ValueError, TypeError):
             stock_val = 0
         sku = _clean_str(_val(row, cols.get("sku"), _SKU_COLS), 99)
-        cat = _clean_str(_val(row, cols.get("category"), _CATEGORIA_COLS), 99)
+        # FASE E: categoría canónica del vertical; sin columna → None.
+        cat_raw = _clean_str(
+            row.get(cols["category"]) if cols.get("category") else _row_val_categoria(row),
+            99,
+        )
+        cat: str | None = None
+        cat_label: str | None = None
+        if cat_raw:
+            cat, cat_label = normalize_product_category(cat_raw, _business_type)
         result = await session.execute(
             select(Product).where(
                 Product.tenant_id == tenant_id,
@@ -936,6 +1352,7 @@ async def _insert_multisheet_data(
                     cost,
                     "purchase" if _delta > 0 else "adjustment",
                     stock_val,
+                    balance_index=_balance_index,
                 )
             if sku:
                 existing.sku = sku
@@ -943,6 +1360,8 @@ async def _insert_multisheet_data(
                 existing.category = cat
         else:
             cf = _custom_fields(row, cf_cols)
+            if cat_label:
+                cf = {**cf, "category_label": cat_label}
             _new_id = uuid.uuid4()
             session.add(
                 Product(
@@ -963,7 +1382,14 @@ async def _insert_multisheet_data(
                 )
             )
             await _record_stock_movement(
-                session, tenant_id, _new_id, stock_val, cost, "purchase", stock_val
+                session,
+                tenant_id,
+                _new_id,
+                stock_val,
+                cost,
+                "purchase",
+                stock_val,
+                balance_index=_balance_index,
             )
         counts["productos"] += 1
 
@@ -978,17 +1404,39 @@ async def _insert_multisheet_data(
     if contexts:
         # ── Path por contexto (hoja/grupo) ──────────────────────────────────────
         for ctx in contexts:
-            entity = ctx.get("entity_type")
-            if entity not in entity_bucket:
-                continue
             ctx_id = ctx.get("context_id")
+            base_entity = ctx.get("entity_type")
+            # FASE F: el usuario puede reasignar una hoja no clasificada a un
+            # tipo importable (context_entity), igual que en documentos de texto.
+            entity = (context_entity or {}).get(ctx_id or "") or base_entity
+            if entity not in entity_bucket:
+                # Hoja no clasificada y no reasignada → bandeja "Otros".
+                otros_rows = [
+                    r
+                    for r in summary.get("otros_detectados", [])
+                    if r.get("__context__") == ctx_id
+                ]
+                if otros_rows:
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        otros_rows,
+                        ctx.get("headers"),
+                        source,
+                        uploaded_file_id,
+                        context_label=str(ctx.get("label") or ctx_id or ""),
+                    )
+                continue
             # Inclusión: por contexto si vino context_confirmed; si no, por tipo (legacy)
             if context_confirmed:
                 if not context_confirmed.get(ctx_id):
                     continue
             elif not confirmed_fields.get(entity_confirm_key[entity]):
                 continue
-            bucket = summary.get(entity_bucket[entity], [])
+            # Las filas viven en el bucket del tipo ORIGINAL de la hoja (o en
+            # otros_detectados si era no clasificada y fue reasignada).
+            bucket_key = entity_bucket.get(base_entity or "", "otros_detectados")
+            bucket = summary.get(bucket_key, [])
             rows = [r for r in bucket if r.get("__context__") == ctx_id]
             if not rows:
                 continue
@@ -998,7 +1446,7 @@ async def _insert_multisheet_data(
                 if entity == "sale":
                     _add_sale(row, cols, cf_cols)
                 elif entity == "expense":
-                    _add_expense(row, cols, cf_cols)
+                    await _add_expense(row, cols, cf_cols)
                 else:
                     await _add_product(row, cols, cf_cols)
                 if (_i + 1) % _flush_every == 0:
@@ -1012,7 +1460,7 @@ async def _insert_multisheet_data(
                     await session.flush()
         if confirmed_fields.get("gastos"):
             for row in summary.get("gastos_detectados", []):
-                _add_expense(row, {}, {})
+                await _add_expense(row, {}, {})
         if confirmed_fields.get("productos"):
             for row in summary.get("stock_detectado", []):
                 await _add_product(row, {}, {})
@@ -1023,7 +1471,7 @@ async def _insert_multisheet_data(
     return counts
 
 
-def _default_confirmed_fields(summary: dict[str, Any]) -> dict[str, bool]:
+def default_confirmed_fields(summary: dict[str, Any]) -> dict[str, bool]:
     inferred = summary.get("inferred_type")
     return {
         "ventas": bool(summary.get("ventas_detectadas")) or inferred == "ventas",

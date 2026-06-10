@@ -22,6 +22,7 @@ from app.api.v1 import (
     notifications,
     oauth,
     onboarding,
+    others,
     products,
     sales,
     settings,
@@ -45,6 +46,7 @@ api_router.include_router(sales.router, prefix="/sales", tags=["Sales"])
 api_router.include_router(expenses.router, prefix="/expenses", tags=["Expenses"])
 api_router.include_router(cash_closes.router, prefix="/cash-closes", tags=["Cash Closes"])
 api_router.include_router(products.router, prefix="/products", tags=["Products"])
+api_router.include_router(others.router, prefix="/others", tags=["Others"])
 api_router.include_router(health_scores.router, prefix="/health-scores", tags=["Health Scores"])
 api_router.include_router(insights.router, prefix="/insights", tags=["Insights"])
 api_router.include_router(

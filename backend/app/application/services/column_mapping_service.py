@@ -27,6 +27,8 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "amount": "Monto del gasto",
         "expense_date": "Fecha del gasto",
         "category": "Categoría",
+        "payment_method": "Método de pago",
+        "is_recurring": "Recurrente",
         "supplier_name": "Proveedor",
         "notes": "Notas",
     },
@@ -94,6 +96,17 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
         },
         "expense_date": {"fecha", "date", "dia", "mes", "periodo"},
         "category": {"categoria", "tipo", "rubro", "clasificacion", "concepto"},
+        "payment_method": {
+            "forma_pago",
+            "forma_de_pago",
+            "metodo_pago",
+            "metodo_de_pago",
+            "medio_pago",
+            "medio_de_pago",
+            "tipo_pago",
+            "payment",
+        },
+        "is_recurring": {"recurrente", "recurring", "es_fijo", "frecuencia"},
         "supplier_name": {
             "proveedor",
             "proveedor_nombre",
@@ -140,12 +153,26 @@ def _normalize_col(col: str) -> str:
 
 
 def _heuristic_match(normalized: str, entity_type: str) -> str | None:
-    """Busca el target_field por substring en las heurísticas."""
+    """Busca el target_field para un header normalizado.
+
+    1. Match exacto contra cualquier keyword (gana siempre).
+    2. Substring: gana el keyword MÁS LARGO entre todos los campos — evita que
+       un keyword corto y genérico de otro campo capture un header específico
+       (ej: `forma_pago` debe ir a payment_method por "forma_pago", no a amount
+       por el substring "pago").
+    """
     heuristics = _HEURISTICS.get(entity_type, {})
     for target_field, keywords in heuristics.items():
-        if any(k in normalized for k in keywords):
+        if normalized in keywords:
             return target_field
-    return None
+    best_len = 0
+    best_target: str | None = None
+    for target_field, keywords in heuristics.items():
+        for k in keywords:
+            if len(k) > best_len and k in normalized:
+                best_len = len(k)
+                best_target = target_field
+    return best_target
 
 
 def _fuzzy_match(normalized: str, entity_type: str) -> tuple[str | None, float]:

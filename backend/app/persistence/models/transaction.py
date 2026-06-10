@@ -91,6 +91,10 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
+    # OPEX = gasto operativo; COGS = compra de mercadería (entra al stock).
+    expense_type: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default="OPEX", default="OPEX"
+    )
     transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     description: Mapped[str] = mapped_column(String(500), nullable=False)
     is_recurring: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -109,6 +113,10 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_expense_entries_provenance"),
+        CheckConstraint(
+            "expense_type IN ('OPEX', 'COGS')", name="ck_expense_entries_expense_type"
+        ),
+        Index("ix_expense_entries_tenant_expense_type", "tenant_id", "expense_type"),
         CheckConstraint(
             "void_reason IS NULL OR void_reason IN ("
             "'REPAIR_MISCLASSIFIED_IMPORT','USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID')",

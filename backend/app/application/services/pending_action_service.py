@@ -26,7 +26,11 @@ import app.application.services.stock_service as stock_service
 from app.application.agents.shared.schemas import ActionType
 from app.application.services.automation_service import determine_external_system
 from app.application.services.chat_memory_service import ChatMemoryService
-from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.application.services.ingestion_import_service import (
+    check_nonempty_import,
+    default_confirmed_fields,
+    insert_confirmed_data,
+)
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
@@ -265,7 +269,9 @@ async def execute_pending_action(
             )
 
     elif action.action_type == ActionType.REGISTER_PURCHASE:
-        purchase_payload = {**payload, "category": "compra_proveedor"}
+        # Compra de mercadería: categoría canónica + COGS (muere el literal
+        # "compra_proveedor", que quedaba fuera del catálogo).
+        purchase_payload = {**payload, "category": "INVENTORY", "expense_type": "COGS"}
         await cash_service.save_expense(purchase_payload, action.tenant_id, db)
 
         product_id_str = payload.get("product_id")
@@ -419,20 +425,43 @@ async def execute_pending_action(
             if not isinstance(uploaded_file.parsed_summary_json, dict):
                 raise ValueError("IMPORT_TABULAR_FILE archivo sin parsed_summary_json")
 
-            confirmed_fields = payload.get("confirmed_fields")
-            if not isinstance(confirmed_fields, dict):
-                confirmed_fields = {}
-
             summary = uploaded_file.parsed_summary_json
+            confirmed_fields = payload.get("confirmed_fields")
+            if not isinstance(confirmed_fields, dict) or not confirmed_fields:
+                # Sin confirmación explícita en el payload: usar los MISMOS
+                # defaults que aplica insert_confirmed_data, para que el check
+                # anti-vacío evalúe lo que realmente se intentó importar (con {}
+                # el check quedaba muerto y un import de 0 filas pasaba como OK).
+                confirmed_fields = default_confirmed_fields(summary)
+
             counts = await insert_confirmed_data(
                 session=db,
                 tenant_id=action.tenant_id,
                 summary=summary,
                 confirmed_fields=confirmed_fields,
+                source="chat",
+                uploaded_file_id=uploaded_file.id,
             )
+            # Import vacío con datos presentes → falla visible (la pending action
+            # queda FAILED y el archivo NO se marca DONE).
+            check_nonempty_import(counts, summary, confirmed_fields)
             uploaded_file.processing_status = PROCESSING_STATUS_DONE
+            # Compactar antes de escribir de vuelta: los buckets de filas pueden
+            # pesar varios MB de JSONB (mismo criterio que el confirm de la API).
             uploaded_file.parsed_summary_json = {
-                **summary,
+                **{
+                    k: v
+                    for k, v in summary.items()
+                    if k
+                    not in (
+                        "ventas_detectadas",
+                        "gastos_detectados",
+                        "stock_detectado",
+                        "otros_detectados",
+                        "preview_rows",
+                        "mapping_contexts",
+                    )
+                },
                 "confirmed_fields": confirmed_fields,
                 "imported_counts": counts,
             }
@@ -452,7 +481,9 @@ async def execute_pending_action(
                 tenant_id=action.tenant_id,
                 summary=summary,
                 confirmed_fields=confirmed_fields,
+                source="chat",
             )
+            check_nonempty_import(counts, summary, confirmed_fields)
             source = payload.get("source") or "tabular"
             description = f"Importado desde {source}: {counts}"
             entity_type = summary.get("inferred_type")

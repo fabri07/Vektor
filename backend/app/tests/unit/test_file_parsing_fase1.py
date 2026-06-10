@@ -119,8 +119,11 @@ def test_csv_over_50_rows_not_truncated() -> None:
     csv = "\n".join(lines).encode()
     summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
     assert summary["row_count"] == 200
-    # Todas las filas quedan en el bucket (no truncadas a 50).
-    assert len(summary["ventas_detectadas"]) == 200
+    # Todas las filas quedan en el bucket (no truncadas a 50). FASE F: un CSV
+    # sin señales de contexto (solo fecha+monto) es ambiguo → otros_detectados,
+    # ya no cae a ventas por default; la confirmación explícita lo importa.
+    assert len(summary["otros_detectados"]) == 200
+    assert summary["ventas_detectadas"] == []
 
 
 def test_gastos_csv_does_not_contaminate_ventas_bucket() -> None:

@@ -26,6 +26,10 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
+from app.domain.expense_categories import (
+    EXPENSE_CATEGORY_LABELS_ES,
+    normalize_expense_category,
+)
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -70,25 +74,23 @@ class AgentExpense(BaseAgent):
         return "other"
 
     def _extract_expense_category(self, message: str) -> tuple[str, str]:
+        # Primero el normalizador canónico (aliases es-AR del catálogo completo,
+        # matching por palabra completa sobre el mensaje).
+        code, _ = normalize_expense_category(message)
+        if code != "OTHER":
+            return code, EXPENSE_CATEGORY_LABELS_ES[code]
+        # Red de keywords coloquiales que no son nombres de categoría.
         message_lower = message.lower()
         category_rules = (
-            ("RENT", ("alquiler", "renta"), "Alquiler"),
-            ("UTILITIES", ("luz", "gas", "internet", "agua", "servicio"), "Servicios"),
-            (
-                "PAYROLL",
-                ("sueldo", "sueldos", "empleado", "personal", "nomina", "nómina"),
-                "Sueldos",
-            ),
-            (
-                "INVENTORY",
-                ("mercadería", "mercaderia", "stock", "proveedor", "compra"),
-                "Mercadería / stock",
-            ),
-            ("MARKETING", ("marketing", "publicidad", "anuncio", "ads"), "Marketing"),
+            ("RENT", ("renta",), ),
+            ("UTILITIES", ("servicio",), ),
+            ("PAYROLL", ("empleado", "personal", "nomina", "nómina"), ),
+            ("INVENTORY", ("proveedor", "compra"), ),
+            ("MARKETING", ("anuncio", "ads"), ),
         )
-        for canonical, keywords, label in category_rules:
+        for canonical, keywords in category_rules:
             if any(keyword in message_lower for keyword in keywords):
-                return canonical, label
+                return canonical, EXPENSE_CATEGORY_LABELS_ES[canonical]
         return "OTHER", "Gasto"
 
     def _extract_transaction_date(self, message: str) -> str:
@@ -201,6 +203,18 @@ class AgentExpense(BaseAgent):
             if not pre_check.has_data_intent:
                 continue
             rows = uploaded_file.parsed_summary_json.get("rows_processed", 0)
+            # FASE F: archivo ambiguo ("unclassified") ruteado a este agente →
+            # el usuario habló de gastos: se importa como gastos, con
+            # consentimiento explícito en el summary de la aprobación.
+            is_unclassified = pre_check.intent_type == "unclassified"
+            summary_text = (
+                f"Importar {rows} registros desde {uploaded_file.original_filename}."
+            )
+            if is_unclassified:
+                summary_text = (
+                    f"Importar {rows} registros desde {uploaded_file.original_filename} "
+                    "(tipo no detectado automáticamente — se cargarán como GASTOS)."
+                )
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
@@ -209,16 +223,15 @@ class AgentExpense(BaseAgent):
                 requires_approval=True,
                 confidence=Confidence(pre_check.confidence),
                 result={
-                    "summary": (
-                        f"Importar {rows} registros desde " f"{uploaded_file.original_filename}."
-                    ),
+                    "summary": summary_text,
                     "action_type": ActionType.IMPORT_TABULAR_FILE,
                     "structured_data": {
                         "source": "uploaded_file",
                         "file_id": str(uploaded_file.id),
                         "confirmed_fields": {
                             "ventas": pre_check.intent_type in ("sale", "mixed"),
-                            "gastos": pre_check.intent_type in ("expense", "mixed"),
+                            "gastos": pre_check.intent_type in ("expense", "mixed")
+                            or is_unclassified,
                             "productos": pre_check.intent_type == "product",
                         },
                     },

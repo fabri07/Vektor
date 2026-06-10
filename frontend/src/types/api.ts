@@ -107,6 +107,11 @@ export interface BusinessBreakdownResponse {
   low_stock_count: number;
   no_rotation_count: number;
   total_products: number;
+  /** FASE D: gasto operativo vs compra de mercadería del período. */
+  opex_total: number;
+  cogs_total: number;
+  /** Valor actual del stock (stock_units × unit_cost_ars de productos activos). */
+  stock_value_total: number;
 }
 
 export interface HealthScoreV2Response {

@@ -12,7 +12,7 @@ import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildCustomFieldColumns } from "@/lib/customFields";
-import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
+import { formatDateTime, parseDateOnly, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import {
@@ -21,6 +21,23 @@ import {
   resolvePreviousPeriod,
   previousPeriodShortLabel,
 } from "@/lib/period";
+import {
+  ALL_CATEGORIES,
+  CATEGORY_LABELS,
+  CATEGORY_VARIANTS,
+  categoryDisplay,
+} from "@/lib/expenseCategories";
+
+function formatRangeDate(value: string | null): string {
+  if (!value) return "—";
+  // parseDateOnly: "YYYY-MM-DD" como fecha local (new Date() lo tomaría UTC
+  // y en UTC-3 mostraría el día anterior).
+  return parseDateOnly(value).toLocaleDateString("es-AR", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
 
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
@@ -30,26 +47,6 @@ function formatARS(value: number): string {
     maximumFractionDigits: 0,
   }).format(value);
 }
-
-const CATEGORY_LABELS: Record<string, string> = {
-  RENT: "Alquiler",
-  UTILITIES: "Servicios",
-  PAYROLL: "Sueldos",
-  INVENTORY: "Inventario",
-  MARKETING: "Marketing",
-  OTHER: "Otros",
-};
-
-const CATEGORY_VARIANTS: Record<string, "default" | "info" | "warning" | "danger" | "success"> = {
-  RENT: "info",
-  UTILITIES: "warning",
-  PAYROLL: "danger",
-  INVENTORY: "success",
-  MARKETING: "info",
-  OTHER: "default",
-};
-
-const ALL_CATEGORIES = Object.keys(CATEGORY_LABELS);
 
 const COLUMNS = [
   {
@@ -65,17 +62,14 @@ const COLUMNS = [
     hideable: true,
     render: (v: unknown, row: ExpenseEntryResponse) => {
       const cat = String(v);
-      // Si es "Otro" y hay nombre personalizado, mostrarlo en vez de "Otro".
-      const text =
-        cat === "OTHER" && row.category_label
-          ? row.category_label
-          : (CATEGORY_LABELS[cat] ?? cat);
-      return <Badge variant={CATEGORY_VARIANTS[cat] ?? "default"}>{text}</Badge>;
+      return (
+        <Badge variant={CATEGORY_VARIANTS[cat] ?? "default"}>
+          {categoryDisplay(cat, row.category_label)}
+        </Badge>
+      );
     },
     csvValue: (v: unknown, row: ExpenseEntryResponse) =>
-      String(v) === "OTHER" && row.category_label
-        ? row.category_label
-        : (CATEGORY_LABELS[String(v)] ?? String(v)),
+      categoryDisplay(String(v), row.category_label),
   },
   {
     key: "description",
@@ -83,6 +77,18 @@ const COLUMNS = [
     hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
     csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
+    key: "expense_type",
+    header: "Tipo",
+    hideable: true,
+    render: (v: unknown) =>
+      v === "COGS" ? (
+        <Badge variant="success">Mercadería</Badge>
+      ) : (
+        <Badge variant="default">Operativo</Badge>
+      ),
+    csvValue: (v: unknown) => (v === "COGS" ? "Mercadería" : "Operativo"),
   },
   {
     key: "supplier_name",
@@ -117,6 +123,7 @@ export default function ExpensesPage() {
     preset: "this_month",
   });
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "OPEX" | "COGS">("all");
   const [editing, setEditing] = useState<ExpenseEntryResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
@@ -192,7 +199,7 @@ export default function ExpensesPage() {
   }, {});
   const topCat = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0];
   const topCatLabel = topCat
-    ? `${CATEGORY_LABELS[topCat[0]] ?? topCat[0]}: ${formatARS(topCat[1])}`
+    ? `${categoryDisplay(topCat[0])}: ${formatARS(topCat[1])}`
     : "—";
 
   let variacionTrend: "up" | "down" | "neutral" = "neutral";
@@ -204,11 +211,12 @@ export default function ExpensesPage() {
     variacionLabel = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% ${previousPeriodShortLabel(period)}`;
   }
 
-  // Apply category filter
-  const filtered =
-    categoryFilter === "all"
-      ? entries
-      : entries.filter((e) => e.category === categoryFilter);
+  // Apply category + type filters
+  const filtered = entries.filter(
+    (e) =>
+      (categoryFilter === "all" || e.category === categoryFilter) &&
+      (typeFilter === "all" || (e.expense_type ?? "OPEX") === typeFilter),
+  );
 
   const sorted = [...filtered].sort(
     (a, b) =>
@@ -233,6 +241,16 @@ export default function ExpensesPage() {
                 {CATEGORY_LABELS[cat] ?? cat}
               </option>
             ))}
+          </select>
+          <label className="ml-3 text-sm text-vk-text-muted">Tipo:</label>
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as "all" | "OPEX" | "COGS")}
+            className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+          >
+            <option value="all">Todos</option>
+            <option value="OPEX">Operativos</option>
+            <option value="COGS">Mercadería</option>
           </select>
         </div>
       </div>
@@ -271,11 +289,28 @@ export default function ExpensesPage() {
           Error al cargar los gastos. Recargá la página.
         </p>
       ) : !isLoading && filtered.length === 0 ? (
-        <EmptyState
-          title="Sin gastos en este período"
-          description="Registrá tus gastos usando el chat."
-          action={{ label: "Ir al chat", href: "/chat" }}
-        />
+        entries.length === 0 && dateRange?.max_date ? (
+          // Hay gastos registrados pero fuera del período seleccionado: avisar
+          // en vez de mostrar un vacío engañoso (típico tras importar histórico).
+          <EmptyState
+            title="Sin gastos en este período"
+            description={`Tenés gastos registrados entre ${formatRangeDate(dateRange.min_date)} y ${formatRangeDate(dateRange.max_date)}, fuera del período seleccionado.`}
+            action={{
+              label: "Ver período con datos",
+              onClick: () =>
+                setPeriod({
+                  kind: "year",
+                  year: parseDateOnly(dateRange.max_date as string).getFullYear(),
+                }),
+            }}
+          />
+        ) : (
+          <EmptyState
+            title="Sin gastos en este período"
+            description="Registrá tus gastos usando el chat."
+            action={{ label: "Ir al chat", href: "/chat" }}
+          />
+        )
       ) : (
         <SmartTable
           columns={[...COLUMNS, ...buildCustomFieldColumns<ExpenseEntryResponse>(fieldDefs)]}

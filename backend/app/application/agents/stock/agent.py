@@ -687,7 +687,8 @@ class AgentStock(BaseAgent):
     @staticmethod
     def _summary_product_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
         """Extrae filas de producto del summary (stock_detectado o ventas_detectadas)."""
-        for key in ("stock_detectado", "ventas_detectadas", "gastos_detectados"):
+        _buckets = ("stock_detectado", "ventas_detectadas", "gastos_detectados", "otros_detectados")
+        for key in _buckets:
             rows = summary.get(key)
             if isinstance(rows, list) and rows:
                 return [r for r in rows if isinstance(r, dict)]

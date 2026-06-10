@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/Input";
 import { salesService } from "@/services/sales.service";
 import { expensesService } from "@/services/expenses.service";
 import { productsService } from "@/services/products.service";
+import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -190,14 +191,10 @@ function SaleTab({ onToast }: { onToast: (t: ToastState) => void }) {
 
 // ── Expense form ──────────────────────────────────────────────────────────────
 
-const EXPENSE_CATEGORIES = [
-  { value: "RENT", label: "Alquiler" },
-  { value: "UTILITIES", label: "Servicios (luz, gas, internet)" },
-  { value: "PAYROLL", label: "Sueldos y personal" },
-  { value: "INVENTORY", label: "Mercadería / Stock" },
-  { value: "MARKETING", label: "Marketing y publicidad" },
-  { value: "OTHER", label: "Otro" },
-];
+const EXPENSE_CATEGORIES = ALL_CATEGORIES.map((value) => ({
+  value,
+  label: CATEGORY_LABELS[value],
+}));
 
 interface ExpenseForm {
   amount: string;

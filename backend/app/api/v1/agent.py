@@ -323,9 +323,16 @@ async def _execute_local_action(
             error_type=type(exc).__name__,
             exc_info=True,
         )
+        # Errores con mensaje pensado para el usuario (ej: import vacío) se
+        # muestran tal cual; el resto queda genérico.
+        user_message = getattr(exc, "user_message", None)
         return {
             "status": "failed",
-            "message": "No se pudo completar la operación. Intente nuevamente.",
+            "message": (
+                user_message
+                if isinstance(user_message, str)
+                else "No se pudo completar la operación. Intente nuevamente."
+            ),
             "execution_status": "FAILED",
         }
 

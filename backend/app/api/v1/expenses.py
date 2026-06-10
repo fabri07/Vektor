@@ -133,6 +133,7 @@ async def list_expenses(
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     category: str | None = Query(default=None),
+    expense_type: str | None = Query(default=None, pattern=r"^(OPEX|COGS)$"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     tenant: Tenant = Depends(get_current_tenant),
@@ -146,6 +147,7 @@ async def list_expenses(
         from_date=from_date,
         to_date=to_date,
         category=category,
+        expense_type=expense_type,
         limit=limit,
         offset=offset,
     )
@@ -171,6 +173,7 @@ async def create_expense(
         tenant_id=tenant.tenant_id,
         amount=body.amount,
         category=body.category,
+        expense_type=body.expense_type,
         transaction_date=body.expense_date,
         description=body.description,
         is_recurring=body.is_recurring,
@@ -214,6 +217,8 @@ async def update_expense(
         entry.amount = body.amount
     if body.category is not None:
         entry.category = body.category
+    if body.expense_type is not None:
+        entry.expense_type = body.expense_type
     if body.expense_date is not None:
         entry.transaction_date = body.expense_date
     if body.description is not None:

@@ -263,7 +263,8 @@ class AgentSupplier(BaseAgent):
 
         payload: dict[str, Any] = {
             "amount": amount,
-            "category": "compra_proveedor",
+            "category": "INVENTORY",
+            "expense_type": "COGS",
             "description": f"Compra a {supplier}" + (f" — {product_name}" if product_name else ""),
             "transaction_date": entities.get("transaction_date", ""),
             "notes": request.message,
@@ -558,7 +559,13 @@ class AgentSupplier(BaseAgent):
         from app.application.agents.shared.analytics import parse_money  # noqa: PLC0415
 
         def _price_map(summary: dict[str, Any]) -> dict[str, float]:
-            for key in ("stock_detectado", "ventas_detectadas", "gastos_detectados"):
+            _buckets = (
+                "stock_detectado",
+                "ventas_detectadas",
+                "gastos_detectados",
+                "otros_detectados",
+            )
+            for key in _buckets:
                 rows = summary.get(key)
                 if isinstance(rows, list) and rows:
                     out: dict[str, float] = {}

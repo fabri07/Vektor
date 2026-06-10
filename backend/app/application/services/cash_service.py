@@ -7,30 +7,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.expense_categories import infer_expense_type, normalize_expense_category
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 logger = get_logger(__name__)
-
-_EXPENSE_CATEGORY_MAP = {
-    "rent": "RENT",
-    "alquiler": "RENT",
-    "utilities": "UTILITIES",
-    "servicios": "UTILITIES",
-    "service": "UTILITIES",
-    "payroll": "PAYROLL",
-    "sueldos": "PAYROLL",
-    "inventario": "INVENTORY",
-    "inventory": "INVENTORY",
-    "mercaderia": "INVENTORY",
-    "mercadería": "INVENTORY",
-    "stock": "INVENTORY",
-    "marketing": "MARKETING",
-    "publicidad": "MARKETING",
-    "other": "OTHER",
-    "otros": "OTHER",
-}
 
 _PAYMENT_METHOD_MAP = {
     "cash": "cash",
@@ -40,6 +22,10 @@ _PAYMENT_METHOD_MAP = {
     "debit_card": "debit_card",
     "debito": "debit_card",
     "débito": "debit_card",
+    # Débito automático (servicios/seguros): sale de la cuenta bancaria.
+    "debito_automatico": "transfer",
+    "debito automatico": "transfer",
+    "débito automático": "transfer",
     "credit_card": "credit_card",
     "credito": "credit_card",
     "crédito": "credit_card",
@@ -47,17 +33,17 @@ _PAYMENT_METHOD_MAP = {
 }
 
 
-def _normalize_payment_method(value: str | None) -> str:
+def normalize_payment_method(value: str | None) -> str:
+    """Texto libre → código canónico de método de pago; sin match → 'other'."""
     if not value:
         return "other"
     return _PAYMENT_METHOD_MAP.get(str(value).strip().lower(), "other")
 
 
-def _normalize_expense_category(value: str | None) -> str:
-    if not value:
-        return "OTHER"
-    normalized = str(value).strip().lower()
-    return _EXPENSE_CATEGORY_MAP.get(normalized, str(value).strip().upper())
+# Alias interno legacy.
+_normalize_payment_method = normalize_payment_method
+
+
 
 
 def _coerce_transaction_date(value: object) -> datetime:
@@ -164,10 +150,20 @@ async def save_expense(
     db: AsyncSession,
 ) -> ExpenseEntry:
     """Registra un gasto en expense_entries."""
+    category, category_label = normalize_expense_category(entities.get("category"))
+    # Discriminador canónico: COGS si es mercadería (INVENTORY o producto
+    # vinculado), igual que en los caminos de import — antes el mismo gasto de
+    # mercadería quedaba OPEX por chat y COGS por archivo.
+    expense_type = infer_expense_type(
+        category,
+        product_id=entities.get("product_id"),
+        explicit=entities.get("expense_type"),
+    )
     expense = ExpenseEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
-        category=_normalize_expense_category(entities.get("category")),
+        category=category,
+        expense_type=expense_type,
         transaction_date=_coerce_transaction_date(
             entities.get("transaction_date") or entities.get("date")
         ),
@@ -178,6 +174,11 @@ async def save_expense(
         notes=entities.get("notes"),
         provenance="REAL",
     )
+    if category_label:
+        expense.custom_fields = {
+            **(expense.custom_fields or {}),
+            "category_label": category_label,
+        }
     db.add(expense)
     await db.flush()
     logger.info(
