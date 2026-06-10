@@ -7,6 +7,7 @@ export const PAYMENT_LABELS: Record<string, string> = {
   credit_card: "Crédito",
   transfer: "Transferencia",
   qr: "QR",
+  account: "Cuenta corriente",
   inflow: "Cobro cta. cte.",
   other: "Otro",
   OTROS: "Otros",

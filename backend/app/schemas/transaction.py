@@ -57,7 +57,7 @@ class CreateSaleRequest(BaseModel):
     quantity: int = Field(ge=1, default=1)
     transaction_date: datetime
     payment_method: str = Field(
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$", default="cash"
+        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$", default="cash"
     )
     product_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
@@ -83,7 +83,7 @@ class UpdateSaleRequest(BaseModel):
     transaction_date: datetime | None = None
     payment_method: str | None = Field(
         default=None,
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$",
+        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$",
     )
     product_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
@@ -185,7 +185,7 @@ class CreateExpenseRequest(BaseModel):
     description: str = Field(default="", max_length=500)
     is_recurring: bool = False
     payment_method: str = Field(
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|other)$",
+        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$",
         default="transfer",
     )
     supplier_name: str | None = Field(default=None, max_length=300)
