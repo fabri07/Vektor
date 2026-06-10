@@ -12,11 +12,16 @@ Usage:
 
 Qué hace (por tenant):
   1. expense_entries con category fuera del catálogo canónico → normaliza
-     (alias es-AR / fuzzy); el texto original se preserva en
-     custom_fields.category_label cuando cae a OTHER. Reversible.
+     (alias es-AR / fuzzy); una categoría que matchea el catálogo de PRODUCTOS
+     del vertical ("Bebidas", "Golosinas") es compra de mercadería → INVENTORY;
+     el texto original se preserva en custom_fields.category_label cuando cae a
+     OTHER o a INVENTORY-por-producto. Reversible.
   2. expense_type: COGS donde category == INVENTORY o product_id IS NOT NULL
      (solo si la columna existe — correr DESPUÉS de la migración 20260710_0001).
-  3. --products: products.category fuera del catálogo del vertical → normaliza.
+  3. payment_method fuera del catálogo canónico (efectivo→cash, mercadopago→qr,
+     cuenta_corriente→account...) en ventas Y gastos; sin match → other con el
+     texto original en custom_fields.payment_method_label.
+  4. --products: products.category fuera del catálogo del vertical → normaliza.
 
 NUNCA imprime la connection URL. Requiere correr desde backend/ (importa app.domain).
 """
@@ -36,14 +41,18 @@ from _db import async_engine_config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
+from app.application.services.cash_service import normalize_payment_method  # noqa: E402
 from app.domain.expense_categories import (  # noqa: E402
     EXPENSE_CATEGORY_CODES,
-    normalize_expense_category,
+    classify_expense_with_vertical,
 )
 from app.domain.product_categories import (  # noqa: E402
     PRODUCT_CATEGORY_LABELS,
     normalize_product_category,
 )
+from app.domain.transaction import PaymentMethod  # noqa: E402
+
+_PAYMENT_CODES = {m.value for m in PaymentMethod}
 
 
 async def _tenant_ids(session: AsyncSession, tenant: str | None) -> list[uuid.UUID]:
@@ -53,8 +62,18 @@ async def _tenant_ids(session: AsyncSession, tenant: str | None) -> list[uuid.UU
     return [r[0] for r in rows.all()]
 
 
+async def _load_vertical(session: AsyncSession, tid: uuid.UUID) -> str | None:
+    return (
+        await session.execute(
+            text("SELECT vertical_code FROM business_profiles WHERE tenant_id = :tid"),
+            {"tid": tid},
+        )
+    ).scalar_one_or_none()
+
+
 async def backfill_expenses(session: AsyncSession, tid: uuid.UUID, apply: bool) -> None:
     canonical = set(EXPENSE_CATEGORY_CODES)
+    vertical = await _load_vertical(session, tid)
     rows = (
         await session.execute(
             text(
@@ -68,7 +87,9 @@ async def backfill_expenses(session: AsyncSession, tid: uuid.UUID, apply: bool) 
     for row_id, category, _cf in rows:
         if category in canonical:
             continue
-        code, label = normalize_expense_category(category)
+        # Vertical-aware: "Bebidas"/"Golosinas" (catálogo de productos) es
+        # compra de mercadería → INVENTORY (COGS), no OTHER.
+        code, label, _ = classify_expense_with_vertical(category, vertical)
         plan[(category, code)] += 1
         if apply:
             await session.execute(
@@ -118,6 +139,51 @@ async def backfill_expenses(session: AsyncSession, tid: uuid.UUID, apply: bool) 
             )
     else:
         print("    (columna expense_type ausente — correr la migración 20260710_0001 primero)")
+
+
+async def backfill_payment_methods(session: AsyncSession, tid: uuid.UUID, apply: bool) -> None:
+    """Normaliza payment_method crudo ('efectivo', 'mercadopago', 'cuenta_corriente')
+    al catálogo canónico en ventas y gastos. Sin match → 'other' preservando el
+    texto original en custom_fields.payment_method_label (reversible)."""
+    for tbl, label in (("sales_entries", "venta"), ("expense_entries", "gasto")):
+        rows = (
+            await session.execute(
+                text(
+                    f"SELECT payment_method, count(*) FROM {tbl} "  # noqa: S608
+                    "WHERE tenant_id = :tid AND voided_at IS NULL "
+                    "AND payment_method IS NOT NULL GROUP BY payment_method"
+                ),
+                {"tid": tid},
+            )
+        ).all()
+        for raw, n in rows:
+            if raw in _PAYMENT_CODES:
+                continue
+            code = normalize_payment_method(raw)
+            print(f"    pago ({label}) {raw!r:28} → {code:12} ×{n}")
+            if not apply:
+                continue
+            if code == "other":
+                # Preservar el texto original: sin él la fila sería irrecuperable.
+                await session.execute(
+                    text(
+                        f"UPDATE {tbl} SET payment_method = :code, "  # noqa: S608
+                        "custom_fields = COALESCE(custom_fields, '{}'::jsonb) || "
+                        "jsonb_build_object('payment_method_label', CAST(:raw AS TEXT)) "
+                        "WHERE tenant_id = :tid AND voided_at IS NULL "
+                        "AND payment_method = :raw"
+                    ),
+                    {"code": code, "raw": raw, "tid": tid},
+                )
+            else:
+                await session.execute(
+                    text(
+                        f"UPDATE {tbl} SET payment_method = :code "  # noqa: S608
+                        "WHERE tenant_id = :tid AND voided_at IS NULL "
+                        "AND payment_method = :raw"
+                    ),
+                    {"code": code, "raw": raw, "tid": tid},
+                )
 
 
 async def backfill_products(session: AsyncSession, tid: uuid.UUID, apply: bool) -> None:
@@ -181,6 +247,7 @@ async def main() -> None:
         for tid in tids:
             print(f"\n  tenant {tid}")
             await backfill_expenses(session, tid, args.apply)
+            await backfill_payment_methods(session, tid, args.apply)
             if args.products:
                 await backfill_products(session, tid, args.apply)
         if args.apply:
