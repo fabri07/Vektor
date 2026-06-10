@@ -18,6 +18,9 @@ class PaymentMethod(StrEnum):
     CREDIT_CARD = "credit_card"
     TRANSFER = "transfer"
     QR = "qr"
+    # Cuenta corriente / fiado: señal real en kioscos (venta sin plata en caja,
+    # gasto a pagar al proveedor). No es "other" — se reporta por separado.
+    ACCOUNT = "account"
     OTHER = "other"
 
 

@@ -1,5 +1,6 @@
 """cash_service — persiste ventas, cobros y gastos."""
 
+import re
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -7,37 +8,60 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.expense_categories import infer_expense_type, normalize_expense_category
+from app.domain.expense_categories import (
+    infer_expense_type,
+    normalize_expense_category,
+    strip_accents,
+)
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 logger = get_logger(__name__)
 
+# Claves en forma normalizada: lower, sin tildes, separadores (espacio/-/_//) → " ".
 _PAYMENT_METHOD_MAP = {
     "cash": "cash",
     "efectivo": "cash",
+    "contado": "cash",
     "transfer": "transfer",
     "transferencia": "transfer",
-    "debit_card": "debit_card",
-    "debito": "debit_card",
-    "débito": "debit_card",
     # Débito automático (servicios/seguros): sale de la cuenta bancaria.
-    "debito_automatico": "transfer",
     "debito automatico": "transfer",
-    "débito automático": "transfer",
-    "credit_card": "credit_card",
+    "debit card": "debit_card",
+    "debito": "debit_card",
+    "tarjeta debito": "debit_card",
+    "credit card": "credit_card",
     "credito": "credit_card",
-    "crédito": "credit_card",
+    "tarjeta credito": "credit_card",
     "qr": "qr",
+    # Billeteras virtuales: el cobro entra por QR/app.
+    "mercadopago": "qr",
+    "mercado pago": "qr",
+    "mp": "qr",
+    "billetera virtual": "qr",
+    # Cuenta corriente / fiado: canónico propio (no se pierde como "other").
+    "account": "account",
+    "cuenta corriente": "account",
+    "cta cte": "account",
+    "ctacte": "account",
+    "cta corriente": "account",
+    "fiado": "account",
+    "other": "other",
+    "otro": "other",
 }
 
 
 def normalize_payment_method(value: str | None) -> str:
-    """Texto libre → código canónico de método de pago; sin match → 'other'."""
+    """Texto libre → código canónico de método de pago; sin match → 'other'.
+
+    Tolera tildes y separadores ("Cuenta_Corriente", "débito automático",
+    "Mercado-Pago") normalizando la clave antes del lookup.
+    """
     if not value:
         return "other"
-    return _PAYMENT_METHOD_MAP.get(str(value).strip().lower(), "other")
+    key = re.sub(r"[.\s\-_/]+", " ", strip_accents(str(value).strip().lower())).strip()
+    return _PAYMENT_METHOD_MAP.get(key, "other")
 
 
 # Alias interno legacy.

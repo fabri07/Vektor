@@ -233,6 +233,34 @@ def normalize_expense_category(raw: str | None) -> tuple[str, str | None]:
     return _normalizer.normalize(raw)
 
 
+def classify_expense_with_vertical(
+    raw: str | None,
+    business_type: str | None,
+) -> tuple[str, str | None, bool]:
+    """Texto libre → ``(código, label, es_mercaderia)`` considerando el vertical.
+
+    Regla contable: una categoría de gasto que matchea el catálogo de PRODUCTOS
+    del vertical ("Bebidas", "Golosinas", "Textiles"...) es una compra de
+    mercadería → ``INVENTORY`` (expense_type COGS), preservando el texto
+    original como label. Solo se consulta el catálogo de productos cuando el
+    catálogo de gastos no reconoció el texto (fallback OTHER), así "Alquiler"
+    o "Mercadería" siguen resolviendo igual que siempre.
+    """
+    code, label = _normalizer.normalize(raw)
+    if code != "OTHER" or raw is None:
+        return code, label, code == "INVENTORY"
+
+    from app.domain.product_categories import (  # noqa: PLC0415 — evita import circular
+        normalize_product_category,
+    )
+
+    prod_code, prod_label = normalize_product_category(raw, business_type)
+    if prod_code != "OTHER" and prod_label is None:
+        # Match real contra el catálogo del vertical → mercadería.
+        return "INVENTORY", str(raw).strip()[:50], True
+    return code, label, False
+
+
 def infer_expense_type(
     category: str,
     product_id: object | None = None,

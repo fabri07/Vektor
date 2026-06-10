@@ -61,8 +61,10 @@ async def run(conn: asyncpg.Connection, email: str) -> None:
             "SELECT * FROM tenants WHERE tenant_id = $1", tid
         )
         if t:
+            # asyncpg.Record itera VALORES (no claves): `for k in t` + `t[k]`
+            # reventaba con cualquier valor no-string. Iterar items().
             print(f"\n  TENANT {tid}: " + ", ".join(
-                f"{k}={t[k]}" for k in t if k not in ("tenant_id",)
+                f"{k}={v}" for k, v in dict(t).items() if k != "tenant_id"
             )[:400])
         bp = await conn.fetchrow(
             "SELECT business_type, business_name FROM business_profiles "

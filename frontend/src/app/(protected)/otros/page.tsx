@@ -350,6 +350,7 @@ function ReclassifyModal({
               <option value="debit_card">Débito</option>
               <option value="credit_card">Crédito</option>
               <option value="qr">QR</option>
+              <option value="account">Cuenta corriente</option>
             </select>
           </label>
         ) : null}

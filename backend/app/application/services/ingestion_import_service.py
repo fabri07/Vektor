@@ -15,7 +15,10 @@ from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
-from app.domain.expense_categories import infer_expense_type, normalize_expense_category
+from app.domain.expense_categories import (
+    classify_expense_with_vertical,
+    infer_expense_type,
+)
 from app.domain.product_categories import normalize_product_category
 from app.observability.logger import get_logger
 
@@ -665,8 +668,12 @@ async def insert_confirmed_data(
             else ({}, {})
         )
         # FASE E: vertical del tenant para normalizar categorías de producto.
+        # También para gastos: una categoría que matchea el catálogo de productos
+        # del vertical es compra de mercadería → INVENTORY/COGS.
         _business_type = (
-            await _load_business_type(session, tenant_id) if wants_productos else None
+            await _load_business_type(session, tenant_id)
+            if (wants_productos or wants_gastos)
+            else None
         )
         # Batch: balances del tenant en una query (evita un SELECT por fila
         # en los movimientos de stock del import).
@@ -709,13 +716,14 @@ async def insert_confirmed_data(
                         else "Importado desde archivo"
                     )
 
-                    # Método de pago
-                    pay_raw = row.get(payment_col) if payment_col else None
-                    pay_str = (
-                        str(pay_raw).strip()[:50]
-                        if pay_raw and str(pay_raw).strip() not in {"None", "nan", ""}
-                        else "cash"
+                    # Método de pago: canónico (antes se guardaba el texto crudo
+                    # del archivo — "efectivo", "mercadopago" — y los filtros
+                    # quedaban inconsistentes con los registros manuales).
+                    pay_raw = _clean_str(
+                        row.get(payment_col) if payment_col else _row_val(row, _PAGO_COLS),
+                        50,
                     )
+                    pay_str = normalize_payment_method(pay_raw) if pay_raw else "cash"
 
                     # Custom fields
                     cf: dict[str, str] = {
@@ -763,7 +771,11 @@ async def insert_confirmed_data(
                         if category_col
                         else _row_val_categoria(row)
                     )
-                    cat_code, cat_label = normalize_expense_category(_clean_str(cat_raw))
+                    # Categoría de producto del vertical ("Bebidas") = compra de
+                    # mercadería → INVENTORY/COGS, preservando el texto como label.
+                    cat_code, cat_label, _ = classify_expense_with_vertical(
+                        _clean_str(cat_raw), _business_type
+                    )
 
                     # Método de pago real del archivo (antes hardcodeado "transfer").
                     exp_pay_raw = _clean_str(
@@ -1205,13 +1217,16 @@ async def _insert_multisheet_data(
                 qty = 1
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         notes = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
-        pay = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
+        # Canónico: antes se guardaba el texto crudo del archivo ("efectivo",
+        # "mercadopago") y filtros/arqueo quedaban inconsistentes.
+        pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
+        pay = normalize_payment_method(pay_raw) if pay_raw else "cash"
         entry = SaleEntry(
             tenant_id=tenant_id,
             amount=amount,
             quantity=qty,
             transaction_date=tx_date,
-            payment_method=pay or "cash",
+            payment_method=pay,
             notes=notes or "Importado desde archivo",
             provenance="REAL",
         )
@@ -1253,7 +1268,9 @@ async def _insert_multisheet_data(
             row.get(cols["category"]) if cols.get("category") else _row_val_categoria(row),
             99,
         )
-        cat_code, cat_label = normalize_expense_category(cat_raw)
+        # Categoría de producto del vertical ("Bebidas") = compra de mercadería
+        # → INVENTORY/COGS, preservando el texto original como label.
+        cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw, _business_type)
         recurring = _parse_bool_es(_val(row, cols.get("is_recurring"), _RECURRENTE_COLS))
         expense = ExpenseEntry(
             tenant_id=tenant_id,

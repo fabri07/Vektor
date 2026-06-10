@@ -54,6 +54,7 @@ const PAYMENT_METHODS = [
   { value: "credit_card", label: "Tarjeta crédito" },
   { value: "transfer", label: "Transferencia" },
   { value: "qr", label: "QR / Mercado Pago" },
+  { value: "account", label: "Cuenta corriente (fiado)" },
   { value: "other", label: "Otro" },
 ];
 
