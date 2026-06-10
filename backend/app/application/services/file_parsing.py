@@ -20,6 +20,7 @@ import filetype
 if TYPE_CHECKING:
     from decimal import Decimal
 
+from app.domain.expense_categories import strip_accents
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -512,6 +513,274 @@ def _detect_header_row(rows: list[list[Any]], *, max_scan: int = 15) -> int:
     return 0
 
 
+# ── Libro Diario (doble encabezado: Dinero/Mercadería × Ingreso/Egreso) ───────
+# Formato típico de libros contables manuales en Excel: una fila superior con
+# grupos en celdas combinadas ("Dinero", "Mercadería") y una segunda fila con
+# "Ingreso"/"Egreso" por grupo. Muchas filas continúan la fecha de la anterior
+# (forward-fill). Semántica contable (regla canónica del negocio):
+#   - Dinero/Ingreso                 → venta (entra plata; la mercadería sale)
+#   - Mercadería/Ingreso             → compra de mercadería (entra stock, sale
+#                                      plata) → gasto INVENTORY (COGS)
+#   - Dinero/Egreso sin mercadería   → gasto operativo (OPEX)
+#   - Plata que entra Y sale en la misma fila, o salida de mercadería sin plata
+#     → ambiguo: revisión manual ("otros"), nunca se adivina.
+
+_LD_GRUPO_DINERO = {"dinero", "caja", "efectivo", "plata"}
+_LD_GRUPO_MERCADERIA = {"mercaderia", "mercaderias", "stock", "inventario"}
+_LD_SUB_INGRESO = {"ingreso", "ingresos", "entrada", "entradas"}
+_LD_SUB_EGRESO = {"egreso", "egresos", "salida", "salidas"}
+_LD_DETALLE_KEYS = {"detalle", "descripcion", "concepto", "glosa", "movimiento", "observa"}
+# Filas de cierre que no son movimientos (subtotales del libro).
+_LD_TOTAL_PREFIXES = ("total", "subtotal", "saldo", "acumulado")
+# Hojas derivadas del Libro Diario: importarlas además duplicaría las ventas.
+_LD_DERIVED_SHEET_PREFIXES = ("ganancia", "resumen", "balance")
+
+
+def _ld_norm_cell(value: Any) -> str:
+    """lower, sin tildes, separadores colapsados a un espacio."""
+    if value is None:
+        return ""
+    s = strip_accents(str(value).strip().lower())
+    return re.sub(r"[\s\-_/]+", " ", s)
+
+
+def detect_libro_diario_header(
+    rows: list[list[Any]], *, max_scan: int = 15
+) -> tuple[int, dict[str, int]] | None:
+    """Detecta el doble encabezado del Libro Diario.
+
+    Busca una fila con un grupo "Dinero" (celdas combinadas → None en las
+    columnas no-ancla) seguida de una fila con "Ingreso"/"Egreso". Devuelve
+    ``(header_idx, col_map)`` con índices de columna para ``dinero_ingreso``,
+    ``dinero_egreso``, ``mercaderia_ingreso``, ``mercaderia_egreso``, ``fecha``
+    y ``detalle`` — o ``None`` si la estructura no está presente. Exige ambas
+    columnas de Dinero para evitar falsos positivos.
+    """
+    limit = min(len(rows), max_scan)
+    for i in range(limit - 1):
+        top = [_ld_norm_cell(c) for c in (rows[i] or [])]
+        if not any(c in _LD_GRUPO_DINERO for c in top):
+            continue
+        sub = [_ld_norm_cell(c) for c in (rows[i + 1] or [])]
+        # Forward-fill de los grupos: las celdas combinadas llegan vacías.
+        groups: list[str] = []
+        current = ""
+        for c in top:
+            if c:
+                current = c
+            groups.append(current)
+        col_map: dict[str, int] = {}
+        for j in range(max(len(groups), len(sub))):
+            g = groups[j] if j < len(groups) else ""
+            s = sub[j] if j < len(sub) else ""
+            if s in _LD_SUB_INGRESO or s in _LD_SUB_EGRESO:
+                sfx = "ingreso" if s in _LD_SUB_INGRESO else "egreso"
+                if g in _LD_GRUPO_DINERO:
+                    col_map.setdefault(f"dinero_{sfx}", j)
+                elif g in _LD_GRUPO_MERCADERIA:
+                    col_map.setdefault(f"mercaderia_{sfx}", j)
+                continue
+            label = s or (top[j] if j < len(top) else "")
+            if any(k in label for k in FECHA_COLS):
+                col_map.setdefault("fecha", j)
+            elif any(k in label for k in _LD_DETALLE_KEYS):
+                col_map.setdefault("detalle", j)
+        if "dinero_ingreso" in col_map and "dinero_egreso" in col_map:
+            return i, col_map
+    return None
+
+
+def _ld_cell(cells: list[Any], col_map: dict[str, int], key: str) -> Any:
+    idx = col_map.get(key)
+    return cells[idx] if idx is not None and idx < len(cells) else None
+
+
+def _ld_amount(value: Any) -> Decimal | None:
+    """Monto positivo de la celda o None (vacío / no numérico / ≤ 0)."""
+    amount = normalize_numeric(value)
+    return amount if amount is not None and amount > 0 else None
+
+
+def parse_libro_diario(
+    rows: list[list[Any]], hdr_idx: int, col_map: dict[str, int]
+) -> dict[str, list[dict[str, Any]]]:
+    """Clasifica las filas del Libro Diario en ventas / gastos / otros.
+
+    Emite dicts con claves canónicas que el import resuelve por keyword
+    (``fecha``, ``detalle``, ``monto``, ``categoria``, ``forma_pago``) en vez
+    de los encabezados compuestos crudos. La fecha se forward-fillea (las filas
+    del libro continúan la fecha de la anterior).
+    """
+    ventas: list[dict[str, Any]] = []
+    gastos: list[dict[str, Any]] = []
+    otros: list[dict[str, Any]] = []
+    last_fecha: Any = None
+
+    for raw_row in rows[hdr_idx + 2 :]:
+        cells = list(raw_row) if raw_row is not None else []
+        fecha_raw = _ld_cell(cells, col_map, "fecha")
+        if fecha_raw is not None and str(fecha_raw).strip() != "":
+            last_fecha = fecha_raw
+        detalle_raw = _ld_cell(cells, col_map, "detalle")
+        detalle = (
+            str(detalle_raw).strip()
+            if detalle_raw is not None and str(detalle_raw).strip()
+            else None
+        )
+        if detalle and _ld_norm_cell(detalle).startswith(_LD_TOTAL_PREFIXES):
+            continue  # subtotales/saldos del libro: no son movimientos
+
+        din_in = _ld_amount(_ld_cell(cells, col_map, "dinero_ingreso"))
+        din_out = _ld_amount(_ld_cell(cells, col_map, "dinero_egreso"))
+        mer_in = _ld_amount(_ld_cell(cells, col_map, "mercaderia_ingreso"))
+        mer_out = _ld_amount(_ld_cell(cells, col_map, "mercaderia_egreso"))
+        if not any((din_in, din_out, mer_in, mer_out)):
+            continue
+
+        fecha = str(last_fecha).strip() if last_fecha is not None else None
+        base: dict[str, Any] = {"fecha": fecha, "detalle": detalle}
+
+        if din_in and (din_out or mer_in):
+            # Plata que entra y sale (o venta + compra) en la misma fila →
+            # nunca adivinar: revisión manual.
+            otros.append(
+                {
+                    **base,
+                    "dinero_ingreso": str(din_in),
+                    "dinero_egreso": str(din_out) if din_out else None,
+                    "mercaderia_ingreso": str(mer_in) if mer_in else None,
+                    "mercaderia_egreso": str(mer_out) if mer_out else None,
+                }
+            )
+        elif din_in:
+            ventas.append({**base, "monto": str(din_in)})
+        elif mer_in:
+            # Compra de mercadería: entra stock, sale plata → gasto INVENTORY
+            # (COGS). Sin salida de plata en la fila, la compra fue a cuenta
+            # corriente del proveedor (fiado).
+            gasto = {**base, "monto": str(din_out or mer_in), "categoria": "Mercadería"}
+            if not din_out:
+                gasto["forma_pago"] = "cuenta corriente"
+            gastos.append(gasto)
+        elif din_out:
+            # Gasto operativo: la categoría se infiere del detalle (los alias
+            # del catálogo matchean "luz", "alquiler", etc.; sin match → OTHER
+            # con el detalle preservado como label).
+            gastos.append({**base, "monto": str(din_out), "categoria": detalle})
+        else:
+            # Salida de mercadería sin plata (consumo propio / merma / ajuste):
+            # no es venta ni gasto → revisión manual.
+            otros.append({**base, "mercaderia_egreso": str(mer_out)})
+
+    return {"ventas": ventas, "gastos": gastos, "otros": otros}
+
+
+def _append_libro_diario_contexts(
+    summary: dict[str, Any],
+    contexts: list[dict[str, Any]],
+    sheet_label: str,
+    parsed: dict[str, list[dict[str, Any]]],
+    ventas_bucket: list[dict[str, Any]],
+    gastos_bucket: list[dict[str, Any]],
+) -> None:
+    """Vuelca el resultado del Libro Diario en buckets + mapping_contexts.
+
+    Una misma hoja emite hasta tres contextos: ventas, gastos y (si hubo filas
+    ambiguas) un contexto sin clasificar que termina en la bandeja "Otros".
+    """
+    spec = (
+        ("ventas", "sale", "Ventas (Dinero/Ingreso)", ventas_bucket,
+         ["fecha", "detalle", "monto"]),
+        ("gastos", "expense", "Gastos y compras (Dinero/Egreso)", gastos_bucket,
+         ["fecha", "detalle", "monto", "categoria", "forma_pago"]),
+    )
+    for key, entity, sub_label, bucket, headers in spec:
+        rows = parsed.get(key) or []
+        if not rows:
+            continue
+        ctx_id = f"sheet:{sheet_label}:{key}"
+        bucket.extend({**r, "__context__": ctx_id} for r in rows)
+        contexts.append(
+            {
+                "context_id": ctx_id,
+                "label": f"{sheet_label} — {sub_label}",
+                "source_kind": "sheet_group",
+                "entity_type": entity,
+                "headers": headers,
+                "fields": None,
+                "preview_rows": rows[:10],
+                "row_count": len(rows),
+                "libro_diario": True,
+            }
+        )
+    otros = parsed.get("otros") or []
+    if otros:
+        ctx_id = f"sheet:{sheet_label}:otros"
+        contexts.append(
+            {
+                "context_id": ctx_id,
+                "label": f"{sheet_label} — Movimientos ambiguos",
+                "source_kind": "sheet_group",
+                "entity_type": None,
+                "headers": None,
+                "fields": sorted({k for r in otros for k in r}),
+                "preview_rows": otros[:10],
+                "row_count": len(otros),
+                "unclassified": True,
+                "libro_diario": True,
+            }
+        )
+        summary.setdefault("otros_detectados", []).extend(
+            {**r, "__context__": ctx_id} for r in otros
+        )
+        summary["warnings"].append(
+            f"{len(otros)} movimiento(s) de '{sheet_label}' son ambiguos (plata que "
+            "entra y sale en la misma fila, o salida de mercadería sin plata) y "
+            "quedaron para revisión manual."
+        )
+
+
+def _finish_libro_diario_summary(
+    summary: dict[str, Any],
+    rows: list[list[Any]],
+    ld: tuple[int, dict[str, int]],
+    label: str,
+) -> dict[str, Any]:
+    """Completa el summary de un archivo de UNA tabla con formato Libro Diario.
+
+    ``inferred_type="mixed"`` rutea la inserción al path multi-contexto, que
+    procesa ventas y gastos por separado desde la misma hoja.
+    """
+    hdr_idx, col_map = ld
+    parsed = parse_libro_diario(rows, hdr_idx, col_map)
+    contexts: list[dict[str, Any]] = []
+    all_ventas: list[dict[str, Any]] = []
+    all_gastos: list[dict[str, Any]] = []
+    _append_libro_diario_contexts(summary, contexts, label, parsed, all_ventas, all_gastos)
+    total = sum(len(v) for v in parsed.values())
+    preview = (parsed["ventas"][:5] + parsed["gastos"][:5])[:10]
+    summary.update(
+        {
+            "libro_diario": True,
+            "inferred_type": "mixed",
+            "confidence": "HIGH" if (all_ventas or all_gastos) else "LOW",
+            "has_venta": bool(all_ventas),
+            "has_gasto": bool(all_gastos),
+            "has_producto": False,
+            "headers": ["fecha", "detalle", "monto"],
+            "columns": ["fecha", "detalle", "monto"],
+            "row_count": total,
+            "rows_processed": total,
+            "ventas_detectadas": all_ventas,
+            "gastos_detectados": all_gastos,
+            "stock_detectado": [],
+            "preview_rows": preview,
+            "mapping_contexts": contexts,
+        }
+    )
+    return summary
+
+
 def _decode_text_bytes(content: bytes) -> str:
     """Decodifica bytes de CSV/texto probando encodings comunes (UTF-8 BOM, latin-1, cp1252)."""
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
@@ -717,6 +986,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             )
             return summary
 
+        # Libro Diario (doble encabezado Dinero/Mercadería × Ingreso/Egreso).
+        ld = detect_libro_diario_header(rows)
+        if ld is not None:
+            return _finish_libro_diario_summary(summary, rows, ld, "Libro diario")
+
         # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
         hdr_idx = _detect_header_row(rows)
         headers = rows[hdr_idx]
@@ -785,10 +1059,61 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             contexts: list[dict[str, Any]] = []
             total_rows = 0
 
+            # Pre-pass: materializar hojas y detectar Libro Diario antes de
+            # clasificar — las hojas derivadas ("Ganancias", "Resumen") solo se
+            # excluyen si el libro fuente está presente en el mismo archivo.
+            sheets_data: list[tuple[str, list[list[Any]], tuple[int, dict[str, int]] | None]] = []
             for sheet_name in sheet_names:
                 ws = workbook[sheet_name]
                 rows = [list(r) for r in ws.iter_rows(values_only=True)]
                 if len(rows) < 2:
+                    continue
+                sheets_data.append((sheet_name, rows, detect_libro_diario_header(rows)))
+            has_libro_diario = any(ld is not None for _, _, ld in sheets_data)
+
+            for sheet_name, rows, ld in sheets_data:
+                if ld is not None:
+                    hdr_idx, col_map = ld
+                    parsed = parse_libro_diario(rows, hdr_idx, col_map)
+                    _append_libro_diario_contexts(
+                        summary, contexts, sheet_name, parsed, all_ventas, all_gastos
+                    )
+                    total_rows += sum(len(v) for v in parsed.values())
+                    continue
+                if has_libro_diario and _ld_norm_cell(sheet_name).startswith(
+                    _LD_DERIVED_SHEET_PREFIXES
+                ):
+                    # Hoja derivada del Libro Diario (resumen/ganancias):
+                    # importarla además del libro duplicaría los movimientos.
+                    # Se preserva sin clasificar por si el usuario la quiere.
+                    _hdr = _detect_header_row(rows)
+                    _headers = [
+                        str(c) if c is not None else f"col_{i}"
+                        for i, c in enumerate(rows[_hdr])
+                    ]
+                    _dicts = rows_to_dicts(_headers, rows[_hdr + 1 :])
+                    context_id = f"sheet:{sheet_name}"
+                    contexts.append(
+                        {
+                            "context_id": context_id,
+                            "label": sheet_name,
+                            "source_kind": "sheet",
+                            "entity_type": None,
+                            "headers": _headers,
+                            "fields": None,
+                            "preview_rows": _dicts[:10],
+                            "row_count": len(_dicts),
+                            "unclassified": True,
+                        }
+                    )
+                    summary.setdefault("otros_detectados", []).extend(
+                        {**d, "__context__": context_id} for d in _dicts
+                    )
+                    summary["warnings"].append(
+                        f"La hoja '{sheet_name}' parece derivada del Libro Diario "
+                        "(resumen): no se importa automáticamente para no duplicar "
+                        "movimientos. Podés reclasificarla manualmente si hace falta."
+                    )
                     continue
 
                 # Detecta la fila de encabezado real de la hoja.
@@ -926,8 +1251,16 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             )
             return summary
 
-        # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
         _all = [list(r) for r in all_rows]
+
+        # Libro Diario (doble encabezado Dinero/Mercadería × Ingreso/Egreso).
+        ld = detect_libro_diario_header(_all)
+        if ld is not None:
+            return _finish_libro_diario_summary(
+                summary, _all, ld, str(worksheet.title or "Libro diario")
+            )
+
+        # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
         hdr_idx = _detect_header_row(_all)
         headers = [
             str(cell) if cell is not None else f"col_{index}"
