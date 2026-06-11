@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Download, SlidersHorizontal, Check } from "lucide-react";
+import { Download, SlidersHorizontal, Check, ChevronLeft, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { Table } from "./Table";
 import type { TableColumn } from "./Table";
@@ -19,6 +19,17 @@ interface SmartTableProps<T extends object> {
   exportFilename?: string;
   renderActions?: (row: T) => ReactNode;
 }
+
+type PageSize = number | "all";
+
+const PAGE_SIZE_OPTIONS: { value: PageSize; label: string }[] = [
+  { value: 25, label: "25" },
+  { value: 50, label: "50" },
+  { value: 100, label: "100" },
+  { value: "all", label: "Todos" },
+];
+
+const DEFAULT_PAGE_SIZE: PageSize = 25;
 
 function toCSVValue(val: unknown): string {
   const s = val == null ? "" : String(val);
@@ -45,6 +56,8 @@ export function SmartTable<T extends object>({
   );
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
+  const [page, setPage] = useState(0);
 
   useEffect(() => {
     function handler(e: MouseEvent) {
@@ -80,6 +93,16 @@ export function SmartTable<T extends object>({
       ]
     : visibleColumns;
   const hideableColumns = columns.filter((c) => c.hideable !== false);
+
+  // Paginación client-side: el clamp con safePage evita páginas fuera de rango
+  // cuando los datos se achican (filtros, cambio de período) sin necesitar effects.
+  const total = data.length;
+  const pageCount = pageSize === "all" ? 1 : Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const pageData =
+    pageSize === "all" ? data : data.slice(safePage * pageSize, (safePage + 1) * pageSize);
+  const rangeStart = total === 0 ? 0 : pageSize === "all" ? 1 : safePage * pageSize + 1;
+  const rangeEnd = pageSize === "all" ? total : Math.min((safePage + 1) * pageSize, total);
 
   const exportCSV = useCallback(() => {
     const headers = visibleColumns.map((c) => toCSVValue(c.header));
@@ -157,7 +180,61 @@ export function SmartTable<T extends object>({
         </button>
       </div>
 
-      <Table columns={tableColumns} data={data} emptyMessage={emptyMessage} />
+      <Table columns={tableColumns} data={pageData} emptyMessage={emptyMessage} />
+
+      {/* Paginación */}
+      {total > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-vk-text-muted">
+            Mostrando {rangeStart}–{rangeEnd} de {total}
+          </p>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-xs text-vk-text-muted">
+              Filas por página:
+              <select
+                value={String(pageSize)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setPageSize(v === "all" ? "all" : Number(v));
+                  setPage(0);
+                }}
+                className="rounded-lg border border-vk-border-w bg-vk-surface-w px-2 py-1.5 text-xs text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+              >
+                {PAGE_SIZE_OPTIONS.map((opt) => (
+                  <option key={String(opt.value)} value={String(opt.value)}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {pageCount > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  aria-label="Página anterior"
+                  disabled={safePage === 0}
+                  onClick={() => setPage(safePage - 1)}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-vk-border-w bg-vk-surface-w text-vk-text-secondary transition-colors hover:text-vk-text-primary disabled:opacity-40"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <span className="px-1 text-xs text-vk-text-muted">
+                  {safePage + 1} / {pageCount}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Página siguiente"
+                  disabled={safePage >= pageCount - 1}
+                  onClick={() => setPage(safePage + 1)}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-vk-border-w bg-vk-surface-w text-vk-text-secondary transition-colors hover:text-vk-text-primary disabled:opacity-40"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
