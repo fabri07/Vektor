@@ -100,6 +100,7 @@ async def _process_file(
     file_row: Any,
     existing_keys: set[tuple[str, str]],
     apply: bool,
+    include_imported: bool = False,
 ) -> dict[str, int]:
     stats = {"to_otros": 0, "dedup_skipped": 0, "errors": 0}
     old_summary = file_row.parsed_summary_json or {}
@@ -131,7 +132,12 @@ async def _process_file(
         if is_done and entity is not None:
             confirm_key = _BUCKET_CONFIRM_KEY[bucket]
             # Bucket ya importado en su momento → no recandidatear (cero duplicados).
-            if confirmed.get(confirm_key) or imported.get(confirm_key, 0) > 0:
+            # --include-imported lo anula para ventas/gastos (caso: el import viejo
+            # era basura y fue ANULADO con void_misclassified_imports — el dedup por
+            # (fecha, monto) sigue protegiendo contra duplicados reales). Los
+            # productos NUNCA se re-candidatean: no tienen fecha+monto para dedup.
+            already = bool(confirmed.get(confirm_key)) or imported.get(confirm_key, 0) > 0
+            if already and (not include_imported or bucket == "stock_detectado"):
                 continue
         elif not is_done and entity is not None:
             # Archivos sin confirmar siguen en el flujo normal de confirmación;
@@ -214,6 +220,13 @@ async def main() -> None:
     parser.add_argument("--apply", action="store_true", help="Escribir cambios (default: dry-run)")
     parser.add_argument("--tenant", help="UUID de tenant puntual (piloto)")
     parser.add_argument("--all-active", action="store_true", help="Todos los tenants activos")
+    parser.add_argument(
+        "--include-imported",
+        action="store_true",
+        help="Re-candidatear buckets de ventas/gastos ya importados (usar DESPUÉS de "
+        "anular un import basura con void_misclassified_imports; el dedup por "
+        "fecha+monto sigue activo). Productos no se re-candidatean nunca.",
+    )
     args = parser.parse_args()
 
     if not args.tenant and not args.all_active:
@@ -255,7 +268,10 @@ async def main() -> None:
             existing_keys = await _existing_tx_keys(session, tid)
             for f in files:
                 print(f"    ── {f.original_filename!r} [{f.processing_status}]")
-                stats = await _process_file(session, s3, tid, f, existing_keys, args.apply)
+                stats = await _process_file(
+                    session, s3, tid, f, existing_keys, args.apply,
+                    include_imported=args.include_imported,
+                )
                 print(
                     f"       a_otros={stats['to_otros']} "
                     f"dedup={stats['dedup_skipped']} errores={stats['errors']}"
