@@ -96,7 +96,7 @@ async def backfill_expenses(session: AsyncSession, tid: uuid.UUID, apply: bool) 
                 text(
                     "UPDATE expense_entries SET category = :code, "
                     "custom_fields = custom_fields || "
-                    "CASE WHEN :label IS NOT NULL THEN "
+                    "CASE WHEN CAST(:label AS TEXT) IS NOT NULL THEN "
                     "jsonb_build_object('category_label', CAST(:label AS TEXT)) "
                     "ELSE '{}'::jsonb END "
                     "WHERE id = :id"
@@ -215,7 +215,7 @@ async def backfill_products(session: AsyncSession, tid: uuid.UUID, apply: bool) 
                 text(
                     "UPDATE products SET category = :code, "
                     "custom_fields = COALESCE(custom_fields, '{}'::jsonb) || "
-                    "CASE WHEN :label IS NOT NULL THEN "
+                    "CASE WHEN CAST(:label AS TEXT) IS NOT NULL THEN "
                     "jsonb_build_object('category_label', CAST(:label AS TEXT)) "
                     "ELSE '{}'::jsonb END "
                     "WHERE id = :id"
