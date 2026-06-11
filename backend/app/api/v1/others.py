@@ -63,6 +63,18 @@ class ReclassifyRequest(BaseModel):
     fields: dict[str, Any]
 
 
+class BulkImportRequest(BaseModel):
+    # None = ventas y gastos sugeridos. Los sugeridos como producto nunca
+    # entran en el bulk (necesitan campos que la fila suelta no garantiza).
+    entity_type: Literal["sale", "expense"] | None = None
+
+
+class BulkImportResponse(BaseModel):
+    imported_sales: int
+    imported_expenses: int
+    skipped: int
+
+
 @router.get(
     "",
     response_model=list[UnclassifiedRecordResponse],
@@ -210,6 +222,30 @@ async def reclassify_record(
     await session.flush()
     trigger_score_recalculation.delay(str(tenant.tenant_id), "unclassified_reclassified")
     return MessageResponse(message=f"Registro importado como {label}.")
+
+
+@router.post(
+    "/bulk-import",
+    response_model=BulkImportResponse,
+    summary="Importar en lote los registros de Otros sugeridos como venta/gasto",
+)
+async def bulk_import_records(
+    body: BulkImportRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
+    session: AsyncSession = Depends(get_db_session),
+) -> BulkImportResponse:
+    """Importa cada PENDING con `suggested_entity` venta/gasto cuya fila cruda
+    parsea (fecha + monto), con las mismas normalizaciones canónicas que el
+    import de archivos. Lo que no parsea queda PENDING para el modal manual."""
+    from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+        bulk_import_unclassified,
+    )
+
+    counts = await bulk_import_unclassified(session, tenant.tenant_id, body.entity_type)
+    if counts["imported_sales"] or counts["imported_expenses"]:
+        trigger_score_recalculation.delay(str(tenant.tenant_id), "unclassified_bulk_import")
+    return BulkImportResponse(**counts)
 
 
 @router.post(

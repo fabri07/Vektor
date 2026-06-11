@@ -1488,6 +1488,126 @@ async def _insert_multisheet_data(
     return counts
 
 
+async def bulk_import_unclassified(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    entity_filter: str | None = None,
+) -> dict[str, int]:
+    """Importa en lote los ``unclassified_records`` PENDING sugeridos como
+    venta/gasto cuya fila cruda parsea (fecha + monto).
+
+    Reusa la misma resolución por keyword y normalizaciones canónicas que el
+    import de archivos: categoría con vertical (mercadería → INVENTORY/COGS),
+    payment_method canónico y vínculo al producto del catálogo. Lo que no
+    parsea queda PENDING (el modal por registro permite completarlo a mano);
+    los sugeridos como producto no entran acá (necesitan campos que la fila
+    suelta no garantiza). Devuelve ``{imported_sales, imported_expenses,
+    skipped}``.
+    """
+    from datetime import UTC  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+    from app.persistence.models.unclassified_record import (  # noqa: PLC0415
+        UNCLASSIFIED_STATUS_IMPORTED,
+        UNCLASSIFIED_STATUS_PENDING,
+        UnclassifiedRecord,
+    )
+
+    entities = [entity_filter] if entity_filter else ["sale", "expense"]
+    records = (
+        (
+            await session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+                    UnclassifiedRecord.suggested_entity.in_(entities),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    counts = {"imported_sales": 0, "imported_expenses": 0, "skipped": 0}
+    if not records:
+        return counts
+
+    _by_sku, _by_name = await _load_product_index(session, tenant_id)
+    _business_type = await _load_business_type(session, tenant_id)
+    _flush_every = 500
+
+    for i, rec in enumerate(records):
+        row: dict[str, Any] = rec.row_data or {}
+        fecha = _parse_date(_row_val(row, _FECHA_COLS))
+        amount = (
+            _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))
+            or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
+            or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
+        )
+        if fecha is None or amount is None:
+            counts["skipped"] += 1
+            continue
+        desc = _clean_str(_row_val(row, _NOMBRE_COLS), 499)
+        pay_raw = _clean_str(_row_val(row, _PAGO_COLS), 30)
+        product_id = _resolve_product(
+            _by_sku,
+            _by_name,
+            _clean_str(_row_val(row, _NOMBRE_COLS), 299),
+            _clean_str(_row_val(row, _SKU_COLS), 99),
+        )
+
+        if rec.suggested_entity == "sale":
+            qty = 1
+            qty_raw = _row_val(row, _CANTIDAD_COLS)
+            if qty_raw not in (None, "", "None", "nan"):
+                try:
+                    qty = max(1, int(float(str(qty_raw))))
+                except (ValueError, TypeError):
+                    qty = 1
+            session.add(
+                SaleEntry(
+                    tenant_id=tenant_id,
+                    amount=amount,
+                    quantity=qty,
+                    transaction_date=fecha,
+                    payment_method=normalize_payment_method(pay_raw) if pay_raw else "cash",
+                    product_id=product_id,
+                    notes=desc or "Importado desde Otros",
+                    provenance="REAL",
+                )
+            )
+            counts["imported_sales"] += 1
+        else:
+            cat_code, cat_label, _ = classify_expense_with_vertical(
+                _clean_str(_row_val_categoria(row), 99), _business_type
+            )
+            expense = ExpenseEntry(
+                tenant_id=tenant_id,
+                amount=amount,
+                category=cat_code,
+                transaction_date=fecha,
+                description=desc or "Gasto importado",
+                is_recurring=False,
+                payment_method=normalize_payment_method(pay_raw) if pay_raw else "transfer",
+                provenance="REAL",
+            )
+            expense.product_id = product_id
+            expense.expense_type = infer_expense_type(cat_code, product_id=product_id)
+            if cat_label:
+                expense.custom_fields = {"category_label": cat_label}
+            session.add(expense)
+            counts["imported_expenses"] += 1
+
+        rec.status = UNCLASSIFIED_STATUS_IMPORTED
+        rec.resolved_at = datetime.now(UTC)
+        if (i + 1) % _flush_every == 0:
+            await session.flush()
+
+    await session.flush()
+    return counts
+
+
 def default_confirmed_fields(summary: dict[str, Any]) -> dict[str, bool]:
     inferred = summary.get("inferred_type")
     return {

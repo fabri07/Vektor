@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Trash2, FolderInput } from "lucide-react";
+import { Trash2, FolderInput, Zap } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -89,6 +89,23 @@ export default function OtrosPage() {
     onError: () => toast("No se pudo descartar el registro.", "error"),
   });
 
+  const bulkImportMutation = useMutation({
+    mutationFn: () => othersService.bulkImport(),
+    onSuccess: async (result) => {
+      const total = result.imported_sales + result.imported_expenses;
+      toast(
+        `${total} registro(s) importados (${result.imported_sales} ventas, ` +
+          `${result.imported_expenses} gastos)` +
+          (result.skipped > 0
+            ? `; ${result.skipped} quedaron pendientes (sin fecha o monto legibles).`
+            : "."),
+        "success",
+      );
+      await invalidate();
+    },
+    onError: () => toast("No se pudo importar en lote. Probá de nuevo.", "error"),
+  });
+
   const reclassifyMutation = useMutation({
     mutationFn: ({
       id,
@@ -127,10 +144,30 @@ export default function OtrosPage() {
         />
       ) : (
         <>
-        <p className="text-xs text-vk-text-muted">
-          {pendingTotal} registro(s) pendiente(s)
-          {totalPages > 1 ? ` — página ${page + 1} de ${totalPages}` : ""}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-vk-text-muted">
+            {pendingTotal} registro(s) pendiente(s)
+            {totalPages > 1 ? ` — página ${page + 1} de ${totalPages}` : ""}
+          </p>
+          <button
+            type="button"
+            disabled={bulkImportMutation.isPending}
+            onClick={() => {
+              if (
+                confirm(
+                  "¿Importar TODOS los registros pendientes sugeridos como venta o gasto? " +
+                    "Cada uno se registra en su sección con la fecha, monto y categoría detectados. " +
+                    "Los que no tengan fecha o monto legibles quedan pendientes para revisión manual.",
+                )
+              )
+                bulkImportMutation.mutate();
+            }}
+            className="inline-flex items-center gap-1.5 rounded border border-vektor-teal/40 px-3 py-1.5 text-sm text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
+          >
+            <Zap className="h-4 w-4" />
+            {bulkImportMutation.isPending ? "Importando…" : "Importar todo lo sugerido"}
+          </button>
+        </div>
         <ul className="space-y-3">
           {records.map((record) => (
             <li
@@ -140,6 +177,11 @@ export default function OtrosPage() {
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="info">{SOURCE_LABELS[record.source] ?? record.source}</Badge>
+                  {record.suggested_entity ? (
+                    <Badge variant="success">
+                      Sugerido: {ENTITY_LABELS[record.suggested_entity]}
+                    </Badge>
+                  ) : null}
                   {record.context_label ? (
                     <span className="text-xs text-vk-text-muted">{record.context_label}</span>
                   ) : null}

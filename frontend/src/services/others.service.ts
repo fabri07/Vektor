@@ -20,6 +20,12 @@ export interface ReclassifyPayload {
   fields: Record<string, unknown>;
 }
 
+export interface BulkImportResult {
+  imported_sales: number;
+  imported_expenses: number;
+  skipped: number;
+}
+
 export const othersService = {
   async getPending(offset = 0, limit = 50): Promise<UnclassifiedRecordResponse[]> {
     const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
@@ -39,5 +45,13 @@ export const othersService = {
 
   async dismiss(id: string): Promise<void> {
     await api.post(`/others/${id}/dismiss`);
+  },
+
+  /** Importa en lote todos los pendientes sugeridos como venta/gasto. */
+  async bulkImport(entityType?: "sale" | "expense"): Promise<BulkImportResult> {
+    const res = await api.post<BulkImportResult>("/others/bulk-import", {
+      entity_type: entityType ?? null,
+    });
+    return res.data;
   },
 };
