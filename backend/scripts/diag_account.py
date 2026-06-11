@@ -67,12 +67,13 @@ async def run(conn: asyncpg.Connection, email: str) -> None:
                 f"{k}={v}" for k, v in dict(t).items() if k != "tenant_id"
             )[:400])
         bp = await conn.fetchrow(
-            "SELECT business_type, business_name FROM business_profiles "
+            "SELECT vertical_code, onboarding_completed FROM business_profiles "
             "WHERE tenant_id=$1 LIMIT 1",
             tid,
         )
         if bp:
-            print(f"  business: type={bp['business_type']} name={bp['business_name']!r}")
+            print(f"  business: vertical={bp['vertical_code']} "
+                  f"onboarding={bp['onboarding_completed']}")
 
         # ── UPLOADED FILES ────────────────────────────────────────────────
         p(f"UPLOADED FILES  (tenant {tid})")
