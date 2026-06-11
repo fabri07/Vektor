@@ -211,6 +211,11 @@ export default function ExpensesPage() {
     variacionLabel = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% ${previousPeriodShortLabel(period)}`;
   }
 
+  // Con "Operativos" la categoría Mercadería (INVENTORY) no aplica; con
+  // "Mercadería" el desplegable de categoría directamente se oculta.
+  const categoryOptions =
+    typeFilter === "OPEX" ? ALL_CATEGORIES.filter((c) => c !== "INVENTORY") : ALL_CATEGORIES;
+
   // Apply category + type filters
   const filtered = entries.filter(
     (e) =>
@@ -229,29 +234,38 @@ export default function ExpensesPage() {
       <div className="flex flex-col gap-3">
         <PeriodFilter value={period} onChange={setPeriod} availableRange={dateRange} />
         <div className="flex items-center gap-2">
-          <label className="text-sm text-vk-text-muted">Categoría:</label>
-          <select
-            value={categoryFilter}
-            onChange={(e) => setCategoryFilter(e.target.value)}
-            className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
-          >
-            <option value="all">Todas</option>
-            {ALL_CATEGORIES.map((cat) => (
-              <option key={cat} value={cat}>
-                {CATEGORY_LABELS[cat] ?? cat}
-              </option>
-            ))}
-          </select>
-          <label className="ml-3 text-sm text-vk-text-muted">Tipo:</label>
+          <label className="text-sm text-vk-text-muted">Tipo:</label>
           <select
             value={typeFilter}
-            onChange={(e) => setTypeFilter(e.target.value as "all" | "OPEX" | "COGS")}
+            onChange={(e) => {
+              setTypeFilter(e.target.value as "all" | "OPEX" | "COGS");
+              // Las opciones de categoría dependen del tipo: evitar quedar
+              // filtrando por una categoría que ya no está en el desplegable.
+              setCategoryFilter("all");
+            }}
             className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
           >
             <option value="all">Todos</option>
             <option value="OPEX">Operativos</option>
             <option value="COGS">Mercadería</option>
           </select>
+          {typeFilter !== "COGS" && (
+            <>
+              <label className="ml-3 text-sm text-vk-text-muted">Categoría:</label>
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+              >
+                <option value="all">Todas</option>
+                {categoryOptions.map((cat) => (
+                  <option key={cat} value={cat}>
+                    {CATEGORY_LABELS[cat] ?? cat}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
         </div>
       </div>
 
