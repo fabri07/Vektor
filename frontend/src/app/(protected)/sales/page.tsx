@@ -34,7 +34,26 @@ function formatARS(value: number): string {
 }
 
 
-function buildColumns(productById: Map<string, ProductResponse>) {
+/** Categoría de la venta derivada del producto vinculado: código canónico →
+ * label del catálogo; OTHER con nombre custom → ese nombre; sin producto o
+ * sin categoría → "—". */
+function saleCategoryDisplay(
+  product: ProductResponse | undefined,
+  catalogLabels: Record<string, string>,
+): string {
+  const cat = (product?.category ?? "").trim();
+  if (!cat) return "—";
+  if (cat === "OTHER") {
+    const label = product?.custom_fields?.category_label;
+    if (typeof label === "string" && label.trim()) return label.trim();
+  }
+  return catalogLabels[cat] ?? cat;
+}
+
+function buildColumns(
+  productById: Map<string, ProductResponse>,
+  catalogLabels: Record<string, string>,
+) {
   return [
   {
     key: "transaction_date",
@@ -62,6 +81,21 @@ function buildColumns(productById: Map<string, ProductResponse>) {
       const id = String(v ?? "");
       return id ? productById.get(id)?.name ?? "" : "";
     },
+  },
+  {
+    key: "_category",
+    header: "Categoría",
+    hideable: true,
+    render: (_: unknown, row: SaleEntryResponse) =>
+      saleCategoryDisplay(
+        row.product_id ? productById.get(row.product_id) : undefined,
+        catalogLabels,
+      ),
+    csvValue: (_: unknown, row: SaleEntryResponse) =>
+      saleCategoryDisplay(
+        row.product_id ? productById.get(row.product_id) : undefined,
+        catalogLabels,
+      ),
   },
   {
     key: "payment_method",
@@ -117,6 +151,15 @@ export default function SalesPage() {
     queryFn: () => productsService.getAllProducts({ is_active: true }),
     staleTime: 2 * 60 * 1000,
   });
+
+  // Catálogo de categorías del vertical: labels para la columna Categoría
+  // (derivada del producto vinculado a cada venta).
+  const { data: categories = [] } = useQuery({
+    queryKey: ["product-categories"],
+    queryFn: () => productsService.getCategories(),
+    staleTime: 30 * 60 * 1000,
+  });
+  const catalogLabels = Object.fromEntries(categories.map((c) => [c.code, c.label]));
 
   const { data: fieldDefs = [] } = useQuery({
     queryKey: ["field-definitions", "sale"],
@@ -181,7 +224,7 @@ export default function SalesPage() {
   );
   const productById = new Map(products.map((product) => [product.id, product]));
   const columns = [
-    ...buildColumns(productById),
+    ...buildColumns(productById, catalogLabels),
     ...buildCustomFieldColumns<SaleEntryResponse>(fieldDefs),
   ];
 
