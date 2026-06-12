@@ -40,6 +40,16 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - **UPDATE_PRODUCT vía chat** (Sprint 14): `ActionType.UPDATE_PRODUCT` (MEDIUM). AgentCEO intent `update_product` → AgentStock `PRODUCT_UPDATE` handler. Extrae campos a modificar; distingue `sku` (identificador) de `new_sku` (campo a actualizar). `PendingActionService` ejecuta via `ProductRepository`; recalcula score solo si cambian `sale_price_ars/unit_cost_ars/stock_units`. `ChatOrchestrator` eliminó la restricción "no puede modificar datos vía chat"; incluye regla FUENTE DE VERDAD: Google Sheets solo para import/export, nunca para modificar.
 - **Política null/NaN en imports** (Sprint 14): helpers en `file_parsing.py` — `normalize_numeric()`, `normalize_categorical()`, `impute_column()` (quantity→0, numeric→mediana, categorical→None), `compute_column_null_stats()`, `flag_columns_at_risk()` (umbral 35%). `_parse_spreadsheet` calcula `columns_at_risk` y lo incluye en `parsed_summary_json`. Validators `amount_no_nan` en `CreateSaleRequest` y `CreateExpenseRequest`.
 - **Ingesta interactiva para columnas riesgosas** (Sprint 14): `GET /ingestion/files/{id}/preview` expone `columns_at_risk[]`. `POST /files/{id}/drop-columns` elimina columnas de todos los buckets del summary (ventas/gastos/productos/stock_detectado). `POST /files/{id}/cancel` marca el archivo como `NEEDS_COMPLETION`. Frontend `FileListSection` muestra panel por cada columna >35% nulos con botones "Eliminar columna" y "Cancelar y completar datos".
+- **Horarios laborales + cierre de caja** (Sprint 20): `work_schedule_service.py` (BusinessProfile + onboarding + settings, migración `20260616_0001`) y `cash_close_service.py` con arqueo y neteo de efectivo (`cash_closes`, migración `20260617_0001`). Router `/cash-closes`: `GET /preview`, `POST` (crear cierre), `GET` (listar). Filtros temporales jerárquicos en ventas/gastos.
+- **Mapeo inteligente de columnas** (Sprint 21): `column_mapping_service.py` (`ColumnMapper`) con aliases por tenant en `tenant_column_mappings` (migración `20260620_0001`). Frontend: `ColumnMapperPanel.tsx`. Rescate de adjuntos en chat: Redis `pending_file:{conversation_id}` TTL 30min.
+- **Mapping contexts universales:** `parsed_summary_json` incluye `mapping_contexts[]` (mapeo por hoja/grupo en todos los formatos — spreadsheet, texto, imagen) + tablas dinámicas desde field-definitions.
+- **`transaction_date` es DATETIME** (migración `20260625_0001`, también `products.acquired_at`): soporta intradía. En queries de rango/agregación por día usar `func.date()`.
+- **Remediación de ingestión (FASES 0–3, PR #4):** FASE 1 fixes — CSV sin límite de filas (eliminado `[:50]`), detección de delimitador `;`, hojas no clasificables preservadas. FASE 2 — `llm_column_mapper.py` (4ª capa de mapeo LLM), `llm_file_type_detector.py` (detección de tipo por contenido), traza en `pipeline_events` (`pipeline_event_service.py`, migración `20260701_0001`), UI de clarificación inline. FASE 3 — `expense_entries.product_id` (mig `20260705_0001`), productos `requires_completion` (mig `20260705_0002`), sync `InventoryBalance` (`inventory_balances`).
+- **Resumen económico analítico** (FASE 4): `GET /economic-summary` (`economic_summary_service.py`) + frontend `/resumen-economico`. Stock valuado = `stock_units × unit_cost_ars`; `missing_cost` solo con stock>0; doble disclaimer (NO es informe contable). Sin migraciones.
+- **Parser Libro Diario** (`file_parsing.py`): `detect_libro_diario_header()` + `parse_libro_diario()` — doble encabezado Dinero/Mercadería × Ingreso/Egreso. Las hojas derivadas del Libro Diario no se importan además (duplicarían ventas). `PaymentMethod.ACCOUNT` + normalización de pagos canónicos en ventas importadas.
+- **Categorías de gasto canónicas + COGS/OPEX:** catálogo de 13 categorías en `app/domain/expense_categories.py`; `infer_expense_type()` discrimina `COGS` (product_id vinculado o categoría `INVENTORY`) vs `OPEX` (migración `20260710_0001`). Gastos de mercadería del vertical → INVENTORY/COGS.
+- **Sección "Otros"** (`unclassified_records`, migración `20260712_0001`): filas ambiguas de imports ya NO caen a ventas por default — van a `unclassified_records` con `suggested_entity`. Router `/others`: listar, `GET /count`, clasificar, importación masiva de sugeridos. Frontend `/otros` con badge de sugerencia.
+- **Diagnóstico MCP Google** (FASE 5): `GET /integrations/google/diagnostics` (SUPERADMIN) vía `mcp_diagnostics_service.py` — chequea flag/URL/secret/conectividad/auth. Runbook: `docs/runbooks/google_mcp_oauth.md`.
 
 ---
 
@@ -75,7 +85,8 @@ pytest app/tests/api/v1/test_auth.py::test_login -v
 make lint / make format / make typecheck / make check
 
 # Migraciones (dir: backend/app/persistence/migrations/versions/, NO backend/alembic/versions/)
-make migrate / make migrate-down
+make migrate / make migrate-down   # contra Docker Postgres local
+make migrate-neon                  # contra Neon (producción) — pide DATABASE_URL del shell
 make migrate-create MSG="descripcion"
 make migrate-history
 
@@ -83,6 +94,14 @@ make migrate-history
 make seed-demo / make reset-demo
 make db-reset               # ⚠️ PELIGROSO
 ```
+
+### Scripts operativos (`backend/scripts/`)
+
+- `diag_account.py` / `diag_expenses.py` — diagnóstico de cuentas reales: **read-only, solo SELECT, nunca imprimen la connection URL**. La `DATABASE_URL` la provee el usuario desde su shell (el `.env` está bloqueado para lectura).
+- `void_misclassified_imports.py` — anula (soft delete auditado) registros importados mal clasificados.
+- `backfill_inventory_balances.py` / `backfill_expense_categories.py` — backfills vertical-aware.
+- `reanalyze_uploaded_files.py` — re-corre el pipeline de parsing sobre archivos ya subidos (`--include-imported` disponible).
+- `_db.py` — helper compartido de conexión para los scripts.
 
 ### Frontend (correr desde `frontend/`)
 
@@ -122,7 +141,7 @@ HTTP Request
 |------|------|-----------------|
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
-| Application | `app/application/services/` | Orquestación: auth, cash, conversation, google_oauth, health_score, health_config, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import, data_repair, report_export, team_plan_executor, help_documentation |
+| Application | `app/application/services/` | Orquestación: auth, cash, cash_close, conversation, google_oauth, health_score, health_config, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import, data_repair, report_export, team_plan_executor, help_documentation, column_mapping, llm_column_mapper, llm_file_type_detector, pipeline_event, economic_summary, work_schedule, mcp_diagnostics |
 | Commands/Queries | `app/application/commands/` `app/application/queries/` | CQRS writes/reads |
 | DTOs | `app/application/dto/` | Objetos de transferencia entre capas |
 | DB middleware | `app/application/db/tenant_context.py` | Inyecta tenant_id en SQLAlchemy |
@@ -136,7 +155,7 @@ HTTP Request
 
 ### API Routers (`app/api/v1/`)
 
-Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`, `fields`, `automations`, `settings`.
+Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`, `fields`, `automations`, `settings`, `cash_closes` (`/cash-closes`), `others` (`/others`), `economic_summary` (`/economic-summary`).
 
 **Router `settings`** (`app/api/v1/settings.py`):
 - `GET /settings/health-config` — configuración de margen actual del tenant
@@ -361,8 +380,11 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `/expenses` | Analytics + lista de gastos |
 | `/products` | Catálogo; query param `?stock=ok|low|out` |
 | `/apps` | Integraciones Google |
-| `/settings` | Cuenta, configuración, panel de custom fields (`FieldDefinitionsPanel` + `SchemaERDView`) y config de margen (`HealthConfigPanel`) |
+| `/settings` | Cuenta, configuración, panel de custom fields (`FieldDefinitionsPanel` + `SchemaERDView`), config de margen (`HealthConfigPanel`) y horarios laborales |
 | `/help` | Chat de ayuda de plataforma — `HelpChat.tsx`, endpoint `/agent/help/chat` |
+| `/ingestion` | Pipeline de ingestión de archivos con preview/confirm |
+| `/otros` | Registros sin clasificar (`unclassified_records`) — clasificación manual + importación masiva de sugeridos |
+| `/resumen-economico` | Resumen económico analítico (`GET /economic-summary`) — no contable, con disclaimers |
 
 **Ruta pública:** `/oauth/callback?session_id=` → `POST /auth/oauth/google/exchange`.
 
@@ -416,6 +438,20 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | 17 | ✅ | **Intents analíticos + tolerancia al lenguaje natural:** catálogo 18→60 intents en 8 familias (archivos, precios, stock, ventas, gastos, proveedores, caja, clientes-stub, fallback). 7 ActionTypes analíticos read-only (`ANALYZE_*`, `SIMULATE_SCENARIO`). Dos capas de rescate antes de cortar: `DataIntentExtractor` (adjuntos) + `intent_rescue.py` (scoring semántico + `rapidfuzz`, normalización voseo/tildes). Se conserva `out_of_scope` para off-topic claro; ambiguo de negocio → `pedir_aclaracion_negocio`/`_sobre_archivo`. Math determinística en `shared/analytics.py`. Handlers en los 5 agentes; 4 queries nuevas en repos. Clientes (4 intents) stub → Sprint 18. `rapidfuzz` agregado a deps. |
 | 18 | ✅ | **AgentChat + migración a Sonnet 4.6 + NLP rioplatense** (commit `a230009e`): nuevo `agent_chat` que absorbe la síntesis de respuesta al usuario (reemplaza `_generate_rich_response` del ChatOrchestrator; `_format_agent_result`/`_render_session_memory`/`_format_history_turn` movidos a AgentChat). Todos los agentes migrados Haiku 4.5 → `claude-sonnet-4-6` (max_tokens subidos). `INTENT_CATALOG` reestructurado `list[str]` → `dict[str, {desc, triggers}]` (60 intents, triggers rioplatenses, system prompt dinámico). `nlp_preprocessor.py`: normalización de lunfardo + spacy opcional antes del CEO. Google MCP: allowlist corregida (eliminado alias `agent_cash`). Limpieza repo: `.venv/`+`.claude-flow/` sacados del índice. 650 tests passing. |
 | 19 | ✅ | **Consolidación de intents 60→28 (granularidad a entidades):** las 35 variantes analíticas (mismo agente + mismo ActionType) colapsan a 8 familias; el sub-análisis se mueve a la entidad `analysis_type`. `generar_informe`→`consultar_estado_negocio`; `ayudar_con_archivo`/`explicar_que_puedo_hacer_con_datos`→`ayuda_plataforma`. Espacio de decisión del clasificador: ~60→~25 intents sin hermanos solapados. Mecanismo: `_ANALYTIC_FAMILIES` + `_resolve_legacy_discriminator()` traduce `analysis_type`→`_intent` legacy (handlers **intactos**); `_LEGACY_INTENT_ALIASES` cubre keys en vuelo. `intent_rescue.rescue_intent()` ahora devuelve `tuple[intent, entities]`. Smoke clasificador: 20/20. 699 tests passing, cobertura 66.77%. |
+| 20 | ✅ | Filtros temporales jerárquicos (ventas/gastos), horarios laborales (BusinessProfile + onboarding + settings, mig `20260616_0001`), cierre de caja con arqueo + neteo de efectivo (`cash_closes`, mig `20260617_0001`). |
+| 21 | ✅ | Mapeo inteligente de columnas (`tenant_column_mappings` mig `20260620_0001`, `ColumnMapper`, `ColumnMapperPanel.tsx`) + fix rescate de adjuntos en chat (Redis `pending_file:{conversation_id}` TTL 30min). |
+
+### Post-Sprint 21 — proyectos mergeados a main
+
+| Proyecto | Descripción |
+|----------|-------------|
+| Mapeo universal de imports | `mapping_contexts[]` en `parsed_summary_json` (por hoja/grupo en todos los formatos) + tablas dinámicas desde field-definitions. |
+| Transaction datetime | `transaction_date` DATE→DATETIME + `products.acquired_at` (mig `20260625_0001`). Usar `func.date()` en queries de rango. |
+| Remediación de ingestión F0–F3 (PR #4) | F1: CSV sin límite `[:50]`, delimitador `;`, hojas preservadas. F2: LLM 4ª capa de mapeo + detección de tipo por contenido + traza `pipeline_events` (mig `20260701_0001`) + UI clarificación inline. F3: `expense_entries.product_id` (mig `20260705_0001`), productos `requires_completion` (mig `20260705_0002`), sync `InventoryBalance`. |
+| Resumen económico F4 (PR #5) | `GET /economic-summary` + frontend `/resumen-economico`. Sin migraciones. |
+| Diagnóstico MCP F5 (PR #6) | `GET /integrations/google/diagnostics` (SUPERADMIN) + runbook `docs/runbooks/google_mcp_oauth.md`. El código MCP está completo; el fallo OAuth restante es operacional (Google Cloud Console). |
+| Libro Diario + pagos canónicos | Parser doble encabezado en `file_parsing.py`, `PaymentMethod.ACCOUNT`, mercadería→COGS por vertical, scripts `void_misclassified_imports.py` + `backfill_inventory_balances.py`. |
+| Categorías COGS + Otros | Catálogo 13 categorías (`domain/expense_categories.py`), `expense_type` COGS/OPEX (mig `20260710_0001`), `unclassified_records` + `/others` + `/otros` (mig `20260712_0001`), importación masiva de sugeridos. |
 
 ### Cadena de migraciones (recientes)
 
@@ -438,6 +474,15 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `20260512_0001` | `low_stock_threshold_units` nullable en `products` (NULL = no configurado; 0 = umbral explícito sin alerta) |
 | `20260601_0001` | `approval_group_id` + `group_execution_status` en `pending_actions` (Stage 3 multi-task) |
 | `20260615_0001` | `score_growth INTEGER NULL` en `health_score_snapshots` (NULL = snapshot v1 pre-Stage-5a; NOT NULL = fórmula v2 con 5 dims) |
+| `20260616_0001` | horarios laborales (`work_schedule`) en business profile |
+| `20260617_0001` | `cash_closes` (ORM: `CashClose`) — cierre de caja con arqueo |
+| `20260620_0001` | `tenant_column_mappings` (ORM: `TenantColumnMapping`) — aliases de mapeo de columnas por tenant |
+| `20260625_0001` | `transaction_date` DATE→DATETIME en ventas/gastos + `products.acquired_at` |
+| `20260701_0001` | `pipeline_events` (ORM: `PipelineEvent`) + auditoría de archivos — traza del pipeline de ingestión |
+| `20260705_0001` | `product_id` en `expense_entries` (vincula gasto de mercadería al producto) |
+| `20260705_0002` | `requires_completion` en `products` (productos creados incompletos desde imports) |
+| `20260710_0001` | `expense_type` COGS/OPEX en `expense_entries` + catálogo canónico de categorías |
+| `20260712_0001` | `unclassified_records` (ORM: `UnclassifiedRecord`) — sección "Otros" |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
 
@@ -473,22 +518,22 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 
 ## Deploy (Railway + Vercel — beta)
 
-Beta: único servicio Railway (sin worker/beat). Celery pausado.
-
 | Servicio | Manifiesto | Start |
 |----------|-----------|-------|
-| `vektor-api` | `backend/railway.toml` | `sh scripts/start_web.sh` → uvicorn |
+| `vektor-api` | `backend/railway.toml` | `sh scripts/start.sh` → uvicorn |
+| `vektor-worker` | `backend/worker/railway.toml` | `sh scripts/start_worker.sh` → Celery |
+| `vektor-mcp` | (servicio MCP propio) | — |
 | Postgres | Neon (externo) | — |
-| Redis | Railway managed (opcional en beta) | — |
+| Redis | Railway managed | — |
 | Frontend | Vercel, root `frontend/` | `next start` |
 
-Alembic no corre al arrancar — migrations manuales contra Neon.
+Alembic no corre al arrancar — migrations manuales contra Neon (`make migrate-neon`).
 
 **Graceful bootstrap:** `app/bootstrap.py` captura errores DB/Redis → uvicorn arranca aunque estén caídos.
 - `/health` — liveness, siempre 200 (usado por `healthcheckPath` en `railway.toml`, timeout 120s).
 - `/ready` — chequea DB + Redis, devuelve 503 si falla (no usado por Railway actualmente).
 
-**Separar worker/beat** cuando haya tráfico: restaurar `backend/worker/` y `backend/beat/` (en repo como referencia).
+**Beat** todavía no está desplegado como servicio (`backend/beat/railway.toml` en repo como referencia).
 
 ## Demo
 
