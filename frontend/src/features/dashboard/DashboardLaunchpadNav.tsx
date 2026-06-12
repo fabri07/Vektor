@@ -6,10 +6,11 @@ import { useRouter } from "next/navigation";
 const SCREENS = [
   { id: "dashboard", label: "Resumen", href: "/dashboard" },
   { id: "analisis", label: "Analisis", href: "/dashboard/analisis" },
+  { id: "balance", label: "Balance", href: "/dashboard/balance" },
 ] as const;
 
 interface Props {
-  active: "dashboard" | "analisis";
+  active: "dashboard" | "analisis" | "balance";
 }
 
 export function DashboardLaunchpadNav({ active }: Props) {
@@ -64,7 +65,7 @@ export function DashboardLaunchpadNav({ active }: Props) {
 
       <div className="fixed inset-x-4 bottom-4 z-30 sm:hidden">
         <div className="rounded-full border border-vektor-border bg-vektor-ink/95 p-1 shadow-lg backdrop-blur-xl">
-          <div className="grid grid-cols-2 gap-1">
+          <div className="grid grid-cols-3 gap-1">
             {SCREENS.map((screen) => {
               const isActive = screen.id === active;
               return (

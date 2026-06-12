@@ -67,6 +67,7 @@ export default function DashboardAnalysisPage() {
         const end = event.changedTouches[0]?.clientX ?? null;
         if (start == null || end == null) return;
         if (end - start > 70) router.push("/dashboard");
+        if (start - end > 70) router.push("/dashboard/balance");
       }}
     >
       <DashboardLaunchpadNav active="analisis" />

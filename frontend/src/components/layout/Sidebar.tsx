@@ -14,7 +14,6 @@ import {
   Upload,
   Settings,
   Plug,
-  TrendingUp,
   Inbox,
   ChevronLeft,
   ChevronRight,
@@ -35,7 +34,6 @@ const NAV_ITEMS = [
   { label: "Gastos",        href: "/expenses",   icon: Receipt },
   { label: "Productos",     href: "/products",   icon: Package },
   { label: "Otros",         href: "/otros",      icon: Inbox },
-  { label: "Resumen económico", href: "/resumen-economico", icon: TrendingUp },
   { label: "Cargar datos",  href: "/ingestion",  icon: Upload },
   { label: "Aplicaciones",  href: "/apps",       icon: Plug },
 ];

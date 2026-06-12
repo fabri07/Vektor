@@ -3,7 +3,7 @@ import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import EconomicSummaryPage from "@/app/(protected)/resumen-economico/page";
+import { EconomicSummaryScreen as EconomicSummaryPage } from "@/features/economic-summary/EconomicSummaryScreen";
 import { economicSummaryService } from "@/services/economic-summary.service";
 
 jest.mock("@/services/economic-summary.service", () => ({
