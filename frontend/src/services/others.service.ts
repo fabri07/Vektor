@@ -9,6 +9,9 @@ export interface UnclassifiedRecordResponse {
   headers: string[] | null;
   row_data: Record<string, string>;
   suggested_entity: "sale" | "expense" | "product" | null;
+  /** Código canónico recomendado (catálogo de gastos o de productos según destino). */
+  suggested_category: string | null;
+  suggested_category_label: string | null;
   status: "PENDING" | "IMPORTED" | "DISMISSED";
   created_at: string;
 }

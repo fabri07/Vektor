@@ -22,8 +22,16 @@ from app.api.v1.deps import get_current_tenant, require_role
 from app.api.v1.expenses import _apply_category_label
 from app.api.v1.products import _tenant_business_type
 from app.application.services.score_trigger_service import trigger_score_recalculation
-from app.domain.expense_categories import normalize_expense_category
-from app.domain.product_categories import normalize_product_category
+from app.domain.expense_categories import (
+    EXPENSE_CATEGORY_LABELS_ES,
+    classify_expense_with_vertical,
+    normalize_expense_category,
+)
+from app.domain.product_categories import (
+    PRODUCT_CATEGORY_LABELS,
+    _resolve_vertical,
+    normalize_product_category,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -52,6 +60,10 @@ class UnclassifiedRecordResponse(BaseModel):
     headers: list[str] | None
     row_data: dict[str, Any]
     suggested_entity: str | None
+    # Categoría recomendada computada desde la fila cruda con los normalizadores
+    # canónicos del domain (catálogo de gastos o de productos según el destino).
+    suggested_category: str | None = None
+    suggested_category_label: str | None = None
     status: str
     created_at: datetime
 
@@ -86,7 +98,13 @@ async def list_unclassified(
     offset: int = Query(default=0, ge=0),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[UnclassifiedRecord]:
+) -> list[UnclassifiedRecordResponse]:
+    # Lazy import: ingestion_import_service importa schemas/transaction y crearía
+    # un ciclo a nivel módulo (mismo criterio que bulk_import_unclassified).
+    from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+        _row_val_categoria,
+    )
+
     q = (
         select(UnclassifiedRecord)
         .where(
@@ -98,7 +116,28 @@ async def list_unclassified(
         .offset(offset)
     )
     result = await session.execute(q)
-    return list(result.scalars().all())
+    records = list(result.scalars().all())
+
+    vertical = await _tenant_business_type(session, tenant.tenant_id)
+    responses: list[UnclassifiedRecordResponse] = []
+    for rec in records:
+        resp = UnclassifiedRecordResponse.model_validate(rec)
+        raw = _row_val_categoria(rec.row_data or {})
+        raw_s = str(raw).strip() if raw not in (None, "") else None
+        if raw_s and rec.suggested_entity == "expense":
+            code, custom_label, _ = classify_expense_with_vertical(raw_s, vertical)
+            resp.suggested_category = code
+            resp.suggested_category_label = custom_label or EXPENSE_CATEGORY_LABELS_ES.get(
+                code, code
+            )
+        elif raw_s and rec.suggested_entity == "product":
+            code, custom_label = normalize_product_category(raw_s, vertical)
+            resp.suggested_category = code
+            resp.suggested_category_label = custom_label or PRODUCT_CATEGORY_LABELS[
+                _resolve_vertical(vertical)
+            ].get(code, code)
+        responses.append(resp)
+    return responses
 
 
 @router.get("/count", summary="Cantidad de registros pendientes en Otros")
