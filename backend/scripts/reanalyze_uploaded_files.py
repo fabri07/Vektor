@@ -52,7 +52,9 @@ from app.application.services.ingestion_import_service import (  # noqa: E402
 from app.integrations.s3 import S3Client  # noqa: E402
 
 _FECHA_KEYS = {"fecha", "date", "dia", "mes", "periodo"}
-_MONTO_KEYS = {"monto", "importe", "total", "precio", "valor", "gasto", "venta"}
+# Tupla = prioridad en _row_val: "precio" va último porque matchea por substring
+# ("precio_unitario") y en filas con cantidad>1 NO es el monto de la operación.
+_MONTO_KEYS = ("monto", "importe", "total", "venta", "gasto", "valor", "precio")
 
 _BUCKET_ENTITY = {
     "ventas_detectadas": "sale",
@@ -155,6 +157,11 @@ async def _process_file(
         if key is not None and key in existing_keys:
             stats["dedup_skipped"] += 1
             continue
+        # La misma fila puede venir de dos archivos (ej: el mismo CSV de gastos
+        # adjuntado suelto y dentro del xlsx) — registrar la clave para que la
+        # segunda aparición también dedupee dentro del run.
+        if key is not None:
+            existing_keys.add(key)
         stats["to_otros"] += 1
         if apply:
             await session.execute(
