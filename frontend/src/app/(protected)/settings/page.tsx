@@ -14,6 +14,7 @@ import { FieldDefinitionsPanel } from "@/features/settings/components/FieldDefin
 import { HealthConfigPanel } from "@/features/settings/components/HealthConfigPanel";
 import { SchemaERDView } from "@/features/settings/components/SchemaERDView";
 import { WorkSchedulePanel } from "@/features/settings/components/WorkSchedulePanel";
+import { FiscalConditionPanel } from "@/features/settings/components/FiscalConditionPanel";
 
 const AGENT_LABELS: Record<string, string> = {
   agent_calendar: "Calendar",
@@ -494,7 +495,12 @@ export default function SettingsPage() {
 
       {activeTab === "general" && <GeneralTab />}
       {activeTab === "salud" && <HealthConfigPanel />}
-      {activeTab === "horarios" && <WorkSchedulePanel />}
+      {activeTab === "horarios" && (
+        <>
+          <WorkSchedulePanel />
+          <FiscalConditionPanel />
+        </>
+      )}
       {activeTab === "campos" && <FieldDefinitionsPanel />}
       {activeTab === "diagrama" && <SchemaERDView />}
     </PageWrapper>

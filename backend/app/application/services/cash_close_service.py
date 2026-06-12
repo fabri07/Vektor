@@ -89,6 +89,30 @@ class CashCloseService:
             return False
         return now.hour >= close_hour
 
+    async def _suggested_opening_float(self, tenant_id: uuid.UUID) -> float | None:
+        """Fondo del último cierre con arqueo — el fondo es fijo día a día."""
+        row = (
+            await self._session.execute(
+                select(CashClose.opening_float_ars)
+                .where(
+                    CashClose.tenant_id == tenant_id,
+                    CashClose.opening_float_ars.is_not(None),
+                )
+                .order_by(CashClose.close_date.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return float(row) if row is not None else None
+
+    async def _fiscal_condition(self, tenant_id: uuid.UUID) -> str | None:
+        return (
+            await self._session.execute(
+                select(BusinessProfile.fiscal_condition).where(
+                    BusinessProfile.tenant_id == tenant_id
+                )
+            )
+        ).scalar_one_or_none()
+
     async def preview(
         self, tenant_id: uuid.UUID, close_date: date
     ) -> CashClosePreviewResponse:
@@ -104,6 +128,8 @@ class CashCloseService:
             ],
             already_closed=already is not None,
             is_past_close_now=is_past_close and already is None,
+            suggested_opening_float_ars=await self._suggested_opening_float(tenant_id),
+            fiscal_condition=await self._fiscal_condition(tenant_id),
         )
 
     async def create(
@@ -120,10 +146,41 @@ class CashCloseService:
         expected_total, expected_by_method = await self._compute_expected(
             tenant_id, body.close_date
         )
-        counted_total = float(body.counted_total_ars)
-        difference = round(counted_total - expected_total, 2)
 
-        counted_by_method = body.counted_by_method or {}
+        counted_by_method = {
+            m: float(v) for m, v in (body.counted_by_method or {}).items()
+        }
+        # Arqueo estructurado: el contado de efectivo se computa server-side.
+        #   efectivo neto = físico (por denominación) − fondo inicial + vales
+        # El fondo no es ganancia del día; los vales justifican salidas de caja
+        # con comprobante casero que NO están registradas como gasto (las
+        # registradas ya se netean en el esperado).
+        is_arqueo = (
+            body.opening_float_ars is not None
+            or body.cash_denominations is not None
+            or body.voucher_expenses_ars is not None
+        )
+        if is_arqueo:
+            if body.cash_denominations is not None:
+                physical_cash = sum(
+                    float(denom) * qty for denom, qty in body.cash_denominations.items()
+                )
+            else:
+                physical_cash = counted_by_method.get(_CASH_METHOD, 0.0)
+            opening_float = float(body.opening_float_ars or 0)
+            vouchers = float(body.voucher_expenses_ars or 0)
+            counted_by_method[_CASH_METHOD] = round(
+                physical_cash - opening_float + vouchers, 2
+            )
+            counted_total = round(sum(counted_by_method.values()), 2)
+        else:
+            counted_total = float(body.counted_total_ars)
+
+        difference = round(counted_total - expected_total, 2)
+        result_code = (
+            "BALANCED" if difference == 0 else "SURPLUS" if difference > 0 else "SHORTAGE"
+        )
+
         breakdown: dict[str, dict[str, float | None]] = {}
         all_methods = set(expected_by_method) | set(counted_by_method)
         for method in all_methods:
@@ -142,8 +199,38 @@ class CashCloseService:
             breakdown_by_method=breakdown,
             notes=body.notes,
             closed_by_user_id=user_id,
+            opening_float_ars=(
+                Decimal(str(float(body.opening_float_ars)))
+                if body.opening_float_ars is not None
+                else None
+            ),
+            cash_denominations=body.cash_denominations,
+            voucher_expenses_ars=(
+                Decimal(str(float(body.voucher_expenses_ars)))
+                if body.voucher_expenses_ars is not None
+                else None
+            ),
+            result_code=result_code,
         )
         await self._repo.save(entry)
+
+        # Sobrante → otros ingresos (inflow): trazable y no contamina el
+        # esperado de efectivo de mañana.
+        surplus_registered = False
+        if body.register_surplus_as_income and difference > 0:
+            from app.application.services.cash_service import (  # noqa: PLC0415
+                save_cash_inflow,
+            )
+
+            await save_cash_inflow(
+                {
+                    "amount": difference,
+                    "notes": f"Sobrante de caja (arqueo {body.close_date})",
+                },
+                tenant_id,
+                self._session,
+            )
+            surplus_registered = True
 
         self._session.add(
             DecisionAuditLog(
@@ -155,6 +242,18 @@ class CashCloseService:
                     "counted_total_ars": counted_total,
                     "difference_ars": difference,
                     "breakdown_by_method": breakdown,
+                    "result_code": result_code,
+                    "opening_float_ars": (
+                        float(body.opening_float_ars)
+                        if body.opening_float_ars is not None
+                        else None
+                    ),
+                    "voucher_expenses_ars": (
+                        float(body.voucher_expenses_ars)
+                        if body.voucher_expenses_ars is not None
+                        else None
+                    ),
+                    "surplus_registered": surplus_registered,
                 },
                 triggered_by="ui:cash_close",
                 actor_user_id=user_id,
@@ -182,10 +281,12 @@ class CashCloseService:
             close_date=str(body.close_date),
             difference=difference,
         )
-        return self._to_response(entry)
+        return self._to_response(entry, surplus_registered=surplus_registered)
 
     @staticmethod
-    def _to_response(entry: CashClose) -> CashCloseResponse:
+    def _to_response(
+        entry: CashClose, *, surplus_registered: bool = False
+    ) -> CashCloseResponse:
         return CashCloseResponse(
             id=entry.id,
             close_date=entry.close_date,
@@ -196,6 +297,19 @@ class CashCloseService:
             notes=entry.notes,
             closed_by_user_id=entry.closed_by_user_id,
             created_at=entry.created_at,
+            opening_float_ars=(
+                float(entry.opening_float_ars)
+                if entry.opening_float_ars is not None
+                else None
+            ),
+            cash_denominations=entry.cash_denominations,
+            voucher_expenses_ars=(
+                float(entry.voucher_expenses_ars)
+                if entry.voucher_expenses_ars is not None
+                else None
+            ),
+            result_code=entry.result_code,
+            surplus_registered=surplus_registered,
         )
 
     async def list_closes(

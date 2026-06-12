@@ -72,6 +72,11 @@ class BusinessProfile(TimestampMixin, Base):
     work_open_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
     work_close_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── Condición fiscal (arqueo de caja) ─────────────────────────────────────
+    # 'registered' (monotributo/RI) | 'informal' | NULL = no configurado.
+    # Solo adapta la guía del arqueo en la UI — no cambia ningún cálculo.
+    fiscal_condition: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )

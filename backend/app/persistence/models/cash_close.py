@@ -36,6 +36,13 @@ class CashClose(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     breakdown_by_method: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, default=dict
     )
+    # Arqueo estructurado (NULL = cierre pre-arqueo, solo total contado).
+    opening_float_ars: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # {denominación: cantidad} — ej {"20000": 3, "10000": 5}
+    cash_denominations: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
+    voucher_expenses_ars: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # BALANCED | SURPLUS | SHORTAGE
+    result_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     closed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

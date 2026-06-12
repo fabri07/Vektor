@@ -64,4 +64,21 @@ export const settingsService = {
     const res = await api.patch<WorkSchedule>("/settings/work-schedule", payload);
     return res.data;
   },
+
+  async getFiscalCondition(): Promise<FiscalCondition | null> {
+    try {
+      const res = await api.get<{ fiscal_condition: FiscalCondition | null }>(
+        "/settings/fiscal-condition",
+      );
+      return res.data.fiscal_condition;
+    } catch {
+      return null;
+    }
+  },
+
+  async updateFiscalCondition(value: FiscalCondition | null): Promise<void> {
+    await api.patch("/settings/fiscal-condition", { fiscal_condition: value });
+  },
 };
+
+export type FiscalCondition = "registered" | "informal";

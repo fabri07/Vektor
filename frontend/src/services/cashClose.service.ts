@@ -11,6 +11,10 @@ export interface CashClosePreview {
   breakdown: CashMethodBreakdown[];
   already_closed: boolean;
   is_past_close_now: boolean;
+  /** Fondo de caja del último cierre con arqueo (sugerencia). */
+  suggested_opening_float_ars: number | null;
+  /** 'registered' | 'informal' | null — solo adapta la guía del modal. */
+  fiscal_condition: "registered" | "informal" | null;
 }
 
 export interface CreateCashClosePayload {
@@ -18,6 +22,11 @@ export interface CreateCashClosePayload {
   counted_total_ars: number;
   counted_by_method?: Record<string, number>;
   notes?: string | null;
+  // Arqueo estructurado (opcionales; el flujo simple sigue andando).
+  opening_float_ars?: number;
+  cash_denominations?: Record<string, number>;
+  voucher_expenses_ars?: number;
+  register_surplus_as_income?: boolean;
 }
 
 export interface CashCloseResponse {
@@ -30,6 +39,11 @@ export interface CashCloseResponse {
   notes: string | null;
   closed_by_user_id: string | null;
   created_at: string;
+  opening_float_ars: number | null;
+  cash_denominations: Record<string, number> | null;
+  voucher_expenses_ars: number | null;
+  result_code: "BALANCED" | "SURPLUS" | "SHORTAGE" | null;
+  surplus_registered: boolean;
 }
 
 export const cashCloseService = {
