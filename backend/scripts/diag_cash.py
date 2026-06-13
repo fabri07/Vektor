@@ -138,8 +138,45 @@ async def run(conn: asyncpg.Connection, email: str) -> None:
         )
         print(f"  NETO TODOS los métodos all-time          = {allnet['s']} − {allnet['e']} = "
               f"{allnet['s'] - allnet['e']}")
-        print("\n  → cash_on_hand_est actual del código = "
-              "(estimate si onboarding_recent, si no 0). Ver sección 1.")
+
+        # Ventana 30d: lo que REALMENTE usa el score de cobertura (no el all-time).
+        win = await conn.fetchrow(
+            "SELECT "
+            f"(SELECT coalesce(sum(amount),0) FROM sales_entries WHERE tenant_id=$1 "
+            f"  AND voided_at IS NULL AND payment_method IN {liq} "
+            "  AND transaction_date >= now() - interval '30 days') AS win_in, "
+            f"(SELECT coalesce(sum(amount),0) FROM expense_entries WHERE tenant_id=$1 "
+            f"  AND voided_at IS NULL AND payment_method IN {liq} "
+            "  AND transaction_date >= now() - interval '30 days') AS win_out",
+            tid,
+        )
+        win_in, win_out = win["win_in"], win["win_out"]
+        ratio = float(win_in / win_out) if win_out and win_out > 0 else None
+        print(f"\n  VENTANA 30d líquido = {win_in} (in) / {win_out} (out)  →  ratio="
+              f"{round(ratio, 2) if ratio is not None else 'N/A (sin egresos)'}"
+              "   ← esto alimenta el score de cobertura")
+
+        p(f"4) ÚLTIMO HEALTH_SCORE_SNAPSHOT  tenant={tid}")
+        snap = await conn.fetchrow(
+            "SELECT created_at, total_score, score_cash, primary_risk_code, confidence_level, "
+            "score_inputs_json->>'cash_source' AS cash_source "
+            "FROM health_score_snapshots WHERE tenant_id = $1 "
+            "ORDER BY created_at DESC LIMIT 1",
+            tid,
+        )
+        if snap is None:
+            print("  (sin snapshot persistido todavía)")
+        else:
+            print(f"  created_at={snap['created_at']}")
+            print(f"  total_score={snap['total_score']}  score_cash={snap['score_cash']}")
+            print(f"  cash_source={snap['cash_source']}  (None=snapshot viejo, pre-fix)")
+            print(f"  primary_risk_code={snap['primary_risk_code']}  "
+                  f"confidence={snap['confidence_level']}")
+            if snap["cash_source"] in (None, "desconocido"):
+                print("  → ⚠ snapshot viejo o sin recálculo fresco. Reprocesá+confirmá un "
+                      "archivo (cambia el fingerprint) o forzá refresh del BusinessState.")
+            elif snap["cash_source"] == "flujo":
+                print("  → ✅ fix aplicado: caja por cobertura de flujo.")
 
 
 if __name__ == "__main__":
