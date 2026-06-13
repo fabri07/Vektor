@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "vektor"
     POSTGRES_USER: str = "vektor"
     POSTGRES_PASSWORD: str = "vektor"
+    # Timeouts de asyncpg (segundos). Acotan conexión y cada query para que un
+    # stall de Neon falle ruidoso en vez de colgar la task hasta el SIGKILL.
+    PG_CONNECT_TIMEOUT: int = 10
+    PG_COMMAND_TIMEOUT: int = 60
 
     # ── Redis ─────────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -179,6 +183,11 @@ class Settings(BaseSettings):
     S3_BUCKET_NAME: str = "vektor-uploads"
     S3_REGION: str = "us-east-1"
     USE_LOCAL_FALLBACK: bool = False
+    # Timeouts/retries del cliente boto3 (R2). Acotados para que un cuelgue de red
+    # falle ruidoso (FAILED) en vez de colgar la task hasta el SIGKILL de Celery.
+    S3_CONNECT_TIMEOUT: int = 10
+    S3_READ_TIMEOUT: int = 30
+    S3_MAX_ATTEMPTS: int = 2
 
     # ── Email (Resend HTTP API) ────────────────────────────────────────────────
     RESEND_API_KEY: str = ""
@@ -339,12 +348,21 @@ class Settings(BaseSettings):
 
     @property
     def pg_connect_args(self) -> dict:  # type: ignore[type-arg]
-        """SSL connect_args for asyncpg when DATABASE_URL requires SSL (Neon, RDS, etc.)."""
+        """connect_args para asyncpg: SSL (Neon, RDS) + timeouts acotados.
+
+        `timeout` limita el establecimiento de conexión y `command_timeout` cada
+        query, para que un stall de Neon surja como error (y la task marque FAILED)
+        en vez de colgarse hasta el SIGKILL de Celery.
+        """
+        args: dict = {  # type: ignore[type-arg]
+            "timeout": self.PG_CONNECT_TIMEOUT,
+            "command_timeout": self.PG_COMMAND_TIMEOUT,
+        }
         if self.DATABASE_URL_RAW and "sslmode=require" in self.DATABASE_URL_RAW:
             import ssl  # noqa: PLC0415
 
-            return {"ssl": ssl.create_default_context()}
-        return {}
+            args["ssl"] = ssl.create_default_context()
+        return args
 
     @property
     def is_production(self) -> bool:

@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.config.settings import get_settings
@@ -18,11 +19,23 @@ class S3Client:
         self._settings = s
         self._bucket = s.S3_BUCKET_NAME
         self._local_root = Path(__file__).resolve().parents[2] / ".local_uploads"
+        # Timeouts acotados + cap de retries: sin esto, boto3 usa defaults de
+        # botocore (connect/read 60s, retries legacy max_attempts=5). Si R2 está
+        # lento/inalcanzable desde el worker, get_object() cuelga en el socket
+        # read, supera el time_limit=180s de Celery y el SIGKILL mata el worker
+        # ANTES de poder marcar el archivo FAILED → queda eterno en PROCESSING.
+        # Peor caso aquí ≈ (connect+read)×attempts = (10+30)×2 = 80s < soft_time_limit
+        # 150s, así un fallo real surge como s3.download_failed → FAILED visible.
         self._client = boto3.client(  # type: ignore[call-overload]
             "s3",
             region_name=s.S3_REGION,
             aws_access_key_id=s.S3_ACCESS_KEY_ID,
             aws_secret_access_key=s.S3_SECRET_ACCESS_KEY,
+            config=Config(
+                connect_timeout=s.S3_CONNECT_TIMEOUT,
+                read_timeout=s.S3_READ_TIMEOUT,
+                retries={"max_attempts": s.S3_MAX_ATTEMPTS, "mode": "standard"},
+            ),
             **({"endpoint_url": s.S3_ENDPOINT_URL} if s.S3_ENDPOINT_URL else {}),
         )
 
