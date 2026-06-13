@@ -35,7 +35,11 @@ from app.application.services.health_score_service import HealthScoreService  # 
 async def main(email: str) -> None:
     url, connect_args = async_engine_config()
     engine = create_async_engine(url, connect_args=connect_args)
-    async with AsyncSession(engine) as session:
+    # expire_on_commit=False replica la sesión de la app (persistence/db/session.py).
+    # Sin esto, compute_business_state revienta con MissingGreenlet: tras su commit
+    # interno los Product quedan expirados y acceder a p.id dispara un lazy-load IO
+    # fuera del greenlet async.
+    async with AsyncSession(engine, expire_on_commit=False) as session:
         row = await session.execute(
             text("SELECT tenant_id FROM users WHERE lower(email) = lower(:e)"),
             {"e": email},

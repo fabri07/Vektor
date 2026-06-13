@@ -78,3 +78,6 @@ graphify-out/
 
 # ── Claude Code internal ───────────────────────────────────────────────────────
 .claude/scheduled_tasks.lock
+
+# Screenshots locales (no son artefactos del proyecto)
+capturas/
