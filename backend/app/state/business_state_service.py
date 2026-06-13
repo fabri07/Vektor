@@ -39,11 +39,17 @@ from app.heuristics.kiosco import KioscoHeuristicRuleSet
 from app.heuristics.limpieza import LimpiezaHeuristicRuleSet
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessSnapshot
+from app.persistence.models.cash_close import CashClose
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
 
 logger = get_logger(__name__)
+
+# Métodos de pago "líquidos" = plata disponible hoy. Excluye 'account' (fiado/
+# cuenta corriente, no realizado), 'credit_card' (acreditación diferida ~30d) y
+# 'other' (desconocido). Definición de caja para el health score.
+_LIQUID_METHODS = ("cash", "transfer", "qr", "debit_card")
 
 # ── Heuristic registry ─────────────────────────────────────────────────────────
 
@@ -97,6 +103,12 @@ class BusinessState:
     main_concern: str | None
     # Ventas reales del período anterior (días 31-60). Decimal("0") si no hay historial.
     prev_monthly_sales_est: Decimal = Decimal("0")
+    # Fuente de la caja: "arqueo" | "onboarding" | "flujo" | "desconocido".
+    # Define cómo el health engine puntúa la dimensión caja (saldo vs cobertura).
+    cash_source: str = "desconocido"
+    # Flujos líquidos en la ventana (cash+transfer+qr+debit). Usados en modo "flujo".
+    liquid_inflow_est: Decimal = Decimal("0")
+    liquid_outflow_est: Decimal = Decimal("0")
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
@@ -135,6 +147,8 @@ def _serialize_state(state: BusinessState) -> str:
     d["monthly_fixed_expenses_est"] = str(state.monthly_fixed_expenses_est)
     d["cash_on_hand_est"] = str(state.cash_on_hand_est)
     d["prev_monthly_sales_est"] = str(state.prev_monthly_sales_est)
+    d["liquid_inflow_est"] = str(state.liquid_inflow_est)
+    d["liquid_outflow_est"] = str(state.liquid_outflow_est)
     # ruleset is not JSON-serializable; store vertical_code only (re-loaded on deserialize)
     d["ruleset"] = state.ruleset.vertical
     d["products"] = [
@@ -185,6 +199,9 @@ def _deserialize_state(raw: str) -> BusinessState:
         products=products,
         main_concern=d.get("main_concern"),
         prev_monthly_sales_est=Decimal(d.get("prev_monthly_sales_est", "0")),
+        cash_source=d.get("cash_source", "desconocido"),
+        liquid_inflow_est=Decimal(d.get("liquid_inflow_est", "0")),
+        liquid_outflow_est=Decimal(d.get("liquid_outflow_est", "0")),
     )
 
 
@@ -330,6 +347,37 @@ async def compute_business_state(
     fixed_row = fixed_sum_result.one()
     real_fixed_expenses: Decimal = Decimal(str(fixed_row[0] or 0))
 
+    # ── 3b. Flujos líquidos en la ventana (para el modo cobertura de caja) ───────
+    liquid_in_result = await session.execute(
+        select(func.sum(SaleEntry.amount)).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+            SaleEntry.transaction_date >= window_start,
+            func.date(SaleEntry.transaction_date) <= window_end,
+            SaleEntry.payment_method.in_(_LIQUID_METHODS),
+        )
+    )
+    liquid_inflow_est: Decimal = Decimal(str(liquid_in_result.scalar_one() or 0))
+    liquid_out_result = await session.execute(
+        select(func.sum(ExpenseEntry.amount)).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
+            ExpenseEntry.transaction_date >= window_start,
+            func.date(ExpenseEntry.transaction_date) <= window_end,
+            ExpenseEntry.payment_method.in_(_LIQUID_METHODS),
+        )
+    )
+    liquid_outflow_est: Decimal = Decimal(str(liquid_out_result.scalar_one() or 0))
+
+    # ── 3c. Último arqueo (CashClose) — saldo medido si existe ──────────────────
+    cash_close_result = await session.execute(
+        select(CashClose.counted_total_ars)
+        .where(CashClose.tenant_id == tenant_id)
+        .order_by(CashClose.close_date.desc())
+        .limit(1)
+    )
+    latest_counted_cash = cash_close_result.scalar_one_or_none()
+
     # total expense count (for fingerprint)
     expense_count_result = await session.execute(
         select(func.count(ExpenseEntry.id)).where(
@@ -434,11 +482,24 @@ async def compute_business_state(
         if real_fixed_expenses > 0
         else (profile.monthly_fixed_expenses_estimate_ars or Decimal("0"))
     )
-    cash_on_hand_est = (
-        profile.cash_on_hand_estimate_ars
-        if onboarding_recent and profile.cash_on_hand_estimate_ars is not None
-        else Decimal("0")
-    )
+    # Tiering de la fuente de caja (de más a menos confiable):
+    #   1. arqueo       → saldo medido (CashClose.counted_total_ars)
+    #   2. onboarding   → estimado del perfil (solo si onboarding_recent)
+    #   3. flujo        → hay movimientos líquidos pero no saldo → modo cobertura
+    #   4. desconocido  → sin nada → caja excluida del score (no-invention)
+    has_liquid_movements = liquid_inflow_est > 0 or liquid_outflow_est > 0
+    if latest_counted_cash is not None:
+        cash_on_hand_est = Decimal(str(latest_counted_cash))
+        cash_source = "arqueo"
+    elif onboarding_recent and profile.cash_on_hand_estimate_ars is not None:
+        cash_on_hand_est = profile.cash_on_hand_estimate_ars
+        cash_source = "onboarding"
+    elif has_liquid_movements:
+        cash_on_hand_est = Decimal("0")  # sin saldo; el score usa cobertura de flujo
+        cash_source = "flujo"
+    else:
+        cash_on_hand_est = Decimal("0")
+        cash_source = "desconocido"
 
     product_count = (
         real_product_count if real_product_count > 0 else (profile.product_count_estimate or 0)
@@ -451,7 +512,8 @@ async def compute_business_state(
     has_sales = monthly_sales_est > 0
     has_inventory_cost = monthly_inventory_cost_est > 0
     has_fixed_expenses = monthly_fixed_expenses_est > 0
-    has_cash_on_hand = cash_on_hand_est > 0
+    # Caja "presente" si hay cualquier fuente real (arqueo, estimado o flujo líquido).
+    has_cash_on_hand = cash_source != "desconocido"
 
     completeness = _compute_completeness(
         has_sales=has_sales,
@@ -521,6 +583,9 @@ async def compute_business_state(
         products=product_summaries,
         main_concern=main_concern,
         prev_monthly_sales_est=prev_real_sales,
+        cash_source=cash_source,
+        liquid_inflow_est=liquid_inflow_est,
+        liquid_outflow_est=liquid_outflow_est,
     )
 
     # ── 10. Update Redis cache ───────────────────────────────────────────────

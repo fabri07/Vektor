@@ -43,6 +43,11 @@ def _make_state(
     products: list[ProductSummary] | None = None,
     data_completeness_score: float = 75.0,
     confidence_level: str = "MEDIUM",
+    # Default "onboarding" = modo balance (días de runway sobre cash_on_hand_est),
+    # que es lo que asumen los tests de caja con saldo.
+    cash_source: str = "onboarding",
+    liquid_inflow_est: Decimal = Decimal("0"),
+    liquid_outflow_est: Decimal = Decimal("0"),
 ) -> BusinessState:
     return BusinessState(
         snapshot_id=uuid.uuid4(),
@@ -61,6 +66,9 @@ def _make_state(
         supplier_count=supplier_count,
         products=products or [],
         main_concern=None,
+        cash_source=cash_source,
+        liquid_inflow_est=liquid_inflow_est,
+        liquid_outflow_est=liquid_outflow_est,
     )
 
 
@@ -250,3 +258,62 @@ def test_vertical_json_loader_falls_back_to_kiosco_for_unknown_vertical() -> Non
 
     assert config.business_type == "kiosco_almacen"
     assert config.margin.healthy_max == 0.28
+
+
+# ── Modo cobertura de caja (sin saldo: cash_source="flujo") ───────────────────
+
+
+def test_cash_coverage_mode_scores_from_liquid_flow() -> None:
+    """Sin saldo pero con movimientos líquidos: el score sale de la cobertura
+    in/out, no de días de runway. ratio 2.0 → banda [1.5,3.0] → 90+."""
+    state = _make_state(
+        cash_source="flujo",
+        cash_on_hand_est=Decimal("0"),  # sin saldo
+        liquid_inflow_est=Decimal("2000000"),
+        liquid_outflow_est=Decimal("1000000"),  # ratio = 2.0
+    )
+    result = calculate_health_score(state)
+    assert result.cash_source == "flujo"
+    assert result.score_cash >= 90, f"score_cash={result.score_cash}"
+    # No dispara CASH_LOW con caja sana
+    assert result.primary_risk_code != "CASH_LOW"
+
+
+def test_cash_coverage_burning_cash_scores_low() -> None:
+    """Egresos líquidos > ingresos → quema caja → score bajo + CASH_LOW."""
+    state = _make_state(
+        cash_source="flujo",
+        cash_on_hand_est=Decimal("0"),
+        liquid_inflow_est=Decimal("500"),
+        liquid_outflow_est=Decimal("1000"),  # ratio = 0.5
+        products=[],
+        supplier_count=5,
+    )
+    result = calculate_health_score(state)
+    assert result.score_cash <= 14, f"score_cash={result.score_cash}"
+
+
+def test_unknown_cash_excluded_from_total_and_risk() -> None:
+    """cash_source='desconocido': caja NO cuenta en el total (pesos re-normalizados)
+    ni puede ser el riesgo primario. No más CASH_LOW falso."""
+    state = _make_state(
+        cash_source="desconocido",
+        cash_on_hand_est=Decimal("0"),
+        liquid_inflow_est=Decimal("0"),
+        liquid_outflow_est=Decimal("0"),
+    )
+    result = calculate_health_score(state)
+    assert result.cash_source == "desconocido"
+    assert result.primary_risk_code != "CASH_LOW"
+    # El total se computa solo con las dimensiones conocidas (sin caja=50 arrastrando).
+    # Pesos renormalizados sobre stock/supplier/margin/growth (0.20+0.10+0.20+0.20=0.70).
+    expected = round(
+        (
+            result.score_stock * 0.20
+            + result.score_supplier * 0.10
+            + result.score_margin * 0.20
+            + result.score_growth * 0.20
+        )
+        / 0.70
+    )
+    assert result.score_total == expected, f"total={result.score_total} expected={expected}"

@@ -29,6 +29,7 @@ class ComponentScoresV2(BaseModel):
     primary_risk_code: str
     confidence_level: str
     data_completeness_score: float
+    cash_source: str = "desconocido"
 
 
 def compute_scores(
@@ -48,4 +49,5 @@ def compute_scores(
         primary_risk_code=result.primary_risk_code,
         confidence_level=result.confidence_level,
         data_completeness_score=result.data_completeness_score,
+        cash_source=result.cash_source,
     )

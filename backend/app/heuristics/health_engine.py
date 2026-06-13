@@ -67,6 +67,9 @@ class HealthScoreResult:
     risk_description: str
     confidence_level: str
     data_completeness_score: float
+    # Fuente de la caja: "arqueo" (medido) | "onboarding" (estimado) |
+    # "flujo" (cobertura líquida, sin saldo) | "desconocido" (sin dato → excluida del total).
+    cash_source: str = "desconocido"
 
 
 # ── Band interpolation ────────────────────────────────────────────────────────
@@ -132,6 +135,36 @@ def _score_cash(
         return 60
     cash_days = float(cash_on_hand / daily_fixed_expenses)
     return _band_score(cash_days, _cash_bands(config))
+
+
+# ── Cash coverage score (sin saldo: modo flujo) ────────────────────────────────
+# Cuando NO hay un saldo medido (arqueo) ni estimado, no se pueden calcular días
+# de runway (runway = saldo ÷ gasto, y no hay saldo). En su lugar puntuamos la
+# COBERTURA de flujo líquido: ¿los ingresos líquidos cubren los egresos líquidos
+# en la ventana? Es honesto — no inventa un saldo — y sí es calculable de flujos.
+# Líquido = cash + transfer + qr + debit (excluye fiado/cuenta corriente y
+# crédito de acreditación diferida). Ver business_state_service._LIQUID_METHODS.
+_COVERAGE_BANDS: list[_Band] = [
+    # (ratio_low, ratio_high, score_low, score_high)
+    (0.0, 0.7, 0, 14),  # quema caja fuerte (gasta mucho más de lo que entra)
+    (0.7, 0.9, 15, 39),  # quema caja
+    (0.9, 1.1, 40, 69),  # apenas cubre / breakeven
+    (1.1, 1.5, 70, 89),  # genera caja sana
+    (1.5, 3.0, 90, 100),  # fuerte generación de caja
+]
+
+
+def _score_cash_coverage(liquid_inflow: Decimal, liquid_outflow: Decimal) -> int:
+    """
+    ratio = ingresos_líquidos / egresos_líquidos en la ventana.
+    Si no hay egresos líquidos no se puede calcular el ratio: devolvemos un valor
+    sano-conservador cuando hay ingresos (no excelente, falta evidencia de egreso),
+    o 50 neutro si tampoco hay ingresos.
+    """
+    if liquid_outflow <= 0:
+        return 75 if liquid_inflow > 0 else 50
+    ratio = float(liquid_inflow / liquid_outflow)
+    return _band_score(ratio, _COVERAGE_BANDS)
 
 
 # ── Margin score ──────────────────────────────────────────────────────────────
@@ -265,13 +298,13 @@ def _primary_risk(scores: dict[str, int]) -> str:
     """
     Return the dimension name with the lowest score.
     Ties broken by _DIMENSION_PRIORITY order (cash > margin > stock > supplier).
+    Dimensiones ausentes (ej. caja desconocida) no se consideran como riesgo.
     """
     min_score = min(scores.values())
     for dim in _DIMENSION_PRIORITY:
-        if scores[dim] == min_score:
+        if scores.get(dim) == min_score:
             return dim
-    # unreachable, but satisfies type checker
-    return _DIMENSION_PRIORITY[0]
+    return next(iter(scores))
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -292,11 +325,24 @@ def calculate_health_score(
     if benchmark is None:
         benchmark = config.margin
 
-    s_cash = _score_cash(
-        state.cash_on_hand_est,
-        state.monthly_fixed_expenses_est,
-        config,
-    )
+    # ── Caja: 3 modos según la fuente del dato (ver business_state_service) ──────
+    #   arqueo / onboarding → días de runway (hay saldo)
+    #   flujo               → cobertura líquida (no hay saldo, sí movimientos)
+    #   desconocido         → sin dato: caja excluida del total y del riesgo
+    cash_source = getattr(state, "cash_source", "desconocido")
+    if cash_source == "flujo":
+        s_cash = _score_cash_coverage(
+            getattr(state, "liquid_inflow_est", Decimal("0")),
+            getattr(state, "liquid_outflow_est", Decimal("0")),
+        )
+        cash_known = True
+    elif cash_source in ("arqueo", "onboarding"):
+        s_cash = _score_cash(state.cash_on_hand_est, state.monthly_fixed_expenses_est, config)
+        cash_known = True
+    else:  # desconocido — placeholder neutro, NO se muestra (gated por cash_source)
+        s_cash = 50
+        cash_known = False
+
     s_margin = _score_margin(state, benchmark)
     s_stock = _score_stock(state.products, config)
     s_supplier = _score_supplier(state.supplier_count, config)
@@ -310,16 +356,20 @@ def calculate_health_score(
         "growth": s_growth,
     }
 
-    # Fórmula v2 (Stage 5a): cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20
-    total = round(
-        s_cash * 0.30 + s_stock * 0.20 + s_supplier * 0.10 + s_margin * 0.20 + s_growth * 0.20
-    )
+    # Fórmula v2 (Stage 5a): cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20.
+    # Si la caja es desconocida se excluye y se re-normalizan los pesos restantes
+    # (no-invention: no metemos un 0/50 falso que arrastre el total).
+    weights = {"cash": 0.30, "stock": 0.20, "supplier": 0.10, "margin": 0.20, "growth": 0.20}
+    included = [d for d in scores if d != "cash" or cash_known]
+    total_weight = sum(weights[d] for d in included)
+    total = round(sum(scores[d] * weights[d] for d in included) / total_weight)
     if state.data_completeness_score < 40:
         total = min(total, 60)
     elif state.data_completeness_score < 60:
         total = min(total, 75)
 
-    weakest_dim = _primary_risk(scores)
+    risk_scores = {d: scores[d] for d in included}
+    weakest_dim = _primary_risk(risk_scores)
     risk_code = _DIMENSION_RISK_CODE[weakest_dim]
 
     return HealthScoreResult(
@@ -333,4 +383,5 @@ def calculate_health_score(
         risk_description=_RISK_DESCRIPTIONS[risk_code],
         confidence_level=state.confidence_level,
         data_completeness_score=state.data_completeness_score,
+        cash_source=cash_source,
     )
