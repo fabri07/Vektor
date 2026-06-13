@@ -205,6 +205,7 @@ async def get_latest_score(
         level=snapshot.level,
         created_at=snapshot.created_at,
         is_demo_data=tenant.is_demo,
+        cash_source=(snapshot.score_inputs_json or {}).get("cash_source"),
     )
 
 
@@ -273,6 +274,7 @@ async def get_score_history_v2(
             data_completeness_score=float(s.data_completeness_score or 0),
             level=s.level,
             created_at=s.created_at,
+            cash_source=(s.score_inputs_json or {}).get("cash_source"),
         )
         for s in snapshots
         if s.score_cash is not None  # only F1-01 snapshots

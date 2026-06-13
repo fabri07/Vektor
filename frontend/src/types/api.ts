@@ -128,6 +128,10 @@ export interface HealthScoreV2Response {
   data_completeness_score: number;
   level: string;
   created_at: string;
+  is_demo_data?: boolean;
+  // Fuente de la caja: "arqueo" | "onboarding" | "flujo" | "desconocido" | null.
+  // "flujo" → mostrar recordatorio de arqueo. null = snapshot viejo.
+  cash_source?: "arqueo" | "onboarding" | "flujo" | "desconocido" | null;
 }
 
 export interface CalculatingResponse {

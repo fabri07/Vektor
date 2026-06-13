@@ -69,6 +69,9 @@ class HealthScoreV2Response(BaseModel):
     level: str
     created_at: datetime
     is_demo_data: bool = False
+    # Fuente de la caja: "arqueo" | "onboarding" | "flujo" | "desconocido".
+    # "flujo" → el frontend muestra el recordatorio de arqueo. None en snapshots viejos.
+    cash_source: str | None = None
 
 
 class CalculatingResponse(BaseModel):
