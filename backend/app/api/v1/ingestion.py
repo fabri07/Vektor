@@ -11,7 +11,7 @@ import hashlib
 import time
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -510,7 +510,25 @@ async def reprocess_file(
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
-    if record.processing_status not in (PROCESSING_STATUS_PENDING, PROCESSING_STATUS_FAILED):
+    # PROCESSING "trabado": si el worker murió (SIGKILL por time_limit, sin escribir
+    # FAILED), el archivo queda eterno en PROCESSING. Lo consideramos reprocesable
+    # cuando lleva más que el hard time_limit de Celery (180s) + margen → sin riesgo
+    # de pisar un job realmente en vuelo. Así el usuario re-lee el archivo (ya está
+    # en R2) sin re-subirlo.
+    stale_after = timedelta(seconds=300)
+    updated = record.updated_at
+    if updated is not None and updated.tzinfo is None:
+        updated = updated.replace(tzinfo=UTC)
+    is_stale_processing = (
+        record.processing_status == PROCESSING_STATUS_PROCESSING
+        and updated is not None
+        and updated < datetime.now(UTC) - stale_after
+    )
+    reprocessable = record.processing_status in (
+        PROCESSING_STATUS_PENDING,
+        PROCESSING_STATUS_FAILED,
+    )
+    if not (reprocessable or is_stale_processing):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"El archivo no puede reprocesarse (estado actual: {record.processing_status}).",

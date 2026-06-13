@@ -156,9 +156,13 @@ export function FileListSection() {
                             Confirmar
                           </button>
                         )}
-                        {/* Reintentar: PENDING o FAILED */}
+                        {/* Reintentar: PENDING, FAILED o PROCESSING trabado (>5 min:
+                            el worker murió sin escribir FAILED). El archivo ya está
+                            en R2 → se re-lee sin re-subir. */}
                         {(file.processing_status === "PENDING" ||
-                          file.processing_status === "FAILED") && (
+                          file.processing_status === "FAILED" ||
+                          (file.processing_status === "PROCESSING" &&
+                            Date.now() - new Date(file.created_at).getTime() > 5 * 60 * 1000)) && (
                           <button
                             onClick={() => reprocessMutation.mutate(file.id)}
                             disabled={reprocessMutation.isPending}
