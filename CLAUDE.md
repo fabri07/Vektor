@@ -50,6 +50,9 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - **Categorías de gasto canónicas + COGS/OPEX:** catálogo de 13 categorías en `app/domain/expense_categories.py`; `infer_expense_type()` discrimina `COGS` (product_id vinculado o categoría `INVENTORY`) vs `OPEX` (migración `20260710_0001`). Gastos de mercadería del vertical → INVENTORY/COGS.
 - **Sección "Otros"** (`unclassified_records`, migración `20260712_0001`): filas ambiguas de imports ya NO caen a ventas por default — van a `unclassified_records` con `suggested_entity`. Router `/others`: listar, `GET /count`, clasificar, importación masiva de sugeridos. Frontend `/otros` con badge de sugerencia.
 - **Diagnóstico MCP Google** (FASE 5): `GET /integrations/google/diagnostics` (SUPERADMIN) vía `mcp_diagnostics_service.py` — chequea flag/URL/secret/conectividad/auth. Runbook: `docs/runbooks/google_mcp_oauth.md`.
+- **Régimen fiscal** (`business_profiles.fiscal_condition`): 3 valores canónicos `monotributo | responsable_inscripto | informal` (+ NULL = no configurado). **Solo informativo** (mejora heurísticas + guía del arqueo), nunca bloquea. Normalizador tolerante a legacy en `app/domain/fiscal_condition.py` (`'registered'`→`'monotributo'`); `GET/PATCH /settings/fiscal-condition` y `cash_close_service` normalizan al leer. Opcional en onboarding. Frontend: `lib/fiscalCondition.ts` (+ `FISCAL_PRIVACY_NOTE`, copy Ley 25.326/AAIP), `FiscalConditionPanel`. Migración `20260716_0001` (obligatoria; ver tabla).
+- **Compra de mercadería = COGS + producto + stock** (`ingestion_import_service.py`): un libro de compras ruteado a gastos crea el `Product` además del gasto COGS+caja, vía el helper compartido `build_incomplete_product()` (`requires_completion=True`, `sale_price_ars=0`). Gate estricto (`expense_type=="COGS"` + nombre + cantidad>0) para NO crear productos basura desde OPEX. `_ensure_product_for_purchase()` delega en el helper. El clasificador (`file_parsing.infer_spreadsheet_type`) ya distingue libro de compras (total+forma_pago+proveedor+fecha) de catálogo de productos.
+- **Reclasificar gasto vía chat** (`ActionType.RECLASSIFY_EXPENSE`, MEDIUM): intent `reclasificar_gasto` → `agent_expense`. El handler asesora **reventa** (COGS/INVENTORY → producto vendible) vs **insumo** (OPEX/SUPPLIES) vs otra categoría según el vertical, y al confirmar reclasifica `category`+`expense_type` (y crea producto vendible si reventa) vía `pending_action_service._execute_reclassify_expense` + `ExpenseRepository.reclassify`. `intent_rescue.OBJECTS_CLASIFICACION` evita que una consulta de categorización caiga en `out_of_scope`.
 
 ---
 
@@ -230,7 +233,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca float
 - `LLMCall`: `{ source, model, input_tokens, output_tokens }`. `UsageSummary`: `{ calls: list[LLMCall] }` + `total_input/output/total`.
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado de 27 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado de 28 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
@@ -245,6 +248,8 @@ UPLOAD_TO_DRIVE        CREATE_GOOGLE_DOC       APPEND_TO_SHEET
 ANALYZE_FILE           ANALYZE_PRICES          ANALYZE_STOCK_DATA
 ANALYZE_SALES_DATA     ANALYZE_EXPENSE_DATA    ANALYZE_SUPPLIER_DATA
 SIMULATE_SCENARIO
+# Reclasificación de gastos vía chat (MEDIUM, requiere aprobación)
+RECLASSIFY_EXPENSE
 ```
 
 Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
@@ -266,7 +271,7 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **HeuristicEngine** (`shared/heuristic_engine.py`): `get(business_type)` síncrono; `get_async(...)` aplica `BusinessHeuristicOverride` de la DB. `to_prompt_fragment()` genera valores numéricos para system prompts — nunca texto narrativo. Fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo:** `nlp_preprocessor` (Sprint 18, `agents/shared/nlp_preprocessor.py`) normaliza lunfardo/rioplatense (merca, birra, remarcar, guita, etc.) antes del LLM; spacy (`es_core_news_sm`) opcional con fallback a regex puro; las entidades NLP se inyectan como anotación pre-análisis en el prompt del CEO. Luego `classify_intent()` → LLM (max_tokens=800) → **28 intents** del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido`). `INTENT_CATALOG` es `dict[str, {desc, triggers}]` y el CEO construye el system prompt dinámicamente desde el catálogo. **Sprint 19 (consolidación):** las 8 familias analíticas son UN intent cada una; el sub-análisis va en la entidad `analysis_type` (best-effort). `build_plan()` traduce `(intent, analysis_type)` → el `_intent` legacy que el handler espera vía `_resolve_legacy_discriminator()` (default por familia si falta `analysis_type`); el mapeo vive en `_ANALYTIC_FAMILIES`. `_LEGACY_INTENT_ALIASES` resuelve keys granulares en vuelo (red de seguridad). Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
+**AgentCEO — flujo:** `nlp_preprocessor` (Sprint 18, `agents/shared/nlp_preprocessor.py`) normaliza lunfardo/rioplatense (merca, birra, remarcar, guita, etc.) antes del LLM; spacy (`es_core_news_sm`) opcional con fallback a regex puro; las entidades NLP se inyectan como anotación pre-análisis en el prompt del CEO. Luego `classify_intent()` → LLM (max_tokens=800) → **29 intents** del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido` y `reclasificar_gasto` → `agent_expense` → `RECLASSIFY_EXPENSE`). `INTENT_CATALOG` es `dict[str, {desc, triggers}]` y el CEO construye el system prompt dinámicamente desde el catálogo. **Sprint 19 (consolidación):** las 8 familias analíticas son UN intent cada una; el sub-análisis va en la entidad `analysis_type` (best-effort). `build_plan()` traduce `(intent, analysis_type)` → el `_intent` legacy que el handler espera vía `_resolve_legacy_discriminator()` (default por familia si falta `analysis_type`); el mapeo vive en `_ANALYTIC_FAMILIES`. `_LEGACY_INTENT_ALIASES` resuelve keys granulares en vuelo (red de seguridad). Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
 
 **Rescate de intent (Sprint 17):** cuando el CEO devuelve `intent_desconocido`, ChatOrchestrator NO corta inmediatamente. Aplica dos capas determinísticas (sin LLM) en `_rescue_unknown_intent()`: (1) `DataIntentExtractor` sobre los adjuntos parseados → si hay datos importables, mapea a `analizar_precios`(`analysis_type=lista`)/`analizar_archivo`; (2) `intent_rescue.rescue_intent()` (en `shared/intent_rescue.py`, devuelve `tuple[intent, entities]` con `analysis_type`) — scoring semántico de verbo ambiguo + objeto de negocio + tipo de adjunto, con normalización de voseo/tildes y fuzzy matching (`rapidfuzz`, umbral 85) para typos. Solo si ambas fallan corta: `out_of_scope` (off-topic claro → mensaje de scope) o `pedir_aclaracion_negocio`/`pedir_aclaracion_sobre_archivo` (suena a negocio pero ambiguo → pide detalle). Constantes `_NO_AGENT_INTENTS`/`_NO_AGENT_MESSAGES` en `chat_orchestrator.py`. Para los 7 ActionTypes analíticos (+`ANSWER_HELP_REQUEST`), `build_plan()` inyecta el sub-análisis en `entities["_intent"]` (resuelto desde `analysis_type`) para que el handler distinga sub-análisis dentro de un mismo ActionType.
 
@@ -483,6 +488,8 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `20260705_0002` | `requires_completion` en `products` (productos creados incompletos desde imports) |
 | `20260710_0001` | `expense_type` COGS/OPEX en `expense_entries` + catálogo canónico de categorías |
 | `20260712_0001` | `unclassified_records` (ORM: `UnclassifiedRecord`) — sección "Otros" |
+| `20260715_0001` | arqueo de caja completo en `cash_closes` (`opening_float_ars`, `cash_denominations`, `voucher_expenses_ars`, `result_code`) + `business_profiles.fiscal_condition` (`String(12)`, CHECK legacy) |
+| `20260716_0001` | reconcilia `fiscal_condition` a 3 valores canónicos (`monotributo`/`responsable_inscripto`/`informal`): ensancha a `Text`, normaliza legacy `'registered'`→`'monotributo'`, reemplaza el CHECK. **Obligatoria** — el CHECK/`String(12)` de `20260715_0001` rompía el `PATCH /settings/fiscal-condition` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
 
@@ -496,7 +503,7 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 - Scores recalculan solo ante cambios de datos (Celery async).
 - Toda decisión → `decision_audit_log` (insert-only).
 - Fail-closed en writes sensibles.
-- `ActionType` cerrado (27 valores) — cambiar requiere actualizar `RiskEngine` y tests.
+- `ActionType` cerrado (28 valores) — cambiar requiere actualizar `RiskEngine` y tests.
 - System prompts: heurísticas como valores numéricos, nunca texto narrativo.
 - Todo input de usuario a LLM pasa por `wrap_user_input()`.
 - Toda aritmética financiera va por `DeterministicFinance` — LLMs nunca calculan montos.
