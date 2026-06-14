@@ -9,6 +9,7 @@ Estrategia:
 
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from redis.asyncio import Redis
@@ -20,6 +21,10 @@ from app.persistence.models.conversation_context import AgentConversationContext
 REDIS_TTL = 86400  # 24 horas
 MAX_TOKENS_BEFORE_SUMMARIZE = 8000
 MAX_TURNS = 10
+
+# Vida útil del puntero a la última acción pendiente confirmable por lenguaje
+# natural. Pasado este lapso, "sí" ya no confirma (la acción se considera vieja).
+PENDING_CONFIRM_TTL_SECONDS = 600  # 10 minutos
 
 logger = get_logger(__name__)
 
@@ -125,6 +130,80 @@ class ConversationService:
         await self.persist(conversation_id, tenant_id, user_id)
         await self.db.commit()
         return ctx
+
+    # ── Puntero a la última acción pendiente (confirmación por lenguaje natural) ──
+
+    async def record_pending_action(
+        self,
+        conversation_id: str,
+        *,
+        pending_action_id: str | None,
+        approval_group_id: str | None,
+        status: str,
+    ) -> None:
+        """Guarda en el contexto el puntero a la última acción/grupo pendiente.
+
+        Se invoca cuando una respuesta sale ``requires_approval`` para que el
+        router de confirmación por lenguaje natural pueda ejecutar/cancelar en el
+        turno siguiente. Solo Redis (puntero volátil, TTL-bound). Fail-silencioso.
+        """
+        try:
+            ctx = await self.get_context(conversation_id)
+            ctx["pending"] = {
+                "pending_action_id": pending_action_id,
+                "approval_group_id": approval_group_id,
+                "status": status,
+                "ts": datetime.now(UTC).isoformat(),
+            }
+            await self.redis.setex(f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx))
+        except Exception as exc:
+            logger.warning(
+                "conversation_record_pending_failed",
+                conversation_id=conversation_id,
+                error=str(exc),
+            )
+
+    async def get_pending_action(self, conversation_id: str) -> dict[str, Any] | None:
+        """Devuelve el puntero a la acción pendiente viva (no expirado), o None.
+
+        Considera expirado todo puntero más viejo que ``PENDING_CONFIRM_TTL_SECONDS``.
+        """
+        try:
+            ctx = await self.get_context(conversation_id)
+        except Exception as exc:
+            logger.warning(
+                "conversation_get_pending_failed",
+                conversation_id=conversation_id,
+                error=str(exc),
+            )
+            return None
+        pending = ctx.get("pending")
+        if not isinstance(pending, dict):
+            return None
+        ts_raw = pending.get("ts")
+        if not ts_raw:
+            return None
+        try:
+            ts = datetime.fromisoformat(str(ts_raw))
+        except ValueError:
+            return None
+        if (datetime.now(UTC) - ts).total_seconds() > PENDING_CONFIRM_TTL_SECONDS:
+            return None
+        return pending
+
+    async def clear_pending_action(self, conversation_id: str) -> None:
+        """Limpia el puntero a la acción pendiente (tras confirmar/cancelar)."""
+        try:
+            ctx = await self.get_context(conversation_id)
+            if "pending" in ctx:
+                ctx.pop("pending", None)
+                await self.redis.setex(f"conv:{conversation_id}", REDIS_TTL, json.dumps(ctx))
+        except Exception as exc:
+            logger.warning(
+                "conversation_clear_pending_failed",
+                conversation_id=conversation_id,
+                error=str(exc),
+            )
 
     async def persist(
         self,

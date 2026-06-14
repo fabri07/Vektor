@@ -62,6 +62,101 @@ _FINGERPRINT_ACTION_TYPES = {
     str(ActionType.REGISTER_PURCHASE),
 }
 
+# ── Confirmación por lenguaje natural (router NL antes del CEO) ────────────────
+# Roles habilitados a confirmar acciones mutantes por texto (mismo que /agent/confirm).
+_CONFIRM_ROLES: frozenset[str] = frozenset({"OWNER", "ADMIN"})
+
+# Afirmaciones puras: "sí", "dale", "ok", "confirmo", "ejecutá", "hacelo".
+_AFFIRMATIONS: frozenset[str] = frozenset(
+    {
+        "si",
+        "sii",
+        "sip",
+        "dale",
+        "ok",
+        "oka",
+        "okay",
+        "okey",
+        "confirmo",
+        "confirmar",
+        "confirmado",
+        "ejecuta",
+        "ejecutalo",
+        "hacelo",
+        "hacela",
+        "adelante",
+        "listo",
+        "perfecto",
+        "de una",
+        "obvio",
+        "claro",
+        "correcto",
+        "exacto",
+        "va",
+        "vale",
+        "aprobado",
+        "apruebo",
+        "si dale",
+        "si por favor",
+        "que si",
+    }
+)
+# Negaciones puras: "no", "cancelá", "rechazo", "mejor no".
+_NEGATIONS: frozenset[str] = frozenset(
+    {
+        "no",
+        "nop",
+        "nope",
+        "cancela",
+        "cancelar",
+        "cancelalo",
+        "cancelala",
+        "rechazo",
+        "rechazar",
+        "rechazado",
+        "mejor no",
+        "no gracias",
+        "nada",
+        "olvidalo",
+        "dejalo",
+        "negativo",
+        "para nada",
+        "no por ahora",
+    }
+)
+
+
+def _normalize_bool_es(message: str) -> str:
+    """Normaliza el mensaje para comparar contra afirmaciones/negaciones.
+
+    lowercase → quitar tildes → quitar signos → colapsar espacios.
+    """
+    import re as _re  # noqa: PLC0415
+    import unicodedata as _ud  # noqa: PLC0415
+
+    text = message.lower().strip()
+    text = _ud.normalize("NFD", text)
+    text = "".join(c for c in text if _ud.category(c) != "Mn")
+    text = _re.sub(r"[^\w\s]", " ", text)
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_bool_es(message: str) -> bool | None:
+    """Devuelve True (afirmación pura), False (negación pura), o None (ninguna).
+
+    Solo matchea cuando el mensaje COMPLETO es una afirmación/negación, para no
+    confundir "no quiero registrar nada nuevo, mejor mostrame X" con un rechazo.
+    """
+    norm = _normalize_bool_es(message)
+    if not norm:
+        return None
+    if norm in _AFFIRMATIONS:
+        return True
+    if norm in _NEGATIONS:
+        return False
+    return None
+
+
 _ANTHROPIC_RATE_LIMIT_MESSAGE = (
     "El servicio de IA alcanzó temporalmente su límite. Intenta de nuevo en unos segundos."
 )
@@ -518,6 +613,188 @@ async def _process_agent_action(
     return None
 
 
+async def _try_nl_confirmation(
+    *,
+    body: ChatRequest,
+    current_user: User,
+    db: AsyncSession,
+    redis: Redis,
+) -> AgentResponse | None:
+    """Router de confirmación por lenguaje natural (antes del CEO).
+
+    Si el último turno del asistente dejó una acción/grupo pendiente vivo (no
+    expirado) y el mensaje del usuario es una afirmación/negación pura, ejecuta
+    o cancela sin gastar tokens de LLM. Devuelve None si no aplica (sigue el flujo
+    normal por el orquestador).
+
+    RBAC: solo OWNER/ADMIN pueden EJECUTAR mutantes por texto; VIEWER no confirma.
+    """
+    if not body.conversation_id:
+        return None
+
+    decision = _parse_bool_es(body.message)
+    if decision is None:
+        return None
+
+    from app.application.services.conversation_service import (  # noqa: PLC0415
+        ConversationService,
+    )
+
+    conv_svc = ConversationService(redis, db)
+    pending = await conv_svc.get_pending_action(body.conversation_id)
+    if pending is None or pending.get("status") != "requires_approval":
+        return None
+
+    pending_action_id = pending.get("pending_action_id")
+    approval_group_id = pending.get("approval_group_id")
+    if not pending_action_id and not approval_group_id:
+        return None
+
+    tenant_id = current_user.tenant_id
+
+    def _resp(
+        status_value: str,
+        message: str,
+        *,
+        is_error: bool = False,
+        action_type: str | None = None,
+        execution_status: str | None = None,
+    ) -> AgentResponse:
+        result: dict[str, Any] = {
+            "summary": message,
+            "nl_confirmation": status_value,
+            "conversation_id": body.conversation_id,
+        }
+        # action_type permite que el frontend invalide las queries afectadas
+        # (gastos/productos/stock/score) tras confirmar por texto.
+        if action_type:
+            result["action_type"] = action_type
+        if execution_status:
+            result["execution_status"] = execution_status
+        return AgentResponse(
+            request_id=str(uuid.uuid4()),
+            agent_name="agent_ceo",
+            status="error" if is_error else "success",
+            risk_level="MEDIUM",
+            confidence="HIGH",
+            requires_approval=False,
+            message=message,
+            result=result,
+        )
+
+    # ── Negación: cancelar (sin restricción de rol — cancelar no muta datos) ──
+    if decision is False:
+        try:
+            if approval_group_id:
+                await _cancel_action_group_shared(
+                    group_id=str(approval_group_id), tenant_id=tenant_id, db=db
+                )
+            else:
+                await _cancel_pending_action_shared(
+                    pending_id=uuid.UUID(str(pending_action_id)), tenant_id=tenant_id, db=db
+                )
+        except PendingActionNotFoundError:
+            await conv_svc.clear_pending_action(body.conversation_id)
+            return None
+        except (PendingActionConflictError, ValueError):
+            await conv_svc.clear_pending_action(body.conversation_id)
+            return None
+        await conv_svc.clear_pending_action(body.conversation_id)
+        return _resp("cancelled", "Listo, cancelé esa acción. ¿Necesitás algo más?")
+
+    # ── Afirmación: ejecutar — exige rol OWNER/ADMIN ──────────────────────────
+    if current_user.role_code not in _CONFIRM_ROLES:
+        return _resp(
+            "forbidden",
+            "Tu rol no tiene permiso para confirmar esta acción. "
+            "Pedile a un OWNER o ADMIN que la apruebe.",
+            is_error=True,
+        )
+
+    try:
+        if approval_group_id:
+            confirm_result = await _confirm_action_group_shared(
+                group_id=str(approval_group_id), tenant_id=tenant_id, db=db, redis=redis
+            )
+        else:
+            confirm_result = await _confirm_pending_action(
+                pending_id=uuid.UUID(str(pending_action_id)),
+                tenant_id=tenant_id,
+                db=db,
+                redis=redis,
+            )
+    except PendingActionNotFoundError:
+        await conv_svc.clear_pending_action(body.conversation_id)
+        return None
+    except PendingActionExpiredError:
+        await conv_svc.clear_pending_action(body.conversation_id)
+        return _resp(
+            "expired",
+            "Esa acción ya venció. Volvé a enviar el mensaje original y la procesamos de nuevo.",
+            is_error=True,
+        )
+    except ValueError:
+        await conv_svc.clear_pending_action(body.conversation_id)
+        return None
+
+    await conv_svc.clear_pending_action(body.conversation_id)
+
+    # Propagar el resultado REAL de la ejecución (no asumir éxito). Para grupos,
+    # tomar el estado del grupo y el action_type representativo del primer task.
+    exec_status = confirm_result.get("group_execution_status") or confirm_result.get(
+        "execution_status"
+    )
+    tasks = confirm_result.get("tasks") or []
+    action_type = confirm_result.get("action_type") or (
+        tasks[0].get("action_type") if tasks else None
+    )
+    if exec_status == "REQUIRES_RECONNECT":
+        return _resp(
+            "requires_reconnect",
+            "La acción necesita reconectar Google. Andá a la sección Aplicaciones y reintentá.",
+            is_error=True,
+            action_type=action_type,
+            execution_status=exec_status,
+        )
+    if exec_status in ("FAILED", "PARTIAL_FAILED"):
+        return _resp(
+            "failed",
+            "No pude completar esa acción. Revisá los datos e intentá de nuevo.",
+            is_error=True,
+            action_type=action_type,
+            execution_status=exec_status,
+        )
+    return _resp(
+        "confirmed",
+        "Hecho, ejecuté esa acción.",
+        action_type=action_type,
+        execution_status=exec_status,
+    )
+
+
+async def _maybe_record_pending_pointer(
+    *,
+    agent_response: AgentResponse,
+    conversation_id: str | None,
+    db: AsyncSession,
+    redis: Redis,
+) -> None:
+    """Si la respuesta sale requires_approval, persiste el puntero para el router NL."""
+    if not conversation_id or agent_response.status != "requires_approval":
+        return
+    from app.application.services.conversation_service import (  # noqa: PLC0415
+        ConversationService,
+    )
+
+    conv_svc = ConversationService(redis, db)
+    await conv_svc.record_pending_action(
+        conversation_id,
+        pending_action_id=agent_response.pending_action_id,
+        approval_group_id=agent_response.approval_group_id,
+        status="requires_approval",
+    )
+
+
 # ── GET /usage ────────────────────────────────────────────────────────────────
 
 
@@ -619,6 +896,15 @@ async def chat(
             tenant_id=str(tenant_id),
         )
 
+    # ── Router NL de confirmación: si hay una acción pendiente viva y el mensaje
+    # es afirmación/negación pura, ejecutar/cancelar sin pasar por el CEO. ───────
+    nl_resp = await _try_nl_confirmation(
+        body=body, current_user=current_user, db=db, redis=redis
+    )
+    if nl_resp is not None:
+        _attach_conversation_id(nl_resp, body.conversation_id)
+        return nl_resp
+
     # ── ChatOrchestrator: CEO + sub-agente + LLM conversacional ─────────────
     request = AgentRequest(
         user_id=str(user_id),
@@ -670,6 +956,12 @@ async def chat(
         agent_response=agent_response,
         tenant_id=tenant_id,
         user_id=user_id,
+        db=db,
+        redis=redis,
+    )
+    await _maybe_record_pending_pointer(
+        agent_response=agent_response,
+        conversation_id=body.conversation_id,
         db=db,
         redis=redis,
     )
@@ -775,6 +1067,26 @@ async def chat_stream(
             tenant_id=str(tenant_id),
         )
 
+    # ── Router NL de confirmación (mismo que /chat) — emite la respuesta como SSE.
+    nl_resp = await _try_nl_confirmation(
+        body=body, current_user=current_user, db=db, redis=redis
+    )
+    if nl_resp is not None:
+        _attach_conversation_id(nl_resp, body.conversation_id)
+
+        async def _nl_stream() -> AsyncGenerator[str, None]:
+            thinking_event = {"type": "thinking", "text": "Procesando tu confirmación..."}
+            yield f"data: {json_module.dumps(thinking_event, ensure_ascii=False)}\n\n"
+            response_event = {"type": "response", "data": nl_resp.model_dump()}
+            yield f"data: {json_module.dumps(response_event, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _nl_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     request_obj = AgentRequest(
         user_id=str(user_id),
         business_id=str(tenant_id),
@@ -816,6 +1128,12 @@ async def chat_stream(
                 agent_response=agent_response,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                db=db,
+                redis=redis,
+            )
+            await _maybe_record_pending_pointer(
+                agent_response=agent_response,
+                conversation_id=body.conversation_id,
                 db=db,
                 redis=redis,
             )
@@ -924,22 +1242,43 @@ async def chat_stream(
     )
 
 
-# ── POST /confirm/{pending_id} ────────────────────────────────────────────────
+# ── Confirmación/cancelación: funciones internas compartidas ──────────────────
+# Reusadas por los endpoints REST (/confirm, /cancel, /confirm/group, /cancel/group)
+# y por el router de confirmación por lenguaje natural en /chat y /chat/stream.
 
 
-@router.post("/confirm/{pending_id}", summary="Confirmar acción pendiente")
-async def confirm_action(
+class PendingActionNotFoundError(Exception):
+    """No existe una PendingAction PENDING con ese id para el tenant."""
+
+
+class PendingActionExpiredError(Exception):
+    """La PendingAction venció antes de confirmarse."""
+
+
+class PendingActionConflictError(Exception):
+    """La PendingAction ya fue procesada (no está PENDING)."""
+
+    def __init__(self, status_value: str) -> None:
+        self.status_value = status_value
+        super().__init__(status_value)
+
+
+async def _confirm_pending_action(
+    *,
     pending_id: uuid.UUID,
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
-    db: AsyncSession = Depends(get_db_session),
-    redis: Redis = Depends(get_redis),
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    redis: Redis,
 ) -> dict[str, Any]:
-    # SELECT FOR UPDATE — previene race conditions
+    """Aprueba y ejecuta UNA PendingAction. Lógica compartida (sin HTTP).
+
+    Levanta PendingActionNotFoundError / PendingActionExpiredError; commitea el estado.
+    """
     stmt = (
         select(PendingAction)
         .where(
             PendingAction.id == pending_id,
-            PendingAction.tenant_id == current_user.tenant_id,
+            PendingAction.tenant_id == tenant_id,
             PendingAction.status == "PENDING",
         )
         .with_for_update()
@@ -948,26 +1287,17 @@ async def confirm_action(
     action = result.scalar_one_or_none()
 
     if action is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Acción no encontrada o ya procesada.",
-        )
+        raise PendingActionNotFoundError
 
     if action.expires_at.replace(tzinfo=UTC) < datetime.now(UTC):
         action.status = "EXPIRED"
         await db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="Esta acción venció. Volvé a enviar el mensaje.",
-        )
+        raise PendingActionExpiredError
 
-    # ── Aprobación ────────────────────────────────────────────────────────────
     action.approved_at = datetime.now(UTC)
     action.status = "APPROVED"
 
     if action.is_external:
-        # Acciones externas: lifecycle IN_PROGRESS → SUCCEEDED|FAILED|REQUIRES_RECONNECT.
-        # Nunca se re-lanza la excepción — el fallo se persiste y el endpoint responde con estado.
         action.execution_status = "IN_PROGRESS"
         await db.flush()  # visible antes de la llamada externa
         try:
@@ -982,14 +1312,14 @@ async def confirm_action(
             action.failure_code = None
             action.failure_message = str(exc)[:500]
     else:
-        # Deduplicación por fingerprint SHA-256 antes de ejecutar acciones financieras.
         duplicate = await _execute_local_action(
             action=action,
-            tenant_id=current_user.tenant_id,
+            tenant_id=tenant_id,
             db=db,
             redis=redis,
         )
         if duplicate is not None:
+            await db.commit()
             return duplicate
 
     action.executed_at = datetime.now(UTC)
@@ -1000,7 +1330,7 @@ async def confirm_action(
         action_id=str(pending_id),
         action_type=action.action_type,
         execution_status=action.execution_status,
-        tenant_id=str(current_user.tenant_id),
+        tenant_id=str(tenant_id),
     )
     response: dict[str, Any] = {
         "status": "confirmed",
@@ -1013,62 +1343,44 @@ async def confirm_action(
     return response
 
 
-# ── POST /cancel/{pending_id} ─────────────────────────────────────────────────
-
-
-@router.post("/cancel/{pending_id}", summary="Cancelar acción pendiente")
-async def cancel_action(
+async def _cancel_pending_action_shared(
+    *,
     pending_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
 ) -> dict[str, Any]:
+    """Rechaza UNA PendingAction. Lógica compartida (sin HTTP)."""
     stmt = select(PendingAction).where(
         PendingAction.id == pending_id,
-        PendingAction.tenant_id == current_user.tenant_id,
+        PendingAction.tenant_id == tenant_id,
     )
     result = await db.execute(stmt)
     action = result.scalar_one_or_none()
 
     if action is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Acción no encontrada.",
-        )
+        raise PendingActionNotFoundError
 
     if action.status != "PENDING":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"La acción ya fue procesada (status={action.status}).",
-        )
+        raise PendingActionConflictError(action.status)
 
     await cancel_pending_action(action, db)
     action.status = "REJECTED"
     await db.commit()
-
     return {"status": "cancelled", "action_type": action.action_type}
 
 
-# ── POST /confirm/group/{group_id} ───────────────────────────────────────────
-
-
-@router.post("/confirm/group/{group_id}", summary="Confirmar grupo de acciones pendientes")
-async def confirm_action_group(
+async def _confirm_action_group_shared(
+    *,
     group_id: str,
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
-    db: AsyncSession = Depends(get_db_session),
-    redis: Redis = Depends(get_redis),
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    redis: Redis,
 ) -> dict[str, Any]:
-    """Aprueba todas las PendingActions del grupo y las ejecuta en orden por group_position.
-
-    Semántica abort-all: si alguna task falla, las posteriores se marcan FAILED con
-    failure_message="upstream_task_failed" y NO se ejecutan. Cada task commitea su
-    propia transacción para no perder progreso ante un fallo intermedio.
-    group_execution_status final → SUCCEEDED | PARTIAL_FAILED.
-    """
+    """Aprueba y ejecuta todas las PendingActions de un grupo. Compartida (sin HTTP)."""
     stmt = (
         select(PendingAction)
         .where(
-            PendingAction.tenant_id == current_user.tenant_id,
+            PendingAction.tenant_id == tenant_id,
             PendingAction.approval_group_id == group_id,
             PendingAction.status == "PENDING",
         )
@@ -1079,10 +1391,7 @@ async def confirm_action_group(
     actions = list(result.scalars().all())
 
     if not actions:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Grupo no encontrado o ya procesado.",
-        )
+        raise PendingActionNotFoundError
 
     now = datetime.now(UTC)
     expired = [a for a in actions if a.expires_at.replace(tzinfo=UTC) < now]
@@ -1090,12 +1399,8 @@ async def confirm_action_group(
         for a in expired:
             a.status = "EXPIRED"
         await db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="Una o más acciones del grupo vencieron. Volvé a enviar el mensaje.",
-        )
+        raise PendingActionExpiredError
 
-    # Aprobamos todas en un solo commit (precondición de ejecución)
     for action in actions:
         action.status = "APPROVED"
         action.approved_at = now
@@ -1107,7 +1412,6 @@ async def confirm_action_group(
     sorted_actions = sorted(actions, key=lambda a: (a.group_position or 0))
 
     for action in sorted_actions:
-        # Abort-all: si una previa falló, esta queda en FAILED sin ejecutar
         if any_failed:
             action.execution_status = "FAILED"
             action.failure_message = "upstream_task_failed"
@@ -1139,7 +1443,7 @@ async def confirm_action_group(
         else:
             duplicate = await _execute_local_action(
                 action=action,
-                tenant_id=current_user.tenant_id,
+                tenant_id=tenant_id,
                 db=db,
                 redis=redis,
             )
@@ -1147,7 +1451,6 @@ async def confirm_action_group(
                 any_failed = True
 
         action.executed_at = now
-        # Commit por task: garantiza durabilidad de cada paso completado
         await db.commit()
         task_results.append(
             {
@@ -1160,7 +1463,6 @@ async def confirm_action_group(
     group_execution_status = "PARTIAL_FAILED" if any_failed else "SUCCEEDED"
     for action in actions:
         action.group_execution_status = group_execution_status
-
     await db.commit()
 
     logger.info(
@@ -1168,7 +1470,7 @@ async def confirm_action_group(
         group_id=group_id,
         action_count=len(actions),
         group_execution_status=group_execution_status,
-        tenant_id=str(current_user.tenant_id),
+        tenant_id=str(tenant_id),
     )
     return {
         "status": "confirmed",
@@ -1176,6 +1478,127 @@ async def confirm_action_group(
         "group_execution_status": group_execution_status,
         "tasks": task_results,
     }
+
+
+async def _cancel_action_group_shared(
+    *,
+    group_id: str,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    """Rechaza todas las PendingActions PENDING de un grupo. Compartida (sin HTTP)."""
+    stmt = select(PendingAction).where(
+        PendingAction.tenant_id == tenant_id,
+        PendingAction.approval_group_id == group_id,
+        PendingAction.status == "PENDING",
+    )
+    result = await db.execute(stmt)
+    actions = list(result.scalars().all())
+
+    if not actions:
+        raise PendingActionNotFoundError
+
+    for action in actions:
+        action.status = "REJECTED"
+        action.group_execution_status = "FAILED"
+    await db.commit()
+    return {
+        "status": "cancelled",
+        "approval_group_id": group_id,
+        "cancelled_count": len(actions),
+    }
+
+
+# ── POST /confirm/{pending_id} ────────────────────────────────────────────────
+
+
+@router.post("/confirm/{pending_id}", summary="Confirmar acción pendiente")
+async def confirm_action(
+    pending_id: uuid.UUID,
+    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> dict[str, Any]:
+    try:
+        return await _confirm_pending_action(
+            pending_id=pending_id,
+            tenant_id=current_user.tenant_id,
+            db=db,
+            redis=redis,
+        )
+    except PendingActionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Acción no encontrada o ya procesada.",
+        ) from None
+    except PendingActionExpiredError:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Esta acción venció. Volvé a enviar el mensaje.",
+        ) from None
+
+
+# ── POST /cancel/{pending_id} ─────────────────────────────────────────────────
+
+
+@router.post("/cancel/{pending_id}", summary="Cancelar acción pendiente")
+async def cancel_action(
+    pending_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    try:
+        return await _cancel_pending_action_shared(
+            pending_id=pending_id,
+            tenant_id=current_user.tenant_id,
+            db=db,
+        )
+    except PendingActionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Acción no encontrada.",
+        ) from None
+    except PendingActionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"La acción ya fue procesada (status={exc.status_value}).",
+        ) from None
+
+
+# ── POST /confirm/group/{group_id} ───────────────────────────────────────────
+
+
+@router.post("/confirm/group/{group_id}", summary="Confirmar grupo de acciones pendientes")
+async def confirm_action_group(
+    group_id: str,
+    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> dict[str, Any]:
+    """Aprueba todas las PendingActions del grupo y las ejecuta en orden por group_position.
+
+    Semántica abort-all: si alguna task falla, las posteriores se marcan FAILED con
+    failure_message="upstream_task_failed" y NO se ejecutan. Cada task commitea su
+    propia transacción para no perder progreso ante un fallo intermedio.
+    group_execution_status final → SUCCEEDED | PARTIAL_FAILED.
+    """
+    try:
+        return await _confirm_action_group_shared(
+            group_id=group_id,
+            tenant_id=current_user.tenant_id,
+            db=db,
+            redis=redis,
+        )
+    except PendingActionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Grupo no encontrado o ya procesado.",
+        ) from None
+    except PendingActionExpiredError:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Una o más acciones del grupo vencieron. Volvé a enviar el mensaje.",
+        ) from None
 
 
 # ── POST /cancel/group/{group_id} ─────────────────────────────────────────────
@@ -1188,30 +1611,17 @@ async def cancel_action_group(
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Rechaza todas las PendingActions PENDING del grupo en un solo commit."""
-    stmt = select(PendingAction).where(
-        PendingAction.tenant_id == current_user.tenant_id,
-        PendingAction.approval_group_id == group_id,
-        PendingAction.status == "PENDING",
-    )
-    result = await db.execute(stmt)
-    actions = list(result.scalars().all())
-
-    if not actions:
+    try:
+        return await _cancel_action_group_shared(
+            group_id=group_id,
+            tenant_id=current_user.tenant_id,
+            db=db,
+        )
+    except PendingActionNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Grupo no encontrado o ya procesado.",
-        )
-
-    for action in actions:
-        action.status = "REJECTED"
-        action.group_execution_status = "FAILED"
-
-    await db.commit()
-    return {
-        "status": "cancelled",
-        "approval_group_id": group_id,
-        "cancelled_count": len(actions),
-    }
+        ) from None
 
 
 # ── POST /retry/{pending_id} ──────────────────────────────────────────────────

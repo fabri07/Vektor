@@ -25,6 +25,7 @@ import {
   ALL_CATEGORIES,
   CATEGORY_LABELS,
   CATEGORY_VARIANTS,
+  accountingTypeDisplay,
   categoryDisplay,
 } from "@/lib/expenseCategories";
 
@@ -62,9 +63,14 @@ const COLUMNS = [
     hideable: true,
     render: (v: unknown, row: ExpenseEntryResponse) => {
       const cat = String(v);
+      const label = categoryDisplay(cat, row.category_label);
       return (
-        <Badge variant={CATEGORY_VARIANTS[cat] ?? "default"}>
-          {categoryDisplay(cat, row.category_label)}
+        <Badge
+          variant={CATEGORY_VARIANTS[cat] ?? "default"}
+          className="max-w-[12rem] truncate"
+          title={label}
+        >
+          {label}
         </Badge>
       );
     },
@@ -72,23 +78,30 @@ const COLUMNS = [
       categoryDisplay(String(v), row.category_label),
   },
   {
+    // Tipo contable: SIEMPRE derivado de `expense_type` (COGS/OPEX), nunca del
+    // label custom de la categoría. COGS → "Mercadería" (verde), OPEX →
+    // "Operativo" (azul). Texto sin truncar para que nunca se confunda.
+    key: "expense_type",
+    header: "Tipo contable",
+    hideable: true,
+    render: (v: unknown) => {
+      const { label, variant } = accountingTypeDisplay(
+        typeof v === "string" ? v : null,
+      );
+      return (
+        <Badge variant={variant} className="whitespace-nowrap">
+          {label}
+        </Badge>
+      );
+    },
+    csvValue: (v: unknown) => accountingTypeDisplay(typeof v === "string" ? v : null).label,
+  },
+  {
     key: "description",
     header: "Descripción",
     hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
     csvValue: (v: unknown) => String(v ?? "").trim(),
-  },
-  {
-    key: "expense_type",
-    header: "Tipo",
-    hideable: true,
-    render: (v: unknown) =>
-      v === "COGS" ? (
-        <Badge variant="success">Mercadería</Badge>
-      ) : (
-        <Badge variant="default">Operativo</Badge>
-      ),
-    csvValue: (v: unknown) => (v === "COGS" ? "Mercadería" : "Operativo"),
   },
   {
     key: "supplier_name",

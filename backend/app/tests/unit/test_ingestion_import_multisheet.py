@@ -163,6 +163,150 @@ async def test_context_custom_field_persisted(
     assert "__context__" not in sale.custom_fields
 
 
+@pytest.mark.asyncio
+async def test_multisheet_reimport_is_idempotent(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """B1: re-importar el mismo archivo multi-hoja = 0 filas nuevas."""
+    import uuid as _uuid
+
+    from app.persistence.models.file import UploadedFile
+
+    uploaded = UploadedFile(
+        id=_uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        original_filename="mixto.xlsx",
+        s3_key="test/mixto.xlsx",
+        content_type="application/vnd.ms-excel",
+        size_bytes=2048,
+        purpose="ingestion",
+    )
+    db_session.add(uploaded)
+    await db_session.flush()
+
+    kwargs: dict[str, Any] = {
+        "context_mappings": {"sheet:Ventas": {"valor": "amount", "fecha": "transaction_date"}},
+        "context_confirmed": {"sheet:Ventas": True, "sheet:Gastos": True},
+        "uploaded_file_id": uploaded.id,
+    }
+    confirmed = {"ventas": True, "gastos": True}
+    first = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, _multisheet_summary(), confirmed, **kwargs
+    )
+    assert first["ventas"] == 1
+    assert first["gastos"] == 1
+
+    second = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, _multisheet_summary(), confirmed, **kwargs
+    )
+    assert second["ventas"] == 0
+    assert second["gastos"] == 0
+
+    sales = (await db_session.execute(select(SaleEntry))).scalars().all()
+    expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
+    assert len(sales) == 1
+    assert len(expenses) == 1
+    assert sales[0].source_upload_id == uploaded.id
+    assert expenses[0].source_upload_id == uploaded.id
+
+
+@pytest.mark.asyncio
+async def test_multisheet_invalid_row_not_burned_reimport_corrected(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """B1 (registración diferida) en el path por contexto.
+
+    Una fila de gastos sin monto no inserta nada y NO se quema. Al re-subir el
+    MISMO archivo con esa fila corregida, se importa (no quedó marcada); la fila
+    que ya había entrado sigue idempotente.
+    """
+    import uuid as _uuid
+
+    from app.persistence.models.file import UploadedFile
+
+    uploaded = UploadedFile(
+        id=_uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        original_filename="mixto_parcial.xlsx",
+        s3_key="test/mixto_parcial.xlsx",
+        content_type="application/vnd.ms-excel",
+        size_bytes=2048,
+        purpose="ingestion",
+    )
+    db_session.add(uploaded)
+    await db_session.flush()
+
+    def _summary(monto_fila0: str) -> dict[str, Any]:
+        # Hoja de gastos con 2 filas: index 0 (monto variable) + index 1 (válida).
+        return {
+            "file_type": "spreadsheet",
+            "inferred_type": "expense",
+            "multi_sheet": True,
+            "mapping_contexts": [
+                {
+                    "context_id": "sheet:Gastos",
+                    "entity_type": "expense",
+                    "source_kind": "sheet",
+                    "headers": ["fecha", "concepto", "monto"],
+                    "fields": None,
+                    "preview_rows": [],
+                    "row_count": 2,
+                }
+            ],
+            "ventas_detectadas": [],
+            "gastos_detectados": [
+                {
+                    "fecha": "2024-01-15",
+                    "concepto": "Luz",
+                    "monto": monto_fila0,
+                    "__context__": "sheet:Gastos",
+                },
+                {
+                    "fecha": "2024-01-16",
+                    "concepto": "Agua",
+                    "monto": "8000",
+                    "__context__": "sheet:Gastos",
+                },
+            ],
+            "stock_detectado": [],
+        }
+
+    kwargs: dict[str, Any] = {
+        "context_confirmed": {"sheet:Gastos": True},
+        "uploaded_file_id": uploaded.id,
+    }
+
+    # 1er import: fila 0 sin monto → no inserta; fila 1 → inserta.
+    first = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, _summary(""), {"gastos": True}, **kwargs
+    )
+    assert first["gastos"] == 1
+    descs = {
+        e.description
+        for e in (await db_session.execute(select(ExpenseEntry))).scalars().all()
+    }
+    assert descs == {"Agua"}
+
+    # 2do import del MISMO archivo, fila 0 ahora con monto → entra (no quemada);
+    # fila 1 ya estaba → idempotente.
+    second = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, _summary("4500"), {"gastos": True}, **kwargs
+    )
+    assert second["gastos"] == 1
+    descs = {
+        e.description
+        for e in (await db_session.execute(select(ExpenseEntry))).scalars().all()
+    }
+    assert descs == {"Luz", "Agua"}
+
+    # 3er import idéntico → 0 nuevas.
+    third = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, _summary("4500"), {"gastos": True}, **kwargs
+    )
+    assert third["gastos"] == 0
+    assert len((await db_session.execute(select(ExpenseEntry))).scalars().all()) == 2
+
+
 def _text_summary() -> dict[str, Any]:
     """Summary de documento de texto con dos grupos detectados (ventas + gastos)."""
     return {

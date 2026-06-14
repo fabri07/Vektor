@@ -91,6 +91,16 @@ _VOSEO_MAP = {
     "sugerí": "sugiere",
     "priorizame": "prioriza",
     "priorizá": "prioriza",
+    # búsqueda / detección (voseo + clíticos) — Workstream C4
+    "detectá": "detecta",
+    "detectame": "detecta",
+    "buscá": "busca",
+    "buscame": "busca",
+    "encontrá": "encontra",
+    "encontrame": "encontra",
+    "mostrá": "mostra",
+    "ubicá": "ubica",
+    "identificá": "identifica",
 }
 
 
@@ -190,6 +200,24 @@ VERBS_NEGOCIO = frozenset(
         "me conviene",
         "donde pierdo",
         "cuanto gano",
+    }
+)
+# Verbos de búsqueda/detección (normalizados, sin tildes). Disparan la
+# identificación/búsqueda de gastos para reclasificación masiva (Workstream C4).
+VERBS_BUSQUEDA = frozenset(
+    {
+        "detecta",
+        "busca",
+        "encontra",
+        "encuentra",
+        "mostrame",
+        "muestra",
+        "mostra",
+        "ubica",
+        "identifica",
+        "buscame",
+        "detectame",
+        "encontrame",
     }
 )
 VERBS_IMPORTAR = frozenset(
@@ -426,6 +454,19 @@ def rescue_intent(
         return "analizar_archivo", {}
 
     # ── Reglas sin attachment: objeto de negocio detectado ────────────────────
+    # 4.4 búsqueda/detección de gastos para reclasificar (Workstream C4): verbo de
+    #     búsqueda + objeto de gasto/reclasificación → reclasificar_gasto en modo
+    #     búsqueda (el handler de AgentExpense detecta candidatos y arma el plan masivo).
+    #     Va ANTES de la regla 4.5 para no caer en el análisis read-only de gastos.
+    if _contains_any(norm, VERBS_BUSQUEDA) and (
+        _contains_any(norm, OBJECTS_CLASIFICACION)
+        or _contains_any(norm, OBJECTS_GASTOS)
+        or "registro" in norm
+        or "registros" in norm
+        or "movimiento" in norm
+        or "movimientos" in norm
+    ):
+        return "reclasificar_gasto", {"search": "true"}
     # 4.5 categorización/clasificación de gastos (prioridad: antes que stock para que
     #     "esto es mercadería o insumo?" no se confunda con quiebres de stock; y antes
     #     del out_of_scope para que "reclasificar este movimiento" nunca corte).

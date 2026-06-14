@@ -36,6 +36,15 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("products.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # B1: archivo de origen de una fila importada (NULL = manual / histórico).
+    # Da señal de origen-import al detector de duplicados; SET NULL al borrar el
+    # archivo (la transacción se conserva).
+    source_upload_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
@@ -94,6 +103,13 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # OPEX = gasto operativo; COGS = compra de mercadería (entra al stock).
     expense_type: Mapped[str] = mapped_column(
         String(10), nullable=False, server_default="OPEX", default="OPEX"
+    )
+    # B1: archivo de origen de una fila importada (NULL = manual / histórico).
+    source_upload_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     description: Mapped[str] = mapped_column(String(500), nullable=False)

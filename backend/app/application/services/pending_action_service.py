@@ -191,16 +191,100 @@ def _make_google_broker(action: "PendingAction") -> "GoogleToolBroker":
     )
 
 
+class ReclassifyExpenseError(Exception):
+    """No se pudo resolver ningún gasto para reclasificar (identificación vacía)."""
+
+    user_message = (
+        "No encontré el gasto que querés reclasificar. Probá indicando la "
+        "descripción, el monto o la fecha, o pedime que detecte los registros."
+    )
+
+
+async def _resolve_reclassify_target_expenses(
+    action: PendingAction,
+    db: AsyncSession,
+    payload: dict[str, Any],
+) -> list[Any]:
+    """Resuelve la lista de ExpenseEntry a reclasificar (masivo o singular).
+
+    Prioridad: ``expense_ids[]`` (masivo) → ``expense_id`` (singular) →
+    fallback por fecha + monto + descripción (singular). Tenant-isolated y
+    excluye gastos anulados.
+    """
+    from decimal import Decimal  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+    from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+        ExpenseRepository,
+    )
+
+    repo = ExpenseRepository(db)
+
+    # ── Masivo: expense_ids[] ─────────────────────────────────────────────────
+    expense_ids_raw = payload.get("expense_ids")
+    if isinstance(expense_ids_raw, list) and expense_ids_raw:
+        parsed_ids: list[uuid.UUID] = []
+        for raw in expense_ids_raw:
+            with contextlib.suppress(ValueError, TypeError):
+                parsed_ids.append(uuid.UUID(str(raw)))
+        if parsed_ids:
+            q = select(ExpenseEntry).where(
+                ExpenseEntry.tenant_id == action.tenant_id,
+                ExpenseEntry.voided_at.is_(None),
+                ExpenseEntry.id.in_(parsed_ids),
+            )
+            result = await db.execute(q)
+            return list(result.scalars().all())
+        return []
+
+    # ── Singular: expense_id ──────────────────────────────────────────────────
+    expense_id_raw = payload.get("expense_id")
+    if expense_id_raw:
+        with contextlib.suppress(ValueError):
+            expense = await repo.get_by_id(uuid.UUID(str(expense_id_raw)), action.tenant_id)
+            if expense is not None:
+                return [expense]
+
+    # ── Fallback: identificación por fecha + monto + descripción ──────────────
+    q = select(ExpenseEntry).where(
+        ExpenseEntry.tenant_id == action.tenant_id,
+        ExpenseEntry.voided_at.is_(None),
+    )
+    monto_raw = payload.get("monto")
+    if monto_raw:
+        with contextlib.suppress(Exception):
+            q = q.where(ExpenseEntry.amount == Decimal(str(monto_raw)))
+    fecha_raw = payload.get("fecha")
+    if fecha_raw:
+        from sqlalchemy import func  # noqa: PLC0415
+
+        try:
+            fecha = datetime.fromisoformat(str(fecha_raw)).date()
+            q = q.where(func.date(ExpenseEntry.transaction_date) == fecha)
+        except ValueError:
+            pass
+    q = q.order_by(ExpenseEntry.transaction_date.desc()).limit(1)
+    result = await db.execute(q)
+    expense = result.scalar_one_or_none()
+    return [expense] if expense is not None else []
+
+
 async def _execute_reclassify_expense(
     action: PendingAction,
     db: AsyncSession,
     payload: dict[str, Any],
 ) -> None:
-    """Reclasifica un gasto in-place (category + expense_type) y, si es reventa,
-    crea/vincula un Product vendible incompleto seteando expense.product_id.
+    """Reclasifica uno o varios gastos in-place (category + expense_type) y, si es
+    reventa, crea/vincula un Product vendible incompleto por gasto.
 
-    Reversible: el audit_log guarda el estado anterior (``before``) para poder
-    revertir la reclasificación.
+    Soporta reclasificación MASIVA vía ``payload["expense_ids"]`` (Workstream C3),
+    además del singular ``expense_id`` y el fallback por fecha+monto+descripción.
+
+    0 resultados → ``ReclassifyExpenseError`` (FAILED visible, NO return silencioso).
+
+    Reversible: el audit_log guarda el estado anterior (``before``) por cada gasto.
     """
     from decimal import Decimal  # noqa: PLC0415
 
@@ -213,112 +297,85 @@ async def _execute_reclassify_expense(
     )
 
     target = str(payload.get("target") or "categoria").lower()
-    category = str(payload.get("category") or "OTHER")
+    base_category = str(payload.get("category") or "OTHER")
+    product_policy = str(payload.get("product_policy") or "auto").lower()
     repo = ExpenseRepository(db)
 
-    # ── Resolver el gasto a reclasificar ──────────────────────────────────────
-    expense = None
-    expense_id_raw = payload.get("expense_id")
-    if expense_id_raw:
-        try:
-            expense = await repo.get_by_id(uuid.UUID(str(expense_id_raw)), action.tenant_id)
-        except ValueError:
-            expense = None
-    if expense is None:
-        # Fallback: identificación por fecha + monto + descripción.
-        from sqlalchemy import select  # noqa: PLC0415
+    expenses = await _resolve_reclassify_target_expenses(action, db, payload)
 
-        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
-
-        q = select(ExpenseEntry).where(
-            ExpenseEntry.tenant_id == action.tenant_id,
-            ExpenseEntry.voided_at.is_(None),
-        )
-        monto_raw = payload.get("monto")
-        if monto_raw:
-            with contextlib.suppress(Exception):
-                q = q.where(ExpenseEntry.amount == Decimal(str(monto_raw)))
-        fecha_raw = payload.get("fecha")
-        if fecha_raw:
-            from sqlalchemy import func  # noqa: PLC0415
-
-            try:
-                fecha = datetime.fromisoformat(str(fecha_raw)).date()
-                q = q.where(func.date(ExpenseEntry.transaction_date) == fecha)
-            except ValueError:
-                pass
-        q = q.order_by(ExpenseEntry.transaction_date.desc()).limit(1)
-        result = await db.execute(q)
-        expense = result.scalar_one_or_none()
-
-    if expense is None:
+    if not expenses:
         logger.warning(
             "execute_pending_action: RECLASSIFY_EXPENSE expense not found",
             action_id=str(action.id),
             payload=payload,
         )
-        return
+        raise ReclassifyExpenseError(ReclassifyExpenseError.user_message)
 
-    before = {
-        "category": expense.category,
-        "expense_type": expense.expense_type,
-        "product_id": str(expense.product_id) if expense.product_id else None,
-    }
+    reclassified_ids: list[str] = []
+    for expense in expenses:
+        category = base_category
+        before = {
+            "category": expense.category,
+            "expense_type": expense.expense_type,
+            "product_id": str(expense.product_id) if expense.product_id else None,
+        }
 
-    # ── Reventa: crear/vincular un producto vendible incompleto ───────────────
-    product_id: uuid.UUID | None = None
-    if target == "reventa":
-        product_id = expense.product_id  # reusar si ya estaba vinculado
-        if product_id is None:
-            unit_cost_raw = payload.get("unit_cost")
-            unit_cost = (
-                Decimal(str(unit_cost_raw)) if unit_cost_raw not in (None, "") else None
-            )
-            product_id = build_incomplete_product(
-                session=db,
-                tenant_id=action.tenant_id,
-                name=payload.get("product_name") or expense.description,
-                sku=payload.get("sku"),
-                unit_cost=unit_cost,
-            )
-        category = "INVENTORY"
+        # ── Reventa: crear/vincular un producto vendible incompleto ────────────
+        product_id: uuid.UUID | None = None
+        if target == "reventa":
+            product_id = expense.product_id  # reusar si ya estaba vinculado
+            if product_id is None and product_policy != "skip":
+                unit_cost_raw = payload.get("unit_cost")
+                unit_cost = (
+                    Decimal(str(unit_cost_raw)) if unit_cost_raw not in (None, "") else None
+                )
+                product_id = build_incomplete_product(
+                    session=db,
+                    tenant_id=action.tenant_id,
+                    name=payload.get("product_name") or expense.description,
+                    sku=payload.get("sku"),
+                    unit_cost=unit_cost,
+                )
+            category = "INVENTORY"
 
-    expense_type = infer_expense_type(category, product_id=product_id)
-    await repo.reclassify(
-        expense,
-        category=category,
-        expense_type=expense_type,
-        product_id=product_id,
-    )
+        expense_type = infer_expense_type(category, product_id=product_id)
+        await repo.reclassify(
+            expense,
+            category=category,
+            expense_type=expense_type,
+            product_id=product_id,
+        )
+        reclassified_ids.append(str(expense.id))
 
-    audit = DecisionAuditLog(
-        id=uuid.uuid4(),
-        tenant_id=action.tenant_id,
-        decision_type="EXPENSE_RECLASSIFIED",
-        decision_data={
-            "pending_action_id": str(action.id),
-            "expense_id": str(expense.id),
-            "before": before,
-            "after": {
-                "category": category,
-                "expense_type": expense_type,
-                "product_id": str(product_id) if product_id else None,
+        audit = DecisionAuditLog(
+            id=uuid.uuid4(),
+            tenant_id=action.tenant_id,
+            decision_type="EXPENSE_RECLASSIFIED",
+            decision_data={
+                "pending_action_id": str(action.id),
+                "expense_id": str(expense.id),
+                "before": before,
+                "after": {
+                    "category": category,
+                    "expense_type": expense_type,
+                    "product_id": str(product_id) if product_id else None,
+                },
+                "target": target,
             },
-            "target": target,
-        },
-        triggered_by="agent:confirm",
-        actor_user_id=action.user_id,
-        context={"action_type": str(action.action_type)},
-        created_at=datetime.now(UTC),
-    )
-    db.add(audit)
+            triggered_by="agent:confirm",
+            actor_user_id=action.user_id,
+            context={"action_type": str(action.action_type)},
+            created_at=datetime.now(UTC),
+        )
+        db.add(audit)
+
     logger.info(
         "expense_reclassified",
         action_id=str(action.id),
-        expense_id=str(expense.id),
+        expense_ids=reclassified_ids,
+        count=len(reclassified_ids),
         target=target,
-        category=category,
-        expense_type=expense_type,
+        category=base_category,
     )
 
 

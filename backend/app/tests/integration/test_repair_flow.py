@@ -394,3 +394,189 @@ async def test_apply_twice_is_idempotent(session: AsyncSession, tenant, user) ->
     )
     products = list(prod_result.scalars().all())
     assert len(products) == 1
+
+
+# ── B2: detector de duplicados de import + reclasificación OPEX→COGS ───────────
+
+
+async def _make_expense(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    amount: Decimal,
+    description: str,
+    category: str = "OTHER",
+    expense_type: str = "OPEX",
+    payment_method: str = "transfer",
+    source_upload_id: uuid.UUID | None = None,
+    custom_fields: dict[str, Any] | None = None,
+    product_id: uuid.UUID | None = None,
+) -> Any:
+    from app.persistence.models.transaction import ExpenseEntry
+
+    e = ExpenseEntry(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        amount=amount,
+        category=category,
+        expense_type=expense_type,
+        transaction_date=datetime(2026, 6, 1),
+        description=description,
+        payment_method=payment_method,
+        provenance="REAL",
+        source_upload_id=source_upload_id,
+        product_id=product_id,
+    )
+    if custom_fields:
+        e.custom_fields = custom_fields
+    session.add(e)
+    await session.flush()
+    return e
+
+
+async def _make_sale_with_source(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    amount: Decimal,
+    notes: str,
+    payment_method: str = "cash",
+    source_upload_id: uuid.UUID | None = None,
+) -> SaleEntry:
+    s = SaleEntry(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        amount=amount,
+        quantity=1,
+        transaction_date=datetime(2026, 6, 1),
+        payment_method=payment_method,
+        notes=notes,
+        provenance="REAL",
+        source_upload_id=source_upload_id,
+    )
+    session.add(s)
+    await session.flush()
+    return s
+
+
+@pytest.mark.asyncio
+async def test_30_legit_identical_sales_not_voided(session: AsyncSession, tenant, user) -> None:
+    """BLOQUEANTE: 30 ventas idénticas legítimas (sin señal de import) NO se anulan."""
+    from app.application.services.data_repair_service import detect_duplicate_imports
+
+    for _ in range(30):
+        # mismas fecha/monto/notes/payment, SIN source_upload_id ni sufijo "— X"
+        await _make_sale_with_source(
+            session, tenant.tenant_id, amount=Decimal("1500"), notes="Venta mostrador"
+        )
+    await session.flush()
+
+    groups = await detect_duplicate_imports(session, tenant_id=tenant.tenant_id)
+    assert groups == []  # sin señal de origen-import → no son duplicados
+
+
+@pytest.mark.asyncio
+async def test_import_duplicate_sales_voided_reversibly(
+    session: AsyncSession, tenant, user
+) -> None:
+    """Dos ventas idénticas del MISMO archivo (source_upload_id repetido) → una se anula."""
+    from app.application.services.data_repair_service import (
+        apply_repair,
+        detect_duplicate_imports,
+    )
+    from app.persistence.models.repair import DataRepairItem
+
+    upload_id = uuid.uuid4()
+    f = await _make_uploaded_file(
+        session, tenant.tenant_id, user.user_id, {"file_type": "spreadsheet"}
+    )
+    upload_id = f.id
+    s1 = await _make_sale_with_source(
+        session, tenant.tenant_id, amount=Decimal("999"), notes="Coca", source_upload_id=upload_id
+    )
+    s2 = await _make_sale_with_source(
+        session, tenant.tenant_id, amount=Decimal("999"), notes="Coca", source_upload_id=upload_id
+    )
+    await session.flush()
+
+    groups = await detect_duplicate_imports(session, tenant_id=tenant.tenant_id)
+    assert len(groups) == 1
+    assert groups[0].entity == "sale"
+    assert len(groups[0].duplicates) == 1
+
+    # dry-run no muta
+    dry = await apply_repair(session, tenant_id=tenant.tenant_id, dry_run=True)
+    assert dry.dry_run is True
+    await session.refresh(s1)
+    await session.refresh(s2)
+    assert s1.voided_at is None and s2.voided_at is None
+
+    # apply anula exactamente una (la más nueva) con motivo DUPLICATE
+    applied = await apply_repair(session, tenant_id=tenant.tenant_id, dry_run=False)
+    assert applied.sales_voided >= 1
+    await session.refresh(s1)
+    await session.refresh(s2)
+    voided = [s for s in (s1, s2) if s.voided_at is not None]
+    kept = [s for s in (s1, s2) if s.voided_at is None]
+    assert len(voided) == 1
+    assert len(kept) == 1
+    assert voided[0].void_reason == "DUPLICATE"
+    assert voided[0].voided_by_repair_run_id == applied.run_id
+
+    # Reversible: el before_json conserva el snapshot para deshacer.
+    items = (
+        await session.execute(
+            select(DataRepairItem).where(DataRepairItem.action == "VOID_DUPLICATE")
+        )
+    ).scalars().all()
+    assert len(items) >= 1
+    assert items[0].before_json is not None
+    assert items[0].before_json.get("amount") == "999"
+
+
+@pytest.mark.asyncio
+async def test_opex_merchandise_reclassified_to_cogs(session: AsyncSession, tenant, user) -> None:
+    """Gasto OPEX 'Bebidas' (mercadería del vertical kiosco) → INVENTORY/COGS."""
+    from app.application.services.data_repair_service import (
+        apply_repair,
+        detect_misclassified_opex_to_cogs,
+    )
+    from app.persistence.models.business import BusinessProfile
+
+    session.add(
+        BusinessProfile(tenant_id=tenant.tenant_id, vertical_code="kiosco_almacen")
+    )
+    # mercadería mal clasificada como OPEX
+    merch = await _make_expense(
+        session,
+        tenant.tenant_id,
+        amount=Decimal("8000"),
+        description="Compra Bebidas",
+        category="OTHER",
+        expense_type="OPEX",
+        custom_fields={"category_label": "Bebidas"},
+    )
+    # gasto operativo genuino: NO debe tocarse
+    rent = await _make_expense(
+        session,
+        tenant.tenant_id,
+        amount=Decimal("500000"),
+        description="Alquiler local",
+        category="RENT",
+        expense_type="OPEX",
+    )
+    await session.flush()
+
+    candidates = await detect_misclassified_opex_to_cogs(session, tenant_id=tenant.tenant_id)
+    assert len(candidates) == 1
+    assert candidates[0].expense.id == merch.id
+
+    applied = await apply_repair(session, tenant_id=tenant.tenant_id, dry_run=False)
+    assert applied.run_id is not None
+    await session.refresh(merch)
+    await session.refresh(rent)
+    assert merch.category == "INVENTORY"
+    assert merch.expense_type == "COGS"
+    # El gasto operativo genuino quedó intacto.
+    assert rent.category == "RENT"
+    assert rent.expense_type == "OPEX"

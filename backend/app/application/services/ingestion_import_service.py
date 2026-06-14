@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from datetime import datetime
@@ -81,6 +82,92 @@ def check_nonempty_import(
 def _normalize_name(name: str) -> str:
     """Normaliza nombre de producto para comparación: lower, sin guiones, espacios únicos."""
     return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
+
+
+# ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
+
+_IMPORT_ROW_ACTION = "IMPORT_ROW"
+
+
+async def _register_import_row_fingerprint(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    anchor: str,
+) -> bool:
+    """Registra (idempotentemente) la huella de una fila importada.
+
+    El ancla identifica unívocamente la fila dentro de su archivo/contexto
+    (``sha256("{tenant}:IMPORT_ROW:{uploaded_file_id}:{context_id}:{row_index}")``
+    o, para el bulk de "Otros", anclado en ``UnclassifiedRecord.id``). Se inserta
+    en ``operation_fingerprints`` (unique ``(tenant_id, fingerprint)``) bajo un
+    ``begin_nested()``: si la huella ya existía, el ``IntegrityError`` del
+    savepoint no aborta la transacción padre y devolvemos ``True`` (= ya
+    importada → la fila debe saltearse). Mismo patrón que
+    ``api/v1/agent.py:_register_operation_fingerprint``.
+
+    Devuelve ``True`` si la fila ya estaba registrada (skip), ``False`` si es
+    nueva (procesar).
+    """
+    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
+    from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
+
+    fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
+    try:
+        async with session.begin_nested():
+            session.add(
+                OperationFingerprint(
+                    tenant_id=tenant_id,
+                    fingerprint=fingerprint,
+                    action_type=_IMPORT_ROW_ACTION,
+                )
+            )
+    except IntegrityError:
+        return True
+    return False
+
+
+async def _import_row_seen(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    anchor: str,
+) -> bool:
+    """¿La fila (por su ancla) ya fue importada en una corrida previa?
+
+    Chequeo READ-ONLY: hace un ``SELECT`` sobre ``operation_fingerprints`` por
+    ``(tenant_id, fingerprint=sha256(anchor))`` y NO registra nada. Sirve para
+    SALTEAR al tope de la fila sin "quemarla": la huella se registra recién
+    DESPUÉS, con ``_register_import_row_fingerprint``, y solo si la fila produjo
+    al menos un registro (venta/gasto). Así una fila inválida/mal mapeada que no
+    insertó nada no queda marcada como importada y puede reintentarse corregida.
+
+    Devuelve ``True`` si la huella ya existe (skip), ``False`` si es nueva.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
+
+    fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
+    result = await session.execute(
+        select(OperationFingerprint.id).where(
+            OperationFingerprint.tenant_id == tenant_id,
+            OperationFingerprint.fingerprint == fingerprint,
+        )
+    )
+    return result.first() is not None
+
+
+def _import_row_anchor(
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    context_id: str | None,
+    row_index: int,
+) -> str:
+    """Ancla canónica de una fila de import (archivo + contexto + índice)."""
+    return (
+        f"{tenant_id}:{_IMPORT_ROW_ACTION}:"
+        f"{uploaded_file_id or ''}:{context_id or ''}:{row_index}"
+    )
 
 
 def _capture_unclassified(
@@ -777,6 +864,23 @@ async def insert_confirmed_data(
         )
 
         for row_index, row in enumerate(rows):
+            # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
+            # corrida previa, saltarla (re-subir el mismo archivo = 0 filas nuevas).
+            # Chequeo READ-ONLY: la huella se registra recién al final de la fila y
+            # SOLO si insertó algún registro — una fila inválida no queda "quemada"
+            # y puede reintentarse corregida. Solo aplica con uploaded_file_id real
+            # (el correctivo de repair llama sin él y nunca dedupea acá).
+            _row_anchor = (
+                _import_row_anchor(tenant_id, uploaded_file_id, None, row_index)
+                if uploaded_file_id is not None
+                else None
+            )
+            if _row_anchor is not None and await _import_row_seen(
+                session, tenant_id, _row_anchor
+            ):
+                continue
+            _inserted_before = counts["ventas"] + counts["gastos"]
+
             raw_date = row.get(fecha_col) if fecha_col else None
             tx_date = _parse_date(raw_date) if fecha_col else None
             if tx_date is None:
@@ -833,6 +937,7 @@ async def insert_confirmed_data(
                         payment_method=pay_str,
                         notes=notes_str,
                         provenance="REAL",
+                        source_upload_id=uploaded_file_id,
                     )
                     if cf:
                         entry.custom_fields = cf
@@ -900,6 +1005,7 @@ async def insert_confirmed_data(
                         is_recurring=recurring if recurring is not None else False,
                         payment_method=exp_pay,
                         provenance="REAL",
+                        source_upload_id=uploaded_file_id,
                     )
                     if cf:
                         expense.custom_fields = cf
@@ -962,6 +1068,15 @@ async def insert_confirmed_data(
                     )
                     session.add(expense)
                     counts["gastos"] += 1
+
+            # B1: registrar la huella SOLO si la fila produjo ≥1 registro
+            # (venta/gasto). Si no insertó nada (sin monto parseable, mapeo
+            # incorrecto, etc.) NO se quema y podrá reintentarse corregida.
+            if (
+                _row_anchor is not None
+                and counts["ventas"] + counts["gastos"] > _inserted_before
+            ):
+                await _register_import_row_fingerprint(session, tenant_id, _row_anchor)
 
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
@@ -1307,7 +1422,8 @@ async def _insert_multisheet_data(
                 out[cf_key] = str(v)
         return out
 
-    def _add_sale(row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]) -> None:
+    def _add_sale(row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]) -> bool:
+        """Inserta una venta. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
         amount = (
             _parse_amount(row.get(amount_col))
@@ -1316,7 +1432,7 @@ async def _insert_multisheet_data(
             or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
         )
         if not amount:
-            return
+            return False
         raw_date = _val(row, cols.get("transaction_date") or cols.get("expense_date"), _FECHA_COLS)
         tx_date = _parse_date(raw_date) if raw_date is not None else today
         if tx_date is None:
@@ -1342,6 +1458,7 @@ async def _insert_multisheet_data(
             payment_method=pay,
             notes=notes or "Importado desde archivo",
             provenance="REAL",
+            source_upload_id=uploaded_file_id,
         )
         cf = _custom_fields(row, cf_cols)
         if cf:
@@ -1355,10 +1472,12 @@ async def _insert_multisheet_data(
         )
         session.add(entry)
         counts["ventas"] += 1
+        return True
 
     async def _add_expense(
         row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
-    ) -> None:
+    ) -> bool:
+        """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
         amount = (
             _parse_amount(row.get(amount_col))
@@ -1367,7 +1486,7 @@ async def _insert_multisheet_data(
             or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
         )
         if not amount:
-            return
+            return False
         raw_date = _val(row, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS)
         tx_date = _parse_date(raw_date) if raw_date is not None else today
         if tx_date is None:
@@ -1394,6 +1513,7 @@ async def _insert_multisheet_data(
             is_recurring=recurring if recurring is not None else False,
             payment_method=pay,
             provenance="REAL",
+            source_upload_id=uploaded_file_id,
         )
         cf = _custom_fields(row, cf_cols)
         if cat_label:
@@ -1449,6 +1569,7 @@ async def _insert_multisheet_data(
         )
         session.add(expense)
         counts["gastos"] += 1
+        return True
 
     async def _add_product(
         row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
@@ -1592,24 +1713,63 @@ async def _insert_multisheet_data(
             mapping = context_mappings.get(ctx_id or "", {})
             cols, cf_cols = _resolve_target_cols(mapping) if mapping else ({}, {})
             for _i, row in enumerate(rows):
+                # B1: idempotencia por (archivo, contexto, índice). Chequeo
+                # READ-ONLY; la huella se registra recién DESPUÉS y solo si la
+                # fila insertó (una fila sin monto no queda quemada). Productos no
+                # se dedupean acá (su identidad es nombre/SKU, ya manejada por upsert).
+                _ctx_anchor = (
+                    _import_row_anchor(tenant_id, uploaded_file_id, ctx_id, _i)
+                    if entity in ("sale", "expense") and uploaded_file_id is not None
+                    else None
+                )
+                if _ctx_anchor is not None and await _import_row_seen(
+                    session, tenant_id, _ctx_anchor
+                ):
+                    continue
                 if entity == "sale":
-                    _add_sale(row, cols, cf_cols)
+                    _did_insert = _add_sale(row, cols, cf_cols)
                 elif entity == "expense":
-                    await _add_expense(row, cols, cf_cols)
+                    _did_insert = await _add_expense(row, cols, cf_cols)
                 else:
                     await _add_product(row, cols, cf_cols)
+                    _did_insert = False  # productos no se fingerprintean
+                if _ctx_anchor is not None and _did_insert:
+                    await _register_import_row_fingerprint(
+                        session, tenant_id, _ctx_anchor
+                    )
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
         if confirmed_fields.get("ventas"):
             for _i, row in enumerate(summary.get("ventas_detectadas", [])):
-                _add_sale(row, {}, {})
+                # Chequeo READ-ONLY; registrar recién después y solo si insertó.
+                _v_anchor = (
+                    _import_row_anchor(tenant_id, uploaded_file_id, "ventas", _i)
+                    if uploaded_file_id is not None
+                    else None
+                )
+                if _v_anchor is not None and await _import_row_seen(
+                    session, tenant_id, _v_anchor
+                ):
+                    continue
+                if _add_sale(row, {}, {}) and _v_anchor is not None:
+                    await _register_import_row_fingerprint(session, tenant_id, _v_anchor)
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
         if confirmed_fields.get("gastos"):
-            for row in summary.get("gastos_detectados", []):
-                await _add_expense(row, {}, {})
+            for _j, row in enumerate(summary.get("gastos_detectados", [])):
+                _g_anchor = (
+                    _import_row_anchor(tenant_id, uploaded_file_id, "gastos", _j)
+                    if uploaded_file_id is not None
+                    else None
+                )
+                if _g_anchor is not None and await _import_row_seen(
+                    session, tenant_id, _g_anchor
+                ):
+                    continue
+                if await _add_expense(row, {}, {}) and _g_anchor is not None:
+                    await _register_import_row_fingerprint(session, tenant_id, _g_anchor)
         if confirmed_fields.get("productos"):
             for row in summary.get("stock_detectado", []):
                 await _add_product(row, {}, {})
@@ -1670,6 +1830,16 @@ async def bulk_import_unclassified(
     _flush_every = 500
 
     for i, rec in enumerate(records):
+        # B1: idempotencia anclada en el UnclassifiedRecord (importar el mismo
+        # sugerido dos veces = 0 filas nuevas). El registro queda IMPORTED igual,
+        # pero la huella protege ante reintentos concurrentes / estados sucios.
+        if await _register_import_row_fingerprint(
+            session,
+            tenant_id,
+            f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{rec.id}",
+        ):
+            counts["skipped"] += 1
+            continue
         row: dict[str, Any] = rec.row_data or {}
         fecha = _parse_date(_row_val(row, _FECHA_COLS))
         amount = (
@@ -1707,6 +1877,7 @@ async def bulk_import_unclassified(
                     product_id=product_id,
                     notes=desc or "Importado desde Otros",
                     provenance="REAL",
+                    source_upload_id=rec.uploaded_file_id,
                 )
             )
             counts["imported_sales"] += 1
@@ -1723,6 +1894,7 @@ async def bulk_import_unclassified(
                 is_recurring=False,
                 payment_method=normalize_payment_method(pay_raw) if pay_raw else "transfer",
                 provenance="REAL",
+                source_upload_id=rec.uploaded_file_id,
             )
             expense.product_id = product_id
             expense.expense_type = infer_expense_type(cat_code, product_id=product_id)

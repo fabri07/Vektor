@@ -78,7 +78,8 @@ class DataRepairItem(UUIDPrimaryKeyMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('VOID_SALE','CREATE_PRODUCT','UPDATE_PRODUCT','UPDATE_SALE','REVIEW_SALE')",
+            "action IN ('VOID_SALE','CREATE_PRODUCT','UPDATE_PRODUCT','UPDATE_SALE',"
+            "'REVIEW_SALE','VOID_DUPLICATE','RECLASSIFY_EXPENSE')",
             name="ck_repair_items_action",
         ),
     )

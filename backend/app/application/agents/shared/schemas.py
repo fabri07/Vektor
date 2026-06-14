@@ -47,6 +47,16 @@ class ActionType(StrEnum):
     ANALYZE_SUPPLIER_DATA = "ANALYZE_SUPPLIER_DATA"  # ranking, dependencia, pedidos sugeridos
     SIMULATE_SCENARIO = "SIMULATE_SCENARIO"  # escenarios financieros what-if
     # Nivel 2: reclasificación contable de un gasto (muta clasificación → MEDIUM)
+    #
+    # Payload de RECLASSIFY_EXPENSE (compatible singular + masivo):
+    #   - expense_id: str | None            — identificación de UN gasto (singular, legacy)
+    #   - expense_ids: list[str] | None     — identificación MASIVA de varios gastos (Workstream C3)
+    #   - fecha / monto / descripcion: str  — fallback de identificación singular (sin expense_id)
+    #   - target: "reventa" | "insumo" | "categoria"
+    #   - category: str                     — código canónico de categoría destino
+    #   - product_policy: "auto" | "skip"   — si crear/vincular Product vendible en reventa
+    #   - sku / product_name / unit_cost    — datos del producto vendible (solo target=reventa)
+    # Compat: si llega `expense_ids` se procesan todos; si no, se usa `expense_id`/fallback.
     RECLASSIFY_EXPENSE = "RECLASSIFY_EXPENSE"  # reventa (COGS) | insumo (OPEX) | otra categoría
 
 

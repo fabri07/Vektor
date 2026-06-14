@@ -211,7 +211,26 @@ async def test_dry_run_does_not_void_sales():
     product_lookup_result = MagicMock()
     product_lookup_result.scalar_one_or_none.return_value = None
 
-    mock_db = _mock_db_session([files_result, sales_result, product_lookup_result])
+    # B2: los detectores genéricos (duplicados + OPEX→COGS) corren después.
+    # detect_chat_sale_quality_issues: 1 query (notes); duplicados: 2 queries
+    # (ventas, gastos); _load_vertical_by_tenant: 1; misclassified: 1 (gastos).
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    empty_vertical = MagicMock()
+    empty_vertical.all.return_value = []
+
+    mock_db = _mock_db_session(
+        [
+            files_result,  # detect_misclassified: archivos
+            sales_result,  # detect_misclassified: ventas del archivo
+            empty,  # detect_chat: ventas con notes
+            empty,  # detect_duplicates: ventas
+            empty,  # detect_duplicates: gastos
+            empty_vertical,  # _load_vertical_by_tenant
+            empty,  # detect_misclassified_opex: gastos
+            product_lookup_result,  # _process_candidate dry-run: lookup de producto
+        ]
+    )
 
     result = await apply_repair(mock_db, tenant_id=tenant_id, dry_run=True)
 
@@ -279,7 +298,21 @@ async def test_apply_voids_sales_and_creates_run():
             }
         ),
     ):
-        mock_db = _mock_db_session([files_result, sales_result])
+        empty = MagicMock()
+        empty.scalars.return_value.all.return_value = []
+        empty_vertical = MagicMock()
+        empty_vertical.all.return_value = []
+        mock_db = _mock_db_session(
+            [
+                files_result,  # detect_misclassified: archivos
+                sales_result,  # detect_misclassified: ventas
+                empty,  # detect_chat
+                empty,  # detect_duplicates: ventas
+                empty,  # detect_duplicates: gastos
+                empty_vertical,  # _load_vertical_by_tenant
+                empty,  # detect_misclassified_opex: gastos
+            ]
+        )
         result = await apply_repair(mock_db, tenant_id=tenant_id, dry_run=False)
 
     assert result.dry_run is False

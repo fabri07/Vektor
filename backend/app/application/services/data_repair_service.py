@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -26,13 +27,20 @@ from app.application.services.ingestion_import_service import (
     _NOMBRE_COLS,
     _PRECIO_VENTA_COLS,
     _find_col,
+    _parse_qty,
+    build_incomplete_product,
     insert_confirmed_data,
 )
+from app.domain.expense_categories import (
+    classify_expense_with_vertical,
+    infer_expense_type,
+)
 from app.observability.logger import get_logger
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
-from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 logger = get_logger(__name__)
 
@@ -40,9 +48,16 @@ REPAIR_TYPE_MISCLASSIFIED = "MISCLASSIFIED_PRODUCT_IMPORT"
 REPAIR_TYPE_DATA_QUALITY = "DATA_QUALITY_REPAIR"
 VOID_REASON = "REPAIR_MISCLASSIFIED_IMPORT"
 
+# B2 — correctivo genérico:
+VOID_REASON_DUPLICATE = "DUPLICATE"
+
 # Ventana temporal para asociar SaleEntry con UploadedFile:
 # se usa created_at de SaleEntry vs created_at de UploadedFile (más fiable que transaction_date)
 _WINDOW_DAYS = 2
+
+# Sufijo "— proveedor" / "— importado" que el import histórico anexaba a la
+# descripción: señal de origen-import para el detector de duplicados.
+_DESC_IMPORT_SUFFIX_RE = re.compile(r"\s*[—\-–]\s*[^—\-–]+$")
 
 
 def normalize_product_name(name: str) -> str:
@@ -72,6 +87,9 @@ class RepairResult:
     products_updated: int
     products_skipped: int
     tenant_results: list[dict[str, Any]] = field(default_factory=list)
+    # Contadores entity-aware (reporting honesto: no mezclar gastos con ventas/productos).
+    expenses_voided: int = 0
+    expenses_reclassified: int = 0
 
 
 @dataclass
@@ -86,10 +104,56 @@ class ChatSaleRepairCandidate:
     reason: str
 
 
+@dataclass
+class DuplicateGroup:
+    """Grupo de transacciones activas idénticas con señal de origen-import.
+
+    ``entity`` distingue ventas de gastos. ``keep`` es la fila más antigua (no se
+    toca); ``duplicates`` son las que se anulan (soft delete ``DUPLICATE``).
+    """
+
+    tenant_id: uuid.UUID
+    entity: str  # "sale" | "expense"
+    keep_id: uuid.UUID
+    duplicates: Sequence[SaleEntry | ExpenseEntry]
+    confidence: str
+
+
+@dataclass
+class MisclassifiedExpenseCandidate:
+    """Gasto OPEX cuyo texto matchea producto vendible del vertical → debe ser COGS."""
+
+    tenant_id: uuid.UUID
+    expense: ExpenseEntry
+    matched_text: str
+    new_category: str
+    new_label: str | None
+    confidence: str
+
+
 _SALE_QTY_RE = re.compile(
     r"\b(?:venta\s+de|vend[ií]|vendi|vendió|vendio)\s+(\d+(?:[,.]\d+)?)\s+(.+)",
     re.IGNORECASE,
 )
+
+
+def _normalize_desc_base(desc: str | None) -> str:
+    """Base de descripción para agrupar duplicados: minúsculas, sin sufijo "— X".
+
+    El import histórico anexaba "— proveedor"/"— importado" al final; quitarlo
+    deja la base común para detectar dos filas que son la misma operación.
+    """
+    if not desc:
+        return ""
+    base = _DESC_IMPORT_SUFFIX_RE.sub("", desc.strip())
+    return re.sub(r"\s+", " ", base.lower()).strip()
+
+
+def _has_import_suffix(desc: str | None) -> bool:
+    """¿La descripción trae el patrón "— proveedor"/"— importado" del import?"""
+    if not desc:
+        return False
+    return bool(_DESC_IMPORT_SUFFIX_RE.search(desc.strip()))
 
 
 def _sale_snapshot(sale: SaleEntry) -> dict[str, Any]:
@@ -612,11 +676,19 @@ async def apply_repair(
 
     candidates = await detect_misclassified_product_imports(db, tenant_id=tenant_id)
     chat_candidates = await detect_chat_sale_quality_issues(db, tenant_id=tenant_id)
+    # B2 — correctivo genérico: duplicados + misclasificación OPEX→COGS.
+    duplicate_groups = await detect_duplicate_imports(db, tenant_id=tenant_id)
+    misclassified_expenses = await detect_misclassified_opex_to_cogs(db, tenant_id=tenant_id)
 
     result = RepairResult(
         run_id=run.id,
         dry_run=dry_run,
-        candidates_found=len(candidates) + len(chat_candidates),
+        candidates_found=(
+            len(candidates)
+            + len(chat_candidates)
+            + len(duplicate_groups)
+            + len(misclassified_expenses)
+        ),
         sales_detected=sum(len(c.suspicious_sales) for c in candidates) + len(chat_candidates),
         sales_voided=0,
         products_detected=sum(len(c.product_rows) for c in candidates),
@@ -686,13 +758,74 @@ async def apply_repair(
                 }
             )
 
+    # B2 Detector 1 — duplicados (ventas/gastos con señal de import).
+    dup_planned: frozenset[uuid.UUID] | None = None
+    reclass_planned: frozenset[uuid.UUID] | None = None
+    if not dry_run and source_run_id is not None:
+        dup_planned = await _load_planned_ids_by_action(
+            db, source_run_id, "VOID_DUPLICATE", "sale_entry_id"
+        )
+        reclass_planned = await _load_planned_ids_by_action(
+            db, source_run_id, "RECLASSIFY_EXPENSE", "before_id"
+        )
+    for group in duplicate_groups:
+        savepoint = await db.begin_nested()
+        try:
+            await _process_duplicate_group(db, run, group, dry_run, result, dup_planned)
+            await savepoint.commit()
+        except Exception as exc:
+            await savepoint.rollback()
+            logger.warning(
+                "data_repair.duplicate_group.failed",
+                tenant_id=str(group.tenant_id),
+                entity=group.entity,
+                error=str(exc),
+            )
+            result.tenant_results.append(
+                {
+                    "tenant_id": str(group.tenant_id),
+                    "entity": group.entity,
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            )
+
+    # B2 Detector 2 — misclasificación OPEX→COGS vertical-aware.
+    for mis_candidate in misclassified_expenses:
+        savepoint = await db.begin_nested()
+        try:
+            await _process_misclassified_expense(
+                db, run, mis_candidate, dry_run, result, reclass_planned
+            )
+            await savepoint.commit()
+        except Exception as exc:
+            await savepoint.rollback()
+            logger.warning(
+                "data_repair.misclassified_expense.failed",
+                tenant_id=str(mis_candidate.tenant_id),
+                expense_id=str(mis_candidate.expense.id),
+                error=str(exc),
+            )
+            result.tenant_results.append(
+                {
+                    "tenant_id": str(mis_candidate.tenant_id),
+                    "expense_id": str(mis_candidate.expense.id),
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            )
+
     run.sales_voided = result.sales_voided
     run.products_created = result.products_created
     run.products_updated = result.products_updated
     run.products_skipped = result.products_skipped
     run.status = "COMPLETED"
     run.completed_at = datetime.now(UTC)
-    run.details_json = {"tenant_results": result.tenant_results} if result.tenant_results else {}
+    run.details_json = {
+        "expenses_voided": result.expenses_voided,
+        "expenses_reclassified": result.expenses_reclassified,
+        **({"tenant_results": result.tenant_results} if result.tenant_results else {}),
+    }
 
     # Si es apply con source_run_id, marcar el run fuente como APPLIED
     if not dry_run and source_run_id is not None:
@@ -708,6 +841,8 @@ async def apply_repair(
         dry_run=dry_run,
         candidates=result.candidates_found,
         sales_voided=result.sales_voided,
+        expenses_voided=result.expenses_voided,
+        expenses_reclassified=result.expenses_reclassified,
         products_created=result.products_created,
     )
     return result
@@ -954,3 +1089,373 @@ async def _process_chat_sale_candidate(
         )
 
     await db.flush()
+
+
+# ── B2 Detector 1: DUPLICADOS de import (ventas/gastos) ───────────────────────
+
+
+def _as_date(value: Any) -> Any:
+    """Día de un transaction_date que puede venir como datetime o date."""
+    if value is None:
+        return None
+    date_attr = getattr(value, "date", None)
+    return date_attr() if callable(date_attr) else value
+
+
+def _sale_dup_key(sale: SaleEntry) -> tuple[Any, ...]:
+    """Clave de contenido fuerte para agrupar ventas idénticas."""
+    return (
+        _as_date(sale.transaction_date),
+        str(sale.amount),
+        _normalize_desc_base(sale.notes),
+        sale.product_id,
+        sale.payment_method,
+    )
+
+
+def _expense_dup_key(expense: ExpenseEntry) -> tuple[Any, ...]:
+    """Clave de contenido fuerte para agrupar gastos idénticos."""
+    return (
+        _as_date(expense.transaction_date),
+        str(expense.amount),
+        _normalize_desc_base(expense.description),
+        expense.product_id,
+        expense.payment_method,
+    )
+
+
+def _group_has_import_signal(
+    rows: list[SaleEntry] | list[ExpenseEntry],
+    desc_attr: str,
+) -> bool:
+    """¿El grupo tiene señal de origen-import (no es una repetición legítima)?
+
+    Señal = al menos dos filas comparten el mismo ``source_upload_id`` (no NULL),
+    o alguna fila trae el sufijo "— proveedor"/"— importado" en su descripción.
+    Sin señal, NO se considera duplicado (un kiosco vende lo mismo muchas veces
+    el mismo día y eso es legítimo).
+    """
+    upload_ids = [r.source_upload_id for r in rows if r.source_upload_id is not None]
+    if len(upload_ids) >= 2 and len(set(upload_ids)) < len(upload_ids):
+        return True
+    return any(_has_import_suffix(getattr(r, desc_attr, None)) for r in rows)
+
+
+async def detect_duplicate_imports(
+    db: AsyncSession,
+    tenant_id: uuid.UUID | None = None,
+) -> list[DuplicateGroup]:
+    """Detecta grupos de ventas/gastos activos idénticos CON señal de origen-import.
+
+    Criterio seguro (plan): agrupar por (fecha, monto, desc-base, product_id,
+    payment_method) y exigir señal de import. Transacciones manuales idénticas
+    (sin source_upload_id compartido ni sufijo) NUNCA se agrupan.
+    """
+    groups: list[DuplicateGroup] = []
+
+    # Ventas
+    sale_q = select(SaleEntry).where(
+        SaleEntry.provenance == "REAL",
+        SaleEntry.voided_at.is_(None),
+    )
+    if tenant_id is not None:
+        sale_q = sale_q.where(SaleEntry.tenant_id == tenant_id)
+    sales = list((await db.execute(sale_q)).scalars().all())
+    sale_buckets: dict[tuple[Any, ...], list[SaleEntry]] = {}
+    for sale in sales:
+        sale_buckets.setdefault((sale.tenant_id, *_sale_dup_key(sale)), []).append(sale)
+    for key, bucket in sale_buckets.items():
+        if len(bucket) < 2 or not _group_has_import_signal(bucket, "notes"):
+            continue
+        ordered = sorted(bucket, key=lambda s: (s.created_at is None, str(s.created_at), str(s.id)))
+        groups.append(
+            DuplicateGroup(
+                tenant_id=key[0],
+                entity="sale",
+                keep_id=ordered[0].id,
+                duplicates=ordered[1:],
+                confidence="HIGH",
+            )
+        )
+
+    # Gastos
+    exp_q = select(ExpenseEntry).where(
+        ExpenseEntry.provenance == "REAL",
+        ExpenseEntry.voided_at.is_(None),
+    )
+    if tenant_id is not None:
+        exp_q = exp_q.where(ExpenseEntry.tenant_id == tenant_id)
+    expenses = list((await db.execute(exp_q)).scalars().all())
+    exp_buckets: dict[tuple[Any, ...], list[ExpenseEntry]] = {}
+    for expense in expenses:
+        exp_buckets.setdefault((expense.tenant_id, *_expense_dup_key(expense)), []).append(expense)
+    for key, ebucket in exp_buckets.items():
+        if len(ebucket) < 2 or not _group_has_import_signal(ebucket, "description"):
+            continue
+        ordered_e = sorted(
+            ebucket, key=lambda e: (e.created_at is None, str(e.created_at), str(e.id))
+        )
+        groups.append(
+            DuplicateGroup(
+                tenant_id=key[0],
+                entity="expense",
+                keep_id=ordered_e[0].id,
+                duplicates=ordered_e[1:],
+                confidence="HIGH",
+            )
+        )
+
+    logger.info(
+        "data_repair.detect_duplicates.completed",
+        groups=len(groups),
+        tenant_id=str(tenant_id) if tenant_id else "all",
+    )
+    return groups
+
+
+def _dup_snapshot(row: SaleEntry | ExpenseEntry, entity: str) -> dict[str, Any]:
+    desc = row.notes if entity == "sale" else getattr(row, "description", None)
+    return {
+        "id": str(row.id),
+        "entity": entity,
+        "amount": str(row.amount),
+        "transaction_date": str(row.transaction_date),
+        "payment_method": row.payment_method,
+        "description": desc,
+        "source_upload_id": str(row.source_upload_id) if row.source_upload_id else None,
+    }
+
+
+async def _process_duplicate_group(
+    db: AsyncSession,
+    run: DataRepairRun,
+    group: DuplicateGroup,
+    dry_run: bool,
+    result: RepairResult,
+    planned_ids: frozenset[uuid.UUID] | None,
+) -> None:
+    now = datetime.now(UTC)
+    for row in group.duplicates:
+        # En apply con plan, solo tocar lo planificado en el dry-run.
+        if planned_ids is not None and row.id not in planned_ids:
+            continue
+        if not dry_run:
+            row.voided_at = now
+            row.void_reason = VOID_REASON_DUPLICATE
+            row.voided_by_repair_run_id = run.id
+            # Contar según la entidad real (no mezclar gastos duplicados con ventas).
+            if group.entity == "expense":
+                result.expenses_voided += 1
+            else:
+                result.sales_voided += 1
+        item_kwargs: dict[str, Any] = {
+            "id": uuid.uuid4(),
+            "run_id": run.id,
+            "tenant_id": group.tenant_id,
+            "action": "VOID_DUPLICATE",
+            "before_json": {**_dup_snapshot(row, group.entity), "planned": dry_run},
+            "after_json": {"kept_id": str(group.keep_id), "planned": dry_run},
+            "confidence": group.confidence,
+            "created_at": now,
+        }
+        if group.entity == "sale":
+            item_kwargs["sale_entry_id"] = row.id
+        db.add(DataRepairItem(**item_kwargs))
+    result.tenant_results.append(
+        {
+            "tenant_id": str(group.tenant_id),
+            "entity": group.entity,
+            "status": "DUPLICATES_VOIDED" if not dry_run else "DUPLICATES_PLANNED",
+            "kept_id": str(group.keep_id),
+            "voided": len(group.duplicates),
+        }
+    )
+    await db.flush()
+
+
+# ── B2 Detector 2: MISCLASIFICACIÓN OPEX→COGS (vertical-aware) ─────────────────
+
+
+async def _load_vertical_by_tenant(
+    db: AsyncSession,
+    tenant_id: uuid.UUID | None,
+) -> dict[uuid.UUID, str | None]:
+    """Vertical de cada tenant (una query) para clasificar gastos en lote."""
+    q = select(BusinessProfile.tenant_id, BusinessProfile.vertical_code)
+    if tenant_id is not None:
+        q = q.where(BusinessProfile.tenant_id == tenant_id)
+    rows = (await db.execute(q)).all()
+    return {row[0]: row[1] for row in rows}
+
+
+def _expense_match_text(expense: ExpenseEntry) -> str | None:
+    """Texto a clasificar: category_label custom, descripción o categoría."""
+    label = (expense.custom_fields or {}).get("category_label")
+    return label or expense.description or expense.category or None
+
+
+async def detect_misclassified_opex_to_cogs(
+    db: AsyncSession,
+    tenant_id: uuid.UUID | None = None,
+) -> list[MisclassifiedExpenseCandidate]:
+    """Gastos OPEX cuyo texto matchea producto vendible del vertical → deben ser COGS.
+
+    Usa ``classify_expense_with_vertical``: si reconoce el texto como mercadería
+    del vertical devuelve ``("INVENTORY", label, True)``. Gastos operativos
+    genuinos (alquiler, servicios, sueldos) NO matchean y quedan OPEX.
+    """
+    verticals = await _load_vertical_by_tenant(db, tenant_id)
+
+    exp_q = select(ExpenseEntry).where(
+        ExpenseEntry.provenance == "REAL",
+        ExpenseEntry.voided_at.is_(None),
+        ExpenseEntry.expense_type == "OPEX",
+    )
+    if tenant_id is not None:
+        exp_q = exp_q.where(ExpenseEntry.tenant_id == tenant_id)
+    expenses = list((await db.execute(exp_q)).scalars().all())
+
+    candidates: list[MisclassifiedExpenseCandidate] = []
+    for expense in expenses:
+        text_to_match = _expense_match_text(expense)
+        if not text_to_match:
+            continue
+        code, label, is_merch = classify_expense_with_vertical(
+            text_to_match, verticals.get(expense.tenant_id)
+        )
+        if not is_merch or code != "INVENTORY":
+            continue
+        candidates.append(
+            MisclassifiedExpenseCandidate(
+                tenant_id=expense.tenant_id,
+                expense=expense,
+                matched_text=text_to_match,
+                new_category="INVENTORY",
+                new_label=label,
+                confidence="HIGH",
+            )
+        )
+
+    logger.info(
+        "data_repair.detect_misclassified_opex.completed",
+        candidates=len(candidates),
+        tenant_id=str(tenant_id) if tenant_id else "all",
+    )
+    return candidates
+
+
+async def _process_misclassified_expense(
+    db: AsyncSession,
+    run: DataRepairRun,
+    candidate: MisclassifiedExpenseCandidate,
+    dry_run: bool,
+    result: RepairResult,
+    planned_ids: frozenset[uuid.UUID] | None,
+) -> None:
+    now = datetime.now(UTC)
+    expense = candidate.expense
+    if planned_ids is not None and expense.id not in planned_ids:
+        return
+
+    before = {
+        "id": str(expense.id),
+        "category": expense.category,
+        "expense_type": expense.expense_type,
+        "product_id": str(expense.product_id) if expense.product_id else None,
+    }
+
+    new_product_id: uuid.UUID | None = None
+    if not dry_run:
+        expense.category = candidate.new_category
+        expense.expense_type = infer_expense_type(
+            candidate.new_category, product_id=expense.product_id
+        )
+        if candidate.new_label:
+            cf = dict(expense.custom_fields or {})
+            cf["category_label"] = candidate.new_label
+            expense.custom_fields = cf
+        # Crear/vincular producto incompleto SOLO con nombre + cantidad suficiente
+        # (qty>0). Sin cantidad, no se crea producto basura (gate del plan).
+        if expense.product_id is None:
+            qty = _parse_qty((expense.custom_fields or {}).get("quantity"))
+            name = candidate.new_label or candidate.matched_text
+            if qty > 0 and name:
+                new_product_id = build_incomplete_product(
+                    db, candidate.tenant_id, name, None, None
+                )
+                if new_product_id is not None:
+                    expense.product_id = new_product_id
+                    expense.expense_type = "COGS"
+        # Reclasificación de gasto OPEX→COGS: contar como reclasificación, y solo
+        # como producto creado si efectivamente se creó/vinculó uno.
+        result.expenses_reclassified += 1
+        if new_product_id is not None:
+            result.products_created += 1
+
+    after = {
+        "category": candidate.new_category,
+        "expense_type": "COGS",
+        "matched_text": candidate.matched_text,
+        "new_product_id": str(new_product_id) if new_product_id else None,
+        "planned": dry_run,
+    }
+    db.add(
+        DataRepairItem(
+            id=uuid.uuid4(),
+            run_id=run.id,
+            tenant_id=candidate.tenant_id,
+            product_id=new_product_id,
+            action="RECLASSIFY_EXPENSE",
+            before_json={**before, "planned": dry_run},
+            after_json=after,
+            confidence=candidate.confidence,
+            created_at=now,
+        )
+    )
+    result.tenant_results.append(
+        {
+            "tenant_id": str(candidate.tenant_id),
+            "expense_id": str(expense.id),
+            "status": "RECLASSIFIED" if not dry_run else "RECLASSIFY_PLANNED",
+            "matched_text": candidate.matched_text,
+            "from": before["category"],
+            "to": candidate.new_category,
+        }
+    )
+    await db.flush()
+
+
+async def _load_planned_ids_by_action(
+    db: AsyncSession,
+    source_run_id: uuid.UUID,
+    action: str,
+    id_field: str,
+) -> frozenset[uuid.UUID] | None:
+    """IDs (sale_entry_id o derivados del before_json) planificados para una acción.
+
+    Para ``VOID_DUPLICATE`` (ventas usan sale_entry_id; gastos viven en
+    before_json["id"]) y ``RECLASSIFY_EXPENSE`` (before_json["id"]) leemos el id
+    desde el campo indicado. Devuelve None si el run fuente no existe / no es dry-run.
+    """
+    source_run = await db.get(DataRepairRun, source_run_id)
+    if source_run is None or not source_run.dry_run:
+        return None
+    items = (
+        await db.execute(
+            select(DataRepairItem).where(
+                DataRepairItem.run_id == source_run_id,
+                DataRepairItem.action == action,
+            )
+        )
+    ).scalars().all()
+    ids: set[uuid.UUID] = set()
+    for item in items:
+        if id_field == "sale_entry_id" and item.sale_entry_id is not None:
+            ids.add(item.sale_entry_id)
+        raw = (item.before_json or {}).get("id")
+        if raw:
+            try:
+                ids.add(uuid.UUID(str(raw)))
+            except (ValueError, TypeError):
+                continue
+    return frozenset(ids)

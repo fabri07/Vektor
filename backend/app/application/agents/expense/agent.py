@@ -600,16 +600,252 @@ class AgentExpense(BaseAgent):
             return code, "insumo", False
         return code, "categoria", False
 
+    # ── Búsqueda asistida de gastos para reclasificación masiva (C3) ───────────
+
+    _SEARCH_VERBS: tuple[str, ...] = (
+        "detecta",
+        "detectá",
+        "detectame",
+        "busca",
+        "buscá",
+        "buscame",
+        "encontra",
+        "encontrá",
+        "encontrame",
+        "mostrame",
+        "mostra",
+        "mostrá",
+        "ubica",
+        "ubicá",
+        "identifica",
+        "identificá",
+    )
+
+    def _is_search_request(self, entities: dict[str, Any], message: str) -> bool:
+        """True si el usuario pide DETECTAR/BUSCAR gastos para reclasificar.
+
+        Señal explícita: ``entities["search"]`` truthy. Fallback determinístico:
+        verbo de búsqueda en el mensaje + objeto de gasto/reclasificación.
+        """
+        if entities.get("search") or entities.get("buscar"):
+            return True
+        msg = message.lower()
+        has_verb = any(verb in msg for verb in self._SEARCH_VERBS)
+        if not has_verb:
+            return False
+        has_object = any(
+            token in msg
+            for token in (
+                "registro",
+                "gasto",
+                "movimiento",
+                "compra",
+                "reclasific",
+                "mercaderia",
+                "mercadería",
+                "insumo",
+            )
+        )
+        return has_object
+
+    def _search_term(self, entities: dict[str, Any], message: str) -> str:
+        """Extrae el término de búsqueda (descripción/etiqueta del gasto)."""
+        for key in ("query", "descripcion", "description", "label", "termino", "term"):
+            val = entities.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return message.strip()
+
+    async def _search_expenses_for_reclassify(
+        self, tenant_id: uuid.UUID, term: str
+    ) -> list[Any]:
+        """Busca gastos activos por descripción/categoría (ILIKE por token).
+
+        Tenant-isolated, excluye anulados. Limita a 50 candidatos.
+        """
+        if self._db is None:
+            return []
+        from sqlalchemy import or_, select  # noqa: PLC0415
+
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        tokens = [t for t in re.split(r"\W+", term.lower()) if len(t) >= 4]
+        _stop = {
+            "registro",
+            "registros",
+            "gasto",
+            "gastos",
+            "movimiento",
+            "movimientos",
+            "para",
+            "reclasificar",
+            "como",
+            "todos",
+            "todas",
+            "esos",
+            "esas",
+        }
+        tokens = [t for t in tokens if t not in _stop and t not in self._SEARCH_VERBS]
+        if not tokens:
+            return []
+        q = select(ExpenseEntry).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
+        )
+        like_clauses = []
+        for tok in tokens:
+            pattern = f"%{tok}%"
+            like_clauses.append(ExpenseEntry.description.ilike(pattern))
+            like_clauses.append(ExpenseEntry.category.ilike(pattern))
+            # El label legible (ej. "Revistas") suele vivir solo en
+            # custom_fields.category_label, no en description/category.
+            # `.as_string()` es cross-dialect (PG + SQLite de tests); `.astext`
+            # es solo JSONB de Postgres y rompe en SQLite.
+            like_clauses.append(
+                ExpenseEntry.custom_fields["category_label"].as_string().ilike(pattern)
+            )
+        q = q.where(or_(*like_clauses)).order_by(ExpenseEntry.transaction_date.desc()).limit(50)
+        result = await self._db.execute(q)
+        return list(result.scalars().all())
+
+    def _normalize_reclassify_target(
+        self, target: str, entities: dict[str, Any]
+    ) -> tuple[str, str]:
+        """Normaliza el target a (target_canónico, category_code)."""
+        normalized = target.strip().lower()
+        if normalized in ("reventa", "mercaderia", "mercadería"):
+            return "reventa", "INVENTORY"
+        if normalized in ("insumo", "insumos"):
+            return "insumo", "SUPPLIES"
+        raw_cat = entities.get("category")
+        final_category, _ = (
+            normalize_expense_category(str(raw_cat)) if raw_cat else ("OTHER", "")
+        )
+        return "categoria", final_category
+
+    async def _handle_search_reclassify(
+        self, request: AgentRequest, entities: dict[str, Any], tenant_id: uuid.UUID | None
+    ) -> AgentResponse:
+        """Detecta gastos candidatos y arma reclasificación MASIVA o pide aclaración."""
+        if tenant_id is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                question="No pude identificar tu negocio para buscar los gastos.",
+                result={"summary": "Sin tenant para buscar gastos."},
+            )
+
+        term = self._search_term(entities, request.message)
+        candidates = await self._search_expenses_for_reclassify(tenant_id, term)
+
+        if not candidates:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                question=(
+                    "No encontré gastos que coincidan con esa búsqueda. "
+                    "Probá con otra descripción o el nombre exacto del proveedor/producto."
+                ),
+                result={"summary": "Búsqueda de gastos sin resultados.", "candidates": []},
+            )
+
+        business_type = await self._business_vertical(tenant_id)
+        target = entities.get("target")
+        if target:
+            normalized_target, final_category = self._normalize_reclassify_target(
+                str(target), entities
+            )
+        else:
+            final_category, normalized_target, _es = self._advise_reventa_vs_insumo(
+                term, business_type
+            )
+
+        candidate_payload = [
+            {
+                "expense_id": str(e.id),
+                "descripcion": e.description,
+                "monto": str(e.amount),
+                "category": e.category,
+                "expense_type": e.expense_type,
+            }
+            for e in candidates
+        ]
+
+        # Target no resoluble (categoria sin código claro) → pedir destino.
+        if normalized_target == "categoria" and final_category in ("OTHER", ""):
+            label_reco = EXPENSE_CATEGORY_LABELS_ES.get(final_category or "OTHER", "Gasto")
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.MEDIUM,
+                question=(
+                    f"Encontré {len(candidates)} gasto(s) que coinciden. "
+                    f"Para tu rubro lo cargaría como {label_reco}, pero decime a qué "
+                    "querés reclasificarlos: ¿mercadería de reventa, insumo, u otra categoría?"
+                ),
+                result={
+                    "summary": f"{len(candidates)} candidato(s) — falta destino.",
+                    "candidates": candidate_payload,
+                    "recommended_category": final_category,
+                    "recommended_target": normalized_target,
+                },
+            )
+
+        label = EXPENSE_CATEGORY_LABELS_ES.get(final_category, final_category)
+        expense_ids = [str(e.id) for e in candidates]
+        structured: dict[str, Any] = {
+            "expense_ids": expense_ids,
+            "target": normalized_target,
+            "category": final_category,
+            "product_policy": entities.get("product_policy", "auto"),
+            "sku": entities.get("sku"),
+            "product_name": entities.get("product_name") or entities.get("nombre"),
+        }
+        if normalized_target == "reventa":
+            summary = (
+                f"Reclasificar {len(expense_ids)} gasto(s) como mercadería de reventa "
+                f"(Mercadería/COGS)."
+            )
+        else:
+            summary = (
+                f"Reclasificar {len(expense_ids)} gasto(s) como {label} ({normalized_target})."
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_approval",
+            risk_level=RiskLevel.MEDIUM,
+            requires_approval=True,
+            confidence=Confidence.HIGH,
+            result={
+                "summary": summary,
+                "action_type": ActionType.RECLASSIFY_EXPENSE,
+                "structured_data": structured,
+                "candidates": candidate_payload,
+                "alerts": [],
+            },
+        )
+
     async def _handle_reclassify_expense(
         self, request: AgentRequest, task: Any | None
     ) -> AgentResponse:
-        """Asesora o reclasifica un gasto entre reventa / insumo / otra categoría.
+        """Asesora, busca o reclasifica gasto(s) entre reventa / insumo / otra categoría.
 
-        - ASESORÍA (read-only): si el usuario no identificó un gasto concreto ni
-          dio un ``target`` explícito, recomienda determinísticamente reventa vs
-          insumo según el vertical. status="success", LOW risk.
-        - ESCRITURA: si hay identificación (expense_id o fecha+monto+descripción)
-          y un ``target``, construye un pending action MEDIUM (requires_approval).
+        - BÚSQUEDA (C3): "detectá/buscá los registros de X para reclasificar" →
+          busca candidatos; arma reclasificación masiva o pide destino.
+        - ESCRITURA (C1): si hay identificación CONCRETA de un gasto (expense_id o
+          monto), SIEMPRE emite pending action MEDIUM. Si falta target, lo DERIVA
+          del consejo determinístico vertical-aware (no cae a asesoría read-only).
+        - ASESORÍA (read-only): sin identificación concreta (solo un tópico/descr.)
+          o sin nada → recomienda reventa vs insumo.
         """
         entities: dict[str, Any] = getattr(task, "entities", {}) or {}
         try:
@@ -617,13 +853,24 @@ class AgentExpense(BaseAgent):
         except (ValueError, TypeError):
             tenant_id = None
 
+        # ── BÚSQUEDA asistida (detectá/buscá ... para reclasificar) ────────────
+        if self._is_search_request(entities, request.message):
+            return await self._handle_search_reclassify(request, entities, tenant_id)
+
         target = entities.get("target")
         expense_id = entities.get("expense_id")
+        # Identificación amplia (gate write/advice): expense_id, monto o descripción.
         has_identification = bool(
             expense_id
-            or (entities.get("monto") or entities.get("amount"))
+            or entities.get("monto")
+            or entities.get("amount")
             or entities.get("descripcion")
             or entities.get("description")
+        )
+        # Identificación CONCRETA de un gasto puntual (una fila): expense_id o monto.
+        # Una `descripcion` suelta es solo un tópico de asesoría, no una fila concreta.
+        has_concrete_identification = bool(
+            expense_id or entities.get("monto") or entities.get("amount")
         )
 
         business_type = (
@@ -632,7 +879,22 @@ class AgentExpense(BaseAgent):
             else "kiosco_almacen"
         )
 
-        # ── ASESORÍA: sin target o sin identificación → recomendamos ──────────
+        # ── C1: identificación CONCRETA SIN target → derivar target y ESCRIBIR ──
+        # (no caer a asesoría read-only cuando ya hay una fila concreta señalada)
+        if has_concrete_identification and not target:
+            advice_text = (
+                str(entities.get("descripcion") or entities.get("description") or "")
+                or request.message
+            )
+            rec_category, rec_target, _es_reventa = self._advise_reventa_vs_insumo(
+                advice_text, business_type
+            )
+            entities = {**entities, "target": rec_target}
+            if rec_target == "categoria":
+                entities.setdefault("category", rec_category)
+            target = rec_target
+
+        # ── ASESORÍA: sin target o sin identificación → recomendamos ───────────
         if not target or not has_identification:
             advice_text = (
                 str(entities.get("descripcion") or entities.get("description") or "")
@@ -681,19 +943,9 @@ class AgentExpense(BaseAgent):
             )
 
         # ── ESCRITURA: identificación + target → pending action MEDIUM ────────
-        normalized_target = str(target).strip().lower()
-        if normalized_target in ("reventa", "mercaderia", "mercadería"):
-            normalized_target = "reventa"
-            final_category = "INVENTORY"
-        elif normalized_target in ("insumo", "insumos"):
-            normalized_target = "insumo"
-            final_category = "SUPPLIES"
-        else:
-            normalized_target = "categoria"
-            raw_cat = entities.get("category")
-            final_category, _ = (
-                normalize_expense_category(str(raw_cat)) if raw_cat else ("OTHER", None)
-            )
+        normalized_target, final_category = self._normalize_reclassify_target(
+            str(target), entities
+        )
 
         structured: dict[str, Any] = {
             "expense_id": str(expense_id) if expense_id else None,

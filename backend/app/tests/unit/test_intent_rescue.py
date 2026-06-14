@@ -176,3 +176,40 @@ def test_import_verbs_with_attachment_route_to_import_intents():
     )
     assert rescue_intent("subí el archivo", True, None) == ("importar_archivo_ventas", {})
     assert rescue_intent("importalo", True, "product") == ("importar_archivo_productos", {})
+
+
+# ── Workstream C4: verbos de búsqueda/detección → reclasificar_gasto ──────────
+
+
+def test_search_verb_detecta_registros_routes_to_reclassify():
+    assert rescue_intent("detectá los registros de revistas para reclasificar", False, None) == (
+        "reclasificar_gasto",
+        {"search": "true"},
+    )
+
+
+def test_search_verb_busca_gastos_routes_to_reclassify():
+    assert rescue_intent("buscá los gastos de La Nación", False, None) == (
+        "reclasificar_gasto",
+        {"search": "true"},
+    )
+
+
+def test_search_verb_encontra_movimientos_routes_to_reclassify():
+    assert rescue_intent("encontrá los movimientos de diarios", False, None) == (
+        "reclasificar_gasto",
+        {"search": "true"},
+    )
+
+
+def test_search_verb_mostrame_gastos_mercaderia_routes_to_reclassify():
+    assert rescue_intent("mostrame los gastos de mercadería", False, None) == (
+        "reclasificar_gasto",
+        {"search": "true"},
+    )
+
+
+def test_search_verb_without_object_does_not_route_to_reclassify():
+    # verbo de búsqueda sin objeto de gasto/reclasificación → NO reclasificar_gasto
+    intent, _ = rescue_intent("mostrame", False, None)
+    assert intent != "reclasificar_gasto"

@@ -5,6 +5,15 @@ el catálogo depende del vertical del negocio (``BusinessProfile.business_type``
 Texto sin match → ``OTHER`` preservando el original como label en
 ``custom_fields["category_label"]``. Vertical desconocido → ``kiosco_almacen``
 (mismo fallback que ``HeuristicEngine``).
+
+Una categoría ≠ ``OTHER`` para el vertical es la señal que ``expense_categories.
+classify_expense_with_vertical`` usa para marcar un gasto como mercadería de
+reventa (INVENTORY/COGS). Por eso el catálogo cubre la mercadería realmente
+vendida del vertical (en kiosco: diarios/revistas y regalería/accesorios además
+de bebidas, golosinas, etc.). Los casos genuinamente ambiguos reventa-vs-insumo
+—p. ej. accesorios de limpieza (trapos, guantes) que un kiosco puede consumir
+internamente o revender— se dejan en su default y se reclasifican vía chat; no se
+fuerzan acá para no convertir un insumo operativo en COGS por error.
 """
 
 from __future__ import annotations
@@ -26,6 +35,8 @@ PRODUCT_CATEGORY_LABELS: dict[str, dict[str, str]] = {
         "SNACKS": "Snacks",
         "LIMPIEZA": "Limpieza",
         "PERFUMERIA": "Perfumería",
+        "DIARIOS_REVISTAS": "Diarios y revistas",
+        "REGALERIA": "Regalería y varios",
         "OTHER": "Otros",
     },
     "limpieza": {
@@ -99,6 +110,32 @@ _ALIASES: dict[str, dict[str, str]] = {
         "higiene": "PERFUMERIA",
         "perfumeria": "PERFUMERIA",
         "cosmetica": "PERFUMERIA",
+        # Diarios y revistas (mercadería de reventa de kiosco). Cabeceras locales
+        # frecuentes se listan como alias para que el import las marque COGS.
+        "diario": "DIARIOS_REVISTAS",
+        "diarios": "DIARIOS_REVISTAS",
+        "revista": "DIARIOS_REVISTAS",
+        "revistas": "DIARIOS_REVISTAS",
+        "periodico": "DIARIOS_REVISTAS",
+        "suplemento": "DIARIOS_REVISTAS",
+        "la nacion": "DIARIOS_REVISTAS",
+        "clarin": "DIARIOS_REVISTAS",
+        "ole": "DIARIOS_REVISTAS",
+        "pagina 12": "DIARIOS_REVISTAS",
+        # Regalería y accesorios vendibles que hoy caían a OTHER/OPEX (de capturas
+        # reales). Librería vendible (cuaderno, lapicera) entra acá como reventa.
+        "regaleria": "REGALERIA",
+        "auricular": "REGALERIA",
+        "auriculares": "REGALERIA",
+        "pila": "REGALERIA",
+        "pilas": "REGALERIA",
+        "encendedor": "REGALERIA",
+        "encendedores": "REGALERIA",
+        "fosforo": "REGALERIA",
+        "fosforos": "REGALERIA",
+        "cuaderno": "REGALERIA",
+        "lapicera": "REGALERIA",
+        "cargador": "REGALERIA",
     },
     "limpieza": {
         "detergente": "DETERGENTES",

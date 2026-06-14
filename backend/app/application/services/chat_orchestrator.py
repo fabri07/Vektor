@@ -281,7 +281,11 @@ class ChatOrchestrator:
         #   2. IntentRescue: scoring semántico (verbo ambiguo + objeto + contexto)
         # También rescatamos si el CEO devolvió pedir_aclaracion_sobre_archivo
         # directamente con archivos adjuntos — el rescue puede resolver mejor.
-        _should_rescue = ceo_intent == "intent_desconocido" or (
+        # Y pedir_aclaracion_negocio (Workstream C4): el usuario suena a negocio pero
+        # el CEO no precisó; el rescate determinístico puede mapear verbos de
+        # búsqueda/reclasificación. Guarda anti-loop: el rescate corre UNA sola vez;
+        # si devuelve otro sentinel de _NO_AGENT_INTENTS, se mantiene (no re-itera).
+        _should_rescue = ceo_intent in ("intent_desconocido", "pedir_aclaracion_negocio") or (
             ceo_intent == "pedir_aclaracion_sobre_archivo" and bool(effective_attachments)
         )
         if _should_rescue:

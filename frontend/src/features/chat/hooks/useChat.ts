@@ -29,6 +29,7 @@ const MUTATING_ACTIONS = new Set([
   "REGISTER_STOCK_LOSS",
   "UPDATE_PRODUCT",
   "IMPORT_TABULAR_FILE",
+  "RECLASSIFY_EXPENSE",
 ]);
 
 // Re-exportar para compatibilidad con importadores existentes

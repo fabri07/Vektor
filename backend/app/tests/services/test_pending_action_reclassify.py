@@ -177,3 +177,114 @@ async def test_reclassify_by_amount_and_date_fallback(
 
     assert expense.category == "SUPPLIES"
     assert expense.expense_type == "OPEX"
+
+
+@pytest.mark.asyncio
+async def test_reclassify_nonexistent_raises_visible_error(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """0 resultados → ReclassifyExpenseError con user_message (FAILED visible)."""
+    from app.application.services.pending_action_service import ReclassifyExpenseError
+
+    tenant_id = sample_tenant.tenant_id
+    action = _make_action(
+        tenant_id,
+        {
+            "expense_id": str(uuid.uuid4()),  # no existe
+            "target": "insumo",
+            "category": "SUPPLIES",
+        },
+    )
+    with pytest.raises(ReclassifyExpenseError) as exc_info:
+        await execute_pending_action(action, db_session)
+    assert hasattr(exc_info.value, "user_message")
+    assert "encontr" in ReclassifyExpenseError.user_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_reclassify_massive_expense_ids(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """expense_ids[] reclasifica varios gastos en una sola acción."""
+    tenant_id = sample_tenant.tenant_id
+    e1 = await _make_expense(db_session, tenant_id, description="revista uno")
+    e2 = await _make_expense(db_session, tenant_id, description="revista dos")
+
+    action = _make_action(
+        tenant_id,
+        {
+            "expense_ids": [str(e1.id), str(e2.id)],
+            "target": "insumo",
+            "category": "SUPPLIES",
+        },
+    )
+    await execute_pending_action(action, db_session)
+    await db_session.flush()
+    await db_session.refresh(e1)
+    await db_session.refresh(e2)
+
+    assert e1.category == "SUPPLIES"
+    assert e1.expense_type == "OPEX"
+    assert e2.category == "SUPPLIES"
+    assert e2.expense_type == "OPEX"
+
+
+# ── Búsqueda asistida + reclasificación masiva (Workstream C3) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_search_reclassify_with_clear_target_builds_massive_pending(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """"detectá los registros de revistas" + target → pending masivo (expense_ids)."""
+    from app.application.agents.expense.agent import AgentExpense
+    from app.application.agents.shared.schemas import AgentRequest, AgentTask, RiskLevel
+
+    tenant_id = sample_tenant.tenant_id
+    await _make_expense(db_session, tenant_id, description="revista La Nación")
+    await _make_expense(db_session, tenant_id, description="revista Clarín")
+    await _make_expense(db_session, tenant_id, description="alquiler local")
+
+    agent = AgentExpense(db=db_session)
+    req = AgentRequest(
+        user_id=str(uuid.uuid4()),
+        business_id=str(tenant_id),
+        message="detectá los registros de revista para reclasificar",
+    )
+    task = AgentTask(
+        agent="agent_expense",
+        action_type=ActionType.RECLASSIFY_EXPENSE,
+        entities={"search": "true", "target": "insumo"},
+    )
+    res = await agent.process(req, task=task)
+    assert res.status == "requires_approval"
+    assert res.risk_level == RiskLevel.MEDIUM
+    sd = res.result["structured_data"]
+    assert len(sd["expense_ids"]) == 2  # solo las dos revistas
+    assert sd["target"] == "insumo"
+
+
+@pytest.mark.asyncio
+async def test_search_reclassify_no_matches_asks_clarification(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    from app.application.agents.expense.agent import AgentExpense
+    from app.application.agents.shared.schemas import AgentRequest, AgentTask
+
+    tenant_id = sample_tenant.tenant_id
+    await _make_expense(db_session, tenant_id, description="alquiler local")
+
+    agent = AgentExpense(db=db_session)
+    req = AgentRequest(
+        user_id=str(uuid.uuid4()),
+        business_id=str(tenant_id),
+        message="detectá los registros de cigarrillos para reclasificar",
+    )
+    task = AgentTask(
+        agent="agent_expense",
+        action_type=ActionType.RECLASSIFY_EXPENSE,
+        entities={"search": "true", "target": "reventa"},
+    )
+    res = await agent.process(req, task=task)
+    assert res.status == "requires_clarification"
+    assert res.result["candidates"] == []

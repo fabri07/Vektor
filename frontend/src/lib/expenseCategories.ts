@@ -56,3 +56,21 @@ export function categoryDisplay(category: string, categoryLabel?: string | null)
   if (category === "OTHER" && categoryLabel) return categoryLabel;
   return CATEGORY_LABELS[category] ?? LEGACY_CATEGORY_LABELS[category] ?? category;
 }
+
+/**
+ * Tipo contable. Se deriva ESTRICTAMENTE de `expense_type` (COGS/OPEX), nunca
+ * de la categoría ni de un label custom. Un gasto sin `expense_type` definido se
+ * trata como Operativo (OPEX) por convención del backend.
+ *  - COGS → "Mercadería" (costo de mercadería vendida) — variant success (verde)
+ *  - OPEX → "Operativo"  (gasto operativo)             — variant info    (azul)
+ */
+export type ExpenseAccountingType = "COGS" | "OPEX";
+
+export function accountingTypeDisplay(expenseType?: string | null): {
+  label: string;
+  variant: BadgeVariant;
+} {
+  return expenseType === "COGS"
+    ? { label: "Mercadería", variant: "success" }
+    : { label: "Operativo", variant: "info" };
+}

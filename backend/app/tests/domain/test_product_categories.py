@@ -1,5 +1,6 @@
 """Tests de los catálogos de categorías de producto por vertical."""
 
+from app.domain.expense_categories import classify_expense_with_vertical
 from app.domain.product_categories import (
     PRODUCT_CATEGORY_LABELS,
     normalize_product_category,
@@ -71,3 +72,63 @@ class TestNormalize:
             "LIMPIEZA",
             None,
         )
+
+    def test_kiosco_diarios_revistas(self) -> None:
+        assert normalize_product_category("Diarios", "kiosco_almacen") == (
+            "DIARIOS_REVISTAS",
+            None,
+        )
+        assert normalize_product_category("La Nación", "kiosco_almacen") == (
+            "DIARIOS_REVISTAS",
+            None,
+        )
+        assert normalize_product_category("Clarín", "kiosco_almacen") == (
+            "DIARIOS_REVISTAS",
+            None,
+        )
+        assert normalize_product_category("Revistas", "kiosco_almacen") == (
+            "DIARIOS_REVISTAS",
+            None,
+        )
+
+    def test_kiosco_regaleria_accesorios(self) -> None:
+        assert normalize_product_category("Auriculares", "kiosco_almacen") == (
+            "REGALERIA",
+            None,
+        )
+        assert normalize_product_category("Pilas", "kiosco_almacen") == (
+            "REGALERIA",
+            None,
+        )
+        assert normalize_product_category("Encendedores", "kiosco_almacen") == (
+            "REGALERIA",
+            None,
+        )
+
+
+class TestExpenseCrossClassification:
+    """Cruce con ``classify_expense_with_vertical``: mercadería vendible del
+    vertical detectada en un texto de gasto → INVENTORY/COGS."""
+
+    def test_diarios_classifies_as_inventory(self) -> None:
+        code, label, is_merch = classify_expense_with_vertical(
+            "Diarios La Nación", "kiosco_almacen"
+        )
+        assert code == "INVENTORY"
+        assert label == "Diarios La Nación"
+        assert is_merch is True
+
+    def test_auriculares_classifies_as_inventory(self) -> None:
+        code, _label, is_merch = classify_expense_with_vertical(
+            "Auriculares", "kiosco_almacen"
+        )
+        assert code == "INVENTORY"
+        assert is_merch is True
+
+    def test_operativo_stays_opex(self) -> None:
+        # Insumo operativo real → NO debe volverse mercadería.
+        code, _label, is_merch = classify_expense_with_vertical(
+            "bolsas uso interno", "kiosco_almacen"
+        )
+        assert code != "INVENTORY"
+        assert is_merch is False
