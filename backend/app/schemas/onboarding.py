@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.domain.fiscal_condition import FiscalCondition
+
 
 class OnboardingSubmitRequest(BaseModel):
     vertical_code: str = Field(pattern=r"^(kiosco|decoracion_hogar|limpieza)$")
@@ -24,6 +26,9 @@ class OnboardingSubmitRequest(BaseModel):
     work_days: list[int] | None = Field(default=None)
     work_open_hour: int | None = Field(default=None, ge=0, le=23)
     work_close_hour: int | None = Field(default=None, ge=0, le=23)
+    # Condición fiscal — opcional y solo informativa. Si viene, se guarda en el
+    # profile; si falta, queda NULL (no configurado) y NO bloquea el onboarding.
+    fiscal_condition: FiscalCondition | None = Field(default=None)
 
     @model_validator(mode="after")
     def _validate_work_schedule(self) -> OnboardingSubmitRequest:

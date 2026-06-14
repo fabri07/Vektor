@@ -1,4 +1,7 @@
 import { api } from "@/lib/api";
+import type { FiscalCondition } from "@/lib/fiscalCondition";
+
+export type { FiscalCondition } from "@/lib/fiscalCondition";
 
 export interface HealthConfig {
   target_margin_pct: number;
@@ -80,5 +83,3 @@ export const settingsService = {
     await api.patch("/settings/fiscal-condition", { fiscal_condition: value });
   },
 };
-
-export type FiscalCondition = "registered" | "informal";

@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import type { FiscalCondition } from "@/lib/fiscalCondition";
 
 export interface OnboardingSubmitPayload {
   vertical_code: string;
@@ -12,6 +13,8 @@ export interface OnboardingSubmitPayload {
   work_days?: number[];
   work_open_hour?: number;
   work_close_hour?: number;
+  /** Régimen fiscal — opcional y salteable en el onboarding. */
+  fiscal_condition?: FiscalCondition;
 }
 
 export interface OnboardingSubmitResult {

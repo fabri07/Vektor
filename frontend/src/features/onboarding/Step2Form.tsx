@@ -1,6 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import {
+  FISCAL_CONDITION_OPTIONS,
+  FISCAL_PRIVACY_NOTE,
+  type FiscalCondition,
+} from "@/lib/fiscalCondition";
 
 export type MainConcern = "MARGIN" | "STOCK" | "CASH";
 
@@ -15,6 +20,8 @@ export interface Step2Data {
   work_days: number[];
   work_open_hour: number;
   work_close_hour: number;
+  /** Régimen fiscal — opcional y salteable. `null` = el usuario no eligió. */
+  fiscal_condition: FiscalCondition | null;
 }
 
 // 0=lunes … 6=domingo (consistente con el backend)
@@ -145,6 +152,9 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
   const [closeHour, setCloseHour] = useState<number>(
     initialData?.work_close_hour ?? DEFAULT_CLOSE_HOUR,
   );
+  const [fiscalCondition, setFiscalCondition] = useState<FiscalCondition | null>(
+    initialData?.fiscal_condition ?? null,
+  );
   const [errors, setErrors] = useState<FormErrors>({});
 
   function toggleDay(day: number) {
@@ -203,6 +213,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
       work_days: workDays,
       work_open_hour: openHour,
       work_close_hour: closeHour,
+      fiscal_condition: fiscalCondition,
     };
   }
 
@@ -370,6 +381,62 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
             </select>
           </div>
           {errors.work_schedule && <FieldError text={errors.work_schedule} />}
+        </div>
+
+        <div>
+          <p className="mb-1 text-sm font-medium text-gray-800">
+            ¿Cuál es tu régimen fiscal?{" "}
+            <span className="font-normal text-gray-400">(opcional)</span>
+          </p>
+          <FieldHelper text="Adapta la guía de comprobantes del cierre de caja. Podés saltearlo y configurarlo después en Configuración." />
+          <div
+            role="radiogroup"
+            aria-label="Régimen fiscal"
+            className="mt-3 flex flex-col gap-2"
+          >
+            {FISCAL_CONDITION_OPTIONS.map((opt) => {
+              const isSelected = fiscalCondition === opt.value;
+              return (
+                <label
+                  key={opt.value}
+                  className={[
+                    "flex cursor-pointer items-start gap-3 rounded-xl border-2 px-4 py-3 transition-all duration-150",
+                    isSelected
+                      ? "border-vk-navy bg-vk-bg-light"
+                      : "border-gray-200 bg-white hover:border-gray-300",
+                  ].join(" ")}
+                >
+                  <input
+                    type="radio"
+                    name="fiscal-condition"
+                    value={opt.value}
+                    checked={isSelected}
+                    onChange={() => setFiscalCondition(opt.value)}
+                    className="mt-0.5 accent-vk-navy focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-gray-900">{opt.label}</span>
+                    <span className="block text-xs text-gray-500">{opt.detail}</span>
+                  </span>
+                </label>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => setFiscalCondition(null)}
+              className={[
+                "self-start text-xs underline underline-offset-2 transition-colors",
+                fiscalCondition === null
+                  ? "text-gray-500"
+                  : "text-gray-400 hover:text-gray-600",
+              ].join(" ")}
+            >
+              Prefiero no decirlo ahora
+            </button>
+          </div>
+          <p className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">
+            {FISCAL_PRIVACY_NOTE}
+          </p>
         </div>
       </div>
 

@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal } from "@/components/ui/Modal";
 import { cashCloseService } from "@/services/cashClose.service";
 import { paymentLabel } from "@/lib/payment";
+import { isFiscallyRegistered } from "@/lib/fiscalCondition";
 import { useToastStore } from "@/stores/toastStore";
 
 function formatARS(value: number): string {
@@ -395,14 +396,14 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
               <details className="rounded-lg border border-vk-border-w bg-vk-surface-w px-4 py-3 text-sm">
                 <summary className="cursor-pointer text-vk-text-secondary">
                   Guía del arqueo{" "}
-                  {preview?.fiscal_condition === "registered"
+                  {isFiscallyRegistered(preview?.fiscal_condition)
                     ? "(negocio registrado)"
                     : preview?.fiscal_condition === "informal"
                       ? "(control interno)"
                       : ""}
                 </summary>
                 <div className="mt-2 space-y-1.5 text-xs text-vk-text-muted">
-                  {preview?.fiscal_condition === "registered" ? (
+                  {isFiscallyRegistered(preview?.fiscal_condition) ? (
                     <>
                       <p>• Sumá solo comprobantes válidos: facturas A/B/C, tiques de controlador fiscal o factura electrónica. Los &quot;X&quot; y remitos no cuentan como venta legal.</p>
                       <p>• El total de cobros por QR o tarjeta debe coincidir con el cierre de lote de tu terminal y los reportes de las billeteras.</p>

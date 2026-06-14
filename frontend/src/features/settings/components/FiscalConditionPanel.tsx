@@ -2,20 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { settingsService, type FiscalCondition } from "@/services/settings.service";
+import { settingsService } from "@/services/settings.service";
+import {
+  FISCAL_CONDITION_OPTIONS,
+  FISCAL_PRIVACY_NOTE,
+  type FiscalCondition,
+} from "@/lib/fiscalCondition";
 import { useToastStore } from "@/stores/toastStore";
 
 const OPTIONS: { value: FiscalCondition | ""; label: string; detail: string }[] = [
-  {
-    value: "registered",
-    label: "Registrado",
-    detail: "Monotributo o Responsable Inscripto ante ARCA (ex-AFIP).",
-  },
-  {
-    value: "informal",
-    label: "No registrado",
-    detail: "El arqueo de caja es control interno, sin valor fiscal.",
-  },
+  ...FISCAL_CONDITION_OPTIONS,
   { value: "", label: "Prefiero no configurarlo", detail: "" },
 ];
 
@@ -83,6 +79,10 @@ export function FiscalConditionPanel() {
             </label>
           ))}
         </div>
+
+        <p className="rounded-lg border border-vektor-border bg-vektor-surface/40 px-3 py-2 text-xs text-vektor-muted">
+          {FISCAL_PRIVACY_NOTE}
+        </p>
 
         <button
           type="button"

@@ -109,6 +109,11 @@ class OnboardingService:
         bp.work_close_hour = (
             body.work_close_hour if body.work_close_hour is not None else DEFAULT_CLOSE_HOUR
         )
+
+        # Condición fiscal (opcional, informativa): solo se persiste si vino.
+        # Si falta, no se toca (queda NULL = no configurado). No bloquea el alta.
+        if body.fiscal_condition is not None:
+            bp.fiscal_condition = body.fiscal_condition
         await self._repo.save(bp)
 
         # Step 5-6: calculate completeness and confidence

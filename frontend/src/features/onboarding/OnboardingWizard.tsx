@@ -65,6 +65,9 @@ export function OnboardingWizard() {
           work_days: state.formData.work_days,
           work_open_hour: state.formData.work_open_hour,
           work_close_hour: state.formData.work_close_hour,
+          ...(state.formData.fiscal_condition
+            ? { fiscal_condition: state.formData.fiscal_condition }
+            : {}),
         });
         setState((prev) => ({ ...prev, formSubmitted: true }));
       } catch {

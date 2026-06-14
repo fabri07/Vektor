@@ -72,9 +72,13 @@ class BusinessProfile(TimestampMixin, Base):
     work_open_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
     work_close_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # ── Condición fiscal (arqueo de caja) ─────────────────────────────────────
-    # 'registered' (monotributo/RI) | 'informal' | NULL = no configurado.
-    # Solo adapta la guía del arqueo en la UI — no cambia ningún cálculo.
+    # ── Condición fiscal (informativa) ────────────────────────────────────────
+    # Valores canónicos: 'monotributo' | 'responsable_inscripto' | 'informal'
+    # | NULL = no configurado. Legacy 'registered' aún válido en filas viejas →
+    # se normaliza a 'monotributo' al leer (ver app/domain/fiscal_condition.py).
+    # Columna Text libre a propósito (sin enum PG): validación en la capa de app,
+    # esquema additive/reversible. SOLO INFORMATIVO: mejora heurísticas de
+    # impuestos/márgenes y la guía del arqueo — nunca bloquea ni cambia cálculos.
     fiscal_condition: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     custom_fields: Mapped[dict[str, Any]] = mapped_column(

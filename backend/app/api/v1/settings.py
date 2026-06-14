@@ -10,8 +10,6 @@ Endpoints:
   PATCH /settings/fiscal-condition   → actualizar condición fiscal
 """
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -28,6 +26,10 @@ from app.application.services.work_schedule_service import (
     WorkScheduleResponse,
     WorkScheduleService,
 )
+from app.domain.fiscal_condition import (
+    FiscalCondition,
+    normalize_fiscal_condition,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.user import User
@@ -36,12 +38,13 @@ router = APIRouter()
 
 
 class FiscalConditionResponse(BaseModel):
-    # 'registered' (monotributo/RI) | 'informal' | None = no configurado.
-    fiscal_condition: Literal["registered", "informal"] | None
+    # 'monotributo' | 'responsable_inscripto' | 'informal' | None = no configurado.
+    # El legacy 'registered' se normaliza a 'monotributo' al leerlo (additive).
+    fiscal_condition: FiscalCondition | None
 
 
 class FiscalConditionRequest(BaseModel):
-    fiscal_condition: Literal["registered", "informal"] | None
+    fiscal_condition: FiscalCondition | None
 
 
 @router.get("/health-config", response_model=HealthConfigResponse)
@@ -118,9 +121,15 @@ async def get_fiscal_condition(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> FiscalConditionResponse:
-    """Condición fiscal del negocio — solo adapta la guía del arqueo en la UI."""
+    """Condición fiscal del negocio — solo informativa (heurísticas + guía del arqueo).
+
+    Normaliza el valor persistido (incluido el legacy 'registered') a un código
+    canónico antes de devolverlo, sin reescribir la fila.
+    """
     profile = await _get_business_profile(db, current_user.tenant_id)
-    return FiscalConditionResponse(fiscal_condition=profile.fiscal_condition)
+    return FiscalConditionResponse(
+        fiscal_condition=normalize_fiscal_condition(profile.fiscal_condition)
+    )
 
 
 @router.patch("/fiscal-condition", response_model=FiscalConditionResponse)
@@ -129,7 +138,10 @@ async def update_fiscal_condition(
     current_user: User = Depends(require_role("OWNER", "ADMIN")),
     db: AsyncSession = Depends(get_db_session),
 ) -> FiscalConditionResponse:
-    """Actualiza la condición fiscal. Requiere OWNER o ADMIN."""
+    """Actualiza la condición fiscal. Requiere OWNER o ADMIN.
+
+    Persiste el valor canónico (Pydantic ya restringe a los 3 valores o None).
+    """
     profile = await _get_business_profile(db, current_user.tenant_id)
     profile.fiscal_condition = body.fiscal_condition
     await db.flush()

@@ -120,6 +120,20 @@ GASTO_SIGNAL_COLS = {
     "logística", "factura_recibida", "compra", "costo", "deuda",
 }
 
+# Señales transaccionales para desambiguar un LIBRO DE COMPRAS de un CATÁLOGO.
+# Un catálogo de productos NO trae monto de transacción + método de pago + proveedor
+# + fecha juntos; un libro de compras de mercadería SÍ. Esto evita que `sku/cantidad/
+# costo_unitario` clasifiquen una compra como "stock" perdiendo el gasto (COGS) y la
+# salida de caja.
+# Columna de MONTO de transacción (lo que se pagó/cobró en la operación). "precio"/
+# "valor" quedan FUERA a propósito: en un catálogo "precio" es precio de lista, no un
+# monto de operación.
+TRANSACCION_MONTO_COLS = {"total", "monto", "importe", "monto_total", "importe_total"}
+# Columna de método/forma de pago (efectivo, transferencia, tarjeta…).
+FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago", "método_pago", "forma_de_pago"}
+# Columna de proveedor (contraparte de una compra).
+PROVEEDOR_COLS = {"proveedor", "proveedores"}
+
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
 GASTO_CTX = {"gasto", "compra", "pago", "factura", "proveedor", "egreso", "gaste"}
 STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia", "mercadería"}
@@ -362,6 +376,13 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     # Señales ambiguas: "precio" / "total" solos pueden ser precio de catálogo
     has_precio_ambiguo = any(col in ("precio", "total", "price", "valor") for col in normalized)
 
+    # Señales transaccionales de COMPRA (libro de compras ≠ catálogo): monto de la
+    # operación + método de pago + proveedor. Se exige coincidencia exacta de columna
+    # para no disparar con sufijos espurios.
+    has_monto_transaccion = any(col in TRANSACCION_MONTO_COLS for col in normalized)
+    has_forma_pago = any(col in FORMA_PAGO_COLS for col in normalized)
+    has_proveedor = any(col in PROVEEDOR_COLS for col in normalized)
+
     inferred_type = infer_spreadsheet_type(
         has_fecha=has_fecha,
         has_venta=has_venta,
@@ -374,6 +395,9 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_cantidad=has_cantidad,
         venta_score=venta_score,
         gasto_score=gasto_score,
+        has_monto_transaccion=has_monto_transaccion,
+        has_forma_pago=has_forma_pago,
+        has_proveedor=has_proveedor,
     )
 
     has_catalogo_signal = has_catalogo_fuerte or has_nombre
@@ -402,10 +426,18 @@ def infer_spreadsheet_type(
     has_cantidad: bool = False,
     venta_score: int = 0,
     gasto_score: int = 0,
+    has_monto_transaccion: bool = False,
+    has_forma_pago: bool = False,
+    has_proveedor: bool = False,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
     Reglas (en orden de prioridad):
+    -1. LIBRO DE COMPRAS: catálogo (sku/producto/cantidad) + monto de transacción +
+        fecha + (forma de pago O proveedor) Y contexto de gasto dominante → gastos,
+        aunque traiga sku/cantidad/costo_unitario. Una compra de mercadería es a la vez
+        gasto (COGS) y salida de caja; el catálogo no la captura. CONSERVADOR: solo se
+        dispara cuando, sin esta regla, el archivo caería en "stock" por error.
     0. Compra de mercadería/insumos + cantidad → inventario (FASE 3, conservador).
     1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
     2. Señal de nombre/producto sin venta explícita → stock.
@@ -414,6 +446,28 @@ def infer_spreadsheet_type(
     5. Sin señales de catálogo: fecha + venta → ventas; fecha + gasto → gastos.
     6. Fallbacks por señales sueltas.
     """
+    # Regla -1 (CONSERVADORA): un LIBRO DE COMPRAS de mercadería tiene a la vez columnas
+    # de catálogo (sku/producto/cantidad) Y de operación (monto de transacción + fecha +
+    # forma de pago/proveedor). Sin esta regla, las señales de catálogo lo clasificarían
+    # como "stock" y se perdería el gasto (COGS) y la salida de caja. Solo se dispara si:
+    #   (a) hay señal de catálogo (sku/articulo/… o producto/nombre o cantidad) — si no la
+    #       hay, el scoring venta/gasto de abajo ya resuelve bien y no hay que intervenir;
+    #   (b) hay monto de transacción + fecha + (forma de pago O proveedor) — patrón de
+    #       operación, no de lista de precios; y
+    #   (c) el contexto de GASTO domina al de VENTA (gasto_score > venta_score) — así una
+    #       venta con cliente+forma_pago+total NO cae acá.
+    # Un catálogo real (precio_venta/stock_actual/stock_minimo, sin forma_pago/proveedor
+    # ni monto de operación) NO cumple (b) y sigue siendo "stock".
+    has_catalogo_signal_any = has_catalogo_fuerte or has_nombre or has_cantidad
+    if (
+        has_catalogo_signal_any
+        and has_monto_transaccion
+        and has_fecha
+        and (has_forma_pago or has_proveedor)
+        and gasto_score > venta_score
+    ):
+        return "gastos"
+
     # FASE 3: compra de mercadería/insumos para reventa CON columna de cantidad →
     # inventario, NO gasto corriente. Conservador: requiere AMBAS señales para no
     # absorber "compra de servicios/alquiler" (sin columnas de inventario).

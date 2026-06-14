@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import type { LegacyFiscalCondition } from "@/lib/fiscalCondition";
 
 export interface CashMethodBreakdown {
   payment_method: string;
@@ -13,8 +14,11 @@ export interface CashClosePreview {
   is_past_close_now: boolean;
   /** Fondo de caja del último cierre con arqueo (sugerencia). */
   suggested_opening_float_ars: number | null;
-  /** 'registered' | 'informal' | null — solo adapta la guía del modal. */
-  fiscal_condition: "registered" | "informal" | null;
+  /**
+   * Régimen fiscal — solo adapta la guía del modal. Tolera el valor legacy
+   * "registered" mientras el backend migra a monotributo/responsable_inscripto.
+   */
+  fiscal_condition: LegacyFiscalCondition | null;
 }
 
 export interface CreateCashClosePayload {

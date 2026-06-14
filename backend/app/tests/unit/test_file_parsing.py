@@ -167,6 +167,71 @@ def test_ambiguous_price_without_strong_signal_is_general() -> None:
     assert result == "general"
 
 
+def test_libro_compras_with_sku_classified_as_gastos_not_stock() -> None:
+    """Bug regression: un LIBRO DE COMPRAS de mercadería (monto de transacción + forma
+    de pago + proveedor + fecha) debe clasificarse como gastos AUNQUE traiga
+    sku/cantidad/costo_unitario. Antes, `has_catalogo_fuerte` (sku) ganaba y se perdía
+    el COGS y la salida de caja."""
+    result = infer_spreadsheet_type(
+        has_fecha=True,
+        has_venta=False,
+        has_gasto=True,
+        has_producto=True,
+        has_precio_ambiguo=True,  # "total" presente
+        has_catalogo_fuerte=True,  # sku presente
+        has_nombre=True,  # producto presente
+        has_cantidad=True,  # cantidad presente
+        has_monto_transaccion=True,  # total
+        has_forma_pago=True,  # forma_pago (venta_score +1)
+        has_proveedor=True,  # proveedor (gasto_score +1)
+        # proveedor + categoria + costo_unitario → 3 señales de gasto; forma_pago → 1 de venta
+        gasto_score=3,
+        venta_score=1,
+    )
+    assert result == "gastos"
+
+
+def test_real_catalogo_still_classified_as_stock() -> None:
+    """Un catálogo real (sku+nombre+precio_venta+stock_actual+stock_minimo, sin
+    forma_pago/proveedor/monto de transacción) sigue siendo stock — el guard de
+    libro de compras NO se dispara."""
+    result = infer_spreadsheet_type(
+        has_fecha=False,
+        has_venta=False,
+        has_gasto=False,
+        has_producto=True,
+        has_precio_ambiguo=False,
+        has_catalogo_fuerte=True,  # sku
+        has_nombre=True,  # nombre
+        has_monto_transaccion=False,
+        has_forma_pago=False,
+        has_proveedor=False,
+    )
+    assert result == "stock"
+
+
+def test_csv_libro_compras_end_to_end_infers_gastos() -> None:
+    """End-to-end: el CSV del libro de compras reportado se rutea a gastos, no stock."""
+    csv = (
+        b"fecha,sku,producto,cantidad,costo_unitario,total,proveedor,forma_pago,categoria\n"
+        b"2024-01-15,SKU001,Coca-Cola 600ml,24,800,19200,Distribuidora SA,transferencia,Bebidas\n"
+        b"2024-01-16,SKU002,Agua 1.5L,12,300,3600,Distribuidora SA,efectivo,Bebidas\n"
+    )
+    summary = parse_uploaded_content(csv, "text/csv", "libro_compras.csv")
+    assert summary["inferred_type"] == "gastos"
+
+
+def test_csv_catalogo_end_to_end_infers_stock() -> None:
+    """End-to-end: un catálogo de productos sigue clasificándose como stock."""
+    csv = (
+        b"sku,nombre,precio_venta,stock_actual,stock_minimo\n"
+        b"SKU001,Coca-Cola 600ml,1200,48,10\n"
+        b"SKU002,Agua 1.5L,600,24,6\n"
+    )
+    summary = parse_uploaded_content(csv, "text/csv", "catalogo.csv")
+    assert summary["inferred_type"] == "stock"
+
+
 def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) -> None:
     """CSV con columnas fecha+nombre+precio → inferred_type='stock' (bug regression end-to-end)."""
     product_csv = (
