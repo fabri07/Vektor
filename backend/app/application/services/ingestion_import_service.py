@@ -273,6 +273,99 @@ async def _record_stock_movement(
         balance.current_qty += qty
 
 
+def _parse_qty(qty_raw: Any) -> int:
+    """Cantidad entera de una celda de compra. 0 si vacía/no parseable/negativa."""
+    if qty_raw in (None, "", "None", "nan"):
+        return 0
+    try:
+        qty = int(float(str(qty_raw)))
+    except (ValueError, TypeError):
+        return 0
+    return qty if qty > 0 else 0
+
+
+def build_incomplete_product(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    name: str | None,
+    sku: str | None,
+    unit_cost: Decimal | None,
+) -> uuid.UUID | None:
+    """Construye y agrega a la sesión un ``Product`` vendible INCOMPLETO desde una
+    compra de mercadería, devolviendo su id (o ``None`` si no hay nombre utilizable).
+
+    Un producto nacido de una compra no trae precio de venta ni categoría de
+    catálogo: nace ``requires_completion=True``, ``sale_price_ars=0``,
+    ``unit_cost_ars`` del costo si vino, ``stock_units=0`` (el stock lo incrementa
+    quien corresponda después). Único lugar donde se materializa este patrón de
+    "producto desde compra", reusado por el import (``_ensure_product_for_purchase``)
+    y por la reclasificación de gastos a reventa (``RECLASSIFY_EXPENSE``).
+    """
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    clean_name = _clean_str(name, 299)
+    if not clean_name:
+        return None
+    clean_sku = _clean_str(sku, 99)
+
+    new_id = uuid.uuid4()
+    session.add(
+        Product(
+            id=new_id,
+            tenant_id=tenant_id,
+            name=clean_name,
+            sku=clean_sku,
+            sale_price_ars=Decimal("0"),  # una compra no trae precio de venta
+            unit_cost_ars=unit_cost,
+            stock_units=0,  # el incremento lo hace quien corresponda después
+            # category de PRODUCTO (vertical) ≠ código de gasto → None (incompleto).
+            category=None,
+            low_stock_threshold_units=None,
+            provenance="REAL",
+            requires_completion=True,  # falta precio de venta → completar
+        )
+    )
+    return new_id
+
+
+def _ensure_product_for_purchase(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    name: str | None,
+    sku: str | None,
+    unit_cost: Decimal | None,
+    by_sku: dict[str, uuid.UUID],
+    by_name: dict[str, uuid.UUID | None],
+) -> uuid.UUID | None:
+    """Crea el ``Product`` de una compra de mercadería cuyo SKU/nombre NO está en
+    el catálogo, y devuelve su id (o ``None`` si no hay nombre utilizable).
+
+    Específico de "compra desde gasto": a diferencia del bloque ``wants_productos``
+    (que SETEA stock absoluto y precio de venta del archivo), acá el producto nace
+    INCOMPLETO —``requires_completion=True``, ``sale_price_ars=0`` (una compra no
+    trae precio de venta), ``unit_cost_ars`` del costo si vino— y el stock lo
+    INCREMENTA luego ``_apply_purchase_to_stock``. Delega la construcción del ORM
+    en ``build_incomplete_product`` (helper compartido) y solo agrega el cacheo
+    por SKU/nombre para no duplicar producto entre filas del mismo archivo.
+
+    Cachea el id nuevo en ``by_sku``/``by_name`` para que filas posteriores del
+    mismo SKU/nombre en el mismo archivo reusen el producto (sin duplicar).
+    """
+    new_id = build_incomplete_product(session, tenant_id, name, sku, unit_cost)
+    if new_id is None:
+        return None
+    clean_name = _clean_str(name, 299)
+    clean_sku = _clean_str(sku, 99)
+    # Cachear para que filas repetidas del mismo SKU/nombre no dupliquen producto.
+    if clean_sku:
+        by_sku[clean_sku.lower()] = new_id
+    if clean_name:
+        norm = _normalize_name(clean_name)
+        if norm:
+            by_name[norm] = new_id
+    return new_id
+
+
 async def _apply_purchase_to_stock(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -839,6 +932,26 @@ async def insert_confirmed_data(
                         if exp_cost_col and exp_cost_col != gasto_col
                         else None
                     )
+                    # Compra de mercadería con SKU/nombre NUEVO: una compra es a la
+                    # vez gasto COGS+caja Y alta/reposición de producto. Gate estricto
+                    # (COGS + nombre + cantidad>0) para no crear productos basura
+                    # desde gastos de servicios/alquiler. Crea el producto incompleto
+                    # y deja que _apply_purchase_to_stock incremente el stock.
+                    exp_name = str(row.get(nombre_col)) if nombre_col else None
+                    if (
+                        expense.product_id is None
+                        and expense.expense_type == "COGS"
+                        and _parse_qty(exp_qty_raw) > 0
+                    ):
+                        expense.product_id = _ensure_product_for_purchase(
+                            session,
+                            tenant_id,
+                            exp_name,
+                            str(row.get(sku_col)) if sku_col else None,
+                            exp_unit_cost,
+                            _by_sku,
+                            _by_name,
+                        )
                     await _apply_purchase_to_stock(
                         session,
                         tenant_id,
@@ -1307,11 +1420,30 @@ async def _insert_multisheet_data(
         unit_cost = (
             _parse_amount(row.get(_uc_col)) if _uc_col and _uc_col != _amount_src else None
         )
+        exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
+        # Compra de mercadería con SKU/nombre NUEVO: a la vez gasto COGS+caja Y
+        # alta/reposición de producto. Gate estricto (COGS + nombre + cantidad>0)
+        # para no crear productos basura desde servicios/alquiler. Crea el producto
+        # incompleto y deja que _apply_purchase_to_stock incremente el stock.
+        if (
+            expense.product_id is None
+            and expense.expense_type == "COGS"
+            and _parse_qty(exp_qty_raw) > 0
+        ):
+            expense.product_id = _ensure_product_for_purchase(
+                session,
+                tenant_id,
+                _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
+                _val(row, cols.get("sku"), _SKU_COLS),
+                unit_cost,
+                _by_sku,
+                _by_name,
+            )
         await _apply_purchase_to_stock(
             session,
             tenant_id,
             expense,
-            _val(row, cols.get("quantity"), _CANTIDAD_COLS),
+            exp_qty_raw,
             unit_cost,
             balance_index=_balance_index,
         )

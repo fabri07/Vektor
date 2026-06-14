@@ -5,6 +5,9 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.persistence.models.business import BusinessProfile
 
 _TODAY = str(date.today())
 
@@ -70,6 +73,30 @@ class TestCashClosePreview:
         assert methods["cash"] == 7000.0  # 10000 ventas - 3000 gasto efectivo
         assert methods["transfer"] == 5000.0
         assert data["expected_total_ars"] == 12000.0
+
+    async def test_preview_normalizes_legacy_fiscal_condition(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Any,
+    ) -> None:
+        """El preview normaliza el legacy 'registered' → 'monotributo', igual que
+        GET /settings/fiscal-condition (consistencia entre ambos endpoints)."""
+        db_session.add(
+            BusinessProfile(
+                tenant_id=sample_tenant.tenant_id,
+                vertical_code="kiosco_almacen",
+                fiscal_condition="registered",  # valor legacy crudo
+            )
+        )
+        await db_session.commit()
+
+        resp = await client.get(
+            f"/api/v1/cash-closes/preview?close_date={_TODAY}", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        assert resp.json()["fiscal_condition"] == "monotributo"
 
 
 @pytest.mark.asyncio

@@ -304,6 +304,30 @@ OBJECTS_PROVEEDOR = frozenset(
         "aumentos",
     }
 )
+# Señales de categorización/clasificación de gastos (normalizadas, sin tildes).
+# Se chequea ANTES del routing por objeto y del out_of_scope para que una consulta
+# de "¿cómo clasifico este gasto?" / "esto es mercadería o insumo?" nunca caiga en
+# out_of_scope ni se confunda con una consulta de stock por la palabra "mercadería".
+OBJECTS_CLASIFICACION = frozenset(
+    {
+        "mercaderia",
+        "mercaderias",
+        "clasificar",
+        "clasificas",
+        "clasifico",
+        "clasificarias",
+        "clasificarian",
+        "clasificacion",
+        "categoria",
+        "categorias",
+        "categorizar",
+        "recategorizar",
+        "reclasificar",
+        "insumo",
+        "insumos",
+        "reventa",
+    }
+)
 
 
 def _contains_any(normalized: str, terms: frozenset[str]) -> bool:
@@ -402,6 +426,11 @@ def rescue_intent(
         return "analizar_archivo", {}
 
     # ── Reglas sin attachment: objeto de negocio detectado ────────────────────
+    # 4.5 categorización/clasificación de gastos (prioridad: antes que stock para que
+    #     "esto es mercadería o insumo?" no se confunda con quiebres de stock; y antes
+    #     del out_of_scope para que "reclasificar este movimiento" nunca corte).
+    if _contains_any(norm, OBJECTS_CLASIFICACION):
+        return "analizar_gastos", {"analysis_type": "clasificacion"}
     # 5. márgenes / rentabilidad
     if _contains_any(norm, OBJECTS_MARGEN):
         return "analizar_precios", {"analysis_type": "margenes"}

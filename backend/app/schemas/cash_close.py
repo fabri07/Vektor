@@ -25,7 +25,8 @@ class CashClosePreviewResponse(BaseModel):
     is_past_close_now: bool
     # Fondo de caja sugerido: el del último cierre con arqueo (None si no hay).
     suggested_opening_float_ars: float | None = None
-    # 'registered' | 'informal' | None — solo adapta la guía del modal.
+    # 'monotributo' | 'responsable_inscripto' | 'informal' | None — valor canónico
+    # (normalizado en el servicio); solo adapta la guía del modal de arqueo.
     fiscal_condition: str | None = None
 
 

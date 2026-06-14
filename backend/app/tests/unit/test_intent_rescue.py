@@ -98,6 +98,49 @@ def test_rule12_off_topic_stays_out_of_scope():
     assert rescue_intent("quién ganó el mundial", False, None) == ("out_of_scope", {})
 
 
+# ── Clasificación/categorización de gastos: nunca out_of_scope ────────────────
+
+
+def test_clasificacion_mercaderia_o_insumo_no_out_of_scope():
+    # "esto es mercadería o insumo?" → consejo de clasificación de gasto, NO out_of_scope
+    # ni stock (la palabra "mercadería" no debe rutear a quiebres en este contexto).
+    assert rescue_intent("esto es mercadería o insumo?", False, None) == (
+        "analizar_gastos",
+        {"analysis_type": "clasificacion"},
+    )
+
+
+def test_clasificacion_como_clasificarias_gasto_no_out_of_scope():
+    assert rescue_intent("¿cómo clasificarías este gasto de $3000?", False, None) == (
+        "analizar_gastos",
+        {"analysis_type": "clasificacion"},
+    )
+
+
+def test_clasificacion_reclasificar_movimiento_no_out_of_scope():
+    # sin objeto de negocio explícito ni verbo ambiguo: antes caía en out_of_scope.
+    assert rescue_intent("reclasificar este movimiento", False, None) == (
+        "analizar_gastos",
+        {"analysis_type": "clasificacion"},
+    )
+
+
+def test_clasificacion_screenshot_real_revista_mercaderia():
+    # Caso real de la screenshot: el agente respondía "fuera de mis competencias".
+    result = rescue_intent(
+        "Revistas Diario La Nación Mercadería $3.000 ¿cómo lo clasificarías?",
+        False,
+        None,
+    )
+    assert result != ("out_of_scope", {})
+    assert result == ("analizar_gastos", {"analysis_type": "clasificacion"})
+
+
+def test_off_topic_real_still_out_of_scope():
+    # el gate de clasificación NO debe ablandar off-topic genuino.
+    assert rescue_intent("contame un chiste", False, None) == ("out_of_scope", {})
+
+
 # ── Tolerancia a typos (fuzzy matching) ───────────────────────────────────────
 
 

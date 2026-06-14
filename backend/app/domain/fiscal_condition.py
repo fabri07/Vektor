@@ -23,6 +23,10 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
+from app.observability.logger import get_logger
+
+logger = get_logger(__name__)
+
 # ── Valores canónicos ────────────────────────────────────────────────────────
 
 # Tipo estrecho para schemas Pydantic y firmas (None = no configurado).
@@ -84,7 +88,16 @@ def normalize_fiscal_condition(value: str | None) -> FiscalCondition | None:
     key = _norm_key(value)
     if not key:
         return None
-    return _ALIASES.get(key)
+    canonical = _ALIASES.get(key)
+    if canonical is None:
+        # No vaciar en silencio: un valor no vacío que no reconocemos es señal de
+        # un alias faltante o de datos corruptos. Se descarta a None (contrato
+        # intacto) pero queda registrado para no perder la pista.
+        logger.warning(
+            "fiscal_condition_unrecognized",
+            normalized_key=key,
+        )
+    return canonical
 
 
 def is_registered(value: str | None) -> bool:

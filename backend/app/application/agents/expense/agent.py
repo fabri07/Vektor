@@ -252,6 +252,10 @@ class AgentExpense(BaseAgent):
         if action_type == ActionType.ANALYZE_EXPENSE_DATA:
             return await self._handle_expense_analysis(request, analysis_intent)
 
+        # ── Nivel 2: reclasificar gasto (asesoría read-only o escritura MEDIUM) ──
+        if action_type == ActionType.RECLASSIFY_EXPENSE:
+            return await self._handle_reclassify_expense(request, task)
+
         file_import = await self._maybe_build_uploaded_file_import(request)
         if file_import is not None:
             return file_import
@@ -554,6 +558,180 @@ class AgentExpense(BaseAgent):
             "clasificar_gastos",
             "\n".join(lines),
             {"by_category": by_cat},
+        )
+
+    # ── Nivel 2: reclasificación de gastos (asesoría + escritura) ──────────────
+
+    async def _business_vertical(self, tenant_id: uuid.UUID) -> str:
+        """Devuelve el vertical_code del tenant o fallback a kiosco_almacen."""
+        if self._db is None:
+            return "kiosco_almacen"
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+
+        result = await self._db.execute(
+            select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+        )
+        code = result.scalar_one_or_none()
+        return code or "kiosco_almacen"
+
+    def _advise_reventa_vs_insumo(
+        self, text: str, business_type: str
+    ) -> tuple[str, str, bool]:
+        """Recomienda reventa (COGS/INVENTORY) vs insumo (OPEX/SUPPLIES) vs otra
+        categoría según el VERTICAL, de forma determinística (sin LLM).
+
+        Devuelve ``(category_code, target, es_reventa)``. Reusa el catálogo
+        canónico de gastos + el catálogo de productos del vertical vía
+        ``classify_expense_with_vertical``: si el texto matchea un producto
+        vendible del rubro (golosinas, bebidas, cigarrillos...) → reventa
+        (INVENTORY). Si matchea una categoría de gasto operativo (bolsas,
+        librería, limpieza...) → insumo/otra categoría (OPEX).
+        """
+        from app.domain.expense_categories import (  # noqa: PLC0415
+            classify_expense_with_vertical,
+        )
+
+        code, _label, es_mercaderia = classify_expense_with_vertical(text, business_type)
+        if es_mercaderia:
+            return "INVENTORY", "reventa", True
+        if code in ("SUPPLIES", "MAINTENANCE"):
+            return code, "insumo", False
+        return code, "categoria", False
+
+    async def _handle_reclassify_expense(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Asesora o reclasifica un gasto entre reventa / insumo / otra categoría.
+
+        - ASESORÍA (read-only): si el usuario no identificó un gasto concreto ni
+          dio un ``target`` explícito, recomienda determinísticamente reventa vs
+          insumo según el vertical. status="success", LOW risk.
+        - ESCRITURA: si hay identificación (expense_id o fecha+monto+descripción)
+          y un ``target``, construye un pending action MEDIUM (requires_approval).
+        """
+        entities: dict[str, Any] = getattr(task, "entities", {}) or {}
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            tenant_id = None
+
+        target = entities.get("target")
+        expense_id = entities.get("expense_id")
+        has_identification = bool(
+            expense_id
+            or (entities.get("monto") or entities.get("amount"))
+            or entities.get("descripcion")
+            or entities.get("description")
+        )
+
+        business_type = (
+            await self._business_vertical(tenant_id)
+            if tenant_id is not None
+            else "kiosco_almacen"
+        )
+
+        # ── ASESORÍA: sin target o sin identificación → recomendamos ──────────
+        if not target or not has_identification:
+            advice_text = (
+                str(entities.get("descripcion") or entities.get("description") or "")
+                or request.message
+            )
+            rec_category, rec_target, es_reventa = self._advise_reventa_vs_insumo(
+                advice_text, business_type
+            )
+            label = EXPENSE_CATEGORY_LABELS_ES.get(rec_category, rec_category)
+            if es_reventa:
+                msg = (
+                    "Para tu rubro, eso es mercadería de reventa: se carga como compra "
+                    "de inventario (categoría Mercadería, costo COGS) y conviene vincularlo "
+                    "a un producto vendible para seguir su stock y margen. "
+                    "Si querés, decime el gasto puntual y lo reclasifico."
+                )
+            elif rec_target == "insumo":
+                msg = (
+                    f"Eso suena a insumo de uso interno (no se revende): se carga como "
+                    f"gasto operativo, categoría {label} (OPEX). "
+                    "Si querés, indicame el gasto y lo reclasifico."
+                )
+            else:
+                msg = (
+                    f"Eso no es mercadería de reventa: lo cargaría como gasto operativo "
+                    f"en la categoría {label} (OPEX). "
+                    "Decime el gasto puntual si querés que lo reclasifique."
+                )
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.HIGH,
+                message=msg,
+                result={
+                    "summary": "Asesoría de clasificación de gasto",
+                    "structured_data": {
+                        "recommended_category": rec_category,
+                        "recommended_target": rec_target,
+                        "es_reventa": es_reventa,
+                    },
+                    "analysis": True,
+                },
+            )
+
+        # ── ESCRITURA: identificación + target → pending action MEDIUM ────────
+        normalized_target = str(target).strip().lower()
+        if normalized_target in ("reventa", "mercaderia", "mercadería"):
+            normalized_target = "reventa"
+            final_category = "INVENTORY"
+        elif normalized_target in ("insumo", "insumos"):
+            normalized_target = "insumo"
+            final_category = "SUPPLIES"
+        else:
+            normalized_target = "categoria"
+            raw_cat = entities.get("category")
+            final_category, _ = (
+                normalize_expense_category(str(raw_cat)) if raw_cat else ("OTHER", None)
+            )
+
+        structured: dict[str, Any] = {
+            "expense_id": str(expense_id) if expense_id else None,
+            "fecha": entities.get("fecha") or entities.get("transaction_date"),
+            "monto": str(entities.get("monto") or entities.get("amount") or "")
+            or None,
+            "descripcion": entities.get("descripcion") or entities.get("description"),
+            "target": normalized_target,
+            "category": final_category,
+            "sku": entities.get("sku"),
+            "product_name": entities.get("product_name") or entities.get("nombre"),
+        }
+        label = EXPENSE_CATEGORY_LABELS_ES.get(final_category, final_category)
+        ident = (
+            f"el gasto {structured['expense_id']}"
+            if structured["expense_id"]
+            else (structured["descripcion"] or "el gasto indicado")
+        )
+        if normalized_target == "reventa":
+            summary = (
+                f"Reclasificar {ident} como mercadería de reventa "
+                f"(Mercadería/COGS) y vincularlo a un producto vendible."
+            )
+        else:
+            summary = f"Reclasificar {ident} como {label} ({normalized_target})."
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_approval",
+            risk_level=RiskLevel.MEDIUM,
+            requires_approval=True,
+            confidence=Confidence.HIGH,
+            result={
+                "summary": summary,
+                "action_type": ActionType.RECLASSIFY_EXPENSE,
+                "structured_data": structured,
+                "alerts": [],
+            },
         )
 
     async def _handle_cash_outflow(self, request: AgentRequest, task: Any | None) -> AgentResponse:

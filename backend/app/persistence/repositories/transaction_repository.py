@@ -500,6 +500,28 @@ class ExpenseRepository:
         await self._session.flush()
         return entry
 
+    async def reclassify(
+        self,
+        entry: ExpenseEntry,
+        *,
+        category: str,
+        expense_type: str,
+        product_id: UUID | None = None,
+    ) -> ExpenseEntry:
+        """Reclasifica un gasto in-place: category + expense_type (+ product_id opcional).
+
+        Aditivo respecto del resto del repo: muta solo los campos de clasificación
+        contable, sin tocar montos ni fechas. ``product_id`` solo se setea cuando
+        viene explícito (reventa → producto vendible vinculado); nunca lo limpia.
+        """
+        entry.category = category
+        entry.expense_type = expense_type
+        if product_id is not None:
+            entry.product_id = product_id
+        self._session.add(entry)
+        await self._session.flush()
+        return entry
+
     async def delete(self, entry: ExpenseEntry) -> None:
         await self._session.delete(entry)
         await self._session.flush()

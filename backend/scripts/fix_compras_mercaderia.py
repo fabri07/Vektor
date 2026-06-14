@@ -80,10 +80,15 @@ def p(t: str) -> None:
     print(f"\n{'='*70}\n  {t}\n{'='*70}")
 
 
-def _key(d: date | None, amt: Decimal | None) -> tuple[str, str] | None:
+def _key(
+    d: date | None, amt: Decimal | None, pid: uuid.UUID | None = None
+) -> tuple[str, str, str] | None:
+    """Clave de match: (fecha, monto, product_id). El product_id desambigua
+    cuando varias filas comparten fecha+monto (evita emparejar el COGS
+    equivocado o insertar fantasmas). `pid=None` → clave genérica (fallback)."""
     if d is None or amt is None:
         return None
-    return (d.isoformat(), f"{float(amt):.2f}")
+    return (d.isoformat(), f"{float(amt):.2f}", str(pid) if pid is not None else "")
 
 
 def _col(row: dict, *names: str) -> str:
@@ -144,9 +149,21 @@ async def _undo(session: AsyncSession, tid: uuid.UUID) -> None:
             )
         ).scalars().all()
     }
+    # Bulk load de productos (evita N+1: un get() por movimiento en el loop).
+    comp_pids = [m.product_id for m in comps]
+    prod_index = {
+        p_.id: p_
+        for p_ in (
+            await session.execute(
+                select(Product).where(
+                    Product.tenant_id == tid, Product.id.in_(comp_pids)
+                )
+            )
+        ).scalars().all()
+    } if comp_pids else {}
     reverted = 0
     for m in comps:
-        prod = await session.get(Product, m.product_id)
+        prod = prod_index.get(m.product_id)
         if prod is not None:
             prod.stock_units -= m.qty  # deshacer el delta compensatorio
         b = bal_index.get(m.product_id)
@@ -207,21 +224,33 @@ async def run(session: AsyncSession, email: str, apply: bool, undo: bool) -> Non
     rows = await _load_csv_rows(frow[1])
     by_sku, by_name = await _load_product_index(session, tid)
 
-    # COGS existentes indexados por (fecha, monto)
+    # COGS existentes indexados por (fecha, monto, product_id).
+    # Incluye también filas YA tagueadas por este mismo batch (cualquier
+    # expense_type) para que un re-run las reconozca y NO las re-inserte
+    # (un insert previo pudo quedar OPEX y no entraría por el filtro COGS).
     existing = (
         await session.execute(
             select(ExpenseEntry).where(
                 ExpenseEntry.tenant_id == tid,
                 ExpenseEntry.voided_at.is_(None),
-                (ExpenseEntry.category == "INVENTORY") | (ExpenseEntry.expense_type == "COGS"),
+                (ExpenseEntry.category == "INVENTORY")
+                | (ExpenseEntry.expense_type == "COGS")
+                | (ExpenseEntry.custom_fields["_fix_batch"].astext == BATCH_TAG),
             )
         )
     ).scalars().all()
-    idx: dict[tuple[str, str], list[ExpenseEntry]] = defaultdict(list)
+    # Doble índice: clave específica (con product_id) + clave genérica
+    # (sin product_id) como fallback cuando la fila no tiene producto resuelto.
+    idx: dict[tuple[str, str, str], list[ExpenseEntry]] = defaultdict(list)
+    idx_loose: dict[tuple[str, str, str], list[ExpenseEntry]] = defaultdict(list)
     for e in existing:
-        k = _key(e.transaction_date.date(), e.amount)
-        if k:
-            idx[k].append(e)
+        ed = e.transaction_date.date()
+        ks = _key(ed, e.amount, e.product_id)
+        if ks:
+            idx[ks].append(e)
+        kl = _key(ed, e.amount, None)
+        if kl:
+            idx_loose[kl].append(e)
 
     n_updated = n_pay_fixed = n_inserted = 0
     pay_counts: Counter[str] = Counter()
@@ -243,10 +272,25 @@ async def run(session: AsyncSession, email: str, apply: bool, undo: bool) -> Non
         pay_counts[pay] += 1
         pay_money[pay] += amt
 
-        k = _key(d.date() if d else None, amt)
-        match = idx.get(k, [])
-        if match:
-            e = match.pop(0)
+        # Match: primero clave específica (fecha, monto, product_id);
+        # si no hay producto resuelto o no matchea, fallback a (fecha, monto).
+        dd = d.date() if d else None
+        e = None
+        ks = _key(dd, amt, product_id) if product_id is not None else None
+        if ks and idx.get(ks):
+            e = idx[ks].pop(0)
+        else:
+            kl = _key(dd, amt, None)
+            if kl and idx_loose.get(kl):
+                e = idx_loose[kl].pop(0)
+        if e is not None:
+            # Mantener ambos índices consistentes (la fila no debe re-matchear).
+            ke_s = _key(e.transaction_date.date(), e.amount, e.product_id)
+            ke_l = _key(e.transaction_date.date(), e.amount, None)
+            if ke_s and e in idx.get(ke_s, []):
+                idx[ke_s].remove(e)
+            if ke_l and e in idx_loose.get(ke_l, []):
+                idx_loose[ke_l].remove(e)
             cf = dict(e.custom_fields or {})
             if e.payment_method != pay:
                 cf["_orig_payment_method"] = e.payment_method
@@ -259,7 +303,9 @@ async def run(session: AsyncSession, email: str, apply: bool, undo: bool) -> Non
             if not e.supplier_name and proveedor:
                 e.supplier_name = proveedor
             cf["_fix_batch"] = BATCH_TAG
-            cf["_fix_op"] = "update"
+            # No degradar un insert previo a "update" en un re-run: el --undo
+            # debe seguir borrando esa fila, no restaurarla.
+            cf["_fix_op"] = cf.get("_fix_op") or "update"
             e.custom_fields = cf
             n_updated += 1
         else:
@@ -287,51 +333,83 @@ async def run(session: AsyncSession, email: str, apply: bool, undo: bool) -> Non
             n_inserted += 1
 
     # ── STOCK: revertir el import malo del 13/06 ──────────────────────────
-    movs = (
+    # IDEMPOTENCIA: si ya existen movimientos compensatorios de este batch,
+    # la reversa ya se aplicó en un --apply previo → la salteamos (un segundo
+    # --apply no debe re-restar el stock).
+    already = (
         await session.execute(
-            select(InventoryMovement).where(
+            select(func.count())
+            .select_from(InventoryMovement)
+            .where(
                 InventoryMovement.tenant_id == tid,
-                func.date(InventoryMovement.created_at) == IMPORT_DAY,
-                InventoryMovement.source_event_id == "import",
+                InventoryMovement.source_event_id == BATCH_TAG,
             )
         )
-    ).scalars().all()
-    net_by_prod: dict[uuid.UUID, int] = defaultdict(int)
-    for m in movs:
-        net_by_prod[m.product_id] += m.qty
-    bal_index = {
-        b.product_id: b
-        for b in (
-            await session.execute(
-                select(InventoryBalance).where(InventoryBalance.tenant_id == tid)
-            )
-        ).scalars().all()
-    }
+    ).scalar_one()
     delta_total = 0
     n_stock = 0
-    for pid, net in net_by_prod.items():
-        if net == 0:
-            continue
-        prod = await session.get(Product, pid)
-        if prod is None:
-            continue
-        prod.stock_units -= net  # restaurar pre-import
-        delta_total += -net
-        b = bal_index.get(pid)
-        if b is not None:
-            b.current_qty -= net
-        session.add(
-            InventoryMovement(
-                tenant_id=tid,
-                product_id=pid,
-                movement_type="adjustment",
-                qty=-net,
-                unit_cost=None,
-                source_event_id=BATCH_TAG,
-                reason="reversa import 13/06 mal clasificado (fix compras)",
-            )
+    stock_skipped = bool(already)
+    if stock_skipped:
+        print(
+            f"\n  ⏭  STOCK ya revertido (existen {already} movimientos "
+            f"'{BATCH_TAG}'). Salteo la reversa de stock (idempotente)."
         )
-        n_stock += 1
+    else:
+        movs = (
+            await session.execute(
+                select(InventoryMovement).where(
+                    InventoryMovement.tenant_id == tid,
+                    func.date(InventoryMovement.created_at) == IMPORT_DAY,
+                    InventoryMovement.source_event_id == "import",
+                )
+            )
+        ).scalars().all()
+        net_by_prod: dict[uuid.UUID, int] = defaultdict(int)
+        for m in movs:
+            net_by_prod[m.product_id] += m.qty
+        bal_index = {
+            b.product_id: b
+            for b in (
+                await session.execute(
+                    select(InventoryBalance).where(InventoryBalance.tenant_id == tid)
+                )
+            ).scalars().all()
+        }
+        # Bulk load de productos (evita N+1: un get() por producto en el loop).
+        pids = [pid for pid, net in net_by_prod.items() if net != 0]
+        prod_index = {
+            p_.id: p_
+            for p_ in (
+                await session.execute(
+                    select(Product).where(
+                        Product.tenant_id == tid, Product.id.in_(pids)
+                    )
+                )
+            ).scalars().all()
+        } if pids else {}
+        for pid, net in net_by_prod.items():
+            if net == 0:
+                continue
+            prod = prod_index.get(pid)
+            if prod is None:
+                continue
+            prod.stock_units -= net  # restaurar pre-import
+            delta_total += -net
+            b = bal_index.get(pid)
+            if b is not None:
+                b.current_qty -= net
+            session.add(
+                InventoryMovement(
+                    tenant_id=tid,
+                    product_id=pid,
+                    movement_type="adjustment",
+                    qty=-net,
+                    unit_cost=None,
+                    source_event_id=BATCH_TAG,
+                    reason="reversa import 13/06 mal clasificado (fix compras)",
+                )
+            )
+            n_stock += 1
 
     # ── Reporte ───────────────────────────────────────────────────────────
     p("RESULTADO (gastos / caja)")
@@ -351,9 +429,12 @@ async def run(session: AsyncSession, email: str, apply: bool, undo: bool) -> Non
         print(f"    OTROS                        {dict(other)}")
 
     p("RESULTADO (stock)")
-    print(f"  productos con stock restaurado = {n_stock}")
-    print(f"  movimientos compensatorios     = {n_stock}")
-    print(f"  Δ total stock (debería ≈ +397 hacia 4135) = {delta_total}")
+    if stock_skipped:
+        print("  reversa de stock SALTEADA (ya aplicada en un --apply previo).")
+    else:
+        print(f"  productos con stock restaurado = {n_stock}")
+        print(f"  movimientos compensatorios     = {n_stock}")
+        print(f"  Δ total stock (debería ≈ +397 hacia 4135) = {delta_total}")
 
     if apply:
         await session.commit()

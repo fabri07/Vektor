@@ -14,8 +14,9 @@ from app.application.agents.shared.schemas import ActionType, AgentTeamPlan
 def test_intent_catalog_size():
     # Sprint 19: catálogo consolidado. 11 escritura + 2 informes + 3 google +
     # 1 ayuda + 1 desconocido + 8 familias analíticas + 2 sentinels aclaración = 28.
+    # Nivel 2: + reclasificar_gasto = 29.
     # Las 35 variantes analíticas viejas ahora son valores de `analysis_type`.
-    assert len(INTENT_CATALOG) == 28
+    assert len(INTENT_CATALOG) == 29
 
 
 def test_all_intents_have_agent_mapping():
@@ -55,6 +56,23 @@ def test_build_plan_ingresar_gasto():
     plan = build_plan("ingresar_gasto", {"descripcion": "alquiler"})
     assert plan.tasks[0].action_type == ActionType.REGISTER_EXPENSE
     assert plan.tasks[0].agent == "agent_expense"
+
+
+def test_build_plan_reclasificar_gasto():
+    plan = build_plan("reclasificar_gasto", {"target": "reventa"})
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].action_type == ActionType.RECLASSIFY_EXPENSE
+    assert plan.tasks[0].agent == "agent_expense"
+    assert plan.tasks[0].entities["target"] == "reventa"
+    assert plan.requires_synthesis is False
+
+
+def test_reclassify_expense_in_risk_engine_is_medium():
+    from app.application.agents.shared.risk_engine import RiskEngine
+    from app.application.agents.shared.schemas import RiskLevel
+
+    assert RiskEngine.evaluate(ActionType.RECLASSIFY_EXPENSE) == RiskLevel.MEDIUM
+    assert RiskEngine.requires_approval(ActionType.RECLASSIFY_EXPENSE) is True
 
 
 def test_build_plan_registrar_merma():

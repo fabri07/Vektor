@@ -46,6 +46,8 @@ class ActionType(StrEnum):
     )
     ANALYZE_SUPPLIER_DATA = "ANALYZE_SUPPLIER_DATA"  # ranking, dependencia, pedidos sugeridos
     SIMULATE_SCENARIO = "SIMULATE_SCENARIO"  # escenarios financieros what-if
+    # Nivel 2: reclasificación contable de un gasto (muta clasificación → MEDIUM)
+    RECLASSIFY_EXPENSE = "RECLASSIFY_EXPENSE"  # reventa (COGS) | insumo (OPEX) | otra categoría
 
 
 class RiskLevel(StrEnum):

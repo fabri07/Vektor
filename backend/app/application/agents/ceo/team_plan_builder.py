@@ -140,6 +140,21 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
             "compré stock por $20000",
         ],
     },
+    "reclasificar_gasto": {
+        "desc": "Reclasificar un gasto entre mercadería de reventa, insumo u otra categoría "
+        "(muta su clasificación contable)",
+        "triggers": [
+            "reclasificá ese gasto",
+            "recategorizá esta compra",
+            "esto es mercadería o insumo",
+            "cambialo a mercadería",
+            "esto va como gasto",
+            "esto es un insumo, no reventa",
+            "marcá esto como reventa",
+            "este gasto en realidad es mercadería",
+            "movelo a insumos",
+        ],
+    },
     # ── Informes y estado ─────────────────────────────────────────────────────
     "consultar_estado_negocio": {
         "desc": "Ver el estado de salud financiera del negocio o generar un informe",
@@ -256,6 +271,10 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
             "hay algún gasto raro o inusual",
             "separame costos fijos de variables",
             "cuánto tengo que vender para no perder",
+            "cómo clasifico este gasto",
+            "esto es mercadería o insumo",
+            "este gasto cómo lo cargo",
+            "esto va como reventa o como gasto",
         ],
     },
     "analizar_proveedores": {
@@ -421,6 +440,7 @@ INTENT_TO_AGENT: dict[str, str] = {
     "importar_archivo_productos": "agent_income",
     # Stage 3: compound → (agent_stock, REGISTER_PURCHASE) + (agent_expense, REGISTER_CASH_OUTFLOW)
     "registrar_compra_proveedor": "agent_supplier",
+    "reclasificar_gasto": "agent_expense",
     "consultar_estado_negocio": "agent_health",
     "generar_informe_con_export": "agent_health",  # Stage 4: DAG health → upload Drive
     "gestionar_proveedor": "agent_supplier",
@@ -455,6 +475,7 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "importar_archivo_gastos": ActionType.IMPORT_TABULAR_FILE,
     "importar_archivo_productos": ActionType.IMPORT_TABULAR_FILE,
     "registrar_compra_proveedor": ActionType.REGISTER_PURCHASE,
+    "reclasificar_gasto": ActionType.RECLASSIFY_EXPENSE,
     "consultar_estado_negocio": ActionType.GENERATE_HEALTH_REPORT,
     "generar_informe_con_export": ActionType.GENERATE_HEALTH_REPORT,  # Stage 4: primary action
     "gestionar_proveedor": ActionType.CREATE_SUPPLIER_DRAFT,

@@ -19,6 +19,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.work_schedule_service import resolve_schedule
+from app.domain.fiscal_condition import (
+    FiscalCondition,
+    normalize_fiscal_condition,
+)
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -104,14 +108,22 @@ class CashCloseService:
         ).scalar_one_or_none()
         return float(row) if row is not None else None
 
-    async def _fiscal_condition(self, tenant_id: uuid.UUID) -> str | None:
-        return (
+    async def _fiscal_condition(self, tenant_id: uuid.UUID) -> FiscalCondition | None:
+        """Condición fiscal canónica del tenant.
+
+        Normaliza el valor crudo (incluido el legacy 'registered') con el mismo
+        normalizador que usa ``GET /settings/fiscal-condition``, para que el modal
+        de arqueo reciba siempre un código canónico y el frontend lo clasifique
+        igual en todos lados.
+        """
+        raw = (
             await self._session.execute(
                 select(BusinessProfile.fiscal_condition).where(
                     BusinessProfile.tenant_id == tenant_id
                 )
             )
         ).scalar_one_or_none()
+        return normalize_fiscal_condition(raw)
 
     async def preview(
         self, tenant_id: uuid.UUID, close_date: date
