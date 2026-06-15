@@ -116,7 +116,10 @@ async def main() -> None:
             await session.commit()
             print(
                 f"COMMIT aplicado. run_id={res.run_id} "
-                f"voided={res.sales_voided} reclasificados={res.products_updated}"
+                f"duplicados_anulados={res.sales_voided + res.expenses_voided} "
+                f"(ventas={res.sales_voided}/gastos={res.expenses_voided}) "
+                f"reclasificados_OPEX→COGS={res.expenses_reclassified} "
+                f"productos_creados={res.products_created}"
             )
         else:
             await session.rollback()
