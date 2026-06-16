@@ -11,6 +11,7 @@ export interface CreateProductPayload {
   sku?: string | null;
   description?: string | null;
   acquired_at?: string | null;
+  custom_fields?: Record<string, unknown>;
 }
 
 export type UpdateProductPayload = Partial<CreateProductPayload> & {
@@ -57,8 +58,15 @@ const PAGE_SIZE = 200;
 const MAX_PAGES = 25;
 
 export const productsService = {
-  async createProduct(payload: CreateProductPayload): Promise<ProductResponse> {
-    const res = await api.post<ProductResponse>("/products", payload);
+  async createProduct(
+    payload: CreateProductPayload,
+    idempotencyKey?: string,
+  ): Promise<ProductResponse> {
+    const res = await api.post<ProductResponse>(
+      "/products",
+      payload,
+      idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : undefined,
+    );
     return res.data;
   },
 

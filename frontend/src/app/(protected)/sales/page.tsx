@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Trash2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
+import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { StatCard } from "@/components/ui/StatCard";
 import { SmartTable } from "@/components/ui/SmartTable";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -229,7 +230,7 @@ export default function SalesPage() {
   ];
 
   return (
-    <PageWrapper title="Ventas">
+    <PageWrapper title="Ventas" actions={<ManualEntryLauncher />}>
       {/* Period filter + cierre de caja */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PeriodFilter value={period} onChange={setPeriod} availableRange={dateRange} />

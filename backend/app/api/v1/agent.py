@@ -355,9 +355,9 @@ async def _register_operation_fingerprint(
     if str(action.action_type) not in _FINGERPRINT_ACTION_TYPES:
         return False
 
-    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
-
-    from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
+    from app.application.services.idempotency import (  # noqa: PLC0415
+        claim_operation_fingerprint,
+    )
 
     payload = _payload_for_fingerprint(action.payload or {})
     raw = (
@@ -366,21 +366,12 @@ async def _register_operation_fingerprint(
     )
     fingerprint = hashlib.sha256(raw.encode()).hexdigest()
 
-    # Usar savepoint para que un IntegrityError no aborte la transacción padre.
-    try:
-        async with db.begin_nested():
-            db.add(
-                OperationFingerprint(
-                    tenant_id=tenant_id,
-                    fingerprint=fingerprint,
-                    action_type=str(action.action_type),
-                )
-            )
-    except IntegrityError:
-        # El fingerprint ya existía — operación duplicada.
-        return True
-
-    return False
+    # claim_operation_fingerprint inserta con savepoint y devuelve True si el
+    # fingerprint era nuevo; aquí la semántica es inversa: True == duplicado.
+    claimed = await claim_operation_fingerprint(
+        db, tenant_id, fingerprint, str(action.action_type)
+    )
+    return not claimed
 
 
 async def _execute_local_action(

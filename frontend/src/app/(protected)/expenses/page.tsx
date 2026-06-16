@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Trash2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
+import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { StatCard } from "@/components/ui/StatCard";
 import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
@@ -242,7 +243,7 @@ export default function ExpensesPage() {
   );
 
   return (
-    <PageWrapper title="Gastos">
+    <PageWrapper title="Gastos" actions={<ManualEntryLauncher />}>
       {/* Filters */}
       <div className="flex flex-col gap-3">
         <PeriodFilter value={period} onChange={setPeriod} availableRange={dateRange} />

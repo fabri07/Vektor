@@ -10,6 +10,7 @@ export interface CreateSalePayload {
   payment_method: string;
   product_id?: string | null;
   notes?: string | null;
+  custom_fields?: Record<string, unknown>;
 }
 
 export type UpdateSalePayload = Partial<CreateSalePayload>;
@@ -43,8 +44,15 @@ const PAGE_SIZE = 200;
 const MAX_PAGES = 25;
 
 export const salesService = {
-  async createSale(payload: CreateSalePayload): Promise<SaleEntryResponse> {
-    const res = await api.post<SaleEntryResponse>("/sales", payload);
+  async createSale(
+    payload: CreateSalePayload,
+    idempotencyKey?: string,
+  ): Promise<SaleEntryResponse> {
+    const res = await api.post<SaleEntryResponse>(
+      "/sales",
+      payload,
+      idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : undefined,
+    );
     return res.data;
   },
 

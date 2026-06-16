@@ -15,6 +15,9 @@ export interface CreateExpensePayload {
   payment_method?: string;
   supplier_name?: string | null;
   notes?: string | null;
+  /** OPEX = gasto operativo; COGS = compra de mercadería. */
+  expense_type?: "OPEX" | "COGS";
+  custom_fields?: Record<string, unknown>;
 }
 
 export type UpdateExpensePayload = Partial<CreateExpensePayload>;
@@ -55,8 +58,13 @@ const MAX_PAGES = 25;
 export const expensesService = {
   async createExpense(
     payload: CreateExpensePayload,
+    idempotencyKey?: string,
   ): Promise<ExpenseEntryResponse> {
-    const res = await api.post<ExpenseEntryResponse>("/expenses", payload);
+    const res = await api.post<ExpenseEntryResponse>(
+      "/expenses",
+      payload,
+      idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : undefined,
+    );
     return res.data;
   },
 

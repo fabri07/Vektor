@@ -8,13 +8,15 @@ interface ModalProps {
   onClose: () => void;
   title?: string;
   children: ReactNode;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl";
 }
 
 const SIZE_CLASS: Record<NonNullable<ModalProps["size"]>, string> = {
   sm: "max-w-sm",
   md: "max-w-md",
   lg: "max-w-lg",
+  xl: "max-w-xl",
+  "2xl": "max-w-2xl",
 };
 
 const FOCUSABLE = [
@@ -147,7 +149,7 @@ export function Modal({ isOpen, onClose, title, children, size = "md" }: ModalPr
         )}
 
         {/* Body */}
-        <div className="px-6 py-5">{children}</div>
+        <div className="max-h-[80vh] overflow-y-auto px-6 py-5">{children}</div>
       </div>
     </div>
   );

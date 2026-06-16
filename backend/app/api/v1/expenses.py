@@ -4,10 +4,11 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
+from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
@@ -164,7 +165,15 @@ async def create_expense(
     tenant: Tenant = Depends(get_current_tenant),
     _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ExpenseEntry:
+    # Idempotencia opcional: si llega la key, reclamarla ANTES de crear. Comparte
+    # transacción con la creación (commit único en get_db_session), por lo que si
+    # la creación falla el claim se revierte y un reintento futuro puede entrar.
+    if idempotency_key is not None and not await claim_idempotency_key(
+        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_EXPENSE"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = ExpenseRepository(session)
     # FASE 3.1: categoría "Otro" editable — el label libre va a custom_fields;
     # category sigue siendo OTHER (reportes/agregaciones intactos).

@@ -3,11 +3,12 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
+from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.product_categories import (
     normalize_product_category,
@@ -118,7 +119,15 @@ async def create_product(
     tenant: Tenant = Depends(get_current_tenant),
     _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> Product:
+    # Idempotencia opcional: si llega la key, reclamarla ANTES de crear. Comparte
+    # transacción con la creación (commit único en get_db_session), por lo que si
+    # la creación falla el claim se revierte y un reintento futuro puede entrar.
+    if idempotency_key is not None and not await claim_idempotency_key(
+        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_PRODUCT"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = ProductRepository(session)
     data = body.model_dump()
     # FASE E: normalizar categoría libre al catálogo del vertical.

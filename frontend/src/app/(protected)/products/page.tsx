@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { Pencil, Trash2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
+import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { StatCard } from "@/components/ui/StatCard";
 import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
@@ -256,7 +257,7 @@ export default function ProductsPage() {
     .map((p) => ({ ...p, _status: null }));
 
   return (
-    <PageWrapper title="Productos">
+    <PageWrapper title="Productos" actions={<ManualEntryLauncher />}>
       {/* Filter */}
       <div className="flex items-center gap-3">
         <label className="text-sm text-vk-text-muted">Estado:</label>
