@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { productsService } from "@/services/products.service";
+import { customersService } from "@/services/customers.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
 import type { FieldDefinition } from "@/types/api";
@@ -96,6 +97,7 @@ interface SaleForm {
   transaction_date: string;
   payment_method: string;
   product_id: string;
+  customer_id: string;
   notes: string;
 }
 
@@ -106,6 +108,7 @@ function emptySaleForm(): SaleForm {
     transaction_date: nowStr(),
     payment_method: "cash",
     product_id: "",
+    customer_id: "",
     notes: "",
   };
 }
@@ -121,6 +124,10 @@ function SaleTab({ onToast }: { onToast: (t: ToastState) => void }) {
   const { data: products } = useQuery({
     queryKey: ["products-list"],
     queryFn: () => productsService.getAllProducts({ is_active: true }),
+  });
+  const { data: customers } = useQuery({
+    queryKey: ["customers-list"],
+    queryFn: () => customersService.getAllCustomers(),
   });
   const { data: customDefs } = useQuery({
     queryKey: ["field-definitions", "sale"],
@@ -170,6 +177,7 @@ function SaleTab({ onToast }: { onToast: (t: ToastState) => void }) {
         transaction_date: form.transaction_date,
         payment_method: form.payment_method,
         product_id: form.product_id || null,
+        customer_id: form.customer_id || null,
         notes: form.notes || null,
         ...(Object.keys(custom).length ? { custom_fields: custom } : {}),
       },
@@ -258,6 +266,24 @@ function SaleTab({ onToast }: { onToast: (t: ToastState) => void }) {
           {(products ?? []).map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label className="text-xs font-medium text-vk-text-secondary">
+          Cliente (opcional)
+        </label>
+        <select
+          value={form.customer_id}
+          onChange={set("customer_id")}
+          className={selectClass}
+        >
+          <option value="">Sin cliente</option>
+          {(customers ?? []).map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
             </option>
           ))}
         </select>

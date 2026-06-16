@@ -39,6 +39,7 @@ def _sale_snapshot(entry: SaleEntry) -> dict[str, object]:
         "transaction_date": str(entry.transaction_date),
         "payment_method": entry.payment_method,
         "product_id": str(entry.product_id) if entry.product_id else None,
+        "customer_id": str(entry.customer_id) if entry.customer_id else None,
         "notes": entry.notes,
         "custom_fields": entry.custom_fields,
         "voided_at": entry.voided_at.isoformat() if entry.voided_at else None,
@@ -109,6 +110,7 @@ async def sales_date_range(
 async def list_sales(
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
+    customer_id: UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     tenant: Tenant = Depends(get_current_tenant),
@@ -118,7 +120,12 @@ async def list_sales(
         from_date = date.today() - timedelta(days=30)
     repo = SaleRepository(session)
     return await repo.list_by_tenant(
-        tenant.tenant_id, from_date=from_date, to_date=to_date, limit=limit, offset=offset
+        tenant.tenant_id,
+        from_date=from_date,
+        to_date=to_date,
+        customer_id=customer_id,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -191,6 +198,7 @@ async def create_sale(
         transaction_date=body.transaction_date,
         payment_method=body.payment_method,
         product_id=body.product_id,
+        customer_id=body.customer_id,
         notes=body.notes,
         custom_fields=body.custom_fields,
     )
@@ -235,6 +243,8 @@ async def update_sale(
         entry.payment_method = body.payment_method
     if "product_id" in body.model_fields_set:
         entry.product_id = body.product_id
+    if "customer_id" in body.model_fields_set:
+        entry.customer_id = body.customer_id
     if body.notes is not None:
         entry.notes = body.notes
     if body.custom_fields is not None:

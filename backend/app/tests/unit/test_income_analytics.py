@@ -109,11 +109,12 @@ async def test_productos_estrella(db_session, seeded):
 
 
 @pytest.mark.asyncio
-async def test_clientes_stub(db_session, seeded):
+async def test_clientes_sin_datos(db_session, seeded):
+    """El fixture `seeded` no tiene clientes → mensaje claro, sin inventar cifras."""
     agent = AgentIncome(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("analizar_clientes"))
     assert resp.status == "success"
-    assert resp.result["summary"] == "clientes_stub"
+    assert resp.result["summary"] == "clientes_sin_datos"
     assert "cliente" in resp.message.lower()
 
 

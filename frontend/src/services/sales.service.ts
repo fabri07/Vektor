@@ -9,6 +9,7 @@ export interface CreateSalePayload {
   transaction_date: string; // YYYY-MM-DD
   payment_method: string;
   product_id?: string | null;
+  customer_id?: string | null;
   notes?: string | null;
   custom_fields?: Record<string, unknown>;
 }
@@ -19,6 +20,7 @@ export interface SaleEntryResponse {
   id: string;
   tenant_id: string;
   product_id: string | null;
+  customer_id: string | null;
   amount: number;
   quantity: number;
   transaction_date: string;
@@ -31,6 +33,7 @@ export interface SaleEntryResponse {
 export interface SalesListParams {
   from_date?: string;
   to_date?: string;
+  customer_id?: string;
   limit?: number;
   offset?: number;
 }

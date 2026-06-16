@@ -15,6 +15,7 @@ from app.persistence.models.cash_close import CashClose
 from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.column_mapping import TenantColumnMapping
 from app.persistence.models.conversation_context import AgentConversationContext
+from app.persistence.models.customer import Customer
 from app.persistence.models.field_definitions import (
     TenantCustomFieldDefinition,
     TenantFieldChangeLog,
@@ -63,6 +64,7 @@ __all__ = [
     "Insight",
     "ActionSuggestion",
     "DecisionAuditLog",
+    "Customer",
     "UnclassifiedRecord",
     "UploadedFile",
     "Notification",

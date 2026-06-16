@@ -353,6 +353,67 @@ def classify_star_vs_problem(
     return {"stars": stars, "problems": problems, "no_cost": no_cost}
 
 
+# ── Clientes ──────────────────────────────────────────────────────────────────
+
+
+def rank_customers(
+    sales_by_customer: list[dict[str, Any]],
+    top_n: int = 10,
+) -> dict[str, Any]:
+    """Rankea clientes por facturación y agrega ticket promedio por cliente.
+
+    `sales_by_customer` proviene de `SaleRepository.get_sales_by_customer`
+    (customer_id, customer_name, total, n_sales, last_sale_date). Devuelve el top N
+    con ticket promedio (total/n_sales) y los totales generales. Política
+    no-invention: si un cliente tiene 0 ventas, su ticket es None (no se inventa).
+
+    Returns: {top: [...], n_customers, total_revenue, total_sales}.
+    """
+    ranked = sorted(sales_by_customer, key=lambda c: c["total"], reverse=True)
+    enriched: list[dict[str, Any]] = []
+    for c in ranked:
+        n_sales = c.get("n_sales", 0)
+        total = c.get("total", 0.0)
+        avg_ticket = round(total / n_sales, 2) if n_sales > 0 else None
+        enriched.append(
+            {
+                "customer_id": c.get("customer_id"),
+                "customer_name": c.get("customer_name"),
+                "total": total,
+                "n_sales": n_sales,
+                "avg_ticket": avg_ticket,
+                "last_sale_date": c.get("last_sale_date"),
+            }
+        )
+    return {
+        "top": enriched[:top_n],
+        "n_customers": len(sales_by_customer),
+        "total_revenue": round(sum(c.get("total", 0.0) for c in sales_by_customer), 2),
+        "total_sales": sum(c.get("n_sales", 0) for c in sales_by_customer),
+    }
+
+
+def summarize_receivables(
+    receivables_by_customer: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Resume las cuentas por cobrar (fiado) por cliente.
+
+    `receivables_by_customer` proviene de `SaleRepository.get_receivables_by_customer`
+    (customer_id, customer_name, total_owed, n_sales). Ordena por monto adeudado desc
+    y computa el total general. Sin invención: si no hay fiado, total_owed = 0.0.
+
+    Returns: {by_customer: [...desc], total_owed, n_customers}.
+    """
+    by_customer = sorted(
+        receivables_by_customer, key=lambda c: c["total_owed"], reverse=True
+    )
+    return {
+        "by_customer": by_customer,
+        "total_owed": round(sum(c.get("total_owed", 0.0) for c in by_customer), 2),
+        "n_customers": len(by_customer),
+    }
+
+
 # ── Gastos inteligentes ───────────────────────────────────────────────────────
 
 

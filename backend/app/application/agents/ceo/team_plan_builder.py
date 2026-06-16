@@ -299,7 +299,8 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
         ],
     },
     "analizar_clientes": {
-        "desc": "Análisis de clientes (stub — requiere campo cliente en ventas)",
+        "desc": "Análisis de clientes: mejores clientes, inactivos, cuentas por cobrar "
+        "(fiado) y prioridad de cobranza",
         "triggers": [
             "quiénes son mis mejores clientes",
             "qué clientes no compran más",

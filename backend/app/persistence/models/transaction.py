@@ -36,6 +36,13 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("products.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Cliente opcional vinculado a la venta (Fase 2). NULL = venta sin cliente
+    # informado / histórica. SET NULL al borrar el cliente: la venta se conserva.
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("customers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # B1: archivo de origen de una fila importada (NULL = manual / histórico).
     # Da señal de origen-import al detector de duplicados; SET NULL al borrar el
     # archivo (la transacción se conserva).

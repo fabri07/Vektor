@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 
@@ -36,6 +37,7 @@ class SaleRepository:
         tenant_id: UUID,
         from_date: date | None = None,
         to_date: date | None = None,
+        customer_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[SaleEntry]:
@@ -47,6 +49,8 @@ class SaleRepository:
             q = q.where(func.date(SaleEntry.transaction_date) >= from_date)
         if to_date:
             q = q.where(func.date(SaleEntry.transaction_date) <= to_date)
+        if customer_id:
+            q = q.where(SaleEntry.customer_id == customer_id)
         q = q.order_by(SaleEntry.transaction_date.desc()).limit(limit).offset(offset)
         result = await self._session.execute(q)
         return list(result.scalars().all())
@@ -183,6 +187,97 @@ class SaleRepository:
                 "product_id": str(row.product_id),
                 "units": int(row.units or 0),
                 "revenue": float(row.revenue or 0),
+                "n_sales": int(row.n_sales or 0),
+            }
+            for row in result.all()
+        ]
+
+    async def get_sales_by_customer(
+        self,
+        tenant_id: UUID,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> list[dict[str, Any]]:
+        """Ventas agregadas por cliente (Fase 2 — análisis de clientes).
+
+        JOIN sales_entries × customers, GROUP BY cliente. Solo ventas con
+        `customer_id` no nulo y no anuladas. Por cada cliente: total facturado,
+        cantidad de ventas y fecha de la última venta. Ordenado por total desc.
+        El cálculo (top N, ticket promedio) lo hace `shared/analytics.py`.
+
+        Returns list[dict]: customer_id, customer_name, total, n_sales, last_sale_date.
+        """
+        last_sale = func.max(SaleEntry.transaction_date).label("last_sale")
+        q = (
+            select(
+                SaleEntry.customer_id,
+                Customer.name.label("customer_name"),
+                func.sum(SaleEntry.amount).label("total"),
+                func.count(SaleEntry.id).label("n_sales"),
+                last_sale,
+            )
+            .join(Customer, Customer.id == SaleEntry.customer_id)
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.customer_id.isnot(None),
+            )
+            .group_by(SaleEntry.customer_id, Customer.name)
+            .order_by(func.sum(SaleEntry.amount).desc())
+        )
+        if from_date:
+            q = q.where(func.date(SaleEntry.transaction_date) >= from_date)
+        if to_date:
+            q = q.where(func.date(SaleEntry.transaction_date) <= to_date)
+        result = await self._session.execute(q)
+        return [
+            {
+                "customer_id": str(row.customer_id),
+                "customer_name": row.customer_name,
+                "total": float(row.total or 0),
+                "n_sales": int(row.n_sales or 0),
+                "last_sale_date": _as_date(row.last_sale),
+            }
+            for row in result.all()
+        ]
+
+    async def get_receivables_by_customer(
+        self,
+        tenant_id: UUID,
+    ) -> list[dict[str, Any]]:
+        """Cuentas por cobrar (fiado): ventas con payment_method == 'account'.
+
+        Agrupa por cliente sumando el monto adeudado. Solo ventas no anuladas con
+        cliente identificado y método de pago `account` (cuenta corriente / fiado).
+        El total general lo computa `shared/analytics.py`.
+
+        Returns list[dict]: customer_id, customer_name, total_owed, n_sales.
+        """
+        from app.domain.transaction import PaymentMethod  # noqa: PLC0415
+
+        q = (
+            select(
+                SaleEntry.customer_id,
+                Customer.name.label("customer_name"),
+                func.sum(SaleEntry.amount).label("total_owed"),
+                func.count(SaleEntry.id).label("n_sales"),
+            )
+            .join(Customer, Customer.id == SaleEntry.customer_id)
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.customer_id.isnot(None),
+                SaleEntry.payment_method == PaymentMethod.ACCOUNT.value,
+            )
+            .group_by(SaleEntry.customer_id, Customer.name)
+            .order_by(func.sum(SaleEntry.amount).desc())
+        )
+        result = await self._session.execute(q)
+        return [
+            {
+                "customer_id": str(row.customer_id),
+                "customer_name": row.customer_name,
+                "total_owed": float(row.total_owed or 0),
                 "n_sales": int(row.n_sales or 0),
             }
             for row in result.all()

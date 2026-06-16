@@ -36,6 +36,7 @@ class SaleEntryResponse(BaseModel):
     id: UUID
     tenant_id: UUID
     product_id: UUID | None
+    customer_id: UUID | None = None
     amount: Decimal
     quantity: int
     transaction_date: datetime
@@ -60,6 +61,7 @@ class CreateSaleRequest(BaseModel):
         pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$", default="cash"
     )
     product_id: UUID | None = None
+    customer_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
 
@@ -86,6 +88,7 @@ class UpdateSaleRequest(BaseModel):
         pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$",
     )
     product_id: UUID | None = None
+    customer_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
     custom_fields: dict[str, Any] | None = None
 
