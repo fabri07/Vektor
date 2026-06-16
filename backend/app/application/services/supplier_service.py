@@ -19,11 +19,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.supplier import Supplier
 
 
-async def get_approved_senders(tenant_id: str, db: AsyncSession) -> list[str]:
+def _as_uuid(tenant_id: str | uuid.UUID) -> uuid.UUID:
+    """Coacciona el tenant_id a UUID (los call sites legacy lo pasan como str)."""
+    return tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+
+
+async def get_approved_senders(tenant_id: str | uuid.UUID, db: AsyncSession) -> list[str]:
     """Emails de proveedores activos del tenant (para el preflight de Gmail)."""
     result = await db.execute(
         select(Supplier.email).where(
-            Supplier.tenant_id == tenant_id,
+            Supplier.tenant_id == _as_uuid(tenant_id),
             Supplier.deactivated_at.is_(None),
             Supplier.email.isnot(None),
         )
@@ -33,14 +38,15 @@ async def get_approved_senders(tenant_id: str, db: AsyncSession) -> list[str]:
 
 async def get_supplier_by_email(
     email: str,
-    tenant_id: str,
+    tenant_id: str | uuid.UUID,
     db: AsyncSession,
 ) -> dict[str, Any] | None:
     """Busca un proveedor activo por email dentro del tenant. None si no existe."""
     result = await db.execute(
         select(Supplier).where(
-            Supplier.tenant_id == tenant_id,
+            Supplier.tenant_id == _as_uuid(tenant_id),
             Supplier.email == email.lower(),
+            Supplier.deactivated_at.is_(None),
         )
     )
     supplier = result.scalars().first()

@@ -56,6 +56,15 @@ function isNetworkError(e: unknown): boolean {
   return axios.isAxiosError(e) && !e.response;
 }
 
+// Error de cliente (4xx): permanente — reintentar el mismo payload no lo va a arreglar.
+function isClientError(e: unknown): boolean {
+  const status = axios.isAxiosError(e) ? e.response?.status : undefined;
+  return status !== undefined && status >= 400 && status < 500;
+}
+
+// Tope de reintentos para errores transitorios (5xx) — evita loops infinitos en la cola.
+const MAX_FLUSH_ATTEMPTS = 5;
+
 // Replay idempotente: el backend ya tiene el registro → 409 con el código del contrato.
 function isDuplicate(e: unknown): boolean {
   if (!axios.isAxiosError(e) || e.response?.status !== 409) return false;
@@ -124,10 +133,18 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
             // Sigue offline: registrar el intento y cortar; se reintenta en el próximo flush.
             useOfflineQueueStore.getState().markFailed(item.id, "Sin conexión al sincronizar");
             break;
+          } else if (isClientError(e)) {
+            // 4xx permanente (payload inválido, entidad referida borrada, etc.): reintentar el
+            // mismo payload nunca va a funcionar → sacarlo de la cola para no loopear infinito.
+            useOfflineQueueStore.getState().remove(item.id);
           } else {
-            // 4xx/5xx: error real del servidor. No se borra en silencio — se conserva en la
-            // cola con el detalle (attempts++/lastError) para que el usuario lo vea como pendiente.
-            useOfflineQueueStore.getState().markFailed(item.id, errorMessage(e));
+            // 5xx u otro error transitorio del servidor: reintentar con tope. Al alcanzar
+            // MAX_FLUSH_ATTEMPTS se descarta (evita el poison-item que se reintenta para siempre).
+            if (item.attempts + 1 >= MAX_FLUSH_ATTEMPTS) {
+              useOfflineQueueStore.getState().remove(item.id);
+            } else {
+              useOfflineQueueStore.getState().markFailed(item.id, errorMessage(e));
+            }
           }
         }
       }
