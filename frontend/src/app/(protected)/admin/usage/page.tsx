@@ -142,6 +142,7 @@ export default function AdminUsagePage() {
     tokens_total: 0,
     cost_usd: 0,
     decisions: 0,
+    unpriced_tokens: 0,
   };
   const byAgent: UsageByAgent[] = Array.isArray(data?.by_agent) ? data.by_agent : [];
   const byModel: UsageByModel[] = Array.isArray(data?.by_model) ? data.by_model : [];
@@ -185,6 +186,15 @@ export default function AdminUsagePage() {
         </div>
       ) : (
         <>
+          {/* Aviso: costo incompleto si hay tokens sin precio */}
+          {(totals.unpriced_tokens ?? 0) > 0 && (
+            <div className="rounded-lg border border-vk-warning/30 bg-vk-warning-bg px-4 py-2.5 text-xs text-vk-warning">
+              Costo estimado incompleto: {fmtInt(totals.unpriced_tokens)} tokens sin precio
+              (modelo no mapeado). El costo total mostrado subestima el real — actualizá
+              los precios en <code>model_pricing.py</code>.
+            </div>
+          )}
+
           {/* StatCards */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <StatCard label="Tokens totales" value={fmtInt(totals.tokens_total)} />

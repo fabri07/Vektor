@@ -7,6 +7,8 @@ export interface UsageTotals {
   tokens_total: number;
   cost_usd: number;
   decisions: number;
+  /** Tokens cuyo modelo no tiene precio mapeado → cost_usd subestima el real si >0. */
+  unpriced_tokens: number;
 }
 
 /** Consumo por agente (desc por costo = top consumers). */

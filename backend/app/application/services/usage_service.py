@@ -39,11 +39,24 @@ _UNKNOWN_AGENT = "unknown"
 
 
 def _agent_name(decision_data: dict[str, Any]) -> str:
-    """Resuelve el agente atribuible: sub_agent_name → ceo_target_agent → unknown."""
+    """Agente a nivel fila (fallback): sub_agent_name → ceo_target_agent → unknown.
+
+    Solo se usa cuando la fila no tiene `token_calls` con `source` por llamada
+    (el `source` por call es la atribución real; `sub_agent_name` suele ser el
+    orquestador/CEO y colapsaría todo el gasto sobre él).
+    """
     name = decision_data.get("sub_agent_name") or decision_data.get("ceo_target_agent")
     if isinstance(name, str) and name.strip():
         return name
     return _UNKNOWN_AGENT
+
+
+def _coerce_int(value: Any) -> int:
+    """Coacciona a int de forma segura — datos JSONB no confiables no deben 500ear."""
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 async def get_usage_dashboard(
@@ -87,6 +100,7 @@ async def get_usage_dashboard(
     tot_out = 0
     tot_total = 0
     tot_cost = Decimal("0")
+    tot_unpriced = 0  # tokens sin precio (modelo no mapeado o fila sin token_calls)
     decisions = 0
 
     # by_model: input/output/cost/priced
@@ -113,17 +127,23 @@ async def get_usage_dashboard(
         tot_out += row.tokens_output
         tot_total += row.tokens_total
 
-        # Costo de la fila: suma sobre token_calls (granularidad por modelo).
+        # Costo de la fila: suma sobre token_calls (granularidad por modelo + source).
         token_calls = decision_data.get("token_calls")
         row_cost = Decimal("0")
 
         if isinstance(token_calls, list) and token_calls:
+            fallback_agent = _agent_name(decision_data)
             for call in token_calls:
                 if not isinstance(call, dict):
                     continue
                 model = call.get("model") or _UNKNOWN_MODEL
-                in_tok = int(call.get("input_tokens") or 0)
-                out_tok = int(call.get("output_tokens") or 0)
+                # Atribución REAL por llamada: el `source` del LLMCall (ceo, agent_health,
+                # agent_stock, …). Fallback al agente de la fila si no viene.
+                source = call.get("source")
+                call_agent = source if isinstance(source, str) and source.strip() else fallback_agent
+                in_tok = _coerce_int(call.get("input_tokens"))
+                out_tok = _coerce_int(call.get("output_tokens"))
+                call_tokens = in_tok + out_tok
                 cost, priced = estimate_cost_usd(model, in_tok, out_tok)
                 model_in[model] += in_tok
                 model_out[model] += out_tok
@@ -131,18 +151,21 @@ async def get_usage_dashboard(
                 # priced=False si CUALQUIER muestra de ese modelo no tiene precio.
                 model_priced[model] = model_priced[model] and priced
                 row_cost += cost
+                if not priced:
+                    tot_unpriced += call_tokens
+                # by_agent por source real (no por sub_agent_name = orquestador).
+                agent_tokens[call_agent] += call_tokens
+                agent_cost[call_agent] += cost
         else:
-            # Fila con tokens pero sin desglose de calls → modelo "unknown".
+            # Fila con tokens pero sin desglose de calls → modelo "unknown", costo 0.
             model_in[_UNKNOWN_MODEL] += row.tokens_input
             model_out[_UNKNOWN_MODEL] += row.tokens_output
             model_priced[_UNKNOWN_MODEL] = False
-            # cost queda 0 (no inventamos precio para modelo desconocido).
+            tot_unpriced += row.tokens_total
+            # Sin desglose por call → atribución a nivel fila (mejor esfuerzo), costo 0.
+            agent_tokens[_agent_name(decision_data)] += row.tokens_total
 
         tot_cost += row_cost
-
-        agent = _agent_name(decision_data)
-        agent_tokens[agent] += row.tokens_total
-        agent_cost[agent] += row_cost
 
         day_tokens[row_day] += row.tokens_total
         day_cost[row_day] += row_cost
@@ -156,6 +179,7 @@ async def get_usage_dashboard(
         tokens_total=tot_total,
         cost_usd=float(tot_cost),
         decisions=decisions,
+        unpriced_tokens=tot_unpriced,
     )
 
     by_model = sorted(

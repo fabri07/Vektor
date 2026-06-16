@@ -227,6 +227,107 @@ async def test_usage_filtered_by_tenant(
 
 
 @pytest.mark.asyncio
+async def test_by_agent_uses_call_source_not_sub_agent(
+    client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """by_agent atribuye por el `source` real de la call, no por sub_agent_name (CEO)."""
+    headers = await _superadmin_headers(db_session, sample_tenant)
+    now = datetime.now(UTC)
+    decision_data = {
+        # El orquestador deja sub_agent_name = agent_ceo, pero el gasto real es de agent_health.
+        "sub_agent_name": "agent_ceo",
+        "ceo_target_agent": "agent_ceo",
+        "token_calls": [
+            {
+                "source": "agent_health",
+                "model": "claude-sonnet-4-6",
+                "input_tokens": 1_000_000,
+                "output_tokens": 0,
+            }
+        ],
+    }
+    db_session.add(
+        DecisionAuditLog(
+            id=uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            decision_type="AGENT_ACTION",
+            decision_data=decision_data,
+            triggered_by="chat",
+            actor_user_id=None,
+            tokens_input=1_000_000,
+            tokens_output=0,
+            tokens_total=1_000_000,
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    resp = await client.get(_USAGE, headers=headers)
+    assert resp.status_code == 200
+    agents = {a["agent"] for a in resp.json()["by_agent"]}
+    assert "agent_health" in agents
+    assert "agent_ceo" not in agents
+
+
+@pytest.mark.asyncio
+async def test_unpriced_tokens_surfaced(
+    client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Modelo no mapeado y filas sin token_calls → cost 0 pero unpriced_tokens los cuenta."""
+    headers = await _superadmin_headers(db_session, sample_tenant)
+    now = datetime.now(UTC)
+    # Modelo no mapeado → priced False, cost 0.
+    db_session.add(
+        DecisionAuditLog(
+            id=uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            decision_type="AGENT_ACTION",
+            decision_data={
+                "sub_agent_name": "agent_income",
+                "token_calls": [
+                    {
+                        "source": "agent_income",
+                        "model": "modelo-futuro-sin-precio",
+                        "input_tokens": 500_000,
+                        "output_tokens": 500_000,
+                    }
+                ],
+            },
+            triggered_by="chat",
+            actor_user_id=None,
+            tokens_input=500_000,
+            tokens_output=500_000,
+            tokens_total=1_000_000,
+            created_at=now,
+        )
+    )
+    # Fila con tokens pero SIN token_calls → unpriced + atribución best-effort.
+    db_session.add(
+        DecisionAuditLog(
+            id=uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            decision_type="AGENT_ACTION",
+            decision_data={"sub_agent_name": "agent_stock"},
+            triggered_by="chat",
+            actor_user_id=None,
+            tokens_input=200_000,
+            tokens_output=0,
+            tokens_total=200_000,
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    resp = await client.get(_USAGE, headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["totals"]["unpriced_tokens"] == 1_200_000  # 1M (modelo sin precio) + 200k (sin calls)
+    assert data["totals"]["cost_usd"] == pytest.approx(0.0)
+    by_model = {m["model"]: m for m in data["by_model"]}
+    assert by_model["modelo-futuro-sin-precio"]["priced"] is False
+
+
+@pytest.mark.asyncio
 async def test_usage_empty(
     client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

@@ -21,6 +21,10 @@ class UsageTotals(BaseModel):
     tokens_total: int
     cost_usd: float
     decisions: int
+    # Tokens cuyo modelo no tiene precio mapeado (o filas sin desglose de calls):
+    # NO se inventa costo para ellos, pero se exponen para señalar que cost_usd
+    # está incompleto y por cuánto. >0 ⇒ el costo mostrado subestima el real.
+    unpriced_tokens: int
 
 
 class AgentUsage(BaseModel):
