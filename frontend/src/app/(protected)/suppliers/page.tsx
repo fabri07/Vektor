@@ -16,6 +16,7 @@ import {
   type SupplierResponse,
 } from "@/services/suppliers.service";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
+import { ContactCommunication } from "@/features/communication/ContactCommunication";
 import { categoryDisplay } from "@/lib/expenseCategories";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
@@ -395,6 +396,14 @@ function SupplierDetailModal({
             </div>
           ) : null}
         </section>
+
+        {/* Comunicación */}
+        <ContactCommunication
+          recipientType="supplier"
+          recipientId={supplier.id}
+          email={supplier.email}
+          phone={supplier.phone}
+        />
 
         {/* Compras asociadas */}
         <section className="space-y-2">

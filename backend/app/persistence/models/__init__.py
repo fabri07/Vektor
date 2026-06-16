@@ -14,6 +14,7 @@ from app.persistence.models.business import (
 from app.persistence.models.cash_close import CashClose
 from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.column_mapping import TenantColumnMapping
+from app.persistence.models.communication_log import CommunicationLog
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.customer import Customer
 from app.persistence.models.field_definitions import (
@@ -36,6 +37,7 @@ from app.persistence.models.score import (
     HeuristicRuleSet,
     WeeklyScoreHistory,
 )
+from app.persistence.models.social_metric import SocialMetric
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -88,4 +90,6 @@ __all__ = [
     "DataRepairRun",
     "DataRepairItem",
     "PipelineEvent",
+    "CommunicationLog",
+    "SocialMetric",
 ]

@@ -136,6 +136,8 @@ class Settings(BaseSettings):
         "ENABLE_FACEBOOK_LOGIN",
         "ENABLE_GOOGLE_MCP_TOOLS",
         "ENABLE_AGENT_AUTOMATIONS",
+        "ENABLE_WHATSAPP",
+        "ENABLE_SOCIAL_SYNC",
         "DEMO_MODE",
         "USE_LOCAL_FALLBACK",
         mode="before",
@@ -195,6 +197,24 @@ class Settings(BaseSettings):
         ""  # alias legacy — se usa como RESEND_API_KEY si RESEND_API_KEY está vacío
     )
     SMTP_FROM_EMAIL: str = "noreply@vektor.app"
+
+    # ── Comunicación: WhatsApp (DORMIDO — Fase posterior) ──────────────────────
+    # Canal WhatsApp vía Meta Cloud API. Default OFF: requiere verificación de la
+    # app en Meta + número aprobado. Mientras ENABLE_WHATSAPP=False el adapter
+    # levanta ChannelNotConfigured y el router responde 503.
+    ENABLE_WHATSAPP: bool = False
+    WHATSAPP_TOKEN: str = ""
+    WHATSAPP_PHONE_ID: str = ""
+
+    # ── Marketing: sincronización de redes (DORMIDO — Fase posterior) ──────────
+    # Sync automático de métricas de redes sociales vía OAuth (Meta/TikTok).
+    # Default OFF: requiere verificación de la app (OAuth). Por ahora la carga de
+    # métricas es 100% manual; los adapters levantan NotImplementedError.
+    ENABLE_SOCIAL_SYNC: bool = False
+    META_APP_ID: str = ""
+    META_APP_SECRET: str = ""
+    TIKTOK_CLIENT_KEY: str = ""
+    TIKTOK_CLIENT_SECRET: str = ""
 
     # ── Feature flags ─────────────────────────────────────────────────────────
     ENABLE_SCORE_RECALCULATION: bool = True
@@ -317,6 +337,12 @@ class Settings(BaseSettings):
             )
         if self.ENABLE_EMAIL_NOTIFICATIONS and not _has_email_key:
             raise ValueError("ENABLE_EMAIL_NOTIFICATIONS=true requiere RESEND_API_KEY configurado.")
+
+        # ── WhatsApp: validar combo flag + credencial ──────────────────────────
+        if self.ENABLE_WHATSAPP and not self.WHATSAPP_TOKEN:
+            raise ValueError(
+                "ENABLE_WHATSAPP=true requiere WHATSAPP_TOKEN (Meta Cloud API) configurado."
+            )
 
         return self
 

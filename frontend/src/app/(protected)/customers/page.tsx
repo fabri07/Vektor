@@ -16,6 +16,7 @@ import {
   type CustomerResponse,
 } from "@/services/customers.service";
 import { salesService, type SaleEntryResponse } from "@/services/sales.service";
+import { ContactCommunication } from "@/features/communication/ContactCommunication";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -413,6 +414,14 @@ function CustomerDetailModal({
             </div>
           ) : null}
         </section>
+
+        {/* Comunicación */}
+        <ContactCommunication
+          recipientType="customer"
+          recipientId={customer.id}
+          email={customer.email}
+          phone={customer.phone}
+        />
 
         {/* Ventas asociadas */}
         <section className="space-y-2">

@@ -9,6 +9,7 @@ from app.api.v1 import (
     automations,
     business_profiles,
     cash_closes,
+    communication,
     customers,
     economic_summary,
     expenses,
@@ -19,6 +20,7 @@ from app.api.v1 import (
     ingestion,
     insights,
     integrations,
+    marketing,
     momentum,
     notifications,
     oauth,
@@ -51,6 +53,10 @@ api_router.include_router(products.router, prefix="/products", tags=["Products"]
 api_router.include_router(customers.router, prefix="/customers", tags=["Customers"])
 api_router.include_router(suppliers.router, prefix="/suppliers", tags=["Suppliers"])
 api_router.include_router(others.router, prefix="/others", tags=["Others"])
+api_router.include_router(
+    communication.router, prefix="/communication", tags=["Communication"]
+)
+api_router.include_router(marketing.router, prefix="/marketing", tags=["Marketing"])
 api_router.include_router(health_scores.router, prefix="/health-scores", tags=["Health Scores"])
 api_router.include_router(insights.router, prefix="/insights", tags=["Insights"])
 api_router.include_router(
