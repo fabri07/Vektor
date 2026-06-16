@@ -15,7 +15,7 @@ const variantClasses: Record<Variant, string> = {
   primary:
     "bg-gradient-to-r from-vektor-blue to-vektor-teal text-vektor-white hover:shadow-glow focus-visible:ring-vektor-blue/40 active:scale-[0.98]",
   secondary:
-    "bg-vektor-surface text-vk-text-primary hover:border-vektor-blue/40 hover:bg-vektor-surface/90 focus-visible:ring-vektor-blue/30 border border-vektor-border",
+    "bg-vektor-surface text-vektor-white hover:border-vektor-blue/40 hover:bg-vektor-surface/90 focus-visible:ring-vektor-blue/30 border border-vektor-border",
   ghost:
     "bg-transparent text-vk-text-secondary hover:text-vk-text-primary hover:bg-vektor-surface focus-visible:ring-vektor-blue/30",
   danger:

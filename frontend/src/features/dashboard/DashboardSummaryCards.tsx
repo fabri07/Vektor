@@ -3,30 +3,37 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
-import { Building2, ChevronDown, ChevronRight, Package, Tag, Truck, Wallet } from "lucide-react";
+import { Building2, ChevronDown, ChevronRight, Package, Tag, Users, Wallet } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Select } from "@/components/ui/Select";
 import { Tooltip } from "@/components/ui/Tooltip";
+import type { CustomerResponse } from "@/services/customers.service";
 import type { ExpenseEntryResponse } from "@/services/expenses.service";
 import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
+import type { SupplierResponse } from "@/services/suppliers.service";
 import {
   buildCashBreakdown,
+  buildCustomerBreakdown,
   buildMarginBreakdown,
+  buildProductPurchases,
   buildStockStatuses,
-  buildSupplierSummaries,
+  buildSupplierBreakdown,
   formatARS,
   formatARSCompact,
   formatPercent,
   formatShortDate,
   getMarginToneClass,
   KPI_TOOLTIP_COPY,
+  type VolumeSummary,
 } from "@/features/dashboard/dashboardData";
 
 interface Props {
   sales: SaleEntryResponse[];
   expenses: ExpenseEntryResponse[];
   products: ProductResponse[];
+  suppliers: SupplierResponse[];
+  customers: CustomerResponse[];
   loading?: boolean;
 }
 
@@ -70,28 +77,100 @@ function SkeletonCard() {
   );
 }
 
-export function DashboardSummaryCards({ sales, expenses, products, loading }: Props) {
+function DetailTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">{label}</p>
+      <p className="mt-2 text-xl font-semibold text-vektor-white">{value}</p>
+    </div>
+  );
+}
+
+/**
+ * Desplegable + tarjetas de detalle para un breakdown de volumen
+ * (proveedores, clientes o productos comprados). Maneja su propia selección.
+ */
+function VolumeBreakdownPanel({
+  entries,
+  placeholder,
+  volumeLabel,
+  lastLabel,
+  ticketLabel,
+  volumeTooltip,
+}: {
+  entries: VolumeSummary[];
+  placeholder: string;
+  volumeLabel: string;
+  lastLabel: string;
+  ticketLabel: string;
+  volumeTooltip: string;
+}) {
+  const [selectedKey, setSelectedKey] = useState<string>("");
+  const options = entries.map((entry) => ({
+    value: entry.key,
+    label: `${entry.name} — ${formatARSCompact(entry.total)}`,
+  }));
+  const detail = entries.find((entry) => entry.key === selectedKey) ?? entries[0];
+  if (!detail) return null;
+
+  return (
+    <>
+      <div className="mt-4">
+        <Select
+          options={options}
+          value={detail.key}
+          onChange={setSelectedKey}
+          placeholder={placeholder}
+        />
+      </div>
+      <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
+          <Tooltip content={volumeTooltip}>
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
+              {volumeLabel}
+            </p>
+          </Tooltip>
+          <p className="mt-2 text-xl font-semibold text-vektor-white">{formatARS(detail.total)}</p>
+        </div>
+        <DetailTile label={lastLabel} value={formatShortDate(detail.lastDate)} />
+        <DetailTile label={ticketLabel} value={formatARS(detail.average)} />
+        <DetailTile label="Operaciones" value={String(detail.count)} />
+      </div>
+    </>
+  );
+}
+
+export function DashboardSummaryCards({
+  sales,
+  expenses,
+  products,
+  suppliers,
+  customers,
+  loading,
+}: Props) {
   const router = useRouter();
   const [cashOpen, setCashOpen] = useState(false);
-  const [selectedSupplier, setSelectedSupplier] = useState<string>("");
 
   const cash = useMemo(() => buildCashBreakdown(sales), [sales]);
   const margins = useMemo(() => buildMarginBreakdown(products), [products]);
   const stockStatuses = useMemo(() => buildStockStatuses(products), [products]);
-  const suppliers = useMemo(() => buildSupplierSummaries(expenses), [expenses]);
-
-  const supplierOptions = suppliers.map((supplier) => ({
-    value: supplier.name,
-    label: `${supplier.name} — ${formatARSCompact(supplier.totalPurchased)}`,
-  }));
-
-  const selectedSupplierDetail =
-    suppliers.find((supplier) => supplier.name === selectedSupplier) ?? suppliers[0];
+  const productPurchases = useMemo(
+    () => buildProductPurchases(expenses, products),
+    [expenses, products],
+  );
+  const supplierBreakdown = useMemo(
+    () => buildSupplierBreakdown(expenses, suppliers),
+    [expenses, suppliers],
+  );
+  const customerBreakdown = useMemo(
+    () => buildCustomerBreakdown(sales, customers),
+    [sales, customers],
+  );
 
   if (loading) {
     return (
       <div className="grid gap-4 xl:grid-cols-2">
-        {Array.from({ length: 4 }).map((_, index) => (
+        {Array.from({ length: 5 }).map((_, index) => (
           <SkeletonCard key={index} />
         ))}
       </div>
@@ -230,93 +309,90 @@ export function DashboardSummaryCards({ sales, expenses, products, loading }: Pr
                 );
               })}
             </div>
-            <p className="mt-4 text-sm leading-6 text-vektor-muted">
-              Tocá un estado para abrir la vista de inventario ya filtrada cuando haya productos para revisar.
-            </p>
+            {productPurchases.length > 0 ? (
+              <div className="mt-5">
+                <Tooltip content="Cuánto compraste de cada producto en el período. Sirve para ver dónde concentrás la inversión en mercadería.">
+                  <p className="text-sm font-medium text-vektor-body">Compras por producto</p>
+                </Tooltip>
+                <VolumeBreakdownPanel
+                  entries={productPurchases}
+                  placeholder="Elegí un producto"
+                  volumeLabel="Volumen de compra"
+                  lastLabel="Última compra"
+                  ticketLabel="Ticket promedio"
+                  volumeTooltip="Total invertido en comprar este producto durante el período."
+                />
+              </div>
+            ) : (
+              <p className="mt-4 text-sm leading-6 text-vektor-muted">
+                Tocá un estado para abrir la vista de inventario ya filtrada cuando haya productos para revisar.
+              </p>
+            )}
           </>
         )}
       </article>
 
       <article className="vektor-card p-5">
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <Tooltip content={KPI_TOOLTIP_COPY.Proveedores}>
-              <h2 className="text-lg font-semibold text-vektor-white">Proveedores</h2>
-            </Tooltip>
-            {suppliers.length > 10 ? (
-              <p className="mt-1 text-sm text-vektor-muted">Top 5 por volumen de compra</p>
-            ) : null}
-          </div>
-          {suppliers.length > 10 ? (
-            <Link href="/expenses" className="text-sm font-medium text-vektor-body">
+          <Tooltip content={KPI_TOOLTIP_COPY.Proveedores}>
+            <h2 className="text-lg font-semibold text-vektor-white">Proveedores</h2>
+          </Tooltip>
+          {supplierBreakdown.length > 0 ? (
+            <Link href="/suppliers" className="text-sm font-medium text-vektor-body">
               Ver todos →
             </Link>
           ) : null}
         </div>
 
-        {suppliers.length === 0 ? (
+        {supplierBreakdown.length === 0 ? (
           <CardEmptyState
             icon={Building2}
-            title="Sin proveedores registrados"
-            description="Registrá una compra con proveedor para ver el detalle aquí."
+            title="Sin compras registradas"
+            description="Registrá una compra para ver el volumen por proveedor acá."
             cta="Registrar compra"
             ctaHref="/ingestion"
           />
         ) : (
-          <>
-            <div className="mt-4">
-              <Select
-                options={supplierOptions}
-                value={selectedSupplierDetail?.name}
-                onChange={setSelectedSupplier}
-                placeholder="Elegí un proveedor"
-              />
-            </div>
-            {selectedSupplierDetail ? (
-              <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-                  <Tooltip content="Total de dinero que le compraste a este proveedor en el período seleccionado.">
-                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                      Volumen de compra
-                    </p>
-                  </Tooltip>
-                  <p className="mt-2 text-xl font-semibold text-vektor-white">
-                    {formatARS(selectedSupplierDetail.totalPurchased)}
-                  </p>
-                </div>
-                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                    Último pedido
-                  </p>
-                  <p className="mt-2 text-xl font-semibold text-vektor-white">
-                    {formatShortDate(selectedSupplierDetail.lastOrderDate)}
-                  </p>
-                </div>
-                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                    Ticket promedio
-                  </p>
-                  <p className="mt-2 text-xl font-semibold text-vektor-white">
-                    {formatARS(selectedSupplierDetail.averageOrderValue)}
-                  </p>
-                </div>
-                <div className="rounded-xl border border-vektor-border bg-vektor-surface p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-vektor-muted">
-                    Condiciones / vencidas
-                  </p>
-                  <div className="mt-2 flex items-center justify-between gap-2">
-                    <span className="text-base font-semibold text-vektor-white">
-                      {selectedSupplierDetail.paymentTerms}
-                    </span>
-                    <span className="inline-flex items-center gap-2 rounded-full bg-vektor-night px-3 py-1 text-xs font-medium text-vektor-body">
-                      <Truck className="h-3.5 w-3.5" />
-                      {selectedSupplierDetail.overdueInvoicesCount} vencidas
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ) : null}
-          </>
+          <VolumeBreakdownPanel
+            entries={supplierBreakdown}
+            placeholder="Elegí un proveedor"
+            volumeLabel="Volumen de compra"
+            lastLabel="Último pedido"
+            ticketLabel="Ticket promedio"
+            volumeTooltip="Total de dinero que le compraste a este proveedor en el período seleccionado."
+          />
+        )}
+      </article>
+
+      <article className="vektor-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <Tooltip content="Clientes: quiénes concentran tus ventas. Las ventas sin cliente cargado aparecen como 'Cliente no identificado'.">
+            <h2 className="text-lg font-semibold text-vektor-white">Clientes</h2>
+          </Tooltip>
+          {customerBreakdown.length > 0 ? (
+            <Link href="/customers" className="text-sm font-medium text-vektor-body">
+              Ver todos →
+            </Link>
+          ) : null}
+        </div>
+
+        {customerBreakdown.length === 0 ? (
+          <CardEmptyState
+            icon={Users}
+            title="Sin ventas registradas"
+            description="Registrá una venta para ver el volumen por cliente acá."
+            cta="Registrar venta"
+            ctaHref="/chat"
+          />
+        ) : (
+          <VolumeBreakdownPanel
+            entries={customerBreakdown}
+            placeholder="Elegí un cliente"
+            volumeLabel="Volumen vendido"
+            lastLabel="Última venta"
+            ticketLabel="Ticket promedio"
+            volumeTooltip="Total que te compró este cliente en el período seleccionado."
+          />
         )}
       </article>
     </div>

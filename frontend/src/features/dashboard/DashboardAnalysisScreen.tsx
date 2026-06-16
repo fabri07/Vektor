@@ -95,14 +95,6 @@ function PanelFrame({
           <Tooltip content={tooltip}>
             <h2 className="text-lg font-semibold text-vektor-white">{title}</h2>
           </Tooltip>
-          <div className="mt-2 flex items-center gap-3 text-xs text-vektor-muted">
-            <Tooltip content="Eje X: el paso del tiempo o la agrupacion que estas comparando.">
-              <span>Eje X</span>
-            </Tooltip>
-            <Tooltip content="Eje Y: el valor monetario o el porcentaje asociado a la metrica elegida.">
-              <span>Eje Y</span>
-            </Tooltip>
-          </div>
         </div>
         {controls ? <div className="w-full lg:w-[240px]">{controls}</div> : null}
       </div>
@@ -145,15 +137,17 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
     DISTRIBUTION_OPTIONS.find((option) => option.value === distribution) ?? DISTRIBUTION_OPTIONS[0]!;
 
   return (
-    <div className="grid gap-4 xl:grid-cols-3">
+    <div className="space-y-6">
       {!hasTransactionData && (
-        <div className="xl:col-span-3 rounded-xl border border-vektor-border bg-vektor-surface px-5 py-4 text-sm text-vektor-body">
+        <div className="rounded-xl border border-vektor-border bg-vektor-surface px-5 py-4 text-sm text-vektor-body">
           Los gráficos estarán disponibles cuando cargues ventas o gastos.{" "}
           <Link href="/ingestion" className="font-medium text-vektor-white underline-offset-2 hover:underline">
             Cargar archivo →
           </Link>
         </div>
       )}
+      {/* Gráficos principales: apilados a ancho completo para mejor legibilidad */}
+      <div className="space-y-6">
       <PanelFrame
         title={lineConfig.title}
         tooltip="Este grafico muestra como fue cambiando la metrica elegida a lo largo del tiempo."
@@ -199,9 +193,9 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={lineData}>
                   <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="label" stroke="#90a2bc" tickLine={false} axisLine={false} />
+                  <XAxis dataKey="label" stroke="#d6e2f0" tickLine={false} axisLine={false} />
                   <YAxis
-                    stroke="#90a2bc"
+                    stroke="#d6e2f0"
                     tickLine={false}
                     axisLine={false}
                     tickFormatter={(value) => {
@@ -254,8 +248,8 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={comparisonData}>
                   <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="label" stroke="#90a2bc" tickLine={false} axisLine={false} />
-                  <YAxis stroke="#90a2bc" tickLine={false} axisLine={false} tickFormatter={(value) => formatARSCompact(Number(value))} />
+                  <XAxis dataKey="label" stroke="#d6e2f0" tickLine={false} axisLine={false} />
+                  <YAxis stroke="#d6e2f0" tickLine={false} axisLine={false} tickFormatter={(value) => formatARSCompact(Number(value))} />
                   <RechartsTooltip
                     contentStyle={{ background: "#162236", border: "1px solid #243246", borderRadius: 16 }}
                     formatter={(value) => [formatARS(Number(value ?? 0)), "Valor"]}
@@ -338,9 +332,13 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
           </>
         )}
       </PanelFrame>
+      </div>
 
-      <BreakdownPanels />
-      <ForecastPanel />
+      {/* Desgloses y proyección: dos columnas para densidad */}
+      <div className="grid gap-4 xl:grid-cols-2">
+        <BreakdownPanels />
+        <ForecastPanel />
+      </div>
     </div>
   );
 }
@@ -549,12 +547,12 @@ function ForecastPanel() {
   });
 
   if (isLoading) {
-    return <div className="col-span-3 h-[280px] animate-pulse rounded-2xl bg-vektor-surface" />;
+    return <div className="xl:col-span-2 h-[280px] animate-pulse rounded-2xl bg-vektor-surface" />;
   }
 
   if (!data || data.tier === 0) {
     return (
-      <div className="col-span-3 rounded-2xl border border-vk-border-w bg-vk-surface-w p-6">
+      <div className="xl:col-span-2 rounded-2xl border border-vk-border-w bg-vk-surface-w p-6">
         <h3 className="text-sm font-semibold text-vk-text-secondary mb-2">Proyección de caja</h3>
         <p className="text-sm text-vk-text-muted">
           {data?.message ?? "Sin datos suficientes para proyectar. Cargá al menos 14 días de ventas y gastos."}
@@ -574,7 +572,7 @@ function ForecastPanel() {
   const isPositive = totalNet >= 0;
 
   return (
-    <div className="col-span-3 rounded-2xl border border-vk-border-w bg-vk-surface-w p-6">
+    <div className="xl:col-span-2 rounded-2xl border border-vk-border-w bg-vk-surface-w p-6">
       <div className="flex items-start justify-between mb-1">
         <div>
           <h3 className="text-sm font-semibold text-vk-text-secondary">Proyección de caja</h3>
@@ -600,12 +598,12 @@ function ForecastPanel() {
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
           <XAxis
             dataKey="date"
-            tick={{ fontSize: 10, fill: "var(--vektor-muted)" }}
+            tick={{ fontSize: 10, fill: "var(--vektor-body)" }}
             tickLine={false}
             interval={Math.ceil(chartData.length / 6)}
           />
           <YAxis
-            tick={{ fontSize: 10, fill: "var(--vektor-muted)" }}
+            tick={{ fontSize: 10, fill: "var(--vektor-body)" }}
             tickFormatter={(v: number) => formatARSCompact(v)}
             tickLine={false}
             axisLine={false}

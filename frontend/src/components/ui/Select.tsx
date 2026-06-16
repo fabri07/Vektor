@@ -121,7 +121,7 @@ export function Select({
           disabled && "pointer-events-none opacity-40",
         )}
       >
-        <span className={selectedLabel ? "text-vk-text-primary" : "text-vk-text-placeholder"}>
+        <span className={selectedLabel ? "text-vektor-white" : "text-vektor-muted"}>
           {selectedLabel ?? placeholder}
         </span>
         <ChevronIcon open={isOpen} />

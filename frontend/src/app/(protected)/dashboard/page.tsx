@@ -3,11 +3,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef } from "react";
+import { customersService } from "@/services/customers.service";
 import { fetchCurrentInsight, fetchLatestScore } from "@/services/dashboard.service";
 import { expensesService } from "@/services/expenses.service";
 import { fetchMomentumProfile } from "@/services/momentum.service";
 import { productsService } from "@/services/products.service";
 import { salesService } from "@/services/sales.service";
+import { suppliersService } from "@/services/suppliers.service";
 import { DashboardLaunchpadNav } from "@/features/dashboard/DashboardLaunchpadNav";
 import { DashboardSkeleton } from "@/features/dashboard/DashboardSkeleton";
 import { EmptyState } from "@/features/dashboard/EmptyState";
@@ -107,6 +109,18 @@ export default function DashboardPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const { data: suppliers = [], isLoading: suppliersLoading } = useQuery({
+    queryKey: ["suppliers-all"],
+    queryFn: () => suppliersService.getAllSuppliers({ is_active: true }),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: customers = [], isLoading: customersLoading } = useQuery({
+    queryKey: ["customers-all"],
+    queryFn: () => customersService.getAllCustomers({ is_active: true }),
+    staleTime: 5 * 60 * 1000,
+  });
+
   useEffect(() => {
     if (searchParams.get("focus") === "health") {
       window.setTimeout(() => {
@@ -178,7 +192,15 @@ export default function DashboardPage() {
         sales={sales}
         expenses={expenses}
         products={products}
-        loading={salesLoading || expensesLoading || productsLoading}
+        suppliers={suppliers}
+        customers={customers}
+        loading={
+          salesLoading ||
+          expensesLoading ||
+          productsLoading ||
+          suppliersLoading ||
+          customersLoading
+        }
       />
 
       {score.confidence_level !== "LOW" && score.data_completeness_score >= 50 && (

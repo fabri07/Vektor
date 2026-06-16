@@ -1,7 +1,12 @@
+import type { CustomerResponse } from "@/services/customers.service";
 import type { ExpenseEntryResponse } from "@/services/expenses.service";
 import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
+import type { SupplierResponse } from "@/services/suppliers.service";
 import type { HealthScoreV2Response } from "@/types/api";
+
+export const UNIDENTIFIED_SUPPLIER = "Proveedor no identificado";
+export const UNIDENTIFIED_CUSTOMER = "Cliente no identificado";
 
 export const KPI_TOOLTIP_COPY: Record<string, string> = {
   Caja:
@@ -44,6 +49,19 @@ export interface SupplierSummary {
   averageOrderValue: number;
   paymentTerms: string;
   overdueInvoicesCount: number;
+}
+
+/** Volumen agregado por entidad real (proveedor, cliente o producto). */
+export interface VolumeSummary {
+  /** id de la entidad o "__unidentified__" para el bucket sin identificar. */
+  key: string;
+  name: string;
+  /** true si la fila corresponde a una entidad real del catálogo. */
+  identified: boolean;
+  total: number;
+  lastDate: string | null;
+  average: number;
+  count: number;
 }
 
 export interface LineMetricOption {
@@ -272,6 +290,114 @@ export function buildSupplierSummaries(expenses: ExpenseEntryResponse[]): Suppli
       overdueInvoicesCount: summary.total > 1_500_000 ? 1 : 0,
     }))
     .sort((a, b) => b.totalPurchased - a.totalPurchased);
+}
+
+const UNIDENTIFIED_KEY = "__unidentified__";
+
+interface VolumeAccumulator {
+  name: string;
+  identified: boolean;
+  total: number;
+  count: number;
+  lastDate: string | null;
+}
+
+function finalizeVolume(acc: Map<string, VolumeAccumulator>): VolumeSummary[] {
+  return [...acc.entries()]
+    .map(([key, entry]) => ({
+      key,
+      name: entry.name,
+      identified: entry.identified,
+      total: entry.total,
+      lastDate: entry.lastDate,
+      average: entry.count > 0 ? entry.total / entry.count : 0,
+      count: entry.count,
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+/**
+ * Compras por producto (volumen de compra): agrupa los gastos vinculados a un
+ * producto real (product_id) y los mapea contra el catálogo. Los gastos sin
+ * producto asignado se omiten — esta vista es a nivel producto/stock.
+ */
+export function buildProductPurchases(
+  expenses: ExpenseEntryResponse[],
+  products: ProductResponse[],
+): VolumeSummary[] {
+  const nameById = new Map(products.map((p) => [p.id, p.name]));
+  const acc = new Map<string, VolumeAccumulator>();
+
+  for (const expense of expenses) {
+    const productId = expense.product_id;
+    if (!productId) continue;
+    const name = nameById.get(productId) ?? "Producto sin nombre";
+    const current = acc.get(productId) ?? { name, identified: true, total: 0, count: 0, lastDate: null };
+    current.total += Number(expense.amount);
+    current.count += 1;
+    if (!current.lastDate || new Date(expense.transaction_date) > new Date(current.lastDate)) {
+      current.lastDate = expense.transaction_date;
+    }
+    acc.set(productId, current);
+  }
+
+  return finalizeVolume(acc);
+}
+
+/**
+ * Volumen de compra por proveedor REAL (supplier_id contra el catálogo). Los
+ * gastos sin proveedor identificado se agrupan en "Proveedor no identificado".
+ */
+export function buildSupplierBreakdown(
+  expenses: ExpenseEntryResponse[],
+  suppliers: SupplierResponse[],
+): VolumeSummary[] {
+  const nameById = new Map(suppliers.map((s) => [s.id, s.name]));
+  const acc = new Map<string, VolumeAccumulator>();
+
+  for (const expense of expenses) {
+    const supplierId = expense.supplier_id;
+    const identified = Boolean(supplierId && nameById.has(supplierId));
+    const key = identified ? (supplierId as string) : UNIDENTIFIED_KEY;
+    const name = identified ? nameById.get(supplierId as string)! : UNIDENTIFIED_SUPPLIER;
+    const current = acc.get(key) ?? { name, identified, total: 0, count: 0, lastDate: null };
+    current.total += Number(expense.amount);
+    current.count += 1;
+    if (!current.lastDate || new Date(expense.transaction_date) > new Date(current.lastDate)) {
+      current.lastDate = expense.transaction_date;
+    }
+    acc.set(key, current);
+  }
+
+  return finalizeVolume(acc);
+}
+
+/**
+ * Volumen de venta por cliente REAL (customer_id contra el catálogo). Las
+ * ventas sin cliente identificado se agrupan en "Cliente no identificado".
+ */
+export function buildCustomerBreakdown(
+  sales: SaleEntryResponse[],
+  customers: CustomerResponse[],
+): VolumeSummary[] {
+  const nameById = new Map(customers.map((c) => [c.id, c.name]));
+  const acc = new Map<string, VolumeAccumulator>();
+
+  for (const sale of sales) {
+    const customerId = sale.customer_id;
+    const identified = Boolean(customerId && nameById.has(customerId));
+    const key = identified ? (customerId as string) : UNIDENTIFIED_KEY;
+    const name = identified ? nameById.get(customerId as string)! : UNIDENTIFIED_CUSTOMER;
+    const current = acc.get(key) ?? { name, identified, total: 0, count: 0, lastDate: null };
+    current.total += Number(sale.amount);
+    current.count += 1;
+    if (!current.lastDate || new Date(sale.transaction_date) > new Date(current.lastDate)) {
+      current.lastDate = sale.transaction_date;
+    }
+    acc.set(key, current);
+  }
+
+  return finalizeVolume(acc);
 }
 
 function dateRange(points: number): Date[] {
