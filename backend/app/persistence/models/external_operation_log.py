@@ -6,6 +6,7 @@ OAuth, Gmail/MCP, …). Se correlaciona con DecisionAuditLog y communication_log
 """
 
 import uuid
+from typing import Any
 
 from sqlalchemy import ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -39,8 +40,10 @@ class ExternalOperationLog(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     provider_account_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # "success" | "failed"
     status: Mapped[str] = mapped_column(String(20), nullable=False)
-    request_payload_redacted: Mapped[dict | None] = mapped_column(PGJSONB, nullable=True)
-    response_payload_redacted: Mapped[dict | None] = mapped_column(PGJSONB, nullable=True)
+    request_payload_redacted: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
+    response_payload_redacted: Mapped[dict[str, Any] | None] = mapped_column(
+        PGJSONB, nullable=True
+    )
     provider_request_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

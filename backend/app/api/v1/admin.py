@@ -29,6 +29,7 @@ from app.schemas.admin import (
     RepairRequest,
     VerticalBenchmarkItem,
 )
+from app.schemas.admin_usage import UsageDashboardResponse
 
 router = APIRouter()
 
@@ -172,6 +173,37 @@ async def get_analytics_benchmarks(
         for item in overview
     ]
     return AnalyticsBenchmarksResponse(verticals=items)
+
+
+# ── Usage / token cost dashboard ──────────────────────────────────────────────
+
+
+@router.get(
+    "/usage",
+    response_model=UsageDashboardResponse,
+    summary="Consumo de tokens y costo estimado en USD (SUPERADMIN)",
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+)
+async def get_usage_dashboard(
+    days: int = Query(default=30, ge=1, le=365, description="Ventana en días (1..365)"),
+    tenant_id: UUID | None = Query(
+        default=None, description="Filtrar a un tenant; vacío = global (SUPERADMIN ve todo)"
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> UsageDashboardResponse:
+    """
+    Dashboard read-only de consumo de tokens y costo estimado.
+
+    Lee ``decision_audit_log`` (los tokens ya están persistidos). Agrega por
+    modelo, agente, día y tenant. Costo estimado con un mapa de precios local
+    (⚠️ verificar contra precios oficiales de Anthropic). El SUPERADMIN ve global
+    salvo que pase ``tenant_id``.
+    """
+    from app.application.services import usage_service  # noqa: PLC0415
+
+    return await usage_service.get_usage_dashboard(
+        session, days=days, tenant_id=tenant_id
+    )
 
 
 # ── Data repair endpoints ─────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import {
   Settings,
   Plug,
   Inbox,
+  Coins,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -42,6 +43,11 @@ const NAV_ITEMS = [
   { label: "Otros",         href: "/otros",      icon: Inbox },
   { label: "Cargar datos",  href: "/ingestion",  icon: Upload },
   { label: "Aplicaciones",  href: "/apps",       icon: Plug },
+];
+
+// Items visibles solo para SUPERADMIN (admin de plataforma).
+const SUPERADMIN_NAV_ITEMS = [
+  { label: "Uso & costos", href: "/admin/usage", icon: Coins },
 ];
 
 function getInitials(name: string): string {
@@ -77,6 +83,11 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
 
   const businessName = profileData?.display_name ?? "Mi negocio";
   const initials = getInitials(user?.full_name ?? user?.email ?? "U");
+
+  const navItems =
+    user?.role === "SUPERADMIN"
+      ? [...NAV_ITEMS, ...SUPERADMIN_NAV_ITEMS]
+      : NAV_ITEMS;
 
   return (
     <aside
@@ -128,7 +139,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
       {/* ── Nav items ── */}
       <nav className="flex-1 overflow-y-auto scrollbar-thin px-2 py-3">
         <ul className="space-y-0.5">
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const isActive =
               pathname === item.href || pathname.startsWith(item.href + "/");
             const Icon = item.icon;
