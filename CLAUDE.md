@@ -490,6 +490,8 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `20260712_0001` | `unclassified_records` (ORM: `UnclassifiedRecord`) — sección "Otros" |
 | `20260715_0001` | arqueo de caja completo en `cash_closes` (`opening_float_ars`, `cash_denominations`, `voucher_expenses_ars`, `result_code`) + `business_profiles.fiscal_condition` (`String(12)`, CHECK legacy) |
 | `20260716_0001` | reconcilia `fiscal_condition` a 3 valores canónicos (`monotributo`/`responsable_inscripto`/`informal`): ensancha a `Text`, normaliza legacy `'registered'`→`'monotributo'`, reemplaza el CHECK. **Obligatoria** — el CHECK/`String(12)` de `20260715_0001` rompía el `PATCH /settings/fiscal-condition` |
+| `20260717_0001` | `source_upload_id` en `sales_entries` + `expense_entries` (trazabilidad de import → archivo origen, base de la idempotencia/dedup de ingesta) |
+| `20260717_0002` | amplía el CHECK de `data_repair_items.action` con `VOID_DUPLICATE` + `RECLASSIFY_EXPENSE` (reclasificación vertical-aware + dedup de ingesta) |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
 
