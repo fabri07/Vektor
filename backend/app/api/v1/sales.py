@@ -15,6 +15,7 @@ from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
+from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.transaction_repository import SaleRepository
 from app.schemas.common import MessageResponse
 from app.schemas.transaction import (
@@ -190,6 +191,11 @@ async def create_sale(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE"
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    # El customer_id debe pertenecer al tenant (la FK sola no lo garantiza).
+    if body.customer_id is not None:
+        customer = await CustomerRepository(session).get_by_id(body.customer_id, tenant.tenant_id)
+        if customer is None:
+            raise HTTPException(status_code=400, detail="Customer not found for this tenant.")
     repo = SaleRepository(session)
     entry = SaleEntry(
         tenant_id=tenant.tenant_id,
@@ -244,6 +250,12 @@ async def update_sale(
     if "product_id" in body.model_fields_set:
         entry.product_id = body.product_id
     if "customer_id" in body.model_fields_set:
+        if body.customer_id is not None:
+            customer = await CustomerRepository(session).get_by_id(
+                body.customer_id, tenant.tenant_id
+            )
+            if customer is None:
+                raise HTTPException(status_code=400, detail="Customer not found for this tenant.")
         entry.customer_id = body.customer_id
     if body.notes is not None:
         entry.notes = body.notes

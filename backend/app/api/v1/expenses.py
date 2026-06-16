@@ -15,6 +15,7 @@ from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 from app.persistence.models.user import User
+from app.persistence.repositories.supplier_repository import SupplierRepository
 from app.persistence.repositories.transaction_repository import ExpenseRepository
 from app.schemas.common import MessageResponse
 from app.schemas.transaction import (
@@ -176,6 +177,16 @@ async def create_expense(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_EXPENSE"
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    # El supplier_id debe pertenecer al tenant (la FK sola no lo garantiza).
+    # Si hay proveedor y no se dio supplier_name, lo denormalizamos desde la
+    # entidad para que rankings/análisis (que agrupan por supplier_name) lo vean.
+    supplier_name = body.supplier_name
+    if body.supplier_id is not None:
+        supplier = await SupplierRepository(session).get_by_id(body.supplier_id, tenant.tenant_id)
+        if supplier is None:
+            raise HTTPException(status_code=400, detail="Supplier not found for this tenant.")
+        if not (supplier_name and supplier_name.strip()):
+            supplier_name = supplier.name
     repo = ExpenseRepository(session)
     # FASE 3.1: categoría "Otro" editable — el label libre va a custom_fields;
     # category sigue siendo OTHER (reportes/agregaciones intactos).
@@ -189,7 +200,7 @@ async def create_expense(
         description=body.description,
         is_recurring=body.is_recurring,
         payment_method=body.payment_method,
-        supplier_name=body.supplier_name,
+        supplier_name=supplier_name,
         supplier_id=body.supplier_id,
         notes=body.notes,
         custom_fields=custom_fields,
@@ -239,8 +250,20 @@ async def update_expense(
         entry.is_recurring = body.is_recurring
     if body.supplier_name is not None:
         entry.supplier_name = body.supplier_name
-    if body.supplier_id is not None:
-        entry.supplier_id = body.supplier_id
+    # supplier_id: usar model_fields_set para poder limpiarlo (null) explícitamente.
+    if "supplier_id" in body.model_fields_set:
+        if body.supplier_id is not None:
+            supplier = await SupplierRepository(session).get_by_id(
+                body.supplier_id, tenant.tenant_id
+            )
+            if supplier is None:
+                raise HTTPException(status_code=400, detail="Supplier not found for this tenant.")
+            entry.supplier_id = body.supplier_id
+            # Denormalizar nombre si quedó vacío (mantiene análisis por supplier_name).
+            if not (entry.supplier_name and entry.supplier_name.strip()):
+                entry.supplier_name = supplier.name
+        else:
+            entry.supplier_id = None
     if body.notes is not None:
         entry.notes = body.notes
     if body.custom_fields is not None:

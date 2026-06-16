@@ -1,8 +1,11 @@
-"""Servicio de proveedores — consultas y persistencia de borradores.
+"""Servicio de proveedores — consultas sobre la entidad Supplier (Fase 3).
 
-Nota: la tabla `suppliers` existe en la DB (schema v1.1).
-No hay ORM model para Supplier en esta fase; se usan queries raw.
-save_supplier_draft guarda en tabla `supplier_drafts` — NO envía el correo.
+Las lecturas usan el ORM `Supplier` (tabla `suppliers`, tenant-scoped). El
+parámetro `tenant_id` es el identificador multi-tenant; los call sites legacy lo
+pasaban como `business_id`. "Activo" = `deactivated_at IS NULL`.
+
+`save_supplier_draft` (tabla `supplier_drafts`) sigue pendiente de Fase 5
+(comunicación real): esa tabla aún no existe.
 """
 
 from __future__ import annotations
@@ -10,45 +13,47 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.models.supplier import Supplier
 
-# TODO Fase 5: reconciliar con SupplierRepository/tabla suppliers nueva
-async def get_approved_senders(business_id: str, db: AsyncSession) -> list[str]:
-    """Retorna los emails de proveedores registrados para el negocio."""
+
+async def get_approved_senders(tenant_id: str, db: AsyncSession) -> list[str]:
+    """Emails de proveedores activos del tenant (para el preflight de Gmail)."""
     result = await db.execute(
-        text("SELECT email FROM suppliers WHERE business_id = :business_id AND status = 'active'"),
-        {"business_id": business_id},
+        select(Supplier.email).where(
+            Supplier.tenant_id == tenant_id,
+            Supplier.deactivated_at.is_(None),
+            Supplier.email.isnot(None),
+        )
     )
-    rows = result.fetchall()
-    return [row[0] for row in rows if row[0]]
+    return [row[0] for row in result.all() if row[0]]
 
 
 async def get_supplier_by_email(
     email: str,
-    business_id: str,
+    tenant_id: str,
     db: AsyncSession,
 ) -> dict[str, Any] | None:
-    """Busca un proveedor por email dentro del negocio. Retorna None si no existe."""
+    """Busca un proveedor activo por email dentro del tenant. None si no existe."""
     result = await db.execute(
-        text(
-            "SELECT supplier_id, business_id, name, email, phone, tags, status "
-            "FROM suppliers WHERE email = :email AND business_id = :business_id"
-        ),
-        {"email": email.lower(), "business_id": business_id},
+        select(Supplier).where(
+            Supplier.tenant_id == tenant_id,
+            Supplier.email == email.lower(),
+        )
     )
-    row = result.fetchone()
-    if row is None:
+    supplier = result.scalars().first()
+    if supplier is None:
         return None
     return {
-        "supplier_id": str(row[0]),
-        "business_id": str(row[1]),
-        "name": row[2],
-        "email": row[3],
-        "phone": row[4],
-        "tags": row[5],
-        "status": row[6],
+        "supplier_id": str(supplier.id),
+        "business_id": str(supplier.tenant_id),
+        "name": supplier.name,
+        "email": supplier.email,
+        "phone": supplier.phone,
+        "tags": None,  # legacy field; no aplica a la entidad Supplier nueva
+        "status": "active" if supplier.deactivated_at is None else "inactive",
     }
 
 
