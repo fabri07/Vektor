@@ -28,7 +28,7 @@ class WhatsAppChannel(MessageChannel):
         s = self._settings
         return bool(s.ENABLE_WHATSAPP) and bool(s.WHATSAPP_TOKEN)
 
-    async def send(self, *, to: str, subject: str | None, body: str) -> None:
+    async def send(self, *, to: str, subject: str | None, body: str) -> str | None:
         if not self.available():
             raise ChannelNotConfigured(
                 "WhatsApp no configurado (requiere verificación de Meta — Fase posterior)"

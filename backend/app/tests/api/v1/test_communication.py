@@ -58,7 +58,8 @@ class TestCommunication:
     ) -> None:
         cid = await _create_customer(client, auth_headers, email="dest@example.com")
         with patch(
-            "app.integrations.communication.email_channel.SMTPClient.send"
+            "app.integrations.communication.email_channel.SMTPClient.send",
+            return_value="resend-test-id",
         ) as mock_send:
             resp = await client.post(
                 f"/api/v1/communication/customers/{cid}/send",
@@ -118,7 +119,10 @@ class TestCommunication:
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         cid = await _create_customer(client, auth_headers, email="dest@example.com")
-        with patch("app.integrations.communication.email_channel.SMTPClient.send"):
+        with patch(
+            "app.integrations.communication.email_channel.SMTPClient.send",
+            return_value="resend-test-id",
+        ):
             await client.post(
                 f"/api/v1/communication/customers/{cid}/send",
                 json={"channel": "email", "subject": "A", "body": "primero"},
@@ -143,7 +147,8 @@ class TestCommunication:
     ) -> None:
         sid = await _create_supplier(client, auth_headers, email="prov@example.com")
         with patch(
-            "app.integrations.communication.email_channel.SMTPClient.send"
+            "app.integrations.communication.email_channel.SMTPClient.send",
+            return_value="resend-test-id",
         ) as mock_send:
             resp = await client.post(
                 f"/api/v1/communication/suppliers/{sid}/send",

@@ -19,6 +19,10 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
       config.headers.Authorization = `Bearer ${token}`;
     }
   }
+  // Trazabilidad: una correlación por request (frontend → API → audit → response).
+  if (!config.headers["X-Trace-Id"]) {
+    config.headers["X-Trace-Id"] = crypto.randomUUID();
+  }
   return config;
 });
 

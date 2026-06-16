@@ -72,8 +72,8 @@ def create_app() -> FastAPI:
         allow_origin_regex=settings.CORS_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
-        expose_headers=["X-Request-ID"],
+        allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID", "X-Trace-Id"],
+        expose_headers=["X-Request-ID", "X-Trace-Id"],
     )
 
     # ── Security headers ──────────────────────────────────────────────────────
@@ -100,20 +100,28 @@ def create_app() -> FastAPI:
     ) -> Response:
         import structlog.contextvars  # noqa: PLC0415
 
+        from app.observability.trace import set_trace_id  # noqa: PLC0415
+
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        # trace_id: una sola id de correlación por request (la del cliente si la manda).
+        trace_id = request.headers.get("X-Trace-Id") or request_id
 
         # Reset per-request context and pre-bind known fields
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
             environment=settings.ENVIRONMENT,
             request_id=request_id,
+            trace_id=trace_id,
             method=request.method,
             endpoint=request.url.path,
         )
+        # Disponible para el código de app (audit/external_operation logs) en este request.
+        set_trace_id(trace_id)
 
         t0 = time.monotonic()
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
+        response.headers["X-Trace-Id"] = trace_id
         duration_ms = int((time.monotonic() - t0) * 1000)
 
         logger.info(

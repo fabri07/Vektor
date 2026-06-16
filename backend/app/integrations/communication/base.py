@@ -20,10 +20,11 @@ class MessageChannel(ABC):
     """Interfaz de un canal de comunicación saliente."""
 
     @abstractmethod
-    async def send(self, *, to: str, subject: str | None, body: str) -> None:
+    async def send(self, *, to: str, subject: str | None, body: str) -> str | None:
         """Envía un mensaje al destinatario `to`.
 
         `subject` puede ser None para canales que no lo soportan (WhatsApp).
+        Devuelve el id del mensaje en el proveedor (si lo hay), o None.
         Levanta `ChannelNotConfigured` si el canal no está disponible.
         """
         raise NotImplementedError

@@ -8,6 +8,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.observability.trace import get_trace_id
 from app.persistence.db.base import PGJSONB, Base, UUIDPrimaryKeyMixin
 
 
@@ -34,6 +35,10 @@ class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
         nullable=True,
     )
     context: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
+    # Correlación transversal: autocapturado del request vigente en cada INSERT ORM.
+    trace_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=lambda: get_trace_id()
+    )
     tokens_input: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     tokens_output: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     tokens_total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

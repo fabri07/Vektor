@@ -19,10 +19,13 @@ class EmailChannel(MessageChannel):
         # SMTPClient loguea y no rompe (no falla el envío).
         return True
 
-    async def send(self, *, to: str, subject: str | None, body: str) -> None:
-        self._smtp.send(
+    async def send(self, *, to: str, subject: str | None, body: str) -> str | None:
+        # raise_on_error=True: el envío fallido se propaga para que CommunicationService
+        # lo registre como failed (y como ExternalOperationLog).
+        return self._smtp.send(
             to_email=to,
             subject=subject or "",
             body_html=body,
             body_text=body,
+            raise_on_error=True,
         )

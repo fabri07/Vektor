@@ -5,10 +5,12 @@ envío y persiste un `CommunicationLog` (sent/failed). Errores de configuración
 canal (`ChannelNotConfigured`) se propagan para que el router responda 503.
 """
 
+import time
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.external_operation_service import record_external_operation
 from app.integrations.communication.base import ChannelNotConfigured, MessageChannel
 from app.integrations.communication.email_channel import EmailChannel
 from app.integrations.communication.whatsapp_channel import WhatsAppChannel
@@ -16,6 +18,9 @@ from app.observability.logger import get_logger
 from app.persistence.models.communication_log import CommunicationLog
 from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.supplier_repository import SupplierRepository
+
+# Proveedor por canal (para el log unificado de operaciones externas).
+_PROVIDER_BY_CHANNEL = {"email": "resend", "whatsapp": "whatsapp"}
 
 logger = get_logger(__name__)
 
@@ -101,8 +106,10 @@ class CommunicationService:
 
         status = "sent"
         error: str | None = None
+        provider_message_id: str | None = None
+        t0 = time.monotonic()
         try:
-            await adapter.send(to=to, subject=subject, body=body)
+            provider_message_id = await adapter.send(to=to, subject=subject, body=body)
         except ChannelNotConfigured:
             # Canal dormido / mal configurado: no se registra log, lo maneja el router (503).
             raise
@@ -116,6 +123,7 @@ class CommunicationService:
                 error=error,
                 error_type=type(exc).__name__,
             )
+        latency_ms = int((time.monotonic() - t0) * 1000)
 
         log = CommunicationLog(
             tenant_id=tenant_id,
@@ -126,9 +134,23 @@ class CommunicationService:
             body=body,
             status=status,
             error=error,
+            provider_message_id=provider_message_id,
         )
         self._session.add(log)
         await self._session.flush()
+
+        # Log unificado de la operación externa (trace_id se autocaptura).
+        await record_external_operation(
+            self._session,
+            tenant_id=tenant_id,
+            operation_type=f"{channel}_send",
+            provider=_PROVIDER_BY_CHANNEL.get(channel, channel),
+            status="success" if status == "sent" else "failed",
+            provider_request_id=provider_message_id,
+            request_payload={"recipient_type": recipient_type, "to": to, "subject": subject},
+            error_message=error,
+            latency_ms=latency_ms,
+        )
         return log
 
     async def history(

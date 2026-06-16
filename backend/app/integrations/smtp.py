@@ -26,8 +26,16 @@ class SMTPClient:
         subject: str,
         body_html: str,
         body_text: str | None = None,
-    ) -> None:
-        """Send an email via Resend HTTP API."""
+        *,
+        raise_on_error: bool = False,
+    ) -> str | None:
+        """Send an email via Resend HTTP API.
+
+        Returns the Resend message id on success, or None (dev/no-key fallback).
+        On a real send failure: re-raises if `raise_on_error=True` (para que el
+        canal de comunicación lo registre); de lo contrario loguea y devuelve None
+        (comportamiento histórico para auth/reportes que no deben romper).
+        """
         s = self._settings
         api_key = self._api_key()
 
@@ -40,7 +48,7 @@ class SMTPClient:
                     subject=subject,
                     plain_text=body_text or "(sin texto plano)",
                 )
-            return
+            return None
 
         payload: dict[str, Any] = {
             "from": s.SMTP_FROM_EMAIL,
@@ -59,7 +67,12 @@ class SMTPClient:
                     json=payload,
                 )
                 response.raise_for_status()
-            logger.info("smtp.sent", to=to_email, subject=subject)
+                try:
+                    message_id: str | None = response.json().get("id")
+                except Exception:  # respuesta sin JSON / sin id — no es fatal
+                    message_id = None
+            logger.info("smtp.sent", to=to_email, subject=subject, provider_message_id=message_id)
+            return message_id
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "smtp.send_failed",
@@ -69,6 +82,9 @@ class SMTPClient:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+            if raise_on_error:
+                raise
+            return None
         except Exception as exc:
             logger.error(
                 "smtp.send_failed",
@@ -76,3 +92,6 @@ class SMTPClient:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+            if raise_on_error:
+                raise
+            return None

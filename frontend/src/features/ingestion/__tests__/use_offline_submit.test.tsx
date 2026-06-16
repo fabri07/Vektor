@@ -67,7 +67,7 @@ describe("useOfflineSubmit.flush poison-item handling", () => {
     });
     const items = useOfflineQueueStore.getState().items;
     expect(items).toHaveLength(1);
-    expect(items[0].attempts).toBe(1);
+    expect(items[0]?.attempts).toBe(1);
   });
 
   it("drops a 5xx item once it hits the attempt cap", async () => {

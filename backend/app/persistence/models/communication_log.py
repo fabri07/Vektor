@@ -11,6 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.observability.trace import get_trace_id
 from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
@@ -32,6 +33,12 @@ class CommunicationLog(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # "sent" | "failed"
     status: Mapped[str] = mapped_column(String(10), nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # id del mensaje en el proveedor (p. ej. Resend) — para rastrear entrega.
+    provider_message_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Correlación transversal: autocapturado del request vigente en cada INSERT.
+    trace_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=lambda: get_trace_id()
+    )
 
     __table_args__ = (Index("ix_communication_log_tenant", "tenant_id"),)
 
