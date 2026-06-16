@@ -36,6 +36,7 @@ from app.persistence.models.score import (
     HeuristicRuleSet,
     WeeklyScoreHistory,
 )
+from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
@@ -65,6 +66,7 @@ __all__ = [
     "ActionSuggestion",
     "DecisionAuditLog",
     "Customer",
+    "Supplier",
     "UnclassifiedRecord",
     "UploadedFile",
     "Notification",

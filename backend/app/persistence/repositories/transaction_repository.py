@@ -336,6 +336,7 @@ class ExpenseRepository:
         to_date: date | None = None,
         category: str | None = None,
         expense_type: str | None = None,
+        supplier_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[ExpenseEntry]:
@@ -351,6 +352,8 @@ class ExpenseRepository:
             q = q.where(ExpenseEntry.category == category)
         if expense_type:
             q = q.where(ExpenseEntry.expense_type == expense_type)
+        if supplier_id:
+            q = q.where(ExpenseEntry.supplier_id == supplier_id)
         q = q.order_by(ExpenseEntry.transaction_date.desc()).limit(limit).offset(offset)
         result = await self._session.execute(q)
         return list(result.scalars().all())

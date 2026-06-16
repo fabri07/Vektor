@@ -105,6 +105,14 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("products.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # FASE 3: vínculo opcional al proveedor del catálogo. NULL = gasto sin
+    # proveedor informado / histórico. SET NULL al borrar el proveedor: el gasto
+    # se conserva. Coexiste con `supplier_name` (texto libre, no se reemplaza).
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("suppliers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     # OPEX = gasto operativo; COGS = compra de mercadería (entra al stock).

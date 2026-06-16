@@ -146,6 +146,8 @@ class ExpenseEntryResponse(BaseModel):
     tenant_id: UUID
     # FASE 3 (B1): vínculo opcional al producto del catálogo (compras de mercadería).
     product_id: UUID | None = None
+    # FASE 3: vínculo opcional al proveedor (entidad suppliers).
+    supplier_id: UUID | None = None
     amount: Decimal
     category: str
     # Etiqueta libre cuando category == OTHER (guardada en custom_fields["category_label"]).
@@ -192,6 +194,7 @@ class CreateExpenseRequest(BaseModel):
         default="transfer",
     )
     supplier_name: str | None = Field(default=None, max_length=300)
+    supplier_id: UUID | None = None
     custom_fields: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("amount")
@@ -216,6 +219,7 @@ class UpdateExpenseRequest(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None
     supplier_name: str | None = Field(default=None, max_length=300)
+    supplier_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
     custom_fields: dict[str, Any] | None = None
 

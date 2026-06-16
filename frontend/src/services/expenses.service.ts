@@ -14,6 +14,8 @@ export interface CreateExpensePayload {
   is_recurring?: boolean;
   payment_method?: string;
   supplier_name?: string | null;
+  /** Vínculo opcional a un proveedor del catálogo (entidad Supplier). */
+  supplier_id?: string | null;
   notes?: string | null;
   /** OPEX = gasto operativo; COGS = compra de mercadería. */
   expense_type?: "OPEX" | "COGS";
@@ -38,6 +40,8 @@ export interface ExpenseEntryResponse {
   is_recurring: boolean;
   payment_method: string;
   supplier_name: string | null;
+  /** Vínculo opcional al proveedor del catálogo (entidad Supplier). */
+  supplier_id: string | null;
   notes: string | null;
   custom_fields?: Record<string, unknown>;
   created_at: string;
@@ -48,6 +52,7 @@ export interface ExpensesListParams {
   to_date?: string;
   category?: string;
   expense_type?: "OPEX" | "COGS";
+  supplier_id?: string;
   limit?: number;
   offset?: number;
 }

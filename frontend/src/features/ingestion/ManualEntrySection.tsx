@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { productsService } from "@/services/products.service";
 import { customersService } from "@/services/customers.service";
+import { suppliersService } from "@/services/suppliers.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
 import type { FieldDefinition } from "@/types/api";
@@ -325,6 +326,7 @@ interface ExpenseForm {
   expense_type: string;
   payment_method: string;
   supplier_name: string;
+  supplier_id: string;
   expense_date: string;
   description: string;
   is_recurring: boolean;
@@ -338,6 +340,7 @@ function emptyExpenseForm(): ExpenseForm {
     expense_type: "OPEX",
     payment_method: "transfer",
     supplier_name: "",
+    supplier_id: "",
     expense_date: nowStr(),
     description: "",
     is_recurring: false,
@@ -355,6 +358,10 @@ function ExpenseTab({ onToast }: { onToast: (t: ToastState) => void }) {
   const { data: customDefs } = useQuery({
     queryKey: ["field-definitions", "expense"],
     queryFn: () => fieldDefinitionsService.getAll("expense"),
+  });
+  const { data: suppliers } = useQuery({
+    queryKey: ["suppliers-list"],
+    queryFn: () => suppliersService.getAllSuppliers(),
   });
 
   function resetForm() {
@@ -409,6 +416,7 @@ function ExpenseTab({ onToast }: { onToast: (t: ToastState) => void }) {
         expense_type: form.expense_type === "COGS" ? "COGS" : "OPEX",
         payment_method: form.payment_method,
         supplier_name: form.supplier_name.trim() || null,
+        supplier_id: form.supplier_id || null,
         expense_date: form.expense_date,
         description: form.description || "",
         is_recurring: form.is_recurring,
@@ -518,13 +526,31 @@ function ExpenseTab({ onToast }: { onToast: (t: ToastState) => void }) {
           error={errors.expense_date}
         />
         <Input
-          label="Proveedor (opcional)"
+          label="Proveedor — texto libre (opcional)"
           type="text"
           placeholder="Ej: Distribuidora del Sur"
           maxLength={300}
           value={form.supplier_name}
           onChange={set("supplier_name")}
         />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label className="text-xs font-medium text-vk-text-secondary">
+          Proveedor (opcional)
+        </label>
+        <select
+          value={form.supplier_id}
+          onChange={set("supplier_id")}
+          className={selectClass}
+        >
+          <option value="">Sin proveedor</option>
+          {(suppliers ?? []).map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
       </div>
 
       <Input

@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+# TODO Fase 5: reconciliar con SupplierRepository/tabla suppliers nueva
 async def get_approved_senders(business_id: str, db: AsyncSession) -> list[str]:
     """Retorna los emails de proveedores registrados para el negocio."""
     result = await db.execute(
