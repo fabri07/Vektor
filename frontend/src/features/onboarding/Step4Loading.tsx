@@ -73,7 +73,7 @@ export function Step4Loading() {
   useEffect(() => {
     if (!score) return;
     const t = setTimeout(() => {
-      router.replace("/chat");
+      router.replace("/dashboard");
     }, 2_500);
     return () => clearTimeout(t);
   }, [score, router]);
@@ -103,7 +103,7 @@ export function Step4Loading() {
           </p>
           <button
             type="button"
-            onClick={() => router.replace("/chat")}
+            onClick={() => router.replace("/dashboard")}
             className="mt-6 h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
           >
             Ir al chat

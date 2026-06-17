@@ -25,7 +25,7 @@ export default function OAuthCallbackPage() {
 
   useEffect(() => {
     if (token) {
-      router.replace("/chat");
+      router.replace("/dashboard");
       return;
     }
 
@@ -63,7 +63,7 @@ export default function OAuthCallbackPage() {
             role: auth.user.role_code,
             tenant_id: auth.user.tenant_id,
           });
-          router.replace("/chat");
+          router.replace("/dashboard");
         }
       } catch {
         setErrorMsg("No se pudo completar el inicio de sesión con Google. Intentá de nuevo.");
@@ -90,7 +90,7 @@ export default function OAuthCallbackPage() {
         role: auth.user.role_code,
         tenant_id: auth.user.tenant_id,
       });
-      router.replace("/chat");
+      router.replace("/dashboard");
     } catch {
       setLinkError("Contraseña incorrecta. Intentá de nuevo.");
     } finally {

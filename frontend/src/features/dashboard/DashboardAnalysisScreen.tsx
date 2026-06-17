@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchBusinessBreakdown, fetchCashForecast, fetchCurrentInsight } from "@/services/dashboard.service";
-import type { BusinessBreakdownResponse, CashForecastResponse, HealthScoreV2Response } from "@/types/api";
+import { fetchBusinessBreakdown, fetchCurrentInsight } from "@/services/dashboard.service";
+import type { BusinessBreakdownResponse, HealthScoreV2Response } from "@/types/api";
 import {
   Bar,
   BarChart,
@@ -80,21 +80,27 @@ function InsightBlock() {
 function PanelFrame({
   title,
   tooltip,
+  explanation,
   controls,
   children,
 }: {
   title: string;
   tooltip: string;
+  /** Explicación visible: qué muestra el gráfico y cómo leerlo. */
+  explanation?: string;
   controls?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <article className="vektor-card p-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
+        <div className="min-w-0 lg:max-w-[70%]">
           <Tooltip content={tooltip}>
             <h2 className="text-lg font-semibold text-vektor-white">{title}</h2>
           </Tooltip>
+          {explanation ? (
+            <p className="mt-1.5 text-sm leading-6 text-vektor-muted">{explanation}</p>
+          ) : null}
         </div>
         {controls ? <div className="w-full lg:w-[240px]">{controls}</div> : null}
       </div>
@@ -151,6 +157,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
       <PanelFrame
         title={lineConfig.title}
         tooltip="Este grafico muestra como fue cambiando la metrica elegida a lo largo del tiempo."
+        explanation="Cada punto es un período (día, semana o mes según elijas). Si la línea sube, la métrica mejora; si baja sostenidamente, conviene prestar atención. El eje horizontal es el tiempo y el vertical, el valor."
         controls={(
           <div className="space-y-3">
             <Select
@@ -232,6 +239,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
       <PanelFrame
         title={compareConfig.title}
         tooltip="Este grafico compara grupos entre si para mostrar concentracion, dependencia o diferencia de desempeno."
+        explanation="Cada barra es un grupo (categoría, proveedor, método de pago o día). Cuanto más alta la barra, más concentra. Te sirve para ver de qué dependés y dónde está el grueso del movimiento."
         controls={(
           <Select
             options={COMPARE_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
@@ -270,6 +278,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
       <PanelFrame
         title={distributionConfig.title}
         tooltip="Este grafico muestra como se reparte una metrica entre sus componentes principales."
+        explanation="El anillo muestra cómo se reparte el total entre sus partes. Cada porción es el peso de ese componente sobre el total (en el centro). Las porciones más grandes son las que más pesan."
         controls={(
           <Select
             options={DISTRIBUTION_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
@@ -334,10 +343,9 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
       </PanelFrame>
       </div>
 
-      {/* Desgloses y proyección: dos columnas para densidad */}
+      {/* Desgloses por categoría, proveedores y stock: dos columnas */}
       <div className="grid gap-4 xl:grid-cols-2">
         <BreakdownPanels />
-        <ForecastPanel />
       </div>
     </div>
   );
@@ -371,23 +379,24 @@ function BreakdownPanels() {
       <PanelFrame
         title="Inversión en mercadería"
         tooltip="Lo que salió de caja en compras de mercadería (COGS) del período y el valor actual del stock. El gasto operativo (OPEX) se muestra como referencia."
+        explanation="Cuánto pusiste en comprar mercadería y cuánto vale hoy tu stock. Si el valor del stock es mucho mayor que la salida de caja, tenés plata inmovilizada en góndola."
       >
         <ul className="space-y-4 py-2">
           <li className="flex items-center justify-between text-sm">
-            <span className="text-vk-text-primary">Salida de caja en mercadería</span>
-            <span className="font-medium text-vk-text-primary">
+            <span className="text-vektor-white">Salida de caja en mercadería</span>
+            <span className="font-medium text-vektor-white">
               {formatARS(data.cogs_total)}
             </span>
           </li>
           <li className="flex items-center justify-between text-sm">
-            <span className="text-vk-text-primary">Valor actual del stock</span>
-            <span className="font-medium text-vk-text-primary">
+            <span className="text-vektor-white">Valor actual del stock</span>
+            <span className="font-medium text-vektor-white">
               {formatARS(data.stock_value_total)}
             </span>
           </li>
-          <li className="flex items-center justify-between border-t border-vk-border-w pt-3 text-sm">
-            <span className="text-vk-text-muted">Gastos operativos del período</span>
-            <span className="text-vk-text-muted">{formatARS(data.opex_total)}</span>
+          <li className="flex items-center justify-between border-t border-vektor-border pt-3 text-sm">
+            <span className="text-vektor-muted">Gastos operativos del período</span>
+            <span className="text-vektor-muted">{formatARS(data.opex_total)}</span>
           </li>
         </ul>
       </PanelFrame>
@@ -396,28 +405,29 @@ function BreakdownPanels() {
       <PanelFrame
         title="Gastos por categoría"
         tooltip="Distribución de egresos del último mes por tipo de gasto."
+        explanation="En qué se te va la plata. La barra y el porcentaje muestran cuánto pesa cada categoría sobre el total de gastos del período."
       >
         {data.expenses_by_category.length === 0 ? (
-          <p className="py-8 text-center text-sm text-vk-text-muted">Sin datos de gastos.</p>
+          <p className="py-8 text-center text-sm text-vektor-muted">Sin datos de gastos.</p>
         ) : (
           <ul className="space-y-3">
             {data.expenses_by_category.map((item) => (
               <li key={item.category}>
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-vk-text-primary">
+                  <span className="text-vektor-white">
                     {categoryDisplay(item.category)}
                   </span>
-                  <span className="font-medium text-vk-text-primary">
+                  <span className="font-medium text-vektor-white">
                     {formatARS(item.total)}
                   </span>
                 </div>
-                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-vk-border-w">
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-vektor-border">
                   <div
-                    className="h-full rounded-full bg-vk-blue transition-all"
+                    className="h-full rounded-full bg-vektor-blue transition-all"
                     style={{ width: `${Math.min(item.pct, 100)}%` }}
                   />
                 </div>
-                <p className="mt-0.5 text-right text-xs text-vk-text-muted">{item.pct.toFixed(1)}%</p>
+                <p className="mt-0.5 text-right text-xs text-vektor-muted">{item.pct.toFixed(1)}%</p>
               </li>
             ))}
           </ul>
@@ -428,24 +438,25 @@ function BreakdownPanels() {
       <PanelFrame
         title="Top proveedores"
         tooltip="Proveedores con mayor peso en los egresos del período."
+        explanation="A quién le comprás más. Si uno solo concentra un porcentaje muy alto, dependés demasiado de él: conviene tener una alternativa."
       >
         {data.top_suppliers.length === 0 ? (
-          <p className="py-8 text-center text-sm text-vk-text-muted">Sin proveedores registrados.</p>
+          <p className="py-8 text-center text-sm text-vektor-muted">Sin proveedores registrados.</p>
         ) : (
           <ul className="space-y-3">
             {data.top_suppliers.map((item) => (
               <li key={item.supplier_name}>
                 <div className="flex items-center justify-between text-sm">
-                  <span className="truncate pr-3 text-vk-text-primary">{item.supplier_name}</span>
-                  <span className="font-medium text-vk-text-primary">{formatARS(item.total)}</span>
+                  <span className="truncate pr-3 text-vektor-white">{item.supplier_name}</span>
+                  <span className="font-medium text-vektor-white">{formatARS(item.total)}</span>
                 </div>
-                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-vk-border-w">
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-vektor-border">
                   <div
                     className="h-full rounded-full bg-[#27c7b8] transition-all"
                     style={{ width: `${Math.min(item.pct, 100)}%` }}
                   />
                 </div>
-                <p className="mt-0.5 text-right text-xs text-vk-text-muted">{item.pct.toFixed(1)}%</p>
+                <p className="mt-0.5 text-right text-xs text-vektor-muted">{item.pct.toFixed(1)}%</p>
               </li>
             ))}
           </ul>
@@ -456,9 +467,10 @@ function BreakdownPanels() {
       <PanelFrame
         title={`Stock crítico (${data.low_stock_count} / ${data.total_products})`}
         tooltip="Productos por debajo del umbral mínimo de stock."
+        explanation="Productos que están por debajo de tu umbral mínimo. Si no los reponés pronto, podés quedarte sin venderlos."
       >
         {data.low_stock_products.length === 0 ? (
-          <p className="py-8 text-center text-sm text-vk-text-muted">
+          <p className="py-8 text-center text-sm text-vektor-muted">
             Todos los productos tienen stock suficiente.
           </p>
         ) : (
@@ -466,11 +478,11 @@ function BreakdownPanels() {
             {data.low_stock_products.map((p) => (
               <li
                 key={p.product_id}
-                className="flex items-center justify-between rounded-lg border border-vk-border-w px-3 py-2"
+                className="flex items-center justify-between rounded-lg border border-vektor-border px-3 py-2"
               >
                 <div>
-                  <p className="text-sm font-medium text-vk-text-primary">{p.name}</p>
-                  <p className="text-xs text-vk-text-muted">
+                  <p className="text-sm font-medium text-vektor-white">{p.name}</p>
+                  <p className="text-xs text-vektor-muted">
                     Stock: {p.stock_units} / mínimo {p.low_stock_threshold_units ?? 5}
                   </p>
                 </div>
@@ -493,9 +505,10 @@ function BreakdownPanels() {
       <PanelFrame
         title={`Sin rotación (${data.no_rotation_count} / ${data.total_products})`}
         tooltip="Productos activos con stock pero sin ventas registradas en el período."
+        explanation="Productos con stock pero sin ninguna venta en el período: plata parada. Conviene impulsarlos con una promo o discontinuarlos."
       >
         {data.no_rotation_products.length === 0 ? (
-          <p className="py-8 text-center text-sm text-vk-text-muted">
+          <p className="py-8 text-center text-sm text-vektor-muted">
             No hay productos detenidos en este período.
           </p>
         ) : (
@@ -503,11 +516,11 @@ function BreakdownPanels() {
             {data.no_rotation_products.map((p) => (
               <li
                 key={p.product_id}
-                className="flex items-center justify-between rounded-lg border border-vk-border-w px-3 py-2"
+                className="flex items-center justify-between rounded-lg border border-vektor-border px-3 py-2"
               >
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-vk-text-primary">{p.name}</p>
-                  <p className="text-xs text-vk-text-muted">
+                  <p className="truncate text-sm font-medium text-vektor-white">{p.name}</p>
+                  <p className="text-xs text-vektor-muted">
                     Stock actual: {p.stock_units}
                   </p>
                 </div>
@@ -520,110 +533,5 @@ function BreakdownPanels() {
         )}
       </PanelFrame>
     </>
-  );
-}
-
-// ── Panel de forecast de caja ────────────────────────────────────────────────
-
-const TIER_LABELS: Record<number, string> = {
-  0: "Sin datos suficientes",
-  1: "Proyección básica (14 días)",
-  2: "Proyección semanal (30 días)",
-  3: "Proyección con tendencia (60 días)",
-};
-
-const CONFIDENCE_COLORS: Record<string, string> = {
-  HIGH: "text-emerald-400",
-  MEDIUM: "text-amber-400",
-  LOW: "text-vk-text-muted",
-};
-
-function ForecastPanel() {
-  const { data, isLoading } = useQuery<CashForecastResponse>({
-    queryKey: ["forecast", "cash"],
-    queryFn: () => fetchCashForecast(),
-    staleTime: 30 * 60 * 1000,
-    retry: 1,
-  });
-
-  if (isLoading) {
-    return <div className="xl:col-span-2 h-[280px] animate-pulse rounded-2xl bg-vektor-surface" />;
-  }
-
-  if (!data || data.tier === 0) {
-    return (
-      <div className="xl:col-span-2 rounded-2xl border border-vk-border-w bg-vk-surface-w p-6">
-        <h3 className="text-sm font-semibold text-vk-text-secondary mb-2">Proyección de caja</h3>
-        <p className="text-sm text-vk-text-muted">
-          {data?.message ?? "Sin datos suficientes para proyectar. Cargá al menos 14 días de ventas y gastos."}
-        </p>
-      </div>
-    );
-  }
-
-  const chartData = data.points.map((p) => ({
-    date: new Date(p.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "short" }),
-    Ingresos: p.income,
-    Egresos: p.expense,
-    Neto: p.net,
-  }));
-
-  const totalNet = data.points.reduce((s, p) => s + p.net, 0);
-  const isPositive = totalNet >= 0;
-
-  return (
-    <div className="xl:col-span-2 rounded-2xl border border-vk-border-w bg-vk-surface-w p-6">
-      <div className="flex items-start justify-between mb-1">
-        <div>
-          <h3 className="text-sm font-semibold text-vk-text-secondary">Proyección de caja</h3>
-          <p className="text-xs text-vk-text-muted mt-0.5">{TIER_LABELS[data.tier]}</p>
-        </div>
-        <div className="text-right">
-          <p className={`text-xs font-medium ${CONFIDENCE_COLORS[data.confidence] ?? "text-vk-text-muted"}`}>
-            Confianza {data.confidence}
-          </p>
-          <p className="text-xs text-vk-text-muted">{data.data_days} días de historial</p>
-        </div>
-      </div>
-
-      <div className="mt-1 mb-4">
-        <span className={`text-sm font-semibold ${isPositive ? "text-emerald-400" : "text-vk-danger"}`}>
-          Neto proyectado: {isPositive ? "+" : ""}{formatARSCompact(totalNet)}
-        </span>
-        <span className="ml-2 text-xs text-vk-text-muted">en {data.horizon_days} días</span>
-      </div>
-
-      <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-          <XAxis
-            dataKey="date"
-            tick={{ fontSize: 10, fill: "var(--vektor-body)" }}
-            tickLine={false}
-            interval={Math.ceil(chartData.length / 6)}
-          />
-          <YAxis
-            tick={{ fontSize: 10, fill: "var(--vektor-body)" }}
-            tickFormatter={(v: number) => formatARSCompact(v)}
-            tickLine={false}
-            axisLine={false}
-            width={60}
-          />
-          <RechartsTooltip
-            contentStyle={{ background: "var(--vektor-surface)", border: "1px solid var(--vektor-border)", borderRadius: 8, fontSize: 12 }}
-            formatter={(v) => formatARS(Number(v ?? 0))}
-          />
-          <Line type="monotone" dataKey="Ingresos" stroke="#3a86ff" strokeWidth={2} dot={false} />
-          <Line type="monotone" dataKey="Egresos" stroke="#f06c79" strokeWidth={2} dot={false} />
-          <Line type="monotone" dataKey="Neto" stroke="#27c7b8" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
-        </LineChart>
-      </ResponsiveContainer>
-
-      <div className="mt-3 flex gap-4 text-xs text-vk-text-muted">
-        <span className="flex items-center gap-1.5"><span className="h-2 w-4 rounded bg-vk-blue" />Ingresos</span>
-        <span className="flex items-center gap-1.5"><span className="h-2 w-4 rounded bg-vk-danger" />Egresos</span>
-        <span className="flex items-center gap-1.5"><span className="h-2 w-4 rounded bg-[#27c7b8]" />Neto</span>
-      </div>
-    </div>
   );
 }

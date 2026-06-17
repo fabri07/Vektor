@@ -25,25 +25,27 @@ function gaugeTone(score: number) {
   return "var(--vektor-teal)";
 }
 
+// Véktor concluye y sugiere a partir de los datos del negocio; nunca le pide al
+// usuario que "analice" — ese es justamente el trabajo de Véktor.
 function describeRisk(riskCode: string, fallback?: string | null): string {
   const key = riskCode.toLowerCase();
   if (fallback) return fallback;
   if (key.includes("cash") || key.includes("caja")) {
-    return "La caja disponible es tu principal punto de tension: si los egresos siguen acelerando, te quedas con menos margen para operar tranquilo.";
+    return "Detecté que la caja es tu punto más débil: los egresos vienen creciendo más rápido que los ingresos. Te sugiero priorizar cobranzas y postergar gastos no urgentes esta semana para recuperar aire.";
   }
   if (key.includes("margin") || key.includes("margen")) {
-    return "Tu rentabilidad se esta debilitando en categorias clave y eso te obliga a vender mas para ganar lo mismo.";
+    return "Tu rentabilidad se está achicando en categorías clave: estás vendiendo más para ganar lo mismo. Te conviene revisar precios o el costo de compra de esos productos para recuperar margen.";
   }
   if (key.includes("stock")) {
-    return "La distribucion del stock esta desbalanceada: hay riesgo de perder ventas en algunos productos y de inmovilizar plata en otros.";
+    return "Tu inventario está desbalanceado: hay productos que se te van a agotar y otros con plata inmovilizada. Te sugiero reponer los de alta rotación y liquidar los que no se mueven.";
   }
   if (key.includes("supplier") || key.includes("proveedor")) {
-    return "La dependencia de pocos proveedores aumenta tu exposicion a faltantes, subas de precio y demoras de reposicion.";
+    return "Estás muy concentrado en pocos proveedores, lo que te expone a faltantes y subas de precio. Te conviene sumar al menos un proveedor alternativo para tus insumos principales.";
   }
   if (key.includes("growth") || key.includes("crecimiento")) {
-    return "Las ventas bajaron respecto al mes anterior. Analiza si es estacional, un problema de demanda o una perdida de clientes recurrentes.";
+    return "Tus ventas vienen cayendo respecto al mes anterior. Por el patrón de tus datos parece una baja de demanda más que estacional. Te sugiero reactivar a tus clientes habituales con una promo o contacto directo.";
   }
-  return "Hoy hay senales mixtas entre liquidez, margen y operacion. Conviene atacar primero el factor con mayor impacto para recuperar estabilidad.";
+  return "Hoy tu negocio muestra señales mixtas entre liquidez, margen y operación. El factor de mayor impacto ahora es el que más baja tu score: empezá por ahí para recuperar estabilidad.";
 }
 
 function Gauge({ score }: { score: number }) {

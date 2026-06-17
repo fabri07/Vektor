@@ -214,7 +214,7 @@ export default function DemoPage() {
         role: data.user.role_code,
         tenant_id: data.user.tenant_id,
       });
-      router.replace("/chat");
+      router.replace("/dashboard");
     } catch {
       setError(
         "No se pudo acceder al tenant demo. Verificá que el backend esté corriendo y que hayas ejecutado make seed-demo."

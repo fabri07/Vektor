@@ -91,7 +91,7 @@ export function LoginForm() {
     if (!result.success) return;
 
     login.mutate(result.data, {
-      onSuccess: () => router.replace("/chat"),
+      onSuccess: () => router.replace("/dashboard"),
     });
   }
 

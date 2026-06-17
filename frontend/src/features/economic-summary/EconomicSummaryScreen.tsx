@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
+import { ForecastPanel } from "@/features/dashboard/ForecastPanel";
 import { type PeriodValue, resolvePeriod } from "@/lib/period";
 import { economicSummaryService } from "@/services/economic-summary.service";
 
@@ -97,6 +98,9 @@ export function EconomicSummaryScreen() {
           )}
         </>
       )}
+
+      {/* Proyección de caja (movida desde Análisis) */}
+      <ForecastPanel />
 
       {/* Disclaimer legal — al pie, en negrita; blanco sobre el fondo oscuro de Véktor */}
       <p className="mt-6 border-t border-vk-border-w pt-4 text-center text-xs font-bold text-vk-text-primary">

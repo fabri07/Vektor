@@ -291,7 +291,7 @@ export default function RootPage() {
 
   useEffect(() => {
     if (hasHydrated && token) {
-      router.replace("/chat");
+      router.replace("/dashboard");
     }
   }, [hasHydrated, token, router]);
 
