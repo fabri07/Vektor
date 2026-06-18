@@ -1,6 +1,10 @@
 import { api } from "@/lib/api";
 import type { AxiosError } from "axios";
 
+// La relectura reprocesa el archivo completo; necesita más margen que el
+// timeout global de 15s del cliente axios.
+const REREAD_TIMEOUT_MS = 120_000;
+
 export interface UploadedFileItem {
   id: string;
   original_filename: string;
@@ -229,6 +233,10 @@ export const ingestionService = {
   async rereadPreview(fileId: string): Promise<RereadPreviewResponse> {
     const res = await api.post<RereadPreviewResponse>(
       `/ingestion/files/${fileId}/reread/preview`,
+      undefined,
+      // Relectura sobre archivos grandes (miles de filas) puede tardar más que
+      // el default de 15s del cliente; el edge de Railway corta a ~300s.
+      { timeout: REREAD_TIMEOUT_MS },
     );
     return res.data;
   },
@@ -236,6 +244,8 @@ export const ingestionService = {
   async rereadApply(fileId: string): Promise<RereadApplyResponse> {
     const res = await api.post<RereadApplyResponse>(
       `/ingestion/files/${fileId}/reread/apply`,
+      undefined,
+      { timeout: REREAD_TIMEOUT_MS },
     );
     return res.data;
   },
@@ -243,6 +253,8 @@ export const ingestionService = {
   async rereadUndo(fileId: string): Promise<RereadUndoResponse> {
     const res = await api.post<RereadUndoResponse>(
       `/ingestion/files/${fileId}/reread/undo`,
+      undefined,
+      { timeout: REREAD_TIMEOUT_MS },
     );
     return res.data;
   },
