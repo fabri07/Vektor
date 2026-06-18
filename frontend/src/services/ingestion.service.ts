@@ -84,17 +84,17 @@ export interface RereadCounts {
   to_void: number;
 }
 
-export interface RereadPreviewResponse {
-  file_id: string;
-  counts: RereadCounts;
-  legacy_fallback: boolean;
-  sample_changes: Record<string, unknown>[];
-}
-
 export interface RereadItem {
   action: string;
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;
+}
+
+export interface RereadPreviewResponse {
+  file_id: string;
+  counts: RereadCounts;
+  legacy_fallback: boolean;
+  sample_changes: RereadItem[];
 }
 
 export interface RereadApplyResponse {

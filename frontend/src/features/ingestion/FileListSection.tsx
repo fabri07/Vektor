@@ -13,6 +13,7 @@ import { useToastStore } from "@/stores/toastStore";
 import { Modal } from "@/components/ui/Modal";
 import { ColumnMapperPanel } from "./ColumnMapperPanel";
 import { RereadDiff } from "./RereadDiff";
+import { RereadProgress } from "./RereadProgress";
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "Pendiente",
@@ -53,7 +54,7 @@ function hasActiveFiles(files: UploadedFileItem[]): boolean {
 
 
 /** Fase de la relectura dentro del modal. */
-type RereadPhase = "preview" | "result";
+type RereadPhase = "loading" | "preview" | "applying" | "result";
 
 interface RereadState {
   fileId: string;
@@ -139,22 +140,36 @@ export function FileListSection() {
   const rereadPreviewMutation = useMutation({
     mutationFn: (file: UploadedFileItem) =>
       ingestionService.rereadPreview(file.id),
-    onSuccess: (preview, file) => {
+    // Abrir el modal con la barra de progreso ANTES de esperar la respuesta.
+    onMutate: (file) => {
       setReread({
         fileId: file.id,
         filename: file.original_filename,
-        phase: "preview",
-        preview,
+        phase: "loading",
+        preview: null,
         result: rereadResults[file.id] ?? null,
       });
     },
+    onSuccess: (preview, file) => {
+      setReread((prev) =>
+        prev && prev.fileId === file.id
+          ? { ...prev, phase: "preview", preview }
+          : prev,
+      );
+    },
     onError: () => {
+      setReread(null);
       addToast("No se pudo previsualizar la relectura.", "error");
     },
   });
 
   const rereadApplyMutation = useMutation({
     mutationFn: (fileId: string) => ingestionService.rereadApply(fileId),
+    onMutate: (fileId) => {
+      setReread((prev) =>
+        prev && prev.fileId === fileId ? { ...prev, phase: "applying" } : prev,
+      );
+    },
     onSuccess: (result) => {
       setRereadResults((prev) => ({ ...prev, [result.file_id]: result }));
       setReread((prev) =>
@@ -165,7 +180,11 @@ export function FileListSection() {
       invalidateDataQueries();
       addToast("Relectura aplicada.", "success");
     },
-    onError: () => {
+    onError: (_err, fileId) => {
+      // Volver a la fase preview para que el usuario pueda reintentar.
+      setReread((prev) =>
+        prev && prev.fileId === fileId ? { ...prev, phase: "preview" } : prev,
+      );
       addToast("No se pudo aplicar la relectura.", "error");
     },
   });
@@ -379,6 +398,16 @@ export function FileListSection() {
               </span>
             </p>
 
+            {/* Fase de carga: leyendo + estimando los cambios */}
+            {reread.phase === "loading" && (
+              <RereadProgress />
+            )}
+
+            {/* Fase aplicando: escribiendo los cambios */}
+            {reread.phase === "applying" && (
+              <RereadProgress label="Aplicando cambios…" />
+            )}
+
             {/* Fase preview: contadores + nota legacy + acciones */}
             {reread.phase === "preview" && reread.preview && (
               <>
@@ -412,6 +441,20 @@ export function FileListSection() {
                   </div>
                 )}
 
+                {reread.preview.sample_changes.length > 0 && (
+                  <div>
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-vk-text-muted">
+                      Vista previa de cambios (antes / después)
+                    </h3>
+                    <RereadDiff items={reread.preview.sample_changes} />
+                    <p className="mt-1.5 text-[11px] text-vk-text-muted">
+                      Muestra una parte de los cambios. Los contadores son una
+                      estimación; al aplicar verás el resultado exacto y podrás
+                      deshacerlo.
+                    </p>
+                  </div>
+                )}
+
                 <p className="text-xs text-vk-text-muted">
                   Volvemos a leer el archivo ya subido y aplicamos las correcciones
                   sin que tengas que volver a subirlo. Podés deshacerlo después.
@@ -431,9 +474,6 @@ export function FileListSection() {
                     disabled={rereadApplyMutation.isPending}
                     className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-sm font-medium text-white hover:brightness-110 transition-colors disabled:opacity-50"
                   >
-                    {rereadApplyMutation.isPending && (
-                      <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                    )}
                     Aplicar relectura
                   </button>
                 </div>
