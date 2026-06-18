@@ -8,8 +8,10 @@ const ACTION_LABELS: Record<string, string> = {
   insert: "Nuevo",
   inserted: "Nuevo",
   new: "Nuevo",
+  reread_insert: "Nuevo",
   void: "Anulado",
   voided: "Anulado",
+  reread_void: "Anulado",
   preserve: "Preservado",
   preserved: "Preservado",
 };
@@ -20,8 +22,10 @@ const ACTION_COLORS: Record<string, string> = {
   insert: "text-vk-success bg-vk-success-bg",
   inserted: "text-vk-success bg-vk-success-bg",
   new: "text-vk-success bg-vk-success-bg",
+  reread_insert: "text-vk-success bg-vk-success-bg",
   void: "text-vk-danger bg-vk-danger-bg",
   voided: "text-vk-danger bg-vk-danger-bg",
+  reread_void: "text-vk-danger bg-vk-danger-bg",
   preserve: "text-vk-text-muted bg-vk-border-w",
   preserved: "text-vk-text-muted bg-vk-border-w",
 };

@@ -23,16 +23,19 @@ export function RereadProgress({ label }: { label?: string }) {
   useEffect(() => {
     // Avance asintótico hacia 92%: rápido al principio, lento al final.
     const tick = setInterval(() => {
-      setPct((p) => (p >= 92 ? 92 : p + Math.max(1, (92 - p) * 0.12)));
+      setPct((p) => Math.min(92, p + Math.max(1, (92 - p) * 0.12)));
     }, 220);
-    const stages = setInterval(() => {
-      setStageIdx((i) => (i + 1) % STAGES.length);
-    }, 1300);
+    // El ciclado de etapas solo aplica si NO hay un label fijo (fase 'applying').
+    const stages = label
+      ? null
+      : setInterval(() => {
+          setStageIdx((i) => (i + 1) % STAGES.length);
+        }, 1300);
     return () => {
       clearInterval(tick);
-      clearInterval(stages);
+      if (stages) clearInterval(stages);
     };
-  }, []);
+  }, [label]);
 
   return (
     <div className="flex flex-col gap-2 py-2">
