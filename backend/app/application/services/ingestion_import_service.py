@@ -168,20 +168,48 @@ async def _resolve_or_create_supplier(
 _IMPORT_ROW_ACTION = "IMPORT_ROW"
 
 
+async def _load_import_fingerprints(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> set[str]:
+    """Precarga (una sola query) las huellas de filas de import del tenant.
+
+    Evita el N+1: en vez de un ``SELECT`` por fila en ``_import_row_seen`` y un
+    ``begin_nested()`` por fila en ``_register_import_row_fingerprint`` (miles de
+    round-trips a la DB en archivos grandes), se carga el set una vez y la
+    deduplicación corre en memoria. El set es el estado de ``operation_fingerprints``
+    al inicio de la corrida; los anclas son únicos por (archivo, contexto, índice),
+    así que dentro de una misma corrida basta con ir agregándolos al set.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
+
+    result = await session.execute(
+        select(OperationFingerprint.fingerprint).where(
+            OperationFingerprint.tenant_id == tenant_id,
+            OperationFingerprint.action_type == _IMPORT_ROW_ACTION,
+        )
+    )
+    return set(result.scalars().all())
+
+
 async def _register_import_row_fingerprint(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     anchor: str,
+    seen: set[str] | None = None,
 ) -> bool:
     """Registra (idempotentemente) la huella de una fila importada.
 
     El ancla identifica unívocamente la fila dentro de su archivo/contexto
     (``sha256("{tenant}:IMPORT_ROW:{uploaded_file_id}:{context_id}:{row_index}")``
-    o, para el bulk de "Otros", anclado en ``UnclassifiedRecord.id``). Se inserta
-    en ``operation_fingerprints`` (unique ``(tenant_id, fingerprint)``) bajo un
-    ``begin_nested()``: si la huella ya existía, el ``IntegrityError`` del
-    savepoint no aborta la transacción padre y devolvemos ``True`` (= ya
-    importada → la fila debe saltearse). Mismo patrón que
+    o, para el bulk de "Otros", anclado en ``UnclassifiedRecord.id``).
+
+    Con ``seen`` precargado (camino batch): la deduplicación es en memoria — si la
+    huella ya está en el set, devolvemos ``True`` (skip); si no, se agrega con un
+    ``session.add`` plano (se flushea en lote, sin un savepoint por fila) y al set.
+    Sin ``seen`` (camino legacy): se inserta bajo ``begin_nested()`` y el
+    ``IntegrityError`` del savepoint indica que ya existía. Mismo patrón que
     ``api/v1/agent.py:_register_operation_fingerprint``.
 
     Devuelve ``True`` si la fila ya estaba registrada (skip), ``False`` si es
@@ -192,6 +220,18 @@ async def _register_import_row_fingerprint(
     from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
 
     fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
+    if seen is not None:
+        if fingerprint in seen:
+            return True
+        session.add(
+            OperationFingerprint(
+                tenant_id=tenant_id,
+                fingerprint=fingerprint,
+                action_type=_IMPORT_ROW_ACTION,
+            )
+        )
+        seen.add(fingerprint)
+        return False
     try:
         async with session.begin_nested():
             session.add(
@@ -210,23 +250,27 @@ async def _import_row_seen(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     anchor: str,
+    seen: set[str] | None = None,
 ) -> bool:
     """¿La fila (por su ancla) ya fue importada en una corrida previa?
 
-    Chequeo READ-ONLY: hace un ``SELECT`` sobre ``operation_fingerprints`` por
-    ``(tenant_id, fingerprint=sha256(anchor))`` y NO registra nada. Sirve para
-    SALTEAR al tope de la fila sin "quemarla": la huella se registra recién
-    DESPUÉS, con ``_register_import_row_fingerprint``, y solo si la fila produjo
-    al menos un registro (venta/gasto). Así una fila inválida/mal mapeada que no
-    insertó nada no queda marcada como importada y puede reintentarse corregida.
+    Con ``seen`` precargado: chequeo en memoria (sin round-trip). Sin ``seen``:
+    ``SELECT`` sobre ``operation_fingerprints`` por ``(tenant_id, fingerprint)``.
+    En ambos casos es READ-ONLY: la huella se registra recién DESPUÉS, con
+    ``_register_import_row_fingerprint``, y solo si la fila produjo al menos un
+    registro (venta/gasto). Así una fila inválida/mal mapeada que no insertó nada
+    no queda marcada como importada y puede reintentarse corregida.
 
     Devuelve ``True`` si la huella ya existe (skip), ``False`` si es nueva.
     """
+    fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
+    if seen is not None:
+        return fingerprint in seen
+
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
 
-    fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
     result = await session.execute(
         select(OperationFingerprint.id).where(
             OperationFingerprint.tenant_id == tenant_id,
@@ -976,6 +1020,15 @@ async def insert_confirmed_data(
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
 
+    # Batch anti-N+1: precargar las huellas de import del tenant una sola vez
+    # (solo si hay dedup activa, i.e. uploaded_file_id real). Evita un SELECT y un
+    # savepoint por fila contra la DB en archivos grandes (relectura/import).
+    seen_fp: set[str] | None = (
+        await _load_import_fingerprints(session, tenant_id)
+        if uploaded_file_id is not None
+        else None
+    )
+
     if file_type == "spreadsheet":
         inferred_type = summary.get("inferred_type", "general")
 
@@ -996,6 +1049,7 @@ async def insert_confirmed_data(
                 context_entity=context_entity,
                 source=source,
                 uploaded_file_id=uploaded_file_id,
+                seen_fp=seen_fp,
             )
 
         rows: list[dict[str, Any]]
@@ -1146,7 +1200,7 @@ async def insert_confirmed_data(
                 else None
             )
             if _row_anchor is not None and await _import_row_seen(
-                session, tenant_id, _row_anchor
+                session, tenant_id, _row_anchor, seen_fp
             ):
                 continue
             _inserted_before = counts["ventas"] + counts["gastos"]
@@ -1366,7 +1420,9 @@ async def insert_confirmed_data(
                 _row_anchor is not None
                 and counts["ventas"] + counts["gastos"] > _inserted_before
             ):
-                await _register_import_row_fingerprint(session, tenant_id, _row_anchor)
+                await _register_import_row_fingerprint(
+                    session, tenant_id, _row_anchor, seen_fp
+                )
 
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
@@ -1695,6 +1751,7 @@ async def _insert_multisheet_data(
     context_entity: dict[str, str] | None = None,
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
+    seen_fp: set[str] | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -2110,7 +2167,7 @@ async def _insert_multisheet_data(
                     else None
                 )
                 if _ctx_anchor is not None and await _import_row_seen(
-                    session, tenant_id, _ctx_anchor
+                    session, tenant_id, _ctx_anchor, seen_fp
                 ):
                     continue
                 # Mejora D: ref de fila origen (incluye productos, que no
@@ -2132,7 +2189,7 @@ async def _insert_multisheet_data(
                     _did_insert = False  # productos no se fingerprintean
                 if _ctx_anchor is not None and _did_insert:
                     await _register_import_row_fingerprint(
-                        session, tenant_id, _ctx_anchor
+                        session, tenant_id, _ctx_anchor, seen_fp
                     )
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
@@ -2147,11 +2204,13 @@ async def _insert_multisheet_data(
                     else None
                 )
                 if _v_anchor is not None and await _import_row_seen(
-                    session, tenant_id, _v_anchor
+                    session, tenant_id, _v_anchor, seen_fp
                 ):
                     continue
                 if _add_sale(row, {}, {}, _source_row_ref(_v_anchor)) and _v_anchor is not None:
-                    await _register_import_row_fingerprint(session, tenant_id, _v_anchor)
+                    await _register_import_row_fingerprint(
+                        session, tenant_id, _v_anchor, seen_fp
+                    )
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
         if confirmed_fields.get("gastos"):
@@ -2162,14 +2221,16 @@ async def _insert_multisheet_data(
                     else None
                 )
                 if _g_anchor is not None and await _import_row_seen(
-                    session, tenant_id, _g_anchor
+                    session, tenant_id, _g_anchor, seen_fp
                 ):
                     continue
                 if (
                     await _add_expense(row, {}, {}, _source_row_ref(_g_anchor))
                     and _g_anchor is not None
                 ):
-                    await _register_import_row_fingerprint(session, tenant_id, _g_anchor)
+                    await _register_import_row_fingerprint(
+                        session, tenant_id, _g_anchor, seen_fp
+                    )
         if confirmed_fields.get("productos"):
             for _k, row in enumerate(summary.get("stock_detectado", [])):
                 _p_ref = (

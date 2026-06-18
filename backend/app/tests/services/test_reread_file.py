@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services import reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
+    _load_import_fingerprints,
     default_confirmed_fields,
     insert_confirmed_data,
 )
@@ -336,3 +337,37 @@ async def test_reread_wrong_tenant_not_found(
     other_tenant = uuid.uuid4()
     with pytest.raises(FileNotFoundError):
         await reread_service.preview_reread(db_session, file.id, other_tenant)
+
+
+@pytest.mark.asyncio
+async def test_batch_fingerprints_preloaded_and_idempotent(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El camino batch (anti-N+1) precarga las huellas y dedupea en memoria.
+
+    Tras el import inicial, ``_load_import_fingerprints`` devuelve las 2 huellas
+    registradas; reimportar el MISMO contenido con el mismo ``uploaded_file_id``
+    no inserta filas nuevas (idempotencia vía el set precargado, sin SELECT/
+    savepoint por fila)."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+
+    # El helper batch ve las huellas que registró el import inicial (2 filas).
+    fps = await _load_import_fingerprints(db_session, tenant.tenant_id)
+    assert len(fps) == 2
+
+    # Reimportar el mismo archivo: 0 filas nuevas (dedup por el set precargado).
+    summary = parse_uploaded_content(_CSV_BASE, "text/csv", "gastos.csv")
+    counts = await insert_confirmed_data(
+        db_session,
+        tenant.tenant_id,
+        summary,
+        default_confirmed_fields(summary),
+        source="ingestion",
+        uploaded_file_id=file.id,
+    )
+    await db_session.commit()
+
+    assert counts["gastos"] == 0
+    assert len(await _active_expenses(db_session, tenant, file)) == 2
