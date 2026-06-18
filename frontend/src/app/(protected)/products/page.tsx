@@ -161,6 +161,9 @@ export default function ProductsPage() {
   };
   const [stockFilter, setStockFilter] = useState<StockFilter>(resolveFilter(rawFilter));
   const [categoryFilter, setCategoryFilter] = useState("all");
+  // CTA desde el resumen económico (Balance): ?filter=requires_completion
+  // muestra solo productos auto-creados por import sin costo/precio cargado.
+  const requiresCompletionOnly = searchParams.get("filter") === "requires_completion";
   const [editing, setEditing] = useState<ProductResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
@@ -245,6 +248,7 @@ export default function ProductsPage() {
     const status = p.stock_status ?? (
       p.stock_units === 0 ? "out_of_stock" : p.is_low_stock ? "low_stock" : "in_stock"
     );
+    if (requiresCompletionOnly && p.requires_completion !== true) return false;
     if (stockFilter !== "all" && status !== stockFilter) return false;
     if (categoryFilter === "none") return !(p.category ?? "").trim();
     if (categoryFilter !== "all" && p.category !== categoryFilter) return false;
@@ -327,16 +331,26 @@ export default function ProductsPage() {
         </p>
       ) : !isLoading && filtered.length === 0 ? (
         <EmptyState
-          title={stockFilter === "all" ? "Sin productos cargados" : "Sin productos con ese estado"}
+          title={
+            requiresCompletionOnly
+              ? "No hay productos con costos pendientes"
+              : stockFilter === "all"
+                ? "Sin productos cargados"
+                : "Sin productos con ese estado"
+          }
           description={
-            stockFilter === "all"
-              ? "Agregá productos usando el chat."
-              : "Cambiá el filtro para ver otros productos."
+            requiresCompletionOnly
+              ? "Todos tus productos tienen costo cargado."
+              : stockFilter === "all"
+                ? "Agregá productos usando el chat."
+                : "Cambiá el filtro para ver otros productos."
           }
           action={
-            stockFilter === "all"
-              ? { label: "Ir al chat", href: "/chat" }
-              : undefined
+            requiresCompletionOnly
+              ? { label: "Ver todos los productos", href: "/products" }
+              : stockFilter === "all"
+                ? { label: "Ir al chat", href: "/chat" }
+                : undefined
           }
         />
       ) : (

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -90,11 +91,19 @@ export function EconomicSummaryScreen() {
           </div>
 
           {data.missing_cost_count > 0 && (
-            <p className="rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 px-4 py-2 text-xs text-vk-text-secondary">
-              {data.missing_cost_count} producto(s) sin costo cargado (
-              {data.missing_cost_stock_units} unidades) no se incluyen en el stock
-              valorizado. Cargá el costo para una valuación completa.
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 px-4 py-2">
+              <p className="text-xs text-vk-text-secondary">
+                {data.missing_cost_count} producto(s) sin costo cargado (
+                {data.missing_cost_stock_units} unidades) no se incluyen en el stock
+                valorizado. Cargá el costo para una valuación completa.
+              </p>
+              <Link
+                href="/products?filter=requires_completion"
+                className="shrink-0 rounded-lg border border-vk-warning/40 bg-vk-surface-w px-3 py-1.5 text-xs font-medium text-vk-text-primary transition-colors hover:bg-vk-bg-light"
+              >
+                Completar costos
+              </Link>
+            </div>
           )}
         </>
       )}
