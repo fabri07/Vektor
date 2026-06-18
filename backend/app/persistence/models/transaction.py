@@ -58,6 +58,13 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="cash")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+    # Relectura de archivos: marca si esta fila importada fue editada a mano
+    # (la re-importación no debe pisarla). `source_row_ref` ata el registro a su
+    # fila de origen en el archivo para reconciliar al re-importar.
+    has_user_edits: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    source_row_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )
@@ -71,7 +78,8 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_sales_entries_provenance"),
         CheckConstraint(
             "void_reason IS NULL OR void_reason IN ("
-            "'REPAIR_MISCLASSIFIED_IMPORT','USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID')",
+            "'REPAIR_MISCLASSIFIED_IMPORT','USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID',"
+            "'REREAD_REIMPORT')",
             name="ck_sales_entries_void_reason",
         ),
         CheckConstraint(
@@ -133,6 +141,13 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     supplier_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+    # Relectura de archivos: marca si esta fila importada fue editada a mano
+    # (la re-importación no debe pisarla). `source_row_ref` ata el registro a su
+    # fila de origen en el archivo para reconciliar al re-importar.
+    has_user_edits: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    source_row_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )
@@ -150,7 +165,8 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_expense_entries_tenant_expense_type", "tenant_id", "expense_type"),
         CheckConstraint(
             "void_reason IS NULL OR void_reason IN ("
-            "'REPAIR_MISCLASSIFIED_IMPORT','USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID')",
+            "'REPAIR_MISCLASSIFIED_IMPORT','USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID',"
+            "'REREAD_REIMPORT')",
             name="ck_expense_entries_void_reason",
         ),
         CheckConstraint(

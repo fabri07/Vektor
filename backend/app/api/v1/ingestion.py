@@ -17,7 +17,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, get_current_user
+from app.api.v1.deps import get_current_tenant, get_current_user, require_role
 from app.application.services import pipeline_event_service
 from app.application.services.column_mapping_service import REQUIRED_FIELDS, ColumnMappingService
 from app.application.services.file_parsing import (
@@ -77,6 +77,11 @@ from app.schemas.ingestion import (
     DropColumnsRequest,
     FilePreviewResponse,
     FileStatusItem,
+    RereadApplyResponse,
+    RereadCounts,
+    RereadItem,
+    RereadPreviewResponse,
+    RereadUndoResponse,
     TenantColumnMappingResponse,
     UploadResponse,
 )
@@ -923,4 +928,118 @@ async def confirm_file(
         file_id=record.id,
         status=PROCESSING_STATUS_DONE,
         message=message,
+    )
+
+
+# ── Relectura de archivos (REREAD_FILE) ────────────────────────────────────────
+
+
+@router.post(
+    "/files/{file_id}/reread/preview",
+    response_model=RereadPreviewResponse,
+    summary="Preview de relectura (dry_run): re-lee el archivo y proyecta cambios",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+)
+async def reread_preview(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> RereadPreviewResponse:
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    try:
+        preview = await reread_service.preview_reread(session, file_id, tenant.tenant_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
+        ) from exc
+
+    return RereadPreviewResponse(
+        file_id=file_id,
+        counts=RereadCounts(**preview.counts()),
+        legacy_fallback=preview.legacy_fallback,
+        sample_changes=preview.sample_changes,
+    )
+
+
+@router.post(
+    "/files/{file_id}/reread/apply",
+    response_model=RereadApplyResponse,
+    summary="Aplica la relectura: re-importa corregido preservando ediciones manuales",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+)
+async def reread_apply(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> RereadApplyResponse:
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    try:
+        result = await reread_service.apply_reread(session, file_id, tenant.tenant_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
+        ) from exc
+
+    logger.info(
+        "ingestion.reread.applied",
+        file_id=str(file_id),
+        run_id=str(result.run_id),
+        voided=result.voided,
+        inserted=result.inserted,
+        preserved=result.preserved,
+    )
+
+    return RereadApplyResponse(
+        file_id=file_id,
+        run_id=result.run_id,
+        to_update=result.to_update,
+        preserved=result.preserved,
+        new=result.new,
+        voided=result.voided,
+        inserted=result.inserted,
+        legacy_fallback=result.legacy_fallback,
+        items=[RereadItem(**it) for it in result.items],
+    )
+
+
+@router.post(
+    "/files/{file_id}/reread/undo",
+    response_model=RereadUndoResponse,
+    summary="Revierte la última relectura aplicada de este archivo",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+)
+async def reread_undo(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> RereadUndoResponse:
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    run = await reread_service.latest_applied_run_for_file(
+        session, file_id, tenant.tenant_id
+    )
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No hay una relectura aplicada para revertir en este archivo.",
+        )
+
+    try:
+        result = await reread_service.undo_reread(session, run.id, tenant.tenant_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Relectura no encontrada."
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+
+    return RereadUndoResponse(
+        run_id=run.id,
+        restored=result["restored"],
+        removed=result["removed"],
+        status=result["status"],
     )

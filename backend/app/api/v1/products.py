@@ -197,6 +197,9 @@ async def update_product(
         and product.unit_cost_ars is not None
     ):
         product.requires_completion = False
+    # Relectura de archivos: Product no tiene `source_upload_id`, así que cualquier
+    # edición manual lo marca como editado (la re-importación no debe pisarlo).
+    product.has_user_edits = True
     saved = await repo.save(product)
     _audit_data_change(
         session,

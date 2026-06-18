@@ -273,6 +273,10 @@ async def update_expense(
         entry.custom_fields = _apply_category_label(
             entry.custom_fields, entry.category, body.category_label
         )
+    # Relectura de archivos: si esta fila vino de un import, marcarla como editada
+    # a mano para que la re-importación no la pise.
+    if entry.source_upload_id is not None:
+        entry.has_user_edits = True
     saved = await repo.save(entry)
     _audit_data_change(
         session,

@@ -70,6 +70,48 @@ export interface TenantColumnMapping {
   last_seen_at: string;
 }
 
+// ── Relectura de archivos (REREAD_FILE) ──────────────────────────────────────
+// Espejo de los schemas backend en app/schemas/ingestion.py.
+
+export interface RereadCounts {
+  to_update: number;
+  preserved: number;
+  new: number;
+  to_void: number;
+}
+
+export interface RereadPreviewResponse {
+  file_id: string;
+  counts: RereadCounts;
+  legacy_fallback: boolean;
+  sample_changes: Record<string, unknown>[];
+}
+
+export interface RereadItem {
+  action: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+}
+
+export interface RereadApplyResponse {
+  file_id: string;
+  run_id: string;
+  to_update: number;
+  preserved: number;
+  new: number;
+  voided: number;
+  inserted: number;
+  legacy_fallback: boolean;
+  items: RereadItem[];
+}
+
+export interface RereadUndoResponse {
+  run_id: string;
+  restored: number;
+  removed: number;
+  status: string;
+}
+
 export const ingestionService = {
   async upload(
     file: File,
@@ -181,5 +223,27 @@ export const ingestionService = {
 
   async reprocessFile(fileId: string): Promise<void> {
     await api.post(`/ingestion/files/${fileId}/reprocess`);
+  },
+
+  // ── Relectura de archivos (REREAD_FILE) ──────────────────────────────────
+  async rereadPreview(fileId: string): Promise<RereadPreviewResponse> {
+    const res = await api.post<RereadPreviewResponse>(
+      `/ingestion/files/${fileId}/reread/preview`,
+    );
+    return res.data;
+  },
+
+  async rereadApply(fileId: string): Promise<RereadApplyResponse> {
+    const res = await api.post<RereadApplyResponse>(
+      `/ingestion/files/${fileId}/reread/apply`,
+    );
+    return res.data;
+  },
+
+  async rereadUndo(fileId: string): Promise<RereadUndoResponse> {
+    const res = await api.post<RereadUndoResponse>(
+      `/ingestion/files/${fileId}/reread/undo`,
+    );
+    return res.data;
   },
 };

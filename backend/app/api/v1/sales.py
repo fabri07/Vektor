@@ -261,6 +261,10 @@ async def update_sale(
         entry.notes = body.notes
     if body.custom_fields is not None:
         entry.custom_fields = body.custom_fields
+    # Relectura de archivos: si esta fila vino de un import, marcarla como editada
+    # a mano para que la re-importación no la pise.
+    if entry.source_upload_id is not None:
+        entry.has_user_edits = True
     saved = await repo.save(entry)
     _audit_data_change(
         session,

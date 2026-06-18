@@ -116,3 +116,45 @@ class ConfirmIngestionResponse(BaseModel):
     file_id: UUID
     status: str
     message: str
+
+
+# ── Relectura de archivos (REREAD_FILE) ────────────────────────────────────────
+
+
+class RereadCounts(BaseModel):
+    to_update: int
+    preserved: int
+    new: int
+    to_void: int
+
+
+class RereadPreviewResponse(BaseModel):
+    file_id: UUID
+    counts: RereadCounts
+    legacy_fallback: bool = False
+    sample_changes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RereadItem(BaseModel):
+    action: str
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+
+
+class RereadApplyResponse(BaseModel):
+    file_id: UUID
+    run_id: UUID
+    to_update: int
+    preserved: int
+    new: int
+    voided: int
+    inserted: int
+    legacy_fallback: bool = False
+    items: list[RereadItem] = Field(default_factory=list)
+
+
+class RereadUndoResponse(BaseModel):
+    run_id: UUID
+    restored: int
+    removed: int
+    status: str

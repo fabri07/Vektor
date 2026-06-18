@@ -50,6 +50,13 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Fecha de alta / adquisición editable (NULL = no informada; el frontend cae a created_at).
     acquired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     provenance: Mapped[str] = mapped_column(String(10), nullable=False, default="REAL")
+    # Relectura de archivos: marca si este producto importado fue editado a mano
+    # (la re-importación no debe pisarlo). `source_row_ref` ata el registro a su
+    # fila de origen en el archivo para reconciliar al re-importar.
+    has_user_edits: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    source_row_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )

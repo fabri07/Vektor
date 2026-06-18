@@ -42,7 +42,8 @@ class DataRepairRun(UUIDPrimaryKeyMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('PENDING','RUNNING','COMPLETED','FAILED','APPROVED','APPLIED')",
+            "status IN ('PENDING','RUNNING','COMPLETED','FAILED','APPROVED','APPLIED',"
+            "'REVERTED')",
             name="ck_repair_runs_status",
         ),
     )
@@ -79,7 +80,7 @@ class DataRepairItem(UUIDPrimaryKeyMixin, Base):
     __table_args__ = (
         CheckConstraint(
             "action IN ('VOID_SALE','CREATE_PRODUCT','UPDATE_PRODUCT','UPDATE_SALE',"
-            "'REVIEW_SALE','VOID_DUPLICATE','RECLASSIFY_EXPENSE')",
+            "'REVIEW_SALE','VOID_DUPLICATE','RECLASSIFY_EXPENSE','REREAD_VOID','REREAD_INSERT')",
             name="ck_repair_items_action",
         ),
     )
