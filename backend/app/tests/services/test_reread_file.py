@@ -340,6 +340,32 @@ async def test_reread_wrong_tenant_not_found(
 
 
 @pytest.mark.asyncio
+async def test_preview_returns_before_after_sample(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El preview (estimado en memoria) devuelve un sample antes/después: voids
+    con `before`, y filas nuevas con `after` y sin `before`."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+
+    # S3 ahora tiene una fila extra → debe aparecer como "nuevo" en el sample.
+    _patch_s3(monkeypatch, _CSV_WITH_NEW_ROW)
+    preview = await reread_service.preview_reread(db_session, file.id, tenant.tenant_id)
+
+    assert preview.sample_changes, "el preview debe traer un sample de cambios"
+    actions = {c["action"] for c in preview.sample_changes}
+    # Hay voids (no-editados) y al menos un nuevo (la fila extra).
+    assert "void" in actions
+    assert "new" in actions
+    new_items = [c for c in preview.sample_changes if c["action"] == "new"]
+    assert new_items[0]["before"] is None
+    assert new_items[0]["after"] is not None
+    void_items = [c for c in preview.sample_changes if c["action"] == "void"]
+    assert void_items[0]["before"] is not None
+
+
+@pytest.mark.asyncio
 async def test_batch_fingerprints_preloaded_and_idempotent(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
