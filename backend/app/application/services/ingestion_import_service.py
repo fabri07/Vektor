@@ -193,6 +193,55 @@ async def _load_import_fingerprints(
     return set(result.scalars().all())
 
 
+async def _persist_import_fingerprints(
+    session: AsyncSession, tenant_id: uuid.UUID, fingerprints: set[str]
+) -> None:
+    """Persiste en LOTE las huellas nuevas del camino batch con ``ON CONFLICT DO
+    NOTHING`` — idempotente y seguro ante corridas concurrentes (una corrida que
+    insertó la misma huella entre el preload y este flush NO aborta la transacción;
+    simplemente se ignora). Reemplaza el ``begin_nested()`` por fila.
+
+    El ``id`` se incluye explícito porque el ``default=uuid.uuid4`` del modelo es
+    Python-side y un INSERT por Core no lo aplica solo. ``executed_at`` tiene
+    server_default, así que no hace falta.
+    """
+    if not fingerprints:
+        return
+    from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
+
+    rows = [
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": tenant_id,
+            "fingerprint": fp,
+            "action_type": _IMPORT_ROW_ACTION,
+        }
+        for fp in fingerprints
+    ]
+    bind = session.bind
+    dialect = bind.dialect.name if bind is not None else ""
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as _pg_insert  # noqa: PLC0415
+
+        await session.execute(
+            _pg_insert(OperationFingerprint)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["tenant_id", "fingerprint"])
+        )
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _sqlite_insert  # noqa: PLC0415
+
+        await session.execute(
+            _sqlite_insert(OperationFingerprint)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["tenant_id", "fingerprint"])
+        )
+    else:  # pragma: no cover — fallback genérico (sin garantía de idempotencia)
+        from sqlalchemy import insert as _insert  # noqa: PLC0415
+
+        await session.execute(_insert(OperationFingerprint).values(rows))
+
+
 async def _register_import_row_fingerprint(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -206,8 +255,10 @@ async def _register_import_row_fingerprint(
     o, para el bulk de "Otros", anclado en ``UnclassifiedRecord.id``).
 
     Con ``seen`` precargado (camino batch): la deduplicación es en memoria — si la
-    huella ya está en el set, devolvemos ``True`` (skip); si no, se agrega con un
-    ``session.add`` plano (se flushea en lote, sin un savepoint por fila) y al set.
+    huella ya está en el set, devolvemos ``True`` (skip); si no, se agrega SOLO al
+    set y la persistencia se hace en lote al final vía ``_persist_import_fingerprints``
+    (``INSERT ... ON CONFLICT DO NOTHING``), que es idempotente y seguro ante
+    corridas concurrentes — sin un savepoint ni un INSERT por fila.
     Sin ``seen`` (camino legacy): se inserta bajo ``begin_nested()`` y el
     ``IntegrityError`` del savepoint indica que ya existía. Mismo patrón que
     ``api/v1/agent.py:_register_operation_fingerprint``.
@@ -223,13 +274,7 @@ async def _register_import_row_fingerprint(
     if seen is not None:
         if fingerprint in seen:
             return True
-        session.add(
-            OperationFingerprint(
-                tenant_id=tenant_id,
-                fingerprint=fingerprint,
-                action_type=_IMPORT_ROW_ACTION,
-            )
-        )
+        # Solo se trackea en memoria; se persiste en lote al final (idempotente).
         seen.add(fingerprint)
         return False
     try:
@@ -1028,13 +1073,17 @@ async def insert_confirmed_data(
         if uploaded_file_id is not None
         else None
     )
+    # Snapshot del estado precargado para persistir SOLO las huellas nuevas al final.
+    _preloaded_fp: frozenset[str] | None = (
+        frozenset(seen_fp) if seen_fp is not None else None
+    )
 
     if file_type == "spreadsheet":
         inferred_type = summary.get("inferred_type", "general")
 
         # ── Archivos multi-hoja: delegar a helper que procesa cada tipo por separado ──
         if inferred_type == "mixed" or summary.get("multi_sheet"):
-            return await _insert_multisheet_data(
+            counts = await _insert_multisheet_data(
                 session=session,
                 tenant_id=tenant_id,
                 summary=summary,
@@ -1051,6 +1100,11 @@ async def insert_confirmed_data(
                 uploaded_file_id=uploaded_file_id,
                 seen_fp=seen_fp,
             )
+            if seen_fp is not None and _preloaded_fp is not None:
+                await _persist_import_fingerprints(
+                    session, tenant_id, seen_fp - _preloaded_fp
+                )
+            return counts
 
         rows: list[dict[str, Any]]
         rows_from_otros = False
@@ -1694,6 +1748,9 @@ async def insert_confirmed_data(
                     _add_text_expense(text_row)
 
     await session.flush()
+    # Persistir en lote (idempotente) las huellas nuevas del camino batch.
+    if seen_fp is not None and _preloaded_fp is not None:
+        await _persist_import_fingerprints(session, tenant_id, seen_fp - _preloaded_fp)
     if return_details:
         counts["product_details"] = product_details
     return counts
