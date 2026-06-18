@@ -1186,10 +1186,23 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
 
                 total_rows += len(data_rows)
 
-                sheet_type = _classify_sheet(sheet_name)
-                if sheet_type == "unknown":
-                    # Fallback: inferir por columnas
-                    sheet_type = analyze_headers(headers).get("inferred_type", "general")
+                # Content-first: el CONTENIDO (columnas) decide el tipo de hoja; el
+                # NOMBRE es solo una orientación/contexto que desempata cuando el
+                # contenido es ambiguo. La estructura de datos del usuario no debe
+                # condicionar la nuestra: una hoja "Proveedores y Stock" que en realidad
+                # es un catálogo (Productos/Stock/Precio de compra/Precio de venta) se
+                # rutea como producto por sus columnas, NO como gasto por su nombre.
+                # `analyze_headers` ya distingue libro de compras→gastos (regla -1 de
+                # `infer_spreadsheet_type`), así que las compras de mercadería siguen
+                # cayendo bien aunque traigan columnas de catálogo.
+                content_type = analyze_headers(headers).get("inferred_type", "general")
+                name_hint = _classify_sheet(sheet_name)
+                if content_type != "general":
+                    sheet_type = content_type  # el CONTENIDO manda
+                elif name_hint != "unknown":
+                    sheet_type = name_hint  # el nombre solo desempata si el contenido es ambiguo
+                else:
+                    sheet_type = "general"  # ambiguo → unclassified / Otros (comportamiento actual)
 
                 entity = _TYPE_TO_ENTITY.get(sheet_type)
                 context_id = f"sheet:{sheet_name}"

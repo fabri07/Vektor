@@ -285,12 +285,15 @@ def test_multisheet_compras_routed_to_stock_not_gastos() -> None:
 
     Antes, _classify_sheet ruteaba 'compra'/'mercaderia' a gastos, por lo que las
     compras nunca llegaban a productos.
+
+    Content-first: la hoja de ventas lleva una señal de venta real (cliente); un
+    catálogo de compras (producto/cantidad sin operación) cae a stock por contenido.
     """
     content = _build_multisheet_xlsx(
         {
             "Ventas": [
-                ["fecha", "total", "producto", "cantidad"],
-                ["2024-01-15", "5400", "Gomitas", "2"],
+                ["fecha", "total", "cliente", "cantidad"],
+                ["2024-01-15", "5400", "Juan Pérez", "2"],
             ],
             "Gastos Operativos": [
                 ["fecha", "monto", "categoria", "descripcion"],
@@ -322,7 +325,7 @@ def test_multisheet_exposes_mapping_contexts() -> None:
     y cada fila detectada lleva el marcador __context__."""
     content = _build_multisheet_xlsx(
         {
-            "Ventas": [["fecha", "total", "producto"], ["2024-01-15", "5400", "Gomitas"]],
+            "Ventas": [["fecha", "total", "cliente"], ["2024-01-15", "5400", "Juan Pérez"]],
             "Gastos Operativos": [
                 ["fecha", "monto", "categoria"],
                 ["2024-01-15", "12000", "alquiler"],
@@ -336,7 +339,7 @@ def test_multisheet_exposes_mapping_contexts() -> None:
     by_id = {c["context_id"]: c for c in contexts}
     assert by_id["sheet:Ventas"]["entity_type"] == "sale"
     assert by_id["sheet:Ventas"]["source_kind"] == "sheet"
-    assert by_id["sheet:Ventas"]["headers"] == ["fecha", "total", "producto"]
+    assert by_id["sheet:Ventas"]["headers"] == ["fecha", "total", "cliente"]
     assert by_id["sheet:Gastos Operativos"]["entity_type"] == "expense"
 
     # Cada fila detectada tiene el marcador de contexto.
@@ -344,6 +347,99 @@ def test_multisheet_exposes_mapping_contexts() -> None:
     assert summary["gastos_detectados"][0]["__context__"] == "sheet:Gastos Operativos"
     # El preview global no lo expone.
     assert all("__context__" not in r for r in summary["preview_rows"])
+
+
+def test_multisheet_content_first_proveedores_y_stock_is_product() -> None:
+    """Fix central (caso real ASTERIA): una hoja llamada 'Proveedores y Stock' que en
+    realidad es un CATÁLOGO de productos se rutea por su CONTENIDO (columnas) como
+    producto, NO como gasto por el 'proveedor' del nombre.
+
+    Antes, _classify_sheet matcheaba 'proveedor'→gastos por el nombre y pisaba la
+    inferencia por columnas, perdiendo los productos con su costo/stock.
+    """
+    content = _build_multisheet_xlsx(
+        {
+            "Proveedores y Stock": [
+                ["Tienda", "Productos", "Stock", "Precio de compra", "Precio de venta final"],
+                ["Local Centro", "Coca-Cola 600ml", "24", "800", "1200"],
+            ],
+            "Ventas": [["fecha", "total", "cliente"], ["2024-01-15", "5400", "Juan"]],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "asteria.xlsx")
+
+    contexts = summary["mapping_contexts"]
+    by_id = {c["context_id"]: c for c in contexts}
+    ctx = by_id["sheet:Proveedores y Stock"]
+    # El CONTENIDO manda: es un catálogo → product, no expense.
+    assert ctx["entity_type"] == "product"
+    assert summary["stock_detectado"][0]["Productos"] == "Coca-Cola 600ml"
+    # No debe haber caído en gastos por el nombre de la hoja.
+    assert not summary.get("gastos_detectados")
+
+
+def test_multisheet_content_first_gastos_sheet_is_expense() -> None:
+    """Una hoja 'Gastos' con columnas de gasto (proveedor/categoria/concepto) → expense."""
+    content = _build_multisheet_xlsx(
+        {
+            "Gastos": [
+                ["fecha", "proveedor", "monto", "categoria", "concepto"],
+                ["2024-01-15", "Distribuidora SA", "12000", "alquiler", "Alquiler local"],
+            ],
+            "Ventas": [["fecha", "total", "cliente"], ["2024-01-15", "5400", "Juan"]],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "gastos.xlsx")
+
+    by_id = {c["context_id"]: c for c in summary["mapping_contexts"]}
+    assert by_id["sheet:Gastos"]["entity_type"] == "expense"
+    assert len(summary["gastos_detectados"]) == 1
+
+
+def test_multisheet_content_first_ambiguous_name_catalog_columns_is_product() -> None:
+    """Nombre de hoja sin señal ('Hoja1') pero columnas claras de catálogo → product.
+    El contenido decide aunque el nombre no oriente."""
+    content = _build_multisheet_xlsx(
+        {
+            "Hoja1": [
+                ["Articulo", "SKU", "Stock", "Precio"],
+                ["Lapicera azul", "LAP-001", "50", "350"],
+            ],
+            "Ventas": [["fecha", "total", "cliente"], ["2024-01-15", "5400", "Juan"]],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "hoja1.xlsx")
+
+    by_id = {c["context_id"]: c for c in summary["mapping_contexts"]}
+    assert by_id["sheet:Hoja1"]["entity_type"] == "product"
+    assert len(summary["stock_detectado"]) == 1
+
+
+def test_multisheet_content_first_libro_compras_still_expense() -> None:
+    """Regresión (regla -1 intacta): un libro de compras (sku/producto + monto de
+    transacción + fecha + forma_pago/proveedor, contexto de gasto dominante) sigue
+    ruteándose a gastos pese a traer columnas de catálogo."""
+    content = _build_multisheet_xlsx(
+        {
+            "Compras a proveedores": [
+                [
+                    "sku", "producto", "monto_total", "fecha",
+                    "forma_pago", "proveedor", "concepto", "categoria",
+                ],
+                [
+                    "CC-600", "Coca-Cola 600ml", "19200", "2024-01-15",
+                    "transferencia", "Distribuidora SA", "compra mercaderia", "mercaderia",
+                ],
+            ],
+            "Ventas": [["fecha", "total", "cliente"], ["2024-01-15", "5400", "Juan"]],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "compras.xlsx")
+
+    by_id = {c["context_id"]: c for c in summary["mapping_contexts"]}
+    assert by_id["sheet:Compras a proveedores"]["entity_type"] == "expense"
+    assert len(summary["gastos_detectados"]) == 1
+    assert not summary.get("stock_detectado")
 
 
 def test_csv_exposes_single_table_context() -> None:

@@ -84,6 +84,85 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
 
 
+def _normalize_supplier_name(raw: str) -> str:
+    """Normaliza nombre de proveedor para comparación: lower + espacios colapsados.
+
+    A diferencia de ``_normalize_name`` (productos), NO colapsa guiones/underscores:
+    el nombre comercial de un proveedor puede contener guiones legítimos
+    ("Coca-Cola FEMSA") y no queremos fusionar identidades distintas.
+    """
+    return re.sub(r"\s+", " ", raw.strip().lower())
+
+
+# ── Mejora A: captura de proveedor (find-or-create) en gastos importados ──────
+
+
+async def _load_supplier_index(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> dict[str, uuid.UUID]:
+    """Carga los proveedores activos del tenant UNA vez (find-or-create en memoria).
+
+    Mismo patrón que ``_load_product_index``: evita N queries (una por fila).
+    Key = ``_normalize_supplier_name(name)`` → id. El PRIMER proveedor gana ante
+    nombres normalizados duplicados (dedup; no se sobrescribe).
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    result = await session.execute(
+        select(Supplier.id, Supplier.name).where(
+            Supplier.tenant_id == tenant_id,
+            Supplier.deactivated_at.is_(None),
+        )
+    )
+    index: dict[str, uuid.UUID] = {}
+    for sid, sname in result.all():
+        norm = _normalize_supplier_name(sname or "")
+        if norm and norm not in index:
+            index[norm] = sid
+    return index
+
+
+async def _resolve_or_create_supplier(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    raw_name: Any,
+    supplier_index: dict[str, uuid.UUID],
+) -> tuple[uuid.UUID | None, str | None]:
+    """Resuelve (o crea) el proveedor de una fila importada, devolviendo
+    ``(supplier_id, supplier_name)``.
+
+    Find-or-create contra el índice en memoria (cargado una vez por import):
+      - celda vacía / "none" / "nan" → ``(None, None)``;
+      - si el nombre normalizado ya está en el índice → reusa el proveedor;
+      - si no, crea un ``Supplier`` nuevo, lo agrega a la sesión y hace
+        ``flush`` para materializar su id (necesario para vincular el gasto y
+        cachearlo) dentro de la misma transacción del import — mismo patrón de
+        id-resolución que ``_ensure_product_for_purchase`` (que delega en
+        ``build_incomplete_product`` con id explícito). Cachea el id nuevo para
+        que filas posteriores del mismo proveedor lo reusen sin duplicar.
+    """
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    clean = _clean_str(raw_name, 300)
+    if not clean:
+        return None, None
+    norm = _normalize_supplier_name(clean)
+    if not norm:
+        return None, None
+    hit = supplier_index.get(norm)
+    if hit is not None:
+        return hit, clean
+    new_id = uuid.uuid4()
+    session.add(Supplier(id=new_id, tenant_id=tenant_id, name=clean))
+    # Materializar el id en la misma transacción (lo necesitamos para vincular
+    # el gasto y cachearlo); el commit lo hace el caller del import.
+    await session.flush()
+    supplier_index[norm] = new_id
+    return new_id, clean
+
+
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
 
 _IMPORT_ROW_ACTION = "IMPORT_ROW"
@@ -170,6 +249,19 @@ def _import_row_anchor(
     )
 
 
+def _source_row_ref(anchor: str | None) -> str | None:
+    """Mejora D: ref estable de 64 chars para ``source_row_ref`` desde el ancla.
+
+    ``source_row_ref`` es ``VARCHAR(64)`` y el ancla cruda (tenant:file:ctx:idx)
+    excede ese largo, así que se persiste el ``sha256`` hex (exactamente 64
+    chars) — mismo derivado determinístico que la huella de idempotencia, así la
+    relectura puede recomputarlo desde el mismo ancla para reconciliar la fila.
+    """
+    if anchor is None:
+        return None
+    return hashlib.sha256(anchor.encode()).hexdigest()
+
+
 def _capture_unclassified(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -225,15 +317,35 @@ async def _load_business_type(session: AsyncSession, tenant_id: uuid.UUID) -> st
 # ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
 
 
+# Mejora B: tokens genéricos de unidad/medida que NO identifican un producto.
+_PRODUCT_TOKEN_STOPWORDS: frozenset[str] = frozenset(
+    {"kg", "und", "x", "de", "la", "el", "ml", "gr"}
+)
+
+
+def _product_name_tokens(name: str) -> list[str]:
+    """Tokens significativos del nombre normalizado (≥3 chars, sin stopwords).
+
+    Reusa ``_normalize_name`` (guiones/underscores → espacio) para que
+    "Coca-Cola 500ml" y "coca cola 500" produzcan tokens comparables.
+    """
+    norm = _normalize_name(name)
+    return [
+        t for t in norm.split(" ") if len(t) >= 3 and t not in _PRODUCT_TOKEN_STOPWORDS
+    ]
+
+
 async def _load_product_index(
     session: AsyncSession, tenant_id: uuid.UUID
-) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID | None]]:
+) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID | None], dict[str, set[uuid.UUID]]]:
     """Carga el catálogo del tenant UNA vez para vincular transacciones en memoria.
 
-    Evita N queries (una por fila). Devuelve `(by_sku, by_name)`:
+    Evita N queries (una por fila). Devuelve `(by_sku, by_name, by_token)`:
     - `by_sku[sku_lower] = product_id`
     - `by_name[norm_name] = product_id` o `None` si el nombre normalizado es
       ambiguo (varios productos lo comparten → no se vincula).
+    - `by_token[token] = {product_id, ...}` para match conservador por tokens
+      (Mejora B): token ≥3 chars del nombre, sin stopwords genéricos de unidad.
     """
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -244,13 +356,16 @@ async def _load_product_index(
     )
     by_sku: dict[str, uuid.UUID] = {}
     by_name: dict[str, uuid.UUID | None] = {}
+    by_token: dict[str, set[uuid.UUID]] = {}
     for pid, pname, psku in result.all():
         if psku:
             by_sku[str(psku).strip().lower()] = pid
         norm = _normalize_name(pname or "")
         if norm:
             by_name[norm] = pid if norm not in by_name else None  # None = ambiguo
-    return by_sku, by_name
+        for tok in _product_name_tokens(pname or ""):
+            by_token.setdefault(tok, set()).add(pid)
+    return by_sku, by_name, by_token
 
 
 def _resolve_product(
@@ -258,16 +373,39 @@ def _resolve_product(
     by_name: dict[str, uuid.UUID | None],
     name: str | None,
     sku: str | None,
+    by_token: dict[str, set[uuid.UUID]] | None = None,
 ) -> uuid.UUID | None:
-    """Resuelve product_id desde el índice en memoria. SKU exacto gana; luego nombre."""
+    """Resuelve product_id desde el índice en memoria.
+
+    Tres tiers, en orden: (1) SKU exacto, (2) nombre normalizado exacto,
+    (3) Mejora B: intersección conservadora de tokens. El 3er tier solo acepta
+    cuando la intersección de los productos que comparten los tokens del nombre
+    de entrada tiene EXACTAMENTE un id (0 o >1 → abstención, sin inventar).
+    """
     if sku:
         hit = by_sku.get(str(sku).strip().lower())
         if hit:
             return hit
     if name:
         norm = _normalize_name(str(name))
-        if norm:
-            return by_name.get(norm)  # None si no existe o es ambiguo
+        if norm and norm in by_name:
+            return by_name[norm]  # None si es ambiguo (no degradar a tokens)
+        # Tier 3 (Mejora B): match conservador por tokens. Solo si el nombre
+        # normalizado NO existía en by_name (ni exacto ni ambiguo).
+        if by_token:
+            tokens = sorted(
+                _product_name_tokens(str(name)), key=len, reverse=True
+            )
+            candidates: set[uuid.UUID] | None = None
+            for tok in tokens:
+                ids = by_token.get(tok)
+                if not ids:
+                    continue
+                candidates = set(ids) if candidates is None else (candidates & ids)
+                if not candidates:
+                    break
+            if candidates is not None and len(candidates) == 1:
+                return next(iter(candidates))
     return None
 
 
@@ -423,6 +561,7 @@ def _ensure_product_for_purchase(
     unit_cost: Decimal | None,
     by_sku: dict[str, uuid.UUID],
     by_name: dict[str, uuid.UUID | None],
+    by_token: dict[str, set[uuid.UUID]] | None = None,
 ) -> uuid.UUID | None:
     """Crea el ``Product`` de una compra de mercadería cuyo SKU/nombre NO está en
     el catálogo, y devuelve su id (o ``None`` si no hay nombre utilizable).
@@ -450,6 +589,9 @@ def _ensure_product_for_purchase(
         norm = _normalize_name(clean_name)
         if norm:
             by_name[norm] = new_id
+        if by_token is not None:
+            for tok in _product_name_tokens(clean_name):
+                by_token.setdefault(tok, set()).add(new_id)
     return new_id
 
 
@@ -525,17 +667,52 @@ _COSTO_COLS: set[str] = {
     "costo", "cost", "precio_costo", "p_costo",
     "costo_unitario",  # common in purchase sheets
     "costo_unit",
+    # "precio de compra" / "compra+envio" → costo de adquisición unitario en
+    # catálogos (decoración/retail AR). "compra" como substring cubre ambos.
+    "precio_compra", "precio_de_compra", "p_compra", "costo_compra",
 }
 # Solo nombres INEQUÍVOCOS de costo unitario: "costo" a secas suele ser el
 # total de la línea en archivos de gastos (también matchea _GASTO_COLS) y no
 # debe escribirse como unit_cost del producto.
+#
+# "precio de compra" es el costo unitario en catálogos argentinos (caso real
+# ASTERIA, vertical decoración). Las variantes multiword (precio_compra /
+# precio_de_compra) son inequívocas y van en AMBOS paths (productos y gastos).
+# El substring "compra" a secas SOLO se agrega al detector de costo del path de
+# PRODUCTOS (ver _COSTO_UNITARIO_PRODUCT_COLS): en hojas de GASTOS una columna
+# "compra" podría ser el TOTAL de la línea (libro de compras), así que el path de
+# gastos se queda con las multiword narrow para no corromper el unit_cost.
 _COSTO_UNITARIO_COLS: set[str] = {
     "costo_unitario", "costo_unit", "precio_costo", "p_costo", "unit_cost",
+    "precio_compra", "precio_de_compra", "p_compra", "costo_compra",
 }
+# Path de PRODUCTOS (catálogo/stock): además de las multiword, "compra" a secas
+# (cubre "precio_de_compra" y "compra+envio") es costo de adquisición. No se usa
+# en el path de gastos para no confundir el total de un libro de compras con el
+# costo unitario.
+_COSTO_UNITARIO_PRODUCT_COLS: set[str] = _COSTO_UNITARIO_COLS | {"compra"}
 _STOCK_COLS: set[str] = {
     "stock", "cantidad", "inventario", "units", "qty", "existencia", "stock_actual",
 }
 _SKU_COLS: set[str] = {"sku", "codigo", "código", "code", "ref", "id_producto"}
+_PROVEEDOR_COLS: set[str] = {
+    "proveedor",
+    "proveedores",
+    "proveedor_nombre",
+    "nombre_proveedor",
+    "empresa",
+    "supplier",
+    # Catálogos de productos (caso ASTERIA): la columna "Tienda" identifica el
+    # comercio/proveedor de origen del artículo. Find-or-create de Supplier.
+    # OJO: `_find_col` matchea por SUBSTRING, así que solo agregamos aliases
+    # INEQUÍVOCOS. "local" queda AFUERA a propósito: matchearía "localidad",
+    # "local_venta", etc. (falsos positivos). "tienda"/"tiendas"/"comercio"/
+    # "negocio" son seguros.
+    "tienda",
+    "tiendas",
+    "comercio",
+    "negocio",
+}
 
 # Columnas de monto de venta ampliadas para archivos multi-hoja
 _VENTA_AMOUNT_COLS: set[str] = _VENTA_COLS | {"total", "importe_total", "precio_unitario"}
@@ -610,6 +787,80 @@ def _find_col(headers: list[str], keywords: set[str] | tuple[str, ...]) -> str |
     for h in headers:
         norm = h.lower().strip().replace(" ", "_")
         if any(k in norm for k in keywords):
+            return h
+    return None
+
+
+def _is_total_cost_col(col: str | None) -> bool:
+    """¿El nombre de la columna apunta a un COSTO TOTAL de línea (no unitario)?"""
+    if not col:
+        return False
+    norm = col.lower().strip().replace(" ", "_")
+    return "costo_total" in norm or "total_costo" in norm
+
+
+def _resolve_unit_cost_col(
+    headers: list[str],
+    amount_col: str | None,
+    price_col: str | None,
+) -> str | None:
+    """Mejora C: columna de costo UNITARIO para crear productos, narrow-first.
+
+    Preferir una columna inequívoca de costo unitario
+    (``_COSTO_UNITARIO_PRODUCT_COLS`` — incluye "precio de compra"/"compra" para
+    catálogos AR). Si no hay, caer a la broad (``_COSTO_COLS``, ej "costo") SOLO
+    si esa columna no coincide con la del monto/precio (en archivos de gastos
+    "costo" suele ser el total de la línea). NUNCA aceptar una columna de "costo
+    total". Si no hay columna inequívoca → ``None`` (el producto nace
+    ``requires_completion=True``).
+    """
+    narrow = _find_col(headers, _COSTO_UNITARIO_PRODUCT_COLS)
+    if narrow and not _is_total_cost_col(narrow):
+        return narrow
+    broad = _find_col(headers, _COSTO_COLS)
+    if (
+        broad
+        and broad not in (amount_col, price_col)
+        and not _is_total_cost_col(broad)
+    ):
+        return broad
+    return None
+
+
+def _resolve_sale_price_col(
+    headers: list[str],
+    cost_col: str | None,
+) -> str | None:
+    """Columna de PRECIO DE VENTA, desambiguada de la de compra/costo.
+
+    "Precio de compra" y "Precio de venta final" comparten el substring "precio";
+    el genérico de ``_PRECIO_VENTA_COLS`` (legacy) tomaba la primera por orden de
+    archivo y guardaba el COSTO como precio de venta (caso real ASTERIA). Prioridad
+    explícita, primer match gana:
+
+      1. header con "venta"  → "precio de venta final"
+      2. header con "lista"  → "precio de lista"
+      3. "precio_venta" / "p_venta"
+      4. genérico "precio" / "price" EXCLUYENDO cualquier header de compra/costo
+         (o igual a ``cost_col``) — así nunca se cae a "Precio de compra".
+
+    ``cost_col`` debe resolverse ANTES para poder excluirlo.
+    """
+    def _norm(h: str) -> str:
+        return h.lower().strip().replace(" ", "_")
+
+    for keyword in ("venta", "lista", "precio_venta", "p_venta"):
+        hit = _find_col(headers, {keyword})
+        if hit:
+            return hit
+    # Genérico, excluyendo compra/costo y la columna de costo ya resuelta.
+    for h in headers:
+        norm = _norm(h)
+        if "compra" in norm or "costo" in norm:
+            continue
+        if cost_col is not None and h == cost_col:
+            continue
+        if "precio" in norm or "price" in norm:
             return h
     return None
 
@@ -767,10 +1018,18 @@ async def insert_confirmed_data(
         venta_col = _find_col(headers, _VENTA_AMOUNT_COLS)
         gasto_col = _find_col(headers, _GASTO_AMOUNT_COLS)
         nombre_col = _find_col(headers, _NOMBRE_COLS)
-        precio_col = _find_col(headers, _PRECIO_VENTA_COLS)
-        costo_col = _find_col(headers, _COSTO_COLS)
+        # Mejora C: costo unitario narrow-first. Se resuelve ANTES que el precio
+        # de venta para poder excluirlo del precio (desambiguar compra vs venta).
+        # Preferir una columna inequívoca de costo unitario; solo caer a la broad
+        # ("costo") si NO coincide con la del monto. Nunca una de "costo total".
+        costo_col = _resolve_unit_cost_col(headers, venta_col, None)
+        # Precio de venta desambiguado: "venta" > "lista" > "precio_venta" >
+        # genérico "precio" EXCLUYENDO compra/costo (y la columna de costo ya
+        # resuelta). Antes el genérico "precio" tomaba "Precio de compra".
+        precio_col = _resolve_sale_price_col(headers, costo_col)
         stock_col = _find_col(headers, _STOCK_COLS)
         sku_col = _find_col(headers, _SKU_COLS)
+        supplier_col = _find_col(headers, _PROVEEDOR_COLS)
 
         # Columnas extra (solo disponibles con column_mappings explícitos)
         qty_col: str | None = None
@@ -811,6 +1070,7 @@ async def insert_confirmed_data(
             costo_col = target_to_col.get("unit_cost_ars") or costo_col
             stock_col = target_to_col.get("stock_units") or stock_col
             sku_col = target_to_col.get("sku") or sku_col
+            supplier_col = target_to_col.get("supplier_name") or supplier_col
 
             # Campos extra solo disponibles con mapeo explícito
             qty_col = target_to_col.get("quantity")
@@ -842,10 +1102,20 @@ async def insert_confirmed_data(
 
         # FASE 3: índice de catálogo en memoria para vincular ventas y gastos
         # (B1) al producto. Una sola carga; vacío si no hay columnas de nombre/sku.
-        _by_sku, _by_name = (
+        _by_sku, _by_name, _by_token = (
             await _load_product_index(session, tenant_id)
             if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
-            else ({}, {})
+            else ({}, {}, {})
+        )
+        # Mejora A: índice de proveedores para find-or-create. Una sola carga;
+        # vacío si no hay columna de proveedor/tienda o no se importan
+        # gastos/productos. En catálogos de productos (caso ASTERIA) la columna
+        # "Tienda" puebla la sección Proveedores: se CREA el Supplier (los
+        # productos no llevan supplier_id, así que no se vincula nada).
+        _supplier_index: dict[str, uuid.UUID] = (
+            await _load_supplier_index(session, tenant_id)
+            if (wants_gastos or wants_productos) and supplier_col
+            else {}
         )
         # FASE E: vertical del tenant para normalizar categorías de producto.
         # También para gastos: una categoría que matchea el catálogo de productos
@@ -947,7 +1217,11 @@ async def insert_confirmed_data(
                         _by_name,
                         row.get(nombre_col) if nombre_col else None,
                         row.get(sku_col) if sku_col else None,
+                        _by_token,
                     )
+                    # Mejora D: trazabilidad import → fila origen.
+                    if _row_anchor is not None:
+                        entry.source_row_ref = _source_row_ref(_row_anchor)
                     session.add(entry)
                     counts["ventas"] += 1
 
@@ -1009,12 +1283,24 @@ async def insert_confirmed_data(
                     )
                     if cf:
                         expense.custom_fields = cf
+                    # Mejora A: capturar proveedor (find-or-create) si la fila lo trae.
+                    if supplier_col:
+                        (
+                            expense.supplier_id,
+                            expense.supplier_name,
+                        ) = await _resolve_or_create_supplier(
+                            session,
+                            tenant_id,
+                            row.get(supplier_col),
+                            _supplier_index,
+                        )
                     # FASE 3 (B1): vincular el gasto al producto del catálogo.
                     expense.product_id = _resolve_product(
                         _by_sku,
                         _by_name,
                         str(row.get(nombre_col)) if nombre_col else None,
                         str(row.get(sku_col)) if sku_col else None,
+                        _by_token,
                     )
                     # FASE D: COGS si la fila es compra de mercadería (producto
                     # del catálogo o categoría INVENTORY); además suma stock si
@@ -1057,6 +1343,7 @@ async def insert_confirmed_data(
                             exp_unit_cost,
                             _by_sku,
                             _by_name,
+                            _by_token,
                         )
                     await _apply_purchase_to_stock(
                         session,
@@ -1066,6 +1353,9 @@ async def insert_confirmed_data(
                         exp_unit_cost,
                         balance_index=_balance_index,
                     )
+                    # Mejora D: trazabilidad import → fila origen.
+                    if _row_anchor is not None:
+                        expense.source_row_ref = _source_row_ref(_row_anchor)
                     session.add(expense)
                     counts["gastos"] += 1
 
@@ -1080,10 +1370,30 @@ async def insert_confirmed_data(
 
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
-            for row in rows:
+            for _prod_index, row in enumerate(rows):
                 name = str(row.get(nombre_col, "")).strip()[:299]
                 if not name or name.lower() in {"none", "nan", ""}:
                     continue
+                # Captura de proveedor desde catálogo (columna "Tienda"): se CREA
+                # el Supplier (find-or-create dedup) para poblar la sección
+                # Proveedores. Los productos no llevan supplier_id → no se vincula;
+                # se guarda el nombre en custom_fields como referencia.
+                store_name: str | None = None
+                if supplier_col:
+                    _, store_name = await _resolve_or_create_supplier(
+                        session, tenant_id, row.get(supplier_col), _supplier_index
+                    )
+                # Mejora D: ref de fila origen para el producto creado (no para el
+                # update de uno existente — ese conserva su ref original).
+                _prod_row_ref = (
+                    _source_row_ref(
+                        _import_row_anchor(
+                            tenant_id, uploaded_file_id, None, _prod_index
+                        )
+                    )
+                    if uploaded_file_id is not None
+                    else None
+                )
                 price = _parse_amount(row.get(precio_col)) if precio_col else None
                 cost = _parse_amount(row.get(costo_col)) if costo_col else None
                 try:
@@ -1186,6 +1496,8 @@ async def insert_confirmed_data(
                     }
                     if prod_cat_label:
                         cf_product = {**cf_product, "category_label": prod_cat_label}
+                    if store_name:
+                        cf_product = {**cf_product, "proveedor": store_name}
                     new_product = Product(
                         id=new_product_id,
                         tenant_id=tenant_id,
@@ -1202,6 +1514,7 @@ async def insert_confirmed_data(
                         # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
                         requires_completion=not price or not cost,
                         custom_fields=cf_product if cf_product else None,
+                        source_row_ref=_prod_row_ref,  # Mejora D
                     )
                     session.add(new_product)
                     # FASE 3: audit del ingreso inicial de stock + balance (si trae stock).
@@ -1402,7 +1715,9 @@ async def _insert_multisheet_data(
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
 
     # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
-    _by_sku, _by_name = await _load_product_index(session, tenant_id)
+    _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
+    # Mejora A: índice de proveedores para find-or-create en gastos (una carga).
+    _supplier_index = await _load_supplier_index(session, tenant_id)
     # FASE E: vertical del tenant para normalizar categorías de producto.
     _business_type = await _load_business_type(session, tenant_id)
     # Batch: balances en una query (evita un SELECT por fila en movimientos).
@@ -1422,7 +1737,12 @@ async def _insert_multisheet_data(
                 out[cf_key] = str(v)
         return out
 
-    def _add_sale(row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]) -> bool:
+    def _add_sale(
+        row: dict[str, Any],
+        cols: dict[str, str],
+        cf_cols: dict[str, str],
+        row_ref: str | None = None,
+    ) -> bool:
         """Inserta una venta. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
         amount = (
@@ -1469,13 +1789,19 @@ async def _insert_multisheet_data(
             _by_name,
             _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
             _val(row, cols.get("sku"), _SKU_COLS),
+            _by_token,
         )
+        if row_ref is not None:
+            entry.source_row_ref = row_ref  # Mejora D
         session.add(entry)
         counts["ventas"] += 1
         return True
 
     async def _add_expense(
-        row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
+        row: dict[str, Any],
+        cols: dict[str, str],
+        cf_cols: dict[str, str],
+        row_ref: str | None = None,
     ) -> bool:
         """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
@@ -1520,12 +1846,22 @@ async def _insert_multisheet_data(
             cf = {**cf, "category_label": cat_label}
         if cf:
             expense.custom_fields = cf
+        # Mejora A: capturar proveedor (find-or-create) si la fila/mapeo lo trae.
+        _supplier_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
+        if _supplier_raw is not None:
+            (
+                expense.supplier_id,
+                expense.supplier_name,
+            ) = await _resolve_or_create_supplier(
+                session, tenant_id, _supplier_raw, _supplier_index
+            )
         # FASE 3 (B1): vincular el gasto al producto del catálogo (compra de mercadería).
         expense.product_id = _resolve_product(
             _by_sku,
             _by_name,
             _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
             _val(row, cols.get("sku"), _SKU_COLS),
+            _by_token,
         )
         # FASE D: discriminador COGS/OPEX + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
@@ -1537,8 +1873,11 @@ async def _insert_multisheet_data(
             or _row_col(row, _GASTO_AMOUNT_COLS)
         )
         _uc_col = cols.get("unit_cost_ars") or _row_col(row, _COSTO_UNITARIO_COLS)
+        # Mejora C: nunca tomar una columna de "costo total" como costo unitario.
         unit_cost = (
-            _parse_amount(row.get(_uc_col)) if _uc_col and _uc_col != _amount_src else None
+            _parse_amount(row.get(_uc_col))
+            if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
+            else None
         )
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería con SKU/nombre NUEVO: a la vez gasto COGS+caja Y
@@ -1558,6 +1897,7 @@ async def _insert_multisheet_data(
                 unit_cost,
                 _by_sku,
                 _by_name,
+                _by_token,
             )
         await _apply_purchase_to_stock(
             session,
@@ -1567,19 +1907,63 @@ async def _insert_multisheet_data(
             unit_cost,
             balance_index=_balance_index,
         )
+        if row_ref is not None:
+            expense.source_row_ref = row_ref  # Mejora D
         session.add(expense)
         counts["gastos"] += 1
         return True
 
     async def _add_product(
-        row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
+        row: dict[str, Any],
+        cols: dict[str, str],
+        cf_cols: dict[str, str],
+        row_ref: str | None = None,
     ) -> None:
         _name_col = cols.get("name") or cols.get("product_name")
         name = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 299)
         if not name:
             return
-        price = _parse_amount(_val(row, cols.get("sale_price_ars"), _PRECIO_VENTA_COLS))
-        cost = _parse_amount(_val(row, cols.get("unit_cost_ars"), _COSTO_COLS))
+        # Captura de proveedor desde catálogo (columna "Tienda"): se CREA el
+        # Supplier (find-or-create dedup) para poblar la sección Proveedores. Los
+        # productos no llevan supplier_id → no se vincula; se guarda el nombre en
+        # custom_fields como referencia.
+        store_name: str | None = None
+        _supplier_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
+        if _supplier_raw is not None:
+            _, store_name = await _resolve_or_create_supplier(
+                session, tenant_id, _supplier_raw, _supplier_index
+            )
+        # Mejora C: costo unitario narrow-first. Se resuelve ANTES que el precio
+        # para poder excluirlo (desambiguar "precio de compra" vs "precio de
+        # venta"). Mapeo explícito gana; si no, una columna inequívoca de costo
+        # unitario (incluye "compra"); la broad ("costo") solo si no es la del
+        # precio ni una de "costo total".
+        _uc_mapped = cols.get("unit_cost_ars")
+        _uc_col: str | None = None
+        if _uc_mapped:
+            cost = _parse_amount(row.get(_uc_mapped))
+            _uc_col = _uc_mapped
+        else:
+            _uc_col = _row_col(row, _COSTO_UNITARIO_PRODUCT_COLS)
+            if not _uc_col:
+                _broad = _row_col(row, _COSTO_COLS)
+                if _broad and not _is_total_cost_col(_broad):
+                    _uc_col = _broad
+            cost = (
+                _parse_amount(row.get(_uc_col))
+                if _uc_col and not _is_total_cost_col(_uc_col)
+                else None
+            )
+        # Precio de venta desambiguado del de compra/costo: mapeo explícito gana;
+        # si no, "venta" > "lista" > "precio_venta"/"p_venta" > genérico "precio"
+        # EXCLUYENDO la columna de costo ya resuelta y cualquier header de
+        # compra/costo. Antes el genérico tomaba "Precio de compra" (caso ASTERIA).
+        _price_mapped = cols.get("sale_price_ars")
+        if _price_mapped:
+            price = _parse_amount(row.get(_price_mapped))
+        else:
+            _price_col = _resolve_sale_price_col(list(row.keys()), _uc_col)
+            price = _parse_amount(row.get(_price_col)) if _price_col else None
         try:
             stock_raw = _val(row, cols.get("stock_units"), _STOCK_COLS)
             stock_val = (
@@ -1632,6 +2016,8 @@ async def _insert_multisheet_data(
             cf = _custom_fields(row, cf_cols)
             if cat_label:
                 cf = {**cf, "category_label": cat_label}
+            if store_name:
+                cf = {**cf, "proveedor": store_name}
             _new_id = uuid.uuid4()
             session.add(
                 Product(
@@ -1649,6 +2035,7 @@ async def _insert_multisheet_data(
                     # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
                     requires_completion=not price or not cost,
                     custom_fields=cf or None,
+                    source_row_ref=row_ref,  # Mejora D
                 )
             )
             await _record_stock_movement(
@@ -1726,12 +2113,22 @@ async def _insert_multisheet_data(
                     session, tenant_id, _ctx_anchor
                 ):
                     continue
+                # Mejora D: ref de fila origen (incluye productos, que no
+                # fingerprintean pero sí trazan su fila). Usa el mismo ancla por
+                # (archivo, contexto, índice).
+                _row_ref = (
+                    _source_row_ref(
+                        _import_row_anchor(tenant_id, uploaded_file_id, ctx_id, _i)
+                    )
+                    if uploaded_file_id is not None
+                    else None
+                )
                 if entity == "sale":
-                    _did_insert = _add_sale(row, cols, cf_cols)
+                    _did_insert = _add_sale(row, cols, cf_cols, _row_ref)
                 elif entity == "expense":
-                    _did_insert = await _add_expense(row, cols, cf_cols)
+                    _did_insert = await _add_expense(row, cols, cf_cols, _row_ref)
                 else:
-                    await _add_product(row, cols, cf_cols)
+                    await _add_product(row, cols, cf_cols, _row_ref)
                     _did_insert = False  # productos no se fingerprintean
                 if _ctx_anchor is not None and _did_insert:
                     await _register_import_row_fingerprint(
@@ -1753,7 +2150,7 @@ async def _insert_multisheet_data(
                     session, tenant_id, _v_anchor
                 ):
                     continue
-                if _add_sale(row, {}, {}) and _v_anchor is not None:
+                if _add_sale(row, {}, {}, _source_row_ref(_v_anchor)) and _v_anchor is not None:
                     await _register_import_row_fingerprint(session, tenant_id, _v_anchor)
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
@@ -1768,11 +2165,21 @@ async def _insert_multisheet_data(
                     session, tenant_id, _g_anchor
                 ):
                     continue
-                if await _add_expense(row, {}, {}) and _g_anchor is not None:
+                if (
+                    await _add_expense(row, {}, {}, _source_row_ref(_g_anchor))
+                    and _g_anchor is not None
+                ):
                     await _register_import_row_fingerprint(session, tenant_id, _g_anchor)
         if confirmed_fields.get("productos"):
-            for row in summary.get("stock_detectado", []):
-                await _add_product(row, {}, {})
+            for _k, row in enumerate(summary.get("stock_detectado", [])):
+                _p_ref = (
+                    _source_row_ref(
+                        _import_row_anchor(tenant_id, uploaded_file_id, "productos", _k)
+                    )
+                    if uploaded_file_id is not None
+                    else None
+                )
+                await _add_product(row, {}, {}, _p_ref)
 
     await session.flush()
     if return_details:
@@ -1825,7 +2232,7 @@ async def bulk_import_unclassified(
     if not records:
         return counts
 
-    _by_sku, _by_name = await _load_product_index(session, tenant_id)
+    _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
     _business_type = await _load_business_type(session, tenant_id)
     _flush_every = 500
 
@@ -1857,6 +2264,7 @@ async def bulk_import_unclassified(
             _by_name,
             _clean_str(_row_val(row, _NOMBRE_COLS), 299),
             _clean_str(_row_val(row, _SKU_COLS), 99),
+            _by_token,
         )
 
         if rec.suggested_entity == "sale":

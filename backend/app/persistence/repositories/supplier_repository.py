@@ -23,6 +23,19 @@ class SupplierRepository:
         )
         return result.scalar_one_or_none()
 
+    async def find_by_name(self, name_normalized: str, tenant_id: UUID) -> Supplier | None:
+        """Busca un proveedor activo del tenant por nombre normalizado (lower+trim)."""
+        result = await self._session.execute(
+            select(Supplier)
+            .where(
+                func.lower(func.trim(Supplier.name)) == name_normalized,
+                Supplier.tenant_id == tenant_id,
+                Supplier.deactivated_at.is_(None),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def list_by_tenant(
         self,
         tenant_id: UUID,
