@@ -23,6 +23,7 @@ from app.application.services import reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     _load_import_fingerprints,
+    _persist_import_fingerprints,
     default_confirmed_fields,
     insert_confirmed_data,
 )
@@ -337,6 +338,27 @@ async def test_reread_wrong_tenant_not_found(
     other_tenant = uuid.uuid4()
     with pytest.raises(FileNotFoundError):
         await reread_service.preview_reread(db_session, file.id, other_tenant)
+
+
+@pytest.mark.asyncio
+async def test_persist_import_fingerprints_is_idempotent(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """``_persist_import_fingerprints`` usa ON CONFLICT DO NOTHING: persistir un set
+    que solapa con huellas ya existentes NO levanta IntegrityError ni aborta la
+    transacción (la protección que reemplaza al begin_nested por fila)."""
+    await _persist_import_fingerprints(db_session, tenant.tenant_id, {"aaa", "bbb"})
+    await db_session.commit()
+    assert await _load_import_fingerprints(db_session, tenant.tenant_id) == {"aaa", "bbb"}
+
+    # "bbb" ya existe → no debe romper; "ccc" se agrega.
+    await _persist_import_fingerprints(db_session, tenant.tenant_id, {"bbb", "ccc"})
+    await db_session.commit()
+    assert await _load_import_fingerprints(db_session, tenant.tenant_id) == {
+        "aaa",
+        "bbb",
+        "ccc",
+    }
 
 
 @pytest.mark.asyncio
