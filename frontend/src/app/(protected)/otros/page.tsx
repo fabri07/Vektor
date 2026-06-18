@@ -27,6 +27,8 @@ const ENTITY_LABELS: Record<ReclassifyEntityType, string> = {
   sale: "Venta",
   expense: "Gasto",
   product: "Producto",
+  customer: "Cliente",
+  supplier: "Proveedor",
 };
 
 /** Heurística simple de prellenado desde la fila cruda (solo sugerencia visual). */
@@ -322,6 +324,8 @@ function ReclassifyModal({
   const [category, setCategory] = useState("OTHER");
   const [productCategory, setProductCategory] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
 
   useEffect(() => {
     if (!record) return;
@@ -339,10 +343,14 @@ function ReclassifyModal({
       entity === "product" && record.suggested_category ? record.suggested_category : "",
     );
     setPaymentMethod("cash");
+    setEmail("");
+    setPhone("");
   }, [record]);
 
   if (!record) return null;
 
+  // Cliente y Proveedor son entidades de contacto: solo nombre + email/teléfono.
+  const isContact = entityType === "customer" || entityType === "supplier";
   const inputCls = "rounded border border-vk-border-w px-3 py-2";
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -363,11 +371,18 @@ function ReclassifyModal({
         description: text,
         payment_method: paymentMethod,
       });
-    } else {
+    } else if (entityType === "product") {
       onSave("product", {
         name: text || "Producto importado",
         sale_price_ars: num,
         category: productCategory || null,
+      });
+    } else {
+      // customer | supplier
+      onSave(entityType, {
+        name: text,
+        ...(email ? { email } : {}),
+        ...(phone ? { phone } : {}),
       });
     }
   };
@@ -388,43 +403,75 @@ function ReclassifyModal({
             <option value="sale">Venta</option>
             <option value="expense">Gasto</option>
             <option value="product">Producto</option>
+            <option value="customer">Cliente</option>
+            <option value="supplier">Proveedor</option>
           </select>
         </label>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
-            {entityType === "product" ? "Precio de venta" : "Monto"}
-            <input
-              className={inputCls}
-              type="number"
-              min={0}
-              step="0.01"
-              required
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
-          </label>
-          {entityType !== "product" ? (
+        {!isContact ? (
+          <div className="grid grid-cols-2 gap-3">
             <label className="grid gap-1 text-sm text-vk-text-secondary">
-              Fecha
+              {entityType === "product" ? "Precio de venta" : "Monto"}
               <input
                 className={inputCls}
-                type="date"
+                type="number"
+                min={0}
+                step="0.01"
                 required
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
               />
             </label>
-          ) : null}
-        </div>
+            {entityType !== "product" ? (
+              <label className="grid gap-1 text-sm text-vk-text-secondary">
+                Fecha
+                <input
+                  className={inputCls}
+                  type="date"
+                  required
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                />
+              </label>
+            ) : null}
+          </div>
+        ) : null}
         <label className="grid gap-1 text-sm text-vk-text-secondary">
-          {entityType === "product" ? "Nombre del producto" : "Descripción"}
+          {entityType === "product"
+            ? "Nombre del producto"
+            : entityType === "customer"
+              ? "Nombre del cliente"
+              : entityType === "supplier"
+                ? "Nombre del proveedor"
+                : "Descripción"}
           <input
             className={inputCls}
-            required={entityType === "product"}
+            required={entityType === "product" || isContact}
             value={text}
             onChange={(e) => setText(e.target.value)}
           />
         </label>
+        {isContact ? (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="grid gap-1 text-sm text-vk-text-secondary">
+              Email (opcional)
+              <input
+                className={inputCls}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-vk-text-secondary">
+              Teléfono (opcional)
+              <input
+                className={inputCls}
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+            </label>
+          </div>
+        ) : null}
         {entityType === "expense" ? (
           <label className="grid gap-1 text-sm text-vk-text-secondary">
             Categoría
@@ -458,7 +505,7 @@ function ReclassifyModal({
             </select>
           </label>
         ) : null}
-        {entityType !== "product" ? (
+        {entityType !== "product" && !isContact ? (
           <label className="grid gap-1 text-sm text-vk-text-secondary">
             Forma de pago
             <select

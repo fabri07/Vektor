@@ -33,7 +33,9 @@ from app.domain.product_categories import (
     normalize_product_category,
 )
 from app.persistence.db.session import get_db_session
+from app.persistence.models.customer import Customer
 from app.persistence.models.product import Product
+from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
@@ -44,7 +46,9 @@ from app.persistence.models.unclassified_record import (
 )
 from app.persistence.models.user import User
 from app.schemas.common import MessageResponse
+from app.schemas.customer import CreateCustomerRequest
 from app.schemas.product import CreateProductRequest
+from app.schemas.supplier import CreateSupplierRequest
 from app.schemas.transaction import CreateExpenseRequest, CreateSaleRequest
 
 router = APIRouter()
@@ -69,9 +73,10 @@ class UnclassifiedRecordResponse(BaseModel):
 
 
 class ReclassifyRequest(BaseModel):
-    entity_type: Literal["sale", "expense", "product"]
+    entity_type: Literal["sale", "expense", "product", "customer", "supplier"]
     # Campos del registro a crear; se validan con el schema de creación
-    # correspondiente (CreateSaleRequest / CreateExpenseRequest / CreateProductRequest).
+    # correspondiente (CreateSaleRequest / CreateExpenseRequest / CreateProductRequest /
+    # CreateCustomerRequest / CreateSupplierRequest).
     fields: dict[str, Any]
 
 
@@ -235,7 +240,15 @@ async def reclassify_record(
                 )
             )
             label = "gasto"
-        else:
+        elif body.entity_type == "customer":
+            cust_req = CreateCustomerRequest(**body.fields)
+            session.add(Customer(tenant_id=tenant.tenant_id, **cust_req.model_dump()))
+            label = "cliente"
+        elif body.entity_type == "supplier":
+            sup_req = CreateSupplierRequest(**body.fields)
+            session.add(Supplier(tenant_id=tenant.tenant_id, **sup_req.model_dump()))
+            label = "proveedor"
+        else:  # "product"
             prod_req = CreateProductRequest(**body.fields)
             data = prod_req.model_dump()
             # Misma normalización que POST /products (catálogo del vertical).

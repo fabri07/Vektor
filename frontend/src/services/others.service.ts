@@ -16,7 +16,7 @@ export interface UnclassifiedRecordResponse {
   created_at: string;
 }
 
-export type ReclassifyEntityType = "sale" | "expense" | "product";
+export type ReclassifyEntityType = "sale" | "expense" | "product" | "customer" | "supplier";
 
 export interface ReclassifyPayload {
   entity_type: ReclassifyEntityType;
