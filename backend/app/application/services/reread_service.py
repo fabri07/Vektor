@@ -81,9 +81,15 @@ _FECHA_COLS = _iis._FECHA_COLS  # type: ignore[attr-defined]
 _GASTO_AMOUNT_COLS = _iis._GASTO_AMOUNT_COLS
 _VENTA_AMOUNT_COLS = _iis._VENTA_AMOUNT_COLS
 _NOMBRE_COLS = _iis._NOMBRE_COLS
+_SKU_COLS = _iis._SKU_COLS
+_CANTIDAD_COLS = _iis._CANTIDAD_COLS
 _parse_amount = _iis._parse_amount
 _parse_date = _iis._parse_date
+_parse_qty = _iis._parse_qty
 _row_val = _iis._row_val
+_resolve_product = _iis._resolve_product
+_load_import_fingerprints = _iis._load_import_fingerprints
+_load_product_index = _iis._load_product_index
 
 logger = get_logger(__name__)
 
@@ -124,6 +130,12 @@ class RereadPreview:
     preserved: int = 0
     new: int = 0
     to_void: int = 0
+    # Filas cuya huella ya está registrada (import previo): el reimport las saltea
+    # → no son nuevas ni se duplican. Evita el "todo nuevo" engañoso.
+    unchanged: int = 0
+    # Impacto en el catálogo de productos (estimado): altas + reposiciones de stock.
+    products_new: int = 0
+    products_restock: int = 0
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = field(default_factory=list)
 
@@ -133,6 +145,9 @@ class RereadPreview:
             "preserved": self.preserved,
             "new": self.new,
             "to_void": self.to_void,
+            "unchanged": self.unchanged,
+            "products_new": self.products_new,
+            "products_restock": self.products_restock,
         }
 
 
@@ -713,6 +728,60 @@ def _iter_importable_fresh_rows(
     return out
 
 
+def _estimate_products(
+    fresh: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+    catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Estima el impacto en el catálogo de productos: altas (nombre/SKU que NO
+    está en el catálogo) y reposiciones (sí está). Cubre catálogos de stock y
+    libros de compras (gasto con nombre de producto + cantidad). Dedup por SKU/
+    nombre: un mismo producto en N filas = un solo producto."""
+    by_sku, by_name, by_token = catalog
+    is_stock = fresh.get("inferred_type") == "stock"
+    rows: list[dict[str, Any]] = []
+    require_qty: bool
+    if is_stock:
+        rows = [r for r in (fresh.get("stock_detectado") or []) if isinstance(r, dict)]
+        require_qty = False
+    elif confirmed_fields.get("gastos") or confirmed_fields.get("ventas"):
+        # Libro de compras: filas de gasto/otros con nombre de producto + cantidad.
+        for bk in ("gastos_detectados", "otros_detectados"):
+            rows += [r for r in (fresh.get(bk) or []) if isinstance(r, dict)]
+        require_qty = True
+    else:
+        return 0, 0, []
+
+    new = 0
+    restock = 0
+    samples: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        name = _row_val(row, _NOMBRE_COLS)
+        clean_name = str(name).strip() if name is not None else ""
+        if not clean_name or clean_name.lower() in {"nan", "none"}:
+            continue
+        if require_qty and _parse_qty(_row_val(row, _CANTIDAD_COLS)) <= 0:
+            continue
+        sku = _row_val(row, _SKU_COLS)
+        sku_str = str(sku).strip() if sku is not None else ""
+        key = sku_str.lower() or clean_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        pid = _resolve_product(by_sku, by_name, clean_name, sku_str or None, by_token)
+        after = {"kind": "product", "name": clean_name[:120], "sku": sku_str[:60] or None}
+        if pid is not None:
+            restock += 1
+            if len([s for s in samples if s["action"] == "restock"]) < _SAMPLE_PER_KIND:
+                samples.append({"action": "restock", "before": None, "after": after})
+        else:
+            new += 1
+            if len([s for s in samples if s["action"] == "product_new"]) < _SAMPLE_PER_KIND:
+                samples.append({"action": "product_new", "before": None, "after": after})
+    return new, restock, samples
+
+
 def _estimate_reread(
     file: UploadedFile,
     tenant_id: uuid.UUID,
@@ -720,6 +789,8 @@ def _estimate_reread(
     confirmed_fields: dict[str, bool],
     sales: list[SaleEntry],
     expenses: list[ExpenseEntry],
+    fingerprints: set[str],
+    catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
 ) -> RereadPreview:
     """Proyecta la relectura **en memoria, sin tocar la DB** (sub-segundo)."""
     file_id = file.id
@@ -735,6 +806,7 @@ def _estimate_reread(
 
     update_count = 0
     new_count = 0
+    unchanged_count = 0
     update_samples: list[dict[str, Any]] = []
     new_samples: list[dict[str, Any]] = []
 
@@ -742,8 +814,8 @@ def _estimate_reread(
         fp = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
         if fp in edited_refs:
             continue  # editado → insert lo saltea (preservado)
-        after = _fresh_row_snapshot(row, kind)
         if fp in voided_refs:
+            # no-editado de ESTE archivo → se anula y re-importa corregido (update).
             update_count += 1
             if len(update_samples) < _SAMPLE_PER_KIND:
                 existing = by_ref.get(fp)
@@ -753,12 +825,18 @@ def _estimate_reread(
                 elif isinstance(existing, ExpenseEntry):
                     before = _snapshot_expense(existing)
                 update_samples.append(
-                    {"action": "update", "before": before, "after": after}
+                    {"action": "update", "before": before, "after": _fresh_row_snapshot(row, kind)}
                 )
+        elif fp in fingerprints:
+            # Huella ya registrada (import previo) y NO se va a anular → el reimport
+            # la saltea: ni nueva ni duplicada. Esto evita el "todo nuevo" engañoso.
+            unchanged_count += 1
         else:
             new_count += 1
             if len(new_samples) < _SAMPLE_PER_KIND:
-                new_samples.append({"action": "new", "before": None, "after": after})
+                new_samples.append(
+                    {"action": "new", "before": None, "after": _fresh_row_snapshot(row, kind)}
+                )
 
     # Legacy: los no-editados SIN source_row_ref (importados antes del feature) se
     # anulan y re-crean, pero no matchean por ref → caen como 'new'. Reasignar esa
@@ -768,6 +846,10 @@ def _estimate_reread(
         move = min(legacy_void_n, new_count)
         update_count += move
         new_count -= move
+
+    products_new, products_restock, product_samples = _estimate_products(
+        fresh, confirmed_fields, catalog
+    )
 
     void_samples: list[dict[str, Any]] = []
     for rec in recon.non_edited[:_SAMPLE_PER_KIND]:
@@ -780,8 +862,11 @@ def _estimate_reread(
         preserved=recon.preserved_count,
         new=new_count,
         to_void=len(recon.non_edited),
+        unchanged=unchanged_count,
+        products_new=products_new,
+        products_restock=products_restock,
         legacy_fallback=recon.legacy_fallback,
-        sample_changes=void_samples + update_samples + new_samples,
+        sample_changes=void_samples + update_samples + new_samples + product_samples,
     )
 
 
@@ -806,7 +891,13 @@ async def preview_reread(
     fresh = await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
     sales, expenses = await _load_existing_records(session, file_id, tenant_id)
-    return _estimate_reread(file, tenant_id, fresh, confirmed_fields, sales, expenses)
+    # Huellas de import (lo que el apply usa para deduplicar) + catálogo de productos
+    # (para estimar altas/reposiciones). Dos queries, en memoria.
+    fingerprints = await _load_import_fingerprints(session, tenant_id)
+    catalog = await _load_product_index(session, tenant_id)
+    return _estimate_reread(
+        file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog
+    )
 
 
 async def apply_reread(

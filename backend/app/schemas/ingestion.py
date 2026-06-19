@@ -126,6 +126,12 @@ class RereadCounts(BaseModel):
     preserved: int
     new: int
     to_void: int
+    # Filas ya importadas (huella presente) que el reimport saltea — ni nuevas ni
+    # duplicadas. Default 0 por compatibilidad.
+    unchanged: int = 0
+    # Impacto estimado en el catálogo de productos.
+    products_new: int = 0
+    products_restock: int = 0
 
 
 class RereadPreviewResponse(BaseModel):
