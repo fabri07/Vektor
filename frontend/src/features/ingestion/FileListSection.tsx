@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, CheckCircle, History } from "lucide-react";
 import {
@@ -62,6 +62,8 @@ interface RereadState {
   phase: RereadPhase;
   preview: RereadPreviewResponse | null;
   result: RereadApplyResponse | null;
+  // run del apply en background (fase "applying") para hacer polling del estado.
+  runId?: string;
 }
 
 export function FileListSection() {
@@ -163,6 +165,8 @@ export function FileListSection() {
     },
   });
 
+  // El apply corre en BACKGROUND: el POST encola y devuelve run_id; pasamos a fase
+  // "applying" y hacemos polling del estado (ver rereadStatusQuery + su useEffect).
   const rereadApplyMutation = useMutation({
     mutationFn: (fileId: string) => ingestionService.rereadApply(fileId),
     onMutate: (fileId) => {
@@ -170,24 +174,69 @@ export function FileListSection() {
         prev && prev.fileId === fileId ? { ...prev, phase: "applying" } : prev,
       );
     },
-    onSuccess: (result) => {
-      setRereadResults((prev) => ({ ...prev, [result.file_id]: result }));
+    onSuccess: (start) => {
       setReread((prev) =>
-        prev && prev.fileId === result.file_id
-          ? { ...prev, phase: "result", result }
+        prev && prev.fileId === start.file_id
+          ? { ...prev, phase: "applying", runId: start.run_id }
           : prev,
       );
-      invalidateDataQueries();
-      addToast("Relectura aplicada.", "success");
     },
     onError: (_err, fileId) => {
       // Volver a la fase preview para que el usuario pueda reintentar.
       setReread((prev) =>
         prev && prev.fileId === fileId ? { ...prev, phase: "preview" } : prev,
       );
-      addToast("No se pudo aplicar la relectura.", "error");
+      addToast("No se pudo iniciar la relectura.", "error");
     },
   });
+
+  // Polling del apply en background mientras la fase es "applying".
+  const applyingRunId = reread?.phase === "applying" ? reread.runId : undefined;
+  const applyingFileId = reread?.phase === "applying" ? reread.fileId : undefined;
+  const rereadStatusQuery = useQuery({
+    queryKey: ["reread-run", applyingFileId, applyingRunId],
+    queryFn: () =>
+      ingestionService.rereadRunStatus(applyingFileId!, applyingRunId!),
+    enabled: Boolean(applyingFileId && applyingRunId),
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s === "APPLIED" || s === "FAILED" ? false : 2_500;
+    },
+  });
+
+  useEffect(() => {
+    const data = rereadStatusQuery.data;
+    if (!data) return;
+    if (data.status === "APPLIED") {
+      const result: RereadApplyResponse = {
+        file_id: data.file_id,
+        run_id: data.run_id,
+        to_update: data.to_update,
+        preserved: data.preserved,
+        new: data.new,
+        voided: data.voided,
+        inserted: data.inserted,
+        legacy_fallback: data.legacy_fallback,
+        items: data.items,
+      };
+      setRereadResults((prev) => ({ ...prev, [result.file_id]: result }));
+      setReread((prev) =>
+        prev && prev.fileId === result.file_id
+          ? { ...prev, phase: "result", result, runId: undefined }
+          : prev,
+      );
+      invalidateDataQueries();
+      addToast("Relectura aplicada.", "success");
+    } else if (data.status === "FAILED") {
+      setReread((prev) =>
+        prev && prev.fileId === data.file_id
+          ? { ...prev, phase: "preview", runId: undefined }
+          : prev,
+      );
+      addToast(data.error || "No se pudo aplicar la relectura.", "error");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rereadStatusQuery.data]);
 
   const rereadUndoMutation = useMutation({
     mutationFn: (fileId: string) => ingestionService.rereadUndo(fileId),
@@ -405,7 +454,14 @@ export function FileListSection() {
 
             {/* Fase aplicando: escribiendo los cambios */}
             {reread.phase === "applying" && (
-              <RereadProgress label="Aplicando cambios…" />
+              <>
+                <RereadProgress label="Aplicando cambios…" />
+                <p className="text-xs text-vektor-muted">
+                  Se está aplicando en segundo plano. En archivos grandes puede
+                  tardar unos minutos; podés esperar acá o cerrar y volver — se
+                  sigue procesando igual.
+                </p>
+              </>
             )}
 
             {/* Fase preview: contadores + nota legacy + acciones */}

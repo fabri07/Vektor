@@ -1,14 +1,10 @@
 import { api } from "@/lib/api";
 import type { AxiosError } from "axios";
 
-// La relectura reprocesa el archivo completo; necesita más margen que el
-// timeout global de 15s del cliente axios. El preview ahora estima en memoria
-// (sub-segundo), pero el APPLY inserta todas las filas de verdad: en archivos
-// grandes puede tardar varios minutos, así que usa un timeout más alto (cerca del
-// límite del edge de Railway, ~300s). Si aun así no alcanza, el apply debería
-// pasar a procesamiento en background.
+// El preview estima en memoria (sub-segundo) y el undo es acotado; igual se da
+// margen sobre el timeout global de 15s del cliente. El APPLY ya NO va por acá:
+// corre en background (Celery) y el frontend hace polling del estado.
 const REREAD_TIMEOUT_MS = 120_000;
-const REREAD_APPLY_TIMEOUT_MS = 290_000;
 
 export interface UploadedFileItem {
   id: string;
@@ -115,6 +111,27 @@ export interface RereadApplyResponse {
   inserted: number;
   legacy_fallback: boolean;
   items: RereadItem[];
+}
+
+// El apply corre en background; el POST devuelve el run para hacer polling.
+export interface RereadApplyStartResponse {
+  file_id: string;
+  run_id: string;
+  status: string; // "RUNNING"
+}
+
+export interface RereadRunStatusResponse {
+  run_id: string;
+  file_id: string;
+  status: string; // RUNNING | APPLIED | FAILED
+  to_update: number;
+  preserved: number;
+  new: number;
+  voided: number;
+  inserted: number;
+  legacy_fallback: boolean;
+  items: RereadItem[];
+  error: string | null;
 }
 
 export interface RereadUndoResponse {
@@ -249,12 +266,20 @@ export const ingestionService = {
     return res.data;
   },
 
-  async rereadApply(fileId: string): Promise<RereadApplyResponse> {
-    const res = await api.post<RereadApplyResponse>(
+  // Encola el apply en background y devuelve el run para hacer polling.
+  async rereadApply(fileId: string): Promise<RereadApplyStartResponse> {
+    const res = await api.post<RereadApplyStartResponse>(
       `/ingestion/files/${fileId}/reread/apply`,
-      undefined,
-      // El apply inserta todo el archivo: margen más alto que el preview.
-      { timeout: REREAD_APPLY_TIMEOUT_MS },
+    );
+    return res.data;
+  },
+
+  async rereadRunStatus(
+    fileId: string,
+    runId: string,
+  ): Promise<RereadRunStatusResponse> {
+    const res = await api.get<RereadRunStatusResponse>(
+      `/ingestion/files/${fileId}/reread/runs/${runId}`,
     );
     return res.data;
   },
