@@ -61,6 +61,7 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import ingestion_import_service as _iis
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
@@ -72,6 +73,17 @@ from app.persistence.models.file import UploadedFile
 from app.persistence.models.memory import OperationFingerprint
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+
+# Helpers/constantes de parseo compartidos con el import — reusados en el estimado
+# del preview para clasificar/anclar las filas IGUAL que ``insert_confirmed_data``.
+# Son privados del módulo origen; el reuso cross-módulo es deliberado.
+_FECHA_COLS = _iis._FECHA_COLS  # type: ignore[attr-defined]
+_GASTO_AMOUNT_COLS = _iis._GASTO_AMOUNT_COLS
+_VENTA_AMOUNT_COLS = _iis._VENTA_AMOUNT_COLS
+_NOMBRE_COLS = _iis._NOMBRE_COLS
+_parse_amount = _iis._parse_amount
+_parse_date = _iis._parse_date
+_row_val = _iis._row_val
 
 logger = get_logger(__name__)
 
@@ -582,23 +594,195 @@ async def _audit_inserts(
     return items, inserted
 
 
-# ── sample antes/después para el preview ───────────────────────────────────────
+# ── preview: estimación en memoria, sin escribir en la DB ──────────────────────
+#
+# El apply REAL inserta todas las filas del archivo (en archivos grandes tarda
+# minutos); correrlo en un savepoint solo para el preview lo hacía inusable (499
+# por timeout del cliente). El preview ESTIMA: reusa los mismos helpers de parseo
+# y el mismo anclado (``sha256`` == ``source_row_ref``) que ``insert_confirmed_data``
+# para clasificar cada fila fresca en memoria — sub-segundo sin importar el tamaño.
+# ``to_void``/``preserved`` son exactos; ``new``/``to_update`` son una estimación
+# muy cercana. El apply (``apply_reread``) sigue siendo la fuente de verdad exacta.
 
 _SAMPLE_PER_KIND = 6
 
 
-def _build_preview_sample(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Arma un sample legible para el diff: hasta N anulaciones (con ``before``) +
-    N inserciones (con ``after``), normalizando las acciones a etiquetas que el
-    frontend mapea ('void'/'new')."""
-    voids = [it for it in items if it.get("action") == ACTION_VOID][:_SAMPLE_PER_KIND]
-    inserts = [it for it in items if it.get("action") == ACTION_INSERT][:_SAMPLE_PER_KIND]
-    sample: list[dict[str, Any]] = []
-    for it in voids:
-        sample.append({"action": "void", "before": it.get("before"), "after": None})
-    for it in inserts:
-        sample.append({"action": "new", "before": None, "after": it.get("after")})
-    return sample
+def _row_amount(row: dict[str, Any], kind: str) -> Any:
+    """Monto parseable de la fila según el tipo (None si no hay). Usa ``is None``
+    explícito para NO tratar un monto 0 (válido) como ausente."""
+    if kind == "expense":
+        return _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
+    if kind == "sale":
+        return _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
+    v = _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
+    if v is None:
+        v = _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
+    return v
+
+
+def _fresh_row_snapshot(row: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Snapshot legible de una fila fresca para el diff antes/después (respeta el
+    ``kind`` para tomar la columna de monto correcta)."""
+    amount = _row_amount(row, kind)
+    raw_date = _row_val(row, _FECHA_COLS)
+    tx_date = _parse_date(raw_date) if raw_date is not None else None
+    descr = _row_val(row, _NOMBRE_COLS)
+    descr_str = str(descr).strip() if descr is not None else ""
+    return {
+        "kind": kind,
+        "amount": str(amount) if amount is not None else None,
+        "transaction_date": tx_date.date().isoformat() if tx_date else None,
+        "description": descr_str if descr_str.lower() not in {"", "nan", "none"} else None,
+    }
+
+
+def _iter_importable_fresh_rows(
+    fresh: dict[str, Any], confirmed_fields: dict[str, bool]
+) -> list[tuple[str | None, int, dict[str, Any], str]]:
+    """Filas frescas que producirían venta/gasto, con su ``(context_id, índice)``
+    — replicando el anclado de ``insert_confirmed_data`` para reconciliar por
+    ``source_row_ref``. Gatea por ``confirmed_fields`` (no cuenta tipos no
+    confirmados; las filas 'otros' solo si ventas/gastos están confirmados). Los
+    productos NO entran en los contadores de la relectura.
+    """
+    want_v = bool(confirmed_fields.get("ventas"))
+    want_g = bool(confirmed_fields.get("gastos"))
+
+    def _kind_ok(kind: str) -> bool:
+        if kind == "sale":
+            return want_v
+        if kind == "expense":
+            return want_g
+        return want_v or want_g  # 'unknown' (bucket otros)
+
+    out: list[tuple[str | None, int, dict[str, Any], str]] = []
+    multi = fresh.get("inferred_type") == "mixed" or bool(fresh.get("multi_sheet"))
+
+    if not multi:
+        # Single-sheet: insert usa el PRIMER bucket no vacío, con context_id=None.
+        ventas = fresh.get("ventas_detectadas") or []
+        gastos = fresh.get("gastos_detectados") or []
+        otros = fresh.get("otros_detectados") or []
+        if ventas:
+            rows, kind = ventas, "sale"
+        elif gastos:
+            rows, kind = gastos, "expense"
+        else:
+            rows, kind = otros, "unknown"
+        if not _kind_ok(kind):
+            return out
+        for idx, row in enumerate(rows):
+            if isinstance(row, dict) and _row_amount(row, kind) is not None:
+                out.append((None, idx, row, kind))
+        return out
+
+    # Multi-hoja: el anclado depende de si hay ``mapping_contexts`` (mismo criterio
+    # que ``_insert_multisheet_data``).
+    if fresh.get("mapping_contexts"):
+        # Con mapping_contexts: por bucket, agrupar por __context__ y enumerar
+        # dentro de cada contexto (un contexto vive en un solo bucket).
+        for bucket_key, kind in (
+            ("ventas_detectadas", "sale"),
+            ("gastos_detectados", "expense"),
+            ("otros_detectados", "unknown"),
+        ):
+            if not _kind_ok(kind):
+                continue
+            bucket = fresh.get(bucket_key) or []
+            per_ctx: dict[str | None, int] = {}
+            for row in bucket:
+                if not isinstance(row, dict):
+                    continue
+                ctx = row.get("__context__")
+                idx = per_ctx.get(ctx, 0)
+                per_ctx[ctx] = idx + 1
+                if _row_amount(row, kind) is not None:
+                    out.append((ctx, idx, row, kind))
+    else:
+        # Legacy (sin mapping_contexts): insert ancla con context_id LITERAL
+        # 'ventas'/'gastos' e índice sobre el bucket completo.
+        for bucket_key, ctx_literal, kind in (
+            ("ventas_detectadas", "ventas", "sale"),
+            ("gastos_detectados", "gastos", "expense"),
+        ):
+            if not _kind_ok(kind):
+                continue
+            for idx, row in enumerate(fresh.get(bucket_key) or []):
+                if isinstance(row, dict) and _row_amount(row, kind) is not None:
+                    out.append((ctx_literal, idx, row, kind))
+    return out
+
+
+def _estimate_reread(
+    file: UploadedFile,
+    tenant_id: uuid.UUID,
+    fresh: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+    sales: list[SaleEntry],
+    expenses: list[ExpenseEntry],
+) -> RereadPreview:
+    """Proyecta la relectura **en memoria, sin tocar la DB** (sub-segundo)."""
+    file_id = file.id
+    recon = _split_records(sales, expenses)
+    all_recs: list[SaleEntry | ExpenseEntry] = [*sales, *expenses]
+    by_ref: dict[str, SaleEntry | ExpenseEntry] = {
+        rec.source_row_ref: rec for rec in all_recs if rec.source_row_ref
+    }
+    voided_refs = {
+        rec.source_row_ref for rec in recon.non_edited_with_ref if rec.source_row_ref
+    }
+    edited_refs = recon.edited_refs
+
+    update_count = 0
+    new_count = 0
+    update_samples: list[dict[str, Any]] = []
+    new_samples: list[dict[str, Any]] = []
+
+    for ctx, idx, row, kind in _iter_importable_fresh_rows(fresh, confirmed_fields):
+        fp = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
+        if fp in edited_refs:
+            continue  # editado → insert lo saltea (preservado)
+        after = _fresh_row_snapshot(row, kind)
+        if fp in voided_refs:
+            update_count += 1
+            if len(update_samples) < _SAMPLE_PER_KIND:
+                existing = by_ref.get(fp)
+                before: dict[str, Any] | None = None
+                if isinstance(existing, SaleEntry):
+                    before = _snapshot_sale(existing)
+                elif isinstance(existing, ExpenseEntry):
+                    before = _snapshot_expense(existing)
+                update_samples.append(
+                    {"action": "update", "before": before, "after": after}
+                )
+        else:
+            new_count += 1
+            if len(new_samples) < _SAMPLE_PER_KIND:
+                new_samples.append({"action": "new", "before": None, "after": after})
+
+    # Legacy: los no-editados SIN source_row_ref (importados antes del feature) se
+    # anulan y re-crean, pero no matchean por ref → caen como 'new'. Reasignar esa
+    # porción de new→update (aprox), cubriendo también archivos parcialmente legacy.
+    legacy_void_n = sum(1 for r in recon.non_edited if not r.source_row_ref)
+    if legacy_void_n:
+        move = min(legacy_void_n, new_count)
+        update_count += move
+        new_count -= move
+
+    void_samples: list[dict[str, Any]] = []
+    for rec in recon.non_edited[:_SAMPLE_PER_KIND]:
+        snap = _snapshot_sale(rec) if isinstance(rec, SaleEntry) else _snapshot_expense(rec)
+        void_samples.append({"action": "void", "before": snap, "after": None})
+
+    return RereadPreview(
+        file_id=file_id,
+        to_update=update_count,
+        preserved=recon.preserved_count,
+        new=new_count,
+        to_void=len(recon.non_edited),
+        legacy_fallback=recon.legacy_fallback,
+        sample_changes=void_samples + update_samples + new_samples,
+    )
 
 
 # ── API pública ────────────────────────────────────────────────────────────────
@@ -610,45 +794,19 @@ async def preview_reread(
     tenant_id: uuid.UUID,
     s3: S3Client | None = None,
 ) -> RereadPreview:
-    """Preview de la relectura: corre la MISMA reconciliación que el apply dentro
-    de un SAVEPOINT y hace rollback — contadores y sample antes/después EXACTOS,
-    una sola fuente de verdad (sin estimación que pueda divergir). Con
-    ``dry_run=True`` no escribe la auditoría; ya sin el N+1 de huellas el
-    insert+rollback es rápido."""
+    """Preview RÁPIDO de la relectura: re-descarga + re-parsea el archivo y estima
+    los cambios en memoria, **sin escribir en la DB** (sub-segundo incluso en
+    archivos grandes). ``to_void``/``preserved`` exactos; ``new``/``to_update``
+    estimados — el apply (``apply_reread``) es la fuente de verdad exacta. Devuelve
+    un sample antes/después real para ver qué va a cambiar antes de aplicar."""
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
     s3 = s3 or S3Client()
     fresh = await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
-
-    # Run efímero NO persistido: portador de id/dry_run dentro del savepoint; el
-    # rollback lo descarta.
-    run = DataRepairRun(
-        tenant_id=tenant_id,
-        repair_type=REPAIR_TYPE_REREAD,
-        status="RUNNING",
-        dry_run=True,
-    )
-
-    savepoint = await session.begin_nested()
-    try:
-        session.add(run)
-        await session.flush()
-        result = await _reconcile(
-            session, file, tenant_id, fresh, confirmed_fields, run, dry_run=True
-        )
-        return RereadPreview(
-            file_id=file_id,
-            to_update=result.to_update,
-            preserved=result.preserved,
-            new=result.new,
-            to_void=result.voided,
-            legacy_fallback=result.legacy_fallback,
-            sample_changes=_build_preview_sample(result.items),
-        )
-    finally:
-        await savepoint.rollback()
+    sales, expenses = await _load_existing_records(session, file_id, tenant_id)
+    return _estimate_reread(file, tenant_id, fresh, confirmed_fields, sales, expenses)
 
 
 async def apply_reread(
