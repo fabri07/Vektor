@@ -150,36 +150,50 @@ async def run(conn: asyncpg.Connection, email: str, fname: str) -> None:
         print(f"  (no se pudo leer R2 — {type(exc).__name__}: {exc})")
         print("  → corré con las env vars R2_*/S3_* para el cálculo por producto.")
 
-    p("4) PRODUCTOS: stock actual vs cantidad del archivo (top 20 por gap)")
+    p("4) RECONCILIACIÓN: stock_actual vs (comprado_archivo − vendido_activo)")
+    print("  esperado = Σ cantidad del archivo (compras) − Σ cantidad vendida (ventas")
+    print("  activas). Si stock_actual ≈ esperado → el stock está BIEN (la diferencia")
+    print("  con 'archivo' era por ventas, no inflación). gap>0 = inflado; gap<0 = falta.")
+    # Ventas activas por producto (SaleEntry.quantity).
+    sales_rows = await conn.fetch(
+        "SELECT product_id, coalesce(sum(quantity),0) sold FROM sale_entries "
+        "WHERE tenant_id=$1 AND voided_at IS NULL AND product_id IS NOT NULL "
+        "GROUP BY product_id",
+        tid,
+    )
+    sold_by_pid = {r["product_id"]: Decimal(r["sold"] or 0) for r in sales_rows}
+
     prods = await conn.fetch(
-        "SELECT id, name, sku, stock_units, requires_completion FROM products "
+        "SELECT id, name, sku, stock_units FROM products "
         "WHERE tenant_id=$1 AND deactivated_at IS NULL",
         tid,
     )
-    gaps: list[tuple[str, int, Decimal, Decimal]] = []
+    rows4: list[tuple[str, int, Decimal, Decimal, Decimal]] = []
+    total_abs_gap = Decimal(0)
     for pr in prods:
-        truth = None
+        bought = None
         if pr["sku"] and _norm(pr["sku"]) in truth_by_sku:
-            truth = truth_by_sku[_norm(pr["sku"])]
+            bought = truth_by_sku[_norm(pr["sku"])]
         elif _norm(pr["name"]) in truth_by_name:
-            truth = truth_by_name[_norm(pr["name"])]
-        if truth is None:
+            bought = truth_by_name[_norm(pr["name"])]
+        if bought is None:
             continue
+        sold = sold_by_pid.get(pr["id"], Decimal(0))
+        expected = bought - sold  # puede ser negativo si se vendió más que 1 compra
         cur = Decimal(pr["stock_units"] or 0)
-        gap = cur - truth
-        if gap != 0:
-            gaps.append((pr["name"], pr["stock_units"], truth, gap))
-    gaps.sort(key=lambda t: abs(t[3]), reverse=True)
-    print(f"  productos con gap (stock_units ≠ cantidad del archivo): {len(gaps)}")
-    print(f"  {'producto':<34} {'stock_actual':>12} {'archivo':>9} {'gap':>9}")
-    for name, cur, truth, gap in gaps[:20]:
-        print(f"  {name[:34]:<34} {cur:>12} {truth:>9} {gap:>9}")
-    if gaps:
-        ratios = [Decimal(cur) / truth for _, cur, truth, _ in gaps if truth]
-        if ratios:
-            avg = sum(ratios) / len(ratios)
-            print(f"\n  ratio promedio stock_actual/archivo ≈ {avg:.2f}× "
-                  f"(≈ nº de applies; si ≈1 NO hay inflación)")
+        gap = cur - expected
+        total_abs_gap += abs(gap)
+        rows4.append((pr["name"], pr["stock_units"], bought, sold, gap))
+    rows4.sort(key=lambda t: abs(t[4]), reverse=True)
+    print(f"\n  {'producto':<30} {'stock':>7} {'comprado':>9} {'vendido':>8} "
+          f"{'esper.':>7} {'gap':>7}")
+    for name, cur, bought, sold, gap in rows4[:25]:
+        print(f"  {name[:30]:<30} {cur:>7} {bought:>9} {sold:>8} "
+              f"{bought - sold:>7} {gap:>7}")
+    con_gap = sum(1 for r in rows4 if r[4] != 0)
+    print(f"\n  productos con gap ≠ 0: {con_gap}/{len(rows4)}   Σ|gap| = {total_abs_gap}")
+    print("  → si la mayoría tiene gap ≈ 0: el stock está BIEN, no hay que reparar.")
+    print("  → si gap > 0 sistemático: stock inflado (reparar = setear a 'esper.').")
 
 
 if __name__ == "__main__":
