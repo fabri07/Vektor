@@ -156,7 +156,7 @@ async def run(conn: asyncpg.Connection, email: str, fname: str) -> None:
     print("  con 'archivo' era por ventas, no inflación). gap>0 = inflado; gap<0 = falta.")
     # Ventas activas por producto (SaleEntry.quantity).
     sales_rows = await conn.fetch(
-        "SELECT product_id, coalesce(sum(quantity),0) sold FROM sale_entries "
+        "SELECT product_id, coalesce(sum(quantity),0) sold FROM sales_entries "
         "WHERE tenant_id=$1 AND voided_at IS NULL AND product_id IS NOT NULL "
         "GROUP BY product_id",
         tid,
