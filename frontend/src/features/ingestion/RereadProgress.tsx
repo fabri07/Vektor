@@ -40,10 +40,10 @@ export function RereadProgress({ label }: { label?: string }) {
   return (
     <div className="flex flex-col gap-2 py-2">
       <div className="flex items-center justify-between text-xs">
-        <span className="text-vk-text-secondary">{label ?? STAGES[stageIdx]}</span>
-        <span className="tabular-nums text-vk-text-muted">{Math.round(pct)}%</span>
+        <span className="text-vektor-body">{label ?? STAGES[stageIdx]}</span>
+        <span className="tabular-nums text-vektor-muted">{Math.round(pct)}%</span>
       </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-vk-border-w">
+      <div className="h-2 w-full overflow-hidden rounded-full bg-vektor-border">
         <div
           className="h-full rounded-full bg-vk-blue transition-[width] duration-200 ease-out"
           style={{ width: `${pct}%` }}

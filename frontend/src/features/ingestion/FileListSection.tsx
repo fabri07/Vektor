@@ -392,8 +392,8 @@ export function FileListSection() {
       >
         {reread && (
           <div className="flex flex-col gap-4">
-            <p className="text-sm text-vk-text-secondary">
-              <span className="font-medium text-vk-text-primary">
+            <p className="text-sm text-vektor-muted">
+              <span className="font-medium text-vektor-white">
                 {reread.filename}
               </span>
             </p>
@@ -443,11 +443,11 @@ export function FileListSection() {
 
                 {reread.preview.sample_changes.length > 0 && (
                   <div>
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-vk-text-muted">
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-vektor-muted">
                       Vista previa de cambios (antes / después)
                     </h3>
                     <RereadDiff items={reread.preview.sample_changes} />
-                    <p className="mt-1.5 text-[11px] text-vk-text-muted">
+                    <p className="mt-1.5 text-[11px] text-vektor-muted">
                       Muestra una parte de los cambios. Los contadores son una
                       estimación; al aplicar verás el resultado exacto y podrás
                       deshacerlo.
@@ -455,7 +455,7 @@ export function FileListSection() {
                   </div>
                 )}
 
-                <p className="text-xs text-vk-text-muted">
+                <p className="text-xs text-vektor-muted">
                   Volvemos a leer el archivo ya subido y aplicamos las correcciones
                   sin que tengas que volver a subirlo. Podés deshacerlo después.
                 </p>
@@ -464,7 +464,7 @@ export function FileListSection() {
                   <button
                     type="button"
                     onClick={() => setReread(null)}
-                    className="rounded-lg px-3 py-1.5 text-sm font-medium text-vk-text-secondary hover:bg-vk-bg-light transition-colors"
+                    className="rounded-lg px-3 py-1.5 text-sm font-medium text-vektor-body hover:bg-vektor-surface transition-colors"
                   >
                     Cancelar
                   </button>
@@ -507,7 +507,7 @@ export function FileListSection() {
                 </div>
 
                 <div>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-vk-text-muted">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-vektor-muted">
                     Cambios (antes / después)
                   </h3>
                   <RereadDiff items={reread.result.items} />
@@ -528,7 +528,7 @@ export function FileListSection() {
                   <button
                     type="button"
                     onClick={() => setReread(null)}
-                    className="rounded-lg px-3 py-1.5 text-sm font-medium text-vk-text-secondary hover:bg-vk-bg-light transition-colors"
+                    className="rounded-lg px-3 py-1.5 text-sm font-medium text-vektor-body hover:bg-vektor-surface transition-colors"
                   >
                     Cerrar
                   </button>
