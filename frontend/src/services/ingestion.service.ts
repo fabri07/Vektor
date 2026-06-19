@@ -2,8 +2,13 @@ import { api } from "@/lib/api";
 import type { AxiosError } from "axios";
 
 // La relectura reprocesa el archivo completo; necesita más margen que el
-// timeout global de 15s del cliente axios.
+// timeout global de 15s del cliente axios. El preview ahora estima en memoria
+// (sub-segundo), pero el APPLY inserta todas las filas de verdad: en archivos
+// grandes puede tardar varios minutos, así que usa un timeout más alto (cerca del
+// límite del edge de Railway, ~300s). Si aun así no alcanza, el apply debería
+// pasar a procesamiento en background.
 const REREAD_TIMEOUT_MS = 120_000;
+const REREAD_APPLY_TIMEOUT_MS = 290_000;
 
 export interface UploadedFileItem {
   id: string;
@@ -245,7 +250,8 @@ export const ingestionService = {
     const res = await api.post<RereadApplyResponse>(
       `/ingestion/files/${fileId}/reread/apply`,
       undefined,
-      { timeout: REREAD_TIMEOUT_MS },
+      // El apply inserta todo el archivo: margen más alto que el preview.
+      { timeout: REREAD_APPLY_TIMEOUT_MS },
     );
     return res.data;
   },
