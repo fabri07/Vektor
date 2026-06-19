@@ -434,6 +434,36 @@ export function FileListSection() {
                   />
                 </div>
 
+                {/* Impacto en productos + filas ya importadas (sin cambios) */}
+                {(reread.preview.counts.products_new > 0 ||
+                  reread.preview.counts.products_restock > 0 ||
+                  reread.preview.counts.unchanged > 0) && (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <CountCard
+                      label="Productos nuevos"
+                      value={reread.preview.counts.products_new}
+                      tone="success"
+                    />
+                    <CountCard
+                      label="Reposición de stock"
+                      value={reread.preview.counts.products_restock}
+                      tone="info"
+                    />
+                    <CountCard
+                      label="Sin cambios"
+                      value={reread.preview.counts.unchanged}
+                      tone="muted"
+                    />
+                  </div>
+                )}
+
+                {reread.preview.counts.unchanged > 0 && (
+                  <div className="rounded-lg border border-vektor-border bg-vektor-surface px-3 py-2 text-xs text-vektor-muted">
+                    {reread.preview.counts.unchanged} fila(s) ya estaban importadas
+                    de este archivo: la relectura las saltea (no se duplican).
+                  </div>
+                )}
+
                 {reread.preview.legacy_fallback && (
                   <div className="rounded-lg border border-vk-warning/40 bg-vk-warning-bg px-3 py-2 text-xs text-vk-warning">
                     Primera relectura: reconstrucción best-effort. No hay un import

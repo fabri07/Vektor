@@ -87,6 +87,9 @@ export interface RereadCounts {
   preserved: number;
   new: number;
   to_void: number;
+  unchanged: number;
+  products_new: number;
+  products_restock: number;
 }
 
 export interface RereadItem {

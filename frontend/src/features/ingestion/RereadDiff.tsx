@@ -14,6 +14,8 @@ const ACTION_LABELS: Record<string, string> = {
   reread_void: "Anulado",
   preserve: "Preservado",
   preserved: "Preservado",
+  product_new: "Producto nuevo",
+  restock: "Reposición de stock",
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -28,6 +30,8 @@ const ACTION_COLORS: Record<string, string> = {
   reread_void: "text-vk-danger bg-vk-danger-bg",
   preserve: "text-vk-text-muted bg-vk-border-w",
   preserved: "text-vk-text-muted bg-vk-border-w",
+  product_new: "text-vk-success bg-vk-success-bg",
+  restock: "text-vk-info bg-vk-info-bg",
 };
 
 function actionLabel(action: string): string {
