@@ -156,9 +156,11 @@ async def _resolve_or_create_supplier(
         return hit, clean
     new_id = uuid.uuid4()
     session.add(Supplier(id=new_id, tenant_id=tenant_id, name=clean))
-    # Materializar el id en la misma transacción (lo necesitamos para vincular
-    # el gasto y cachearlo); el commit lo hace el caller del import.
-    await session.flush()
+    # NO se hace flush: el id es explícito (``new_id``), así que no hace falta
+    # materializar para vincular el gasto. Un flush por proveedor nuevo en un
+    # import masivo era O(N) round-trips (flushea todo lo pendiente cada vez) —
+    # un cuello real con libros de compras de muchos proveedores. El commit del
+    # caller persiste Supplier y ExpenseEntry juntos (orden por FK).
     supplier_index[norm] = new_id
     return new_id, clean
 
@@ -604,6 +606,7 @@ def build_incomplete_product(
     name: str | None,
     sku: str | None,
     unit_cost: Decimal | None,
+    product_cache: dict[uuid.UUID, Any] | None = None,
 ) -> uuid.UUID | None:
     """Construye y agrega a la sesión un ``Product`` vendible INCOMPLETO desde una
     compra de mercadería, devolviendo su id (o ``None`` si no hay nombre utilizable).
@@ -614,6 +617,11 @@ def build_incomplete_product(
     quien corresponda después). Único lugar donde se materializa este patrón de
     "producto desde compra", reusado por el import (``_ensure_product_for_purchase``)
     y por la reclasificación de gastos a reventa (``RECLASSIFY_EXPENSE``).
+
+    Si se pasa ``product_cache``, el objeto recién creado se cachea por id. Crítico
+    con ``autoflush=False`` (prod): ``session.get`` no ve un producto pendiente sin
+    flush, así que ``_apply_purchase_to_stock`` no podría incrementarle el stock —
+    el cache se lo entrega sin tocar la DB.
     """
     from app.persistence.models.product import Product  # noqa: PLC0415
 
@@ -623,22 +631,23 @@ def build_incomplete_product(
     clean_sku = _clean_str(sku, 99)
 
     new_id = uuid.uuid4()
-    session.add(
-        Product(
-            id=new_id,
-            tenant_id=tenant_id,
-            name=clean_name,
-            sku=clean_sku,
-            sale_price_ars=Decimal("0"),  # una compra no trae precio de venta
-            unit_cost_ars=unit_cost,
-            stock_units=0,  # el incremento lo hace quien corresponda después
-            # category de PRODUCTO (vertical) ≠ código de gasto → None (incompleto).
-            category=None,
-            low_stock_threshold_units=None,
-            provenance="REAL",
-            requires_completion=True,  # falta precio de venta → completar
-        )
+    product = Product(
+        id=new_id,
+        tenant_id=tenant_id,
+        name=clean_name,
+        sku=clean_sku,
+        sale_price_ars=Decimal("0"),  # una compra no trae precio de venta
+        unit_cost_ars=unit_cost,
+        stock_units=0,  # el incremento lo hace quien corresponda después
+        # category de PRODUCTO (vertical) ≠ código de gasto → None (incompleto).
+        category=None,
+        low_stock_threshold_units=None,
+        provenance="REAL",
+        requires_completion=True,  # falta precio de venta → completar
     )
+    session.add(product)
+    if product_cache is not None:
+        product_cache[new_id] = product
     return new_id
 
 
@@ -651,6 +660,7 @@ def _ensure_product_for_purchase(
     by_sku: dict[str, uuid.UUID],
     by_name: dict[str, uuid.UUID | None],
     by_token: dict[str, set[uuid.UUID]] | None = None,
+    product_cache: dict[uuid.UUID, Any] | None = None,
 ) -> uuid.UUID | None:
     """Crea el ``Product`` de una compra de mercadería cuyo SKU/nombre NO está en
     el catálogo, y devuelve su id (o ``None`` si no hay nombre utilizable).
@@ -666,7 +676,9 @@ def _ensure_product_for_purchase(
     Cachea el id nuevo en ``by_sku``/``by_name`` para que filas posteriores del
     mismo SKU/nombre en el mismo archivo reusen el producto (sin duplicar).
     """
-    new_id = build_incomplete_product(session, tenant_id, name, sku, unit_cost)
+    new_id = build_incomplete_product(
+        session, tenant_id, name, sku, unit_cost, product_cache=product_cache
+    )
     if new_id is None:
         return None
     clean_name = _clean_str(name, 299)
@@ -691,6 +703,7 @@ async def _apply_purchase_to_stock(
     qty_raw: Any,
     unit_cost: Decimal | None,
     balance_index: dict[uuid.UUID, Any] | None = None,
+    product_cache: dict[uuid.UUID, Any] | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
 
@@ -712,8 +725,17 @@ async def _apply_purchase_to_stock(
         return
     from app.persistence.models.product import Product  # noqa: PLC0415
 
-    product = await session.get(Product, expense.product_id)
-    if product is None or product.tenant_id != tenant_id:
+    # Cache primero: con autoflush=False un producto recién creado (pendiente) NO
+    # aparece en session.get; el cache lo entrega. Para los existentes evita un
+    # session.get por fila (se cachea tras el primer acceso).
+    product = product_cache.get(expense.product_id) if product_cache is not None else None
+    if product is None:
+        product = await session.get(Product, expense.product_id)
+        if product is None or product.tenant_id != tenant_id:
+            return
+        if product_cache is not None:
+            product_cache[expense.product_id] = product
+    elif product.tenant_id != tenant_id:
         return
     product.stock_units += qty
     if unit_cost is not None:
@@ -1077,6 +1099,10 @@ async def insert_confirmed_data(
     _preloaded_fp: frozenset[str] | None = (
         frozenset(seen_fp) if seen_fp is not None else None
     )
+    # Cache de productos por id (creados + tocados) para evitar un session.get por
+    # fila al aplicar stock, y para que con autoflush=False los productos recién
+    # creados reciban su stock (session.get no ve pendientes sin flush).
+    _product_cache: dict[uuid.UUID, Any] = {}
 
     if file_type == "spreadsheet":
         inferred_type = summary.get("inferred_type", "general")
@@ -1099,6 +1125,7 @@ async def insert_confirmed_data(
                 source=source,
                 uploaded_file_id=uploaded_file_id,
                 seen_fp=seen_fp,
+                product_cache=_product_cache,
             )
             if seen_fp is not None and _preloaded_fp is not None:
                 await _persist_import_fingerprints(
@@ -1452,6 +1479,7 @@ async def insert_confirmed_data(
                             _by_sku,
                             _by_name,
                             _by_token,
+                            product_cache=_product_cache,
                         )
                     # FASE D: COGS si la fila es compra de mercadería (producto del
                     # catálogo/recién creado o categoría INVENTORY); suma stock si trae
@@ -1466,6 +1494,7 @@ async def insert_confirmed_data(
                         exp_qty_raw,
                         exp_unit_cost,
                         balance_index=_balance_index,
+                        product_cache=_product_cache,
                     )
                     # Mejora D: trazabilidad import → fila origen.
                     if _row_anchor is not None:
@@ -1815,6 +1844,7 @@ async def _insert_multisheet_data(
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
     seen_fp: set[str] | None = None,
+    product_cache: dict[uuid.UUID, Any] | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -2018,6 +2048,7 @@ async def _insert_multisheet_data(
                 _by_sku,
                 _by_name,
                 _by_token,
+                product_cache=product_cache,
             )
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
@@ -2029,6 +2060,7 @@ async def _insert_multisheet_data(
             exp_qty_raw,
             unit_cost,
             balance_index=_balance_index,
+            product_cache=product_cache,
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D

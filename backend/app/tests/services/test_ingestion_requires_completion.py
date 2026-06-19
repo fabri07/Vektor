@@ -7,11 +7,12 @@ con precio y costo queda completo.
 
 from __future__ import annotations
 
+import uuid
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.application.services.ingestion_import_service as importer
 from app.persistence.models.product import Product
@@ -97,3 +98,51 @@ async def test_purchase_book_without_category_creates_product(
     expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
     assert expense.expense_type == "COGS"
     assert expense.product_id == product.id
+
+
+@pytest.mark.asyncio
+async def test_purchase_new_product_gets_stock_without_autoflush(
+    db_engine: AsyncEngine,
+) -> None:
+    """Reproduce prod (``autoflush=False``): un producto NUEVO de una compra recibe
+    su stock vía el ``product_cache``. Sin el cache, ``session.get`` no ve el
+    producto pendiente (no flusheado) y el stock quedaba en 0."""
+    factory = async_sessionmaker(
+        db_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+    )
+    async with factory() as session:
+        tenant = Tenant(
+            tenant_id=uuid.uuid4(),
+            legal_name="K",
+            display_name="K",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status="ACTIVE",
+        )
+        session.add(tenant)
+        await session.commit()
+
+        summary = {
+            "file_type": "spreadsheet",
+            "inferred_type": "gastos",
+            "gastos_detectados": [
+                {
+                    "fecha": "2026-03-10",
+                    "producto": "Producto Nuevo X",
+                    "cantidad": "7",
+                    "total": "500",
+                },
+            ],
+        }
+        await importer.insert_confirmed_data(
+            session, tenant.tenant_id, summary, {"gastos": True}
+        )
+        await session.commit()
+
+        product = (
+            await session.execute(
+                select(Product).where(Product.tenant_id == tenant.tenant_id)
+            )
+        ).scalar_one()
+        assert product.name == "Producto Nuevo X"
+        assert product.stock_units == 7  # el cache entregó el producto nuevo
