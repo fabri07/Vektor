@@ -1413,9 +1413,6 @@ async def insert_confirmed_data(
                     # FASE D: COGS si la fila es compra de mercadería (producto
                     # del catálogo o categoría INVENTORY); además suma stock si
                     # trae cantidad explícita.
-                    expense.expense_type = infer_expense_type(
-                        cat_code, product_id=expense.product_id
-                    )
                     exp_qty_raw = (
                         row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
                     )
@@ -1432,16 +1429,19 @@ async def insert_confirmed_data(
                         if exp_cost_col and exp_cost_col != gasto_col
                         else None
                     )
-                    # Compra de mercadería con SKU/nombre NUEVO: una compra es a la
-                    # vez gasto COGS+caja Y alta/reposición de producto. Gate estricto
-                    # (COGS + nombre + cantidad>0) para no crear productos basura
-                    # desde gastos de servicios/alquiler. Crea el producto incompleto
-                    # y deja que _apply_purchase_to_stock incremente el stock.
+                    # Compra de mercadería = gasto COGS+caja Y alta/reposición de
+                    # producto. Señal a nivel de fila: nombre de producto + cantidad>0
+                    # (un libro de compras con esas columnas). Se CREA el producto
+                    # ANTES de inferir expense_type para que un producto NUEVO (no en
+                    # catálogo, sin categoría) igual quede COGS por su product_id — el
+                    # orden inverso dejaba los productos nuevos como OPEX y nunca se
+                    # creaban. Gate por (nombre + cantidad>0) o categoría INVENTORY:
+                    # los gastos de servicio/alquiler (sin cantidad) NO crean producto.
                     exp_name = str(row.get(nombre_col)) if nombre_col else None
-                    if (
-                        expense.product_id is None
-                        and expense.expense_type == "COGS"
-                        and _parse_qty(exp_qty_raw) > 0
+                    _has_qty = _parse_qty(exp_qty_raw) > 0
+                    _is_merch_purchase = bool(_clean_str(exp_name, 299)) and _has_qty
+                    if expense.product_id is None and (
+                        _is_merch_purchase or (cat_code == "INVENTORY" and _has_qty)
                     ):
                         expense.product_id = _ensure_product_for_purchase(
                             session,
@@ -1453,6 +1453,12 @@ async def insert_confirmed_data(
                             _by_name,
                             _by_token,
                         )
+                    # FASE D: COGS si la fila es compra de mercadería (producto del
+                    # catálogo/recién creado o categoría INVENTORY); suma stock si trae
+                    # cantidad explícita.
+                    expense.expense_type = infer_expense_type(
+                        cat_code, product_id=expense.product_id
+                    )
                     await _apply_purchase_to_stock(
                         session,
                         tenant_id,
@@ -1977,8 +1983,6 @@ async def _insert_multisheet_data(
             _val(row, cols.get("sku"), _SKU_COLS),
             _by_token,
         )
-        # FASE D: discriminador COGS/OPEX + stock desde compras con cantidad.
-        expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
         # Costo unitario: columna inequívoca y DISTINTA de la del monto ("costo"
         # a secas suele ser el total de la línea — no es unit_cost).
         _amount_src = (
@@ -1994,25 +1998,30 @@ async def _insert_multisheet_data(
             else None
         )
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
-        # Compra de mercadería con SKU/nombre NUEVO: a la vez gasto COGS+caja Y
-        # alta/reposición de producto. Gate estricto (COGS + nombre + cantidad>0)
-        # para no crear productos basura desde servicios/alquiler. Crea el producto
-        # incompleto y deja que _apply_purchase_to_stock incremente el stock.
-        if (
-            expense.product_id is None
-            and expense.expense_type == "COGS"
-            and _parse_qty(exp_qty_raw) > 0
+        # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
+        # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
+        # producto ANTES de inferir expense_type para que un producto NUEVO (no en
+        # catálogo, sin categoría) quede COGS por su product_id — el orden inverso lo
+        # dejaba OPEX y nunca se creaba. Servicios/alquiler (sin cantidad) NO crean.
+        _exp_name = _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
+        _has_qty = _parse_qty(exp_qty_raw) > 0
+        _is_merch_purchase = bool(_clean_str(_exp_name, 299)) and _has_qty
+        if expense.product_id is None and (
+            _is_merch_purchase or (cat_code == "INVENTORY" and _has_qty)
         ):
             expense.product_id = _ensure_product_for_purchase(
                 session,
                 tenant_id,
-                _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
+                _exp_name,
                 _val(row, cols.get("sku"), _SKU_COLS),
                 unit_cost,
                 _by_sku,
                 _by_name,
                 _by_token,
             )
+        # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
+        # categoría INVENTORY) + stock desde compras con cantidad.
+        expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
         await _apply_purchase_to_stock(
             session,
             tenant_id,
