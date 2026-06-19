@@ -77,10 +77,11 @@ from app.schemas.ingestion import (
     DropColumnsRequest,
     FilePreviewResponse,
     FileStatusItem,
-    RereadApplyResponse,
+    RereadApplyStartResponse,
     RereadCounts,
     RereadItem,
     RereadPreviewResponse,
+    RereadRunStatusResponse,
     RereadUndoResponse,
     TenantColumnMappingResponse,
     UploadResponse,
@@ -964,43 +965,87 @@ async def reread_preview(
 
 @router.post(
     "/files/{file_id}/reread/apply",
-    response_model=RereadApplyResponse,
-    summary="Aplica la relectura: re-importa corregido preservando ediciones manuales",
+    response_model=RereadApplyStartResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Encola el apply de la relectura en background (devuelve run_id para polling)",
     dependencies=[Depends(require_role("OWNER", "ADMIN"))],
 )
 async def reread_apply(
     file_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> RereadApplyResponse:
+) -> RereadApplyStartResponse:
+    """El apply puede insertar miles de filas (minutos). Corre en background: se
+    crea el run, se encola la task y se devuelve el ``run_id`` para que el frontend
+    haga polling de ``GET /reread/runs/{run_id}``. Guard anti-duplicado: una sola
+    relectura RUNNING por tenant."""
     from app.application.services import reread_service  # noqa: PLC0415
 
     try:
-        result = await reread_service.apply_reread(session, file_id, tenant.tenant_id)
+        run = await reread_service.start_background_apply(
+            session, file_id, tenant.tenant_id
+        )
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
 
-    logger.info(
-        "ingestion.reread.applied",
-        file_id=str(file_id),
-        run_id=str(result.run_id),
-        voided=result.voided,
-        inserted=result.inserted,
-        preserved=result.preserved,
-    )
+    # Commit ANTES de encolar para que el worker vea el run.
+    await session.commit()
 
-    return RereadApplyResponse(
+    from app.jobs.reread_worker import reread_apply as reread_apply_task  # noqa: PLC0415
+
+    try:
+        reread_apply_task.delay(str(run.id), str(file_id), str(tenant.tenant_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("ingestion.reread.enqueue_failed", run_id=str(run.id), error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No se pudo encolar la relectura. Reintentá en unos segundos.",
+        ) from exc
+
+    logger.info("ingestion.reread.enqueued", file_id=str(file_id), run_id=str(run.id))
+    return RereadApplyStartResponse(file_id=file_id, run_id=run.id, status="RUNNING")
+
+
+@router.get(
+    "/files/{file_id}/reread/runs/{run_id}",
+    response_model=RereadRunStatusResponse,
+    summary="Estado del apply en background (polling)",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+)
+async def reread_run_status(
+    file_id: uuid.UUID,
+    run_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> RereadRunStatusResponse:
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    run = await reread_service.get_reread_run(session, run_id, tenant.tenant_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Relectura no encontrada."
+        )
+    d = run.details_json or {}
+    # status del run → status del apply: RUNNING / APPLIED / FAILED.
+    items = [RereadItem(**it) for it in d.get("sample_changes", []) if isinstance(it, dict)]
+    return RereadRunStatusResponse(
+        run_id=run.id,
         file_id=file_id,
-        run_id=result.run_id,
-        to_update=result.to_update,
-        preserved=result.preserved,
-        new=result.new,
-        voided=result.voided,
-        inserted=result.inserted,
-        legacy_fallback=result.legacy_fallback,
-        items=[RereadItem(**it) for it in result.items],
+        status=run.status,
+        to_update=int(d.get("to_update", 0) or 0),
+        preserved=int(d.get("preserved", 0) or 0),
+        new=int(d.get("new", 0) or 0),
+        voided=int(d.get("voided", 0) or 0),
+        inserted=int(d.get("inserted", 0) or 0),
+        legacy_fallback=bool(d.get("legacy_fallback", False)),
+        items=items,
+        error=d.get("error"),
     )
 
 

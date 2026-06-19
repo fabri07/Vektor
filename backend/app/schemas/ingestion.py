@@ -159,6 +159,30 @@ class RereadApplyResponse(BaseModel):
     items: list[RereadItem] = Field(default_factory=list)
 
 
+class RereadApplyStartResponse(BaseModel):
+    """El apply corre en background; se devuelve el run para hacer polling."""
+
+    file_id: UUID
+    run_id: UUID
+    status: str  # "RUNNING"
+
+
+class RereadRunStatusResponse(BaseModel):
+    """Estado del apply en background (polling). ``status``: RUNNING|APPLIED|FAILED."""
+
+    run_id: UUID
+    file_id: UUID
+    status: str
+    to_update: int = 0
+    preserved: int = 0
+    new: int = 0
+    voided: int = 0
+    inserted: int = 0
+    legacy_fallback: bool = False
+    items: list[RereadItem] = Field(default_factory=list)
+    error: str | None = None
+
+
 class RereadUndoResponse(BaseModel):
     run_id: UUID
     restored: int

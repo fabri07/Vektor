@@ -29,6 +29,7 @@ celery_app = Celery(
         "app.jobs.notification_worker",
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
+        "app.jobs.reread_worker",
         "app.jobs.update_momentum",
         "app.jobs.send_weekly_email",
         "app.application.services.score_trigger_service",
@@ -67,6 +68,7 @@ celery_app.conf.update(
         "jobs.process_spreadsheet": {"queue": "ingestion"},
         "jobs.process_text_document": {"queue": "ingestion"},
         "jobs.process_image_ocr": {"queue": "ingestion"},
+        "jobs.reread_apply": {"queue": "ingestion"},
     },
 )
 

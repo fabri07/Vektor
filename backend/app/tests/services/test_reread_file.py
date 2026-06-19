@@ -419,3 +419,44 @@ async def test_batch_fingerprints_preloaded_and_idempotent(
 
     assert counts["gastos"] == 0
     assert len(await _active_expenses(db_session, tenant, file)) == 2
+
+
+@pytest.mark.asyncio
+async def test_background_apply_run_status_and_guard(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El apply en background: ``start_background_apply`` crea el run RUNNING, el
+    worker lo ejecuta con ``apply_reread(run=...)`` dejándolo APPLIED, y
+    ``get_reread_run`` lo devuelve. El guard bloquea una 2ª relectura concurrente."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+
+    run = await reread_service.start_background_apply(
+        db_session, file.id, tenant.tenant_id
+    )
+    assert run.status == "RUNNING"
+    await db_session.commit()
+
+    # Guard: una 2ª relectura mientras hay una RUNNING reciente → ValueError.
+    with pytest.raises(ValueError, match="en curso"):
+        await reread_service.start_background_apply(
+            db_session, file.id, tenant.tenant_id
+        )
+
+    # El "worker" ejecuta el apply reusando el run pre-creado.
+    result = await reread_service.apply_reread(
+        db_session, file.id, tenant.tenant_id, run=run
+    )
+    await db_session.commit()
+    assert result.voided == 2  # los 2 no-editados del import inicial
+
+    fetched = await reread_service.get_reread_run(db_session, run.id, tenant.tenant_id)
+    assert fetched is not None
+    assert fetched.status == "APPLIED"
+    assert (fetched.details_json or {}).get("voided") == 2
+
+    # Otro tenant no ve el run.
+    assert (
+        await reread_service.get_reread_run(db_session, run.id, uuid.uuid4()) is None
+    )

@@ -905,9 +905,13 @@ async def apply_reread(
     file_id: uuid.UUID,
     tenant_id: uuid.UUID,
     s3: S3Client | None = None,
+    run: DataRepairRun | None = None,
 ) -> RereadApplyResult:
     """Aplica la relectura: void no-editados + reimport corregido, auditado y
-    reversible. El commit lo hace el caller (get_db_session)."""
+    reversible. El commit lo hace el caller (get_db_session o el worker).
+
+    Si se pasa ``run`` (creado por ``start_background_apply`` y ejecutado por el
+    worker), se reusa; si no, se crea uno (camino síncrono / tests)."""
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
@@ -915,15 +919,16 @@ async def apply_reread(
     fresh = await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
 
-    run = DataRepairRun(
-        tenant_id=tenant_id,
-        repair_type=REPAIR_TYPE_REREAD,
-        status="RUNNING",
-        dry_run=False,
-        details_json={"file_id": str(file_id)},
-    )
-    session.add(run)
-    await session.flush()
+    if run is None:
+        run = DataRepairRun(
+            tenant_id=tenant_id,
+            repair_type=REPAIR_TYPE_REREAD,
+            status="RUNNING",
+            dry_run=False,
+            details_json={"file_id": str(file_id)},
+        )
+        session.add(run)
+        await session.flush()
 
     result = await _reconcile(session, file, tenant_id, fresh, confirmed_fields, run)
 
@@ -939,6 +944,8 @@ async def apply_reread(
         "voided": result.voided,
         "inserted": result.inserted,
         "legacy_fallback": result.legacy_fallback,
+        # Sample para el diff antes/después en el frontend (limitado para no inflar).
+        "sample_changes": list(result.items)[:24],
         "products_limitation": (
             "Products no se vinculan por source_upload_id; insert_confirmed_data "
             "los re-deriva idempotentemente (upsert por SKU/nombre)."
@@ -948,6 +955,68 @@ async def apply_reread(
 
     _trigger_score(tenant_id)
     return result
+
+
+# ── Apply en background (Celery) ───────────────────────────────────────────────
+
+# Una relectura RUNNING más vieja que esto se considera colgada (worker caído) y
+# NO bloquea una nueva — evita que un run zombie trabe el archivo para siempre.
+_STALE_RUNNING_AFTER_SECONDS = 15 * 60
+
+
+async def start_background_apply(
+    session: AsyncSession,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> DataRepairRun:
+    """Crea el ``DataRepairRun`` (status RUNNING) para un apply en background y lo
+    devuelve. Guard anti-duplicado: si ya hay una relectura RUNNING reciente del
+    tenant, levanta ``ValueError`` (el caller responde 409). El caller commitea y
+    encola la task. Evita el ciclo timeout→reintento→duplicados."""
+    existing = await session.execute(
+        select(DataRepairRun).where(
+            DataRepairRun.tenant_id == tenant_id,
+            DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            DataRepairRun.status == "RUNNING",
+        )
+    )
+    now = datetime.now(UTC)
+    for r in existing.scalars().all():
+        created = r.created_at
+        if created is not None and created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        age = (now - created).total_seconds() if created is not None else 0.0
+        if age < _STALE_RUNNING_AFTER_SECONDS:
+            raise ValueError(
+                "Ya hay una relectura en curso. Esperá a que termine antes de "
+                "aplicar otra."
+            )
+
+    # Validar que el archivo exista/pertenezca antes de encolar.
+    file = await _load_file(session, file_id, tenant_id)
+    if file is None:
+        raise FileNotFoundError(file_id)
+
+    run = DataRepairRun(
+        tenant_id=tenant_id,
+        repair_type=REPAIR_TYPE_REREAD,
+        status="RUNNING",
+        dry_run=False,
+        details_json={"file_id": str(file_id), "phase": "queued"},
+    )
+    session.add(run)
+    await session.flush()
+    return run
+
+
+async def get_reread_run(
+    session: AsyncSession, run_id: uuid.UUID, tenant_id: uuid.UUID
+) -> DataRepairRun | None:
+    """Devuelve el run de relectura (para el polling de estado), validando tenant."""
+    run = await session.get(DataRepairRun, run_id)
+    if run is None or run.tenant_id != tenant_id or run.repair_type != REPAIR_TYPE_REREAD:
+        return None
+    return run
 
 
 async def undo_reread(
