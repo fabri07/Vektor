@@ -128,6 +128,9 @@ class CreateReceiptRequest(BaseModel):
     shipping_cost: Decimal | None = None
     currency: str
     transaction_date: datetime | None = None
+    # Archivo de origen del remito (de POST .../receipts/extract): liga los gastos
+    # creados al UploadedFile para trazabilidad import → archivo.
+    source_upload_id: UUID | None = None
 
     @field_validator("currency")
     @classmethod

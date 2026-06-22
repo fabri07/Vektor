@@ -22,7 +22,7 @@ import io
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from app.application.security.prompt_defense import wrap_user_input
@@ -37,6 +37,7 @@ from app.application.services.file_parsing import (
     _detect_header_row,
     _sniff_delimiter,
     detect_supported_mime,
+    normalize_numeric,
     rows_to_dicts,
 )
 from app.integrations.anthropic_client import (
@@ -63,7 +64,9 @@ class ExtractedLine:
     product_name: str
     sku: str | None
     qty: float
-    unit_price: float
+    # Decimal de punta a punta: el monto se transcribe y se devuelve sin pasar por
+    # float (evita el round-trip float→Decimal que perdía precisión en el endpoint).
+    unit_price: Decimal
 
 
 @dataclass
@@ -75,7 +78,7 @@ class RemitoExtraction:
     """
 
     lines: list[ExtractedLine] = field(default_factory=list)
-    shipping_cost: float | None = None
+    shipping_cost: Decimal | None = None
     currency: str = "ARS"
     confidence: str = "LOW"
     warnings: list[str] = field(default_factory=list)
@@ -96,25 +99,6 @@ _TARGET_UNIT_PRICE = "unit_price"  # target sintético propio del remito
 # Keywords de envío/flete: una columna o fila con esto es el shipping_cost del remito,
 # no una línea de producto.
 _SHIPPING_KEYWORDS = {"envio", "envío", "flete", "shipping", "logistica", "logística"}
-
-
-def _coerce_decimal(value: Any) -> Decimal | None:
-    """Convierte un valor de celda a Decimal, tolerante a formato AR ($ 1.234,50)."""
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not s or s.lower() in ("none", "nan"):
-        return None
-    s = s.replace("$", "").replace(" ", "")
-    # Formato AR: punto como separador de miles, coma como decimal → normalizar.
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        s = s.replace(",", ".")
-    try:
-        return Decimal(s)
-    except (InvalidOperation, ValueError):
-        return None
 
 
 def _map_columns(headers: list[str]) -> dict[str, str]:
@@ -171,23 +155,23 @@ def _parse_tabular(content: bytes, mime: str, filename: str) -> RemitoExtraction
         if name is None:
             # Sin nombre de producto: puede ser una fila de envío/total al pie.
             if shipping_cols and shipping_cost is None:
-                ship = _coerce_decimal(_first_nonempty_raw(row, shipping_cols))
+                ship = normalize_numeric(_first_nonempty_raw(row, shipping_cols))
                 if ship is not None:
                     shipping_cost = ship
             continue
-        qty = _coerce_decimal(_first_nonempty_raw(row, qty_cols)) or Decimal("0")
-        unit_price = _coerce_decimal(_first_nonempty_raw(row, price_cols)) or Decimal("0")
+        qty = normalize_numeric(_first_nonempty_raw(row, qty_cols)) or Decimal("0")
+        unit_price = normalize_numeric(_first_nonempty_raw(row, price_cols)) or Decimal("0")
         sku = _first_nonempty(row, sku_cols)
         lines.append(
             ExtractedLine(
                 product_name=str(name).strip()[:300],
                 sku=(str(sku).strip()[:100] if sku else None),
                 qty=float(qty),
-                unit_price=float(unit_price),
+                unit_price=unit_price,
             )
         )
         if shipping_cols and shipping_cost is None:
-            ship = _coerce_decimal(_first_nonempty_raw(row, shipping_cols))
+            ship = normalize_numeric(_first_nonempty_raw(row, shipping_cols))
             if ship is not None:
                 shipping_cost = ship
 
@@ -204,7 +188,7 @@ def _parse_tabular(content: bytes, mime: str, filename: str) -> RemitoExtraction
 
     return RemitoExtraction(
         lines=lines,
-        shipping_cost=(float(shipping_cost) if shipping_cost is not None else None),
+        shipping_cost=shipping_cost,
         confidence=confidence,
         warnings=warnings,
     )
@@ -429,19 +413,19 @@ def _extraction_from_tool_input(data: dict[str, Any]) -> RemitoExtraction:
         name = item.get("product_name")
         if not name or not str(name).strip():
             continue
-        qty = _coerce_decimal(item.get("qty"))
-        unit_price = _coerce_decimal(item.get("unit_price"))
+        qty = normalize_numeric(item.get("qty"))
+        unit_price = normalize_numeric(item.get("unit_price"))
         sku = item.get("sku")
         lines.append(
             ExtractedLine(
                 product_name=str(name).strip()[:300],
                 sku=(str(sku).strip()[:100] if sku else None),
                 qty=float(qty) if qty is not None else 0.0,
-                unit_price=float(unit_price) if unit_price is not None else 0.0,
+                unit_price=unit_price if unit_price is not None else Decimal("0"),
             )
         )
 
-    shipping = _coerce_decimal(data.get("shipping_cost"))
+    shipping = normalize_numeric(data.get("shipping_cost"))
 
     if not lines:
         warnings.append("La IA no pudo transcribir líneas de producto del remito.")
@@ -462,7 +446,7 @@ def _extraction_from_tool_input(data: dict[str, Any]) -> RemitoExtraction:
 
     return RemitoExtraction(
         lines=lines,
-        shipping_cost=(float(shipping) if shipping is not None else None),
+        shipping_cost=shipping,
         confidence=confidence,
         warnings=warnings,
     )

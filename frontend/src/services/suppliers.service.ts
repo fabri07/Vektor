@@ -156,10 +156,11 @@ export const suppliersService = {
   async extractReceipt(supplierId: string, file: File): Promise<ReceiptExtraction> {
     const formData = new FormData();
     formData.append("file", file);
+    // NO setear Content-Type a mano: el browser/axios lo ponen con el boundary del
+    // multipart. Forzar "multipart/form-data" sin boundary rompe el parseo en FastAPI.
     const res = await api.post<ReceiptExtraction>(
       `/suppliers/${supplierId}/receipts/extract`,
       formData,
-      { headers: { "Content-Type": "multipart/form-data" } },
     );
     return res.data;
   },

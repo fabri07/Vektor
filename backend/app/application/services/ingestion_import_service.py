@@ -2711,6 +2711,7 @@ async def import_receipt(
     *,
     shipping_cost: Decimal | None = None,
     transaction_date: datetime | None = None,
+    source_upload_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Registra un remito ya validado: por cada línea, producto (alta/stock) +
     ``ExpenseEntry`` COGS; el envío → un ``ExpenseEntry`` OPEX ``LOGISTICS``.
@@ -2763,6 +2764,7 @@ async def import_receipt(
             provenance="REAL",
             supplier_id=supplier_id,
             product_id=product_id,
+            source_upload_id=source_upload_id,
         )
         session.add(expense)
         await session.flush()  # materializar el id del gasto para el summary
@@ -2793,6 +2795,7 @@ async def import_receipt(
             provenance="REAL",
             supplier_id=supplier_id,
             product_id=None,
+            source_upload_id=source_upload_id,
         )
         session.add(shipping)
         await session.flush()

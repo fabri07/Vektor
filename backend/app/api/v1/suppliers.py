@@ -1,7 +1,6 @@
 """Supplier (proveedores) CRUD endpoints."""
 
 from datetime import UTC, datetime
-from decimal import Decimal
 from uuid import UUID
 
 from fastapi import (
@@ -231,6 +230,7 @@ async def create_receipt(
         lines,
         shipping_cost=body.shipping_cost,
         transaction_date=body.transaction_date,
+        source_upload_id=body.source_upload_id,
     )
     _audit_data_change(
         session,
@@ -330,12 +330,17 @@ async def extract_receipt(
             detail="No se puede leer un remito contra el proveedor 'No identificado'.",
         )
 
+    # Rechazar por Content-Length ANTES de materializar el archivo en memoria
+    # (evita cargar un upload gigante en RAM solo para descartarlo después).
+    too_large = HTTPException(
+        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        detail="El archivo supera el tamaño máximo de 16 MB.",
+    )
+    if file.size is not None and file.size > MAX_FILE_SIZE_BYTES:
+        raise too_large
     content = await file.read()
-    if len(content) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="El archivo supera el tamaño máximo de 16 MB.",
-        )
+    if len(content) > MAX_FILE_SIZE_BYTES:  # fallback si no vino Content-Length
+        raise too_large
     filename = sanitize_filename(file.filename or "remito")
 
     extraction, usage = await extract_remito(
@@ -381,15 +386,11 @@ async def extract_receipt(
                 product_name=ln.product_name,
                 sku=ln.sku,
                 qty=ln.qty,
-                unit_price=Decimal(str(ln.unit_price)),
+                unit_price=ln.unit_price,
             )
             for ln in extraction.lines
         ],
-        shipping_cost=(
-            Decimal(str(extraction.shipping_cost))
-            if extraction.shipping_cost is not None
-            else None
-        ),
+        shipping_cost=extraction.shipping_cost,
         currency=extraction.currency,
         confidence=extraction.confidence,
         warnings=extraction.warnings,
