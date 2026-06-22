@@ -18,6 +18,8 @@ import { Select } from "@/components/ui/Select";
 import { Modal } from "@/components/ui/Modal";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 import { SmartTable, type SmartColumn } from "@/components/ui/SmartTable";
 import { useToastStore } from "@/stores/toastStore";
 import {
@@ -743,6 +745,7 @@ function CsvImportModal({
 }) {
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState<CsvParseResult | null>(null);
+  const toastAdd = useToastStore((s) => s.add);
 
   useEffect(() => {
     if (!isOpen) {
@@ -753,7 +756,12 @@ function CsvImportModal({
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      toastAdd(`El archivo debe ser menor a ${MAX_UPLOAD_MB} MB.`, "error");
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
@@ -788,6 +796,7 @@ function CsvImportModal({
           />
           <span className="text-xs text-vk-text-muted">o pegá el CSV abajo</span>
         </div>
+        <UploadSizeHint />
 
         <textarea
           value={raw}

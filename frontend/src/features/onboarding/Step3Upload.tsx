@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB, UPLOAD_SIZE_HINT } from "@/constants/upload";
 
 const ACCEPTED = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
 
@@ -11,9 +12,15 @@ interface Step3UploadProps {
 export function Step3Upload({ onNext }: Step3UploadProps) {
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function handleFile(f: File) {
+    if (f.size > MAX_UPLOAD_BYTES) {
+      setError(`El archivo debe ser menor a ${MAX_UPLOAD_MB} MB.`);
+      return;
+    }
+    setError(null);
     setFile(f);
   }
 
@@ -93,10 +100,16 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
                 elegí uno
               </span>
             </p>
-            <p className="mt-1 text-xs text-gray-400">Máx. 10 MB</p>
+            <p className="mt-1 text-xs font-medium text-gray-700">{UPLOAD_SIZE_HINT}</p>
           </div>
         )}
       </div>
+
+      {error && (
+        <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+          {error}
+        </p>
+      )}
 
       <input
         ref={inputRef}

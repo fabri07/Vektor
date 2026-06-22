@@ -9,9 +9,24 @@ from uuid import UUID
 from pydantic import BaseModel, Field, computed_field, field_serializer, field_validator
 from pydantic_core import PydanticCustomError
 
-# CUIL/CUIT argentino: ``XX-XXXXXXXX-X`` (guiones opcionales). No se rellena ni
-# se valida el dígito verificador — solo el formato; NULL/vacío se aceptan.
+# CUIL/CUIT argentino: ``XX-XXXXXXXX-X`` (guiones opcionales). Se valida el formato
+# Y el dígito verificador (módulo 11) — así no entra un CUIL bien formateado pero
+# inválido. NULL/vacío se aceptan (el campo es opcional a nivel API; la obligatoriedad
+# es del formulario manual).
 _CUIL_RE = re.compile(r"^\d{2}-?\d{8}-?\d$")
+# Pesos del cálculo del dígito verificador (sobre los primeros 10 dígitos).
+_CUIL_WEIGHTS = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+
+
+def _cuil_check_digit_ok(digits: str) -> bool:
+    """¿El 11º dígito de un CUIL/CUIT (ya sin guiones, 11 dígitos) es el correcto?"""
+    acc = sum(int(digits[i]) * _CUIL_WEIGHTS[i] for i in range(10))
+    verifier = 11 - (acc % 11)
+    if verifier == 11:
+        verifier = 0
+    elif verifier == 10:
+        verifier = 9
+    return verifier == int(digits[10])
 
 
 def _validate_cuil(value: str | None) -> str | None:
@@ -23,6 +38,10 @@ def _validate_cuil(value: str | None) -> str | None:
     if not _CUIL_RE.match(cleaned):
         raise PydanticCustomError(
             "cuil_format", "CUIL inválido: formato esperado XX-XXXXXXXX-X."
+        )
+    if not _cuil_check_digit_ok(cleaned.replace("-", "")):
+        raise PydanticCustomError(
+            "cuil_check_digit", "CUIL inválido: el dígito verificador no coincide."
         )
     return cleaned
 

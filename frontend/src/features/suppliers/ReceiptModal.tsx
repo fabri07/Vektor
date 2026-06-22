@@ -12,12 +12,14 @@ import {
   type ReceiptLinePayload,
   type SupplierResponse,
 } from "@/services/suppliers.service";
+import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 import { useToastStore } from "@/stores/toastStore";
 
 // Tipos que Vektor sabe leer para un remito (foto/PDF → IA; planilla → parser).
 const ALLOWED_RECEIPT_EXTENSIONS =
   ".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.webp,.heic,.heif";
-const MAX_RECEIPT_BYTES = 15 * 1024 * 1024; // 15 MB
+const MAX_RECEIPT_BYTES = MAX_UPLOAD_BYTES; // 16 MB (alineado con el backend)
 
 const CONFIDENCE_LABELS: Record<ReceiptExtraction["confidence"], string> = {
   HIGH: "Confianza alta",
@@ -123,7 +125,7 @@ export function ReceiptModal({
     e.target.value = "";
     if (!file) return;
     if (file.size > MAX_RECEIPT_BYTES) {
-      setError("El archivo supera el límite de 15 MB.");
+      setError(`El archivo supera el límite de ${MAX_UPLOAD_MB} MB.`);
       return;
     }
     setError(null);
@@ -226,6 +228,7 @@ export function ReceiptModal({
               <p className="text-xs text-vk-text-muted">
                 Lo leemos y te prellenamos las líneas. Después revisás y editás.
               </p>
+              <UploadSizeHint className="mt-1" />
             </div>
             <input
               ref={fileInputRef}

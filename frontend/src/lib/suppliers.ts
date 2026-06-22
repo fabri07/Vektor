@@ -20,9 +20,27 @@ export function paymentLabel(method: string): string {
   return PAYMENT_METHOD_LABELS[method] ?? method;
 }
 
-/** Valida el formato XX-XXXXXXXX-X (con o sin guiones). Suave: solo cuando hay valor. */
+// Pesos del dígito verificador del CUIL/CUIT (sobre los primeros 10 dígitos).
+const CUIL_WEIGHTS = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
+
+/**
+ * Valida un CUIL/CUIT argentino: formato XX-XXXXXXXX-X (guiones opcionales) Y el
+ * dígito verificador (módulo 11). Así detecta un CUIL bien formateado pero mal
+ * tipeado, no solo el formato. Suave: solo se llama cuando hay valor.
+ */
 export function isValidCuil(value: string): boolean {
-  return /^\d{2}-?\d{8}-?\d$/.test(value.trim());
+  const trimmed = value.trim();
+  if (!/^\d{2}-?\d{8}-?\d$/.test(trimmed)) return false;
+  const nums = trimmed.replace(/-/g, "").split("").map(Number);
+  if (nums.length !== 11) return false;
+  let acc = 0;
+  for (let i = 0; i < 10; i++) {
+    acc += (nums[i] ?? 0) * (CUIL_WEIGHTS[i] ?? 0);
+  }
+  let verifier = 11 - (acc % 11);
+  if (verifier === 11) verifier = 0;
+  else if (verifier === 10) verifier = 9;
+  return verifier === (nums[10] ?? -1);
 }
 
 /**

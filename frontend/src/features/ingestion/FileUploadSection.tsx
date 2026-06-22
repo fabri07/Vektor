@@ -7,6 +7,8 @@ import {
   ingestionService,
   type FilePreview,
 } from "@/services/ingestion.service";
+import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 
 const ACCEPTED_EXTENSIONS = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
 const MAX_POLLS = 30;
@@ -181,6 +183,10 @@ export function FileUploadSection() {
   }
 
   function handleFileSelect(file: File) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError(`El archivo debe ser menor a ${MAX_UPLOAD_MB} MB.`);
+      return;
+    }
     setSelectedFile(file);
     setError(null);
   }
@@ -267,8 +273,9 @@ export function FileUploadSection() {
                 <span className="text-vk-blue">hacé click para buscar</span>
               </p>
               <p className="mt-1 text-xs text-vk-text-muted">
-                xlsx, csv, txt, docx, jpg, png — máx. 10 MB
+                xlsx, csv, txt, docx, jpg, png
               </p>
+              <UploadSizeHint className="mt-1" />
             </>
           )}
         </div>

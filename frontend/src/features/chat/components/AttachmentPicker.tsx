@@ -3,6 +3,8 @@
 import { useRef } from "react";
 import { Paperclip, X, Loader2, RefreshCw } from "lucide-react";
 import { filesService } from "@/services/files.service";
+import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 
 const ALLOWED_TYPES = [
   "application/pdf",
@@ -16,7 +18,7 @@ const ALLOWED_TYPES = [
 ];
 const ALLOWED_EXTENSIONS = ".pdf,.xlsx,.csv,.txt,.docx,.pptx,.png,.jpg,.jpeg";
 const MAX_FILES = 3;
-const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_BYTES = MAX_UPLOAD_BYTES; // 16 MB (alineado con el backend)
 const ALLOWED_EXT_SET = new Set([
   "pdf",
   "xlsx",
@@ -133,6 +135,7 @@ export function AttachmentPicker({
           ))}
         </div>
       )}
+      {attachments.length > 0 && <UploadSizeHint className="mb-2" />}
 
       {/* Hidden file input */}
       <input
@@ -152,7 +155,11 @@ export function AttachmentPicker({
         disabled={disabled || attachments.length >= MAX_FILES}
         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-vk-border-w text-vk-text-muted hover:bg-vk-bg-light hover:text-vk-text-secondary disabled:opacity-40 transition-colors"
         aria-label="Adjuntar archivo"
-        title={attachments.length >= MAX_FILES ? "Máximo 3 archivos" : "Adjuntar archivo"}
+        title={
+          attachments.length >= MAX_FILES
+            ? "Máximo 3 archivos"
+            : `Adjuntar archivo (máx. ${MAX_UPLOAD_MB} MB)`
+        }
       >
         <Paperclip className="h-4 w-4" />
       </button>

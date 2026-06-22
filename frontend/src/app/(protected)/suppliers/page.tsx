@@ -20,6 +20,7 @@ import {
 import {
   PAYMENT_METHOD_OPTIONS,
   isValidCuil,
+  paymentLabel,
 } from "@/lib/suppliers";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
@@ -27,7 +28,7 @@ import { useToastStore } from "@/stores/toastStore";
 const COLUMNS = [
   {
     key: "name",
-    header: "Nombre",
+    header: "Nombre / Razón social",
     hideable: true,
     render: (v: unknown, row: Record<string, unknown>) => (
       <Link
@@ -38,6 +39,13 @@ const COLUMNS = [
       </Link>
     ),
     csvValue: (v: unknown) => String(v ?? ""),
+  },
+  {
+    key: "last_name",
+    header: "Apellido",
+    hideable: true,
+    render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
     key: "email",
@@ -52,6 +60,26 @@ const COLUMNS = [
     hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
     csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
+    key: "cuil",
+    header: "CUIL",
+    hideable: true,
+    render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
+    key: "payment_method",
+    header: "Forma de pago",
+    hideable: true,
+    render: (v: unknown) => {
+      const s = String(v ?? "").trim();
+      return s ? paymentLabel(s) : "—";
+    },
+    csvValue: (v: unknown) => {
+      const s = String(v ?? "").trim();
+      return s ? paymentLabel(s) : "";
+    },
   },
   {
     key: "_status",
@@ -247,35 +275,51 @@ function SupplierFormModal({
   onSave: (payload: CreateSupplierPayload) => void;
 }) {
   const [form, setForm] = useState<SupplierFormState>(() => toFormState(supplier));
-  const [nameError, setNameError] = useState<string | null>(null);
-  const [cuilError, setCuilError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // El sentinela "No identificado" es un placeholder (agrupa compras sin proveedor):
+  // no se le exigen los datos de contacto. Para cualquier otro proveedor son
+  // obligatorios — solo el apellido queda opcional.
+  const isSentinel =
+    !!supplier &&
+    (supplier.name === "No identificado" ||
+      supplier.custom_fields?._sentinel === true ||
+      supplier.custom_fields?._sentinel === "true");
 
   useEffect(() => {
     if (isOpen) {
       setForm(toFormState(supplier));
-      setNameError(null);
-      setCuilError(null);
+      setError(null);
     }
   }, [isOpen, supplier]);
 
   function set(key: keyof SupplierFormState) {
-    return (e: React.ChangeEvent<HTMLInputElement>) =>
+    return (e: React.ChangeEvent<HTMLInputElement>) => {
       setForm((prev) => ({ ...prev, [key]: e.target.value }));
+      if (error) setError(null);
+    };
   }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim()) {
-      setNameError("El nombre o razón social es requerido.");
+    const name = form.name.trim();
+    const cuil = form.cuil.trim();
+    if (!name) {
+      setError("El nombre o razón social es requerido.");
       return;
     }
-    const cuil = form.cuil.trim();
+    if (!isSentinel) {
+      if (!form.email.trim()) return setError("El email es requerido.");
+      if (!form.phone.trim()) return setError("El teléfono es requerido.");
+      if (!cuil) return setError("El CUIL es requerido.");
+      if (!form.payment_method) return setError("La forma de pago es requerida.");
+    }
     if (cuil && !isValidCuil(cuil)) {
-      setCuilError("Formato de CUIL inválido (ej: 20-12345678-9).");
+      setError("CUIL inválido: revisá el número (dígito verificador no coincide).");
       return;
     }
     onSave({
-      name: form.name.trim(),
+      name,
       last_name: form.last_name.trim() || null,
       cuil: cuil || null,
       payment_method: form.payment_method || null,
@@ -288,17 +332,23 @@ function SupplierFormModal({
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="lg">
       <form className="space-y-4" onSubmit={handleSubmit}>
+        {error && (
+          <p className="rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-sm text-vk-danger">
+            {error}
+          </p>
+        )}
+        {!isSentinel && (
+          <p className="text-xs text-vk-text-secondary">
+            Los campos sin “(opcional)” son obligatorios.
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-4">
           <Input
             label="Nombre / Razón social"
             type="text"
             placeholder="Ej: Distribuidora del Sur"
             value={form.name}
-            onChange={(e) => {
-              set("name")(e);
-              if (nameError) setNameError(null);
-            }}
-            error={nameError ?? undefined}
+            onChange={set("name")}
           />
           <Input
             label="Apellido (opcional)"
@@ -310,36 +360,33 @@ function SupplierFormModal({
         </div>
         <div className="grid grid-cols-2 gap-4">
           <Input
-            label="CUIL / CUIT (opcional)"
+            label="CUIL / CUIT"
             type="text"
-            placeholder="20-12345678-9"
+            placeholder="20-12345678-6"
             value={form.cuil}
-            onChange={(e) => {
-              set("cuil")(e);
-              if (cuilError) setCuilError(null);
-            }}
-            error={cuilError ?? undefined}
+            onChange={set("cuil")}
           />
           <Select
-            label="Forma de pago (opcional)"
-            placeholder="Sin especificar"
+            label="Forma de pago"
+            placeholder="Elegí una opción"
             options={PAYMENT_METHOD_OPTIONS}
             value={form.payment_method}
-            onChange={(value) =>
-              setForm((prev) => ({ ...prev, payment_method: value }))
-            }
+            onChange={(value) => {
+              setForm((prev) => ({ ...prev, payment_method: value }));
+              if (error) setError(null);
+            }}
           />
         </div>
         <div className="grid grid-cols-2 gap-4">
           <Input
-            label="Email (opcional)"
+            label="Email"
             type="email"
             placeholder="proveedor@email.com"
             value={form.email}
             onChange={set("email")}
           />
           <Input
-            label="Teléfono (opcional)"
+            label="Teléfono"
             type="text"
             placeholder="+54 9 11 1234-5678"
             value={form.phone}

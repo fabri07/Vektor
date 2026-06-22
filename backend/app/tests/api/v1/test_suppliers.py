@@ -254,7 +254,7 @@ class TestSupplierFiscalFields:
             json={
                 "name": "Juan",
                 "last_name": "Pérez",
-                "cuil": "20-12345678-9",
+                "cuil": "20-12345678-6",
                 "payment_method": "transfer",
             },
             headers=auth_headers,
@@ -262,7 +262,7 @@ class TestSupplierFiscalFields:
         assert resp.status_code == 201
         body = resp.json()
         assert body["last_name"] == "Pérez"
-        assert body["cuil"] == "20-12345678-9"
+        assert body["cuil"] == "20-12345678-6"
         assert body["payment_method"] == "transfer"
 
     async def test_invalid_cuil_rejected(
@@ -271,6 +271,17 @@ class TestSupplierFiscalFields:
         resp = await client.post(
             "/api/v1/suppliers",
             json={"name": "Empresa SA", "cuil": "no-es-un-cuil"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_cuil_bad_check_digit_rejected(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        # Formato válido pero dígito verificador incorrecto (el correcto es 6).
+        resp = await client.post(
+            "/api/v1/suppliers",
+            json={"name": "Empresa SA", "cuil": "20-12345678-9"},
             headers=auth_headers,
         )
         assert resp.status_code == 422
