@@ -108,16 +108,26 @@ async def _load_supplier_index(
     """
     from sqlalchemy import select  # noqa: PLC0415
 
-    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+    from app.persistence.models.supplier import (  # noqa: PLC0415
+        SENTINEL_FLAG_KEY,
+        Supplier,
+        is_sentinel_value,
+    )
 
     result = await session.execute(
-        select(Supplier.id, Supplier.name).where(
+        select(Supplier.id, Supplier.name, Supplier.custom_fields).where(
             Supplier.tenant_id == tenant_id,
             Supplier.deactivated_at.is_(None),
         )
     )
     index: dict[str, uuid.UUID] = {}
-    for sid, sname in result.all():
+    for sid, sname, cfields in result.all():
+        # El sentinela se cachea bajo su key dedicada (no por nombre): se resuelve
+        # por flag, no por texto, y no debe matchear find-or-create por nombre.
+        # ``is_sentinel_value`` acepta string "true" o booleano JSON (fuente única).
+        if cfields and is_sentinel_value(cfields.get(SENTINEL_FLAG_KEY)):
+            index.setdefault(_SENTINEL_INDEX_KEY, sid)
+            continue
         norm = _normalize_supplier_name(sname or "")
         if norm and norm not in index:
             index[norm] = sid
@@ -163,6 +173,110 @@ async def _resolve_or_create_supplier(
     # caller persiste Supplier y ExpenseEntry juntos (orden por FK).
     supplier_index[norm] = new_id
     return new_id, clean
+
+
+# ── Sentinela "No identificado" (invariante: UNO por tenant) ──────────────────
+# Compras de mercadería SIN proveedor informado se agrupan en un único proveedor
+# sentinela por tenant ("No identificado"). Se distingue de los reales por el flag
+# ``custom_fields["_sentinel"] == "true"`` y un índice único parcial en la DB
+# garantiza el invariante. NO se aplica a OPEX (gastos operativos) sin proveedor:
+# solo a compras de mercadería (fila con product_id, ``_is_merch_purchase``).
+_SENTINEL_SUPPLIER_NAME = "No identificado"
+# Key cacheada en supplier_index para el sentinela (el nombre podría editarse,
+# pero el flag es el identificador canónico).
+_SENTINEL_INDEX_KEY = "__sentinel__"
+
+
+async def _resolve_or_create_sentinel_supplier(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    supplier_index: dict[str, uuid.UUID],
+) -> uuid.UUID:
+    """Find-or-create del proveedor sentinela "No identificado" del tenant.
+
+    Busca por ``custom_fields["_sentinel"] == "true"`` (no solo por nombre: el
+    usuario puede renombrarlo al completarlo, pero mientras tenga el flag sigue
+    siendo el sentinela). Cachea el id en ``supplier_index`` bajo
+    ``_SENTINEL_INDEX_KEY`` para que filas posteriores del mismo import lo reusen
+    sin re-query. Maneja la concurrencia: si dos imports crean el sentinela a la
+    vez, el índice único parcial dispara ``IntegrityError`` → re-query.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    cached = supplier_index.get(_SENTINEL_INDEX_KEY)
+    if cached is not None:
+        return cached
+
+    async def _find() -> uuid.UUID | None:
+        # ``.as_string()`` es cross-dialect (PG + SQLite de tests); ``.astext`` es
+        # solo de PostgreSQL y rompe en SQLite.
+        result = await session.execute(
+            select(Supplier.id).where(
+                Supplier.tenant_id == tenant_id,
+                Supplier.deactivated_at.is_(None),
+                Supplier.custom_fields["_sentinel"].as_string() == "true",
+            )
+        )
+        return result.scalars().first()
+
+    found = await _find()
+    if found is not None:
+        supplier_index[_SENTINEL_INDEX_KEY] = found
+        return found
+
+    new_id = uuid.uuid4()
+    sentinel = Supplier(
+        id=new_id,
+        tenant_id=tenant_id,
+        name=_SENTINEL_SUPPLIER_NAME,
+        custom_fields={"_sentinel": "true"},
+    )
+    session.add(sentinel)
+    try:
+        # Flush para materializar el INSERT y disparar el índice único parcial
+        # ahora (no en el commit del caller): si otra corrida ya lo creó, lo
+        # detectamos acá y re-queryamos en vez de abortar todo el import.
+        async with session.begin_nested():
+            await session.flush()
+    except IntegrityError:
+        existing = await _find()
+        if existing is None:  # pragma: no cover — el índice garantiza que exista
+            raise
+        supplier_index[_SENTINEL_INDEX_KEY] = existing
+        return existing
+    supplier_index[_SENTINEL_INDEX_KEY] = new_id
+    return new_id
+
+
+def _audit_supplier_decision(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    decision_type: str,
+    data: dict[str, Any],
+) -> None:
+    """Traza granular (agregada, no por fila) de las decisiones de proveedor del
+    import: ``SUPPLIER_CREATED_FROM_PURCHASE`` / ``SUPPLIER_SENTINEL_CREATED`` /
+    ``SUPPLIER_SKIPPED_FROM_CATALOG``. Insert-only, sin commit (entra en el batch
+    del import). ``actor_user_id`` queda ``None``: el servicio no recibe el user.
+    """
+    from datetime import UTC  # noqa: PLC0415
+
+    from app.persistence.models.audit import DecisionAuditLog  # noqa: PLC0415
+
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant_id,
+            decision_type=decision_type,
+            decision_data={"record_type": "supplier", **data},
+            triggered_by="ingestion:import",
+            context={"source": "ingestion_import_service"},
+            created_at=datetime.now(UTC),
+        )
+    )
 
 
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
@@ -527,6 +641,7 @@ async def _record_stock_movement(
     movement_type: str,
     final_qty: int,
     balance_index: dict[uuid.UUID, Any] | None = None,
+    supplier_id: uuid.UUID | None = None,
 ) -> None:
     """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
     `InventoryBalance` por el import, dentro de la misma transacción.
@@ -556,6 +671,7 @@ async def _record_stock_movement(
         InventoryMovement(
             tenant_id=tenant_id,
             product_id=product_id,
+            supplier_id=supplier_id,
             movement_type=movement_type,
             qty=qty,
             unit_cost=unit_cost,
@@ -749,6 +865,9 @@ async def _apply_purchase_to_stock(
         "purchase",
         product.stock_units,
         balance_index=balance_index,
+        # FASE 3: el movimiento de compra hereda el proveedor del gasto (real o
+        # sentinela "No identificado"); NULL si la compra no traía proveedor.
+        supplier_id=getattr(expense, "supplier_id", None),
     )
 
 
@@ -1242,15 +1361,14 @@ async def insert_confirmed_data(
             if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
             else ({}, {}, {})
         )
-        # Mejora A: índice de proveedores para find-or-create. Una sola carga;
-        # vacío si no hay columna de proveedor/tienda o no se importan
-        # gastos/productos. En catálogos de productos (caso ASTERIA) la columna
-        # "Tienda" puebla la sección Proveedores: se CREA el Supplier (los
-        # productos no llevan supplier_id, así que no se vincula nada).
+        # Índice de proveedores para find-or-create en COMPRAS. Una sola carga;
+        # vacío salvo en el path de compras (gastos con columna de proveedor) o
+        # cuando hay que asignar el sentinela a compras de mercadería sin proveedor.
+        # NO se materializa en el path de catálogo de productos: una marca/tienda
+        # de un catálogo es atributo del producto (``custom_fields["marca"]``), no
+        # un proveedor — el bug era crear Supplier desde ahí.
         _supplier_index: dict[str, uuid.UUID] = (
-            await _load_supplier_index(session, tenant_id)
-            if (wants_gastos or wants_productos) and supplier_col
-            else {}
+            await _load_supplier_index(session, tenant_id) if wants_gastos else {}
         )
         # FASE E: vertical del tenant para normalizar categorías de producto.
         # También para gastos: una categoría que matchea el catálogo de productos
@@ -1267,6 +1385,10 @@ async def insert_confirmed_data(
             if (wants_productos or wants_gastos)
             else None
         )
+        # Traza agregada de decisiones de proveedor (Fase 1): proveedores reales
+        # resueltos desde compras y si se usó el sentinela "No identificado".
+        _real_suppliers: set[str] = set()
+        _sentinel_used = False
 
         for row_index, row in enumerate(rows):
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
@@ -1418,7 +1540,7 @@ async def insert_confirmed_data(
                     )
                     if cf:
                         expense.custom_fields = cf
-                    # Mejora A: capturar proveedor (find-or-create) si la fila lo trae.
+                    # Capturar proveedor real (find-or-create) si la fila lo trae.
                     if supplier_col:
                         (
                             expense.supplier_id,
@@ -1429,6 +1551,8 @@ async def insert_confirmed_data(
                             row.get(supplier_col),
                             _supplier_index,
                         )
+                        if expense.supplier_name:
+                            _real_suppliers.add(expense.supplier_name)
                     # FASE 3 (B1): vincular el gasto al producto del catálogo.
                     expense.product_id = _resolve_product(
                         _by_sku,
@@ -1487,6 +1611,14 @@ async def insert_confirmed_data(
                     expense.expense_type = infer_expense_type(
                         cat_code, product_id=expense.product_id
                     )
+                    # Sentinela: una compra de mercadería (tiene product_id) SIN
+                    # proveedor informado se agrupa en "No identificado" — UNO por
+                    # tenant. NO se aplica a OPEX (gastos operativos sin producto).
+                    if expense.supplier_id is None and expense.product_id is not None:
+                        expense.supplier_id = await _resolve_or_create_sentinel_supplier(
+                            session, tenant_id, _supplier_index
+                        )
+                        _sentinel_used = True
                     await _apply_purchase_to_stock(
                         session,
                         tenant_id,
@@ -1513,21 +1645,38 @@ async def insert_confirmed_data(
                     session, tenant_id, _row_anchor, seen_fp
                 )
 
+        # Traza agregada de las decisiones de proveedor del path de compras.
+        if _real_suppliers:
+            _audit_supplier_decision(
+                session,
+                tenant_id,
+                decision_type="SUPPLIER_CREATED_FROM_PURCHASE",
+                data={"suppliers": sorted(_real_suppliers), "count": len(_real_suppliers)},
+            )
+        if _sentinel_used:
+            _audit_supplier_decision(
+                session,
+                tenant_id,
+                decision_type="SUPPLIER_SENTINEL_CREATED",
+                data={"name": _SENTINEL_SUPPLIER_NAME},
+            )
+
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
+            _skipped_brands: set[str] = set()
             for _prod_index, row in enumerate(rows):
                 name = str(row.get(nombre_col, "")).strip()[:299]
                 if not name or name.lower() in {"none", "nan", ""}:
                     continue
-                # Captura de proveedor desde catálogo (columna "Tienda"): se CREA
-                # el Supplier (find-or-create dedup) para poblar la sección
-                # Proveedores. Los productos no llevan supplier_id → no se vincula;
-                # se guarda el nombre en custom_fields como referencia.
-                store_name: str | None = None
-                if supplier_col:
-                    _, store_name = await _resolve_or_create_supplier(
-                        session, tenant_id, row.get(supplier_col), _supplier_index
-                    )
+                # La columna "Tienda"/"proveedor" de un CATÁLOGO es marca/origen del
+                # artículo, NO un proveedor: se guarda como atributo del producto en
+                # ``custom_fields["marca"]``. Antes se creaba un Supplier por cada
+                # marca (BIC, Tulipán, "importado"...) ensuciando Proveedores. Ya NO.
+                store_name: str | None = (
+                    _clean_str(row.get(supplier_col), 300) if supplier_col else None
+                )
+                if store_name:
+                    _skipped_brands.add(store_name)
                 # Mejora D: ref de fila origen para el producto creado (no para el
                 # update de uno existente — ese conserva su ref original).
                 _prod_row_ref = (
@@ -1642,7 +1791,7 @@ async def insert_confirmed_data(
                     if prod_cat_label:
                         cf_product = {**cf_product, "category_label": prod_cat_label}
                     if store_name:
-                        cf_product = {**cf_product, "proveedor": store_name}
+                        cf_product = {**cf_product, "marca": store_name}
                     new_product = Product(
                         id=new_product_id,
                         tenant_id=tenant_id,
@@ -1687,6 +1836,19 @@ async def insert_confirmed_data(
                             }
                         )
                 counts["productos"] += 1
+
+            # Traza agregada: marcas de catálogo que ANTES se creaban como Supplier
+            # y ahora son atributo del producto (no se creó ningún Supplier).
+            if _skipped_brands:
+                _audit_supplier_decision(
+                    session,
+                    tenant_id,
+                    decision_type="SUPPLIER_SKIPPED_FROM_CATALOG",
+                    data={
+                        "skipped_brands": sorted(_skipped_brands),
+                        "count": len(_skipped_brands),
+                    },
+                )
 
         # FASE F: filas ambiguas (otros_detectados) que el usuario NO reasignó a
         # ningún tipo importable → bandeja "Otros" en vez de descartarse.
@@ -1866,12 +2028,17 @@ async def _insert_multisheet_data(
 
     # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
     _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
-    # Mejora A: índice de proveedores para find-or-create en gastos (una carga).
+    # Índice de proveedores para find-or-create en compras (una carga).
     _supplier_index = await _load_supplier_index(session, tenant_id)
     # FASE E: vertical del tenant para normalizar categorías de producto.
     _business_type = await _load_business_type(session, tenant_id)
     # Batch: balances en una query (evita un SELECT por fila en movimientos).
     _balance_index = await _load_balance_index(session, tenant_id)
+    # Traza agregada de decisiones de proveedor (Fase 1): reales desde compras,
+    # marcas omitidas de catálogos, y uso del sentinela "No identificado".
+    _real_suppliers: set[str] = set()
+    _skipped_brands: set[str] = set()
+    _sentinel_used = False
 
     def _val(row: dict[str, Any], col: str | None, keywords: set[str] | tuple[str, ...]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
@@ -1996,7 +2163,7 @@ async def _insert_multisheet_data(
             cf = {**cf, "category_label": cat_label}
         if cf:
             expense.custom_fields = cf
-        # Mejora A: capturar proveedor (find-or-create) si la fila/mapeo lo trae.
+        # Capturar proveedor real (find-or-create) si la fila/mapeo lo trae.
         _supplier_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
         if _supplier_raw is not None:
             (
@@ -2005,6 +2172,8 @@ async def _insert_multisheet_data(
             ) = await _resolve_or_create_supplier(
                 session, tenant_id, _supplier_raw, _supplier_index
             )
+            if expense.supplier_name:
+                _real_suppliers.add(expense.supplier_name)
         # FASE 3 (B1): vincular el gasto al producto del catálogo (compra de mercadería).
         expense.product_id = _resolve_product(
             _by_sku,
@@ -2053,6 +2222,14 @@ async def _insert_multisheet_data(
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
+        # Sentinela: compra de mercadería (con product_id) SIN proveedor informado
+        # → "No identificado" (UNO por tenant). No aplica a OPEX sin producto.
+        if expense.supplier_id is None and expense.product_id is not None:
+            nonlocal _sentinel_used
+            expense.supplier_id = await _resolve_or_create_sentinel_supplier(
+                session, tenant_id, _supplier_index
+            )
+            _sentinel_used = True
         await _apply_purchase_to_stock(
             session,
             tenant_id,
@@ -2078,16 +2255,14 @@ async def _insert_multisheet_data(
         name = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 299)
         if not name:
             return
-        # Captura de proveedor desde catálogo (columna "Tienda"): se CREA el
-        # Supplier (find-or-create dedup) para poblar la sección Proveedores. Los
-        # productos no llevan supplier_id → no se vincula; se guarda el nombre en
-        # custom_fields como referencia.
-        store_name: str | None = None
-        _supplier_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
-        if _supplier_raw is not None:
-            _, store_name = await _resolve_or_create_supplier(
-                session, tenant_id, _supplier_raw, _supplier_index
-            )
+        # La columna "Tienda"/"proveedor" de un CATÁLOGO es marca/origen del
+        # artículo, NO un proveedor: se guarda como atributo del producto en
+        # ``custom_fields["marca"]``. NO se crea Supplier desde un catálogo.
+        store_name: str | None = _clean_str(
+            _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS), 300
+        )
+        if store_name:
+            _skipped_brands.add(store_name)
         # Mejora C: costo unitario narrow-first. Se resuelve ANTES que el precio
         # para poder excluirlo (desambiguar "precio de compra" vs "precio de
         # venta"). Mapeo explícito gana; si no, una columna inequívoca de costo
@@ -2172,7 +2347,7 @@ async def _insert_multisheet_data(
             if cat_label:
                 cf = {**cf, "category_label": cat_label}
             if store_name:
-                cf = {**cf, "proveedor": store_name}
+                cf = {**cf, "marca": store_name}
             _new_id = uuid.uuid4()
             session.add(
                 Product(
@@ -2340,6 +2515,29 @@ async def _insert_multisheet_data(
                 )
                 await _add_product(row, {}, {}, _p_ref)
 
+    # Traza agregada (Fase 1) de las decisiones de proveedor del multi-hoja.
+    if _real_suppliers:
+        _audit_supplier_decision(
+            session,
+            tenant_id,
+            decision_type="SUPPLIER_CREATED_FROM_PURCHASE",
+            data={"suppliers": sorted(_real_suppliers), "count": len(_real_suppliers)},
+        )
+    if _sentinel_used:
+        _audit_supplier_decision(
+            session,
+            tenant_id,
+            decision_type="SUPPLIER_SENTINEL_CREATED",
+            data={"name": _SENTINEL_SUPPLIER_NAME},
+        )
+    if _skipped_brands:
+        _audit_supplier_decision(
+            session,
+            tenant_id,
+            decision_type="SUPPLIER_SKIPPED_FROM_CATALOG",
+            data={"skipped_brands": sorted(_skipped_brands), "count": len(_skipped_brands)},
+        )
+
     await session.flush()
     if return_details:
         counts["product_details"] = product_details
@@ -2485,4 +2683,125 @@ def default_confirmed_fields(summary: dict[str, Any]) -> dict[str, bool]:
         "ventas": bool(summary.get("ventas_detectadas")) or inferred == "ventas",
         "gastos": bool(summary.get("gastos_detectados")) or inferred == "gastos",
         "productos": bool(summary.get("stock_detectado")) or inferred == "stock",
+    }
+
+
+# ── FASE 4: remito (recepción de mercadería) ──────────────────────────────────
+
+
+class ReceiptLine:
+    """Una línea de remito ya validada (producto + cantidad + costo unitario)."""
+
+    __slots__ = ("product_name", "sku", "qty", "unit_price")
+
+    def __init__(
+        self, product_name: str, sku: str | None, qty: int, unit_price: Decimal
+    ) -> None:
+        self.product_name = product_name
+        self.sku = sku
+        self.qty = qty
+        self.unit_price = unit_price
+
+
+async def import_receipt(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    supplier_id: uuid.UUID,
+    lines: list[ReceiptLine],
+    *,
+    shipping_cost: Decimal | None = None,
+    transaction_date: datetime | None = None,
+) -> dict[str, Any]:
+    """Registra un remito ya validado: por cada línea, producto (alta/stock) +
+    ``ExpenseEntry`` COGS; el envío → un ``ExpenseEntry`` OPEX ``LOGISTICS``.
+
+    El ``supplier_id`` ya está resuelto por el endpoint (proveedor REAL del path,
+    nunca sentinela — un remito siempre identifica proveedor). Reutiliza los
+    helpers del import (``_resolve_product``/``_ensure_product_for_purchase``,
+    ``_apply_purchase_to_stock``). Transacción única (el commit lo hace el caller);
+    fail-closed. Devuelve un summary de lo creado.
+    """
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+    tx_date = transaction_date or datetime.now()
+    by_sku, by_name, by_token = await _load_product_index(session, tenant_id)
+    balance_index = await _load_balance_index(session, tenant_id)
+    product_cache: dict[uuid.UUID, Any] = {}
+
+    created_product_ids: list[str] = []
+    expense_ids: list[str] = []
+    total_cogs = Decimal("0")
+
+    for line in lines:
+        # Resolver producto del catálogo; si no existe, crearlo incompleto.
+        product_id = _resolve_product(by_sku, by_name, line.product_name, line.sku, by_token)
+        if product_id is None:
+            product_id = _ensure_product_for_purchase(
+                session,
+                tenant_id,
+                line.product_name,
+                line.sku,
+                line.unit_price,
+                by_sku,
+                by_name,
+                by_token,
+                product_cache=product_cache,
+            )
+            if product_id is not None:
+                created_product_ids.append(str(product_id))
+        line_total = (line.unit_price * line.qty).quantize(Decimal("0.01"))
+        total_cogs += line_total
+        expense = ExpenseEntry(
+            tenant_id=tenant_id,
+            amount=line_total,
+            category="INVENTORY",
+            expense_type="COGS",
+            transaction_date=tx_date,
+            description=f"Remito: {line.product_name}"[:500],
+            is_recurring=False,
+            payment_method="transfer",
+            provenance="REAL",
+            supplier_id=supplier_id,
+            product_id=product_id,
+        )
+        session.add(expense)
+        await session.flush()  # materializar el id del gasto para el summary
+        expense_ids.append(str(expense.id))
+        # Suma stock + movimiento de inventario (hereda supplier_id del gasto).
+        await _apply_purchase_to_stock(
+            session,
+            tenant_id,
+            expense,
+            line.qty,
+            line.unit_price,
+            balance_index=balance_index,
+            product_cache=product_cache,
+        )
+
+    shipping_expense_id: str | None = None
+    if shipping_cost is not None and shipping_cost > 0:
+        # El envío es OPEX LOGISTICS: mismo proveedor, sin producto ni stock.
+        shipping = ExpenseEntry(
+            tenant_id=tenant_id,
+            amount=shipping_cost.quantize(Decimal("0.01")),
+            category="LOGISTICS",
+            expense_type="OPEX",
+            transaction_date=tx_date,
+            description="Remito: costo de envío"[:500],
+            is_recurring=False,
+            payment_method="transfer",
+            provenance="REAL",
+            supplier_id=supplier_id,
+            product_id=None,
+        )
+        session.add(shipping)
+        await session.flush()
+        shipping_expense_id = str(shipping.id)
+
+    return {
+        "lines": len(lines),
+        "products_created": created_product_ids,
+        "expense_ids": expense_ids,
+        "shipping_expense_id": shipping_expense_id,
+        "total_cogs_ars": str(total_cogs),
     }

@@ -163,17 +163,18 @@ async def test_deactivated_supplier_not_reused(
     assert expense.supplier_id != dead.id
 
 
-# ── Captura de proveedor desde CATÁLOGO de productos (columna "Tienda") ───────
-# Los productos NO llevan supplier_id: solo se CREA el Supplier para poblar la
-# sección Proveedores; el nombre de la tienda queda en custom_fields.
+# ── Marca/tienda desde CATÁLOGO de productos (columna "Tienda") ───────────────
+# Reforma Proveedores (Fase 1): una marca/tienda de un CATÁLOGO NO es un proveedor.
+# NO se crea ningún Supplier; el valor queda como atributo del producto en
+# ``custom_fields["marca"]``.
 
 
 @pytest.mark.asyncio
-async def test_catalog_tienda_creates_suppliers(
+async def test_catalog_tienda_creates_no_supplier_stores_brand(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Catálogo (inferred_type='stock') con columna 'Tienda' y 2 tiendas distintas
-    → se crean 2 Supplier; los productos se crean ok (sin supplier_id)."""
+    """Catálogo (inferred_type='stock') con columna 'Tienda' → 0 Supplier nuevos;
+    el valor se guarda en ``custom_fields["marca"]`` del producto."""
     summary = {
         "file_type": "spreadsheet",
         "inferred_type": "stock",
@@ -188,20 +189,21 @@ async def test_catalog_tienda_creates_suppliers(
     )
 
     suppliers = (await db_session.execute(select(Supplier))).scalars().all()
-    assert {s.name for s in suppliers} == {"Deco Norte", "Bazar Sur"}
+    assert suppliers == []  # una marca de catálogo NO crea Supplier
     products = (await db_session.execute(select(Product))).scalars().all()
     assert len(products) == 2
-    # Referencia de la tienda persistida en custom_fields (no hay supplier_id).
     by_name = {p.name: p for p in products}
-    assert by_name["Vela aromática"].custom_fields["proveedor"] == "Deco Norte"
-    assert by_name["Portarretrato"].custom_fields["proveedor"] == "Bazar Sur"
+    # La marca queda como atributo del producto (no como proveedor).
+    assert by_name["Vela aromática"].custom_fields["marca"] == "Deco Norte"
+    assert by_name["Portarretrato"].custom_fields["marca"] == "Bazar Sur"
+    assert "proveedor" not in (by_name["Vela aromática"].custom_fields or {})
 
 
 @pytest.mark.asyncio
-async def test_catalog_same_tienda_different_casing_dedups(
+async def test_catalog_tienda_never_creates_supplier_even_repeated(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """2 productos de la misma tienda (distinto casing) → 1 solo Supplier."""
+    """2 productos de la misma tienda (distinto casing) → sigue siendo 0 Supplier."""
     summary = {
         "file_type": "spreadsheet",
         "inferred_type": "stock",
@@ -216,7 +218,7 @@ async def test_catalog_same_tienda_different_casing_dedups(
     )
 
     suppliers = (await db_session.execute(select(Supplier))).scalars().all()
-    assert len(suppliers) == 1  # dedup por nombre normalizado
+    assert suppliers == []
     products = (await db_session.execute(select(Product))).scalars().all()
     assert len(products) == 2
 

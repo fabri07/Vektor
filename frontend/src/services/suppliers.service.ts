@@ -2,6 +2,9 @@ import { api } from "@/lib/api";
 
 export interface CreateSupplierPayload {
   name: string;
+  last_name?: string | null;
+  cuil?: string | null;
+  payment_method?: string | null;
   email?: string | null;
   phone?: string | null;
   notes?: string | null;
@@ -14,12 +17,37 @@ export interface SupplierResponse {
   id: string;
   tenant_id: string;
   name: string;
+  last_name: string | null;
+  cuil: string | null;
+  payment_method: string | null;
   email: string | null;
   phone: string | null;
   notes: string | null;
   custom_fields?: Record<string, unknown>;
   is_active: boolean;
   created_at: string;
+}
+
+export interface SupplierProductPurchase {
+  product_id: string;
+  name: string;
+  last_purchase_at: string | null;
+  total_qty: number;
+  unit_price: number;
+}
+
+export interface ReceiptLinePayload {
+  product_name: string;
+  sku?: string;
+  qty: number;
+  unit_price: number;
+}
+
+export interface UploadReceiptPayload {
+  lines: ReceiptLinePayload[];
+  shipping_cost?: number;
+  currency: "ARS";
+  transaction_date?: string;
 }
 
 export interface SuppliersListParams {
@@ -83,5 +111,23 @@ export const suppliersService = {
     }
 
     return items;
+  },
+
+  async getSupplierProducts(id: string): Promise<SupplierProductPurchase[]> {
+    const res = await api.get<SupplierProductPurchase[]>(`/suppliers/${id}/products`);
+    return res.data;
+  },
+
+  async uploadReceipt(
+    supplierId: string,
+    payload: UploadReceiptPayload,
+    idempotencyKey?: string,
+  ): Promise<unknown> {
+    const res = await api.post<unknown>(
+      `/suppliers/${supplierId}/receipts`,
+      payload,
+      idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : undefined,
+    );
+    return res.data;
   },
 };

@@ -54,6 +54,13 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         index=True,
     )
+    # FASE 3 (Proveedores): proveedor de una compra. NULL si no es compra o no se
+    # informó. SET NULL al borrar el proveedor: el movimiento histórico se conserva.
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("suppliers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # movement_type: sale | purchase | loss | adjustment | return
     movement_type: Mapped[str] = mapped_column(String(30), nullable=False)
     # positive = stock increase, negative = stock decrease
