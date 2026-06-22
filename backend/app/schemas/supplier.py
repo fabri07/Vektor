@@ -158,6 +158,43 @@ class ReceiptResponse(BaseModel):
     total_cogs_ars: Decimal
 
 
+class ReceiptExtractionLine(BaseModel):
+    """Una línea SUGERIDA por la extracción de remito (prellena el formulario).
+
+    A diferencia de ``ReceiptLineRequest`` (el alta), acá ``qty`` puede ser
+    fraccionario: es solo una sugerencia para revisar/editar. La validación dura
+    (entero, > 0) corre recién al confirmar por ``POST /suppliers/{id}/receipts``.
+    """
+
+    product_name: str
+    sku: str | None = None
+    qty: float
+    unit_price: Decimal
+
+    @field_serializer("unit_price")
+    def _serialize_unit_price(self, v: Decimal) -> float:
+        return float(v)
+
+
+class ReceiptExtractionResponse(BaseModel):
+    """Resultado de leer el archivo de un remito: líneas sugeridas + metadatos.
+
+    NO persiste nada: el alta la confirma el usuario. ``confidence``/``warnings``
+    guían la revisión. ``source_upload_id`` se setea si el archivo se guardó.
+    """
+
+    lines: list[ReceiptExtractionLine]
+    shipping_cost: Decimal | None = None
+    currency: str = "ARS"
+    confidence: str
+    warnings: list[str] = Field(default_factory=list)
+    source_upload_id: UUID | None = None
+
+    @field_serializer("shipping_cost")
+    def _serialize_shipping(self, v: Decimal | None) -> float | None:
+        return float(v) if v is not None else None
+
+
 class UpdateSupplierRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=300)
     last_name: str | None = Field(default=None, max_length=200)

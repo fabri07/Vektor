@@ -1,17 +1,34 @@
 """Supplier (proveedores) CRUD endpoints."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
+from app.application.agents.shared.schemas import LLMCall
+from app.application.services.file_parsing import (
+    MAX_FILE_SIZE_BYTES,
+    sanitize_filename,
+)
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.ingestion_import_service import (
     ReceiptLine,
     import_receipt,
 )
+from app.application.services.remito_extraction_service import extract_remito
+from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.supplier import Supplier
@@ -23,11 +40,15 @@ from app.schemas.common import MessageResponse
 from app.schemas.supplier import (
     CreateReceiptRequest,
     CreateSupplierRequest,
+    ReceiptExtractionLine,
+    ReceiptExtractionResponse,
     ReceiptResponse,
     SupplierProductPurchaseResponse,
     SupplierResponse,
     UpdateSupplierRequest,
 )
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -229,6 +250,150 @@ async def create_receipt(
             else None
         ),
         total_cogs_ars=summary["total_cogs_ars"],
+    )
+
+
+async def _persist_remito_upload(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    content: bytes,
+    filename: str,
+    content_type: str,
+) -> UUID | None:
+    """Guarda el archivo del remito (S3 + UploadedFile) para trazabilidad.
+
+    Fail-soft: si S3 o la persistencia fallan, devuelve None y la extracción sigue
+    (el alta final no depende de esto). No bloquea la lectura del remito.
+    """
+    from app.integrations.s3 import S3Client  # noqa: PLC0415
+    from app.persistence.models.file import (  # noqa: PLC0415
+        PROCESSING_STATUS_DONE,
+        UploadedFile,
+    )
+
+    try:
+        s3_key = await S3Client().upload(
+            content=content,
+            filename=filename,
+            content_type=content_type,
+            tenant_id=str(tenant_id),
+        )
+        record = UploadedFile(
+            tenant_id=tenant_id,
+            uploaded_by=user_id,
+            original_filename=filename,
+            s3_key=s3_key,
+            content_type=content_type,
+            size_bytes=len(content),
+            purpose="receipt",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        session.add(record)
+        await session.flush()
+        return record.id
+    except Exception as exc:  # noqa: BLE001 — trazabilidad best-effort
+        logger.warning("supplier_receipt.upload_persist_failed", error=str(exc))
+        return None
+
+
+@router.post(
+    "/{supplier_id}/receipts/extract",
+    response_model=ReceiptExtractionResponse,
+    summary="Extract receipt lines from an uploaded file (foto/PDF/planilla)",
+)
+async def extract_receipt(
+    supplier_id: UUID,
+    file: UploadFile = File(...),
+    user_hint: str | None = Query(default=None, max_length=500),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
+    session: AsyncSession = Depends(get_db_session),
+) -> ReceiptExtractionResponse:
+    """Lee el archivo de un remito y SUGIERE las líneas (producto/cantidad/precio).
+
+    NO persiste transacciones: el alta la confirma el usuario por
+    ``POST /suppliers/{id}/receipts``. Foto/PDF se leen con IA (transcripción, sin
+    cálculo); planillas XLSX/CSV se parsean determinísticamente. El archivo se guarda
+    (best-effort) para trazabilidad → ``source_upload_id``.
+    """
+    repo = SupplierRepository(session)
+    supplier = await repo.get_by_id(supplier_id, tenant.tenant_id)
+    if not supplier:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found.")
+    # Un remito identifica al proveedor: no contra el sentinela "No identificado".
+    if supplier.is_sentinel:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se puede leer un remito contra el proveedor 'No identificado'.",
+        )
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="El archivo supera el tamaño máximo de 16 MB.",
+        )
+    filename = sanitize_filename(file.filename or "remito")
+
+    extraction, usage = await extract_remito(
+        content,
+        filename,
+        content_type=file.content_type,
+        user_hint=user_hint,
+    )
+
+    # Trazabilidad de uso de IA (cuando hubo llamada al modelo). Se registra el
+    # LLMCall en el log estructurado (mismo patrón source/model/tokens del resto).
+    if usage is not None:
+        llm_call = LLMCall(
+            source="remito_extraction",
+            model="claude-sonnet-4-6",
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+        )
+        logger.info(
+            "supplier_receipt.extracted",
+            tenant_id=str(tenant.tenant_id),
+            lines=len(extraction.lines),
+            confidence=extraction.confidence,
+            source=llm_call.source,
+            model=llm_call.model,
+            input_tokens=llm_call.input_tokens,
+            output_tokens=llm_call.output_tokens,
+        )
+
+    # Guardar el archivo (best-effort) para trazabilidad import → archivo origen.
+    source_upload_id = await _persist_remito_upload(
+        session,
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        content=content,
+        filename=filename,
+        content_type=file.content_type or "application/octet-stream",
+    )
+
+    return ReceiptExtractionResponse(
+        lines=[
+            ReceiptExtractionLine(
+                product_name=ln.product_name,
+                sku=ln.sku,
+                qty=ln.qty,
+                unit_price=Decimal(str(ln.unit_price)),
+            )
+            for ln in extraction.lines
+        ],
+        shipping_cost=(
+            Decimal(str(extraction.shipping_cost))
+            if extraction.shipping_cost is not None
+            else None
+        ),
+        currency=extraction.currency,
+        confidence=extraction.confidence,
+        warnings=extraction.warnings,
+        source_upload_id=source_upload_id,
     )
 
 

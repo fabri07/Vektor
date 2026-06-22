@@ -48,6 +48,28 @@ export interface UploadReceiptPayload {
   shipping_cost?: number;
   currency: "ARS";
   transaction_date?: string;
+  source_upload_id?: string;
+}
+
+/** Línea extraída por IA/parser de un remito. Las cantidades/precios son sugerencias editables. */
+export interface ReceiptExtractionLine {
+  product_name: string;
+  sku: string | null;
+  qty: number;
+  unit_price: number;
+}
+
+/**
+ * Resultado de leer el archivo del remito. La IA (foto/PDF) o el parser
+ * (planilla) transcribe las líneas; el usuario las revisa antes de confirmar.
+ */
+export interface ReceiptExtraction {
+  lines: ReceiptExtractionLine[];
+  shipping_cost: number | null;
+  currency: "ARS";
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  warnings: string[];
+  source_upload_id: string | null;
 }
 
 export interface SuppliersListParams {
@@ -127,6 +149,17 @@ export const suppliersService = {
       `/suppliers/${supplierId}/receipts`,
       payload,
       idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : undefined,
+    );
+    return res.data;
+  },
+
+  async extractReceipt(supplierId: string, file: File): Promise<ReceiptExtraction> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await api.post<ReceiptExtraction>(
+      `/suppliers/${supplierId}/receipts/extract`,
+      formData,
+      { headers: { "Content-Type": "multipart/form-data" } },
     );
     return res.data;
   },
