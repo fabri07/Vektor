@@ -70,9 +70,12 @@ function CustomFieldEditableCell<T>({
 
   const commit = (raw: string) => {
     setEditing(false);
-    const next = coerce(raw, field.data_type);
-    if (next === (value ?? null)) return; // sin cambios
-    const merged = { ...readCustomFields(row), [field.field_key]: next };
+    // Comparar en formato-input (no coaccionado): evita falsos cambios cuando el
+    // valor persistido difiere de tipo/forma del input (date ISO vs YYYY-MM-DD,
+    // number-string en JSONB, boolean sin setear). Sin esto, mirar y blurear una
+    // celda dispararía un PATCH no-op (y, para boolean vacío, escribiría 'false').
+    if (raw === toInputValue(value, field.data_type)) return; // sin cambios reales
+    const merged = { ...readCustomFields(row), [field.field_key]: coerce(raw, field.data_type) };
     void onSave(row, merged);
   };
 
@@ -93,7 +96,9 @@ function CustomFieldEditableCell<T>({
           ref={inputRef as RefObject<HTMLSelectElement>}
           defaultValue={draft}
           className={common}
-          onBlur={(e) => commit(e.target.value)}
+          // El select commitea en onChange (selección inmediata); onBlur solo
+          // cierra para no disparar un segundo PATCH idéntico al perder el foco.
+          onBlur={() => setEditing(false)}
           onChange={(e) => commit(e.target.value)}
           onKeyDown={(e) => e.key === "Escape" && setEditing(false)}
         >

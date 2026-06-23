@@ -142,6 +142,10 @@ async def update_metric(
     if metric is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Metric not found.")
     updates = body.model_dump(exclude_unset=True)
+    # custom_fields es NOT NULL: un `null` explícito en el body se ignora (no se
+    # puede "borrar" la columna a NULL) en vez de romper el insert.
+    if updates.get("custom_fields") is None:
+        updates.pop("custom_fields", None)
     for field, value in updates.items():
         setattr(metric, field, value)
     saved = await repo.save(metric)

@@ -62,6 +62,22 @@ export function SmartTable<T extends object>({
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   const [page, setPage] = useState(0);
 
+  // Columnas que ya vimos: las nuevas (ej: una columna personalizada recién
+  // creada con defaultVisible:true) se agregan a visibleKeys sin pisar los
+  // toggles manuales del usuario sobre columnas ya conocidas.
+  const knownKeysRef = useRef<Set<string>>(new Set(columns.map((c) => c.key)));
+  const columnsSig = columns.map((c) => c.key).join("|");
+  useEffect(() => {
+    const fresh = columns.filter((c) => !knownKeysRef.current.has(c.key));
+    if (fresh.length === 0) return;
+    fresh.forEach((c) => knownKeysRef.current.add(c.key));
+    const toShow = fresh.filter((c) => c.defaultVisible !== false).map((c) => c.key);
+    if (toShow.length > 0) {
+      setVisibleKeys((prev) => new Set([...prev, ...toShow]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columnsSig]);
+
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
