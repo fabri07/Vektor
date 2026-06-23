@@ -48,17 +48,28 @@ _BUSINESS_REDIRECT_MSG = (
 )
 
 _SYSTEM_TEMPLATE = """\
-Sos el asistente de soporte de Véktor. Respondé SOLO preguntas sobre cómo
-usar la plataforma Véktor. Si la pregunta es sobre operaciones del negocio
-(cargar ventas, gastos, consultar stock, etc.), indicalo.
+Sos el asistente de soporte de Véktor. Tu trabajo es EXPLICAR cómo usar la
+plataforma: cómo cargar datos, cómo editar una columna, cómo leer el dashboard,
+qué significa cada cosa, dónde está cada función, etc.
+
+IMPORTANTE — distinguí preguntas de operaciones:
+- Una pregunta sobre CÓMO/QUÉ/DÓNDE/PARA QUÉ usar una función SIEMPRE es de
+  plataforma y la tenés que responder. Ejemplos: "¿cómo cargo una venta?",
+  "¿cómo agrego una columna?", "¿cómo veo mis gastos del mes?", "¿qué es el
+  score?". Aunque mencionen ventas/gastos/stock, son preguntas de ayuda → SÍ
+  las respondés (is_platform_question=true).
+- Solo es is_platform_question=false si el usuario REALMENTE quiere ejecutar una
+  operación de datos (ej: "vendí 5000", "registrá un gasto de 2000") o si la
+  pregunta no tiene nada que ver con usar Véktor.
 
 {doc_context}
 
-REGLAS ESTRICTAS:
-1. Respondé SOLO usando la información de la documentación provista.
-2. Si no encontrás la respuesta en la documentación → confidence="LOW", answer=null.
-3. NO inventés funcionalidades no documentadas.
-4. Si la pregunta es sobre operaciones del negocio → is_platform_question=false.
+REGLAS:
+1. Respondé en español rioplatense, claro y concreto, basándote en la
+   documentación provista. Podés reformular y combinar la info documentada.
+2. NO inventés funcionalidades que no estén en la documentación. Si la
+   documentación no cubre el tema, confidence="LOW" y answer=null.
+3. Para preguntas de cómo-usar-Véktor, is_platform_question=true.
 
 Retorná SOLO un JSON válido:
 {{
@@ -88,7 +99,7 @@ class AgentHelper(BaseAgent):
 
     async def find_answer(self, question: str) -> tuple[dict[str, Any], LLMCall]:
         """Busca respuesta usando el manual YAML + LLM."""
-        matches = search(question, max_results=3)
+        matches = search(question, max_results=5)
         doc_context = (
             format_faq_context(matches) if matches else "Sin documentación relevante encontrada."
         )
@@ -145,21 +156,11 @@ class AgentHelper(BaseAgent):
             module=result.get("related_module"),
         )
 
-        # El LLM también puede detectar pregunta de negocio
-        if not result.get("is_platform_question"):
-            return AgentResponse(
-                request_id=request.request_id,
-                agent_name=self.agent_name,
-                status="success",
-                risk_level=RiskLevel.LOW,
-                result={
-                    "summary": _BUSINESS_REDIRECT_MSG,
-                    "redirect_to": "main_chat",
-                },
-                usage=usage,
-            )
+        # NOTA: el redirect a chat principal lo decide la heurística determinística
+        # de arriba (is_business_data_question), no el LLM. Una pregunta de cómo-usar
+        # ("¿cómo cargo una venta?") NO debe redirigir aunque mencione una operación.
 
-        # confidence LOW o sin respuesta → fallback
+        # confidence LOW o sin respuesta → fallback (no redirige)
         if result.get("confidence") == "LOW" or not result.get("answer"):
             return AgentResponse(
                 request_id=request.request_id,

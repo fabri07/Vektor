@@ -1,189 +1,576 @@
-version: "1.0"
-last_updated: "2026-05-27"
+version: "2.0"
+last_updated: "2026-06-23"
+
+# Manual de usuario de Véktor — base de conocimiento del chat de Ayuda (AgentHelper).
+# Organizado por sección. Cada módulo tiene FAQs (q = pregunta, a = respuesta).
+# Las respuestas describen SOLO funcionalidad real de la plataforma; el agente no
+# debe inventar features que no estén acá.
 
 modules:
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Primeros pasos
+    slug: primeros-pasos
+    description: >
+      Qué es Véktor, cómo está organizado y cómo empezar a usarlo.
+    faq:
+      - q: ¿Qué es Véktor?
+        a: >
+          Véktor es una plataforma de salud financiera para tu PYME. Te ayuda a
+          registrar ventas, gastos, productos, clientes y proveedores, y a partir
+          de eso calcula un score de salud financiera, muestra alertas y proyecta
+          tu caja. No es un sistema contable ni reemplaza a tu contador: es una
+          herramienta de gestión y diagnóstico.
+      - q: ¿Por dónde empiezo?
+        a: >
+          Lo más rápido es cargar tus datos. Tenés tres caminos: (1) escribir en
+          el chat lo que pasó ("vendí 5000", "pagué el alquiler 80000"); (2) subir
+          un archivo Excel/CSV o una foto de un comprobante en "Cargar datos"; o
+          (3) cargar a mano desde cada sección (Ventas, Gastos, Productos, etc.).
+          Con unos días de datos ya empezás a ver tu score y tus gráficos.
+      - q: ¿Cómo está organizado Véktor? ¿Qué secciones hay?
+        a: >
+          En el menú lateral tenés: Dashboard (resumen y score), Ventas, Gastos,
+          Productos, Clientes, Proveedores, Marketing, Otros (registros sin
+          clasificar), Cargar datos (subir archivos), Aplicaciones (Google) y, abajo,
+          Configuración. El Chat es la pantalla principal donde hablás con el
+          asistente.
+      - q: ¿Necesito saber de contabilidad para usar Véktor?
+        a: >
+          No. Hablás en español común y Véktor traduce eso a registros. Entiende
+          modismos ("merca", "guita", "fiado", "remarcar"). No te pide asientos
+          contables ni balances: solo lo que vendiste, gastaste y tenés en stock.
+      - q: ¿Qué es el chat de Ayuda y en qué se diferencia del chat principal?
+        a: >
+          Este chat (Ayuda) te explica CÓMO usar Véktor: dónde está cada cosa, cómo
+          cargar datos, cómo leer el dashboard. El chat principal es para OPERAR:
+          ahí cargás ventas y gastos, consultás el estado del negocio, etc. Si acá
+          escribís una operación real ("vendí 5000"), te vamos a sugerir usar el
+          chat principal.
+
+  # ───────────────────────────────────────────────────────────────────────────
   - name: Chat
     slug: chat
     description: >
-      La interfaz principal de Véktor. Usás lenguaje natural para cargar ventas,
-      gastos, consultar el estado del negocio e importar archivos.
+      La pantalla principal. Hablás en lenguaje natural para cargar y consultar
+      datos del negocio.
     faq:
-      - q: ¿Cómo cargo una venta?
+      - q: ¿Cómo cargo una venta desde el chat?
         a: >
-          Escribí en el chat: "vendí X pesos", "vendí 3 gaseosas a $500 c/u",
-          o "vendí [cantidad] [producto] a $X". El sistema te pedirá confirmación
-          antes de guardar. También podés adjuntar un Excel con el historial.
-      - q: ¿Cómo registro un gasto?
+          Escribí lo que vendiste, por ejemplo: "vendí 5000", "vendí 3 gaseosas a
+          500 cada una" o "vendí 2 shampoo a Juan". Véktor arma el registro y te
+          pide confirmación antes de guardar. Si el producto está en tu catálogo,
+          calcula el monto solo.
+      - q: ¿Cómo registro un gasto desde el chat?
         a: >
-          Escribí: "pagué alquiler $X", "gasto de $X en [concepto]", o
-          "gasté $X en mercadería a [proveedor]". Se te pedirá confirmación.
+          Escribí, por ejemplo: "pagué 80000 de alquiler", "gasté 12000 en
+          mercadería" o "compré 50 unidades de agua a 300 a Distribuidora Sur".
+          Te pide confirmación. Los gastos se registran al instante con el prefijo
+          "Gasto registrado.".
       - q: ¿Cómo registro una compra de mercadería?
         a: >
           Escribí: "compré X unidades de [producto] a $Y por unidad a [proveedor]".
-          Si fue al contado, también se registra el egreso de caja. Las compras
-          a plazo quedan como pedido pendiente (sin impacto en caja todavía).
-      - q: ¿Cómo cobro una deuda o ingreso de caja?
+          Si fue al contado, registra el egreso de caja, crea/actualiza el producto
+          y suma el stock. Si fue a cuenta corriente o tarjeta, lo refleja según la
+          forma de pago.
+      - q: ¿Cómo registro un cobro o un ingreso de caja?
         a: >
-          Escribí: "cobré $X a [cliente]" o "entró $X de [concepto]".
-          Esto registra el cobro sin asociarlo a una venta nueva.
-      - q: ¿Puedo modificar o anular una venta ya registrada?
+          Escribí: "cobré 15000 a [cliente]" o "entró 20000". Esto registra el
+          ingreso de efectivo sin crear una venta nueva.
+      - q: ¿Puedo modificar o anular una venta o gasto ya cargado?
         a: >
-          Sí. Escribí: "actualizá la venta de [fecha/monto/producto]" para
-          modificarla, o pedile al sistema que la anule. Los cambios quedan
-          auditados con razón de cambio.
-      - q: ¿Cómo consulto el estado general del negocio?
+          Sí. Podés pedirlo por el chat ("actualizá la venta de ayer de 5000") o
+          editarlo/anularlo directamente desde la tabla de Ventas o Gastos con los
+          botones de lápiz (editar) y tacho (anular). Las anulaciones quedan
+          auditadas con el motivo.
+      - q: ¿Puedo adjuntar un archivo en el chat?
         a: >
-          Escribí: "¿cómo está el negocio?", "informe de salud" o
-          "¿cuál es mi score?". Recibirás un resumen con el score de salud
-          y las principales alertas.
-      - q: ¿Cómo actualizo el stock de un producto?
+          Sí, con el clip podés adjuntar hasta 3 archivos (Excel, CSV, foto o PDF)
+          de hasta 16 MB cada uno. Véktor los lee y te muestra qué detectó antes de
+          cargar nada.
+      - q: ¿Cómo consulto cómo está mi negocio?
         a: >
-          Escribí: "actualizá el stock de [producto] a X unidades" o
-          "cambié el precio de [producto] a $Y". Requiere confirmación.
+          Escribí "¿cómo está el negocio?", "¿cuál es mi score?" o "informe de
+          salud". Recibís un resumen con el score y las principales alertas.
       - q: ¿Cuántos mensajes puedo enviar por día?
         a: >
-          El chat tiene un límite de 50 mensajes por día. Este panel de Ayuda
-          no cuenta contra ese límite.
+          El chat principal tiene un límite de 50 mensajes por día. Este chat de
+          Ayuda no consume ese límite.
+      - q: El asistente no entendió lo que quise decir, ¿qué hago?
+        a: >
+          Reformulá con un poco más de detalle (monto, producto, a quién). Si subiste
+          un archivo y no quedó claro, Véktor te va a preguntar para aclarar antes de
+          cargar. Nunca guarda datos sin tu confirmación.
 
-  - name: Dashboard
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Cargar datos (archivos)
+    slug: carga-datos
+    description: >
+      Subir archivos Excel, CSV, fotos o PDF para importar ventas, gastos,
+      productos o comprobantes.
+    faq:
+      - q: ¿Cómo cargo un archivo (Excel, CSV, foto o PDF)?
+        a: >
+          Entrá a "Cargar datos" en el menú, o adjuntá el archivo en el chat.
+          Véktor lo procesa, detecta qué tipo de datos tiene (ventas, gastos,
+          productos) y te muestra un preview. Recién cuando confirmás se importa.
+          Nunca se carga nada sin tu confirmación.
+      - q: ¿Qué formatos de archivo acepta Véktor?
+        a: >
+          Planillas Excel (.xlsx) y CSV, y también fotos o PDF de comprobantes,
+          remitos o listas. Las planillas se leen de forma exacta; las fotos/PDF se
+          transcriben con IA y te las muestra para que las confirmes. El límite es
+          16 MB por archivo.
+      - q: ¿Qué es el preview antes de importar?
+        a: >
+          Es la vista previa de lo que Véktor detectó en tu archivo: cuántas filas,
+          a qué sección van (ventas/gastos/productos) y cómo mapeó cada columna.
+          Sirve para revisar antes de confirmar. Si algo está mal, podés ajustar el
+          mapeo o cancelar.
+      - q: ¿Qué pasa si una columna tiene muchos datos vacíos?
+        a: >
+          Si una columna supera el 35% de valores vacíos, Véktor te avisa en el
+          preview y te deja elegir: eliminar esa columna o cancelar la importación
+          para completar los datos. Así no se importan datos de baja calidad.
+      - q: ¿Cómo corrijo el mapeo de columnas de mi archivo?
+        a: >
+          En el preview, Véktor muestra cómo asoció cada columna de tu archivo con
+          los campos de Véktor (fecha, monto, producto, etc.). Si una quedó mal
+          mapeada, podés cambiarla; Véktor recuerda ese alias para tus próximos
+          archivos.
+      - q: La importación falló o quedó a medias, ¿tengo que volver a subir el archivo?
+        a: >
+          No. Véktor puede reprocesar el archivo que ya subiste sin que tengas que
+          volver a cargarlo, y sin duplicar lo que ya se importó.
+      - q: ¿Importar duplica datos si subo el mismo archivo dos veces?
+        a: >
+          No. Véktor detecta registros repetidos por una huella (fecha + monto +
+          tipo) y los marca como duplicados en vez de cargarlos de nuevo.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Dashboard y score de salud
     slug: dashboard
     description: >
       Pantalla de resumen con el health score, KPIs y alertas accionables.
     faq:
-      - q: ¿Qué es el health score?
+      - q: ¿Qué es el health score (score de salud)?
         a: >
-          Es un número del 0 al 100 que refleja la salud financiera del negocio.
+          Es un número del 0 al 100 que resume la salud financiera de tu negocio.
           Combina cinco dimensiones: caja (30%), inventario (20%), proveedores (10%),
           márgenes (20%) y crecimiento de ventas (20%). Cuanto más alto, mejor.
-      - q: ¿Con qué frecuencia se actualiza el score?
+      - q: ¿Cómo interpreto el dashboard?
         a: >
-          El score se recalcula automáticamente cada vez que cargás o modificás
-          ventas, gastos o productos. También podés forzar un recálculo desde el chat.
+          Arriba está el score grande con su nivel y, si corresponde, la variación
+          respecto de la semana anterior. Abajo, las tarjetas de KPIs (ventas,
+          gastos, productos, clientes, proveedores). Si el score detecta un riesgo,
+          aparece una alerta abajo a la derecha con la acción sugerida.
       - q: ¿Qué significan los niveles del score?
         a: >
           0–39: Crítico (riesgo inmediato). 40–59: Advertencia (requiere atención).
-          60–74: Regular (estable pero con oportunidades de mejora).
-          75–89: Bueno. 90–100: Excelente.
-      - q: ¿Qué mide la dimensión de crecimiento?
+          60–74: Regular (estable, con oportunidades). 75–89: Bueno.
+          90–100: Excelente.
+      - q: ¿Con qué frecuencia se actualiza el score?
         a: >
-          Compara las ventas del último mes con las del mes anterior.
-          Caída > 30%: score bajo. Caída 10-30%: advertencia. Crecimiento > 25%: excelente.
-          Si no hay historial del período anterior, se muestra como neutro (50).
+          Se recalcula automáticamente cada vez que cargás o modificás ventas,
+          gastos o productos. El recálculo corre en segundo plano; a veces vas a ver
+          "Calculando…" por unos segundos.
+      - q: ¿Qué mide cada dimensión del score?
+        a: >
+          Caja: liquidez y cobertura de gastos. Inventario: stock sano vs. quiebres
+          o sobrestock. Proveedores: diversificación (depender de uno solo baja el
+          score). Márgenes: rentabilidad bruta vs. tu objetivo. Crecimiento: ventas
+          del último mes vs. el anterior.
+      - q: ¿Por qué mi dashboard muestra un estado vacío o "datos insuficientes"?
+        a: >
+          Véktor no inventa conclusiones: si todavía no tiene datos suficientes
+          (confianza baja), en vez de mostrar un score poco confiable te pide cargar
+          más datos. Cargá unos días de ventas y gastos y el dashboard se completa.
+      - q: ¿Qué son las alertas que aparecen abajo a la derecha?
+        a: >
+          Son avisos accionables cuando el score baja de 75 y hay un riesgo activo:
+          caja baja, margen bajo, stock crítico o dependencia de un proveedor. Se
+          pueden cerrar y vuelven a aparecer si el riesgo persiste.
 
+  # ───────────────────────────────────────────────────────────────────────────
   - name: Análisis
     slug: analisis
     description: >
-      Gráficos, tendencias, proyección de caja y desglose de gastos e inventario crítico.
+      Gráficos, proyección de caja, desglose de gastos e inventario crítico.
     faq:
-      - q: ¿Qué muestra el forecast de caja?
+      - q: ¿Dónde veo los gráficos y el análisis?
         a: >
-          Proyecta el efectivo disponible en los próximos 14-30 días en base al
-          historial reciente. Usa tres métodos según la cantidad de datos: promedio
-          simple, EWMA o patrón semanal. Se actualiza cada 6 horas.
+          En Dashboard → pestaña "Análisis". Ahí están los gráficos de ventas y
+          gastos, la proyección de caja, el desglose de gastos por categoría y el
+          stock crítico.
+      - q: ¿Qué muestra la proyección de caja (forecast)?
+        a: >
+          Proyecta el efectivo disponible en los próximos días según tu historial
+          reciente. Usa tres métodos según cuántos datos tengas (promedio simple,
+          EWMA o patrón semanal) y se actualiza cada pocas horas.
       - q: ¿Cómo interpreto los gráficos de ventas?
         a: >
-          Muestran el total diario real. Los días sin ventas registradas aparecen
-          en blanco — no se interpolan. Si ves muchos días vacíos, puede ser un
-          signo de baja carga de datos.
+          Muestran el total real por día. Los días sin ventas aparecen en blanco
+          (no se rellenan con el día anterior). Si ves muchos huecos, puede ser que
+          falten cargar datos de esos días.
+      - q: ¿Qué es el desglose de gastos por categoría?
+        a: >
+          Es la torta/listado que muestra en qué se te va la plata: mercadería,
+          alquiler, sueldos, servicios, etc. Ayuda a ver tus mayores costos y a
+          quién le comprás más.
 
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Ver datos y filtros
+    slug: filtros
+    description: >
+      Cómo filtrar, por qué a veces no se ven datos y cómo exportar.
+    faq:
+      - q: ¿Cómo filtro por período en Ventas o Gastos?
+        a: >
+          Arriba de la tabla tenés el selector de período (este mes, mes anterior,
+          rango personalizado, etc.). Al cambiarlo, la tabla y los totales se
+          recalculan para ese período.
+      - q: No veo mis datos en una sección, ¿por qué?
+        a: >
+          Lo más común es el filtro de período: puede estar mostrando un rango sin
+          datos. Cambialo a "este mes" o a un rango más amplio. También revisá que
+          la importación se haya confirmado y que no esté filtrado por otra
+          condición (estado de stock, plataforma, etc.).
+      - q: ¿Cómo exporto mis datos a CSV?
+        a: >
+          En cualquier tabla (Ventas, Gastos, Productos, etc.) usá el botón
+          "Exportar CSV" arriba a la derecha. Exporta las columnas visibles
+          respetando el filtro de período aplicado.
+      - q: ¿Puedo elegir qué columnas se ven en la tabla?
+        a: >
+          Sí. Con el botón "Columnas" arriba a la derecha podés mostrar u ocultar
+          columnas. Es solo visual, no borra datos.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Columnas personalizadas
+    slug: columnas
+    description: >
+      Crear columnas propias en las tablas y completar sus datos.
+    faq:
+      - q: ¿Cómo agrego una columna nueva a una tabla?
+        a: >
+          En Ventas, Gastos, Productos, Clientes, Proveedores o Marketing, tocá el
+          botón "Agregar columna" arriba a la derecha de la tabla. Elegí el tipo de
+          dato (texto, número, fecha, sí/no o lista de opciones), ponele nombre y
+          listo: la columna aparece en la tabla.
+      - q: ¿Cómo completo los datos de una columna que creé?
+        a: >
+          Tenés tres caminos: editar la celda directo en la tabla (clic en la celda
+          y escribís), cargar los valores en un archivo al importar, o dictarlos por
+          el chat. La edición en la tabla guarda al instante.
+      - q: ¿En qué secciones puedo agregar columnas?
+        a: >
+          En las seis secciones de datos: Ventas, Gastos, Productos, Clientes,
+          Proveedores y Marketing.
+      - q: ¿Cómo edito el valor de una celda directamente en la tabla?
+        a: >
+          Hacé clic en la celda de una columna personalizada: se vuelve editable
+          (un campo de texto, número, fecha o lista según el tipo). Confirmás con
+          Enter o saliendo del campo, y se guarda solo.
+      - q: ¿Cómo quito o deshabilito una columna que ya no uso?
+        a: >
+          Tocá "Agregar columna" y en el modal vas a ver tus columnas: podés
+          quitarlas o deshacer el último cambio. No se pierden los datos históricos.
+      - q: ¿Qué tipos de columna puedo crear?
+        a: >
+          Texto, número, fecha, sí/no (booleano) y lista de opciones (donde definís
+          las opciones posibles, por ejemplo Norte/Sur/Centro).
+
+  # ───────────────────────────────────────────────────────────────────────────
   - name: Ventas
     slug: ventas
     description: >
-      Historial de ventas con filtros, edición y exportación a CSV.
+      Historial de ventas con filtros, edición, cliente y exportación.
     faq:
-      - q: ¿Cómo exporto mis ventas?
+      - q: ¿Cómo cargo una venta sin usar el chat?
         a: >
-          En la pantalla de Ventas, usá el botón "Exportar CSV" en la esquina
-          superior derecha. Podés filtrar por período antes de exportar.
-      - q: ¿Puedo importar un historial de ventas?
+          En la sección Ventas podés cargarla a mano con el formulario, o importar
+          un historial desde un archivo. También se carga desde el chat con
+          lenguaje natural.
+      - q: ¿Qué es el cliente "Local" en mis ventas?
         a: >
-          Sí. Adjuntá el archivo Excel o CSV en el chat y escribí "importar ventas".
-          Verás un preview de los datos antes de confirmar.
+          Es el cliente de mostrador: cuando una venta no tiene un cliente
+          identificado, Véktor la agrupa bajo "Local". No se puede editar ni borrar;
+          es un agrupador del sistema.
+      - q: ¿Cómo asigno un cliente a una venta?
+        a: >
+          Al cargar o editar la venta, elegís el cliente de la lista. Si no ponés
+          ninguno, queda como "Local".
+      - q: ¿Por qué no me deja registrar una venta fiada sin cliente?
+        a: >
+          El fiado (cuenta corriente) necesita un cliente real para saber a quién le
+          debés cobrar. Cargá o elegí el cliente y vas a poder registrarla.
+      - q: ¿Cómo edito o anulo una venta?
+        a: >
+          En la tabla de Ventas, usá el lápiz para editar o el tacho para anular.
+          La anulación es un borrado auditado (queda el registro del motivo).
 
+  # ───────────────────────────────────────────────────────────────────────────
   - name: Gastos
     slug: gastos
     description: >
-      Registro de gastos operativos, pagos a proveedores y salidas de caja.
+      Registro de gastos, categorías, COGS vs OPEX y reclasificación.
     faq:
       - q: ¿Cómo categorizo un gasto?
         a: >
-          Al registrar un gasto podés especificar: "alquiler", "sueldos",
-          "servicios", "mercadería", "mantenimiento", etc. Si no lo especificás,
-          se clasifica como "general".
+          Al cargarlo elegís la categoría (alquiler, sueldos, servicios, mercadería,
+          logística, etc.). Si es "Otro", podés escribir una etiqueta libre. La
+          categoría ayuda a separar costo de mercadería de gastos operativos.
+      - q: ¿Qué diferencia hay entre COGS y OPEX?
+        a: >
+          COGS es el costo de la mercadería que vendés (lo que comprás para revender).
+          OPEX son los gastos operativos (alquiler, sueldos, servicios). Véktor los
+          separa para calcular bien tu margen.
+      - q: Cargué un gasto en la categoría equivocada, ¿cómo lo cambio?
+        a: >
+          Pedíselo al chat ("reclasificá ese gasto como mercadería") o editá el gasto
+          en la tabla. Si era mercadería para revender, Véktor puede además crear el
+          producto vendible.
       - q: ¿Puedo importar un historial de gastos?
         a: >
-          Sí. Igual que en ventas: adjuntá el archivo en el chat con el mensaje
-          "importar gastos".
+          Sí, igual que ventas: subí el archivo en "Cargar datos" o adjuntalo en el
+          chat y confirmá el preview.
 
-  - name: Inventario
-    slug: inventario
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Productos e inventario
+    slug: productos
     description: >
-      Catálogo de productos con stock, precios y alertas de quiebre.
+      Catálogo de productos, stock, precios y alertas de quiebre.
     faq:
       - q: ¿Cómo agrego un producto nuevo?
         a: >
-          En el panel de Inventario hacé clic en "Nuevo producto". Completá
-          nombre, SKU (opcional), precio de venta, costo unitario y stock inicial.
-          También podés pedirlo por el chat: "agregá el producto [nombre] a $X".
+          En Productos tocá "Nuevo producto" y completá nombre, SKU (opcional),
+          precio de venta, costo y stock inicial. También podés pedirlo por el chat:
+          "agregá el producto [nombre] a $X".
+      - q: ¿Qué significan "En stock", "Pocas unidades" y "Sin stock"?
+        a: >
+          "Sin stock": 0 unidades. "Pocas unidades": stock por debajo del umbral
+          mínimo configurado. "En stock": por encima del umbral. Los badges y el
+          filtro de la sección usan estos estados.
       - q: ¿Cómo configuro el umbral de stock bajo?
         a: >
-          En la ficha del producto podés ingresar el umbral mínimo. Por defecto
-          se usa el umbral estándar del vertical. Cuando el stock baja del umbral,
-          aparece el chip "Pocas unidades".
-      - q: ¿Qué es "Sin stock" vs "Pocas unidades"?
+          En la ficha del producto ponés el umbral mínimo. Por defecto se usa el del
+          rubro. Cuando el stock baja de ese número, el producto pasa a "Pocas
+          unidades".
+      - q: ¿Cómo actualizo el precio o el stock de un producto?
         a: >
-          "Sin stock": stock_units = 0. "Pocas unidades": stock por debajo del
-          umbral mínimo configurado. "En stock": stock por encima del umbral.
+          Editás el producto en la tabla, o lo pedís por el chat: "cambié el precio
+          de [producto] a $Y" o "actualizá el stock de [producto] a X unidades".
+      - q: ¿Qué es un producto "incompleto" o "requiere completar"?
+        a: >
+          Es un producto que Véktor creó a partir de una compra (para no perder el
+          stock) pero al que le falta el precio de venta u otros datos. Completalo
+          para que entre bien en el catálogo y en el score.
 
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Clientes
+    slug: clientes
+    description: >
+      Ficha de clientes (persona o empresa), datos fiscales y carga por archivo.
+    faq:
+      - q: ¿Cómo agrego un cliente?
+        a: >
+          En Clientes tocá "Nuevo cliente". Elegí si es Persona (nombre y apellido)
+          o Empresa (razón social) y completá los datos. Los datos fiscales (DNI/CUIT,
+          condición de IVA, domicilio) son opcionales y solo informativos.
+      - q: ¿Para qué sirven los datos fiscales del cliente?
+        a: >
+          Son informativos: ayudan si después querés facturar o identificar al
+          cliente. Véktor no factura ni valida ante AFIP; solo los guarda.
+      - q: ¿Puedo cargar clientes desde un archivo?
+        a: >
+          Sí. Desde Clientes podés subir una foto/PDF de una ficha (la lee con IA y
+          prellena el formulario) o importar una planilla con varios clientes
+          (matchea por DNI/CUIT para no duplicar). Siempre confirmás antes de guardar.
+      - q: ¿Qué es el cliente "Local"?
+        a: >
+          Es el agrupador de ventas de mostrador sin cliente identificado. Es del
+          sistema: no se edita ni se borra y no aparece en la lista de clientes.
+      - q: ¿Dónde veo el historial de compras de un cliente?
+        a: >
+          Entrá al detalle del cliente (clic en su nombre): ahí ves un resumen
+          comercial y su historial de operaciones.
+
+  # ───────────────────────────────────────────────────────────────────────────
   - name: Proveedores
     slug: proveedores
     description: >
-      Gestión de proveedores y redacción de comunicaciones por email.
+      Proveedores, remitos, productos comprados y comunicación por email.
     faq:
-      - q: ¿Cómo envío un email a un proveedor?
+      - q: ¿Cómo agrego un proveedor?
         a: >
-          Escribí en el chat: "escribile a [proveedor] sobre [tema]". El agente
-          redacta el borrador y te lo muestra para aprobar antes de enviarlo
-          a tu Gmail. Requiere tener Google conectado en /apps.
-      - q: ¿Cuántos proveedores necesito para un buen score?
+          En Proveedores tocá "Nuevo proveedor" y completá los datos (persona o
+          razón social, contacto, forma de pago, CUIL/CUIT). El CUIL se valida por
+          dígito verificador.
+      - q: ¿La marca de un producto es lo mismo que el proveedor?
         a: >
-          El score de proveedores mejora a partir de 3 proveedores activos.
-          Con 4+ proveedores llegás a la zona "buena". Con 1 solo proveedor
-          el sistema marca alta dependencia.
+          No. La marca es un atributo del producto; el proveedor es a quién le
+          comprás. Importar un catálogo de productos NO crea proveedores. Si una
+          compra no tiene proveedor identificado, se agrupa en "No identificado".
+      - q: ¿Qué es el proveedor "No identificado"?
+        a: >
+          Es el agrupador de compras sin proveedor informado. Es del sistema (no se
+          edita ni se borra). Cuando sepas de quién fue la compra, podés asignar el
+          proveedor real.
+      - q: ¿Cómo cargo un remito de proveedor?
+        a: >
+          En el detalle del proveedor podés cargar un remito a mano (línea por
+          línea) o subir el archivo/foto del remito para que Véktor lo lea con IA y
+          te lo prellene. Cada línea crea el producto, suma stock y registra el gasto.
+      - q: ¿Dónde veo qué productos le compré a un proveedor?
+        a: >
+          En el detalle del proveedor (clic en su nombre) tenés la lista de productos
+          comprados, con la última compra, cantidad y precio unitario.
+      - q: ¿Cómo le escribo un email a un proveedor?
+        a: >
+          Pedíselo al chat ("escribile a [proveedor] sobre [tema]"). El agente
+          redacta el borrador y te lo muestra para aprobar antes de mandarlo a tu
+          Gmail. Requiere tener Google conectado en Aplicaciones.
 
-  - name: Integraciones
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Marketing
+    slug: marketing
+    description: >
+      Métricas de redes sociales e inversión publicitaria, y su relación con las ventas.
+    faq:
+      - q: ¿Para qué sirve la sección Marketing?
+        a: >
+          Para cargar métricas de tus redes (seguidores, alcance, interacción) y la
+          inversión en publicidad, y ver cómo se relacionan con tus ventas (ads vs.
+          ventas) en el período.
+      - q: ¿Cómo cargo métricas de marketing?
+        a: >
+          Tocá "Cargar métrica" para cargar una a mano, o "Importar CSV" para subir
+          varias. Cada métrica tiene plataforma, fecha, seguidores, alcance,
+          interacción y gasto en ads.
+      - q: ¿Qué muestra el panel de "ads vs ventas"?
+        a: >
+          Compara cuánto gastaste en publicidad contra los ingresos del período,
+          para tener una idea de si la inversión se está traduciendo en ventas.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Otros (registros sin clasificar)
+    slug: otros
+    description: >
+      Filas ambiguas de importaciones que no cayeron automáticamente en una sección.
+    faq:
+      - q: ¿Qué es la sección "Otros"?
+        a: >
+          Es la bandeja de registros que Véktor no pudo clasificar con seguridad al
+          importar (no asume que son ventas). Ahí los revisás y decidís a qué sección
+          van.
+      - q: ¿Cómo clasifico un registro de "Otros"?
+        a: >
+          Abrí el registro y elegí qué es (venta, gasto, producto, cliente,
+          proveedor). Véktor te muestra una sugerencia. También podés importar de
+          una todos los que tengan sugerencia.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Cierre de caja
+    slug: cierre-caja
+    description: >
+      Arqueo de caja al final del día y neteo de efectivo.
+    faq:
+      - q: ¿Cómo hago el cierre de caja?
+        a: >
+          En Ventas tocá el botón de cierre de caja. Véktor te muestra un preview con
+          el efectivo esperado; cargás el conteo real (arqueo) y registra el cierre,
+          marcando si hay diferencia.
+      - q: ¿Para qué sirve configurar mi condición fiscal?
+        a: >
+          Es informativa: ajusta la guía de comprobantes en el cierre de caja y
+          algunas heurísticas. No cambia ningún cálculo ni te obliga a nada. Se
+          configura en Configuración → Horarios.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Resumen económico
+    slug: resumen-economico
+    description: >
+      Vista analítica del estado económico (no es un informe contable).
+    faq:
+      - q: ¿Qué es el Resumen económico?
+        a: >
+          Es una vista analítica que junta ventas, gastos y el valor de tu stock para
+          darte una foto económica. Incluye un doble aviso de que NO es un informe
+          contable ni reemplaza a tu contador.
+      - q: ¿Cómo se calcula el stock valuado?
+        a: >
+          Multiplica las unidades en stock por el costo unitario de cada producto.
+          Solo valúa productos con stock mayor a cero; si falta el costo, lo señala.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Aplicaciones (Google)
     slug: apps
     description: >
-      Conexión con Google (Gmail, Calendar, Sheets, Drive) vía OAuth.
+      Conexión con Google (Gmail, Calendar, Sheets, Drive) y accesos a las apps.
     faq:
       - q: ¿Cómo conecto Google?
         a: >
-          Andá a /apps y hacé clic en "Conectar Google". Se abre una ventana
-          de autorización de Google. Una vez conectado, podés sincronizar datos
-          con Sheets, agendar en Calendar y leer correos de proveedores.
-      - q: ¿Por qué aparece "REQUIRES_RECONNECT"?
+          Andá a Aplicaciones y tocá "Conectar Google". Se abre la ventana de
+          autorización de Google. Una vez conectado, Véktor puede leer archivos de
+          Drive, redactar borradores en Gmail y trabajar con Sheets/Calendar.
+      - q: ¿Para qué están los botones "Abrir" de cada app de Google?
         a: >
-          El token de Google expiró o los permisos fueron revocados. Andá a
-          /apps y reconectá tu cuenta. La acción pendiente podrá reintentarse
-          una vez reconectado.
+          Te llevan directo a la app de Google correspondiente (Drive, Gmail,
+          Calendar, Sheets/Docs) en una pestaña nueva, para abrirla rápido.
+      - q: ¿Por qué aparece "Reconexión requerida" o REQUIRES_RECONNECT?
+        a: >
+          El permiso de Google venció o fue revocado. Andá a Aplicaciones y reconectá
+          tu cuenta; la acción pendiente se puede reintentar después.
       - q: ¿Qué permisos usa Véktor en Google?
         a: >
-          Solo los necesarios para cada función: Gmail (leer y redactar borradores),
-          Calendar (crear eventos), Sheets (leer y escribir rangos), Drive (subir
-          archivos). Nunca se eliminan correos ni eventos sin tu confirmación.
+          Solo los necesarios por función: leer archivos de Drive, redactar borradores
+          en Gmail, crear eventos en Calendar y leer/escribir rangos en Sheets. No
+          borra correos ni eventos sin tu confirmación.
 
+  # ───────────────────────────────────────────────────────────────────────────
   - name: Configuración
     slug: settings
     description: >
-      Ajustes de cuenta, margen objetivo, campos personalizados y diagrama de datos.
+      Cuenta, objetivo de margen, horarios, condición fiscal y automatizaciones.
     faq:
+      - q: ¿Cómo entro a Configuración?
+        a: >
+          Desde el engranaje arriba a la derecha, o desde "Configuración" abajo en el
+          menú lateral.
       - q: ¿Cómo cambio mi objetivo de margen?
         a: >
-          Andá a /settings → tab "Score de salud". Allí podés ajustar el
-          margen objetivo (meta de rentabilidad bruta) y el umbral de alerta.
-          Cambiar estos valores recalcula la dimensión "Márgenes" de tu score.
-      - q: ¿Qué son los campos personalizados?
+          En Configuración → "Score de salud". Ajustás el margen objetivo (tu meta de
+          rentabilidad bruta) y el umbral de alerta. Cambiarlos recalcula la dimensión
+          "Márgenes" del score.
+      - q: ¿Cómo configuro mis horarios de trabajo?
         a: >
-          Son campos adicionales que podés agregar a ventas, gastos y productos
-          según las necesidades de tu rubro. Por ejemplo, un kiosco puede agregar
-          "origen" a sus ventas. Se gestionan en /settings → "Campos".
+          En Configuración → "Horarios" elegís los días y el horario de apertura y
+          cierre. Véktor lo usa para recordarte el cierre de caja al final del día.
+      - q: ¿Qué son las Automatizaciones?
+        a: >
+          Son acciones que ya aprobaste y que Véktor puede repetir automáticamente
+          (por ejemplo, registrar un gasto recurrente). Las activás o pausás en
+          Configuración → "Automatizaciones".
+      - q: ¿Dónde está la ayuda dentro de la plataforma?
+        a: >
+          En Configuración → "Ayuda" tenés las preguntas frecuentes y este chat de
+          asistencia.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: Datos, seguridad y privacidad
+    slug: seguridad
+    description: >
+      Cómo se guardan tus datos y qué hace (y qué no hace) Véktor.
+    faq:
+      - q: ¿Mis datos están seguros?
+        a: >
+          Sí. La información se guarda encriptada y aislada por negocio (multi-tenant):
+          nunca se comparten datos entre negocios ni con terceros.
+      - q: ¿Véktor es un sistema contable o factura?
+        a: >
+          No. Véktor es una herramienta de gestión y salud financiera. No emite
+          facturas, no liquida impuestos y no reemplaza a tu contador. Los datos
+          fiscales que cargás son informativos.
+      - q: ¿De dónde salen los datos de la cuenta demo?
+        a: >
+          La cuenta demo trae datos de ejemplo marcados como "demo" para que pruebes
+          la plataforma. En tu cuenta real, todo lo que ves sale de lo que vos cargás.
