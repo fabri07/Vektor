@@ -1185,6 +1185,49 @@ async def insert_confirmed_data(
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
+    """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
+
+    Wrapper sobre ``_insert_confirmed_data_impl`` (chokepoint único para TODOS los
+    callers: ingestión, chat, reread, data-repair). Las funciones internas crean
+    ``SaleEntry`` sin ``customer_id``; acá, tras un ``flush`` (prod corre con
+    ``autoflush=False``, así que los inserts pendientes no se ven sin él), una sola
+    query reasigna las huérfanas al sentinela "Local". Idempotente.
+    """
+    from app.application.services.customer_sentinel import (  # noqa: PLC0415
+        assign_orphan_sales_to_local,
+    )
+
+    counts = await _insert_confirmed_data_impl(
+        session,
+        tenant_id,
+        summary,
+        confirmed_fields=confirmed_fields,
+        return_details=return_details,
+        column_mappings=column_mappings,
+        context_mappings=context_mappings,
+        context_confirmed=context_confirmed,
+        context_entity=context_entity,
+        source=source,
+        uploaded_file_id=uploaded_file_id,
+    )
+    await session.flush()
+    await assign_orphan_sales_to_local(session, tenant_id)
+    return counts
+
+
+async def _insert_confirmed_data_impl(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+    confirmed_fields: dict[str, bool] | None = None,
+    return_details: bool = False,
+    column_mappings: dict[str, str] | None = None,
+    context_mappings: dict[str, dict[str, str]] | None = None,
+    context_confirmed: dict[str, bool] | None = None,
+    context_entity: dict[str, str] | None = None,
+    source: str = "ingestion",
+    uploaded_file_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
     When return_details=True, also returns product_details list with per-row
@@ -2674,6 +2717,12 @@ async def bulk_import_unclassified(
             await session.flush()
 
     await session.flush()
+    # Import masivo de "Otros": ventas reconstruidas sin cliente → sentinela "Local".
+    from app.application.services.customer_sentinel import (  # noqa: PLC0415
+        assign_orphan_sales_to_local,
+    )
+
+    await assign_orphan_sales_to_local(session, tenant_id)
     return counts
 
 

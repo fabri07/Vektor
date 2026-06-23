@@ -1,0 +1,427 @@
+"""Tests de la carga de clientes por archivo (Fase B).
+
+Cubre:
+- Servicio determinístico (XLSX/CSV): mapea columnas → campos del cliente sin IA.
+- Servicio IA (foto/PDF): mockea el cliente Anthropic, verifica la request multimodal
+  (image/document block + tool_use forzado) y el parseo a ``CustomerExtraction``.
+- Fail-soft: sin API key / error de red → warnings, nunca rompe.
+- Import masivo: ``build_import_preview`` (crear/actualizar/inválido/duplicado) y
+  ``apply_import`` (upsert idempotente, sentinela nunca creado).
+- Endpoints: ``POST /customers/extract``, ``/import/preview``, ``/import/confirm`` +
+  guard 413.
+"""
+
+from __future__ import annotations
+
+import io
+import unittest.mock
+import uuid
+from typing import Any
+
+import openpyxl
+import pytest
+from httpx import AsyncClient
+
+from app.application.services.customer_extraction_service import (
+    CustomerExtraction,
+    extract_customer,
+    parse_customer_records,
+)
+from app.application.services.customer_import_service import (
+    apply_import,
+    build_import_preview,
+)
+from app.persistence.models.customer import Customer
+
+# CUIT con dígito verificador válido (módulo 11).
+_VALID_CUIT = "20-12345678-6"
+_VALID_CUIT_2 = "27-23456789-1"
+
+
+def _csv_clientes() -> bytes:
+    return (
+        "razon social,cuit,condicion iva,email,celular,localidad,provincia\n"
+        f"Distribuidora Norte SA,{_VALID_CUIT},responsable_inscripto,"
+        "ventas@norte.com,+54 11 4444-0000,San Isidro,Buenos Aires\n"
+    ).encode()
+
+
+def _csv_un_cliente_persona() -> bytes:
+    return (
+        "apellido,nombre,dni,celular,direccion,localidad\n"
+        "Pérez,Juan,30123456,+54 11 5555-0000,Av. Siempreviva 742,Springfield\n"
+    ).encode()
+
+
+def _xlsx_clientes(rows: list[list[Any]]) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["razon social", "cuit", "email", "telefono"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class _FakeBlock:
+    def __init__(self, *, type_: str, **kwargs: Any) -> None:
+        self.type = type_
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class _FakeUsage:
+    input_tokens = 900
+    output_tokens = 50
+
+
+class _FakeResponse:
+    def __init__(self, tool_input: dict[str, Any]) -> None:
+        self.content = [_FakeBlock(type_="tool_use", input=tool_input)]
+        self.usage = _FakeUsage()
+
+
+def _mock_anthropic_factory(
+    tool_input: dict[str, Any],
+) -> tuple[Any, unittest.mock.AsyncMock]:
+    create = unittest.mock.AsyncMock(return_value=_FakeResponse(tool_input))
+    client = unittest.mock.MagicMock()
+    client.messages.create = create
+
+    def factory(*_args: Any, **_kwargs: Any) -> Any:
+        return client
+
+    return factory, create
+
+
+# ── Servicio determinístico (planilla) ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestTabularExtraction:
+    async def test_csv_company_first_record(self) -> None:
+        extraction, usage = await extract_customer(_csv_clientes(), "clientes.csv")
+        assert usage is None  # sin IA
+        assert extraction.confidence == "HIGH"
+        f = extraction.fields
+        assert f["name"] == "Distribuidora Norte SA"
+        assert f["cuit"] == _VALID_CUIT
+        assert f["doc_type"] == "cuit"
+        assert f["iva_condition"] == "responsable_inscripto"
+        assert f["email"] == "ventas@norte.com"
+        assert f["locality"] == "San Isidro"
+        assert f["province"] == "Buenos Aires"
+
+    async def test_csv_person_splits_name_and_infers_type(self) -> None:
+        extraction, _ = await extract_customer(
+            _csv_un_cliente_persona(), "cliente.csv"
+        )
+        f = extraction.fields
+        assert f["name"] == "Juan"
+        assert f["last_name"] == "Pérez"
+        assert f["dni"] == "30123456"
+        assert f["doc_type"] == "dni"
+        assert f["customer_type"] == "person"
+
+    async def test_multiple_rows_takes_first_and_warns(self) -> None:
+        content = _xlsx_clientes(
+            [
+                ["Norte SA", _VALID_CUIT, "a@a.com", "111"],
+                ["Sur SA", _VALID_CUIT_2, "b@b.com", "222"],
+            ]
+        )
+        extraction, _ = await extract_customer(content, "clientes.xlsx")
+        assert extraction.fields["name"] == "Norte SA"
+        assert any("se tomó la primera" in w for w in extraction.warnings)
+
+    async def test_unrecognized_columns_warn(self) -> None:
+        extraction, _ = await extract_customer(b"foo,bar\n1,2\n", "x.csv")
+        assert extraction.fields == {}
+        assert extraction.warnings
+
+
+# ── Servicio IA (foto / PDF) ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestAIExtraction:
+    _TOOL_INPUT = {
+        "customer_type": "person",
+        "name": "María",
+        "last_name": "Gómez",
+        "dni": "28999111",
+        "iva_condition": "consumidor_final",
+        "phone": "+54 11 6666-0000",
+    }
+
+    async def test_image_builds_multimodal_request_and_parses(self) -> None:
+        factory, create = _mock_anthropic_factory(self._TOOL_INPUT)
+        png = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 64
+        extraction, usage = await extract_customer(
+            png, "dni.png", client_factory=factory
+        )
+        assert usage == {"input_tokens": 900, "output_tokens": 50}
+        assert extraction.fields["name"] == "María"
+        assert extraction.fields["last_name"] == "Gómez"
+        assert extraction.fields["doc_type"] == "dni"
+
+        kwargs = create.call_args.kwargs
+        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["tool_choice"]["type"] == "tool"
+        blocks = kwargs["messages"][0]["content"]
+        assert blocks[0]["type"] == "image"
+        assert blocks[0]["source"]["type"] == "base64"
+
+    async def test_pdf_uses_document_block(self) -> None:
+        factory, create = _mock_anthropic_factory(self._TOOL_INPUT)
+        pdf = b"%PDF-1.4\n" + b"0" * 64
+        extraction, usage = await extract_customer(
+            pdf, "ficha.pdf", client_factory=factory
+        )
+        assert usage is not None
+        assert extraction.fields["name"] == "María"
+        blocks = create.call_args.kwargs["messages"][0]["content"]
+        assert blocks[0]["type"] == "document"
+        assert blocks[0]["source"]["media_type"] == "application/pdf"
+
+    async def test_ai_no_name_low_confidence(self) -> None:
+        factory, _ = _mock_anthropic_factory({"phone": "123"})
+        png = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 64
+        extraction, _ = await extract_customer(png, "x.png", client_factory=factory)
+        assert extraction.confidence == "LOW"
+        assert extraction.warnings
+
+    async def test_user_hint_wrapped(self) -> None:
+        factory, create = _mock_anthropic_factory(self._TOOL_INPUT)
+        png = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 64
+        await extract_customer(
+            png, "x.png", user_hint="es cliente mayorista", client_factory=factory
+        )
+        text_block = create.call_args.kwargs["messages"][0]["content"][1]["text"]
+        assert "<user_message>" in text_block
+
+    async def test_ai_failure_is_fail_soft(self) -> None:
+        create = unittest.mock.AsyncMock(side_effect=RuntimeError("boom"))
+        client = unittest.mock.MagicMock()
+        client.messages.create = create
+
+        def factory(*_a: Any, **_k: Any) -> Any:
+            return client
+
+        png = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 64
+        extraction, usage = await extract_customer(png, "x.png", client_factory=factory)
+        assert usage is None
+        assert extraction.fields == {}
+        assert extraction.warnings  # no rompe, sugiere carga manual
+
+
+# ── Import masivo: preview + apply (unitario) ──────────────────────────────────
+
+
+def _row(**kw: Any) -> dict[str, Any]:
+    return kw
+
+
+class TestImportPreview:
+    def test_classifies_create_update_invalid_duplicate(self) -> None:
+        existing = [
+            Customer(
+                tenant_id=uuid.uuid4(),
+                name="Ya Existe SA",
+                cuit=_VALID_CUIT,
+                doc_type="cuit",
+            )
+        ]
+        records = [
+            _row(name="Nuevo", dni="30111222"),  # create
+            _row(name="Actualizar SA", cuit=_VALID_CUIT),  # update (match por cuit)
+            _row(name="Sin Doc"),  # invalid (sin documento)
+            _row(name="Repe", dni="30111222"),  # duplicate_in_file
+        ]
+        preview = build_import_preview(records, existing)
+        assert preview.to_create == 1
+        assert preview.to_update == 1
+        assert preview.invalid == 1
+        assert preview.duplicates == 1
+
+    def test_invalid_cuit_check_digit_flagged(self) -> None:
+        records = [_row(name="Mal CUIT", cuit="20-12345678-0")]
+        preview = build_import_preview(records, [])
+        assert preview.invalid == 1
+        assert preview.items[0].issues
+
+
+@pytest.mark.asyncio
+class TestApplyImport:
+    async def test_upsert_idempotent_and_no_sentinel(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        records = [
+            _row(name="Norte SA", cuit=_VALID_CUIT, iva_condition="responsable_inscripto"),
+            _row(name="Juan Pérez", dni="30123456"),
+        ]
+        first = await apply_import(repo, tid, records)
+        assert len(first.created_ids) == 2
+        assert first.skipped == 0
+
+        # Reaplicar el MISMO archivo: ahora todo matchea → actualiza, no duplica.
+        second = await apply_import(repo, tid, records)
+        assert len(second.created_ids) == 0
+        assert len(second.updated_ids) == 2
+
+        # Total de clientes activos no-sentinela = 2 (no se duplicó).
+        assert await repo.count_active(tid) == 2
+        # Ninguno quedó marcado como sentinela.
+        for c in await repo.list_for_dedup(tid):
+            assert c.is_sentinel is False
+
+    async def test_in_batch_duplicate_not_created_twice(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        records = [
+            _row(name="Dup A", cuit=_VALID_CUIT),
+            _row(name="Dup B", cuit=_VALID_CUIT),  # mismo documento
+        ]
+        result = await apply_import(repo, tid, records)
+        # El segundo matchea al recién creado → update, no segundo create.
+        assert len(result.created_ids) == 1
+        assert len(result.updated_ids) == 1
+        assert await repo.count_active(tid) == 1
+
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def mock_s3_upload():
+    with unittest.mock.patch(
+        "app.integrations.s3.S3Client.upload",
+        new_callable=unittest.mock.AsyncMock,
+        return_value="tenants/test/customer-file",
+    ) as mock:
+        yield mock
+
+
+@pytest.mark.asyncio
+class TestCustomerFileEndpoints:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_extract_happy_path_csv(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        mock_s3_upload: unittest.mock.AsyncMock,
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/customers/extract",
+            files={"file": ("cliente.csv", _csv_clientes(), "text/csv")},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["name"] == "Distribuidora Norte SA"
+        assert body["cuit"] == _VALID_CUIT
+        assert body["confidence"] == "HIGH"
+        assert body["source_upload_id"] is not None
+        mock_s3_upload.assert_called()
+
+    async def test_import_preview_then_confirm_creates(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        mock_s3_upload: unittest.mock.AsyncMock,
+    ) -> None:
+        content = _xlsx_clientes(
+            [
+                ["Norte SA", _VALID_CUIT, "a@a.com", "111"],
+                ["Sur SA", _VALID_CUIT_2, "b@b.com", "222"],
+            ]
+        )
+        prev = await client.post(
+            "/api/v1/customers/import/preview",
+            files={"file": ("clientes.xlsx", content, "application/octet-stream")},
+            headers=auth_headers,
+        )
+        assert prev.status_code == 200, prev.text
+        pbody = prev.json()
+        assert pbody["to_create"] == 2
+        rows = [item["customer"] for item in pbody["items"] if item["status"] == "create"]
+
+        conf = await client.post(
+            "/api/v1/customers/import/confirm",
+            json={"rows": rows},
+            headers=auth_headers,
+        )
+        assert conf.status_code == 200, conf.text
+        cbody = conf.json()
+        assert cbody["created"] == 2
+        assert cbody["updated"] == 0
+
+        # Aparecen en el listado normal.
+        listed = await client.get("/api/v1/customers", headers=auth_headers)
+        names = {c["name"] for c in listed.json()}
+        assert {"Norte SA", "Sur SA"} <= names
+
+    async def test_import_preview_rejects_photo_with_warning(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+    ) -> None:
+        png = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 64
+        resp = await client.post(
+            "/api/v1/customers/import/preview",
+            files={"file": ("foto.png", png, "image/png")},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["to_create"] == 0
+        assert body["warnings"]
+
+    async def test_extract_other_tenant_isolated(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+        mock_s3_upload: unittest.mock.AsyncMock,
+    ) -> None:
+        # El import de un tenant no contamina al otro.
+        content = _xlsx_clientes([["Norte SA", _VALID_CUIT, "a@a.com", "111"]])
+        prev = await client.post(
+            "/api/v1/customers/import/preview",
+            files={"file": ("c.xlsx", content, "application/octet-stream")},
+            headers=auth_headers,
+        )
+        rows = [i["customer"] for i in prev.json()["items"]]
+        await client.post(
+            "/api/v1/customers/import/confirm",
+            json={"rows": rows},
+            headers=auth_headers,
+        )
+        other = await client.get("/api/v1/customers", headers=second_auth_headers)
+        assert "Norte SA" not in {c["name"] for c in other.json()}
+
+
+def test_customer_extraction_dataclass_defaults() -> None:
+    ext = CustomerExtraction()
+    assert ext.fields == {}
+    assert ext.confidence == "LOW"
+
+
+def test_parse_customer_records_shared_parser() -> None:
+    records, warnings = parse_customer_records(
+        _csv_clientes(), "clientes.csv", "text/csv"
+    )
+    assert len(records) == 1
+    assert records[0]["name"] == "Distribuidora Norte SA"

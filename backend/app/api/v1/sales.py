@@ -8,6 +8,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
+from app.application.services.customer_sentinel import (
+    resolve_or_create_local_sentinel,
+)
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.persistence.db.session import get_db_session
@@ -30,6 +33,10 @@ from app.schemas.transaction import (
 router = APIRouter()
 
 VOID_REASON_MANUAL = "MANUAL_ADMIN_VOID"
+# Fiado: venta a cuenta corriente. Exige un cliente REAL (nunca el sentinela
+# "Local"): saber a quién se le fía es el punto. Espejo en el frontend.
+FIADO_PAYMENT_METHOD = "account"
+_FIADO_REQUIRES_CUSTOMER = "El fiado requiere un cliente registrado (no puede ser 'Local')."
 
 
 def _sale_snapshot(entry: SaleEntry) -> dict[str, object]:
@@ -143,6 +150,9 @@ async def bulk_create_sales(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[SaleEntry]:
     repo = SaleRepository(session)
+    # Carga masiva sin cliente (siempre "cash", nunca fiado): todas las entries van
+    # al sentinela "Local" para que ninguna venta quede sin cliente.
+    local_id = await resolve_or_create_local_sentinel(session, tenant.tenant_id)
     if body.entries:
         entries = [
             SaleEntry(
@@ -152,6 +162,7 @@ async def bulk_create_sales(
                 transaction_date=body.period_date,
                 payment_method="cash",
                 product_id=item.product_id,
+                customer_id=local_id,
             )
             for item in body.entries
         ]
@@ -164,6 +175,7 @@ async def bulk_create_sales(
                 transaction_date=body.period_date,
                 payment_method="cash",
                 notes=body.period_type,
+                customer_id=local_id,
             )
         ]
     saved = await repo.bulk_save(entries)
@@ -191,11 +203,21 @@ async def create_sale(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE"
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
-    # El customer_id debe pertenecer al tenant (la FK sola no lo garantiza).
+    is_fiado = body.payment_method == FIADO_PAYMENT_METHOD
     if body.customer_id is not None:
+        # El customer_id debe pertenecer al tenant (la FK sola no lo garantiza).
         customer = await CustomerRepository(session).get_by_id(body.customer_id, tenant.tenant_id)
         if customer is None:
             raise HTTPException(status_code=400, detail="Customer not found for this tenant.")
+        if is_fiado and customer.is_sentinel:
+            raise HTTPException(status_code=400, detail=_FIADO_REQUIRES_CUSTOMER)
+        customer_id = body.customer_id
+    elif is_fiado:
+        # Fiado sin cliente → rechazo (no se permite fiar a "Local").
+        raise HTTPException(status_code=400, detail=_FIADO_REQUIRES_CUSTOMER)
+    else:
+        # Venta sin cliente registrado → sentinela "Local" (nunca queda NULL).
+        customer_id = await resolve_or_create_local_sentinel(session, tenant.tenant_id)
     repo = SaleRepository(session)
     entry = SaleEntry(
         tenant_id=tenant.tenant_id,
@@ -204,7 +226,7 @@ async def create_sale(
         transaction_date=body.transaction_date,
         payment_method=body.payment_method,
         product_id=body.product_id,
-        customer_id=body.customer_id,
+        customer_id=customer_id,
         notes=body.notes,
         custom_fields=body.custom_fields,
     )
@@ -249,6 +271,8 @@ async def update_sale(
         entry.payment_method = body.payment_method
     if "product_id" in body.model_fields_set:
         entry.product_id = body.product_id
+    # ``payment_method`` ya quedó en su valor final arriba → calculamos fiado sobre él.
+    is_fiado = entry.payment_method == FIADO_PAYMENT_METHOD
     if "customer_id" in body.model_fields_set:
         if body.customer_id is not None:
             customer = await CustomerRepository(session).get_by_id(
@@ -256,7 +280,25 @@ async def update_sale(
             )
             if customer is None:
                 raise HTTPException(status_code=400, detail="Customer not found for this tenant.")
-        entry.customer_id = body.customer_id
+            if is_fiado and customer.is_sentinel:
+                raise HTTPException(status_code=400, detail=_FIADO_REQUIRES_CUSTOMER)
+            entry.customer_id = body.customer_id
+        elif is_fiado:
+            raise HTTPException(status_code=400, detail=_FIADO_REQUIRES_CUSTOMER)
+        else:
+            # Limpiar el cliente → sentinela "Local" (la venta nunca queda sin cliente).
+            entry.customer_id = await resolve_or_create_local_sentinel(
+                session, tenant.tenant_id
+            )
+    elif is_fiado:
+        # El cliente no cambió, pero la venta pasó a fiado: exigir cliente real.
+        current = (
+            await CustomerRepository(session).get_by_id(entry.customer_id, tenant.tenant_id)
+            if entry.customer_id is not None
+            else None
+        )
+        if current is None or current.is_sentinel:
+            raise HTTPException(status_code=400, detail=_FIADO_REQUIRES_CUSTOMER)
     if body.notes is not None:
         entry.notes = body.notes
     if body.custom_fields is not None:

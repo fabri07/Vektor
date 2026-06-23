@@ -20,7 +20,14 @@ from httpx import AsyncClient
 async def _create_customer(
     client: AsyncClient, headers: dict[str, Any], **fields: Any
 ) -> str:
-    payload: dict[str, Any] = {"name": "Cliente Com"}
+    # Alta de cliente REAL: identidad + documento + celular son obligatorios desde la
+    # Reforma de Clientes (Fase A). Los tests sobreescriben con **fields cuando hace falta.
+    payload: dict[str, Any] = {
+        "name": "Cliente Com",
+        "last_name": "Test",
+        "dni": "30123456",
+        "phone": "1122334455",
+    }
     payload.update(fields)
     resp = await client.post("/api/v1/customers", json=payload, headers=headers)
     assert resp.status_code == 201, resp.text

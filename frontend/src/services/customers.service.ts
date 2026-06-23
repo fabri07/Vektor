@@ -2,9 +2,20 @@ import { api } from "@/lib/api";
 
 export interface CreateCustomerPayload {
   name: string;
+  customer_type?: string | null;
+  last_name?: string | null;
+  doc_type?: string | null;
+  dni?: string | null;
+  cuit?: string | null;
+  iva_condition?: string | null;
   email?: string | null;
   phone?: string | null;
   telegram_username?: string | null;
+  address?: string | null;
+  locality?: string | null;
+  province?: string | null;
+  postal_code?: string | null;
+  birthday?: string | null;
   notes?: string | null;
   custom_fields?: Record<string, unknown>;
 }
@@ -15,12 +26,24 @@ export interface CustomerResponse {
   id: string;
   tenant_id: string;
   name: string;
+  customer_type: string | null;
+  last_name: string | null;
+  doc_type: string | null;
+  dni: string | null;
+  cuit: string | null;
+  iva_condition: string | null;
   email: string | null;
   phone: string | null;
   telegram_username: string | null;
+  address: string | null;
+  locality: string | null;
+  province: string | null;
+  postal_code: string | null;
+  birthday: string | null;
   notes: string | null;
   custom_fields?: Record<string, unknown>;
   is_active: boolean;
+  is_sentinel: boolean;
   created_at: string;
 }
 
@@ -28,6 +51,78 @@ export interface CustomersListParams {
   is_active?: boolean;
   limit?: number;
   offset?: number;
+}
+
+// ── Carga por archivo (Fase B) ───────────────────────────────────────────────
+
+export type ExtractionConfidence = "HIGH" | "MEDIUM" | "LOW";
+
+/** Ficha individual sugerida al leer una foto/PDF/planilla. NO persiste nada. */
+export interface CustomerExtractionResponse {
+  customer_type: string | null;
+  name: string | null;
+  last_name: string | null;
+  doc_type: string | null;
+  dni: string | null;
+  cuit: string | null;
+  iva_condition: string | null;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  locality: string | null;
+  province: string | null;
+  postal_code: string | null;
+  birthday: string | null;
+  confidence: ExtractionConfidence;
+  warnings: string[];
+  source_upload_id: string | null;
+}
+
+/** Una fila parseada del import masivo (payload del cliente, todo opcional). */
+export interface CustomerImportRow {
+  customer_type?: string | null;
+  name?: string | null;
+  last_name?: string | null;
+  doc_type?: string | null;
+  dni?: string | null;
+  cuit?: string | null;
+  iva_condition?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  locality?: string | null;
+  province?: string | null;
+  postal_code?: string | null;
+  birthday?: string | null;
+}
+
+export type ImportItemStatus = "create" | "update" | "invalid" | "duplicate_in_file";
+
+export interface CustomerImportPreviewItem {
+  row_index: number;
+  status: ImportItemStatus;
+  customer: CustomerImportRow;
+  existing_id: string | null;
+  existing_name: string | null;
+  issues: string[];
+}
+
+export interface CustomerImportPreviewResponse {
+  items: CustomerImportPreviewItem[];
+  to_create: number;
+  to_update: number;
+  invalid: number;
+  duplicates: number;
+  warnings: string[];
+  source_upload_id: string | null;
+}
+
+export interface CustomerImportConfirmResponse {
+  created: number;
+  updated: number;
+  skipped: number;
+  created_ids: string[];
+  updated_ids: string[];
 }
 
 const PAGE_SIZE = 200;
@@ -85,5 +180,39 @@ export const customersService = {
     }
 
     return items;
+  },
+
+  /** Lee la ficha de UN cliente (foto/PDF/planilla) → sugerencia para prellenar. */
+  async extractCustomer(file: File): Promise<CustomerExtractionResponse> {
+    const formData = new FormData();
+    formData.append("file", file);
+    // NO setear Content-Type a mano: el browser/axios ponen el boundary del multipart.
+    const res = await api.post<CustomerExtractionResponse>(
+      "/customers/extract",
+      formData,
+    );
+    return res.data;
+  },
+
+  /** Preview del import masivo: clasifica cada fila (no persiste). */
+  async importPreview(file: File): Promise<CustomerImportPreviewResponse> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await api.post<CustomerImportPreviewResponse>(
+      "/customers/import/preview",
+      formData,
+    );
+    return res.data;
+  },
+
+  /** Confirma el import: upsert idempotente de las filas elegidas. */
+  async importConfirm(
+    rows: CustomerImportRow[],
+  ): Promise<CustomerImportConfirmResponse> {
+    const res = await api.post<CustomerImportConfirmResponse>(
+      "/customers/import/confirm",
+      { rows },
+    );
+    return res.data;
   },
 };

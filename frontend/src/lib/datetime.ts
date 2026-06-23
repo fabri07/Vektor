@@ -17,6 +17,22 @@ export function formatDateTime(value: unknown): string {
 }
 
 /**
+ * Formatea una fecha date-only ("YYYY-MM-DD") como "05 jun 2026", sin hora.
+ * Usa `parseDateOnly` para evitar el corrimiento de día por UTC en UTC-3.
+ */
+export function formatDate(value: unknown): string {
+  if (value == null || value === "") return "—";
+  const raw = String(value);
+  const d = parseDateOnly(raw);
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleDateString("es-AR", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+/**
  * Parsea un string date-only "YYYY-MM-DD" como fecha LOCAL.
  * `new Date("YYYY-MM-DD")` interpreta medianoche UTC: en UTC-3 el día (y en el
  * borde de año, el año) retrocede uno al formatear/leer en hora local.

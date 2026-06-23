@@ -16,16 +16,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
-# El sentinela "No identificado" se marca con ``custom_fields["_sentinel"]``. El
-# valor puede llegar como string ``"true"`` (lo que escribe la ingestión) o como
-# booleano JSON ``true`` (si se edita la fila a mano). Fuente única de verdad para
-# reconocerlo — evita que cada call site invente su propia comparación frágil.
-SENTINEL_FLAG_KEY = "_sentinel"
+# Helper del flag de sentinela ahora compartido con clientes (ver models/_sentinel).
+# Se re-exporta acá por compatibilidad con los imports existentes
+# (``from app.persistence.models.supplier import SENTINEL_FLAG_KEY, is_sentinel_value``).
+from app.persistence.models._sentinel import (
+    SENTINEL_FLAG_KEY,
+    is_sentinel_value,
+)
 
-
-def is_sentinel_value(value: object) -> bool:
-    """True si el valor del flag de sentinela representa "activo" (string o bool)."""
-    return value in ("true", True)
+__all__ = ["SENTINEL_FLAG_KEY", "Supplier", "is_sentinel_value"]
 
 
 class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):

@@ -6,7 +6,9 @@ import type { SupplierResponse } from "@/services/suppliers.service";
 import type { HealthScoreV2Response } from "@/types/api";
 
 export const UNIDENTIFIED_SUPPLIER = "Proveedor no identificado";
-export const UNIDENTIFIED_CUSTOMER = "Cliente no identificado";
+// Las ventas sin cliente registrado se agrupan en el centinela "Local" (mostrador).
+// El centinela se excluye del catálogo de clientes, así que su id no resuelve acá.
+export const UNIDENTIFIED_CUSTOMER = "Local";
 
 export const KPI_TOOLTIP_COPY: Record<string, string> = {
   Caja:
@@ -374,7 +376,7 @@ export function buildSupplierBreakdown(
 
 /**
  * Volumen de venta por cliente REAL (customer_id contra el catálogo). Las
- * ventas sin cliente identificado se agrupan en "Cliente no identificado".
+ * ventas sin cliente registrado se agrupan en el centinela "Local".
  */
 export function buildCustomerBreakdown(
   sales: SaleEntryResponse[],

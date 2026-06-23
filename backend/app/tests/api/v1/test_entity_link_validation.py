@@ -29,9 +29,16 @@ class TestCrossTenantLinkRejected:
         auth_headers: dict[str, Any],
         second_auth_headers: dict[str, Any],
     ) -> None:
-        # Cliente del segundo tenant.
+        # Cliente del segundo tenant (identidad + documento + celular obligatorios).
         other = await client.post(
-            "/api/v1/customers", json={"name": "Ajeno"}, headers=second_auth_headers
+            "/api/v1/customers",
+            json={
+                "name": "Ajeno",
+                "last_name": "Test",
+                "dni": "30123456",
+                "phone": "1122334455",
+            },
+            headers=second_auth_headers,
         )
         other_id = other.json()["id"]
 

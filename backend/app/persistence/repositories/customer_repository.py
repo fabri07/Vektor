@@ -4,11 +4,26 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.models._sentinel import SENTINEL_FLAG_KEY
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import SaleEntry
+
+
+def _not_sentinel() -> ColumnElement[bool]:
+    """Filtro: excluir el cliente sentinela "Local" de toda métrica de clientes.
+
+    ``coalesce(..., '')`` es clave: los clientes reales tienen ``custom_fields={}``
+    (la key ausente → ``.as_string()`` es NULL), y ``NULL <> 'true'`` es NULL —
+    sin el coalesce, el filtro los descartaría a TODOS. ``.as_string()`` es
+    cross-dialect (PG + SQLite de tests).
+    """
+    return (
+        func.coalesce(Customer.custom_fields[SENTINEL_FLAG_KEY].as_string(), "")
+        != "true"
+    )
 
 
 class CustomerRepository:
@@ -36,6 +51,7 @@ class CustomerRepository:
             .where(
                 Customer.tenant_id == tenant_id,
                 Customer.deactivated_at.is_(None),
+                _not_sentinel(),
             )
             .order_by(Customer.created_at.desc())
             .limit(limit)
@@ -82,6 +98,7 @@ class CustomerRepository:
             .where(
                 Customer.tenant_id == tenant_id,
                 Customer.deactivated_at.is_(None),
+                _not_sentinel(),
             )
         )
         result = await self._session.execute(q)
@@ -104,11 +121,27 @@ class CustomerRepository:
         out.sort(key=lambda c: (c["last_sale_date"] is not None, c["last_sale_date"] or date.min))
         return out
 
+    async def list_for_dedup(self, tenant_id: UUID) -> list[Customer]:
+        """Clientes activos no-sentinela del tenant — base de la deduplicación.
+
+        Devuelve los registros completos para que el import masivo arme el índice por
+        documento (DNI/CUIT) en memoria y matchee filas entrantes. Excluye el sentinela
+        "Local" (nunca se actualiza por import) y los soft-deleted.
+        """
+        q = select(Customer).where(
+            Customer.tenant_id == tenant_id,
+            Customer.deactivated_at.is_(None),
+            _not_sentinel(),
+        )
+        result = await self._session.execute(q)
+        return list(result.scalars().all())
+
     async def count_active(self, tenant_id: UUID) -> int:
         """Cantidad de clientes activos (no desactivados) del tenant."""
         q = select(func.count(Customer.id)).where(
             Customer.tenant_id == tenant_id,
             Customer.deactivated_at.is_(None),
+            _not_sentinel(),
         )
         result = await self._session.execute(q)
         return int(result.scalar_one() or 0)

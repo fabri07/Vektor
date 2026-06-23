@@ -32,7 +32,12 @@ class TestTraceId:
         tid = str(uuid.uuid4())
         resp = await client.post(
             "/api/v1/customers",
-            json={"name": "Traza"},
+            json={
+                "name": "Traza",
+                "last_name": "Test",
+                "dni": "30123456",
+                "phone": "1122334455",
+            },
             headers={**auth_headers, "X-Trace-Id": tid},
         )
         assert resp.status_code == 201
@@ -55,7 +60,13 @@ class TestCommunicationExternalOps:
     async def _make_customer(self, client: AsyncClient, headers: dict[str, Any]) -> str:
         resp = await client.post(
             "/api/v1/customers",
-            json={"name": "Cli", "email": "cli@x.com"},
+            json={
+                "name": "Cli",
+                "last_name": "Test",
+                "dni": "30123456",
+                "phone": "1122334455",
+                "email": "cli@x.com",
+            },
             headers=headers,
         )
         assert resp.status_code == 201

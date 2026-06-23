@@ -11,6 +11,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { salesService, type SaleEntryResponse } from "@/services/sales.service";
 import { productsService, type ProductResponse } from "@/services/products.service";
+import { customersService, type CustomerResponse } from "@/services/customers.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildCustomFieldColumns } from "@/lib/customFields";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
@@ -24,6 +25,12 @@ import {
   previousPeriodShortLabel,
 } from "@/lib/period";
 import { PAYMENT_LABELS } from "@/lib/payment";
+
+// Fiado = cuenta corriente: el backend exige un cliente real (no el centinela
+// "Local"). Espejamos esa regla client-side para feedback inmediato.
+const FIADO_PAYMENT_METHOD = "account";
+// Etiqueta del centinela: las ventas sin cliente registrado se agrupan en "Local".
+const LOCAL_CUSTOMER_LABEL = "Local";
 
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
@@ -54,7 +61,14 @@ function saleCategoryDisplay(
 function buildColumns(
   productById: Map<string, ProductResponse>,
   catalogLabels: Record<string, string>,
+  customerById: Map<string, CustomerResponse>,
 ) {
+  // Resuelve el nombre del cliente de una venta. El centinela "Local" se excluye
+  // de la lista de clientes, así que cualquier id no resoluble (o ausente) → "Local".
+  const customerDisplay = (id: string | null): string => {
+    if (!id) return LOCAL_CUSTOMER_LABEL;
+    return customerById.get(id)?.name ?? LOCAL_CUSTOMER_LABEL;
+  };
   return [
   {
     key: "transaction_date",
@@ -97,6 +111,13 @@ function buildColumns(
         row.product_id ? productById.get(row.product_id) : undefined,
         catalogLabels,
       ),
+  },
+  {
+    key: "customer_id",
+    header: "Cliente",
+    hideable: true,
+    render: (v: unknown) => customerDisplay(v ? String(v) : null),
+    csvValue: (v: unknown) => customerDisplay(v ? String(v) : null),
   },
   {
     key: "payment_method",
@@ -153,6 +174,12 @@ export default function SalesPage() {
     staleTime: 2 * 60 * 1000,
   });
 
+  const { data: customers = [] } = useQuery({
+    queryKey: ["customers-list"],
+    queryFn: () => customersService.getAllCustomers(),
+    staleTime: 2 * 60 * 1000,
+  });
+
   // Catálogo de categorías del vertical: labels para la columna Categoría
   // (derivada del producto vinculado a cada venta).
   const { data: categories = [] } = useQuery({
@@ -187,6 +214,9 @@ export default function SalesPage() {
         payment_method: payload.payment_method,
         notes: payload.notes,
         product_id: payload.product_id,
+        // null → el backend rutea al centinela "Local". El fiado sin cliente real
+        // lo rechaza el backend (y lo pre-validamos en el modal).
+        customer_id: payload.customer_id,
       }),
     onSuccess: async () => {
       setEditing(null);
@@ -224,8 +254,9 @@ export default function SalesPage() {
       new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime(),
   );
   const productById = new Map(products.map((product) => [product.id, product]));
+  const customerById = new Map(customers.map((c) => [c.id, c]));
   const columns = [
-    ...buildColumns(productById, catalogLabels),
+    ...buildColumns(productById, catalogLabels, customerById),
     ...buildCustomFieldColumns<SaleEntryResponse>(fieldDefs),
   ];
 
@@ -319,6 +350,7 @@ export default function SalesPage() {
         onClose={() => setEditing(null)}
         onSave={(sale) => updateMutation.mutate(sale)}
         products={products}
+        customers={customers}
       />
     </PageWrapper>
   );
@@ -330,17 +362,21 @@ function SaleEditModal({
   onClose,
   onSave,
   products,
+  customers,
 }: {
   sale: SaleEntryResponse | null;
   saving: boolean;
   onClose: () => void;
   onSave: (sale: SaleEntryResponse) => void;
   products: ProductResponse[];
+  customers: CustomerResponse[];
 }) {
   const [form, setForm] = useState<SaleEntryResponse | null>(sale);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setForm(sale);
+    setError(null);
   }, [sale]);
 
   if (!form) {
@@ -349,7 +385,15 @@ function SaleEditModal({
 
   const set = (key: keyof SaleEntryResponse, value: string | number | null) => {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
+    if (error) setError(null);
   };
+
+  // El select solo lista clientes reales; el centinela "Local" se representa con "".
+  // Si el customer_id de la venta no está en la lista (= centinela), lo tratamos
+  // como "Local" para que el select no quede en un valor fantasma.
+  const customerExists = !!form.customer_id && customers.some((c) => c.id === form.customer_id);
+  const selectValue = customerExists ? (form.customer_id as string) : "";
+  const isFiado = form.payment_method === FIADO_PAYMENT_METHOD;
 
   const setProduct = (productId: string) => {
     const product = products.find((p) => p.id === productId);
@@ -369,9 +413,18 @@ function SaleEditModal({
         className="grid gap-4"
         onSubmit={(event) => {
           event.preventDefault();
+          if (form.payment_method === FIADO_PAYMENT_METHOD && !customerExists) {
+            setError("El fiado (cuenta corriente) requiere un cliente registrado, no puede ser 'Local'.");
+            return;
+          }
           onSave(form);
         }}
       >
+        {error && (
+          <p className="rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-sm text-vk-danger">
+            {error}
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vk-text-secondary">
             Fecha y hora
@@ -402,6 +455,27 @@ function SaleEditModal({
               </option>
             ))}
           </select>
+        </label>
+        <label className="grid gap-1 text-sm text-vk-text-secondary">
+          Cliente
+          <select
+            className="rounded border border-vk-border-w px-3 py-2"
+            value={selectValue}
+            onChange={(e) => set("customer_id", e.target.value || null)}
+          >
+            <option value="">{LOCAL_CUSTOMER_LABEL} (mostrador, sin cliente registrado)</option>
+            {customers.map((customer) => (
+              <option key={customer.id} value={customer.id}>
+                {customer.name}
+                {customer.last_name?.trim() ? ` ${customer.last_name.trim()}` : ""}
+              </option>
+            ))}
+          </select>
+          {isFiado && !customerExists ? (
+            <span className="text-xs text-vk-danger">
+              El fiado requiere un cliente registrado.
+            </span>
+          ) : null}
         </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vk-text-secondary">

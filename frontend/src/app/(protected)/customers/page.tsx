@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Trash2, Eye } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -14,62 +16,84 @@ import {
   customersService,
   type CreateCustomerPayload,
   type CustomerResponse,
+  type CustomerExtractionResponse,
 } from "@/services/customers.service";
-import { salesService, type SaleEntryResponse } from "@/services/sales.service";
-import { ContactCommunication } from "@/features/communication/ContactCommunication";
+import {
+  IVA_CONDITION_OPTIONS,
+  customerTypeLabel,
+  ivaConditionLabel,
+  isValidCuit,
+  isValidDni,
+} from "@/lib/fiscal";
+import { CustomerFileModal } from "@/features/customers/CustomerFileModal";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
-const PAYMENT_METHOD_LABELS: Record<string, string> = {
-  cash: "Efectivo",
-  debit_card: "Tarjeta débito",
-  credit_card: "Tarjeta crédito",
-  transfer: "Transferencia",
-  qr: "QR / Mercado Pago",
-  account: "Cuenta corriente",
-  other: "Otro",
-};
-
-function paymentLabel(method: string): string {
-  return PAYMENT_METHOD_LABELS[method] ?? method;
-}
-
-function formatARS(value: number): string {
-  return new Intl.NumberFormat("es-AR", {
-    style: "currency",
-    currency: "ARS",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(value);
+function customerDoc(c: CustomerResponse): string {
+  if (c.cuit?.trim()) return `CUIT ${c.cuit.trim()}`;
+  if (c.dni?.trim()) return `DNI ${c.dni.trim()}`;
+  return "—";
 }
 
 const COLUMNS = [
   {
     key: "name",
-    header: "Nombre",
+    header: "Nombre / Razón social",
     hideable: true,
-    render: (v: unknown) => (
-      <span className="font-medium text-vk-text-primary">{String(v)}</span>
-    ),
+    render: (v: unknown, row: Record<string, unknown>) => {
+      const c = row as unknown as CustomerResponse;
+      return (
+        <Link
+          href={`/customers/${c.id}`}
+          className="font-medium text-vk-blue underline-offset-2 hover:underline"
+        >
+          {String(v)}
+        </Link>
+      );
+    },
     csvValue: (v: unknown) => String(v ?? ""),
+  },
+  {
+    key: "customer_type",
+    header: "Tipo",
+    hideable: true,
+    render: (v: unknown) => customerTypeLabel(v as string | null),
+    csvValue: (v: unknown) => customerTypeLabel(v as string | null),
+  },
+  {
+    key: "last_name",
+    header: "Apellido",
+    hideable: true,
+    defaultVisible: false,
+    render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
+    key: "_doc",
+    header: "CUIT / DNI",
+    hideable: true,
+    render: (_: unknown, row: Record<string, unknown>) =>
+      customerDoc(row as unknown as CustomerResponse),
+    csvValue: (_: unknown, row: Record<string, unknown>) =>
+      customerDoc(row as unknown as CustomerResponse),
+  },
+  {
+    key: "iva_condition",
+    header: "Condición IVA",
+    hideable: true,
+    render: (v: unknown) => ivaConditionLabel(v as string | null),
+    csvValue: (v: unknown) => ivaConditionLabel(v as string | null),
+  },
+  {
+    key: "phone",
+    header: "Celular",
+    hideable: true,
+    render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
     key: "email",
     header: "Email",
-    hideable: true,
-    render: (v: unknown) => String(v ?? "").trim() || "—",
-    csvValue: (v: unknown) => String(v ?? "").trim(),
-  },
-  {
-    key: "phone",
-    header: "Teléfono",
-    hideable: true,
-    render: (v: unknown) => String(v ?? "").trim() || "—",
-    csvValue: (v: unknown) => String(v ?? "").trim(),
-  },
-  {
-    key: "telegram_username",
-    header: "Telegram",
     hideable: true,
     defaultVisible: false,
     render: (v: unknown) => String(v ?? "").trim() || "—",
@@ -101,7 +125,9 @@ const COLUMNS = [
 export default function CustomersPage() {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<CustomerResponse | null>(null);
-  const [viewing, setViewing] = useState<CustomerResponse | null>(null);
+  const [fileOpen, setFileOpen] = useState(false);
+  // Sugerencia de una ficha leída por archivo: prellena el form de alta (no persiste).
+  const [prefill, setPrefill] = useState<CustomerExtractionResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
 
@@ -142,15 +168,26 @@ export default function CustomersPage() {
     onError: () => toast("No se pudo eliminar el cliente.", "error"),
   });
 
-  const tableData = customers.map((c) => ({ ...c, _status: null }));
+  const tableData = customers.map((c) => ({ ...c, _status: null, _doc: null }));
 
   return (
     <PageWrapper
       title="Clientes"
       actions={
-        <Button size="sm" onClick={() => setCreating(true)}>
-          Nuevo cliente
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="secondary" onClick={() => setFileOpen(true)}>
+            Cargar desde archivo
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              setPrefill(null);
+              setCreating(true);
+            }}
+          >
+            Nuevo cliente
+          </Button>
+        </div>
       }
     >
       {isLoading ? (
@@ -180,15 +217,14 @@ export default function CustomersPage() {
             const customer = row as unknown as CustomerResponse;
             return (
               <div className="flex items-center gap-1">
-                <button
-                  type="button"
+                <Link
+                  href={`/customers/${customer.id}`}
                   title="Ver"
                   aria-label="Ver cliente"
-                  onClick={() => setViewing(customer)}
                   className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
                 >
                   <Eye className="h-4 w-4" />
-                </button>
+                </Link>
                 <button
                   type="button"
                   title="Editar"
@@ -219,10 +255,34 @@ export default function CustomersPage() {
       <CustomerFormModal
         title="Nuevo cliente"
         customer={null}
+        prefill={prefill}
         isOpen={creating}
         saving={createMutation.isPending}
-        onClose={() => setCreating(false)}
+        onClose={() => {
+          setCreating(false);
+          setPrefill(null);
+        }}
         onSave={(payload) => createMutation.mutate(payload)}
+      />
+
+      <CustomerFileModal
+        isOpen={fileOpen}
+        onClose={() => setFileOpen(false)}
+        onExtracted={(extraction) => {
+          // La lectura solo sugiere: cerramos el modal de archivo y abrimos el alta prellenada.
+          setFileOpen(false);
+          setPrefill(extraction);
+          setCreating(true);
+          const notes: string[] = [];
+          if (extraction.confidence === "LOW") {
+            notes.push("Confianza baja: revisá bien los datos antes de guardar.");
+          }
+          notes.push(...extraction.warnings);
+          if (notes.length) toast(notes.join(" "), "info");
+        }}
+        onImported={() =>
+          queryClient.invalidateQueries({ queryKey: ["customers-list"] })
+        }
       />
 
       <CustomerFormModal
@@ -235,35 +295,77 @@ export default function CustomersPage() {
           if (editing) updateMutation.mutate({ id: editing.id, payload });
         }}
       />
-
-      <CustomerDetailModal customer={viewing} onClose={() => setViewing(null)} />
     </PageWrapper>
   );
 }
 
 // ── Form modal (create + edit) ─────────────────────────────────────────────────
 
+type CustomerType = "person" | "company";
+
 interface CustomerFormState {
+  customer_type: CustomerType;
   name: string;
-  email: string;
+  last_name: string;
+  dni: string;
+  cuit: string;
+  iva_condition: string;
   phone: string;
+  email: string;
+  address: string;
+  locality: string;
+  province: string;
+  postal_code: string;
+  birthday: string;
   telegram_username: string;
   notes: string;
 }
 
 function toFormState(customer: CustomerResponse | null): CustomerFormState {
   return {
+    customer_type: (customer?.customer_type as CustomerType) ?? "person",
     name: customer?.name ?? "",
-    email: customer?.email ?? "",
+    last_name: customer?.last_name ?? "",
+    dni: customer?.dni ?? "",
+    cuit: customer?.cuit ?? "",
+    iva_condition: customer?.iva_condition ?? "",
     phone: customer?.phone ?? "",
+    email: customer?.email ?? "",
+    address: customer?.address ?? "",
+    locality: customer?.locality ?? "",
+    province: customer?.province ?? "",
+    postal_code: customer?.postal_code ?? "",
+    birthday: customer?.birthday ?? "",
     telegram_username: customer?.telegram_username ?? "",
     notes: customer?.notes ?? "",
+  };
+}
+
+// Sugerencia de una ficha leída por archivo → estado inicial del form de alta.
+function prefillToFormState(p: CustomerExtractionResponse): CustomerFormState {
+  return {
+    customer_type: (p.customer_type as CustomerType) ?? "person",
+    name: p.name ?? "",
+    last_name: p.last_name ?? "",
+    dni: p.dni ?? "",
+    cuit: p.cuit ?? "",
+    iva_condition: p.iva_condition ?? "",
+    phone: p.phone ?? "",
+    email: p.email ?? "",
+    address: p.address ?? "",
+    locality: p.locality ?? "",
+    province: p.province ?? "",
+    postal_code: p.postal_code ?? "",
+    birthday: p.birthday ?? "",
+    telegram_username: "",
+    notes: "",
   };
 }
 
 function CustomerFormModal({
   title,
   customer,
+  prefill,
   isOpen,
   saving,
   onClose,
@@ -271,6 +373,7 @@ function CustomerFormModal({
 }: {
   title: string;
   customer: CustomerResponse | null;
+  prefill?: CustomerExtractionResponse | null;
   isOpen: boolean;
   saving: boolean;
   onClose: () => void;
@@ -281,10 +384,15 @@ function CustomerFormModal({
 
   useEffect(() => {
     if (isOpen) {
-      setForm(toFormState(customer));
+      // En alta, una sugerencia leída por archivo tiene prioridad sobre el form vacío.
+      setForm(
+        !customer && prefill ? prefillToFormState(prefill) : toFormState(customer),
+      );
       setError(null);
     }
-  }, [isOpen, customer]);
+  }, [isOpen, customer, prefill]);
+
+  const isCompany = form.customer_type === "company";
 
   function set(key: keyof CustomerFormState) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -293,14 +401,55 @@ function CustomerFormModal({
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim()) {
-      setError("El nombre es requerido.");
+    const name = form.name.trim();
+    const lastName = form.last_name.trim();
+    const dni = form.dni.trim();
+    const cuit = form.cuit.trim();
+    const phone = form.phone.trim();
+
+    if (!name) {
+      setError(isCompany ? "La razón social es requerida." : "El nombre es requerido.");
       return;
     }
+    if (!isCompany && !lastName) {
+      setError("El apellido es requerido para una persona.");
+      return;
+    }
+    if (!dni && !cuit) {
+      setError("Cargá al menos un documento: DNI o CUIT.");
+      return;
+    }
+    if (cuit && !isValidCuit(cuit)) {
+      setError("El CUIT/CUIL no es válido (revisá el dígito verificador).");
+      return;
+    }
+    if (dni && !isValidDni(dni)) {
+      setError("El DNI no es válido (7 u 8 dígitos).");
+      return;
+    }
+    if (!phone) {
+      setError("El celular es requerido.");
+      return;
+    }
+
+    // doc_type prioriza CUIT (fiscalmente más completo) cuando ambos están cargados.
+    const docType = cuit ? "cuit" : dni ? "dni" : null;
+
     onSave({
-      name: form.name.trim(),
+      customer_type: form.customer_type,
+      name,
+      last_name: isCompany ? null : lastName || null,
+      doc_type: docType,
+      dni: dni || null,
+      cuit: cuit || null,
+      iva_condition: form.iva_condition || null,
+      phone,
       email: form.email.trim() || null,
-      phone: form.phone.trim() || null,
+      address: form.address.trim() || null,
+      locality: form.locality.trim() || null,
+      province: form.province.trim() || null,
+      postal_code: form.postal_code.trim() || null,
+      birthday: form.birthday.trim() || null,
       telegram_username: form.telegram_username.trim() || null,
       notes: form.notes.trim() || null,
     });
@@ -309,15 +458,77 @@ function CustomerFormModal({
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="lg">
       <form className="space-y-4" onSubmit={handleSubmit}>
-        <Input
-          label="Nombre"
-          type="text"
-          placeholder="Ej: Juan Pérez"
-          value={form.name}
-          onChange={set("name")}
-          error={error ?? undefined}
+        {/* Tipo de cliente */}
+        <Select
+          label="Tipo de cliente"
+          options={[
+            { value: "person", label: "Persona" },
+            { value: "company", label: "Empresa" },
+          ]}
+          value={form.customer_type}
+          onChange={(v) =>
+            setForm((prev) => ({ ...prev, customer_type: v as CustomerType }))
+          }
         />
+
+        {/* Identidad */}
         <div className="grid grid-cols-2 gap-4">
+          <Input
+            label={isCompany ? "Razón social" : "Nombre"}
+            type="text"
+            placeholder={isCompany ? "Distribuidora SA" : "Juan"}
+            value={form.name}
+            onChange={set("name")}
+          />
+          {!isCompany && (
+            <Input
+              label="Apellido"
+              type="text"
+              placeholder="Pérez"
+              value={form.last_name}
+              onChange={set("last_name")}
+            />
+          )}
+        </div>
+
+        {/* Documento fiscal */}
+        <div className="grid grid-cols-2 gap-4">
+          {!isCompany && (
+            <Input
+              label="DNI (opcional si cargás CUIT)"
+              type="text"
+              placeholder="30123456"
+              value={form.dni}
+              onChange={set("dni")}
+            />
+          )}
+          <Input
+            label="CUIT / CUIL"
+            type="text"
+            placeholder="20-12345678-6"
+            value={form.cuit}
+            onChange={set("cuit")}
+          />
+        </div>
+
+        {/* Condición IVA */}
+        <Select
+          label="Condición frente al IVA (opcional)"
+          placeholder="Seleccioná una condición"
+          options={IVA_CONDITION_OPTIONS}
+          value={form.iva_condition}
+          onChange={(v) => setForm((prev) => ({ ...prev, iva_condition: v }))}
+        />
+
+        {/* Contacto */}
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label="Celular (WhatsApp)"
+            type="text"
+            placeholder="+54 9 11 1234-5678"
+            value={form.phone}
+            onChange={set("phone")}
+          />
           <Input
             label="Email (opcional)"
             type="email"
@@ -325,28 +536,70 @@ function CustomerFormModal({
             value={form.email}
             onChange={set("email")}
           />
+        </div>
+
+        {/* Domicilio de entrega */}
+        <Input
+          label="Dirección de entrega (opcional)"
+          type="text"
+          placeholder="Calle y número"
+          value={form.address}
+          onChange={set("address")}
+        />
+        <div className="grid grid-cols-3 gap-4">
           <Input
-            label="Teléfono (opcional)"
+            label="Localidad (opcional)"
             type="text"
-            placeholder="+54 9 11 1234-5678"
-            value={form.phone}
-            onChange={set("phone")}
+            placeholder="Quilmes"
+            value={form.locality}
+            onChange={set("locality")}
+          />
+          <Input
+            label="Provincia (opcional)"
+            type="text"
+            placeholder="Buenos Aires"
+            value={form.province}
+            onChange={set("province")}
+          />
+          <Input
+            label="Cód. postal (opcional)"
+            type="text"
+            placeholder="1878"
+            value={form.postal_code}
+            onChange={set("postal_code")}
+          />
+        </div>
+
+        {/* Comerciales */}
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label="Cumpleaños (opcional)"
+            type="date"
+            value={form.birthday}
+            onChange={set("birthday")}
+          />
+          <Input
+            label="Usuario de Telegram (opcional)"
+            type="text"
+            placeholder="@usuario"
+            value={form.telegram_username}
+            onChange={set("telegram_username")}
           />
         </div>
         <Input
-          label="Usuario de Telegram (opcional)"
+          label="Notas / Preferencias (opcional)"
           type="text"
-          placeholder="@usuario"
-          value={form.telegram_username}
-          onChange={set("telegram_username")}
-        />
-        <Input
-          label="Notas (opcional)"
-          type="text"
-          placeholder="Ej: cliente mayorista, paga a 30 días..."
+          placeholder="Ej: prefiere entregas a la tarde, compra mayorista..."
           value={form.notes}
           onChange={set("notes")}
         />
+
+        {error && (
+          <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-3 py-2 text-sm text-vk-danger">
+            {error}
+          </p>
+        )}
+
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="secondary" size="sm" onClick={onClose}>
             Cancelar
@@ -356,127 +609,6 @@ function CustomerFormModal({
           </Button>
         </div>
       </form>
-    </Modal>
-  );
-}
-
-// ── Detail modal (ficha + ventas asociadas) ───────────────────────────────────
-
-function CustomerDetailModal({
-  customer,
-  onClose,
-}: {
-  customer: CustomerResponse | null;
-  onClose: () => void;
-}) {
-  const { data: sales = [], isLoading } = useQuery({
-    queryKey: ["sales-by-customer", customer?.id],
-    queryFn: () => salesService.getAllEntries({ customer_id: customer!.id }),
-    enabled: !!customer,
-    staleTime: 60 * 1000,
-  });
-
-  if (!customer) return null;
-
-  const totalSales = sales.reduce((s: number, sale: SaleEntryResponse) => s + sale.amount, 0);
-
-  return (
-    <Modal isOpen={!!customer} onClose={onClose} title={customer.name} size="2xl">
-      <div className="space-y-5">
-        {/* Datos de contacto */}
-        <section className="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <p className="text-xs text-vk-text-muted">Email</p>
-            <p className="text-vk-text-primary">{customer.email?.trim() || "—"}</p>
-          </div>
-          <div>
-            <p className="text-xs text-vk-text-muted">Teléfono</p>
-            <p className="text-vk-text-primary">{customer.phone?.trim() || "—"}</p>
-          </div>
-          <div>
-            <p className="text-xs text-vk-text-muted">Telegram</p>
-            <p className="text-vk-text-primary">{customer.telegram_username?.trim() || "—"}</p>
-          </div>
-          <div>
-            <p className="text-xs text-vk-text-muted">Estado</p>
-            <p>
-              {customer.is_active ? (
-                <Badge variant="success">Activo</Badge>
-              ) : (
-                <Badge variant="default">Inactivo</Badge>
-              )}
-            </p>
-          </div>
-          {customer.notes?.trim() ? (
-            <div className="col-span-2">
-              <p className="text-xs text-vk-text-muted">Notas</p>
-              <p className="text-vk-text-primary">{customer.notes}</p>
-            </div>
-          ) : null}
-        </section>
-
-        {/* Comunicación */}
-        <ContactCommunication
-          recipientType="customer"
-          recipientId={customer.id}
-          email={customer.email}
-          phone={customer.phone}
-        />
-
-        {/* Ventas asociadas */}
-        <section className="space-y-2">
-          <div className="flex items-center justify-between">
-            <h3 className="font-display text-sm font-semibold text-vk-text-primary">
-              Ventas asociadas
-            </h3>
-            {sales.length > 0 && (
-              <span className="text-xs text-vk-text-muted">
-                {sales.length} venta(s) · {formatARS(totalSales)}
-              </span>
-            )}
-          </div>
-
-          {isLoading ? (
-            <div className="space-y-2">
-              {[...Array<number>(3)].map((_, i) => (
-                <div
-                  key={i}
-                  className="h-9 animate-pulse rounded-lg border border-vk-border-w bg-vk-surface-w"
-                />
-              ))}
-            </div>
-          ) : sales.length === 0 ? (
-            <p className="rounded-lg border border-vk-border-w bg-vk-surface-w px-4 py-3 text-sm text-vk-text-muted">
-              Este cliente no tiene ventas asociadas todavía.
-            </p>
-          ) : (
-            <div className="overflow-hidden rounded-lg border border-vk-border-w">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-vk-border-w bg-vk-bg-light text-left">
-                    <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Fecha</th>
-                    <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Monto</th>
-                    <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Método de pago</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sales.map((sale: SaleEntryResponse) => (
-                    <tr key={sale.id} className="border-b border-vk-border-w last:border-b-0">
-                      <td className="px-3 py-2 text-vk-text-primary">
-                        {formatDateTime(sale.transaction_date)}
-                      </td>
-                      <td className="px-3 py-2 text-vk-text-primary">{formatARS(sale.amount)}</td>
-                      <td className="px-3 py-2 text-vk-text-secondary">
-                        {paymentLabel(sale.payment_method)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      </div>
     </Modal>
   );
 }
