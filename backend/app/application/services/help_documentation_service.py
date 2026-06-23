@@ -114,6 +114,36 @@ def search(query: str, max_results: int = 3) -> list[FAQMatch]:
     return [m for _, m in scored[:max_results]]
 
 
+def get_sections() -> list[dict[str, Any]]:
+    """Devuelve el manual como secciones navegables para el FAQ por sección del frontend.
+
+    Cada sección: {name, slug, description, faqs: [{q, a}]}. Normaliza el whitespace
+    de los scalars folded (``>``) del YAML a una sola línea.
+    """
+    manual = _load_manual()
+    sections: list[dict[str, Any]] = []
+    for module in manual.get("modules", []):
+        faqs = [
+            {
+                "q": " ".join(str(item.get("q", "")).split()),
+                "a": " ".join(str(item.get("a", "")).split()),
+            }
+            for item in module.get("faq", [])
+            if item.get("q") and item.get("a")
+        ]
+        if not faqs:
+            continue
+        sections.append(
+            {
+                "name": str(module.get("name", "")).strip(),
+                "slug": str(module.get("slug", "")).strip(),
+                "description": " ".join(str(module.get("description", "")).split()),
+                "faqs": faqs,
+            }
+        )
+    return sections
+
+
 def get_module_summary(module_slug: str) -> str | None:
     """Retorna la descripción del módulo dado su slug, o None si no existe."""
     manual = _load_manual()

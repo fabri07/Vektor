@@ -368,9 +368,7 @@ async def _register_operation_fingerprint(
 
     # claim_operation_fingerprint inserta con savepoint y devuelve True si el
     # fingerprint era nuevo; aquí la semántica es inversa: True == duplicado.
-    claimed = await claim_operation_fingerprint(
-        db, tenant_id, fingerprint, str(action.action_type)
-    )
+    claimed = await claim_operation_fingerprint(db, tenant_id, fingerprint, str(action.action_type))
     return not claimed
 
 
@@ -889,9 +887,7 @@ async def chat(
 
     # ── Router NL de confirmación: si hay una acción pendiente viva y el mensaje
     # es afirmación/negación pura, ejecutar/cancelar sin pasar por el CEO. ───────
-    nl_resp = await _try_nl_confirmation(
-        body=body, current_user=current_user, db=db, redis=redis
-    )
+    nl_resp = await _try_nl_confirmation(body=body, current_user=current_user, db=db, redis=redis)
     if nl_resp is not None:
         _attach_conversation_id(nl_resp, body.conversation_id)
         return nl_resp
@@ -1059,9 +1055,7 @@ async def chat_stream(
         )
 
     # ── Router NL de confirmación (mismo que /chat) — emite la respuesta como SSE.
-    nl_resp = await _try_nl_confirmation(
-        body=body, current_user=current_user, db=db, redis=redis
-    )
+    nl_resp = await _try_nl_confirmation(body=body, current_user=current_user, db=db, redis=redis)
     if nl_resp is not None:
         _attach_conversation_id(nl_resp, body.conversation_id)
 
@@ -1754,6 +1748,24 @@ async def retry_action(
 
 
 # ── Help chat (sin rate limit) ────────────────────────────────────────────────
+
+
+@router.get(
+    "/help/faqs",
+    summary="FAQs del manual agrupadas por sección (para el centro de ayuda)",
+)
+async def help_faqs(
+    current_user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    """Devuelve el manual de usuario como secciones navegables (preguntas + respuestas).
+
+    Sirve para el centro de ayuda del frontend: no usa LLM, lee el YAML del manual.
+    """
+    from app.application.services.help_documentation_service import (  # noqa: PLC0415
+        get_sections,
+    )
+
+    return get_sections()
 
 
 @router.post(

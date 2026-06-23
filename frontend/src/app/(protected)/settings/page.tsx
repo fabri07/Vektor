@@ -14,6 +14,7 @@ import { HealthConfigPanel } from "@/features/settings/components/HealthConfigPa
 import { WorkSchedulePanel } from "@/features/settings/components/WorkSchedulePanel";
 import { FiscalConditionPanel } from "@/features/settings/components/FiscalConditionPanel";
 import { HelpChat } from "@/features/help/HelpChat";
+import { HelpCenter } from "@/features/help/HelpCenter";
 
 const AGENT_LABELS: Record<string, string> = {
   agent_calendar: "Calendar",
@@ -24,37 +25,6 @@ const AGENT_LABELS: Record<string, string> = {
   agent_sync: "Sync",
   agent_unknown: "Otros",
 };
-
-function FAQItem({ question, answer }: { question: string; answer: string }) {
-  const [open, setOpen] = useState(false);
-
-  return (
-    <div className="border-b border-vk-border-w last:border-b-0">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center justify-between py-3 text-left text-sm font-medium text-vk-text-primary hover:text-vk-blue transition-colors"
-      >
-        {question}
-        <svg
-          className={`h-4 w-4 shrink-0 text-vk-text-muted transition-transform duration-200 ${open ? "rotate-180" : ""}`}
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2}
-          aria-hidden="true"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-      {open && (
-        <p className="pb-3 text-sm text-vk-text-secondary leading-relaxed">
-          {answer}
-        </p>
-      )}
-    </div>
-  );
-}
 
 function AutomationToggle({
   enabled,
@@ -409,57 +379,23 @@ function GeneralTab() {
   );
 }
 
-const HELP_FAQS = [
-  {
-    question: "¿Que es el score de salud?",
-    answer:
-      "El score de salud es un indicador compuesto (0-100) que mide la situacion financiera de tu negocio en base a liquidez, rentabilidad, control de costos, momentum de ventas y cobertura de deuda.",
-  },
-  {
-    question: "¿Como cargo datos?",
-    answer:
-      "Podes cargar ventas, gastos y productos desde el chat con el asistente o subiendo archivos Excel/CSV desde la seccion de ingestion. Tambien podes registrar movimientos manualmente.",
-  },
-  {
-    question: "¿Como conecto Google?",
-    answer:
-      "Anda a Aplicaciones en el menu lateral para ver el estado real de Gmail, Calendar, Sheets y Docs en este entorno. Si la conexion no esta disponible, ahi mismo se indica.",
-  },
-  {
-    question: "¿Como agrego una columna nueva a una tabla?",
-    answer:
-      "Entra a la seccion (Ventas, Gastos, Productos, Clientes, Proveedores o Marketing), tocá el boton 'Agregar columna' arriba a la derecha de la tabla y creá tu campo. Despues podes completar los valores fila por fila, por carga de archivos o documentos, o desde el chat.",
-  },
-  {
-    question: "¿Mis datos estan seguros?",
-    answer:
-      "Si. Toda la informacion se almacena de forma encriptada y aislada por tenant. Nunca compartimos datos entre negocios ni con terceros.",
-  },
-] as const;
-
 function AyudaTab() {
   return (
     <div className="space-y-6">
-      {/* FAQs */}
-      <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
-        <h2 className="mb-1 text-base font-semibold text-vk-text-primary">
-          Preguntas frecuentes
-        </h2>
-        <p className="mb-4 text-sm text-vk-text-muted">
-          Lo esencial para arrancar. Si necesitás algo más específico, preguntale al asistente abajo.
-        </p>
-        <div className="rounded-lg border border-vk-border-w">
-          <div className="px-4">
-            {HELP_FAQS.map((faq) => (
-              <FAQItem key={faq.question} question={faq.question} answer={faq.answer} />
-            ))}
-          </div>
-        </div>
-      </div>
+      {/* Centro de ayuda: FAQs por sección + buscador */}
+      <HelpCenter />
 
-      {/* Chat con el agente de ayuda */}
+      {/* Chat con el agente de ayuda (para dudas no cubiertas en las FAQ) */}
       <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-2">
-        <div className="h-[520px]">
+        <div className="mb-1 px-4 pt-3">
+          <h2 className="text-base font-semibold text-vk-text-primary">
+            ¿No encontraste tu respuesta?
+          </h2>
+          <p className="text-sm text-vk-text-muted">
+            Preguntale al asistente de ayuda.
+          </p>
+        </div>
+        <div className="h-[480px]">
           <HelpChat />
         </div>
       </div>

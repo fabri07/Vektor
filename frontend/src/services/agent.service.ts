@@ -64,6 +64,24 @@ export async function sendHelpMessage(
   return res.data;
 }
 
+export interface HelpFaqItem {
+  q: string;
+  a: string;
+}
+
+export interface HelpSection {
+  name: string;
+  slug: string;
+  description: string;
+  faqs: HelpFaqItem[];
+}
+
+/** FAQs del manual agrupadas por sección (centro de ayuda — no usa LLM). */
+export async function getHelpFaqs(): Promise<HelpSection[]> {
+  const res = await api.get<HelpSection[]>("/agent/help/faqs");
+  return res.data;
+}
+
 export async function confirmAction(pendingActionId: string): Promise<ConfirmActionResponse> {
   const res = await api.post<ConfirmActionResponse>(`/agent/confirm/${pendingActionId}`);
   return res.data;
