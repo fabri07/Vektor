@@ -29,6 +29,7 @@ import { CustomerFileModal } from "@/features/customers/CustomerFileModal";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -179,17 +180,10 @@ export default function CustomersPage() {
 
   const tableData = customers.map((c) => ({ ...c, _status: null, _doc: null }));
 
-  const saveCustomerCustomField = async (
-    row: Record<string, unknown>,
-    custom_fields: Record<string, unknown>,
-  ) => {
-    try {
-      await customersService.updateCustomer(String(row.id), { custom_fields });
-      await queryClient.invalidateQueries({ queryKey: ["customers-list"] });
-    } catch {
-      toast("No se pudo guardar el dato.", "error");
-    }
-  };
+  const saveCustomerCustomField = useSaveCustomField({
+    listKey: ["customers-list"],
+    update: (id, custom_fields) => customersService.updateCustomer(id, { custom_fields }),
+  });
 
   const columns = [
     ...COLUMNS,

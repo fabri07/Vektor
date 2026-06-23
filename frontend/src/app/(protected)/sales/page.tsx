@@ -15,6 +15,7 @@ import { customersService, type CustomerResponse } from "@/services/customers.se
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
@@ -257,17 +258,10 @@ export default function SalesPage() {
   const productById = new Map(products.map((product) => [product.id, product]));
   const customerById = new Map(customers.map((c) => [c.id, c]));
 
-  const saveCustomField = async (
-    row: SaleEntryResponse,
-    custom_fields: Record<string, unknown>,
-  ) => {
-    try {
-      await salesService.updateSale(row.id, { custom_fields });
-      await queryClient.invalidateQueries({ queryKey: ["sales-entries"] });
-    } catch {
-      toast("No se pudo guardar el dato.", "error");
-    }
-  };
+  const saveCustomField = useSaveCustomField({
+    listKey: ["sales-entries"],
+    update: (id, custom_fields) => salesService.updateSale(id, { custom_fields }),
+  });
 
   const columns = [
     ...buildColumns(productById, catalogLabels, customerById),

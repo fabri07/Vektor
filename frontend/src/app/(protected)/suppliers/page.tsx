@@ -25,6 +25,7 @@ import {
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -158,17 +159,10 @@ export default function SuppliersPage() {
 
   const tableData = suppliers.map((s) => ({ ...s, _status: null }));
 
-  const saveSupplierCustomField = async (
-    row: Record<string, unknown>,
-    custom_fields: Record<string, unknown>,
-  ) => {
-    try {
-      await suppliersService.updateSupplier(String(row.id), { custom_fields });
-      await queryClient.invalidateQueries({ queryKey: ["suppliers-list"] });
-    } catch {
-      toast("No se pudo guardar el dato.", "error");
-    }
-  };
+  const saveSupplierCustomField = useSaveCustomField({
+    listKey: ["suppliers-list"],
+    update: (id, custom_fields) => suppliersService.updateSupplier(id, { custom_fields }),
+  });
 
   const columns = [
     ...COLUMNS,

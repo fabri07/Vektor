@@ -24,6 +24,7 @@ import { SmartTable, type SmartColumn } from "@/components/ui/SmartTable";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { useToastStore } from "@/stores/toastStore";
 import {
   marketingService,
@@ -303,17 +304,11 @@ export default function MarketingPage() {
     await queryClient.invalidateQueries({ queryKey: ["marketing-dashboard"] });
   };
 
-  const saveMarketingCustomField = async (
-    row: SocialMetricResponse,
-    custom_fields: Record<string, unknown>,
-  ) => {
-    try {
-      await marketingService.updateMetric(row.id, { custom_fields });
-      await invalidate();
-    } catch {
-      toast("No se pudo guardar el dato.", "error");
-    }
-  };
+  const saveMarketingCustomField = useSaveCustomField({
+    listKey: ["marketing-metrics"],
+    update: (id, custom_fields) => marketingService.updateMetric(id, { custom_fields }),
+    extraInvalidate: [["marketing-dashboard"]],
+  });
 
   const createMutation = useMutation({
     mutationFn: (payload: CreateSocialMetricPayload) => marketingService.createMetric(payload),

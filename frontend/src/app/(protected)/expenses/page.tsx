@@ -14,6 +14,7 @@ import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime, parseDateOnly, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
@@ -243,6 +244,11 @@ export default function ExpensesPage() {
       new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime(),
   );
 
+  const saveCustomField = useSaveCustomField({
+    listKey: ["expenses-entries"],
+    update: (id, custom_fields) => expensesService.updateExpense(id, { custom_fields }),
+  });
+
   return (
     <PageWrapper title="Gastos" actions={<ManualEntryLauncher />}>
       {/* Filters */}
@@ -344,17 +350,7 @@ export default function ExpensesPage() {
         <SmartTable
           columns={[
             ...COLUMNS,
-            ...buildEditableCustomFieldColumns<ExpenseEntryResponse>(
-              fieldDefs,
-              async (row, custom_fields) => {
-                try {
-                  await expensesService.updateExpense(row.id, { custom_fields });
-                  await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
-                } catch {
-                  toast("No se pudo guardar el dato.", "error");
-                }
-              },
-            ),
+            ...buildEditableCustomFieldColumns<ExpenseEntryResponse>(fieldDefs, saveCustomField),
           ]}
           data={sorted}
           exportFilename="vektor-gastos"

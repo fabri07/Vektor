@@ -19,6 +19,7 @@ import {
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -197,17 +198,10 @@ export default function ProductsPage() {
     csvValue: (_: unknown, row: Record<string, unknown>) =>
       categoryDisplay(row as unknown as ProductResponse, catalogLabels),
   };
-  const saveProductCustomField = async (
-    row: Record<string, unknown>,
-    custom_fields: Record<string, unknown>,
-  ) => {
-    try {
-      await productsService.updateProduct(String(row.id), { custom_fields });
-      await queryClient.invalidateQueries({ queryKey: ["products-list"] });
-    } catch {
-      toast("No se pudo guardar el dato.", "error");
-    }
-  };
+  const saveProductCustomField = useSaveCustomField({
+    listKey: ["products-list"],
+    update: (id, custom_fields) => productsService.updateProduct(id, { custom_fields }),
+  });
 
   const columns = [
     ...COLUMNS.slice(0, 2),
