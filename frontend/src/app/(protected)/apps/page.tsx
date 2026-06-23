@@ -80,7 +80,7 @@ function OpenAppButton({ appId, label }: { appId: string; label: string }) {
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex items-center gap-1.5 rounded-xl border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm font-medium text-vk-blue transition-colors hover:bg-vk-blue-subtle"
+      className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-vk-blue px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-vk-blue-hover"
     >
       <ExternalLink className="h-4 w-4" />
       Abrir {label}
@@ -446,7 +446,7 @@ export default function AppsPage() {
                     ))}
                   </div>
 
-                  <div className="mt-4">
+                  <div className="mt-4 [&>a]:w-full">
                     <OpenAppButton appId={app.id} label={app.label} />
                   </div>
                 </div>

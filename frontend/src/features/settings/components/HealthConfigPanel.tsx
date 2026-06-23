@@ -26,12 +26,12 @@ function SliderField({
   return (
     <div>
       <div className="flex items-baseline justify-between">
-        <label className="text-sm font-medium text-vektor-white">{label}</label>
-        <span className="text-xl font-semibold text-vektor-white tabular-nums">
+        <label className="text-sm font-medium text-vk-text-primary">{label}</label>
+        <span className="text-xl font-semibold text-vk-text-primary tabular-nums">
           {value}%
         </span>
       </div>
-      <p className="mb-3 text-xs text-vektor-muted">{hint}</p>
+      <p className="mb-3 text-xs text-vk-text-muted">{hint}</p>
       <input
         type="range"
         min={min}
@@ -39,9 +39,9 @@ function SliderField({
         step={1}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-vektor-surface accent-[var(--vektor-blue)]"
+        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-vk-border-w accent-vk-blue"
       />
-      <div className="mt-1 flex justify-between text-[10px] text-vektor-muted">
+      <div className="mt-1 flex justify-between text-[10px] text-vk-text-muted">
         <span>{min}%</span>
         <span>{max}%</span>
       </div>
@@ -99,7 +99,7 @@ export function HealthConfigPanel() {
 
   if (isLoading) {
     return (
-      <div className="py-12 text-center text-sm text-vektor-muted">
+      <div className="py-12 text-center text-sm text-vk-text-muted">
         Cargando configuración…
       </div>
     );
@@ -108,23 +108,23 @@ export function HealthConfigPanel() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-base font-semibold text-vektor-white">
+        <h3 className="text-base font-semibold text-vk-text-primary">
           Objetivo de margen
         </h3>
-        <p className="mt-1 text-sm text-vektor-muted">
+        <p className="mt-1 text-sm text-vk-text-muted">
           Configurá los umbrales de margen bruto que Véktor usa para calcular la
           dimensión &quot;Márgenes&quot; en tu score de salud. Los demás factores (caja,
           inventario, proveedores, crecimiento) siguen los benchmarks del rubro.{" "}
           {!config?.is_custom && (
-            <span className="text-vektor-body">
+            <span className="text-vk-text-secondary">
               Usando valores por defecto:{" "}
-              <strong className="text-vektor-white">{VERTICAL_DEFAULTS}</strong>.
+              <strong className="text-vk-text-primary">{VERTICAL_DEFAULTS}</strong>.
             </span>
           )}
         </p>
       </div>
 
-      <div className="vektor-card space-y-6 p-5">
+      <div className="space-y-6 rounded-xl border border-vk-border-w bg-vk-surface-w p-5 shadow-vk-sm">
         <SliderField
           label="Margen objetivo"
           hint="Por encima de este valor el score de márgenes es ≥ 90. Es tu meta de rentabilidad bruta."
@@ -143,7 +143,7 @@ export function HealthConfigPanel() {
         />
 
         {hasError && (
-          <p className="rounded-lg border border-red-700 bg-red-950/40 px-4 py-2 text-xs text-red-400">
+          <p className="rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-4 py-2 text-xs text-vk-danger">
             El umbral de alerta no puede superar el objetivo.
           </p>
         )}
@@ -153,7 +153,7 @@ export function HealthConfigPanel() {
             type="button"
             disabled={hasError || saveMutation.isPending}
             onClick={() => saveMutation.mutate()}
-            className="rounded-full bg-[var(--vektor-blue)] px-5 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-full bg-vk-blue px-5 py-2 text-sm font-medium text-white hover:bg-vk-blue-hover transition-colors disabled:opacity-50"
           >
             {saveMutation.isPending ? "Guardando…" : "Guardar"}
           </button>
@@ -162,7 +162,7 @@ export function HealthConfigPanel() {
               type="button"
               disabled={resetMutation.isPending}
               onClick={() => resetMutation.mutate()}
-              className="rounded-full border border-vektor-border px-5 py-2 text-sm font-medium text-vektor-body hover:text-vektor-white disabled:opacity-50"
+              className="rounded-full border border-vk-border-w px-5 py-2 text-sm font-medium text-vk-text-secondary hover:text-vk-text-primary disabled:opacity-50"
             >
               {resetMutation.isPending ? "Restaurando…" : "Restablecer predeterminados"}
             </button>

@@ -24,7 +24,7 @@ export function AddColumnButton({ entityType, entityLabel, onChanged }: Props) {
         className="flex items-center gap-1.5 rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-xs text-vk-text-secondary transition-colors hover:text-vk-text-primary"
       >
         <Columns3 className="h-3.5 w-3.5" />
-        Columna
+        Agregar columna
       </button>
       {open && (
         <CustomFieldsModal

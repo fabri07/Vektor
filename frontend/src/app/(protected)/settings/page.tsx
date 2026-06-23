@@ -253,8 +253,6 @@ function GeneralTab() {
 
   return (
     <div className="space-y-6">
-      <AutomationsSection />
-
       {/* ── Foto de perfil + Cuenta ──────────────────────────── */}
       <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
         <h2 className="mb-5 text-base font-semibold text-vk-text-primary">
@@ -430,7 +428,7 @@ const HELP_FAQS = [
   {
     question: "¿Como agrego una columna nueva a una tabla?",
     answer:
-      "Entra a la seccion (Ventas, Gastos, Productos, Clientes, Proveedores o Marketing), tocá el boton 'Columna' arriba a la derecha de la tabla y creá tu campo. Despues podes completar los valores fila por fila, por import o desde el chat.",
+      "Entra a la seccion (Ventas, Gastos, Productos, Clientes, Proveedores o Marketing), tocá el boton 'Agregar columna' arriba a la derecha de la tabla y creá tu campo. Despues podes completar los valores fila por fila, por carga de archivos o documentos, o desde el chat.",
   },
   {
     question: "¿Mis datos estan seguros?",
@@ -471,6 +469,7 @@ function AyudaTab() {
 
 const TABS = [
   { id: "general", label: "General" },
+  { id: "automatizaciones", label: "Automatizaciones" },
   { id: "salud", label: "Score de salud" },
   { id: "horarios", label: "Horarios" },
   { id: "ayuda", label: "Ayuda" },
@@ -501,6 +500,7 @@ export default function SettingsPage() {
       </div>
 
       {activeTab === "general" && <GeneralTab />}
+      {activeTab === "automatizaciones" && <AutomationsSection />}
       {activeTab === "salud" && <HealthConfigPanel />}
       {activeTab === "horarios" && (
         <>

@@ -137,7 +137,7 @@ export function CustomFieldsModal({ entityType, entityLabel, onClose, onChanged 
         </div>
         <p className="mb-5 text-sm text-vk-text-muted">
           Agregá columnas propias a esta sección. Después podés completar los datos fila
-          por fila en la tabla, por import o desde el chat.
+          por fila en la tabla, por carga de archivos o documentos, o desde el chat.
         </p>
 
         {/* ── Columnas existentes ─────────────────────────────── */}
