@@ -73,15 +73,15 @@ export function HelpChat() {
       {/* Intro cuando no hay mensajes */}
       {messages.length === 0 && (
         <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4 py-10 text-center">
-          <BookOpen className="h-10 w-10 text-vektor-muted" />
+          <BookOpen className="h-10 w-10 text-vk-text-muted" />
           <div>
-            <p className="text-lg font-semibold text-vektor-white">
+            <p className="text-lg font-semibold text-vk-text-primary">
               Centro de ayuda de Véktor
             </p>
-            <p className="mt-2 max-w-sm text-sm leading-6 text-vektor-body">
+            <p className="mt-2 max-w-sm text-sm leading-6 text-vk-text-secondary">
               Preguntame sobre cómo usar la plataforma. Para cargar ventas,
               gastos o consultar el estado del negocio, usá el{" "}
-              <Link href="/chat" className="text-[var(--vektor-blue)] underline">
+              <Link href="/chat" className="text-vk-blue underline">
                 chat principal
               </Link>
               .
@@ -93,7 +93,7 @@ export function HelpChat() {
                 key={q}
                 type="button"
                 onClick={() => submit(q)}
-                className="rounded-full border border-vektor-border bg-vektor-surface px-4 py-2 text-xs text-vektor-body hover:text-vektor-white transition-colors"
+                className="rounded-full border border-vk-border-w bg-vk-surface-w px-4 py-2 text-xs text-vk-text-secondary hover:text-vk-text-primary transition-colors"
               >
                 {q}
               </button>
@@ -113,15 +113,15 @@ export function HelpChat() {
               <div
                 className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-6 ${
                   msg.role === "user"
-                    ? "bg-[var(--vektor-blue)] text-white"
-                    : "bg-vektor-surface border border-vektor-border text-vektor-body"
+                    ? "bg-vk-blue text-white"
+                    : "bg-vk-bg-light border border-vk-border-w text-vk-text-secondary"
                 }`}
               >
                 <p className="whitespace-pre-wrap">{msg.text}</p>
                 {msg.redirectTo === "main_chat" && (
                   <Link
                     href="/chat"
-                    className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-[var(--vektor-blue)] hover:underline"
+                    className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-vk-blue hover:underline"
                   >
                     Ir al chat principal
                     <ArrowRight className="h-3.5 w-3.5" />
@@ -132,8 +132,8 @@ export function HelpChat() {
           ))}
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-vektor-surface border border-vektor-border rounded-2xl px-4 py-3">
-                <Loader2 className="h-4 w-4 animate-spin text-vektor-muted" />
+              <div className="bg-vk-bg-light border border-vk-border-w rounded-2xl px-4 py-3">
+                <Loader2 className="h-4 w-4 animate-spin text-vk-text-muted" />
               </div>
             </div>
           )}
@@ -141,7 +141,7 @@ export function HelpChat() {
       )}
 
       {/* Input */}
-      <div className="border-t border-vektor-border p-4">
+      <div className="border-t border-vk-border-w p-4">
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -155,17 +155,17 @@ export function HelpChat() {
             onChange={(e) => setInput(e.target.value)}
             placeholder="¿Cómo puedo ayudarte?"
             disabled={loading}
-            className="flex-1 rounded-full border border-vektor-border bg-vektor-surface px-4 py-2.5 text-sm text-vektor-white placeholder:text-vektor-muted focus:outline-none focus:ring-1 focus:ring-[var(--vektor-blue)] disabled:opacity-50"
+            className="flex-1 rounded-full border border-vk-border-w bg-vk-surface-w px-4 py-2.5 text-sm text-vk-text-primary placeholder:text-vk-text-placeholder focus:outline-none focus:ring-1 focus:ring-vk-blue disabled:opacity-50"
           />
           <button
             type="submit"
             disabled={!input.trim() || loading}
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--vektor-blue)] text-white disabled:opacity-40"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-vk-blue text-white disabled:opacity-40"
           >
             <Send className="h-4 w-4" />
           </button>
         </form>
-        <p className="mt-2 text-center text-[10px] text-vektor-muted">
+        <p className="mt-2 text-center text-[10px] text-vk-text-muted">
           Este chat no consume tus mensajes diarios
         </p>
       </div>

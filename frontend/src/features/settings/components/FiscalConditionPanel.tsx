@@ -49,19 +49,19 @@ export function FiscalConditionPanel() {
   return (
     <div className="space-y-6 pt-8">
       <div>
-        <h3 className="text-base font-semibold text-vektor-white">Condición fiscal</h3>
-        <p className="mt-1 text-sm text-vektor-muted">
+        <h3 className="text-base font-semibold text-vk-text-primary">Condición fiscal</h3>
+        <p className="mt-1 text-sm text-vk-text-muted">
           Adapta la guía de comprobantes del cierre de caja. No cambia ningún cálculo
           y Véktor no valida comprobantes ni liquida impuestos.
         </p>
       </div>
 
-      <div className="vektor-card space-y-4 p-5">
+      <div className="space-y-4 rounded-xl border border-vk-border-w bg-vk-surface-w p-5 shadow-vk-sm">
         <div className="space-y-2">
           {OPTIONS.map((opt) => (
             <label
               key={opt.value || "none"}
-              className="flex cursor-pointer items-start gap-2 text-sm text-vektor-body"
+              className="flex cursor-pointer items-start gap-2 text-sm text-vk-text-secondary"
             >
               <input
                 type="radio"
@@ -71,16 +71,16 @@ export function FiscalConditionPanel() {
                 className="mt-0.5"
               />
               <span>
-                <span className="font-medium text-vektor-white">{opt.label}</span>
+                <span className="font-medium text-vk-text-primary">{opt.label}</span>
                 {opt.detail ? (
-                  <span className="block text-xs text-vektor-muted">{opt.detail}</span>
+                  <span className="block text-xs text-vk-text-muted">{opt.detail}</span>
                 ) : null}
               </span>
             </label>
           ))}
         </div>
 
-        <p className="rounded-lg border border-vektor-border bg-vektor-surface/40 px-3 py-2 text-xs text-vektor-muted">
+        <p className="rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-2 text-xs text-vk-text-muted">
           {FISCAL_PRIVACY_NOTE}
         </p>
 
@@ -88,7 +88,7 @@ export function FiscalConditionPanel() {
           type="button"
           disabled={saveMutation.isPending}
           onClick={() => saveMutation.mutate()}
-          className="rounded-full bg-[var(--vektor-blue)] px-5 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className="rounded-full bg-vk-blue px-5 py-2 text-sm font-medium text-white hover:bg-vk-blue-hover transition-colors disabled:opacity-50"
         >
           {saveMutation.isPending ? "Guardando…" : "Guardar"}
         </button>

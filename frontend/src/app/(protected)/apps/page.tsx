@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CalendarClock,
   DatabaseZap,
+  ExternalLink,
   FileSpreadsheet,
   FileText,
   FolderKanban,
@@ -57,6 +58,34 @@ function appIcon(appId: string) {
   if (appId === "calendar") return CalendarClock;
   if (appId === "sheets_docs") return FileSpreadsheet;
   return FileText;
+}
+
+// URL pública de cada app de Google para abrirla directamente en una pestaña nueva.
+const GOOGLE_APP_URLS: Record<string, string> = {
+  drive: "https://drive.google.com",
+  gmail: "https://mail.google.com",
+  calendar: "https://calendar.google.com",
+  sheets_docs: "https://docs.google.com",
+};
+
+function appExternalUrl(appId: string): string | null {
+  return GOOGLE_APP_URLS[appId] ?? null;
+}
+
+function OpenAppButton({ appId, label }: { appId: string; label: string }) {
+  const url = appExternalUrl(appId);
+  if (!url) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-1.5 rounded-xl border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm font-medium text-vk-blue transition-colors hover:bg-vk-blue-subtle"
+    >
+      <ExternalLink className="h-4 w-4" />
+      Abrir {label}
+    </a>
+  );
 }
 
 function appAccent(appId: string) {
@@ -319,15 +348,18 @@ export default function AppsPage() {
                   </div>
                 </div>
 
-                <div className="mt-5 flex flex-wrap gap-2">
-                  {driveCard.required_scopes.map((scope) => (
-                    <span
-                      key={scope}
-                      className="rounded-full bg-[#E8F0FE] px-3 py-1 text-xs font-medium text-[#0B57D0]"
-                    >
-                      {scope}
-                    </span>
-                  ))}
+                <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap gap-2">
+                    {driveCard.required_scopes.map((scope) => (
+                      <span
+                        key={scope}
+                        className="rounded-full bg-[#E8F0FE] px-3 py-1 text-xs font-medium text-[#0B57D0]"
+                      >
+                        {scope}
+                      </span>
+                    ))}
+                  </div>
+                  <OpenAppButton appId={driveCard.id} label={driveCard.label} />
                 </div>
               </div>
             </article>
@@ -412,6 +444,10 @@ export default function AppsPage() {
                         {scope}
                       </span>
                     ))}
+                  </div>
+
+                  <div className="mt-4">
+                    <OpenAppButton appId={app.id} label={app.label} />
                   </div>
                 </div>
               </article>

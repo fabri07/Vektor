@@ -10,11 +10,10 @@ import {
 } from "@/services/automations.service";
 import { useAuthStore } from "@/stores/authStore";
 import { useToastStore } from "@/stores/toastStore";
-import { FieldDefinitionsPanel } from "@/features/settings/components/FieldDefinitionsPanel";
 import { HealthConfigPanel } from "@/features/settings/components/HealthConfigPanel";
-import { SchemaERDView } from "@/features/settings/components/SchemaERDView";
 import { WorkSchedulePanel } from "@/features/settings/components/WorkSchedulePanel";
 import { FiscalConditionPanel } from "@/features/settings/components/FiscalConditionPanel";
+import { HelpChat } from "@/features/help/HelpChat";
 
 const AGENT_LABELS: Record<string, string> = {
   agent_calendar: "Calendar",
@@ -323,55 +322,6 @@ function GeneralTab() {
         </div>
       </div>
 
-      {/* ── Ayuda ────────────────────────────────────────────── */}
-      <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
-        <h2 className="mb-4 text-base font-semibold text-vk-text-primary">
-          Ayuda
-        </h2>
-
-        <a
-          href="#"
-          className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-vk-blue hover:underline"
-        >
-          <svg
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-            aria-hidden="true"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
-            />
-          </svg>
-          Centro de ayuda
-        </a>
-
-        <div className="rounded-lg border border-vk-border-w">
-          <div className="px-4">
-            <FAQItem
-              question="¿Que es el score de salud?"
-              answer="El score de salud es un indicador compuesto (0-100) que mide la situacion financiera de tu negocio en base a liquidez, rentabilidad, control de costos, momentum de ventas y cobertura de deuda."
-            />
-            <FAQItem
-              question="¿Como cargo datos?"
-              answer="Podes cargar ventas, gastos y productos desde el chat con el asistente o subiendo archivos Excel/CSV desde la seccion de ingestion. Tambien podes registrar movimientos manualmente."
-            />
-            <FAQItem
-              question="¿Como conecto Google?"
-              answer="Anda a Aplicaciones en el menu lateral para ver el estado real de Gmail, Calendar, Sheets y Docs en este entorno. Si la conexion no esta disponible, ahi mismo se indica."
-            />
-            <FAQItem
-              question="¿Mis datos estan seguros?"
-              answer="Si. Toda la informacion se almacena de forma encriptada y aislada por tenant. Nunca compartimos datos entre negocios ni con terceros."
-            />
-          </div>
-        </div>
-      </div>
-
       {/* ── Terminos y Politicas ─────────────────────────────── */}
       <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
         <h2 className="mb-4 text-base font-semibold text-vk-text-primary">
@@ -461,12 +411,69 @@ function GeneralTab() {
   );
 }
 
+const HELP_FAQS = [
+  {
+    question: "¿Que es el score de salud?",
+    answer:
+      "El score de salud es un indicador compuesto (0-100) que mide la situacion financiera de tu negocio en base a liquidez, rentabilidad, control de costos, momentum de ventas y cobertura de deuda.",
+  },
+  {
+    question: "¿Como cargo datos?",
+    answer:
+      "Podes cargar ventas, gastos y productos desde el chat con el asistente o subiendo archivos Excel/CSV desde la seccion de ingestion. Tambien podes registrar movimientos manualmente.",
+  },
+  {
+    question: "¿Como conecto Google?",
+    answer:
+      "Anda a Aplicaciones en el menu lateral para ver el estado real de Gmail, Calendar, Sheets y Docs en este entorno. Si la conexion no esta disponible, ahi mismo se indica.",
+  },
+  {
+    question: "¿Como agrego una columna nueva a una tabla?",
+    answer:
+      "Entra a la seccion (Ventas, Gastos, Productos, Clientes, Proveedores o Marketing), tocá el boton 'Columna' arriba a la derecha de la tabla y creá tu campo. Despues podes completar los valores fila por fila, por import o desde el chat.",
+  },
+  {
+    question: "¿Mis datos estan seguros?",
+    answer:
+      "Si. Toda la informacion se almacena de forma encriptada y aislada por tenant. Nunca compartimos datos entre negocios ni con terceros.",
+  },
+] as const;
+
+function AyudaTab() {
+  return (
+    <div className="space-y-6">
+      {/* FAQs */}
+      <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-6">
+        <h2 className="mb-1 text-base font-semibold text-vk-text-primary">
+          Preguntas frecuentes
+        </h2>
+        <p className="mb-4 text-sm text-vk-text-muted">
+          Lo esencial para arrancar. Si necesitás algo más específico, preguntale al asistente abajo.
+        </p>
+        <div className="rounded-lg border border-vk-border-w">
+          <div className="px-4">
+            {HELP_FAQS.map((faq) => (
+              <FAQItem key={faq.question} question={faq.question} answer={faq.answer} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Chat con el agente de ayuda */}
+      <div className="rounded-xl border border-vk-border-w bg-vk-surface-w p-2">
+        <div className="h-[520px]">
+          <HelpChat />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const TABS = [
   { id: "general", label: "General" },
   { id: "salud", label: "Score de salud" },
   { id: "horarios", label: "Horarios" },
-  { id: "campos", label: "Campos" },
-  { id: "diagrama", label: "Diagrama" },
+  { id: "ayuda", label: "Ayuda" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -501,8 +508,7 @@ export default function SettingsPage() {
           <FiscalConditionPanel />
         </>
       )}
-      {activeTab === "campos" && <FieldDefinitionsPanel />}
-      {activeTab === "diagrama" && <SchemaERDView />}
+      {activeTab === "ayuda" && <AyudaTab />}
     </PageWrapper>
   );
 }

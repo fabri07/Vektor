@@ -67,7 +67,7 @@ export function WorkSchedulePanel() {
 
   if (isLoading) {
     return (
-      <div className="py-12 text-center text-sm text-vektor-muted">
+      <div className="py-12 text-center text-sm text-vk-text-muted">
         Cargando horario…
       </div>
     );
@@ -76,24 +76,24 @@ export function WorkSchedulePanel() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-base font-semibold text-vektor-white">
+        <h3 className="text-base font-semibold text-vk-text-primary">
           Días y horario laboral
         </h3>
-        <p className="mt-1 text-sm text-vektor-muted">
+        <p className="mt-1 text-sm text-vk-text-muted">
           Definí cuándo abrís tu negocio. Véktor lo usa para recordarte el cierre
           de caja al final del día laboral.{" "}
           {schedule?.is_default && (
-            <span className="text-vektor-body">
+            <span className="text-vk-text-secondary">
               Usando valores por defecto:{" "}
-              <strong className="text-vektor-white">Lun-Sáb, 09:00-18:00</strong>.
+              <strong className="text-vk-text-primary">Lun-Sáb, 09:00-18:00</strong>.
             </span>
           )}
         </p>
       </div>
 
-      <div className="vektor-card space-y-6 p-5">
+      <div className="space-y-6 rounded-xl border border-vk-border-w bg-vk-surface-w p-5 shadow-vk-sm">
         <div>
-          <label className="mb-3 block text-sm font-medium text-vektor-white">
+          <label className="mb-3 block text-sm font-medium text-vk-text-primary">
             Días que abrís
           </label>
           <div className="flex flex-wrap gap-2">
@@ -107,8 +107,8 @@ export function WorkSchedulePanel() {
                   className={[
                     "rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
                     isSelected
-                      ? "border-[var(--vektor-blue)] bg-[var(--vektor-blue)] text-white"
-                      : "border-vektor-border bg-vektor-surface text-vektor-body hover:text-vektor-white",
+                      ? "border-vk-blue bg-vk-blue text-white"
+                      : "border-vk-border-w bg-vk-surface-w text-vk-text-secondary hover:text-vk-text-primary",
                   ].join(" ")}
                 >
                   {d.label}
@@ -119,11 +119,11 @@ export function WorkSchedulePanel() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <label className="text-sm font-medium text-vektor-white">Abre</label>
+          <label className="text-sm font-medium text-vk-text-primary">Abre</label>
           <select
             value={openHour}
             onChange={(e) => setOpenHour(Number(e.target.value))}
-            className="rounded-lg border border-vektor-border bg-vektor-surface px-3 py-1.5 text-sm text-vektor-white focus:outline-none focus:ring-2 focus:ring-[var(--vektor-blue)]/20"
+            className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
           >
             {HOUR_OPTIONS.map((h) => (
               <option key={h} value={h}>
@@ -131,11 +131,11 @@ export function WorkSchedulePanel() {
               </option>
             ))}
           </select>
-          <label className="text-sm font-medium text-vektor-white">Cierra</label>
+          <label className="text-sm font-medium text-vk-text-primary">Cierra</label>
           <select
             value={closeHour}
             onChange={(e) => setCloseHour(Number(e.target.value))}
-            className="rounded-lg border border-vektor-border bg-vektor-surface px-3 py-1.5 text-sm text-vektor-white focus:outline-none focus:ring-2 focus:ring-[var(--vektor-blue)]/20"
+            className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
           >
             {HOUR_OPTIONS.map((h) => (
               <option key={h} value={h}>
@@ -146,7 +146,7 @@ export function WorkSchedulePanel() {
         </div>
 
         {hasError && (
-          <p className="rounded-lg border border-red-700 bg-red-950/40 px-4 py-2 text-xs text-red-400">
+          <p className="rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-4 py-2 text-xs text-vk-danger">
             {days.length === 0
               ? "Elegí al menos un día laboral."
               : "El horario de cierre debe ser posterior al de apertura."}
@@ -158,7 +158,7 @@ export function WorkSchedulePanel() {
             type="button"
             disabled={hasError || saveMutation.isPending}
             onClick={() => saveMutation.mutate()}
-            className="rounded-full bg-[var(--vektor-blue)] px-5 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-full bg-vk-blue px-5 py-2 text-sm font-medium text-white hover:bg-vk-blue-hover transition-colors disabled:opacity-50"
           >
             {saveMutation.isPending ? "Guardando…" : "Guardar"}
           </button>

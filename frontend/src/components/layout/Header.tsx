@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { Menu, Bell } from "lucide-react";
+import { Menu, Bell, Settings } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { NotificationPanel } from "@/features/notifications/NotificationPanel";
 import { fetchNotifications } from "@/services/notifications.service";
@@ -79,8 +80,23 @@ export function Header({ onMenuToggle }: HeaderProps) {
         )}
       </div>
 
-      {/* Right: notifications + avatar */}
+      {/* Right: settings + notifications + avatar */}
       <div className="flex items-center gap-2">
+        {/* Settings quick access */}
+        <Link
+          href="/settings"
+          aria-label="Configuración"
+          title="Configuración"
+          className={[
+            "flex h-8 w-8 items-center justify-center rounded-md transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60",
+            pathname === "/settings" || pathname.startsWith("/settings/")
+              ? "bg-vk-surface-1 text-vk-text-light"
+              : "text-vk-text-muted hover:bg-vk-surface-1 hover:text-vk-text-light",
+          ].join(" ")}
+        >
+          <Settings className="h-[18px] w-[18px]" />
+        </Link>
+
         {/* Notification bell */}
         <button
           onClick={() => setPanelOpen((v) => !v)}

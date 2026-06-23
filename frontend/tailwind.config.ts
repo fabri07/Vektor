@@ -33,7 +33,7 @@ const vkColors = {
   // Typography
   "vk-text-primary":    "rgb(15 22 35 / <alpha-value>)",
   "vk-text-secondary":  "rgb(74 85 104 / <alpha-value>)",
-  "vk-text-muted":      "rgb(138 155 176 / <alpha-value>)",
+  "vk-text-muted":      "rgb(100 116 139 / <alpha-value>)",
   "vk-text-light":      "rgb(232 237 244 / <alpha-value>)",
   "vk-text-placeholder":"rgb(160 174 192 / <alpha-value>)",
   // Semantic
