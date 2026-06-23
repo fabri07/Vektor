@@ -53,6 +53,8 @@ Véktor es una plataforma SaaS de salud financiera para PYMEs argentinas (kiosco
 - **Régimen fiscal** (`business_profiles.fiscal_condition`): 3 valores canónicos `monotributo | responsable_inscripto | informal` (+ NULL = no configurado). **Solo informativo** (mejora heurísticas + guía del arqueo), nunca bloquea. Normalizador tolerante a legacy en `app/domain/fiscal_condition.py` (`'registered'`→`'monotributo'`); `GET/PATCH /settings/fiscal-condition` y `cash_close_service` normalizan al leer. Opcional en onboarding. Frontend: `lib/fiscalCondition.ts` (+ `FISCAL_PRIVACY_NOTE`, copy Ley 25.326/AAIP), `FiscalConditionPanel`. Migración `20260716_0001` (obligatoria; ver tabla).
 - **Compra de mercadería = COGS + producto + stock** (`ingestion_import_service.py`): un libro de compras ruteado a gastos crea el `Product` además del gasto COGS+caja, vía el helper compartido `build_incomplete_product()` (`requires_completion=True`, `sale_price_ars=0`). Gate estricto (`expense_type=="COGS"` + nombre + cantidad>0) para NO crear productos basura desde OPEX. `_ensure_product_for_purchase()` delega en el helper. El clasificador (`file_parsing.infer_spreadsheet_type`) ya distingue libro de compras (total+forma_pago+proveedor+fecha) de catálogo de productos.
 - **Reclasificar gasto vía chat** (`ActionType.RECLASSIFY_EXPENSE`, MEDIUM): intent `reclasificar_gasto` → `agent_expense`. El handler asesora **reventa** (COGS/INVENTORY → producto vendible) vs **insumo** (OPEX/SUPPLIES) vs otra categoría según el vertical, y al confirmar reclasifica `category`+`expense_type` (y crea producto vendible si reventa) vía `pending_action_service._execute_reclassify_expense` + `ExpenseRepository.reclassify`. `intent_rescue.OBJECTS_CLASIFICACION` evita que una consulta de categorización caiga en `out_of_scope`.
+- **Reforma de Proveedores (marca ≠ proveedor):** los catálogos de productos ya NO crean proveedores — la marca queda en `Product.custom_fields["marca"]`. Una compra sin proveedor informado se agrupa en un único **sentinela "No identificado"** por tenant (flag `custom_fields["_sentinel"]`, índice único parcial, helper centralizado `is_sentinel_value`/`Supplier.is_sentinel` en `models/supplier.py`). Campos de ficha: `last_name`/`cuil`/`payment_method` (persona o razón social). `inventory_movements.supplier_id` alimenta `GET /suppliers/{id}/products` (`InventoryRepository.products_purchased_from_supplier`: última compra/cantidad/precio unit). Frontend: detalle a **página `/suppliers/[id]`** (no modal), nombre navegable, mailto/WhatsApp, helpers en `frontend/src/lib/suppliers.ts`.
+- **Remito de proveedor** (`POST /suppliers/{id}/receipts`): alta manual de líneas → crea Product+stock+`ExpenseEntry` COGS por línea + envío→OPEX `LOGISTICS`, idempotente, validaciones 422 (qty entero, unit_price≥0). **Lectura por archivo** (`POST /suppliers/{id}/receipts/extract`, `remito_extraction_service.py`): planillas XLSX/CSV se parsean determinísticamente (reusa `normalize_numeric`/`ColumnMapper`); foto/PDF con **Claude `sonnet-4-6` multimodal + structured output** (transcribe, NO calcula; fail-soft). Solo SUGIERE (human-in-the-loop): prellena el `ReceiptModal`, el usuario confirma. Guard: no se puede cargar/leer remito contra el sentinela. `source_upload_id` liga el archivo a los `ExpenseEntry` creados.
 
 ---
 
@@ -104,6 +106,8 @@ make db-reset               # ⚠️ PELIGROSO
 - `void_misclassified_imports.py` — anula (soft delete auditado) registros importados mal clasificados.
 - `backfill_inventory_balances.py` / `backfill_expense_categories.py` — backfills vertical-aware.
 - `reanalyze_uploaded_files.py` — re-corre el pipeline de parsing sobre archivos ya subidos (`--include-imported` disponible).
+- `deactivate_brand_suppliers.py` — limpieza reversible de marcas-proveedor (dry-run/`--apply`, `--tenant`/`--all-active`). Categorías: `BRAND_FROM_CATALOG` (matchea `custom_fields["marca"]` en ≥2 productos) y `MERCH_SOURCE_NO_CONTACT` (sin contacto + solo COGS + no creado en app → colapsa al sentinela "No identificado", mueve la marca al producto, re-apunta gastos/movimientos; reversa en `_supplier_prev`). Protege proveedores reales (OPEX o creados en app vía audit `DATA_RECORD_*`). Auditado.
+- `backfill_inventory_movement_supplier.py` — puebla `inventory_movements.supplier_id` desde los gastos (solo match exacto y único; dry-run/`--apply`).
 - `_db.py` — helper compartido de conexión para los scripts.
 
 ### Frontend (correr desde `frontend/`)
@@ -158,7 +162,7 @@ HTTP Request
 
 ### API Routers (`app/api/v1/`)
 
-Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`, `fields`, `automations`, `settings`, `cash_closes` (`/cash-closes`), `others` (`/others`), `economic_summary` (`/economic-summary`).
+Registrados en `router.py`. Dominios: `auth`, `oauth`, `tenants`, `users`, `business_profiles`, `sales`, `expenses`, `products`, `health_scores`, `insights`, `momentum`, `notifications`, `files`, `ingestion`, `onboarding`, `agent`, `integrations`, `forecast`, `admin`, `fields`, `automations`, `settings`, `cash_closes` (`/cash-closes`), `others` (`/others`), `economic_summary` (`/economic-summary`), `suppliers` (`/suppliers`: CRUD + `GET /{id}/products` + `POST /{id}/receipts` + `POST /{id}/receipts/extract`).
 
 **Router `settings`** (`app/api/v1/settings.py`):
 - `GET /settings/health-config` — configuración de margen actual del tenant
@@ -457,6 +461,8 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | Diagnóstico MCP F5 (PR #6) | `GET /integrations/google/diagnostics` (SUPERADMIN) + runbook `docs/runbooks/google_mcp_oauth.md`. El código MCP está completo; el fallo OAuth restante es operacional (Google Cloud Console). |
 | Libro Diario + pagos canónicos | Parser doble encabezado en `file_parsing.py`, `PaymentMethod.ACCOUNT`, mercadería→COGS por vertical, scripts `void_misclassified_imports.py` + `backfill_inventory_balances.py`. |
 | Categorías COGS + Otros | Catálogo 13 categorías (`domain/expense_categories.py`), `expense_type` COGS/OPEX (mig `20260710_0001`), `unclassified_records` + `/others` + `/otros` (mig `20260712_0001`), importación masiva de sugeridos. |
+| Reforma de Proveedores | Marca ≠ proveedor (catálogos no crean suppliers; sentinela "No identificado"), ficha fiscal (`last_name`/`cuil`/`payment_method`, mig `20260720_0003`), `inventory_movements.supplier_id` (mig `20260720_0004`) + `GET /suppliers/{id}/products`, página `/suppliers/[id]`, scripts de limpieza/backfill (categoría `MERCH_SOURCE_NO_CONTACT`). |
+| Remito de proveedor | `POST /suppliers/{id}/receipts` (manual → Product+stock+COGS+envío LOGISTICS) + `POST /suppliers/{id}/receipts/extract` (`remito_extraction_service.py`: planilla determinística / foto-PDF con Claude multimodal, solo sugiere). `source_upload_id` liga archivo→gastos. Sin migraciones. |
 
 ### Cadena de migraciones (recientes)
 
@@ -492,6 +498,9 @@ Feature flag: `ENABLE_GOOGLE_MCP_TOOLS=false` (default). Variables propias: `GOO
 | `20260716_0001` | reconcilia `fiscal_condition` a 3 valores canónicos (`monotributo`/`responsable_inscripto`/`informal`): ensancha a `Text`, normaliza legacy `'registered'`→`'monotributo'`, reemplaza el CHECK. **Obligatoria** — el CHECK/`String(12)` de `20260715_0001` rompía el `PATCH /settings/fiscal-condition` |
 | `20260717_0001` | `source_upload_id` en `sales_entries` + `expense_entries` (trazabilidad de import → archivo origen, base de la idempotencia/dedup de ingesta) |
 | `20260717_0002` | amplía el CHECK de `data_repair_items.action` con `VOID_DUPLICATE` + `RECLASSIFY_EXPENSE` (reclasificación vertical-aware + dedup de ingesta) |
+| `20260720_0001/0002` | relectura de archivos (constraints/estado de re-import) |
+| `20260720_0003` | `suppliers` + `last_name`/`cuil`/`payment_method` (nullable) + índice único parcial del sentinela (`WHERE custom_fields->>'_sentinel' = 'true'`) |
+| `20260720_0004` | `inventory_movements.supplier_id` (FK `suppliers` SET NULL) + índice `(tenant_id, supplier_id)` — base de `GET /suppliers/{id}/products` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
 
