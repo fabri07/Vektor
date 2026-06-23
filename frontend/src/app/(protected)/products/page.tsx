@@ -17,7 +17,8 @@ import {
   type ProductResponse,
 } from "@/services/products.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { buildCustomFieldColumns } from "@/lib/customFields";
+import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -196,11 +197,26 @@ export default function ProductsPage() {
     csvValue: (_: unknown, row: Record<string, unknown>) =>
       categoryDisplay(row as unknown as ProductResponse, catalogLabels),
   };
+  const saveProductCustomField = async (
+    row: Record<string, unknown>,
+    custom_fields: Record<string, unknown>,
+  ) => {
+    try {
+      await productsService.updateProduct(String(row.id), { custom_fields });
+      await queryClient.invalidateQueries({ queryKey: ["products-list"] });
+    } catch {
+      toast("No se pudo guardar el dato.", "error");
+    }
+  };
+
   const columns = [
     ...COLUMNS.slice(0, 2),
     categoryColumn,
     ...COLUMNS.slice(2),
-    ...buildCustomFieldColumns<Record<string, unknown>>(fieldDefs),
+    ...buildEditableCustomFieldColumns<Record<string, unknown>>(
+      fieldDefs,
+      saveProductCustomField,
+    ),
   ];
 
   const updateMutation = useMutation({
@@ -358,6 +374,7 @@ export default function ProductsPage() {
           columns={columns}
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-productos"
+          toolbarActions={<AddColumnButton entityType="product" entityLabel="Productos" />}
           renderActions={(row) => {
             const product = row as unknown as ProductResponse;
             return (

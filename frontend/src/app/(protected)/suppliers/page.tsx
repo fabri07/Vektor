@@ -22,6 +22,9 @@ import {
   isValidCuil,
   paymentLabel,
 } from "@/lib/suppliers";
+import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -116,6 +119,12 @@ export default function SuppliersPage() {
     staleTime: 2 * 60 * 1000,
   });
 
+  const { data: fieldDefs = [] } = useQuery({
+    queryKey: ["field-definitions", "supplier"],
+    queryFn: () => fieldDefinitionsService.getAll("supplier"),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const createMutation = useMutation({
     mutationFn: (payload: CreateSupplierPayload) =>
       suppliersService.createSupplier(payload),
@@ -149,6 +158,26 @@ export default function SuppliersPage() {
 
   const tableData = suppliers.map((s) => ({ ...s, _status: null }));
 
+  const saveSupplierCustomField = async (
+    row: Record<string, unknown>,
+    custom_fields: Record<string, unknown>,
+  ) => {
+    try {
+      await suppliersService.updateSupplier(String(row.id), { custom_fields });
+      await queryClient.invalidateQueries({ queryKey: ["suppliers-list"] });
+    } catch {
+      toast("No se pudo guardar el dato.", "error");
+    }
+  };
+
+  const columns = [
+    ...COLUMNS,
+    ...buildEditableCustomFieldColumns<Record<string, unknown>>(
+      fieldDefs,
+      saveSupplierCustomField,
+    ),
+  ];
+
   return (
     <PageWrapper
       title="Proveedores"
@@ -178,9 +207,10 @@ export default function SuppliersPage() {
         />
       ) : (
         <SmartTable
-          columns={COLUMNS}
+          columns={columns}
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-proveedores"
+          toolbarActions={<AddColumnButton entityType="supplier" entityLabel="Proveedores" />}
           renderActions={(row) => {
             const supplier = row as unknown as SupplierResponse;
             return (

@@ -21,6 +21,9 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 import { SmartTable, type SmartColumn } from "@/components/ui/SmartTable";
+import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { useToastStore } from "@/stores/toastStore";
 import {
   marketingService,
@@ -289,9 +292,27 @@ export default function MarketingPage() {
     staleTime: 60 * 1000,
   });
 
+  const { data: fieldDefs = [] } = useQuery({
+    queryKey: ["field-definitions", "marketing"],
+    queryFn: () => fieldDefinitionsService.getAll("marketing"),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["marketing-metrics"] });
     await queryClient.invalidateQueries({ queryKey: ["marketing-dashboard"] });
+  };
+
+  const saveMarketingCustomField = async (
+    row: SocialMetricResponse,
+    custom_fields: Record<string, unknown>,
+  ) => {
+    try {
+      await marketingService.updateMetric(row.id, { custom_fields });
+      await invalidate();
+    } catch {
+      toast("No se pudo guardar el dato.", "error");
+    }
   };
 
   const createMutation = useMutation({
@@ -371,6 +392,10 @@ export default function MarketingPage() {
       render: (_v, row) => fmtArs(row.ads_spend_ars),
       csvValue: (_v, row) => String(row.ads_spend_ars),
     },
+    ...buildEditableCustomFieldColumns<SocialMetricResponse>(
+      fieldDefs,
+      saveMarketingCustomField,
+    ),
   ];
 
   return (
@@ -498,6 +523,7 @@ export default function MarketingPage() {
             columns={columns}
             data={metrics}
             exportFilename="vektor-marketing"
+            toolbarActions={<AddColumnButton entityType="marketing" entityLabel="Marketing" />}
             emptyMessage="No hay métricas para el filtro seleccionado."
             renderActions={(row) => (
               <div className="flex items-center gap-1.5">

@@ -27,7 +27,9 @@ class FieldDefinitionResponse(BaseModel):
 
 
 class CreateCustomFieldRequest(BaseModel):
-    entity_type: str = Field(pattern="^(sale|expense|product|inventory)$")
+    entity_type: str = Field(
+        pattern="^(sale|expense|product|inventory|customer|supplier|marketing)$"
+    )
     field_key: str = Field(min_length=2, max_length=80, pattern="^[a-z][a-z0-9_]*$")
     label: str = Field(min_length=1, max_length=200)
     data_type: str = Field(default="text", pattern="^(text|number|date|enum|boolean)$")

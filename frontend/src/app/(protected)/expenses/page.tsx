@@ -12,7 +12,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { buildCustomFieldColumns } from "@/lib/customFields";
+import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { formatDateTime, parseDateOnly, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
@@ -341,9 +342,23 @@ export default function ExpensesPage() {
         )
       ) : (
         <SmartTable
-          columns={[...COLUMNS, ...buildCustomFieldColumns<ExpenseEntryResponse>(fieldDefs)]}
+          columns={[
+            ...COLUMNS,
+            ...buildEditableCustomFieldColumns<ExpenseEntryResponse>(
+              fieldDefs,
+              async (row, custom_fields) => {
+                try {
+                  await expensesService.updateExpense(row.id, { custom_fields });
+                  await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
+                } catch {
+                  toast("No se pudo guardar el dato.", "error");
+                }
+              },
+            ),
+          ]}
           data={sorted}
           exportFilename="vektor-gastos"
+          toolbarActions={<AddColumnButton entityType="expense" entityLabel="Gastos" />}
           renderActions={(row) => (
             <div className="flex items-center gap-1">
               <button type="button" title="Editar" aria-label="Editar gasto" onClick={() => setEditing(row)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary">

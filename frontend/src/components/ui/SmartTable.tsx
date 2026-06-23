@@ -18,6 +18,8 @@ interface SmartTableProps<T extends object> {
   emptyMessage?: string;
   exportFilename?: string;
   renderActions?: (row: T) => ReactNode;
+  /** Acciones extra a la izquierda de la toolbar (ej: "+ Columna"). */
+  toolbarActions?: ReactNode;
 }
 
 type PageSize = number | "all";
@@ -45,6 +47,7 @@ export function SmartTable<T extends object>({
   emptyMessage,
   exportFilename = "vektor-export",
   renderActions,
+  toolbarActions,
 }: SmartTableProps<T>) {
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(
     () =>
@@ -127,7 +130,9 @@ export function SmartTable<T extends object>({
   return (
     <div className="space-y-3">
       {/* Toolbar */}
-      <div className="flex items-center justify-end gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">{toolbarActions}</div>
+        <div className="flex items-center gap-2">
         {/* Column picker */}
         {hideableColumns.length > 1 && (
           <div className="relative" ref={pickerRef}>
@@ -178,6 +183,7 @@ export function SmartTable<T extends object>({
           <Download className="h-3.5 w-3.5" />
           Exportar CSV
         </button>
+        </div>
       </div>
 
       <Table columns={tableColumns} data={pageData} emptyMessage={emptyMessage} />

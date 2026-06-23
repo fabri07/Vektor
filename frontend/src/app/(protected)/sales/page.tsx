@@ -13,7 +13,8 @@ import { salesService, type SaleEntryResponse } from "@/services/sales.service";
 import { productsService, type ProductResponse } from "@/services/products.service";
 import { customersService, type CustomerResponse } from "@/services/customers.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { buildCustomFieldColumns } from "@/lib/customFields";
+import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
@@ -255,9 +256,22 @@ export default function SalesPage() {
   );
   const productById = new Map(products.map((product) => [product.id, product]));
   const customerById = new Map(customers.map((c) => [c.id, c]));
+
+  const saveCustomField = async (
+    row: SaleEntryResponse,
+    custom_fields: Record<string, unknown>,
+  ) => {
+    try {
+      await salesService.updateSale(row.id, { custom_fields });
+      await queryClient.invalidateQueries({ queryKey: ["sales-entries"] });
+    } catch {
+      toast("No se pudo guardar el dato.", "error");
+    }
+  };
+
   const columns = [
     ...buildColumns(productById, catalogLabels, customerById),
-    ...buildCustomFieldColumns<SaleEntryResponse>(fieldDefs),
+    ...buildEditableCustomFieldColumns<SaleEntryResponse>(fieldDefs, saveCustomField),
   ];
 
   return (
@@ -315,6 +329,7 @@ export default function SalesPage() {
           columns={columns}
           data={sorted}
           exportFilename="vektor-ventas"
+          toolbarActions={<AddColumnButton entityType="sale" entityLabel="Ventas" />}
           renderActions={(row) => (
             <div className="flex items-center gap-1">
               <button

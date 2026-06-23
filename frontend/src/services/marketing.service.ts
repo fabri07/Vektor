@@ -13,6 +13,7 @@ export interface SocialMetricResponse {
   reach: number;
   engagement: number;
   ads_spend_ars: number;
+  custom_fields?: Record<string, unknown>;
   created_at: string;
 }
 
@@ -24,6 +25,7 @@ export interface CreateSocialMetricPayload {
   reach?: number;
   engagement?: number;
   ads_spend_ars?: number;
+  custom_fields?: Record<string, unknown>;
 }
 
 /** Payload para actualizar una métrica existente (todos los campos opcionales). */

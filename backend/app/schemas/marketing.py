@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -17,6 +17,7 @@ class CreateSocialMetricRequest(BaseModel):
     reach: int = Field(default=0, ge=0)
     engagement: int = Field(default=0, ge=0)
     ads_spend_ars: Decimal = Field(default=Decimal("0"), ge=0)
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class UpdateSocialMetricRequest(BaseModel):
@@ -26,6 +27,7 @@ class UpdateSocialMetricRequest(BaseModel):
     reach: int | None = Field(default=None, ge=0)
     engagement: int | None = Field(default=None, ge=0)
     ads_spend_ars: Decimal | None = Field(default=None, ge=0)
+    custom_fields: dict[str, Any] | None = None
 
 
 class SocialMetricResponse(BaseModel):
@@ -39,6 +41,7 @@ class SocialMetricResponse(BaseModel):
     reach: int
     engagement: int
     ads_spend_ars: Decimal
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 

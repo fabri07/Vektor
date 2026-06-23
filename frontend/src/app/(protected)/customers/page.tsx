@@ -26,6 +26,9 @@ import {
   isValidDni,
 } from "@/lib/fiscal";
 import { CustomerFileModal } from "@/features/customers/CustomerFileModal";
+import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -137,6 +140,12 @@ export default function CustomersPage() {
     staleTime: 2 * 60 * 1000,
   });
 
+  const { data: fieldDefs = [] } = useQuery({
+    queryKey: ["field-definitions", "customer"],
+    queryFn: () => fieldDefinitionsService.getAll("customer"),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const createMutation = useMutation({
     mutationFn: (payload: CreateCustomerPayload) =>
       customersService.createCustomer(payload),
@@ -169,6 +178,26 @@ export default function CustomersPage() {
   });
 
   const tableData = customers.map((c) => ({ ...c, _status: null, _doc: null }));
+
+  const saveCustomerCustomField = async (
+    row: Record<string, unknown>,
+    custom_fields: Record<string, unknown>,
+  ) => {
+    try {
+      await customersService.updateCustomer(String(row.id), { custom_fields });
+      await queryClient.invalidateQueries({ queryKey: ["customers-list"] });
+    } catch {
+      toast("No se pudo guardar el dato.", "error");
+    }
+  };
+
+  const columns = [
+    ...COLUMNS,
+    ...buildEditableCustomFieldColumns<Record<string, unknown>>(
+      fieldDefs,
+      saveCustomerCustomField,
+    ),
+  ];
 
   return (
     <PageWrapper
@@ -210,9 +239,10 @@ export default function CustomersPage() {
         />
       ) : (
         <SmartTable
-          columns={COLUMNS}
+          columns={columns}
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-clientes"
+          toolbarActions={<AddColumnButton entityType="customer" entityLabel="Clientes" />}
           renderActions={(row) => {
             const customer = row as unknown as CustomerResponse;
             return (
