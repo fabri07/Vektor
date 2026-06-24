@@ -4,10 +4,12 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
+from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.product_categories import (
@@ -34,6 +36,19 @@ async def _tenant_business_type(session: AsyncSession, tenant_id: UUID) -> str |
         select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
     )
     return result.scalar_one_or_none()
+
+
+async def _resolve_category(
+    session: AsyncSession, tenant_id: UUID, raw: str, business_type: str | None
+) -> tuple[str, str | None]:
+    """Categoría libre → (code, label). Prioriza las custom del tenant; si no, el
+    catálogo del vertical (label solo poblado cuando cae a OTHER)."""
+    custom = await tenant_categories_service.resolve_custom_product_category(
+        session, tenant_id, raw
+    )
+    if custom is not None:
+        return custom["code"], None
+    return normalize_product_category(raw, business_type)
 
 
 def _product_snapshot(product: Product) -> dict[str, object]:
@@ -98,14 +113,53 @@ async def list_products(
 
 @router.get(
     "/categories",
-    summary="Catálogo de categorías de producto del vertical del tenant",
+    summary="Catálogo de categorías de producto (vertical + custom del tenant)",
 )
 async def list_product_categories(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[dict[str, str]]:
     business_type = await _tenant_business_type(session, tenant.tenant_id)
-    return product_category_catalog(business_type)
+    catalog = product_category_catalog(business_type)
+    custom = await tenant_categories_service.list_product_categories(session, tenant.tenant_id)
+    # Las custom se insertan antes de "OTHER" para que "Otros" quede al final.
+    other = [c for c in catalog if c["code"] == "OTHER"]
+    base = [c for c in catalog if c["code"] != "OTHER"]
+    return [*base, *custom, *other]
+
+
+class CreateProductCategoryRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+
+
+@router.post(
+    "/custom-categories",
+    status_code=status.HTTP_201_CREATED,
+    summary="Crear una categoría de producto personalizada del tenant",
+)
+async def create_product_category(
+    body: CreateProductCategoryRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, str]:
+    # Si el label coincide con una categoría canónica del vertical, devolver ESA
+    # (no crear una custom que colisione: evita CUSTOM_BEBIDAS vs BEBIDAS y mantiene
+    # consistente el código entre carga manual e import/chat).
+    business_type = await _tenant_business_type(session, tenant.tenant_id)
+    code, _label = normalize_product_category(body.label, business_type)
+    if code != "OTHER":
+        match = next(
+            (c for c in product_category_catalog(business_type) if c["code"] == code), None
+        )
+        if match is not None:
+            return match
+    created = await tenant_categories_service.add_product_category(
+        session, tenant.tenant_id, body.label
+    )
+    if created is None:
+        raise HTTPException(status_code=400, detail="No se pudo crear la categoría.")
+    return created
 
 
 @router.post(
@@ -130,10 +184,12 @@ async def create_product(
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = ProductRepository(session)
     data = body.model_dump()
-    # FASE E: normalizar categoría libre al catálogo del vertical.
+    # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     if data.get("category"):
         business_type = await _tenant_business_type(session, tenant.tenant_id)
-        code, label = normalize_product_category(data["category"], business_type)
+        code, label = await _resolve_category(
+            session, tenant.tenant_id, data["category"], business_type
+        )
         data["category"] = code
         if label:
             data["custom_fields"] = {
@@ -176,10 +232,12 @@ async def update_product(
     # permitiendo limpiar opcionales a null (ej. borrar acquired_at). Los campos no
     # enviados quedan intactos.
     updates = body.model_dump(exclude_unset=True)
-    # FASE E: normalizar categoría libre al catálogo del vertical.
+    # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     if updates.get("category"):
         business_type = await _tenant_business_type(session, tenant.tenant_id)
-        code, label = normalize_product_category(updates["category"], business_type)
+        code, label = await _resolve_category(
+            session, tenant.tenant_id, updates["category"], business_type
+        )
         updates["category"] = code
         if label:
             updates["custom_fields"] = {

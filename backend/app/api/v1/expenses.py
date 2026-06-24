@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
+from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.persistence.db.session import get_db_session
@@ -191,6 +192,12 @@ async def create_expense(
     # FASE 3.1: categoría "Otro" editable — el label libre va a custom_fields;
     # category sigue siendo OTHER (reportes/agregaciones intactos).
     custom_fields = _apply_category_label(body.custom_fields, body.category, body.category_label)
+    # Categoría "Otros" con label → persistir por tenant para que reaparezca en
+    # futuros desplegables (sin tabla ni pantalla nueva; vive en custom_fields).
+    if body.category == "OTHER" and body.category_label and body.category_label.strip():
+        await tenant_categories_service.add_expense_category(
+            session, tenant.tenant_id, body.category_label
+        )
     entry = ExpenseEntry(
         tenant_id=tenant.tenant_id,
         amount=body.amount,
@@ -208,6 +215,17 @@ async def create_expense(
     saved = await repo.save(entry)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_created")
     return saved
+
+
+@router.get(
+    "/custom-categories",
+    summary="Categorías de gasto personalizadas del tenant",
+)
+async def list_custom_expense_categories(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[str]:
+    return await tenant_categories_service.list_expense_categories(session, tenant.tenant_id)
 
 
 @router.get("/{expense_id}", response_model=ExpenseEntryResponse, summary="Get expense by ID")

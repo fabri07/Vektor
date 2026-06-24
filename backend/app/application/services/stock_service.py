@@ -98,6 +98,9 @@ async def increment_stock(
     unit_cost: Decimal | None,
     source_event_id: str | None,
     db: AsyncSession,
+    *,
+    supplier_id: uuid.UUID | None = None,
+    update_product_cost: bool = True,
 ) -> InventoryMovement:
     product = await db.get(Product, product_id)
     if product is None or product.tenant_id != tenant_id:
@@ -108,7 +111,11 @@ async def increment_stock(
     # Product.stock_units es la representación canónica que lee la UI: sin esto,
     # una compra confirmada subía el balance pero el stock visible no cambiaba.
     product.stock_units += qty
-    if unit_cost is not None:
+    # El costo histórico SIEMPRE queda en el movimiento (unit_cost abajo). El costo
+    # del catálogo (product.unit_cost_ars) solo se pisa si update_product_cost: una
+    # compra de un producto existente no debe cambiar el costo de referencia salvo
+    # que el usuario lo confirme.
+    if unit_cost is not None and update_product_cost:
         product.unit_cost_ars = unit_cost
 
     movement = InventoryMovement(
@@ -118,6 +125,7 @@ async def increment_stock(
         qty=qty,
         unit_cost=unit_cost,
         source_event_id=source_event_id,
+        supplier_id=supplier_id,
     )
     db.add(movement)
     await db.flush()

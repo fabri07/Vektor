@@ -120,6 +120,44 @@ class BulkSaleRequest(BaseModel):
         return v
 
 
+class BatchSaleItem(BaseModel):
+    """Una línea de una venta manual multi-producto."""
+
+    product_id: UUID
+    quantity: int = Field(ge=1, default=1)
+    unit_price: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
+
+    @field_validator("unit_price")
+    @classmethod
+    def unit_price_no_nan(cls, v: Decimal) -> Decimal:
+        return _reject_nan_inf(v, "unit_price")  # type: ignore[return-value]
+
+
+class ManualBatchSaleRequest(BaseModel):
+    """Venta manual con varias líneas: una SaleEntry por ítem, mismo encabezado."""
+
+    customer_id: UUID | None = None
+    payment_method: str = Field(
+        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$", default="cash"
+    )
+    transaction_date: datetime
+    notes: str | None = Field(default=None, max_length=1000)
+    items: list[BatchSaleItem] = Field(min_length=1)
+
+    @field_validator("transaction_date")
+    @classmethod
+    def transaction_date_not_future(cls, v: datetime) -> datetime:
+        if v.date() > date.today():
+            raise ValueError("transaction_date cannot be in the future.")
+        return v
+
+
+class ManualBatchSaleResponse(BaseModel):
+    sale_group_id: UUID
+    sales: list[SaleEntryResponse]
+    total: float
+
+
 class SaleSummaryResponse(BaseModel):
     total_ars: float
     entry_count: int

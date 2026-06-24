@@ -1,5 +1,6 @@
 """Tests for /api/v1/sales endpoints."""
 
+import unittest.mock
 from datetime import date
 from typing import Any
 
@@ -247,3 +248,105 @@ class TestSalesRBAC:
         sale_id = create_resp.json()["id"]
         resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=viewer_headers)
         assert resp.status_code == 403
+
+
+async def _create_product(
+    client: AsyncClient, headers: dict[str, Any], name: str, *, stock: int, price: str = "100.00"
+) -> str:
+    resp = await client.post(
+        "/api/v1/products",
+        json={"name": name, "sale_price_ars": price, "stock_units": stock},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return str(resp.json()["id"])
+
+
+@pytest.mark.asyncio
+class TestManualBatchSale:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        # decrement_stock emite eventos vía EventBus (Celery send_task → Redis):
+        # neutralizarlos en tests, igual que test_stock_workflow.
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def test_batch_creates_one_sale_per_item_and_decrements_stock(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _create_product(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        p2 = await _create_product(client, auth_headers, "Fideos", stock=5, price="500.00")
+        payload = {
+            "payment_method": "cash",
+            "transaction_date": _TODAY,
+            "items": [
+                {"product_id": p1, "quantity": 2, "unit_price": "1000.00"},
+                {"product_id": p2, "quantity": 1, "unit_price": "500.00"},
+            ],
+        }
+        resp = await client.post(
+            "/api/v1/sales/manual-batch", json=payload, headers=auth_headers
+        )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        assert len(data["sales"]) == 2
+        assert data["total"] == 2500.0
+        # mismo sale_group_id en ambas líneas
+        groups = {s["custom_fields"]["sale_group_id"] for s in data["sales"]}
+        assert groups == {data["sale_group_id"]}
+        # stock descontado
+        r1 = await client.get(f"/api/v1/products/{p1}", headers=auth_headers)
+        r2 = await client.get(f"/api/v1/products/{p2}", headers=auth_headers)
+        assert r1.json()["stock_units"] == 8
+        assert r2.json()["stock_units"] == 4
+
+    async def test_oversell_is_rejected_and_nothing_persists(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _create_product(client, auth_headers, "Agua", stock=3, price="200.00")
+        payload = {
+            "payment_method": "cash",
+            "transaction_date": _TODAY,
+            "items": [{"product_id": p1, "quantity": 5, "unit_price": "200.00"}],
+        }
+        resp = await client.post(
+            "/api/v1/sales/manual-batch", json=payload, headers=auth_headers
+        )
+        assert resp.status_code == 400
+        # stock intacto
+        r1 = await client.get(f"/api/v1/products/{p1}", headers=auth_headers)
+        assert r1.json()["stock_units"] == 3
+
+    async def test_fiado_without_real_customer_rejected(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _create_product(client, auth_headers, "Pan", stock=10, price="100.00")
+        payload = {
+            "payment_method": "account",
+            "transaction_date": _TODAY,
+            "items": [{"product_id": p1, "quantity": 1, "unit_price": "100.00"}],
+        }
+        resp = await client.post(
+            "/api/v1/sales/manual-batch", json=payload, headers=auth_headers
+        )
+        assert resp.status_code == 400
+
+    async def test_duplicate_product_rejected(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _create_product(client, auth_headers, "Cola", stock=10, price="100.00")
+        payload = {
+            "payment_method": "cash",
+            "transaction_date": _TODAY,
+            "items": [
+                {"product_id": p1, "quantity": 1, "unit_price": "100.00"},
+                {"product_id": p1, "quantity": 2, "unit_price": "100.00"},
+            ],
+        }
+        resp = await client.post(
+            "/api/v1/sales/manual-batch", json=payload, headers=auth_headers
+        )
+        assert resp.status_code == 400
+        # nada se persistió: stock intacto
+        r1 = await client.get(f"/api/v1/products/{p1}", headers=auth_headers)
+        assert r1.json()["stock_units"] == 10
