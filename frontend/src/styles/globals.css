@@ -188,6 +188,16 @@
     animation: mesh-shift 18s ease-in-out infinite alternate;
   }
 
+  /* Botón de carga manual: luz que se prende y se apaga para llamar la atención. */
+  .animate-glow-pulse {
+    animation: glow-pulse 2.2s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .animate-glow-pulse {
+      animation: none;
+    }
+  }
+
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: var(--vektor-border) transparent;
@@ -226,6 +236,15 @@
   100% {
     transform: translate3d(2%, -2%, 0) scale(1.04);
     opacity: 1;
+  }
+}
+
+@keyframes glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(58, 134, 255, 0.0), 0 0 8px 0 rgba(58, 134, 255, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgba(58, 134, 255, 0.25), 0 0 22px 4px rgba(58, 134, 255, 0.65);
   }
 }
 

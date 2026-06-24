@@ -24,6 +24,7 @@ import {
 import { useAuthStore } from "@/stores/authStore";
 import { api } from "@/lib/api";
 import { VektorLogo } from "@/components/ui/VektorLogo";
+import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 
 interface SidebarProps {
   mobileOpen: boolean;
@@ -188,6 +189,17 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           })}
         </ul>
       </nav>
+
+      {/* ── Botón destacado de carga manual (debajo de Aplicaciones) ── */}
+      <div
+        className={clsx(
+          "border-t border-vk-border-dark px-4 py-3",
+          // En tablet colapsado (60px) el botón ancho no entra → ocultarlo ahí.
+          collapsed && "md:hidden lg:block",
+        )}
+      >
+        <ManualEntryLauncher prominent />
+      </div>
 
       {/* ── Tablet collapse toggle ── */}
       <div className="hidden md:flex lg:hidden items-center justify-center border-t border-vk-border-dark py-2">
