@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ManualEntrySection } from "./ManualEntrySection";
@@ -17,8 +17,22 @@ interface ManualEntryLauncherProps {
  */
 export function ManualEntryLauncher({ variant = "secondary" }: ManualEntryLauncherProps) {
   const [open, setOpen] = useState(false);
+  const dirtyRef = useRef(false);
   useOfflineSubmit({ autoSync: true });
   const pending = useOfflineQueueCount();
+
+  // Cierre (botón / Escape / overlay → todos pasan por onClose): si hay datos sin
+  // guardar, confirmar antes de descartar.
+  function handleClose() {
+    if (
+      dirtyRef.current &&
+      !window.confirm("Tenés datos sin guardar en este formulario. ¿Cerrar y descartarlos?")
+    ) {
+      return;
+    }
+    dirtyRef.current = false;
+    setOpen(false);
+  }
 
   return (
     <>
@@ -35,11 +49,11 @@ export function ManualEntryLauncher({ variant = "secondary" }: ManualEntryLaunch
       </Button>
       <Modal
         isOpen={open}
-        onClose={() => setOpen(false)}
+        onClose={handleClose}
         title="Carga manual de datos"
-        size="xl"
+        size="4xl"
       >
-        <ManualEntrySection />
+        <ManualEntrySection onDirtyChange={(d) => (dirtyRef.current = d)} />
       </Modal>
     </>
   );

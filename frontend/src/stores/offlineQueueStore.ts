@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type QueuedKind = "sale" | "expense" | "product";
+export type QueuedKind = "sale" | "expense" | "product" | "sale_batch" | "purchase";
 
 export interface QueuedItem {
   id: string; // UUID — también es la Idempotency-Key del POST

@@ -8,7 +8,7 @@ interface ModalProps {
   onClose: () => void;
   title?: string;
   children: ReactNode;
-  size?: "sm" | "md" | "lg" | "xl" | "2xl";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl" | "4xl" | "6xl";
 }
 
 const SIZE_CLASS: Record<NonNullable<ModalProps["size"]>, string> = {
@@ -17,6 +17,8 @@ const SIZE_CLASS: Record<NonNullable<ModalProps["size"]>, string> = {
   lg: "max-w-lg",
   xl: "max-w-xl",
   "2xl": "max-w-2xl",
+  "4xl": "max-w-4xl",
+  "6xl": "max-w-6xl",
 };
 
 const FOCUSABLE = [

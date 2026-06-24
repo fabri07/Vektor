@@ -73,6 +73,12 @@ export const expensesService = {
     return res.data;
   },
 
+  // Categorías de gasto personalizadas del tenant (además de las canónicas).
+  async getCustomCategories(): Promise<string[]> {
+    const res = await api.get<string[]>("/expenses/custom-categories");
+    return res.data;
+  },
+
   async updateExpense(
     id: string,
     payload: UpdateExpensePayload,

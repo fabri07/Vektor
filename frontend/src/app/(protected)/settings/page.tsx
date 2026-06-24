@@ -15,6 +15,7 @@ import { WorkSchedulePanel } from "@/features/settings/components/WorkSchedulePa
 import { FiscalConditionPanel } from "@/features/settings/components/FiscalConditionPanel";
 import { HelpChat } from "@/features/help/HelpChat";
 import { HelpCenter } from "@/features/help/HelpCenter";
+import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 
 const AGENT_LABELS: Record<string, string> = {
   agent_calendar: "Calendar",
@@ -191,6 +192,25 @@ function AutomationsSection() {
             </div>
           </section>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ManualEntryCTA() {
+  return (
+    <div className="overflow-hidden rounded-xl border border-vk-blue/30 bg-gradient-to-br from-vk-blue/10 via-vk-surface-w to-vk-surface-w p-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-vk-text-primary">
+            ¿Preferís cargar a mano?
+          </h2>
+          <p className="mt-1 text-sm text-vk-text-muted">
+            Registrá ventas, gastos y compras de mercadería en segundos, sin esperar a
+            automatizar nada.
+          </p>
+        </div>
+        <ManualEntryLauncher variant="primary" />
       </div>
     </div>
   );
@@ -436,7 +456,12 @@ export default function SettingsPage() {
       </div>
 
       {activeTab === "general" && <GeneralTab />}
-      {activeTab === "automatizaciones" && <AutomationsSection />}
+      {activeTab === "automatizaciones" && (
+        <div className="space-y-5">
+          <AutomationsSection />
+          <ManualEntryCTA />
+        </div>
+      )}
       {activeTab === "salud" && <HealthConfigPanel />}
       {activeTab === "horarios" && (
         <>

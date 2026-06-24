@@ -84,6 +84,12 @@ export const productsService = {
     return res.data;
   },
 
+  // Crea una categoría de producto personalizada del tenant (reutilizable).
+  async createCategory(label: string): Promise<ProductCategoryOption> {
+    const res = await api.post<ProductCategoryOption>("/products/custom-categories", { label });
+    return res.data;
+  },
+
   async getProducts(params?: ProductsListParams): Promise<ProductResponse[]> {
     const res = await api.get<ProductResponse[]>("/products", { params });
     return res.data;

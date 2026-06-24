@@ -16,6 +16,26 @@ export interface CreateSalePayload {
 
 export type UpdateSalePayload = Partial<CreateSalePayload>;
 
+export interface BatchSaleItem {
+  product_id: string;
+  quantity: number;
+  unit_price: number;
+}
+
+export interface ManualBatchSalePayload {
+  customer_id?: string | null;
+  payment_method: string;
+  transaction_date: string;
+  notes?: string | null;
+  items: BatchSaleItem[];
+}
+
+export interface ManualBatchSaleResponse {
+  sale_group_id: string;
+  sales: SaleEntryResponse[];
+  total: number;
+}
+
 export interface SaleEntryResponse {
   id: string;
   tenant_id: string;
@@ -53,6 +73,18 @@ export const salesService = {
   ): Promise<SaleEntryResponse> {
     const res = await api.post<SaleEntryResponse>(
       "/sales",
+      payload,
+      idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : undefined,
+    );
+    return res.data;
+  },
+
+  async createManualBatch(
+    payload: ManualBatchSalePayload,
+    idempotencyKey?: string,
+  ): Promise<ManualBatchSaleResponse> {
+    const res = await api.post<ManualBatchSaleResponse>(
+      "/sales/manual-batch",
       payload,
       idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : undefined,
     );

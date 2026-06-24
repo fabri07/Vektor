@@ -3,9 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { salesService, type CreateSalePayload } from "@/services/sales.service";
+import {
+  salesService,
+  type CreateSalePayload,
+  type ManualBatchSalePayload,
+} from "@/services/sales.service";
 import { expensesService, type CreateExpensePayload } from "@/services/expenses.service";
 import { productsService, type CreateProductPayload } from "@/services/products.service";
+import { purchasesService, type ManualPurchasePayload } from "@/services/purchases.service";
 import {
   useOfflineQueueStore,
   type QueuedKind,
@@ -15,7 +20,11 @@ type PayloadFor<K extends QueuedKind> = K extends "sale"
   ? CreateSalePayload
   : K extends "expense"
     ? CreateExpensePayload
-    : CreateProductPayload;
+    : K extends "product"
+      ? CreateProductPayload
+      : K extends "sale_batch"
+        ? ManualBatchSalePayload
+        : ManualPurchasePayload;
 
 interface SubmitCallbacks {
   onSuccess?: () => void; // entró al servidor (o ya estaba: idempotente)
@@ -28,6 +37,20 @@ const INVALIDATE_KEYS: Record<QueuedKind, string[][]> = {
   sale: [["sales-entries"], ["sales-all"], ["sales-date-range"]],
   expense: [["expenses-entries"], ["expenses-all"], ["expenses-date-range"]],
   product: [["products-list"], ["products-all"], ["product-categories"]],
+  sale_batch: [
+    ["sales-entries"],
+    ["sales-all"],
+    ["sales-date-range"],
+    ["products-list"],
+    ["products-all"],
+  ],
+  purchase: [
+    ["expenses-entries"],
+    ["expenses-all"],
+    ["products-list"],
+    ["products-all"],
+    ["inventory"],
+  ],
 };
 
 function invalidate(qc: QueryClient, kind: QueuedKind) {
@@ -46,8 +69,12 @@ async function postByKind(
     await salesService.createSale(payload as CreateSalePayload, idempotencyKey);
   } else if (kind === "expense") {
     await expensesService.createExpense(payload as CreateExpensePayload, idempotencyKey);
-  } else {
+  } else if (kind === "product") {
     await productsService.createProduct(payload as CreateProductPayload, idempotencyKey);
+  } else if (kind === "sale_batch") {
+    await salesService.createManualBatch(payload as ManualBatchSalePayload, idempotencyKey);
+  } else {
+    await purchasesService.createManual(payload as ManualPurchasePayload, idempotencyKey);
   }
 }
 
@@ -134,9 +161,17 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
             useOfflineQueueStore.getState().markFailed(item.id, "Sin conexión al sincronizar");
             break;
           } else if (isClientError(e)) {
-            // 4xx permanente (payload inválido, entidad referida borrada, etc.): reintentar el
-            // mismo payload nunca va a funcionar → sacarlo de la cola para no loopear infinito.
-            useOfflineQueueStore.getState().remove(item.id);
+            // 4xx permanente (payload inválido, stock insuficiente al sincronizar,
+            // proveedor borrado, etc.): reintentar el mismo payload no lo arregla.
+            // NO borrar en silencio — las operaciones transaccionales (sale_batch /
+            // purchase) pueden 400 legítimamente y el usuario creyó que estaban
+            // guardadas. Marcar como fallida (queda visible en el badge con su
+            // lastError) y recién descartarla tras MAX_FLUSH_ATTEMPTS.
+            if (item.attempts + 1 >= MAX_FLUSH_ATTEMPTS) {
+              useOfflineQueueStore.getState().remove(item.id);
+            } else {
+              useOfflineQueueStore.getState().markFailed(item.id, errorMessage(e));
+            }
           } else {
             // 5xx u otro error transitorio del servidor: reintentar con tope. Al alcanzar
             // MAX_FLUSH_ATTEMPTS se descarta (evita el poison-item que se reintenta para siempre).
