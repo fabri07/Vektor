@@ -27,7 +27,7 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 LLM_MAPPING_THRESHOLD = 0.5
 
 _SYSTEM_PROMPT = (
-    "Sos un asistente que mapea columnas de una planilla de una PYME argentina a los "
+    "Sos un asistente que mapea columnas de una planilla de un negocio argentino a los "
     "campos canónicos de Véktor. Para cada columna te paso su nombre y algunos valores "
     "de ejemplo. Tu tarea es ELEGIR el campo canónico más probable para cada columna, "
     "o 'ignore' si ninguno aplica.\n\n"

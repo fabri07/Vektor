@@ -16,6 +16,7 @@ from app.persistence.models.business import ActionSuggestion, Insight
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.persistence.repositories.inventory_repository import InventoryRepository
 from app.persistence.repositories.transaction_repository import ExpenseRepository, SaleRepository
 
 router = APIRouter()
@@ -172,12 +173,6 @@ class CategoryBreakdownItem(BaseModel):
     pct: float
 
 
-class SupplierBreakdownItem(BaseModel):
-    supplier_name: str
-    total: float
-    pct: float
-
-
 class ProductStockItem(BaseModel):
     product_id: str
     name: str
@@ -185,6 +180,25 @@ class ProductStockItem(BaseModel):
     # None = umbral no configurado; el frontend muestra el default (5) con ?? 5
     low_stock_threshold_units: int | None
     sale_price_ars: float
+    # Plata inmovilizada en este producto: stock_units × unit_cost_ars (0 si no hay costo).
+    immobilized_value: float = 0.0
+
+
+class SupplierBreakdownProductItem(BaseModel):
+    product_id: str
+    name: str
+    brand: str
+    total_amount: float
+    total_qty: float
+
+
+class SupplierPurchaseBreakdownItem(BaseModel):
+    supplier_id: str | None
+    supplier_name: str
+    is_unassigned: bool
+    total_purchased: float
+    coverage_pct: float
+    products: list[SupplierBreakdownProductItem]
 
 
 class BusinessBreakdownResponse(BaseModel):
@@ -192,12 +206,17 @@ class BusinessBreakdownResponse(BaseModel):
     from_date: str
     to_date: str
     expenses_by_category: list[CategoryBreakdownItem]
-    top_suppliers: list[SupplierBreakdownItem]
+    # Desglose de compras de mercadería por proveedor REAL (acordeón del dashboard).
+    suppliers_breakdown: list[SupplierPurchaseBreakdownItem]
     low_stock_products: list[ProductStockItem]
     no_rotation_products: list[ProductStockItem]
     low_stock_count: int
     no_rotation_count: int
     total_products: int
+    # Plata parada en productos sin rotación (todos, no solo los listados) + cuántos
+    # no se pudieron valuar por falta de costo unitario.
+    no_rotation_value_total: float = 0.0
+    no_rotation_unvalued_count: int = 0
     # FASE D: desglose contable del período — OPEX (operativo) vs COGS
     # (compras de mercadería) + valor de stock actual (stock × costo unitario).
     opex_total: float = 0.0
@@ -222,9 +241,6 @@ async def get_business_breakdown(
 
     expenses_by_cat = await expense_repo.expenses_by_category(
         tenant.tenant_id, from_date=from_date, to_date=today
-    )
-    top_suppliers = await expense_repo.top_suppliers(
-        tenant.tenant_id, from_date=from_date, to_date=today, limit=5
     )
     # FASE D: balance mercadería — salida de caja (COGS) vs valor del stock.
     type_totals = await expense_repo.totals_by_expense_type(
@@ -274,7 +290,9 @@ async def get_business_breakdown(
     )
     low_stock = list(low_stock_items_result.scalars().all())
 
-    # Sin rotación: NOT EXISTS correlacionado (sin traer IDs a Python)
+    # Sin rotación (definición corregida): producto activo + stock > 0 + ninguna
+    # venta NO anulada en el período. Ya NO exige superar el umbral mínimo — eso
+    # excluía productos con stock bajo pero positivo que tampoco rotaron.
     _sold_subq = (
         select(SaleEntry.product_id)
         .where(
@@ -290,17 +308,58 @@ async def get_business_breakdown(
     _no_rotation_where = [
         Product.tenant_id == tenant.tenant_id,
         Product.is_active.is_(True),
-        func.coalesce(Product.stock_units, 0) > _effective_threshold,
+        func.coalesce(Product.stock_units, 0) > 0,
         ~_sold_subq,
     ]
     no_rotation_count_result = await session.execute(
         select(func.count(Product.id)).where(*_no_rotation_where)
     )
     no_rotation_count_val = no_rotation_count_result.scalar_one()
+    # Plata parada total (todos los sin-rotación, no solo los listados) + cuántos
+    # no se pueden valuar por unit_cost_ars NULL.
+    _immobilized_expr = func.coalesce(Product.stock_units, 0) * func.coalesce(
+        Product.unit_cost_ars, 0
+    )
+    no_rotation_value_total = float(
+        (
+            await session.execute(
+                select(func.coalesce(func.sum(_immobilized_expr), 0)).where(*_no_rotation_where)
+            )
+        ).scalar_one()
+        or 0
+    )
+    no_rotation_unvalued_count = (
+        await session.execute(
+            select(func.count(Product.id)).where(
+                *_no_rotation_where, Product.unit_cost_ars.is_(None)
+            )
+        )
+    ).scalar_one()
     no_rotation_items_result = await session.execute(
-        select(Product).where(*_no_rotation_where).limit(10)
+        select(Product).where(*_no_rotation_where).order_by(_immobilized_expr.desc()).limit(10)
     )
     no_rotation = list(no_rotation_items_result.scalars().all())
+
+    # Desglose de compras por proveedor real (reemplaza la agrupación por texto libre).
+    # HISTÓRICO (sin filtro de fecha): inventory_movements solo tiene created_at (= día
+    # de import, no fecha de compra), así que filtrar por período mezclaría semánticas
+    # con los demás paneles (que usan transaction_date). La relación con un proveedor es
+    # de largo plazo; mostramos el acumulado y el panel lo rotula como tal.
+    suppliers_breakdown = await InventoryRepository(session).suppliers_purchase_breakdown(
+        tenant.tenant_id
+    )
+
+    def _stock_item(p: Product) -> ProductStockItem:
+        stock = p.stock_units or 0
+        cost = float(p.unit_cost_ars or 0)
+        return ProductStockItem(
+            product_id=str(p.id),
+            name=p.name,
+            stock_units=stock,
+            low_stock_threshold_units=p.low_stock_threshold_units,
+            sale_price_ars=float(p.sale_price_ars or 0),
+            immobilized_value=stock * cost,
+        )
 
     return BusinessBreakdownResponse(
         period_days=days,
@@ -310,30 +369,33 @@ async def get_business_breakdown(
         cogs_total=type_totals["COGS"],
         stock_value_total=stock_value_total,
         expenses_by_category=[CategoryBreakdownItem(**item) for item in expenses_by_cat],
-        top_suppliers=[SupplierBreakdownItem(**item) for item in top_suppliers],
-        low_stock_products=[
-            ProductStockItem(
-                product_id=str(p.id),
-                name=p.name,
-                stock_units=p.stock_units or 0,
-                low_stock_threshold_units=p.low_stock_threshold_units,
-                sale_price_ars=float(p.sale_price_ars or 0),
+        suppliers_breakdown=[
+            SupplierPurchaseBreakdownItem(
+                supplier_id=str(s.supplier_id) if s.supplier_id else None,
+                supplier_name=s.supplier_name,
+                is_unassigned=s.is_unassigned,
+                total_purchased=s.total_purchased,
+                coverage_pct=s.coverage_pct,
+                products=[
+                    SupplierBreakdownProductItem(
+                        product_id=str(pr.product_id),
+                        name=pr.name,
+                        brand=pr.brand,
+                        total_amount=pr.total_amount,
+                        total_qty=pr.total_qty,
+                    )
+                    for pr in s.products
+                ],
             )
-            for p in low_stock[:10]
+            for s in suppliers_breakdown
         ],
-        no_rotation_products=[
-            ProductStockItem(
-                product_id=str(p.id),
-                name=p.name,
-                stock_units=p.stock_units or 0,
-                low_stock_threshold_units=p.low_stock_threshold_units,
-                sale_price_ars=float(p.sale_price_ars or 0),
-            )
-            for p in no_rotation[:10]
-        ],
+        low_stock_products=[_stock_item(p) for p in low_stock[:10]],
+        no_rotation_products=[_stock_item(p) for p in no_rotation[:10]],
         low_stock_count=low_stock_count_val,
         no_rotation_count=no_rotation_count_val,
         total_products=total_products,
+        no_rotation_value_total=no_rotation_value_total,
+        no_rotation_unvalued_count=no_rotation_unvalued_count,
     )
 
 

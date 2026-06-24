@@ -37,8 +37,8 @@ _VALID_TYPES = frozenset({"ventas", "gastos", "stock"})
 _MAX_SAMPLE_ROWS = 8
 
 _SYSTEM_PROMPT = (
-    "Sos un asistente que clasifica el propósito de una planilla de una PYME "
-    "argentina. Te paso los nombres de columna y algunas filas de ejemplo. "
+    "Sos un asistente que clasifica el propósito de una planilla de un negocio "
+    "argentino. Te paso los nombres de columna y algunas filas de ejemplo. "
     "Decidí si la planilla registra VENTAS (ingresos/cobros a clientes), GASTOS "
     "(egresos/pagos a proveedores, servicios, alquiler) o STOCK (catálogo de "
     "productos / inventario / lista de precios).\n\n"

@@ -1,23 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import axios from "axios";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Mail, MessageCircle } from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
+import { useQuery } from "@tanstack/react-query";
+import { ExternalLink, Mail, MessageCircle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
-import { Modal } from "@/components/ui/Modal";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { formatDateTime } from "@/lib/datetime";
-import { useToastStore } from "@/stores/toastStore";
+import { isLikelyValidWhatsApp, whatsappDigits } from "@/lib/fiscal";
 import {
   communicationService,
-  type ChannelAvailability,
   type CommunicationChannel,
   type CommunicationLogResponse,
   type RecipientType,
-  type SendMessagePayload,
 } from "@/services/communication.service";
 
 interface ContactCommunicationProps {
@@ -32,16 +25,6 @@ const CHANNEL_LABELS: Record<CommunicationChannel, string> = {
   whatsapp: "WhatsApp",
 };
 
-function sendMessage(
-  recipientType: RecipientType,
-  id: string,
-  payload: SendMessagePayload,
-): Promise<CommunicationLogResponse> {
-  return recipientType === "customer"
-    ? communicationService.sendToCustomer(id, payload)
-    : communicationService.sendToSupplier(id, payload);
-}
-
 function fetchHistory(
   recipientType: RecipientType,
   id: string,
@@ -51,21 +34,20 @@ function fetchHistory(
     : communicationService.getSupplierHistory(id);
 }
 
-function isChannelNotConfigured(err: unknown): boolean {
-  if (!axios.isAxiosError(err) || err.response?.status !== 503) return false;
-  const detail = (err.response.data as { detail?: { code?: string } } | undefined)?.detail;
-  return detail?.code === "CHANNEL_NOT_CONFIGURED";
+// Compose de Gmail web, con el destinatario precargado. El usuario escribe el
+// mensaje en Gmail — Véktor no envía ni registra estos mensajes externos.
+function gmailComposeUrl(email: string): string {
+  return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email)}`;
 }
 
-function errorMessage(err: unknown): string {
-  if (isChannelNotConfigured(err)) {
-    return "El canal no está configurado todavía. Probá de nuevo más tarde.";
-  }
-  if (axios.isAxiosError(err) && err.response?.status === 400) {
-    return "No se pudo enviar: el destinatario no tiene un dato de contacto válido.";
-  }
-  return "No se pudo enviar el mensaje. Intentá de nuevo.";
-}
+// Clases del botón secundario (espejo de components/ui/Button), reusadas para
+// renderizar enlaces externos con la misma apariencia.
+const LINK_BASE =
+  "inline-flex h-8 items-center justify-center gap-1.5 rounded-xl border px-3 text-xs font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2";
+const LINK_ENABLED =
+  "border-vektor-border bg-vektor-surface text-vektor-white hover:border-vektor-blue/40 hover:bg-vektor-surface/90 focus-visible:ring-vektor-blue/30";
+const LINK_DISABLED =
+  "cursor-not-allowed border-vektor-border bg-vektor-surface text-vektor-white opacity-40";
 
 export function ContactCommunication({
   recipientType,
@@ -73,17 +55,7 @@ export function ContactCommunication({
   email,
   phone,
 }: ContactCommunicationProps) {
-  const toast = useToastStore((s) => s.add);
-  const queryClient = useQueryClient();
-  const [composeChannel, setComposeChannel] = useState<CommunicationChannel | null>(null);
-
   const historyKey = ["comm-history", recipientType, recipientId] as const;
-
-  const { data: channels = [] } = useQuery({
-    queryKey: ["comm-channels"],
-    queryFn: () => communicationService.getChannels(),
-    staleTime: 5 * 60 * 1000,
-  });
 
   const { data: history = [], isLoading: historyLoading } = useQuery({
     queryKey: historyKey,
@@ -92,45 +64,15 @@ export function ContactCommunication({
     staleTime: 30 * 1000,
   });
 
-  const channelMap = useMemo(() => {
-    const map = new Map<CommunicationChannel, ChannelAvailability>();
-    for (const c of channels) map.set(c.channel, c);
-    return map;
-  }, [channels]);
+  const emailValue = email?.trim() ?? "";
+  const waDigits = whatsappDigits(phone ?? "");
+  const phoneValid = isLikelyValidWhatsApp(phone);
 
-  const sendMutation = useMutation({
-    mutationFn: (payload: SendMessagePayload) =>
-      sendMessage(recipientType, recipientId, payload),
-    onSuccess: async (log) => {
-      setComposeChannel(null);
-      if (log.status === "sent") {
-        toast("Mensaje enviado.", "success");
-      } else {
-        toast(log.error ?? "El mensaje no se pudo entregar.", "error");
-      }
-      await queryClient.invalidateQueries({ queryKey: historyKey });
-    },
-    onError: (err) => toast(errorMessage(err), "error"),
-  });
-
-  const emailAvailable = channelMap.get("email")?.available ?? false;
-  const whatsappAvailable = channelMap.get("whatsapp")?.available ?? false;
-
-  const hasEmail = Boolean(email?.trim());
-  const hasPhone = Boolean(phone?.trim());
-
-  const emailEnabled = emailAvailable && hasEmail;
-  const whatsappEnabled = whatsappAvailable && hasPhone;
-
-  const emailTooltip = !emailAvailable
-    ? "No disponible"
-    : !hasEmail
-      ? "Sin email"
-      : null;
-  const whatsappTooltip = !whatsappAvailable
-    ? "Disponible próximamente"
-    : !hasPhone
-      ? "No disponible"
+  const emailTooltip = emailValue ? null : "Sin email";
+  const whatsappTooltip = !phone?.trim()
+    ? "Sin teléfono"
+    : !phoneValid
+      ? "Revisá el número: falta código de país/área"
       : null;
 
   return (
@@ -140,25 +82,26 @@ export function ContactCommunication({
       </h3>
 
       <div className="flex flex-wrap items-center gap-2">
-        <ChannelButton
+        <ContactLink
           icon={<Mail className="h-4 w-4" />}
           label={CHANNEL_LABELS.email}
-          enabled={emailEnabled}
+          href={emailValue ? gmailComposeUrl(emailValue) : null}
           tooltip={emailTooltip}
-          onClick={() => setComposeChannel("email")}
         />
-        <ChannelButton
+        <ContactLink
           icon={<MessageCircle className="h-4 w-4" />}
           label={CHANNEL_LABELS.whatsapp}
-          enabled={whatsappEnabled}
+          href={phoneValid ? `https://wa.me/${waDigits}` : null}
           tooltip={whatsappTooltip}
-          onClick={() => setComposeChannel("whatsapp")}
         />
       </div>
 
-      {/* Historial de mensajes */}
+      {/* Historial: solo mensajes enviados desde Véktor. Los abiertos en apps
+          externas (Gmail/WhatsApp) NO quedan registrados acá. */}
       <div className="space-y-2">
-        <p className="text-xs font-medium text-vk-text-secondary">Historial de mensajes</p>
+        <p className="text-xs font-medium text-vk-text-secondary">
+          Mensajes enviados anteriormente desde Véktor
+        </p>
         {historyLoading ? (
           <div className="space-y-2">
             {[...Array<number>(2)].map((_, i) => (
@@ -170,7 +113,7 @@ export function ContactCommunication({
           </div>
         ) : history.length === 0 ? (
           <p className="rounded-lg border border-vk-border-w bg-vk-surface-w px-4 py-3 text-sm text-vk-text-muted">
-            Todavía no se enviaron mensajes.
+            Todavía no se enviaron mensajes desde Véktor.
           </p>
         ) : (
           <div className="overflow-hidden rounded-lg border border-vk-border-w">
@@ -209,147 +152,49 @@ export function ContactCommunication({
           </div>
         )}
       </div>
-
-      <ComposeModal
-        channel={composeChannel}
-        sending={sendMutation.isPending}
-        onClose={() => setComposeChannel(null)}
-        onSend={(payload) => sendMutation.mutate(payload)}
-      />
     </section>
   );
 }
 
-// ── Channel button (with disabled tooltip) ─────────────────────────────────────
+// ── Enlace externo (con tooltip cuando está deshabilitado) ──────────────────────
 
-function ChannelButton({
+function ContactLink({
   icon,
   label,
-  enabled,
+  href,
   tooltip,
-  onClick,
 }: {
   icon: React.ReactNode;
   label: string;
-  enabled: boolean;
+  href: string | null;
   tooltip: string | null;
-  onClick: () => void;
 }) {
-  const button = (
-    <Button
-      type="button"
-      variant="secondary"
-      size="sm"
-      disabled={!enabled}
-      onClick={onClick}
-    >
+  if (href) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`${LINK_BASE} ${LINK_ENABLED}`}
+      >
+        {icon}
+        {label}
+        <ExternalLink className="h-3.5 w-3.5" />
+      </a>
+    );
+  }
+
+  const disabled = (
+    <span className={`${LINK_BASE} ${LINK_DISABLED}`} aria-disabled="true">
       {icon}
       {label}
-    </Button>
+    </span>
   );
 
-  if (enabled || !tooltip) return button;
-
-  // Tooltip needs a hoverable target; wrap disabled button in a span.
+  if (!tooltip) return disabled;
   return (
     <Tooltip content={tooltip}>
-      <span className="inline-flex cursor-not-allowed">{button}</span>
+      <span className="inline-flex">{disabled}</span>
     </Tooltip>
-  );
-}
-
-// ── Compose modal ──────────────────────────────────────────────────────────────
-
-function ComposeModal({
-  channel,
-  sending,
-  onClose,
-  onSend,
-}: {
-  channel: CommunicationChannel | null;
-  sending: boolean;
-  onClose: () => void;
-  onSend: (payload: SendMessagePayload) => void;
-}) {
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  // Reset fields whenever the modal target changes.
-  const isOpen = channel !== null;
-
-  function handleClose() {
-    setSubject("");
-    setBody("");
-    setError(null);
-    onClose();
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!body.trim()) {
-      setError("El mensaje no puede estar vacío.");
-      return;
-    }
-    if (!channel) return;
-    const trimmedSubject = subject.trim();
-    onSend({
-      channel,
-      body: body.trim(),
-      ...(trimmedSubject ? { subject: trimmedSubject } : {}),
-    });
-  }
-
-  const title =
-    channel === "email"
-      ? "Enviar email"
-      : channel === "whatsapp"
-        ? "Enviar WhatsApp"
-        : "Enviar mensaje";
-
-  return (
-    <Modal isOpen={isOpen} onClose={handleClose} title={title} size="lg">
-      <form className="space-y-4" onSubmit={handleSubmit}>
-        {channel === "email" ? (
-          <Input
-            label="Asunto (opcional)"
-            type="text"
-            placeholder="Ej: Recordatorio de pago"
-            value={subject}
-            onChange={(e) => setSubject(e.target.value)}
-          />
-        ) : null}
-
-        <div className="flex flex-col gap-1.5">
-          <label
-            htmlFor="comm-body"
-            className="text-xs font-medium text-vk-text-secondary"
-          >
-            Mensaje
-          </label>
-          <textarea
-            id="comm-body"
-            rows={5}
-            placeholder="Escribí tu mensaje…"
-            value={body}
-            onChange={(e) => {
-              setBody(e.target.value);
-              if (error) setError(null);
-            }}
-            className="w-full rounded-xl border border-vk-border-w bg-vektor-surface px-3 py-2 text-sm text-vk-text-primary placeholder:text-vk-text-placeholder transition-all duration-200 focus:border-vk-blue/40 focus:outline-none focus:ring-2 focus:ring-vk-blue/15"
-          />
-          {error ? <p className="text-xs text-vk-danger">{error}</p> : null}
-        </div>
-
-        <div className="flex justify-end gap-2 pt-2">
-          <Button type="button" variant="secondary" size="sm" onClick={handleClose}>
-            Cancelar
-          </Button>
-          <Button type="submit" size="sm" loading={sending}>
-            Enviar
-          </Button>
-        </div>
-      </form>
-    </Modal>
   );
 }

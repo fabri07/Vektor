@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.application.agents.helper.agent import FALLBACK_RESPONSE
+from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.schemas import AgentRequest, Confidence, RiskLevel
 
 
@@ -180,16 +181,18 @@ async def test_answer_does_not_modify_data():
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_payload))
         mock_cls.return_value = mock_client
 
-        # Verificar que no se importan servicios de escritura en el módulo
+        # Verificar que el parseo pasa por el helper compartido (no json.loads suelto)
         with unittest.mock.patch(
-            "app.application.agents.helper.agent.json.loads",
-            wraps=json.loads,
-        ):
+            "app.application.agents.helper.agent.parse_llm_json",
+            wraps=parse_llm_json,
+        ) as spy_parse:
             from app.application.agents.helper.agent import AgentHelper
 
             agent = AgentHelper()
             agent.client = mock_client
             result = await agent.process(_make_request("¿cómo cargo una venta?"))
+
+        assert spy_parse.call_count == 1
 
     # La respuesta debe ser success sin requires_approval (no modifica datos)
     assert result.status == "success"

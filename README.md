@@ -1,6 +1,6 @@
 # Véktor
 
-Plataforma SaaS de salud financiera para PYMEs argentinas.
+Plataforma SaaS de salud financiera para negocios argentinos.
 
 ## Stack
 

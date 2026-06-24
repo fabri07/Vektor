@@ -50,7 +50,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Véktor API",
         version="1.0.0",
-        description="Plataforma SaaS de salud financiera para PYMEs argentinas.",
+        description="Plataforma SaaS de salud financiera para negocios argentinos.",
         docs_url="/docs" if not settings.is_production else None,
         redoc_url="/redoc" if not settings.is_production else None,
         openapi_url="/openapi.json" if not settings.is_production else None,

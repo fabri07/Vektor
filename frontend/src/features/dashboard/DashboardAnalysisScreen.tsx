@@ -3,8 +3,13 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { ChevronDown } from "lucide-react";
 import { fetchBusinessBreakdown, fetchCurrentInsight } from "@/services/dashboard.service";
-import type { BusinessBreakdownResponse, HealthScoreV2Response } from "@/types/api";
+import type {
+  BusinessBreakdownResponse,
+  HealthScoreV2Response,
+  SupplierPurchaseBreakdownItem,
+} from "@/types/api";
 import {
   Bar,
   BarChart,
@@ -434,33 +439,13 @@ function BreakdownPanels() {
         )}
       </PanelFrame>
 
-      {/* Top proveedores */}
+      {/* Top proveedores — acordeón por proveedor real */}
       <PanelFrame
         title="Top proveedores"
-        tooltip="Proveedores con mayor peso en los egresos del período."
-        explanation="A quién le comprás más. Si uno solo concentra un porcentaje muy alto, dependés demasiado de él: conviene tener una alternativa."
+        tooltip="Compras de mercadería acumuladas (histórico) agrupadas por proveedor real. Desplegá cada uno para ver qué productos te provee."
+        explanation="A quién le comprás más mercadería desde que cargás compras. Si uno solo concentra casi todo, dependés demasiado de él: conviene tener una alternativa. Tocá un proveedor para ver sus productos."
       >
-        {data.top_suppliers.length === 0 ? (
-          <p className="py-8 text-center text-sm text-vektor-muted">Sin proveedores registrados.</p>
-        ) : (
-          <ul className="space-y-3">
-            {data.top_suppliers.map((item) => (
-              <li key={item.supplier_name}>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="truncate pr-3 text-vektor-white">{item.supplier_name}</span>
-                  <span className="font-medium text-vektor-white">{formatARS(item.total)}</span>
-                </div>
-                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-vektor-border">
-                  <div
-                    className="h-full rounded-full bg-[#27c7b8] transition-all"
-                    style={{ width: `${Math.min(item.pct, 100)}%` }}
-                  />
-                </div>
-                <p className="mt-0.5 text-right text-xs text-vektor-muted">{item.pct.toFixed(1)}%</p>
-              </li>
-            ))}
-          </ul>
-        )}
+        <SuppliersBreakdown suppliers={data.suppliers_breakdown} />
       </PanelFrame>
 
       {/* Stock crítico */}
@@ -512,26 +497,141 @@ function BreakdownPanels() {
             No hay productos detenidos en este período.
           </p>
         ) : (
-          <ul className="space-y-2">
-            {data.no_rotation_products.map((p) => (
-              <li
-                key={p.product_id}
-                className="flex items-center justify-between rounded-lg border border-vektor-border px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-vektor-white">{p.name}</p>
-                  <p className="text-xs text-vektor-muted">
-                    Stock actual: {p.stock_units}
-                  </p>
-                </div>
-                <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-400">
-                  Revisar
-                </span>
-              </li>
-            ))}
-          </ul>
+          <div className="space-y-3">
+            {/* Cifra-tesis: la plata parada es el dato que importa. */}
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+              <p className="text-xs uppercase tracking-widest text-amber-300/80">Plata parada</p>
+              <p className="mt-0.5 font-display text-2xl font-bold tabular-nums text-vektor-amber">
+                {formatARS(data.no_rotation_value_total)}
+              </p>
+              <p className="mt-1 text-xs text-vektor-muted">
+                Inmovilizada en {data.no_rotation_count} producto
+                {data.no_rotation_count === 1 ? "" : "s"} sin ventas en el período.
+                {data.no_rotation_unvalued_count > 0
+                  ? ` ${data.no_rotation_unvalued_count} sin costo cargado, no valuados.`
+                  : ""}
+              </p>
+            </div>
+            <ul className="space-y-2">
+              {data.no_rotation_products.map((p) => (
+                <li
+                  key={p.product_id}
+                  className="flex items-center justify-between rounded-lg border border-vektor-border px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-vektor-white">{p.name}</p>
+                    <p className="text-xs text-vektor-muted">Stock actual: {p.stock_units}</p>
+                  </div>
+                  <span className="ml-3 shrink-0 text-sm font-medium tabular-nums text-vektor-amber">
+                    {p.immobilized_value > 0 ? formatARS(p.immobilized_value) : "sin costo"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {data.no_rotation_count > data.no_rotation_products.length ? (
+              <p className="text-center text-xs text-vektor-muted">
+                Mostrando los {data.no_rotation_products.length} de mayor valor, de{" "}
+                {data.no_rotation_count}.
+              </p>
+            ) : null}
+          </div>
         )}
       </PanelFrame>
     </>
+  );
+}
+
+// ── Acordeón de proveedores ───────────────────────────────────────────────────
+
+function SuppliersBreakdown({ suppliers }: { suppliers: SupplierPurchaseBreakdownItem[] }) {
+  if (suppliers.length === 0) {
+    return (
+      <p className="py-8 text-center text-sm text-vektor-muted">
+        Sin compras de mercadería en el período.
+      </p>
+    );
+  }
+  const maxTotal = Math.max(...suppliers.map((s) => s.total_purchased), 1);
+  return (
+    <ul className="space-y-2">
+      {suppliers.map((s) => (
+        <SupplierAccordionRow
+          key={s.supplier_id ?? "__unassigned__"}
+          supplier={s}
+          maxTotal={maxTotal}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function SupplierAccordionRow({
+  supplier,
+  maxTotal,
+}: {
+  supplier: SupplierPurchaseBreakdownItem;
+  maxTotal: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const sharePct = Math.min((supplier.total_purchased / maxTotal) * 100, 100);
+  const hasProducts = supplier.products.length > 0;
+
+  return (
+    <li className="rounded-lg border border-vektor-border">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        disabled={!hasProducts}
+        className="w-full px-3 py-2 text-left transition-colors hover:bg-vektor-surface/60 disabled:cursor-default"
+      >
+        <div className="flex items-center justify-between gap-3 text-sm">
+          <span className="flex min-w-0 items-center gap-1.5">
+            {hasProducts ? (
+              <ChevronDown
+                className={`h-3.5 w-3.5 shrink-0 text-vektor-muted transition-transform motion-reduce:transition-none ${
+                  open ? "rotate-180" : ""
+                }`}
+              />
+            ) : (
+              <span className="inline-block w-3.5" />
+            )}
+            <span className="truncate text-vektor-white">{supplier.supplier_name}</span>
+          </span>
+          <span className="shrink-0 font-medium tabular-nums text-vektor-white">
+            {formatARS(supplier.total_purchased)}
+          </span>
+        </div>
+        <div className="ml-5 mt-1 h-1.5 w-[calc(100%-1.25rem)] overflow-hidden rounded-full bg-vektor-border">
+          <div
+            className="h-full rounded-full bg-[#27c7b8] transition-all motion-reduce:transition-none"
+            style={{ width: `${sharePct}%` }}
+          />
+        </div>
+        {supplier.coverage_pct < 100 ? (
+          <p className="ml-5 mt-1 text-xs text-vektor-muted">
+            Calculado sobre {supplier.coverage_pct.toFixed(0)}% de las compras (resto sin costo
+            cargado).
+          </p>
+        ) : null}
+      </button>
+
+      {open && hasProducts ? (
+        // Regla vertical hairline: ata los productos a su proveedor.
+        <ul className="ml-5 space-y-1.5 border-l border-vektor-border py-2 pl-3 pr-3">
+          {supplier.products.map((p) => (
+            <li key={p.product_id} className="flex items-baseline justify-between gap-3 text-sm">
+              <span className="min-w-0">
+                <span className="block truncate text-vektor-body">{p.name}</span>
+                <span className="block truncate text-xs text-vektor-muted">{p.brand}</span>
+              </span>
+              <span className="shrink-0 font-medium tabular-nums text-vektor-white">
+                {formatARS(p.total_amount)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
   );
 }

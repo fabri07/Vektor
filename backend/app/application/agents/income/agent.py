@@ -11,7 +11,6 @@ AgentCash queda como shim delegante para PendingActions históricas.
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from decimal import Decimal
@@ -23,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -137,12 +137,12 @@ class AgentIncome(BaseAgent):
             output_tokens=response.usage.output_tokens,
         )
         raw = response.content[0].text.strip() if response.content else ""
-        try:
-            return json.loads(raw), llm_call
-        except Exception:
+        parsed = parse_llm_json(raw)
+        if parsed is None:
             return {
                 "error": "No pude interpretar la venta. Intentá con monto y forma de pago."
             }, llm_call
+        return parsed, llm_call
 
     async def _lookup_product_price(
         self, product_description: str, tenant_id: str

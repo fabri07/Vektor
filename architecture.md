@@ -2,7 +2,7 @@
 
 ## Overview
 
-Véktor es un **monolito modular multi-tenant** (v1) para salud financiera de PYMEs.
+Véktor es un **monolito modular multi-tenant** (v1) para salud financiera de negocios.
 
 - Backend: FastAPI + SQLAlchemy + Alembic + PostgreSQL
 - Async: Celery + Redis

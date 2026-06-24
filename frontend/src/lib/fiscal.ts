@@ -45,6 +45,22 @@ export function whatsappDigits(phone: string): string {
   return digits.startsWith("54") ? digits : `54${digits}`;
 }
 
+/**
+ * ¿El teléfono tiene suficientes dígitos para armar un link wa.me plausible?
+ *
+ * No intenta distinguir móvil de fijo (la regla del "9" de celulares AR no se
+ * puede inferir con certeza). Acota el largo a un rango plausible: un número AR
+ * completo (54 + área + abonado) tiene ≥ 12 dígitos; aceptamos ≥ 11 para no
+ * falsear teléfonos del interior cargados sin el 54, y ≤ 15 (máximo E.164) para
+ * rechazar strings que no son teléfonos (CUIT, códigos internos pegados por error).
+ * Si devuelve false, la UI deshabilita el botón y muestra una advertencia.
+ */
+export function isLikelyValidWhatsApp(phone: string | null | undefined): boolean {
+  if (!phone) return false;
+  const len = whatsappDigits(phone).length;
+  return len >= 11 && len <= 15;
+}
+
 // ── Condición frente al IVA (canónica, espejo del backend) ─────────────────────
 
 export const IVA_CONDITION_LABELS: Record<string, string> = {

@@ -1,6 +1,5 @@
 """AgentStock — gestión de inventario en tiempo real."""
 
-import json
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -12,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.llm_safe import call_llm
 from app.application.agents.shared.product_resolver import resolve_product_id
 from app.application.agents.shared.schemas import (
@@ -149,13 +149,13 @@ class AgentStock(BaseAgent):
             max_tokens=300,
         )
         if raw is not None:
-            try:
-                parsed = json.loads(raw)
+            parsed = parse_llm_json(raw)
+            if parsed is None:
+                pass
+            else:
                 intent = parsed.get("intent", "STOCK_QUERY")
                 if intent in ("STOCK_LOSS", "STOCK_ADJUSTMENT", "PRODUCT_UPDATE", "STOCK_QUERY"):
                     return intent, classify_call
-            except (json.JSONDecodeError, ValueError):
-                pass
         # Fallback determinístico por palabras clave
         msg = message.lower()
         if any(
@@ -356,10 +356,10 @@ class AgentStock(BaseAgent):
             output_tokens=response.usage.output_tokens,
         )
         raw = response.content[0].text.strip() if response.content else ""
-        try:
-            return json.loads(raw), extract_call
-        except (json.JSONDecodeError, ValueError):
+        parsed = parse_llm_json(raw)
+        if parsed is None:
             return {"product_name": None, "sku": None, "confidence": "LOW"}, extract_call
+        return parsed, extract_call
 
     async def _handle_product_update(
         self, request: AgentRequest
@@ -485,10 +485,10 @@ class AgentStock(BaseAgent):
         )
         if raw is None:
             return _fallback, extract_call
-        try:
-            return json.loads(raw), extract_call
-        except (json.JSONDecodeError, ValueError):
+        parsed = parse_llm_json(raw)
+        if parsed is None:
             return _fallback, extract_call
+        return parsed, extract_call
 
     async def _handle_query(self, request: AgentRequest) -> AgentResponse:
         logger = get_logger(__name__)

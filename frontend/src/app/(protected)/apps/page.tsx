@@ -56,7 +56,8 @@ function appIcon(appId: string) {
   if (appId === "drive") return FolderKanban;
   if (appId === "gmail") return Mail;
   if (appId === "calendar") return CalendarClock;
-  if (appId === "sheets_docs") return FileSpreadsheet;
+  if (appId === "sheets") return FileSpreadsheet;
+  if (appId === "docs") return FileText;
   return FileText;
 }
 
@@ -65,7 +66,8 @@ const GOOGLE_APP_URLS: Record<string, string> = {
   drive: "https://drive.google.com",
   gmail: "https://mail.google.com",
   calendar: "https://calendar.google.com",
-  sheets_docs: "https://docs.google.com",
+  sheets: "https://sheets.google.com",
+  docs: "https://docs.google.com",
 };
 
 function appExternalUrl(appId: string): string | null {
@@ -92,7 +94,8 @@ function appAccent(appId: string) {
   if (appId === "drive") return "from-[#0B57D0] via-[#4285F4] to-[#34A853]";
   if (appId === "gmail") return "from-[#EA4335] to-[#FBBC05]";
   if (appId === "calendar") return "from-[#1A73E8] to-[#8AB4F8]";
-  if (appId === "sheets_docs") return "from-[#188038] to-[#34A853]";
+  if (appId === "sheets") return "from-[#188038] to-[#34A853]";
+  if (appId === "docs") return "from-[#1A73E8] to-[#4285F4]";
   return "from-vk-blue to-vk-blue-light";
 }
 

@@ -15,7 +15,7 @@ plataforma ni cambia ningún cálculo determinístico.
 
 Compatibilidad legacy: el valor viejo ``registered`` (monotributo/RI juntos)
 debe seguir leyéndose sin romper. ``normalize_fiscal_condition`` lo mapea a
-``monotributo`` por defecto (caso más común en PYMEs argentinas). Para lógica
+``monotributo`` por defecto (caso más común en negocios argentinos). Para lógica
 que solo necesite saber "está registrado o no", usar ``is_registered``.
 """
 

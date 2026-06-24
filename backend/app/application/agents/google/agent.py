@@ -13,7 +13,6 @@ emiten PendingActions con ActionType externo y PendingActionService delega al br
 from __future__ import annotations
 
 import base64
-import json
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +20,7 @@ import anthropic
 
 from app.application.agents.base import BaseAgent
 from app.application.agents.google.tool_broker import GoogleToolBroker
+from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.llm_safe import call_llm
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -375,11 +375,11 @@ class AgentGoogle(BaseAgent):
         )
         if raw is None:
             return {"has_enough_info": False}, None
-        try:
-            return json.loads(raw), llm_call
-        except (json.JSONDecodeError, ValueError):
+        parsed = parse_llm_json(raw)
+        if parsed is None:
             logger.warning("agent_google.calendar_extract_json_failed", raw=raw[:200])
             return {"has_enough_info": False}, llm_call
+        return parsed, llm_call
 
     # ── SYNC_TO_GOOGLE ────────────────────────────────────────────────────────
 

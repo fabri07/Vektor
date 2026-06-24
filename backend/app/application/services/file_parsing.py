@@ -492,7 +492,7 @@ def infer_spreadsheet_type(
 
     # Nombre/producto + fecha + venta transaccional → ambiguo; preferimos stock en Véktor
     # porque las listas de precios con precio_venta son más comunes que las exportaciones
-    # de ventas con columna "nombre" en el contexto de PYMEs argentinas.
+    # de ventas con columna "nombre" en el contexto de negocios argentinos.
     if has_nombre:
         return "stock"
 
@@ -1079,7 +1079,7 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
     import openpyxl  # noqa: PLC0415
 
     # Sin límite de filas: se importan todas las filas del archivo.
-    # JSONB de Neon soporta hasta ~255 MB; un archivo típico de PYME es < 5 MB.
+    # JSONB de Neon soporta hasta ~255 MB; un archivo típico de un negocio es < 5 MB.
     _max_rows_per_type = None  # None = sin límite
 
     def _classify_sheet(name: str) -> str:

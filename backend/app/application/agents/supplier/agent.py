@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -13,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.base import BaseAgent
+from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.llm_safe import call_llm
 from app.application.agents.shared.product_resolver import resolve_product_id
 from app.application.agents.shared.schemas import (
@@ -194,11 +194,10 @@ class AgentSupplier(BaseAgent):
         )
         if raw is None:
             return {"has_enough_info": False}, None
-        try:
-            return json.loads(raw), llm_call
-        except Exception:
-            logger.warning("agent_supplier.draft_json_parse_failed", raw=raw[:200])
+        parsed = parse_llm_json(raw)
+        if parsed is None:
             return {"has_enough_info": False}, llm_call
+        return parsed, llm_call
 
     async def _handle_record_purchase(self, request: AgentRequest) -> AgentResponse:
         entities, purchase_call = await self._extract_purchase_entities(request.message)
@@ -325,13 +324,12 @@ class AgentSupplier(BaseAgent):
             return {
                 "error": "No pude interpretar la compra. Indicame el monto y el producto."
             }, None
-        try:
-            return json.loads(raw), llm_call
-        except Exception:
-            logger.warning("agent_supplier.purchase_json_parse_failed", raw=raw[:200])
+        parsed = parse_llm_json(raw)
+        if parsed is None:
             return {
                 "error": "No pude interpretar la compra. Indicame el monto y el producto."
             }, llm_call
+        return parsed, llm_call
 
     # ── Sprint 17: análisis de proveedores (read-only, determinístico) ────────
 

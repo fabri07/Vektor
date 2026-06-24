@@ -28,11 +28,11 @@ const appUrl =
 
 export const metadata: Metadata = {
   metadataBase: new URL(appUrl),
-  title: "Véktor — Salud financiera para PYMEs argentinas",
+  title: "Véktor — Salud financiera para negocios argentinos",
   description:
     "Controlá caja, margen y stock en tiempo real. Sin contabilidad, sin hojas de cálculo.",
   openGraph: {
-    title: "Véktor — Salud financiera para PYMEs argentinas",
+    title: "Véktor — Salud financiera para negocios argentinos",
     description:
       "Controlá caja, margen y stock en tiempo real. Sin contabilidad, sin hojas de cálculo.",
     siteName: "Véktor",
@@ -43,7 +43,7 @@ export const metadata: Metadata = {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "Véktor — Salud financiera para PYMEs",
+        alt: "Véktor — Salud financiera para negocios",
       },
     ],
   },

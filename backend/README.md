@@ -1,6 +1,6 @@
 # Véktor Backend
 
-Plataforma SaaS de salud financiera para PYMEs argentinas.
+Plataforma SaaS de salud financiera para negocios argentinos.
 Stack: **FastAPI · PostgreSQL · Redis · Celery · Python 3.12**
 
 ## Quick start

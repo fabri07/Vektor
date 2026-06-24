@@ -84,9 +84,30 @@ def _load_manual() -> dict[str, Any]:
         return {}
 
 
+# Grupos de sinónimos: tokens que el usuario usa para el mismo concepto pero que
+# el manual escribe distinto. Sin esto, "¿cómo importo un Excel?" no matchea la FAQ
+# "¿cómo cargo un archivo…?" porque "importo" ≠ "cargo". El matching es por keyword
+# exacto, así que expandimos los tokens de la consulta a su grupo.
+_SYNONYM_GROUPS: list[set[str]] = [
+    {"importar", "importo", "importás", "importa", "subir", "subo", "cargar", "cargo", "cargás"},
+    {"archivo", "planilla", "excel", "csv", "hoja"},
+    {"borrar", "eliminar", "anular", "quitar"},
+    {"editar", "modificar", "cambiar", "corregir"},
+]
+
+
 def _tokenize(text: str) -> set[str]:
     """Extrae palabras en minúsculas, sin puntuación."""
     return set(re.findall(r"[a-záéíóúüñ]+", text.lower()))
+
+
+def _expand_synonyms(tokens: set[str]) -> set[str]:
+    """Agrega a ``tokens`` los sinónimos de cada grupo que toque la consulta."""
+    expanded = set(tokens)
+    for group in _SYNONYM_GROUPS:
+        if tokens & group:
+            expanded |= group
+    return expanded
 
 
 def search(query: str, max_results: int = 3) -> list[FAQMatch]:
@@ -96,7 +117,7 @@ def search(query: str, max_results: int = 3) -> list[FAQMatch]:
     if not modules:
         return []
 
-    query_tokens = _tokenize(query)
+    query_tokens = _expand_synonyms(_tokenize(query))
     scored: list[tuple[int, FAQMatch]] = []
 
     for module in modules:

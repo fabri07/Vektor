@@ -10,12 +10,12 @@ Context Budget: 2.500 tokens.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import anthropic
 
 from app.application.agents.base import BaseAgent
+from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -98,7 +98,12 @@ class AgentHelper(BaseAgent):
         self._client = value
 
     async def find_answer(self, question: str) -> tuple[dict[str, Any], LLMCall]:
-        """Busca respuesta usando el manual YAML + LLM."""
+        """Busca respuesta usando el manual YAML + LLM.
+
+        Instrumentado para diagnosticar el fallback genérico: loguea cuántas FAQs
+        matchearon y, si no hay respuesta útil, la causa clasificada
+        (``no_matches`` | ``invalid_json`` | ``empty_answer`` | ``low_confidence``).
+        """
         matches = search(question, max_results=5)
         doc_context = (
             format_faq_context(matches) if matches else "Sin documentación relevante encontrada."
@@ -118,15 +123,37 @@ class AgentHelper(BaseAgent):
             output_tokens=response.usage.output_tokens,
         )
         raw = response.content[0].text.strip() if response.content else ""
-        try:
-            return json.loads(raw), llm_call
-        except (json.JSONDecodeError, ValueError):
+
+        parsed = parse_llm_json(raw)
+        if parsed is None:
+            logger.warning(
+                "agent_helper.parse_failed",
+                fallback_cause="invalid_json" if matches else "no_matches",
+                manual_matches=len(matches),
+                raw_preview=raw[:200],
+            )
             return {
                 "answer": None,
                 "confidence": "LOW",
                 "related_module": None,
                 "is_platform_question": False,
             }, llm_call
+
+        confidence = parsed.get("confidence")
+        if not parsed.get("answer") or confidence == "LOW":
+            logger.info(
+                "agent_helper.fallback",
+                fallback_cause=(
+                    "no_matches"
+                    if not matches
+                    else "empty_answer"
+                    if not parsed.get("answer")
+                    else "low_confidence"
+                ),
+                manual_matches=len(matches),
+                confidence=confidence,
+            )
+        return parsed, llm_call
 
     async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         # Heurística rápida antes de llamar al LLM: detectar pregunta de negocio

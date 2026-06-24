@@ -26,6 +26,17 @@ class TestSearch:
         matches = search("cómo conecto Google")
         assert len(matches) >= 1
 
+    def test_importar_matches_cargar_faq_via_synonyms(self) -> None:
+        # "importo un Excel" debe matchear la FAQ "cómo cargo un archivo (Excel…)".
+        matches = search("¿Cómo importo un Excel?")
+        assert len(matches) >= 1
+        texts = " ".join(m.question.lower() + " " + m.answer.lower() for m in matches)
+        assert "archivo" in texts or "excel" in texts
+
+    def test_subir_planilla_matches_via_synonyms(self) -> None:
+        matches = search("cómo subo una planilla")
+        assert len(matches) >= 1
+
     def test_max_results_respected(self) -> None:
         matches = search("ventas gastos stock proveedor", max_results=2)
         assert len(matches) <= 2

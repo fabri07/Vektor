@@ -111,7 +111,7 @@ function VideoHero() {
         <div className="max-w-2xl">
           <p className="mb-4 text-xs font-semibold uppercase tracking-[0.22em] text-white/50">
             <ShieldCheck className="mr-1.5 inline h-3.5 w-3.5 text-vektor-teal" />
-            Salud financiera para PYMEs argentinas
+            Salud financiera para negocios argentinos
           </p>
           <h1 className="font-display text-[52px] font-bold uppercase leading-[0.92] tracking-tight text-white sm:text-[72px] lg:text-[88px]">
             Tomá las<br />

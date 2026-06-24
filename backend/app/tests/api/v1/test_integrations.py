@@ -65,6 +65,40 @@ async def test_status_returns_real_state_from_db(
 
 
 @pytest.mark.asyncio
+async def test_status_sheets_and_docs_are_independent_cards(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_user: User,
+) -> None:
+    """Sheets y Docs son tarjetas separadas; cada una refleja su propio scope.
+
+    Con solo ``spreadsheets`` otorgado: Sheets queda connected y Docs needs_reconnect.
+    """
+    conn = GoogleMcpConnection(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_user.user_id,
+        status="CONNECTED",
+        scopes_granted=["spreadsheets"],
+    )
+    db_session.add(conn)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/integrations/google/status", headers=auth_headers)
+    assert resp.status_code == 200
+    apps = {app["id"]: app for app in resp.json()["apps"]}
+
+    assert "sheets" in apps and "docs" in apps
+    assert "sheets_docs" not in apps
+    assert apps["sheets"]["connected"] is True
+    assert apps["sheets"]["needs_reconnect"] is False
+    assert apps["docs"]["connected"] is False
+    assert apps["docs"]["needs_reconnect"] is True
+
+
+@pytest.mark.asyncio
 async def test_status_promotes_mcp_callback_error_to_connection_error(
     client: AsyncClient,
     auth_headers: dict[str, Any],

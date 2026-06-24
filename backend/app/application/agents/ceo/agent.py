@@ -10,7 +10,6 @@ RESTRICCIÓN: AgentCEO NUNCA accede directamente a:
   db.sales, db.inventory, db.cash_movements, db.purchase_orders
 """
 
-import json
 import sys
 from typing import Any
 
@@ -24,6 +23,7 @@ from app.application.agents.ceo.team_plan_builder import (
     INTENT_TO_AGENT,
     build_plan,
 )
+from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.risk_engine import RiskEngine
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -139,7 +139,7 @@ class AgentCEO(BaseAgent):
 
         system = (
             "Sos el clasificador de intenciones de Véktor, sistema de gestión financiera para "
-            "PyMEs argentinas (kioscos, almacenes, distribuidoras, locales de limpieza y "
+            "negocios argentinos (kioscos, almacenes, distribuidoras, locales de limpieza y "
             "decoración).\n"
             "Hablás con dueños de pequeños negocios en Argentina — español rioplatense, voseo, "
             "lunfardo de negocio. Tu tarea: entender QUÉ quieren hacer y retornar el intent "
@@ -184,9 +184,8 @@ class AgentCEO(BaseAgent):
             output_tokens=response.usage.output_tokens,
         )
         text = (response.content[0].text if response.content else "").strip()
-        try:
-            parsed = json.loads(text)
-        except (json.JSONDecodeError, IndexError, ValueError):
+        parsed = parse_llm_json(text)
+        if parsed is None:
             return {"intent": "intent_desconocido", "entities": {}}, llm_call
 
         if parsed.get("intent") not in INTENT_CATALOG:

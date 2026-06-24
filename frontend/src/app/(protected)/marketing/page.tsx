@@ -25,6 +25,7 @@ import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
+import { SocialGuides } from "@/features/marketing/SocialGuides";
 import { useToastStore } from "@/stores/toastStore";
 import {
   marketingService,
@@ -415,6 +416,9 @@ export default function MarketingPage() {
           verificación de las apps). Por ahora cargá las métricas manualmente o por CSV.
         </p>
       </div>
+
+      {/* Redes del negocio + guías de carga */}
+      <SocialGuides />
 
       {/* Selector de período */}
       <div className="flex items-center justify-between gap-3">

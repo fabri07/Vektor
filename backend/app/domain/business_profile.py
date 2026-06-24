@@ -1,7 +1,7 @@
 """
 BusinessProfile domain entity.
 
-Represents the static profile of a PYME: sector, size, location, etc.
+Represents the static profile of a business: sector, size, location, etc.
 Changes here trigger a score recalculation via Business State Layer.
 """
 

@@ -82,18 +82,32 @@ export interface CategoryBreakdownItem {
   pct: number;
 }
 
-export interface SupplierBreakdownItem {
-  supplier_name: string;
-  total: number;
-  pct: number;
-}
-
 export interface ProductStockItem {
   product_id: string;
   name: string;
   stock_units: number;
   low_stock_threshold_units: number | null;
   sale_price_ars: number;
+  /** Plata inmovilizada: stock_units × unit_cost_ars (0 si no hay costo). */
+  immobilized_value: number;
+}
+
+export interface SupplierBreakdownProductItem {
+  product_id: string;
+  name: string;
+  brand: string;
+  total_amount: number;
+  total_qty: number;
+}
+
+export interface SupplierPurchaseBreakdownItem {
+  supplier_id: string | null;
+  supplier_name: string;
+  is_unassigned: boolean;
+  total_purchased: number;
+  /** % de compras del proveedor con costo unitario conocido. */
+  coverage_pct: number;
+  products: SupplierBreakdownProductItem[];
 }
 
 export interface BusinessBreakdownResponse {
@@ -101,12 +115,16 @@ export interface BusinessBreakdownResponse {
   from_date: string;
   to_date: string;
   expenses_by_category: CategoryBreakdownItem[];
-  top_suppliers: SupplierBreakdownItem[];
+  /** Compras de mercadería agrupadas por proveedor real (acordeón). */
+  suppliers_breakdown: SupplierPurchaseBreakdownItem[];
   low_stock_products: ProductStockItem[];
   no_rotation_products: ProductStockItem[];
   low_stock_count: number;
   no_rotation_count: number;
   total_products: number;
+  /** Plata parada total en productos sin rotación + cuántos no se pudieron valuar. */
+  no_rotation_value_total: number;
+  no_rotation_unvalued_count: number;
   /** FASE D: gasto operativo vs compra de mercadería del período. */
   opex_total: number;
   cogs_total: number;
