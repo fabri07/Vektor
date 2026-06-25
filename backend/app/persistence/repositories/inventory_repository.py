@@ -11,9 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
-from app.persistence.models.supplier import Supplier
+from app.persistence.models.supplier import SENTINEL_FLAG_KEY, Supplier, is_sentinel_value
 
-_UNASSIGNED_SUPPLIER_LABEL = "Sin proveedor asignado"
+# Compras sin proveedor (supplier_id NULL) y el proveedor sentinela se unifican en una
+# sola etiqueta "No identificado" (coincide con el nombre del sentinela) para no mostrar
+# dos entradas separadas que son el mismo concepto.
+_UNASSIGNED_SUPPLIER_LABEL = "No identificado"
 _NO_BRAND_LABEL = "Sin marca"
 
 
@@ -230,55 +233,89 @@ class InventoryRepository:
         )
         product_rows = (await self._session.execute(product_q)).all()
 
-        # Nombres de proveedor (los supplier_id no nulos del set).
+        # Nombres + detección de sentinela (los supplier_id no nulos del set).
         supplier_ids = [r.supplier_id for r in supplier_rows if r.supplier_id is not None]
         name_by_id: dict[UUID, str] = {}
+        sentinel_ids: set[UUID] = set()
         if supplier_ids:
             name_rows = (
                 await self._session.execute(
-                    select(Supplier.id, Supplier.name).where(
+                    select(Supplier.id, Supplier.name, Supplier.custom_fields).where(
                         Supplier.tenant_id == tenant_id,
                         Supplier.id.in_(supplier_ids),
                     )
                 )
             ).all()
-            name_by_id = {row.id: row.name for row in name_rows}
+            for row in name_rows:
+                name_by_id[row.id] = row.name
+                if is_sentinel_value((row.custom_fields or {}).get(SENTINEL_FLAG_KEY)):
+                    sentinel_ids.add(row.id)
 
-        # Agrupar productos por proveedor.
-        products_by_supplier: dict[UUID | None, list[SupplierBreakdownProduct]] = {}
+        # Clave canónica: NULL y sentinela → None (un único "No identificado").
+        def _canon(sid: UUID | None) -> UUID | None:
+            return None if (sid is None or sid in sentinel_ids) else sid
+
+        # Productos por proveedor canónico, fusionando por product_id (NULL + sentinela
+        # del mismo producto se suman en una sola fila).
+        prod_acc: dict[UUID | None, dict[UUID, dict[str, Any]]] = {}
         for r in product_rows:
+            key = _canon(r.supplier_id)
+            bucket = prod_acc.setdefault(key, {})
             brand = str((r.custom_fields or {}).get("marca") or "").strip() or _NO_BRAND_LABEL
-            products_by_supplier.setdefault(r.supplier_id, []).append(
+            cur = bucket.get(r.product_id)
+            line_amount = float(r.total_amount or 0)
+            line_qty = float(r.total_qty or 0)
+            if cur is None:
+                bucket[r.product_id] = {
+                    "name": r.name,
+                    "brand": brand,
+                    "total_amount": line_amount,
+                    "total_qty": line_qty,
+                }
+            else:
+                cur["total_amount"] += line_amount
+                cur["total_qty"] += line_qty
+
+        products_by_supplier: dict[UUID | None, list[SupplierBreakdownProduct]] = {
+            key: [
                 SupplierBreakdownProduct(
-                    product_id=r.product_id,
-                    name=r.name,
-                    brand=brand,
-                    total_amount=float(r.total_amount or 0),
-                    total_qty=float(r.total_qty or 0),
+                    product_id=pid,
+                    name=p["name"],
+                    brand=p["brand"],
+                    total_amount=p["total_amount"],
+                    total_qty=p["total_qty"],
                 )
-            )
+                for pid, p in bucket.items()
+            ]
+            for key, bucket in prod_acc.items()
+        }
+
+        # Totales por proveedor canónico (fusiona NULL + sentinela).
+        supplier_acc: dict[UUID | None, dict[str, float]] = {}
+        for r in supplier_rows:
+            key = _canon(r.supplier_id)
+            a = supplier_acc.setdefault(key, {"total": 0.0, "n_costed": 0.0, "n_total": 0.0})
+            a["total"] += float(r.total_amount or 0)
+            a["n_costed"] += int(r.n_costed or 0)
+            a["n_total"] += int(r.n_total or 0)
 
         breakdown: list[SupplierPurchaseBreakdown] = []
-        for r in supplier_rows:
-            sid = r.supplier_id
+        for key, a in supplier_acc.items():
             products = sorted(
-                products_by_supplier.get(sid, []),
+                products_by_supplier.get(key, []),
                 key=lambda p: (-p.total_amount, p.name.lower()),
             )[:top_products_per_supplier]
-            n_total = int(r.n_total or 0)
-            n_costed = int(r.n_costed or 0)
-            coverage = round(n_costed / n_total * 100, 1) if n_total > 0 else 0.0
-            name = (
-                _UNASSIGNED_SUPPLIER_LABEL
-                if sid is None
-                else name_by_id.get(sid, _UNASSIGNED_SUPPLIER_LABEL)
+            n_total = int(a["n_total"])
+            coverage = round(a["n_costed"] / n_total * 100, 1) if n_total > 0 else 0.0
+            name = _UNASSIGNED_SUPPLIER_LABEL if key is None else name_by_id.get(
+                key, _UNASSIGNED_SUPPLIER_LABEL
             )
             breakdown.append(
                 SupplierPurchaseBreakdown(
-                    supplier_id=sid,
+                    supplier_id=key,
                     supplier_name=name,
-                    is_unassigned=sid is None,
-                    total_purchased=float(r.total_amount or 0),
+                    is_unassigned=key is None,
+                    total_purchased=a["total"],
                     coverage_pct=coverage,
                     products=products,
                 )

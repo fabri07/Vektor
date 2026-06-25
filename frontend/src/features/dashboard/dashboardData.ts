@@ -5,7 +5,17 @@ import type { SaleEntryResponse } from "@/services/sales.service";
 import type { SupplierResponse } from "@/services/suppliers.service";
 import type { HealthScoreV2Response } from "@/types/api";
 
-export const UNIDENTIFIED_SUPPLIER = "Proveedor no identificado";
+// Compras sin proveedor (supplier_id NULL) y el proveedor sentinela se unifican en
+// una sola etiqueta "No identificado" — coincide con el nombre del sentinela para que
+// no aparezcan dos entradas separadas en el dashboard.
+export const UNIDENTIFIED_SUPPLIER = "No identificado";
+
+// El proveedor sentinela ("No identificado") es un Supplier real con el flag
+// `custom_fields._sentinel`. Detectarlo para fusionarlo con las compras sin proveedor.
+function isSentinelSupplier(s: SupplierResponse): boolean {
+  const flag = s.custom_fields?._sentinel;
+  return flag === "true" || flag === true;
+}
 // Las ventas sin cliente registrado se agrupan en el centinela "Local" (mostrador).
 // El centinela se excluye del catálogo de clientes, así que su id no resuelve acá.
 export const UNIDENTIFIED_CUSTOMER = "Local";
@@ -348,18 +358,23 @@ export function buildProductPurchases(
 
 /**
  * Volumen de compra por proveedor REAL (supplier_id contra el catálogo). Los
- * gastos sin proveedor identificado se agrupan en "Proveedor no identificado".
+ * gastos sin proveedor y los del sentinela se unifican en "No identificado".
  */
 export function buildSupplierBreakdown(
   expenses: ExpenseEntryResponse[],
   suppliers: SupplierResponse[],
 ): VolumeSummary[] {
   const nameById = new Map(suppliers.map((s) => [s.id, s.name]));
+  // Ids del/los proveedor(es) sentinela: sus compras se fusionan con las que no
+  // tienen proveedor (supplier_id NULL) en un único bucket "No identificado".
+  const sentinelIds = new Set(suppliers.filter(isSentinelSupplier).map((s) => s.id));
   const acc = new Map<string, VolumeAccumulator>();
 
   for (const expense of expenses) {
     const supplierId = expense.supplier_id;
-    const identified = Boolean(supplierId && nameById.has(supplierId));
+    const identified = Boolean(
+      supplierId && nameById.has(supplierId) && !sentinelIds.has(supplierId),
+    );
     const key = identified ? (supplierId as string) : UNIDENTIFIED_KEY;
     const name = identified ? nameById.get(supplierId as string)! : UNIDENTIFIED_SUPPLIER;
     const current = acc.get(key) ?? { name, identified, total: 0, count: 0, lastDate: null };

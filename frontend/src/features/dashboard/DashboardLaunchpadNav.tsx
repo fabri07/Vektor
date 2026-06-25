@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { Settings } from "lucide-react";
 
 const SCREENS = [
   { id: "dashboard", label: "Resumen", href: "/dashboard" },
@@ -44,22 +45,35 @@ export function DashboardLaunchpadNav({ active }: Props) {
           })}
         </div>
 
-        <div className="flex items-center gap-2">
-          {SCREENS.map((screen) => {
-            const isActive = screen.id === active;
-            return (
-              <button
-                key={screen.id}
-                type="button"
-                onClick={() => goTo(screen.id)}
-                aria-label={`Ir a ${screen.label}`}
-                className={[
-                  "h-2.5 rounded-full transition-all duration-200",
-                  isActive ? "w-8 bg-vektor-white" : "w-2.5 bg-vektor-border hover:bg-vektor-muted",
-                ].join(" ")}
-              />
-            );
-          })}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            {SCREENS.map((screen) => {
+              const isActive = screen.id === active;
+              return (
+                <button
+                  key={screen.id}
+                  type="button"
+                  onClick={() => goTo(screen.id)}
+                  aria-label={`Ir a ${screen.label}`}
+                  className={[
+                    "h-2.5 rounded-full transition-all duration-200",
+                    isActive
+                      ? "w-8 bg-vektor-white"
+                      : "w-2.5 bg-vektor-border hover:bg-vektor-muted",
+                  ].join(" ")}
+                />
+              );
+            })}
+          </div>
+
+          {/* Acceso directo a Configuración */}
+          <Link
+            href="/settings"
+            className="inline-flex items-center gap-1.5 rounded-full border border-vektor-border bg-vektor-ink px-3 py-1.5 text-sm font-medium text-vektor-body transition-colors hover:bg-vektor-surface hover:text-vektor-white"
+          >
+            <Settings className="h-4 w-4" />
+            Configuración
+          </Link>
         </div>
       </div>
 

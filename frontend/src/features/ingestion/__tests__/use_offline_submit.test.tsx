@@ -48,8 +48,24 @@ beforeEach(() => {
 });
 
 describe("useOfflineSubmit.flush poison-item handling", () => {
-  it("removes a permanent 4xx item (no infinite retry)", async () => {
+  it("keeps a 4xx item marked-failed (visible, no silent drop) below the cap", async () => {
+    // Una operación transaccional (sale_batch/purchase) puede 400 legítimamente en
+    // el replay (sobreventa, proveedor borrado): NO se borra en silencio, queda
+    // visible con su lastError hasta el tope de reintentos.
     seed();
+    mockCreateSale.mockRejectedValue(axiosErr(400));
+    const { result } = renderHook(() => useOfflineSubmit(), { wrapper });
+    await act(async () => {
+      await result.current.flush();
+    });
+    const items = useOfflineQueueStore.getState().items;
+    expect(items).toHaveLength(1);
+    expect(items[0]?.attempts).toBe(1);
+    expect(items[0]?.lastError).toBeTruthy();
+  });
+
+  it("drops a permanent 4xx item once it hits the attempt cap (no infinite retry)", async () => {
+    seed(4); // next attempt = 5 = MAX_FLUSH_ATTEMPTS
     mockCreateSale.mockRejectedValue(axiosErr(400));
     const { result } = renderHook(() => useOfflineSubmit(), { wrapper });
     await act(async () => {

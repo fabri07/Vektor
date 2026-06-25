@@ -103,6 +103,38 @@ async def test_breakdown_null_supplier_is_unassigned_and_coverage_partial(
     assert len(result) == 1
     s = result[0]
     assert s.is_unassigned is True
-    assert s.supplier_name == "Sin proveedor asignado"
+    assert s.supplier_name == "No identificado"
     assert s.total_purchased == pytest.approx(1000.0)  # la fila sin costo no suma
     assert s.coverage_pct == 50.0
+
+
+@pytest.mark.asyncio
+async def test_null_and_sentinel_supplier_merge_into_one(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Compras sin proveedor (NULL) + el sentinela 'No identificado' se unifican."""
+    tid = sample_tenant.tenant_id
+    sentinel = Supplier(
+        id=uuid.uuid4(),
+        tenant_id=tid,
+        name="No identificado",
+        custom_fields={"_sentinel": "true"},
+    )
+    db_session.add(sentinel)
+    await db_session.flush()
+    p1 = await _product(db_session, tid, "Yerba")
+    await _purchase(db_session, tid, p1.id, None, 5, Decimal("100"))  # sin proveedor
+    await _purchase(db_session, tid, p1.id, sentinel.id, 3, Decimal("100"))  # sentinela
+    await db_session.commit()
+
+    result = await InventoryRepository(db_session).suppliers_purchase_breakdown(tid)
+
+    # Un único bucket "No identificado" con ambas compras sumadas (8*100=800) y el
+    # producto fusionado en una sola fila.
+    assert len(result) == 1
+    s = result[0]
+    assert s.supplier_name == "No identificado"
+    assert s.is_unassigned is True
+    assert s.total_purchased == pytest.approx(800.0)
+    assert len(s.products) == 1
+    assert s.products[0].total_qty == pytest.approx(8.0)
