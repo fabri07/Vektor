@@ -393,7 +393,7 @@ function ReclassifyModal({
         <div className="rounded border border-vk-border-w bg-vk-bg-light p-3 text-xs text-vk-text-muted">
           {rowPreview(record)}
         </div>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">
+        <label className="grid gap-1 text-sm text-vektor-body">
           Importar como
           <select
             className={inputCls}
@@ -409,7 +409,7 @@ function ReclassifyModal({
         </label>
         {!isContact ? (
           <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-sm text-vk-text-secondary">
+            <label className="grid gap-1 text-sm text-vektor-body">
               {entityType === "product" ? "Precio de venta" : "Monto"}
               <input
                 className={inputCls}
@@ -422,7 +422,7 @@ function ReclassifyModal({
               />
             </label>
             {entityType !== "product" ? (
-              <label className="grid gap-1 text-sm text-vk-text-secondary">
+              <label className="grid gap-1 text-sm text-vektor-body">
                 Fecha
                 <input
                   className={inputCls}
@@ -435,7 +435,7 @@ function ReclassifyModal({
             ) : null}
           </div>
         ) : null}
-        <label className="grid gap-1 text-sm text-vk-text-secondary">
+        <label className="grid gap-1 text-sm text-vektor-body">
           {entityType === "product"
             ? "Nombre del producto"
             : entityType === "customer"
@@ -452,7 +452,7 @@ function ReclassifyModal({
         </label>
         {isContact ? (
           <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-sm text-vk-text-secondary">
+            <label className="grid gap-1 text-sm text-vektor-body">
               Email (opcional)
               <input
                 className={inputCls}
@@ -461,7 +461,7 @@ function ReclassifyModal({
                 onChange={(e) => setEmail(e.target.value)}
               />
             </label>
-            <label className="grid gap-1 text-sm text-vk-text-secondary">
+            <label className="grid gap-1 text-sm text-vektor-body">
               Teléfono (opcional)
               <input
                 className={inputCls}
@@ -473,7 +473,7 @@ function ReclassifyModal({
           </div>
         ) : null}
         {entityType === "expense" ? (
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
+          <label className="grid gap-1 text-sm text-vektor-body">
             Categoría
             <select
               className={inputCls}
@@ -489,7 +489,7 @@ function ReclassifyModal({
           </label>
         ) : null}
         {entityType === "product" && productCategories.length > 0 ? (
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
+          <label className="grid gap-1 text-sm text-vektor-body">
             Categoría
             <select
               className={inputCls}
@@ -506,7 +506,7 @@ function ReclassifyModal({
           </label>
         ) : null}
         {entityType !== "product" && !isContact ? (
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
+          <label className="grid gap-1 text-sm text-vektor-body">
             Forma de pago
             <select
               className={inputCls}

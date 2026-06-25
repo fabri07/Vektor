@@ -409,15 +409,15 @@ function ExpenseEditModal({
     <Modal isOpen={!!expense} onClose={onClose} title="Editar gasto" size="lg">
       <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onSave(form); }}>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Fecha y hora<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} /></label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Fecha y hora<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
         </div>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} /></label>
+        <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Proveedor<input className="rounded border border-vk-border-w px-3 py-2" value={form.supplier_name ?? ""} onChange={(e) => set("supplier_name", e.target.value || null)} /></label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Monto<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.amount} onChange={(e) => set("amount", Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Proveedor<input className="rounded border border-vk-border-w px-3 py-2" value={form.supplier_name ?? ""} onChange={(e) => set("supplier_name", e.target.value || null)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Monto<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.amount} onChange={(e) => set("amount", Number(e.target.value))} /></label>
         </div>
-        <label className="flex items-center gap-2 text-sm text-vk-text-secondary"><input type="checkbox" checked={form.is_recurring} onChange={(e) => set("is_recurring", e.target.checked)} />Recurrente</label>
+        <label className="flex items-center gap-2 text-sm text-vektor-body"><input type="checkbox" checked={form.is_recurring} onChange={(e) => set("is_recurring", e.target.checked)} />Recurrente</label>
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
           <button type="submit" disabled={saving} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>

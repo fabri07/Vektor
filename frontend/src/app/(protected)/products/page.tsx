@@ -428,10 +428,10 @@ function ProductEditModal({
   return (
     <Modal isOpen={!!product} onClose={onClose} title="Editar producto" size="lg">
       <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onSave(form); }}>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">Producto<input className="rounded border border-vk-border-w px-3 py-2" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
+        <label className="grid gap-1 text-sm text-vektor-body">Producto<input className="rounded border border-vk-border-w px-3 py-2" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">SKU<input className="rounded border border-vk-border-w px-3 py-2" value={form.sku ?? ""} onChange={(e) => set("sku", e.target.value || null)} /></label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Categoría
+          <label className="grid gap-1 text-sm text-vektor-body">SKU<input className="rounded border border-vk-border-w px-3 py-2" value={form.sku ?? ""} onChange={(e) => set("sku", e.target.value || null)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Categoría
             <select
               className="rounded border border-vk-border-w px-3 py-2"
               value={form.category ?? ""}
@@ -451,15 +451,15 @@ function ProductEditModal({
           </label>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Precio<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Costo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.unit_cost_ars ?? ""} onChange={(e) => set("unit_cost_ars", e.target.value ? Number(e.target.value) : null)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Precio<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Costo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.unit_cost_ars ?? ""} onChange={(e) => set("unit_cost_ars", e.target.value ? Number(e.target.value) : null)} /></label>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Stock<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} value={form.stock_units} onChange={(e) => set("stock_units", Number(e.target.value))} /></label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">Umbral mínimo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} placeholder="5 (default)" value={form.low_stock_threshold_units ?? ""} onChange={(e) => set("low_stock_threshold_units", e.target.value === "" ? null : Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Stock<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} value={form.stock_units} onChange={(e) => set("stock_units", Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Umbral mínimo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} placeholder="5 (default)" value={form.low_stock_threshold_units ?? ""} onChange={(e) => set("low_stock_threshold_units", e.target.value === "" ? null : Number(e.target.value))} /></label>
         </div>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
+        <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
+        <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
           <button type="submit" disabled={saving} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>

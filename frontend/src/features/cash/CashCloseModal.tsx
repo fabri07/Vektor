@@ -29,7 +29,7 @@ const DENOMINATIONS = [20000, 10000, 2000, 1000, 500, 200, 100, 50, 20, 10] as c
 
 const inputCls =
   "w-full rounded-lg border border-vk-border-w bg-vk-night py-2 pl-7 pr-3 text-sm " +
-  "text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20";
+  "text-vektor-white focus:outline-none focus:ring-2 focus:ring-vk-blue/20";
 
 interface CashCloseModalProps {
   isOpen: boolean;
@@ -166,7 +166,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
       {isLoading ? (
         <p className="py-8 text-center text-sm text-vk-text-muted">Calculando…</p>
       ) : preview?.already_closed ? (
-        <p className="py-8 text-center text-sm text-vk-text-secondary">
+        <p className="py-8 text-center text-sm text-vektor-body">
           Ya registraste el cierre de caja de hoy.
         </p>
       ) : (
@@ -180,17 +180,17 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
               <div className="space-y-1.5">
                 {preview.breakdown.map((b) => (
                   <div key={b.payment_method} className="flex justify-between text-sm">
-                    <span className="text-vk-text-secondary">
+                    <span className="text-vektor-body">
                       {paymentLabel(b.payment_method)}
                     </span>
-                    <span className="tabular-nums text-vk-text-primary">
+                    <span className="tabular-nums text-vektor-white">
                       {formatARS(b.expected_ars)}
                     </span>
                   </div>
                 ))}
                 <div className="mt-2 flex justify-between border-t border-vk-border-w pt-2 text-sm font-semibold">
-                  <span className="text-vk-text-primary">Total esperado</span>
-                  <span className="tabular-nums text-vk-text-primary">
+                  <span className="text-vektor-white">Total esperado</span>
+                  <span className="tabular-nums text-vektor-white">
                     {formatARS(expected)}
                   </span>
                 </div>
@@ -216,7 +216,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
             <div>
               <label
                 htmlFor="counted"
-                className="mb-1.5 block text-sm font-medium text-vk-text-primary"
+                className="mb-1.5 block text-sm font-medium text-vektor-white"
               >
                 ¿Cuánto contaste en caja?
               </label>
@@ -241,7 +241,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
               <div>
                 <label
                   htmlFor="opening-float"
-                  className="mb-1.5 block text-sm font-medium text-vk-text-primary"
+                  className="mb-1.5 block text-sm font-medium text-vektor-white"
                 >
                   1. Fondo de caja inicial
                 </label>
@@ -267,7 +267,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
 
               {/* Paso 2 — conteo de efectivo por denominación */}
               <div>
-                <p className="mb-1.5 text-sm font-medium text-vk-text-primary">
+                <p className="mb-1.5 text-sm font-medium text-vektor-white">
                   2. Recuento del efectivo físico
                 </p>
                 <p className="mb-2 text-xs text-vk-text-muted">
@@ -275,7 +275,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
                 </p>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                   {DENOMINATIONS.map((d) => (
-                    <label key={d} className="grid gap-1 text-xs text-vk-text-secondary">
+                    <label key={d} className="grid gap-1 text-xs text-vektor-body">
                       ${d.toLocaleString("es-AR")}
                       <input
                         type="number"
@@ -286,7 +286,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
                           setDenoms((prev) => ({ ...prev, [String(d)]: e.target.value }))
                         }
                         placeholder="0"
-                        className="w-full rounded-lg border border-vk-border-w bg-vk-night px-2 py-1.5 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+                        className="w-full rounded-lg border border-vk-border-w bg-vk-night px-2 py-1.5 text-sm text-vektor-white focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
                       />
                     </label>
                   ))}
@@ -298,7 +298,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
 
               {/* Paso 3 — digitales y comprobantes */}
               <div>
-                <p className="mb-1.5 text-sm font-medium text-vk-text-primary">
+                <p className="mb-1.5 text-sm font-medium text-vektor-white">
                   3. Pagos digitales y comprobantes
                 </p>
                 <p className="mb-2 text-xs text-vk-text-muted">
@@ -307,7 +307,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
                 <div className="space-y-2">
                   {digitalMethods.map((b) => (
                     <div key={b.payment_method} className="flex items-center gap-2">
-                      <span className="w-32 text-sm text-vk-text-secondary">
+                      <span className="w-32 text-sm text-vektor-body">
                         {paymentLabel(b.payment_method)}
                       </span>
                       <div className="relative flex-1">
@@ -331,7 +331,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
                     </div>
                   ))}
                   <div className="flex items-center gap-2">
-                    <span className="w-32 text-sm text-vk-text-secondary">Vales de gasto</span>
+                    <span className="w-32 text-sm text-vektor-body">Vales de gasto</span>
                     <div className="relative flex-1">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-vk-text-muted">
                         $
@@ -433,7 +433,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
           <div>
             <label
               htmlFor="cash-notes"
-              className="mb-1.5 block text-sm font-medium text-vk-text-primary"
+              className="mb-1.5 block text-sm font-medium text-vektor-white"
             >
               Notas (opcional)
             </label>
@@ -444,7 +444,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
               rows={2}
               maxLength={500}
               placeholder="Ej: faltó vuelto, propina incluida…"
-              className="w-full rounded-lg border border-vk-border-w bg-vk-night px-3 py-2 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+              className="w-full rounded-lg border border-vk-border-w bg-vk-night px-3 py-2 text-sm text-vektor-white focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
             />
           </div>
 
@@ -452,7 +452,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
             <button
               type="button"
               onClick={onClose}
-              className="rounded-full border border-vk-border-w px-5 py-2 text-sm font-medium text-vk-text-secondary hover:text-vk-text-primary"
+              className="rounded-full border border-vk-border-w px-5 py-2 text-sm font-medium text-vektor-body hover:text-vektor-white"
             >
               Cancelar
             </button>

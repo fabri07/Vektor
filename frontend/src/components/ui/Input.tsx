@@ -16,7 +16,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
         {label && (
           <label
             htmlFor={inputId}
-            className="text-xs font-medium text-vk-text-secondary"
+            className="text-xs font-medium text-vektor-body"
           >
             {label}
           </label>
@@ -25,7 +25,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
           ref={ref}
           id={inputId}
           className={twMerge(
-            "h-10 w-full rounded-xl border bg-vektor-surface px-3 text-sm text-vk-text-primary",
+            "h-10 w-full rounded-xl border bg-vektor-surface px-3 text-sm text-vektor-white",
             "placeholder:text-vk-text-placeholder",
             "transition-all duration-200 focus:outline-none focus:ring-2",
             error

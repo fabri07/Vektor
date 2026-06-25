@@ -121,7 +121,7 @@ export function Modal({ isOpen, onClose, title, children, size = "md" }: ModalPr
           <div className="flex items-center justify-between border-b border-vk-border-w px-6 py-4">
             <h2
               id="modal-title"
-              className="font-display text-base font-semibold text-vk-text-primary"
+              className="font-display text-base font-semibold text-vektor-white"
             >
               {title}
             </h2>

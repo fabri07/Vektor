@@ -349,12 +349,6 @@ export function FileUploadSection() {
             ))}
           </div>
 
-          {preview.parsed_summary_json && (
-            <pre className="mb-4 max-h-40 overflow-auto rounded bg-vk-bg-light p-3 text-xs text-vk-text-muted font-mono">
-              {JSON.stringify(preview.parsed_summary_json, null, 2)}
-            </pre>
-          )}
-
           <Button
             size="sm"
             loading={isConfirming}

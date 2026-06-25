@@ -435,22 +435,22 @@ function SaleEditModal({
           </p>
         )}
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
+          <label className="grid gap-1 text-sm text-vektor-body">
             Fecha y hora
             <input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} />
           </label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
+          <label className="grid gap-1 text-sm text-vektor-body">
             Medio de pago
             <select className="rounded border border-vk-border-w px-3 py-2" value={form.payment_method} onChange={(e) => set("payment_method", e.target.value)}>
               {Object.entries(PAYMENT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
         </div>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">
+        <label className="grid gap-1 text-sm text-vektor-body">
           Concepto
           <input className="rounded border border-vk-border-w px-3 py-2" value={form.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
         </label>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">
+        <label className="grid gap-1 text-sm text-vektor-body">
           Producto
           <select
             className="rounded border border-vk-border-w px-3 py-2"
@@ -465,7 +465,7 @@ function SaleEditModal({
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm text-vk-text-secondary">
+        <label className="grid gap-1 text-sm text-vektor-body">
           Cliente
           <select
             className="rounded border border-vk-border-w px-3 py-2"
@@ -487,11 +487,11 @@ function SaleEditModal({
           ) : null}
         </label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
+          <label className="grid gap-1 text-sm text-vektor-body">
             Cantidad
             <input className="rounded border border-vk-border-w px-3 py-2" type="number" min={1} value={form.quantity} onChange={(e) => set("quantity", Number(e.target.value))} />
           </label>
-          <label className="grid gap-1 text-sm text-vk-text-secondary">
+          <label className="grid gap-1 text-sm text-vektor-body">
             Monto
             <input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.amount} onChange={(e) => set("amount", Number(e.target.value))} />
           </label>

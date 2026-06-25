@@ -76,7 +76,7 @@ function Toast({ toast }: { toast: ToastState }) {
 
 const selectClass =
   "h-9 w-full rounded-lg border border-vk-border-w bg-vk-surface-w px-3 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/15 focus:border-vk-blue/40 disabled:opacity-40";
-const labelClass = "text-xs font-medium text-vk-text-secondary";
+const labelClass = "text-xs font-medium text-vektor-body";
 
 const PAYMENT_METHODS = [
   { value: "cash", label: "Efectivo" },
@@ -391,7 +391,7 @@ function SaleTab({ onToast, online }: { onToast: (t: ToastState) => void; online
                 className={selectClass}
               />
               <div className="flex items-center justify-between gap-2 sm:justify-end">
-                <span className="text-sm font-medium tabular-nums text-vk-text-primary">
+                <span className="text-sm font-medium tabular-nums text-vektor-white">
                   {fmtArs(subtotal)}
                 </span>
                 <button
@@ -428,8 +428,8 @@ function SaleTab({ onToast, online }: { onToast: (t: ToastState) => void; online
 
       {/* Pie: total + submit */}
       <div className="flex items-center justify-between border-t border-vk-border-w pt-3">
-        <span className="text-sm text-vk-text-secondary">
-          Total: <span className="font-semibold text-vk-text-primary">{fmtArs(total)}</span>
+        <span className="text-sm text-vektor-body">
+          Total: <span className="font-semibold text-vektor-white">{fmtArs(total)}</span>
         </span>
         <Button type="submit" size="sm" loading={submitting}>
           Registrar venta
@@ -660,7 +660,7 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
           onChange={(e) => setIsRecurring(e.target.checked)}
           className="h-4 w-4 rounded border-vk-border-w accent-vk-blue"
         />
-        <span className="text-sm text-vk-text-secondary">Gasto recurrente</span>
+        <span className="text-sm text-vektor-body">Gasto recurrente</span>
       </label>
 
       <FieldError msg={error ?? undefined} />
@@ -1032,7 +1032,7 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
                   className={selectClass}
                 />
                 <div className="flex items-center justify-end text-sm">
-                  <span className="tabular-nums text-vk-text-secondary">
+                  <span className="tabular-nums text-vektor-body">
                     {m === null ? "—" : `Margen ${m}%`}
                   </span>
                 </div>
@@ -1040,7 +1040,7 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
 
               <div className="flex items-center justify-between">
                 {existing ? (
-                  <label className="flex cursor-pointer items-center gap-2 text-xs text-vk-text-secondary">
+                  <label className="flex cursor-pointer items-center gap-2 text-xs text-vektor-body">
                     <input
                       type="checkbox"
                       checked={l.update_price}
@@ -1052,7 +1052,7 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
                 ) : (
                   <span />
                 )}
-                <span className="text-sm font-medium tabular-nums text-vk-text-primary">
+                <span className="text-sm font-medium tabular-nums text-vektor-white">
                   Subtotal {fmtArs(qty * cost)}
                 </span>
               </div>
@@ -1071,9 +1071,9 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
       <FieldError msg={error ?? undefined} />
 
       <div className="flex items-center justify-between border-t border-vk-border-w pt-3">
-        <span className="text-sm text-vk-text-secondary">
+        <span className="text-sm text-vektor-body">
           Total compra:{" "}
-          <span className="font-semibold text-vk-text-primary">{fmtArs(total)}</span>
+          <span className="font-semibold text-vektor-white">{fmtArs(total)}</span>
         </span>
         <Button type="submit" size="sm" loading={submitting}>
           Registrar compra
@@ -1301,7 +1301,7 @@ function InlineCustomerCreate({
 
   return (
     <div className="space-y-2 rounded-lg border border-vk-blue/30 bg-vk-blue/5 p-3">
-      <p className="text-xs font-medium text-vk-text-secondary">Nuevo cliente</p>
+      <p className="text-xs font-medium text-vektor-body">Nuevo cliente</p>
       <div className="grid gap-2 sm:grid-cols-2">
         <input placeholder="Nombre *" value={name} onChange={(e) => setName(e.target.value)} className={selectClass} />
         <input placeholder="Apellido *" value={lastName} onChange={(e) => setLastName(e.target.value)} className={selectClass} />
@@ -1350,7 +1350,7 @@ function InlineSupplierCreate({
 
   return (
     <div className="space-y-2 rounded-lg border border-vk-blue/30 bg-vk-blue/5 p-3">
-      <p className="text-xs font-medium text-vk-text-secondary">Nuevo proveedor</p>
+      <p className="text-xs font-medium text-vektor-body">Nuevo proveedor</p>
       <input
         placeholder="Nombre / razón social *"
         value={name}
@@ -1435,7 +1435,7 @@ export function ManualEntrySection({
           className={[
             "mb-4 rounded-lg border px-3 py-2 text-xs",
             online
-              ? "border-vk-blue/20 bg-vk-blue/5 text-vk-text-secondary"
+              ? "border-vk-blue/20 bg-vk-blue/5 text-vektor-body"
               : "border-vk-warning/30 bg-vk-warning-bg text-vk-warning",
           ].join(" ")}
         >
