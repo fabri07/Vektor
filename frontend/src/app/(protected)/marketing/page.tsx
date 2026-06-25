@@ -817,7 +817,7 @@ function CsvImportModal({
             type="file"
             accept=".csv,text/csv"
             onChange={handleFile}
-            className="text-sm text-vk-text-secondary file:mr-3 file:rounded-lg file:border file:border-vk-border-w file:bg-vk-surface-w file:px-3 file:py-1.5 file:text-sm file:text-vk-text-primary"
+            className="text-sm text-vektor-body file:mr-3 file:rounded-lg file:border file:border-vk-border-w file:bg-vk-surface-w file:px-3 file:py-1.5 file:text-sm file:text-vk-text-primary"
           />
           <span className="text-xs text-vk-text-muted">o pegá el CSV abajo</span>
         </div>
@@ -828,7 +828,7 @@ function CsvImportModal({
           onChange={(e) => setRaw(e.target.value)}
           rows={6}
           placeholder={"platform,metric_date,followers,reach,engagement,ads_spend_ars\ninstagram,2026-06-01,1200,5400,320,15000"}
-          className="w-full rounded-xl border border-vk-border-w bg-vektor-surface px-3 py-2 font-mono text-xs text-vk-text-primary placeholder:text-vk-text-placeholder focus:outline-none focus:ring-2 focus:ring-vk-blue/15"
+          className="w-full rounded-xl border border-vk-border-w bg-vektor-surface px-3 py-2 font-mono text-xs text-vektor-white placeholder:text-vk-text-placeholder focus:outline-none focus:ring-2 focus:ring-vk-blue/15"
         />
 
         <div className="flex justify-end">

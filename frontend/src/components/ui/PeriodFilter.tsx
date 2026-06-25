@@ -187,7 +187,7 @@ function HierarchicalNav({ value, onChange, minDate, showYearNav }: NavProps) {
             onChange={(e) => {
               if (e.target.value) onChange({ kind: "day", date: e.target.value });
             }}
-            className="rounded-lg border border-vk-border-w bg-vk-night px-3 py-1 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+            className="rounded-lg border border-vk-border-w bg-vk-night px-3 py-1 text-sm text-vektor-white focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
           />
         </div>
       )}
