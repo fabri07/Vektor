@@ -1,5 +1,6 @@
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { useAuthStore } from "@/stores/authStore";
+import { usePinGateStore } from "@/stores/pinGateStore";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -30,8 +31,28 @@ api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as
-      | (InternalAxiosRequestConfig & { _retry?: boolean })
+      | (InternalAxiosRequestConfig & { _retry?: boolean; _pinRetry?: boolean })
       | undefined;
+
+    // Step-up PIN: el backend devuelve 428 con detail "PIN_REQUIRED" cuando la
+    // ventana de PIN venció. Abrimos el modal (single-flight) y reintentamos UNA vez.
+    if (
+      error.response?.status === 428 &&
+      (error.response.data as { detail?: string } | undefined)?.detail === "PIN_REQUIRED" &&
+      typeof window !== "undefined" &&
+      originalRequest &&
+      !originalRequest._pinRetry &&
+      !originalRequest.url?.includes("/auth/pin/")
+    ) {
+      originalRequest._pinRetry = true;
+      try {
+        await usePinGateStore.getState().requirePin("verify");
+      } catch {
+        // El usuario canceló el modal: rechazar la acción original sin reintentar.
+        return Promise.reject(error);
+      }
+      return api.request(originalRequest);
+    }
 
     if (
       error.response?.status === 401 &&

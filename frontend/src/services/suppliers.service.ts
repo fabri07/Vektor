@@ -76,6 +76,8 @@ export interface ReceiptExtraction {
 
 export interface SuppliersListParams {
   is_active?: boolean;
+  /** Incluir proveedores dados de baja (se muestran en rojo). */
+  include_inactive?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -101,8 +103,15 @@ export const suppliersService = {
     return res.data;
   },
 
-  async deleteSupplier(id: string): Promise<{ message: string }> {
-    const res = await api.delete<{ message: string }>(`/suppliers/${id}`);
+  async deleteSupplier(id: string, force = false): Promise<{ message: string }> {
+    const res = await api.delete<{ message: string }>(`/suppliers/${id}`, {
+      params: force ? { force: true } : undefined,
+    });
+    return res.data;
+  },
+
+  async reactivateSupplier(id: string): Promise<SupplierResponse> {
+    const res = await api.post<SupplierResponse>(`/suppliers/${id}/reactivate`);
     return res.data;
   },
 

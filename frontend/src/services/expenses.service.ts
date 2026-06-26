@@ -73,6 +73,17 @@ export const expensesService = {
     return res.data;
   },
 
+  /** Retiro de ganancias anticipadas (sueldo/retiro del dueño) → gasto PAYROLL/OPEX. */
+  async profitWithdrawal(payload: {
+    amount: number;
+    withdrawal_date: string; // YYYY-MM-DD
+    payment_method?: string;
+    notes?: string | null;
+  }): Promise<ExpenseEntryResponse> {
+    const res = await api.post<ExpenseEntryResponse>("/expenses/profit-withdrawal", payload);
+    return res.data;
+  },
+
   // Categorías de gasto personalizadas del tenant (además de las canónicas).
   async getCustomCategories(): Promise<string[]> {
     const res = await api.get<string[]>("/expenses/custom-categories");

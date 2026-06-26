@@ -51,6 +51,8 @@ export interface CustomersListParams {
   is_active?: boolean;
   /** Incluir el cliente centinela "Local" (ventas sin cliente) si existe. */
   include_sentinel?: boolean;
+  /** Incluir clientes dados de baja (se muestran en rojo). */
+  include_inactive?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -148,8 +150,15 @@ export const customersService = {
     return res.data;
   },
 
-  async deleteCustomer(id: string): Promise<{ message: string }> {
-    const res = await api.delete<{ message: string }>(`/customers/${id}`);
+  async deleteCustomer(id: string, force = false): Promise<{ message: string }> {
+    const res = await api.delete<{ message: string }>(`/customers/${id}`, {
+      params: force ? { force: true } : undefined,
+    });
+    return res.data;
+  },
+
+  async reactivateCustomer(id: string): Promise<CustomerResponse> {
+    const res = await api.post<CustomerResponse>(`/customers/${id}/reactivate`);
     return res.data;
   },
 

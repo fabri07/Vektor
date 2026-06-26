@@ -7,6 +7,7 @@ import { Header } from "@/components/layout/Header";
 import { EconomicTicker } from "@/components/dashboard/EconomicTicker";
 import { ActionNotificationToast } from "@/features/notifications/ActionNotificationToast";
 import { ChatWidget } from "@/features/chat/ChatWidget";
+import { PinGateModal } from "@/components/ui/PinGateModal";
 import { useAuthStore } from "@/stores/authStore";
 
 export default function ProtectedLayout({
@@ -63,6 +64,7 @@ export default function ProtectedLayout({
       </div>
       <ActionNotificationToast />
       <ChatWidget />
+      <PinGateModal />
     </div>
   );
 }

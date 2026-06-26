@@ -13,6 +13,7 @@ import { useToastStore } from "@/stores/toastStore";
 import { HealthConfigPanel } from "@/features/settings/components/HealthConfigPanel";
 import { WorkSchedulePanel } from "@/features/settings/components/WorkSchedulePanel";
 import { FiscalConditionPanel } from "@/features/settings/components/FiscalConditionPanel";
+import { SecurityPanel } from "@/features/settings/components/SecurityPanel";
 import { HelpChat } from "@/features/help/HelpChat";
 import { HelpCenter } from "@/features/help/HelpCenter";
 
@@ -405,6 +406,7 @@ function AyudaTab() {
 
 const TABS = [
   { id: "general", label: "General" },
+  { id: "seguridad", label: "Seguridad" },
   { id: "automatizaciones", label: "Automatizaciones" },
   { id: "salud", label: "Score de salud" },
   { id: "horarios", label: "Horarios" },
@@ -436,6 +438,7 @@ export default function SettingsPage() {
       </div>
 
       {activeTab === "general" && <GeneralTab />}
+      {activeTab === "seguridad" && <SecurityPanel />}
       {activeTab === "automatizaciones" && <AutomationsSection />}
       {activeTab === "salud" && <HealthConfigPanel />}
       {activeTab === "horarios" && (

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2, RotateCcw } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -34,14 +34,21 @@ const COLUMNS = [
     key: "name",
     header: "Nombre / Razón social",
     hideable: true,
-    render: (v: unknown, row: Record<string, unknown>) => (
-      <Link
-        href={`/suppliers/${(row as unknown as SupplierResponse).id}`}
-        className="font-medium text-vk-text-primary underline-offset-2 hover:text-vk-blue hover:underline"
-      >
-        {String(v)}
-      </Link>
-    ),
+    render: (v: unknown, row: Record<string, unknown>) => {
+      const s = row as unknown as SupplierResponse;
+      return (
+        <Link
+          href={`/suppliers/${s.id}`}
+          className={`font-medium underline-offset-2 hover:underline ${
+            s.is_active
+              ? "text-vk-text-primary hover:text-vk-blue"
+              : "text-vk-danger line-through"
+          }`}
+        >
+          {String(v)}
+        </Link>
+      );
+    },
     csvValue: (v: unknown) => String(v ?? ""),
   },
   {
@@ -93,7 +100,7 @@ const COLUMNS = [
       (row as unknown as SupplierResponse).is_active ? (
         <Badge variant="success">Activo</Badge>
       ) : (
-        <Badge variant="default">Inactivo</Badge>
+        <Badge variant="danger">Inactivo</Badge>
       ),
     csvValue: (_: unknown, row: Record<string, unknown>) =>
       (row as unknown as SupplierResponse).is_active ? "Activo" : "Inactivo",
@@ -115,8 +122,10 @@ export default function SuppliersPage() {
   const toast = useToastStore((s) => s.add);
 
   const { data: suppliers = [], isLoading, isError } = useQuery({
-    queryKey: ["suppliers-list"],
-    queryFn: () => suppliersService.getAllSuppliers(),
+    // El flag va EN la key: separa este cache (con inactivos) del que comparte el
+    // prefijo "suppliers-list". Las invalidaciones por prefijo lo siguen alcanzando.
+    queryKey: ["suppliers-list", { include_inactive: true }],
+    queryFn: () => suppliersService.getAllSuppliers({ include_inactive: true }),
     staleTime: 2 * 60 * 1000,
   });
 
@@ -149,12 +158,46 @@ export default function SuppliersPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => suppliersService.deleteSupplier(id),
+    mutationFn: async (id: string) => {
+      try {
+        return await suppliersService.deleteSupplier(id, false);
+      } catch (err) {
+        const resp = (err as { response?: { status?: number; data?: { detail?: string } } })
+          .response;
+        // 409 HAS_HISTORY: tiene compras → ofrecer forzar la baja (solo OWNER).
+        if (resp?.status === 409 && resp.data?.detail === "HAS_HISTORY") {
+          const ok = confirm(
+            "Este proveedor tiene historial de operaciones. ¿Darlo de baja igual?\n" +
+              "Queda inactivo (en rojo), no se borra el historial. Solo el dueño puede hacerlo.",
+          );
+          if (!ok) throw new Error("cancelled");
+          return await suppliersService.deleteSupplier(id, true);
+        }
+        throw err;
+      }
+    },
     onSuccess: async () => {
-      toast("Proveedor eliminado.", "success");
+      toast("Proveedor dado de baja.", "success");
       await queryClient.invalidateQueries({ queryKey: ["suppliers-list"] });
     },
-    onError: () => toast("No se pudo eliminar el proveedor.", "error"),
+    onError: (err) => {
+      if ((err as Error).message === "cancelled") return;
+      const status = (err as { response?: { status?: number } }).response?.status;
+      if (status === 403) {
+        toast("Solo el dueño puede dar de baja un proveedor con historial.", "error");
+      } else {
+        toast("No se pudo dar de baja el proveedor.", "error");
+      }
+    },
+  });
+
+  const reactivateMutation = useMutation({
+    mutationFn: (id: string) => suppliersService.reactivateSupplier(id),
+    onSuccess: async () => {
+      toast("Proveedor reactivado.", "success");
+      await queryClient.invalidateQueries({ queryKey: ["suppliers-list"] });
+    },
+    onError: () => toast("No se pudo reactivar el proveedor.", "error"),
   });
 
   const tableData = suppliers.map((s) => ({ ...s, _status: null }));
@@ -209,27 +252,50 @@ export default function SuppliersPage() {
             const supplier = row as unknown as SupplierResponse;
             return (
               <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  title="Editar"
-                  aria-label="Editar proveedor"
-                  onClick={() => setEditing(supplier)}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  title="Eliminar"
-                  aria-label="Eliminar proveedor"
-                  disabled={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm("¿Eliminar este proveedor?")) deleteMutation.mutate(supplier.id);
-                  }}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                {/* El centinela "No identificado" no se edita ni elimina (backend lo protege). */}
+                {!supplier.is_sentinel && supplier.is_active && (
+                  <>
+                    <button
+                      type="button"
+                      title="Editar"
+                      aria-label="Editar proveedor"
+                      onClick={() => setEditing(supplier)}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Dar de baja"
+                      aria-label="Dar de baja proveedor"
+                      disabled={deleteMutation.isPending}
+                      onClick={() => {
+                        if (confirm("¿Dar de baja este proveedor?"))
+                          deleteMutation.mutate(supplier.id);
+                      }}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </>
+                )}
+                {/* Inactivo: solo reactivar (OWNER). */}
+                {!supplier.is_sentinel && !supplier.is_active && (
+                  <button
+                    type="button"
+                    title="Reactivar"
+                    aria-label="Reactivar proveedor"
+                    disabled={reactivateMutation.isPending}
+                    onClick={() => {
+                      if (confirm("¿Reactivar este proveedor?"))
+                        reactivateMutation.mutate(supplier.id);
+                    }}
+                    className="inline-flex h-8 items-center justify-center gap-1 rounded border border-vk-success/30 px-2 text-xs text-vk-success transition-colors hover:bg-vk-success-bg disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Reactivar
+                  </button>
+                )}
               </div>
             );
           }}
