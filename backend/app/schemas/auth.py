@@ -102,6 +102,36 @@ class ChangePasswordRequest(BaseModel):
         return validate_password_strength(v)
 
 
+_PIN_PATTERN = r"^\d{4}$"
+
+
+class PinSetupRequest(BaseModel):
+    pin: str = Field(pattern=_PIN_PATTERN)
+    pin_confirm: str = Field(pattern=_PIN_PATTERN)
+
+
+class PinVerifyRequest(BaseModel):
+    pin: str = Field(pattern=_PIN_PATTERN)
+
+
+class PinChangeRequest(BaseModel):
+    current_pin: str = Field(pattern=_PIN_PATTERN)
+    new_pin: str = Field(pattern=_PIN_PATTERN)
+    new_pin_confirm: str = Field(pattern=_PIN_PATTERN)
+
+
+class PinResetRequest(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+    new_pin: str = Field(pattern=_PIN_PATTERN)
+    new_pin_confirm: str = Field(pattern=_PIN_PATTERN)
+
+
+class PinStatusResponse(BaseModel):
+    pin_set: bool
+    verified: bool
+    must_set: bool
+
+
 class RegisterResponse(BaseModel):
     """Response for POST /register.
     requires_verification=True means the user must click the email link before logging in.

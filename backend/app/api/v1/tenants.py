@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import get_current_tenant, require_modify_access
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -28,7 +28,7 @@ async def get_my_tenant(
 async def update_my_tenant(
     body: TenantUpdateRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    _: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> Tenant:
     repo = TenantRepository(session)

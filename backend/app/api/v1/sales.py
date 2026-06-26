@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
 from app.application.services import stock_service
 from app.application.services.customer_sentinel import (
     resolve_or_create_local_sentinel,
@@ -394,7 +394,7 @@ async def update_sale(
     sale_id: UUID,
     body: UpdateSaleRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> SaleEntry:
     repo = SaleRepository(session)
@@ -465,7 +465,7 @@ async def update_sale(
 async def delete_sale(
     sale_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = SaleRepository(session)

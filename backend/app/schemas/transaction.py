@@ -248,6 +248,30 @@ class CreateExpenseRequest(BaseModel):
         return v
 
 
+class ProfitWithdrawalRequest(BaseModel):
+    """Retiro de ganancias anticipadas = sueldo/retiro del dueño (gasto PAYROLL/OPEX)."""
+
+    amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
+    withdrawal_date: datetime
+    payment_method: str = Field(
+        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$",
+        default="cash",
+    )
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("amount")
+    @classmethod
+    def amount_no_nan(cls, v: Decimal) -> Decimal:
+        return _reject_nan_inf(v, "amount")  # type: ignore[return-value]
+
+    @field_validator("withdrawal_date")
+    @classmethod
+    def withdrawal_date_not_future(cls, v: datetime) -> datetime:
+        if v.date() > date.today():
+            raise ValueError("withdrawal_date cannot be in the future.")
+        return v
+
+
 class UpdateExpenseRequest(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     category: str | None = Field(default=None, pattern=EXPENSE_CATEGORIES)

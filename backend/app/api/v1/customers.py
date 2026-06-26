@@ -13,9 +13,15 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import (
+    get_current_tenant,
+    require_modify_access,
+    require_owner_stepup,
+    require_role,
+)
 from app.application.agents.shared.schemas import LLMCall
 from app.application.services.customer_extraction_service import (
     extract_customer,
@@ -119,12 +125,20 @@ async def list_customers(
         default=False,
         description="Incluir el cliente centinela 'Local' (ventas sin cliente) si existe.",
     ),
+    include_inactive: bool = Query(
+        default=False,
+        description="Incluir clientes dados de baja (se muestran en rojo en la UI).",
+    ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[Customer]:
     repo = CustomerRepository(session)
     return await repo.list_by_tenant(
-        tenant.tenant_id, limit=limit, offset=offset, include_sentinel=include_sentinel
+        tenant.tenant_id,
+        limit=limit,
+        offset=offset,
+        include_sentinel=include_sentinel,
+        include_inactive=include_inactive,
     )
 
 
@@ -388,7 +402,7 @@ async def import_customers_preview(
 async def import_customers_confirm(
     body: CustomerImportConfirmRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> CustomerImportConfirmResponse:
     """Aplica el import: por cada fila, upsert idempotente por documento (crea o
@@ -433,7 +447,9 @@ async def get_customer(
     session: AsyncSession = Depends(get_db_session),
 ) -> Customer:
     repo = CustomerRepository(session)
-    customer = await repo.get_by_id(customer_id, tenant.tenant_id)
+    # include_deactivated: el detalle de un cliente dado de baja se puede abrir
+    # (historial read-only + opción de reactivar).
+    customer = await repo.get_by_id(customer_id, tenant.tenant_id, include_deactivated=True)
     if not customer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
     return customer
@@ -444,7 +460,7 @@ async def update_customer(
     customer_id: UUID,
     body: UpdateCustomerRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> Customer:
     repo = CustomerRepository(session)
@@ -487,8 +503,12 @@ async def update_customer(
 )
 async def delete_customer(
     customer_id: UUID,
+    force: bool = Query(
+        default=False,
+        description="Forzar la baja aunque el cliente tenga historial (solo OWNER).",
+    ),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = CustomerRepository(session)
@@ -501,6 +521,19 @@ async def delete_customer(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El cliente 'Local' no se puede eliminar.",
         )
+    # Protección de historial: si tiene ventas, solo el OWNER puede forzar la baja.
+    sales_count = await repo.count_sales(customer_id, tenant.tenant_id)
+    if sales_count > 0:
+        if not force:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="HAS_HISTORY",
+            )
+        if user.role_code != "OWNER":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el dueño de la cuenta puede dar de baja un cliente con historial.",
+            )
     before = _customer_snapshot(customer)
     await repo.soft_delete(customer)
     _audit_data_change(
@@ -512,3 +545,39 @@ async def delete_customer(
         after=_customer_snapshot(customer),
     )
     return MessageResponse(message="Customer deactivated.")
+
+
+@router.post(
+    "/{customer_id}/reactivate",
+    response_model=CustomerResponse,
+    summary="Reactivate a soft-deleted customer (OWNER only)",
+)
+async def reactivate_customer(
+    customer_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_owner_stepup),
+    session: AsyncSession = Depends(get_db_session),
+) -> Customer:
+    repo = CustomerRepository(session)
+    customer = await repo.get_by_id(customer_id, tenant.tenant_id, include_deactivated=True)
+    if not customer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+    before = _customer_snapshot(customer)
+    try:
+        saved = await repo.reactivate(customer)
+    except IntegrityError as exc:
+        # Colisión con el índice único parcial (DNI/CUIT) de un cliente ya activo.
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ya existe un cliente activo con el mismo DNI/CUIT.",
+        ) from exc
+    _audit_data_change(
+        session,
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        decision_type="DATA_RECORD_UPDATED",
+        before=before,
+        after=_customer_snapshot(saved),
+    )
+    return saved

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_modify_access
 from app.application.services.automation_service import (
     create_rule_from_action,
     serialize_rule,
@@ -92,7 +92,7 @@ async def create_automation_from_pending_action(
 async def update_automation(
     rule_id: uuid.UUID,
     body: AutomationRuleUpdateRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     rule = await db.get(AgentAutomationRule, rule_id)
@@ -133,7 +133,7 @@ async def update_automation(
 @router.delete("/{rule_id}")
 async def delete_automation(
     rule_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     rule = await db.get(AgentAutomationRule, rule_id)

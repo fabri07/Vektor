@@ -10,12 +10,18 @@ Endpoints:
   PATCH /settings/fiscal-condition   → actualizar condición fiscal
 """
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_role
+from app.api.v1.deps import (
+    get_current_user,
+    require_modify_access,
+    require_owner_stepup,
+)
 from app.application.services.health_config_service import (
     HealthConfigRequest,
     HealthConfigResponse,
@@ -33,6 +39,7 @@ from app.domain.fiscal_condition import (
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.user import User
+from app.persistence.repositories.user_repository import UserRepository
 
 router = APIRouter()
 
@@ -60,17 +67,17 @@ async def get_health_config(
 @router.patch("/health-config", response_model=HealthConfigResponse)
 async def update_health_config(
     body: HealthConfigRequest,
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> HealthConfigResponse:
-    """Actualiza los objetivos de margen del tenant. Requiere OWNER o ADMIN."""
+    """Actualiza los objetivos de margen del tenant. Requiere permiso de modificación + PIN."""
     svc = HealthConfigService(db)
     return await svc.update(current_user.tenant_id, body)
 
 
 @router.delete("/health-config", response_model=HealthConfigResponse)
 async def reset_health_config(
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> HealthConfigResponse:
     """Resetea la configuración de margen a los valores por vertical."""
@@ -91,10 +98,10 @@ async def get_work_schedule(
 @router.patch("/work-schedule", response_model=WorkScheduleResponse)
 async def update_work_schedule(
     body: WorkScheduleRequest,
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> WorkScheduleResponse:
-    """Actualiza días y horarios laborales del tenant. Requiere OWNER o ADMIN."""
+    """Actualiza días y horarios laborales del tenant. Requiere permiso de modificación + PIN."""
     svc = WorkScheduleService(db)
     try:
         return await svc.update(current_user.tenant_id, current_user.user_id, body)
@@ -135,10 +142,10 @@ async def get_fiscal_condition(
 @router.patch("/fiscal-condition", response_model=FiscalConditionResponse)
 async def update_fiscal_condition(
     body: FiscalConditionRequest,
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> FiscalConditionResponse:
-    """Actualiza la condición fiscal. Requiere OWNER o ADMIN.
+    """Actualiza la condición fiscal. Requiere permiso de modificación + PIN.
 
     Persiste el valor canónico (Pydantic ya restringe a los 3 valores o None).
     """
@@ -147,3 +154,69 @@ async def update_fiscal_condition(
     await db.flush()
     await db.commit()
     return FiscalConditionResponse(fiscal_condition=body.fiscal_condition)
+
+
+# ── Permisos de equipo (sub-cuentas) ────────────────────────────────────────────
+
+
+class TeamMemberResponse(BaseModel):
+    user_id: UUID
+    email: str
+    full_name: str
+    role_code: str
+    can_modify_sensitive: bool
+    pin_set: bool
+
+
+class TeamPermissionRequest(BaseModel):
+    can_modify_sensitive: bool
+
+
+@router.get("/team", response_model=list[TeamMemberResponse])
+async def list_team(
+    current_user: User = Depends(require_owner_stepup),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[TeamMemberResponse]:
+    """Lista las cuentas del tenant con su permiso de modificación. Solo OWNER."""
+    users = await UserRepository(db).list_by_tenant(current_user.tenant_id)
+    return [
+        TeamMemberResponse(
+            user_id=u.user_id,
+            email=u.email,
+            full_name=u.full_name,
+            role_code=u.role_code,
+            can_modify_sensitive=u.can_modify_sensitive,
+            pin_set=u.pin_hash is not None,
+        )
+        for u in users
+    ]
+
+
+@router.patch("/team/{user_id}", response_model=TeamMemberResponse)
+async def update_team_permission(
+    user_id: UUID,
+    body: TeamPermissionRequest,
+    current_user: User = Depends(require_owner_stepup),
+    db: AsyncSession = Depends(get_db_session),
+) -> TeamMemberResponse:
+    """Otorga/revoca a una sub-cuenta el permiso de modificar datos. Solo OWNER."""
+    repo = UserRepository(db)
+    target = await repo.get_by_id(user_id, current_user.tenant_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+    if target.role_code == "OWNER":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El dueño ya tiene permiso total; no se modifica.",
+        )
+    target.can_modify_sensitive = body.can_modify_sensitive
+    await repo.save(target)
+    await db.commit()
+    return TeamMemberResponse(
+        user_id=target.user_id,
+        email=target.email,
+        full_name=target.full_name,
+        role_code=target.role_code,
+        can_modify_sensitive=target.can_modify_sensitive,
+        pin_set=target.pin_hash is not None,
+    )

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_role
+from app.api.v1.deps import get_current_user, require_modify_access, require_role
 from app.application.services.mcp_diagnostics_service import run_google_mcp_diagnostics
 from app.config.settings import get_settings
 from app.integrations.mcp.exceptions import McpToolUnavailableError
@@ -277,7 +277,7 @@ async def google_status(
     summary="Iniciar flujo OAuth de conexión Google",
 )
 async def google_connect_start(
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> ConnectStartResponse:
     settings = get_settings()
@@ -344,7 +344,7 @@ async def google_connect_start(
     summary="Desconectar Google del usuario actual",
 )
 async def google_disconnect(
-    current_user: User = Depends(require_role("OWNER", "ADMIN")),
+    current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     settings = get_settings()

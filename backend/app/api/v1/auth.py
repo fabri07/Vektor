@@ -2,12 +2,15 @@
 verify-email, resend-verification."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
 from app.application.services.auth_service import AuthService
+from app.application.services.pin_service import PinError, PinService
 from app.main import limiter
+from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.user import User
@@ -18,6 +21,11 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
     MeResponse,
+    PinChangeRequest,
+    PinResetRequest,
+    PinSetupRequest,
+    PinStatusResponse,
+    PinVerifyRequest,
     RefreshRequest,
     RegisterRequest,
     RegisterResponse,
@@ -200,9 +208,11 @@ async def refresh_token(
 )
 async def logout(
     current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
 ) -> MessageResponse:
     # JWT is stateless; logout is handled on the client.
-    # Implement token blacklist with Redis if needed.
+    # Cierra la ventana de PIN para que la próxima sesión la vuelva a pedir.
+    await PinService(redis).invalidate_window(current_user.tenant_id, current_user.user_id)
     return MessageResponse(message="Logged out successfully.")
 
 
@@ -215,6 +225,7 @@ async def change_password(
     body: ChangePasswordRequest,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
 ) -> MessageResponse:
     service = AuthService(session)
     ok = await service.change_password(current_user, body.current_password, body.new_password)
@@ -223,4 +234,112 @@ async def change_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect.",
         )
+    # Cambiar la contraseña invalida la ventana de PIN vigente.
+    await PinService(redis).invalidate_window(current_user.tenant_id, current_user.user_id)
     return MessageResponse(message="Password changed successfully.")
+
+
+# ── PIN step-up ─────────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/pin/status",
+    response_model=PinStatusResponse,
+    summary="PIN setup/verification status for the current user",
+)
+async def pin_status(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> PinStatusResponse:
+    data = await PinService(redis).get_status(current_user)
+    return PinStatusResponse(**data)
+
+
+@router.post(
+    "/pin/setup",
+    response_model=MessageResponse,
+    summary="Set the 4-digit PIN for the first time",
+)
+async def pin_setup(
+    body: PinSetupRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> MessageResponse:
+    # Solo OWNER o sub-cuentas con permiso pueden configurar un PIN.
+    if not (current_user.role_code == "OWNER" or current_user.can_modify_sensitive):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permiso para configurar un PIN.",
+        )
+    service = PinService(redis, session)
+    try:
+        await service.setup_pin(current_user, body.pin, body.pin_confirm)
+    except PinError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
+    return MessageResponse(message="PIN configurado correctamente.")
+
+
+@router.post(
+    "/pin/verify",
+    response_model=MessageResponse,
+    summary="Verify the PIN and open a step-up window",
+)
+@limiter.limit("10/5minutes")
+async def pin_verify(
+    request: Request,
+    body: PinVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> MessageResponse:
+    try:
+        await PinService(redis).verify(current_user, body.pin)
+    except PinError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
+    return MessageResponse(message="PIN verificado.")
+
+
+@router.post(
+    "/pin/change",
+    response_model=MessageResponse,
+    summary="Change the PIN (requires the current PIN)",
+)
+@limiter.limit("10/5minutes")
+async def pin_change(
+    request: Request,
+    body: PinChangeRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> MessageResponse:
+    service = PinService(redis, session)
+    try:
+        await service.change_pin(
+            current_user, body.current_pin, body.new_pin, body.new_pin_confirm
+        )
+    except PinError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
+    return MessageResponse(message="PIN actualizado.")
+
+
+@router.post(
+    "/pin/reset",
+    response_model=MessageResponse,
+    summary="Reset the PIN using the account password",
+)
+@limiter.limit("5/15minutes")
+async def pin_reset(
+    request: Request,
+    body: PinResetRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> MessageResponse:
+    service = PinService(redis, session)
+    try:
+        await service.reset_pin(
+            current_user, body.password, body.new_pin, body.new_pin_confirm
+        )
+    except PinError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
+    return MessageResponse(message="PIN restablecido.")
