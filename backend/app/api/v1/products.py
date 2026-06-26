@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
 from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
@@ -220,7 +220,7 @@ async def update_product(
     product_id: UUID,
     body: UpdateProductRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> Product:
     repo = ProductRepository(session)
@@ -275,7 +275,7 @@ async def update_product(
 async def delete_product(
     product_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = ProductRepository(session)

@@ -17,7 +17,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, get_current_user, require_role
+from app.api.v1.deps import (
+    get_current_tenant,
+    get_current_user,
+    require_modify_access,
+    require_role,
+)
 from app.application.services import pipeline_event_service
 from app.application.services.column_mapping_service import REQUIRED_FIELDS, ColumnMappingService
 from app.application.services.file_parsing import (
@@ -968,7 +973,7 @@ async def reread_preview(
     response_model=RereadApplyStartResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Encola el apply de la relectura en background (devuelve run_id para polling)",
-    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+    dependencies=[Depends(require_modify_access)],
 )
 async def reread_apply(
     file_id: uuid.UUID,

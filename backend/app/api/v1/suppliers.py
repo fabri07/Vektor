@@ -13,9 +13,15 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import (
+    get_current_tenant,
+    require_modify_access,
+    require_owner_stepup,
+    require_role,
+)
 from app.application.agents.shared.schemas import LLMCall
 from app.application.services.file_parsing import (
     MAX_FILE_SIZE_BYTES,
@@ -30,7 +36,11 @@ from app.application.services.remito_extraction_service import extract_remito
 from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
-from app.persistence.models.supplier import Supplier
+from app.persistence.models.supplier import (
+    SENTINEL_FLAG_KEY,
+    Supplier,
+    is_sentinel_value,
+)
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.inventory_repository import InventoryRepository
@@ -101,11 +111,17 @@ def _audit_data_change(
 async def list_suppliers(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    include_inactive: bool = Query(
+        default=False,
+        description="Incluir proveedores dados de baja (se muestran en rojo en la UI).",
+    ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[Supplier]:
     repo = SupplierRepository(session)
-    return await repo.list_by_tenant(tenant.tenant_id, limit=limit, offset=offset)
+    return await repo.list_by_tenant(
+        tenant.tenant_id, limit=limit, offset=offset, include_inactive=include_inactive
+    )
 
 
 @router.post(
@@ -149,7 +165,9 @@ async def get_supplier(
     session: AsyncSession = Depends(get_db_session),
 ) -> Supplier:
     repo = SupplierRepository(session)
-    supplier = await repo.get_by_id(supplier_id, tenant.tenant_id)
+    # include_deactivated: el detalle de un proveedor dado de baja se puede abrir
+    # (historial read-only + opción de reactivar).
+    supplier = await repo.get_by_id(supplier_id, tenant.tenant_id, include_deactivated=True)
     if not supplier:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found.")
     return supplier
@@ -403,7 +421,7 @@ async def update_supplier(
     supplier_id: UUID,
     body: UpdateSupplierRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> Supplier:
     repo = SupplierRepository(session)
@@ -413,6 +431,16 @@ async def update_supplier(
     before = _supplier_snapshot(supplier)
     # exclude_unset: aplica solo los campos enviados; deja intactos los no enviados.
     updates = body.model_dump(exclude_unset=True)
+    # No permitir convertir un proveedor normal en sentinela vía custom_fields
+    # (rompería el invariante "un solo 'No identificado' por tenant"). Completar
+    # el sentinela (renombrarlo y QUITARLE el flag) sí está permitido.
+    if "custom_fields" in updates and is_sentinel_value(
+        (updates["custom_fields"] or {}).get(SENTINEL_FLAG_KEY)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se puede convertir un proveedor en sentinela.",
+        )
     for field, value in updates.items():
         setattr(supplier, field, value)
     saved = await repo.save(supplier)
@@ -432,14 +460,37 @@ async def update_supplier(
 )
 async def delete_supplier(
     supplier_id: UUID,
+    force: bool = Query(
+        default=False,
+        description="Forzar la baja aunque el proveedor tenga historial (solo OWNER).",
+    ),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = SupplierRepository(session)
     supplier = await repo.get_by_id(supplier_id, tenant.tenant_id)
     if not supplier:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found.")
+    # El sentinela "No identificado" agrupa compras sin proveedor: no se borra.
+    if supplier.is_sentinel:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El proveedor 'No identificado' no se puede eliminar.",
+        )
+    # Protección de historial: si tiene operaciones, solo el OWNER puede forzar la baja.
+    history_count = await repo.count_history(supplier_id, tenant.tenant_id)
+    if history_count > 0:
+        if not force:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="HAS_HISTORY",
+            )
+        if user.role_code != "OWNER":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el dueño de la cuenta puede dar de baja un proveedor con historial.",
+            )
     before = _supplier_snapshot(supplier)
     await repo.soft_delete(supplier)
     _audit_data_change(
@@ -451,3 +502,38 @@ async def delete_supplier(
         after=_supplier_snapshot(supplier),
     )
     return MessageResponse(message="Supplier deactivated.")
+
+
+@router.post(
+    "/{supplier_id}/reactivate",
+    response_model=SupplierResponse,
+    summary="Reactivate a soft-deleted supplier (OWNER only)",
+)
+async def reactivate_supplier(
+    supplier_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_owner_stepup),
+    session: AsyncSession = Depends(get_db_session),
+) -> Supplier:
+    repo = SupplierRepository(session)
+    supplier = await repo.get_by_id(supplier_id, tenant.tenant_id, include_deactivated=True)
+    if not supplier:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found.")
+    before = _supplier_snapshot(supplier)
+    try:
+        saved = await repo.reactivate(supplier)
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ya existe un proveedor activo en conflicto con este.",
+        ) from exc
+    _audit_data_change(
+        session,
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        decision_type="DATA_RECORD_UPDATED",
+        before=before,
+        after=_supplier_snapshot(saved),
+    )
+    return saved

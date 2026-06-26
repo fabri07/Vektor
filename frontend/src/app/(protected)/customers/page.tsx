@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Trash2, Eye } from "lucide-react";
+import { Pencil, Trash2, Eye, RotateCcw } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -51,7 +51,9 @@ const COLUMNS = [
         <span className="flex items-center gap-2">
           <Link
             href={`/customers/${c.id}`}
-            className="font-medium text-vk-blue underline-offset-2 hover:underline"
+            className={`font-medium underline-offset-2 hover:underline ${
+              c.is_active ? "text-vk-blue" : "text-vk-danger line-through"
+            }`}
           >
             {String(v)}
           </Link>
@@ -119,7 +121,7 @@ const COLUMNS = [
       (row as unknown as CustomerResponse).is_active ? (
         <Badge variant="success">Activo</Badge>
       ) : (
-        <Badge variant="default">Inactivo</Badge>
+        <Badge variant="danger">Inactivo</Badge>
       ),
     csvValue: (_: unknown, row: Record<string, unknown>) =>
       (row as unknown as CustomerResponse).is_active ? "Activo" : "Inactivo",
@@ -144,10 +146,11 @@ export default function CustomersPage() {
   const toast = useToastStore((s) => s.add);
 
   const { data: customers = [], isLoading, isError } = useQuery({
-    // El flag va EN la key: separa este cache (con centinela) del de la carga
-    // manual (sin centinela), que comparte el prefijo "customers-list".
-    queryKey: ["customers-list", { include_sentinel: true }],
-    queryFn: () => customersService.getAllCustomers({ include_sentinel: true }),
+    // El flag va EN la key: separa este cache (con centinela + inactivos) del de
+    // la carga manual, que comparte el prefijo "customers-list".
+    queryKey: ["customers-list", { include_sentinel: true, include_inactive: true }],
+    queryFn: () =>
+      customersService.getAllCustomers({ include_sentinel: true, include_inactive: true }),
     staleTime: 2 * 60 * 1000,
   });
 
@@ -180,12 +183,46 @@ export default function CustomersPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => customersService.deleteCustomer(id),
+    mutationFn: async (id: string) => {
+      try {
+        return await customersService.deleteCustomer(id, false);
+      } catch (err) {
+        const resp = (err as { response?: { status?: number; data?: { detail?: string } } })
+          .response;
+        // 409 HAS_HISTORY: tiene ventas → ofrecer forzar la baja (solo OWNER).
+        if (resp?.status === 409 && resp.data?.detail === "HAS_HISTORY") {
+          const ok = confirm(
+            "Este cliente tiene historial de ventas. ¿Darlo de baja igual?\n" +
+              "Queda inactivo (en rojo), no se borra el historial. Solo el dueño puede hacerlo.",
+          );
+          if (!ok) throw new Error("cancelled");
+          return await customersService.deleteCustomer(id, true);
+        }
+        throw err;
+      }
+    },
     onSuccess: async () => {
-      toast("Cliente eliminado.", "success");
+      toast("Cliente dado de baja.", "success");
       await queryClient.invalidateQueries({ queryKey: ["customers-list"] });
     },
-    onError: () => toast("No se pudo eliminar el cliente.", "error"),
+    onError: (err) => {
+      if ((err as Error).message === "cancelled") return;
+      const status = (err as { response?: { status?: number } }).response?.status;
+      if (status === 403) {
+        toast("Solo el dueño puede dar de baja un cliente con historial.", "error");
+      } else {
+        toast("No se pudo dar de baja el cliente.", "error");
+      }
+    },
+  });
+
+  const reactivateMutation = useMutation({
+    mutationFn: (id: string) => customersService.reactivateCustomer(id),
+    onSuccess: async () => {
+      toast("Cliente reactivado.", "success");
+      await queryClient.invalidateQueries({ queryKey: ["customers-list"] });
+    },
+    onError: () => toast("No se pudo reactivar el cliente.", "error"),
   });
 
   const tableData = customers.map((c) => ({ ...c, _status: null, _doc: null }));
@@ -262,7 +299,7 @@ export default function CustomersPage() {
                   <Eye className="h-4 w-4" />
                 </Link>
                 {/* El centinela "Local" no se edita ni elimina (backend 400). */}
-                {!isSentinelCustomer(customer) && (
+                {!isSentinelCustomer(customer) && customer.is_active && (
                   <>
                     <button
                       type="button"
@@ -275,17 +312,35 @@ export default function CustomersPage() {
                     </button>
                     <button
                       type="button"
-                      title="Eliminar"
-                      aria-label="Eliminar cliente"
+                      title="Dar de baja"
+                      aria-label="Dar de baja cliente"
                       disabled={deleteMutation.isPending}
                       onClick={() => {
-                        if (confirm("¿Eliminar este cliente?")) deleteMutation.mutate(customer.id);
+                        if (confirm("¿Dar de baja este cliente?"))
+                          deleteMutation.mutate(customer.id);
                       }}
                       className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </>
+                )}
+                {/* Inactivo: solo reactivar (OWNER + PIN). */}
+                {!isSentinelCustomer(customer) && !customer.is_active && (
+                  <button
+                    type="button"
+                    title="Reactivar"
+                    aria-label="Reactivar cliente"
+                    disabled={reactivateMutation.isPending}
+                    onClick={() => {
+                      if (confirm("¿Reactivar este cliente?"))
+                        reactivateMutation.mutate(customer.id);
+                    }}
+                    className="inline-flex h-8 items-center justify-center gap-1 rounded border border-vk-success/30 px-2 text-xs text-vk-success transition-colors hover:bg-vk-success-bg disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Reactivar
+                  </button>
                 )}
               </div>
             );

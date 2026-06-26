@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
 from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
@@ -24,6 +24,7 @@ from app.schemas.transaction import (
     DateRangeResponse,
     ExpenseEntryResponse,
     ExpenseSummaryResponse,
+    ProfitWithdrawalRequest,
     UpdateExpenseRequest,
 )
 
@@ -217,6 +218,51 @@ async def create_expense(
     return saved
 
 
+@router.post(
+    "/profit-withdrawal",
+    response_model=ExpenseEntryResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register an early profit withdrawal (owner salary) as a PAYROLL expense",
+)
+async def create_profit_withdrawal(
+    body: ProfitWithdrawalRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_modify_access),
+    session: AsyncSession = Depends(get_db_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ExpenseEntry:
+    """Retiro de ganancias anticipadas: gasto categoría PAYROLL/OPEX. El monto lo
+    fija el usuario (no se calcula). Protegido por PIN."""
+    if idempotency_key is not None and not await claim_idempotency_key(
+        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_PROFIT_WITHDRAWAL"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    repo = ExpenseRepository(session)
+    entry = ExpenseEntry(
+        tenant_id=tenant.tenant_id,
+        amount=body.amount,
+        category="PAYROLL",
+        expense_type="OPEX",
+        transaction_date=body.withdrawal_date,
+        description="Retiro de ganancias anticipadas",
+        is_recurring=False,
+        payment_method=body.payment_method,
+        notes=body.notes,
+        custom_fields={"profit_withdrawal": True},
+    )
+    saved = await repo.save(entry)
+    _audit_data_change(
+        session,
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        decision_type="DATA_RECORD_CREATED",
+        before=_expense_snapshot(saved),
+        after=_expense_snapshot(saved),
+    )
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "profit_withdrawal_created")
+    return saved
+
+
 @router.get(
     "/custom-categories",
     summary="Categorías de gasto personalizadas del tenant",
@@ -246,7 +292,7 @@ async def update_expense(
     expense_id: UUID,
     body: UpdateExpenseRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseEntry:
     repo = ExpenseRepository(session)
@@ -312,7 +358,7 @@ async def update_expense(
 async def delete_expense(
     expense_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = ExpenseRepository(session)

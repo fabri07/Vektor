@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, get_current_user
+from app.api.v1.deps import get_current_tenant, get_current_user, require_modify_access
 from app.application.services import field_definition_service as svc
 from app.persistence.db.session import get_db_session
 from app.persistence.models.field_definitions import VerticalFieldDefinition
@@ -104,7 +104,7 @@ async def update_field(
     body: UpdateCustomFieldRequest,
     entity_type: str = Query(...),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     vertical_code = await _get_vertical_code(tenant.tenant_id, session)
@@ -143,7 +143,7 @@ async def toggle_field(
     body: ToggleFieldRequest,
     entity_type: str = Query(...),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     vertical_code = await _get_vertical_code(tenant.tenant_id, session)
@@ -177,7 +177,7 @@ async def undo_field_change(
     field_key: str,
     entity_type: str = Query(...),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     undone = await svc.undo_last_change(

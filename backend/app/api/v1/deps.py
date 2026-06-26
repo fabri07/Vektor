@@ -12,15 +12,21 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.pin_service import PinService
 from app.observability.logger import bind_request_context
+from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.tenant_repository import TenantRepository
 from app.persistence.repositories.user_repository import UserRepository
 from app.utils.security import decode_access_token
+
+# Código que el frontend reconoce para abrir el modal de PIN y reintentar.
+PIN_REQUIRED_CODE = "PIN_REQUIRED"
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -95,3 +101,53 @@ def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
         return current_user
 
     return _check
+
+
+# ── Step-up auth (PIN) ──────────────────────────────────────────────────────────
+
+
+async def _require_pin_window(current_user: User, redis: Redis) -> None:
+    """Lanza 428 PIN_REQUIRED si no hay ventana de PIN vigente. Fail-closed."""
+    pin_service = PinService(redis)
+    if not await pin_service.is_window_valid(current_user.tenant_id, current_user.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail=PIN_REQUIRED_CODE,
+        )
+
+
+async def require_modify_access(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Gate para editar/borrar datos ya cargados + configuraciones.
+
+    (a) OWNER o sub-cuenta con ``can_modify_sensitive``, si no → 403.
+    (b) ventana de PIN vigente, si no → 428 PIN_REQUIRED.
+    """
+    if not (current_user.role_code == "OWNER" or current_user.can_modify_sensitive):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permiso para modificar datos. Pedíselo al dueño de la cuenta.",
+        )
+    await _require_pin_window(current_user, redis)
+    return current_user
+
+
+async def require_owner_stepup(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Gate para acciones exclusivas del OWNER (forzar baja con historial,
+    reactivar, permisos de equipo, gestión de usuarios).
+
+    (a) rol OWNER estricto, si no → 403.
+    (b) ventana de PIN vigente, si no → 428 PIN_REQUIRED.
+    """
+    if current_user.role_code != "OWNER":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el dueño de la cuenta puede realizar esta acción.",
+        )
+    await _require_pin_window(current_user, redis)
+    return current_user

@@ -30,14 +30,19 @@ class CustomerRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get_by_id(self, customer_id: UUID, tenant_id: UUID) -> Customer | None:
-        result = await self._session.execute(
-            select(Customer).where(
-                Customer.id == customer_id,
-                Customer.tenant_id == tenant_id,
-                Customer.deactivated_at.is_(None),
-            )
-        )
+    async def get_by_id(
+        self,
+        customer_id: UUID,
+        tenant_id: UUID,
+        include_deactivated: bool = False,
+    ) -> Customer | None:
+        conditions = [
+            Customer.id == customer_id,
+            Customer.tenant_id == tenant_id,
+        ]
+        if not include_deactivated:
+            conditions.append(Customer.deactivated_at.is_(None))
+        result = await self._session.execute(select(Customer).where(*conditions))
         return result.scalar_one_or_none()
 
     async def list_by_tenant(
@@ -46,18 +51,19 @@ class CustomerRepository:
         limit: int = 50,
         offset: int = 0,
         include_sentinel: bool = False,
+        include_inactive: bool = False,
     ) -> list[Customer]:
         """Lista clientes del tenant. Por defecto excluye el centinela "Local".
 
         ``include_sentinel=True`` LISTA el centinela si ya existe (es solo un
         SELECT: nunca lo crea — eso pasa únicamente al asignar una venta huérfana).
-        Las métricas (``count_active``/``get_inactive_customers``) siguen
-        excluyéndolo siempre.
+        ``include_inactive=True`` incluye los dados de baja (``deactivated_at``)
+        para mostrarlos en rojo en la UI. Las métricas
+        (``count_active``/``get_inactive_customers``) siguen excluyéndolos siempre.
         """
-        conditions = [
-            Customer.tenant_id == tenant_id,
-            Customer.deactivated_at.is_(None),
-        ]
+        conditions: list[Any] = [Customer.tenant_id == tenant_id]
+        if not include_inactive:
+            conditions.append(Customer.deactivated_at.is_(None))
         if not include_sentinel:
             conditions.append(_not_sentinel())
         q = (
@@ -156,6 +162,16 @@ class CustomerRepository:
         result = await self._session.execute(q)
         return int(result.scalar_one() or 0)
 
+    async def count_sales(self, customer_id: UUID, tenant_id: UUID) -> int:
+        """Cantidad de ventas no anuladas asociadas al cliente (historial)."""
+        q = select(func.count(SaleEntry.id)).where(
+            SaleEntry.customer_id == customer_id,
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+        )
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
+
     async def save(self, customer: Customer) -> Customer:
         self._session.add(customer)
         await self._session.flush()
@@ -164,6 +180,13 @@ class CustomerRepository:
     async def soft_delete(self, customer: Customer) -> Customer:
         """Marca el cliente como desactivado (soft-delete). No borra la fila."""
         customer.deactivated_at = datetime.now(UTC)
+        self._session.add(customer)
+        await self._session.flush()
+        return customer
+
+    async def reactivate(self, customer: Customer) -> Customer:
+        """Revierte la baja: limpia ``deactivated_at``."""
+        customer.deactivated_at = None
         self._session.add(customer)
         await self._session.flush()
         return customer

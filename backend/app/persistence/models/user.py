@@ -33,6 +33,15 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Step-up auth — PIN de 4 dígitos (bcrypt). NULL = todavía no configurado.
+    pin_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pin_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Permiso de sub-cuenta para modificar datos sensibles. El OWNER está
+    # habilitado implícitamente (no depende de esta columna).
+    can_modify_sensitive: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
     __table_args__ = (

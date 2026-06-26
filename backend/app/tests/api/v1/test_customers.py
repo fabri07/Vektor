@@ -137,11 +137,17 @@ class TestCustomersCRUD:
         resp = await client.delete(f"/api/v1/customers/{cid}", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["message"] == "Customer deactivated."
-        # Ya no es accesible ni listado (soft-delete excluye deactivated).
-        gone = await client.get(f"/api/v1/customers/{cid}", headers=auth_headers)
-        assert gone.status_code == 404
+        # El detalle del inactivo sigue siendo abrible (historial read-only + reactivar).
+        detail = await client.get(f"/api/v1/customers/{cid}", headers=auth_headers)
+        assert detail.status_code == 200
+        assert detail.json()["is_active"] is False
+        # La lista por defecto lo excluye; con include_inactive aparece.
         listed = await client.get("/api/v1/customers", headers=auth_headers)
         assert cid not in {c["id"] for c in listed.json()}
+        listed_all = await client.get(
+            "/api/v1/customers?include_inactive=true", headers=auth_headers
+        )
+        assert cid in {c["id"] for c in listed_all.json()}
 
 
 @pytest.mark.asyncio

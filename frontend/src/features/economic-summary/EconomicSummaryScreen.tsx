@@ -3,10 +3,13 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
+import { Wallet } from "lucide-react";
 import { StatCard } from "@/components/ui/StatCard";
+import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import { ForecastPanel } from "@/features/dashboard/ForecastPanel";
+import { ProfitWithdrawalModal } from "@/features/economic-summary/ProfitWithdrawalModal";
 import { type PeriodValue, resolvePeriod } from "@/lib/period";
 import { economicSummaryService } from "@/services/economic-summary.service";
 
@@ -25,6 +28,7 @@ export function EconomicSummaryScreen() {
     kind: "preset",
     preset: "this_month",
   });
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
   const { from, to } = resolvePeriod(period);
 
   const { data, isLoading, isError } = useQuery({
@@ -45,7 +49,16 @@ export function EconomicSummaryScreen() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PeriodFilter value={period} onChange={setPeriod} availableRange={null} />
+        <Button size="sm" variant="secondary" onClick={() => setWithdrawOpen(true)}>
+          <Wallet className="h-4 w-4" />
+          Retirar ganancias anticipadas
+        </Button>
       </div>
+
+      <ProfitWithdrawalModal
+        isOpen={withdrawOpen}
+        onClose={() => setWithdrawOpen(false)}
+      />
 
       {/* Aclaración de scope (analítico, no contable) */}
       <p className="rounded-lg border border-vk-border-w bg-vk-surface-w px-4 py-2 text-xs text-vk-text-secondary">

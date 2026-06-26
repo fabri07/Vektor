@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
 from app.application.services.marketing_service import MarketingService
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
@@ -134,7 +134,7 @@ async def update_metric(
     metric_id: UUID,
     body: UpdateSocialMetricRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> SocialMetric:
     repo = SocialMetricRepository(session)
@@ -168,7 +168,7 @@ async def update_metric(
 async def delete_metric(
     metric_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     repo = SocialMetricRepository(session)
