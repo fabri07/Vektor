@@ -304,11 +304,9 @@ function SupplierFormModal({
   // El sentinela "No identificado" es un placeholder (agrupa compras sin proveedor):
   // no se le exigen los datos de contacto. Para cualquier otro proveedor son
   // obligatorios — solo el apellido queda opcional.
-  const isSentinel =
-    !!supplier &&
-    (supplier.name === "No identificado" ||
-      supplier.custom_fields?._sentinel === true ||
-      supplier.custom_fields?._sentinel === "true");
+  // Identificado SOLO por el flag is_sentinel del backend, nunca por el nombre:
+  // un proveedor real llamado "No identificado" es un proveedor común.
+  const isSentinel = !!supplier && supplier.is_sentinel;
 
   useEffect(() => {
     if (isOpen) {

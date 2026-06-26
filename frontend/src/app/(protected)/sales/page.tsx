@@ -179,9 +179,11 @@ export default function SalesPage() {
   });
 
   const { data: customers = [] } = useQuery({
-    queryKey: ["customers-list"],
-    // include_sentinel: el centinela "Local" entra al map para resolver el nombre
-    // de las ventas sin cliente en la columna Cliente. El picker del modal lo filtra.
+    // El flag va EN la key: separa este cache (con centinela) del de la carga
+    // manual (sin centinela), que comparte el prefijo "customers-list".
+    queryKey: ["customers-list", { include_sentinel: true }],
+    // El centinela "Local" entra al map para resolver el nombre de las ventas sin
+    // cliente en la columna Cliente. El picker del modal lo filtra (realCustomers).
     queryFn: () => customersService.getAllCustomers({ include_sentinel: true }),
     staleTime: 2 * 60 * 1000,
   });

@@ -35,6 +35,16 @@ class SupplierResponse(BaseModel):
     def is_active(self) -> bool:
         return self.deactivated_at is None
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_sentinel(self) -> bool:
+        """¿Es el proveedor sentinela "No identificado" (compras sin proveedor)?
+
+        Se identifica SOLO por el flag, nunca por el nombre: un proveedor real
+        llamado "No identificado" es un proveedor común.
+        """
+        return (self.custom_fields or {}).get("_sentinel") in ("true", True)
+
 
 class CreateSupplierRequest(BaseModel):
     name: str = Field(min_length=1, max_length=300)

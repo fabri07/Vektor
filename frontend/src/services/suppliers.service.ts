@@ -25,6 +25,8 @@ export interface SupplierResponse {
   notes: string | null;
   custom_fields?: Record<string, unknown>;
   is_active: boolean;
+  /** True si es el proveedor centinela "No identificado". Computado en el backend. */
+  is_sentinel: boolean;
   created_at: string;
 }
 

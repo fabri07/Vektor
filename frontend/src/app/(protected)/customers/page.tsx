@@ -22,6 +22,7 @@ import {
   IVA_CONDITION_OPTIONS,
   customerTypeLabel,
   ivaConditionLabel,
+  isSentinelCustomer,
   isValidCuit,
   isValidDni,
 } from "@/lib/fiscal";
@@ -54,7 +55,7 @@ const COLUMNS = [
           >
             {String(v)}
           </Link>
-          {c.is_sentinel && (
+          {isSentinelCustomer(c) && (
             <span title="Agrupa ventas donde no se identificó cliente.">
               <Badge variant="default">Ventas sin cliente</Badge>
             </span>
@@ -143,8 +144,9 @@ export default function CustomersPage() {
   const toast = useToastStore((s) => s.add);
 
   const { data: customers = [], isLoading, isError } = useQuery({
-    queryKey: ["customers-list"],
-    // include_sentinel: muestra el centinela "Local" (ventas sin cliente) si existe.
+    // El flag va EN la key: separa este cache (con centinela) del de la carga
+    // manual (sin centinela), que comparte el prefijo "customers-list".
+    queryKey: ["customers-list", { include_sentinel: true }],
     queryFn: () => customersService.getAllCustomers({ include_sentinel: true }),
     staleTime: 2 * 60 * 1000,
   });
@@ -199,7 +201,7 @@ export default function CustomersPage() {
       fieldDefs,
       saveCustomerCustomField,
       // El centinela "Local" no es editable (el back da 400): celdas read-only.
-      (row) => (row as unknown as CustomerResponse).is_sentinel,
+      (row) => isSentinelCustomer(row),
     ),
   ];
 
@@ -260,7 +262,7 @@ export default function CustomersPage() {
                   <Eye className="h-4 w-4" />
                 </Link>
                 {/* El centinela "Local" no se edita ni elimina (backend 400). */}
-                {!customer.is_sentinel && (
+                {!isSentinelCustomer(customer) && (
                   <>
                     <button
                       type="button"

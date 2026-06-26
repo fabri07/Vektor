@@ -90,3 +90,11 @@ export function customerTypeLabel(type: string | null | undefined): string {
   if (!type) return "—";
   return CUSTOMER_TYPE_LABELS[type] ?? type;
 }
+
+// ── Centinela de cliente ────────────────────────────────────────────────────────
+
+/** True si es el cliente centinela "Local" (ventas sin cliente identificado).
+ *  Se identifica SOLO por el flag `is_sentinel` del backend, nunca por el nombre. */
+export function isSentinelCustomer(c: unknown): boolean {
+  return (c as { is_sentinel?: boolean } | null)?.is_sentinel === true;
+}
