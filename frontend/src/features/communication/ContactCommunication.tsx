@@ -2,10 +2,13 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink, Mail, MessageCircle } from "lucide-react";
+import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
+import { TableSearch } from "@/components/ui/TableSearch";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { formatDateTime } from "@/lib/datetime";
 import { isLikelyValidWhatsApp, whatsappDigits } from "@/lib/fiscal";
+import { matchesQuery, safeSearchValue } from "@/lib/search";
 import {
   communicationService,
   type CommunicationChannel,
@@ -64,6 +67,25 @@ export function ContactCommunication({
     staleTime: 30 * 1000,
   });
 
+  const [search, setSearch] = useState("");
+  const filteredHistory = useMemo(
+    () =>
+      history.filter((log) =>
+        matchesQuery(
+          [
+            formatDateTime(log.created_at),
+            CHANNEL_LABELS[log.channel],
+            log.subject ?? "",
+            log.status === "sent" ? "enviado" : "falló",
+          ]
+            .map(safeSearchValue)
+            .join(" "),
+          search,
+        ),
+      ),
+    [history, search],
+  );
+
   const emailValue = email?.trim() ?? "";
   const waDigits = whatsappDigits(phone ?? "");
   const phoneValid = isLikelyValidWhatsApp(phone);
@@ -116,40 +138,54 @@ export function ContactCommunication({
             Todavía no se enviaron mensajes desde Véktor.
           </p>
         ) : (
-          <div className="overflow-hidden rounded-lg border border-vk-border-w">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-vk-border-w bg-vk-bg-light text-left">
-                  <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Fecha</th>
-                  <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Canal</th>
-                  <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Asunto</th>
-                  <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Estado</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((log) => (
-                  <tr key={log.id} className="border-b border-vk-border-w last:border-b-0">
-                    <td className="px-3 py-2 text-vk-text-primary">
-                      {formatDateTime(log.created_at)}
-                    </td>
-                    <td className="px-3 py-2 text-vk-text-secondary">
-                      {CHANNEL_LABELS[log.channel]}
-                    </td>
-                    <td className="px-3 py-2 text-vk-text-secondary">
-                      {log.subject?.trim() || "—"}
-                    </td>
-                    <td className="px-3 py-2">
-                      {log.status === "sent" ? (
-                        <Badge variant="success">Enviado</Badge>
-                      ) : (
-                        <Badge variant="danger">Falló</Badge>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <TableSearch
+              value={search}
+              onChange={setSearch}
+              placeholder="Buscar mensaje…"
+              className="mb-2 w-full sm:max-w-xs"
+            />
+            {filteredHistory.length === 0 ? (
+              <p className="rounded-lg border border-vk-border-w bg-vk-surface-w px-4 py-3 text-sm text-vk-text-muted">
+                No hay mensajes que coincidan con la búsqueda.
+              </p>
+            ) : (
+              <div className="overflow-hidden rounded-lg border border-vk-border-w">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-vk-border-w bg-vk-bg-light text-left">
+                      <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Fecha</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Canal</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Asunto</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-vk-text-secondary">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredHistory.map((log) => (
+                      <tr key={log.id} className="border-b border-vk-border-w last:border-b-0">
+                        <td className="px-3 py-2 text-vk-text-primary">
+                          {formatDateTime(log.created_at)}
+                        </td>
+                        <td className="px-3 py-2 text-vk-text-secondary">
+                          {CHANNEL_LABELS[log.channel]}
+                        </td>
+                        <td className="px-3 py-2 text-vk-text-secondary">
+                          {log.subject?.trim() || "—"}
+                        </td>
+                        <td className="px-3 py-2">
+                          {log.status === "sent" ? (
+                            <Badge variant="success">Enviado</Badge>
+                          ) : (
+                            <Badge variant="danger">Falló</Badge>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
         )}
       </div>
     </section>

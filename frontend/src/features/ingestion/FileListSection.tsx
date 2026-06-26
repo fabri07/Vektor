@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, CheckCircle, History } from "lucide-react";
 import {
@@ -11,6 +11,8 @@ import {
 } from "@/services/ingestion.service";
 import { useToastStore } from "@/stores/toastStore";
 import { Modal } from "@/components/ui/Modal";
+import { TableSearch } from "@/components/ui/TableSearch";
+import { matchesQuery, safeSearchValue } from "@/lib/search";
 import { ColumnMapperPanel } from "./ColumnMapperPanel";
 import { RereadDiff } from "./RereadDiff";
 import { RereadProgress } from "./RereadProgress";
@@ -70,6 +72,7 @@ export function FileListSection() {
   const queryClient = useQueryClient();
   const addToast = useToastStore((s) => s.add);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
 
   // Estado del modal de relectura (en memoria de sesión).
   const [reread, setReread] = useState<RereadState | null>(null);
@@ -87,6 +90,26 @@ export function FileListSection() {
       return data && hasActiveFiles(data) ? 3_000 : 30_000;
     },
   });
+
+  // Filtra por los mismos valores que muestran las celdas de la tabla:
+  // nombre, tipo, etiqueta de estado (en español) y fecha formateada.
+  const filteredFiles = useMemo(
+    () =>
+      files.filter((f) =>
+        matchesQuery(
+          [
+            f.original_filename,
+            formatType(f.original_filename),
+            STATUS_LABELS[f.processing_status] ?? f.processing_status,
+            formatDate(f.created_at),
+          ]
+            .map(safeSearchValue)
+            .join(" "),
+          search,
+        ),
+      ),
+    [files, search],
+  );
 
   // Invalida la lista de archivos + las queries de datos que una relectura
   // puede haber modificado (ventas/gastos/productos/inventario/scores/otros).
@@ -285,6 +308,21 @@ export function FileListSection() {
       )}
 
       {!isLoading && files.length > 0 && (
+        <TableSearch
+          value={search}
+          onChange={setSearch}
+          placeholder="Buscar archivo…"
+          className="mb-3 w-full sm:max-w-xs"
+        />
+      )}
+
+      {!isLoading && files.length > 0 && filteredFiles.length === 0 && (
+        <p className="text-sm text-vk-text-muted">
+          No hay archivos que coincidan con la búsqueda.
+        </p>
+      )}
+
+      {!isLoading && filteredFiles.length > 0 && (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -307,7 +345,7 @@ export function FileListSection() {
               </tr>
             </thead>
             <tbody>
-              {files.map((file) => (
+              {filteredFiles.map((file) => (
                 <Fragment key={file.id}>
                   <tr className="border-b border-vk-border-w/60">
                     <td

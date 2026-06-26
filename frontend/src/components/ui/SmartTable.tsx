@@ -1,10 +1,12 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, useDeferredValue } from "react";
 import { Download, SlidersHorizontal, Check, ChevronLeft, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { Table } from "./Table";
 import type { TableColumn } from "./Table";
+import { TableSearch } from "./TableSearch";
+import { matchesQuery, safeSearchValue } from "@/lib/search";
 
 export interface SmartColumn<T = Record<string, unknown>> extends TableColumn<T> {
   hideable?: boolean;
@@ -20,6 +22,9 @@ interface SmartTableProps<T extends object> {
   renderActions?: (row: T) => ReactNode;
   /** Acciones extra a la izquierda de la toolbar (ej: "+ Columna"). */
   toolbarActions?: ReactNode;
+  /** Muestra el buscador en la toolbar (default true). */
+  searchable?: boolean;
+  searchPlaceholder?: string;
 }
 
 type PageSize = number | "all";
@@ -48,6 +53,8 @@ export function SmartTable<T extends object>({
   exportFilename = "vektor-export",
   renderActions,
   toolbarActions,
+  searchable = true,
+  searchPlaceholder,
 }: SmartTableProps<T>) {
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(
     () =>
@@ -61,6 +68,8 @@ export function SmartTable<T extends object>({
   const pickerRef = useRef<HTMLDivElement>(null);
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   const [page, setPage] = useState(0);
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
 
   // Columnas que ya vimos: las nuevas (ej: una columna personalizada recién
   // creada con defaultVisible:true) se agregan a visibleKeys sin pisar los
@@ -113,19 +122,41 @@ export function SmartTable<T extends object>({
     : visibleColumns;
   const hideableColumns = columns.filter((c) => c.hideable !== false);
 
+  // Búsqueda client-side: recorre TODAS las columnas originales (incluidas las
+  // ocultas), no solo las visibles. La columna sintética "__actions" no está en
+  // `columns`, así que queda naturalmente excluida.
+  const filteredData = useMemo(() => {
+    if (!deferredSearch.trim()) return data;
+    return data.filter((row) => {
+      const joined = columns
+        .map((col) => {
+          const raw = (row as Record<string, unknown>)[col.key];
+          const cell = col.csvValue ? col.csvValue(raw, row) : raw;
+          return safeSearchValue(cell);
+        })
+        .join(" ");
+      return matchesQuery(joined, deferredSearch);
+    });
+  }, [data, deferredSearch, columns]);
+
+  // Volver a la primera página cuando cambia la búsqueda.
+  useEffect(() => {
+    setPage(0);
+  }, [deferredSearch]);
+
   // Paginación client-side: el clamp con safePage evita páginas fuera de rango
   // cuando los datos se achican (filtros, cambio de período) sin necesitar effects.
-  const total = data.length;
+  const total = filteredData.length;
   const pageCount = pageSize === "all" ? 1 : Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pageCount - 1);
   const pageData =
-    pageSize === "all" ? data : data.slice(safePage * pageSize, (safePage + 1) * pageSize);
+    pageSize === "all" ? filteredData : filteredData.slice(safePage * pageSize, (safePage + 1) * pageSize);
   const rangeStart = total === 0 ? 0 : pageSize === "all" ? 1 : safePage * pageSize + 1;
   const rangeEnd = pageSize === "all" ? total : Math.min((safePage + 1) * pageSize, total);
 
   const exportCSV = useCallback(() => {
     const headers = visibleColumns.map((c) => toCSVValue(c.header));
-    const rows = data.map((row) =>
+    const rows = filteredData.map((row) =>
       visibleColumns.map((col) => {
         const raw = (row as Record<string, unknown>)[col.key];
         const cell = col.csvValue ? col.csvValue(raw, row) : raw;
@@ -141,13 +172,23 @@ export function SmartTable<T extends object>({
     a.download = `${exportFilename}-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [visibleColumns, data, exportFilename]);
+  }, [visibleColumns, filteredData, exportFilename]);
 
   return (
     <div className="space-y-3">
       {/* Toolbar */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">{toolbarActions}</div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-1 items-center gap-2">
+          {searchable && (
+            <TableSearch
+              value={search}
+              onChange={setSearch}
+              placeholder={searchPlaceholder}
+              className="w-full sm:w-64"
+            />
+          )}
+          {toolbarActions}
+        </div>
         <div className="flex items-center gap-2">
         {/* Column picker */}
         {hideableColumns.length > 1 && (
@@ -193,7 +234,7 @@ export function SmartTable<T extends object>({
         {/* Export CSV */}
         <button
           onClick={exportCSV}
-          disabled={data.length === 0}
+          disabled={filteredData.length === 0}
           className="flex items-center gap-1.5 rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-xs text-vk-text-secondary hover:text-vk-text-primary transition-colors disabled:opacity-40"
         >
           <Download className="h-3.5 w-3.5" />
@@ -202,7 +243,13 @@ export function SmartTable<T extends object>({
         </div>
       </div>
 
-      <Table columns={tableColumns} data={pageData} emptyMessage={emptyMessage} />
+      <Table
+        columns={tableColumns}
+        data={pageData}
+        emptyMessage={
+          deferredSearch.trim() ? `Sin resultados para "${deferredSearch.trim()}"` : emptyMessage
+        }
+      />
 
       {/* Paginación */}
       {total > 0 && (
