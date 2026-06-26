@@ -366,7 +366,7 @@ export function DashboardSummaryCards({
 
       <article className="vektor-card p-5">
         <div className="flex items-start justify-between gap-4">
-          <Tooltip content="Clientes: quiénes concentran tus ventas. Las ventas sin cliente cargado aparecen como 'Cliente no identificado'.">
+          <Tooltip content="Clientes: quiénes concentran tus ventas. Las ventas sin cliente identificado se agrupan como 'Local'.">
             <h2 className="text-lg font-semibold text-vektor-white">Clientes</h2>
           </Tooltip>
           {customerBreakdown.length > 0 ? (

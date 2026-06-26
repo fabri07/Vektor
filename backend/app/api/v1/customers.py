@@ -115,11 +115,17 @@ def _audit_data_change(
 async def list_customers(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    include_sentinel: bool = Query(
+        default=False,
+        description="Incluir el cliente centinela 'Local' (ventas sin cliente) si existe.",
+    ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[Customer]:
     repo = CustomerRepository(session)
-    return await repo.list_by_tenant(tenant.tenant_id, limit=limit, offset=offset)
+    return await repo.list_by_tenant(
+        tenant.tenant_id, limit=limit, offset=offset, include_sentinel=include_sentinel
+    )
 
 
 @router.post(

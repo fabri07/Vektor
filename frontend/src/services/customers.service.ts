@@ -49,6 +49,8 @@ export interface CustomerResponse {
 
 export interface CustomersListParams {
   is_active?: boolean;
+  /** Incluir el cliente centinela "Local" (ventas sin cliente) si existe. */
+  include_sentinel?: boolean;
   limit?: number;
   offset?: number;
 }

@@ -45,14 +45,24 @@ class CustomerRepository:
         tenant_id: UUID,
         limit: int = 50,
         offset: int = 0,
+        include_sentinel: bool = False,
     ) -> list[Customer]:
+        """Lista clientes del tenant. Por defecto excluye el centinela "Local".
+
+        ``include_sentinel=True`` LISTA el centinela si ya existe (es solo un
+        SELECT: nunca lo crea — eso pasa únicamente al asignar una venta huérfana).
+        Las métricas (``count_active``/``get_inactive_customers``) siguen
+        excluyéndolo siempre.
+        """
+        conditions = [
+            Customer.tenant_id == tenant_id,
+            Customer.deactivated_at.is_(None),
+        ]
+        if not include_sentinel:
+            conditions.append(_not_sentinel())
         q = (
             select(Customer)
-            .where(
-                Customer.tenant_id == tenant_id,
-                Customer.deactivated_at.is_(None),
-                _not_sentinel(),
-            )
+            .where(*conditions)
             .order_by(Customer.created_at.desc())
             .limit(limit)
             .offset(offset)

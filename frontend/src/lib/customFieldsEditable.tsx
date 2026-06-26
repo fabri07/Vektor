@@ -152,6 +152,9 @@ function CustomFieldEditableCell<T>({
 export function buildEditableCustomFieldColumns<T>(
   fields: FieldDefinition[],
   onSave: (row: T, customFields: Record<string, unknown>) => void | Promise<void>,
+  /** Si devuelve true para una fila, sus celdas custom se muestran read-only
+   *  (ej. el cliente centinela "Local", que el backend no deja editar). */
+  isReadOnly?: (row: T) => boolean,
 ): SmartColumn<T>[] {
   return [...fields]
     .filter((f) => !f.is_base_field)
@@ -161,9 +164,18 @@ export function buildEditableCustomFieldColumns<T>(
       header: f.label,
       hideable: true,
       defaultVisible: true,
-      render: (_value: unknown, row: T) => (
-        <CustomFieldEditableCell field={f} row={row} onSave={onSave} />
-      ),
+      render: (_value: unknown, row: T) =>
+        isReadOnly?.(row) ? (
+          <span className="truncate px-1.5 text-sm text-vk-text-secondary">
+            {formatCustomFieldValue(
+              readValue(row, f.field_key),
+              f.data_type,
+              f.enum_options,
+            )}
+          </span>
+        ) : (
+          <CustomFieldEditableCell field={f} row={row} onSave={onSave} />
+        ),
       csvValue: (_value: unknown, row: T) =>
         formatCustomFieldValue(readValue(row, f.field_key), f.data_type, f.enum_options),
     }));

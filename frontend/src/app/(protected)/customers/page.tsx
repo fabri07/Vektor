@@ -47,12 +47,19 @@ const COLUMNS = [
     render: (v: unknown, row: Record<string, unknown>) => {
       const c = row as unknown as CustomerResponse;
       return (
-        <Link
-          href={`/customers/${c.id}`}
-          className="font-medium text-vk-blue underline-offset-2 hover:underline"
-        >
-          {String(v)}
-        </Link>
+        <span className="flex items-center gap-2">
+          <Link
+            href={`/customers/${c.id}`}
+            className="font-medium text-vk-blue underline-offset-2 hover:underline"
+          >
+            {String(v)}
+          </Link>
+          {c.is_sentinel && (
+            <span title="Agrupa ventas donde no se identificó cliente.">
+              <Badge variant="default">Ventas sin cliente</Badge>
+            </span>
+          )}
+        </span>
       );
     },
     csvValue: (v: unknown) => String(v ?? ""),
@@ -137,7 +144,8 @@ export default function CustomersPage() {
 
   const { data: customers = [], isLoading, isError } = useQuery({
     queryKey: ["customers-list"],
-    queryFn: () => customersService.getAllCustomers(),
+    // include_sentinel: muestra el centinela "Local" (ventas sin cliente) si existe.
+    queryFn: () => customersService.getAllCustomers({ include_sentinel: true }),
     staleTime: 2 * 60 * 1000,
   });
 
@@ -190,6 +198,8 @@ export default function CustomersPage() {
     ...buildEditableCustomFieldColumns<Record<string, unknown>>(
       fieldDefs,
       saveCustomerCustomField,
+      // El centinela "Local" no es editable (el back da 400): celdas read-only.
+      (row) => (row as unknown as CustomerResponse).is_sentinel,
     ),
   ];
 
@@ -249,27 +259,32 @@ export default function CustomersPage() {
                 >
                   <Eye className="h-4 w-4" />
                 </Link>
-                <button
-                  type="button"
-                  title="Editar"
-                  aria-label="Editar cliente"
-                  onClick={() => setEditing(customer)}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  title="Eliminar"
-                  aria-label="Eliminar cliente"
-                  disabled={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm("¿Eliminar este cliente?")) deleteMutation.mutate(customer.id);
-                  }}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                {/* El centinela "Local" no se edita ni elimina (backend 400). */}
+                {!customer.is_sentinel && (
+                  <>
+                    <button
+                      type="button"
+                      title="Editar"
+                      aria-label="Editar cliente"
+                      onClick={() => setEditing(customer)}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Eliminar"
+                      aria-label="Eliminar cliente"
+                      disabled={deleteMutation.isPending}
+                      onClick={() => {
+                        if (confirm("¿Eliminar este cliente?")) deleteMutation.mutate(customer.id);
+                      }}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </>
+                )}
               </div>
             );
           }}

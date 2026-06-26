@@ -182,7 +182,18 @@ export default function CustomerDetailPage() {
         </section>
       )}
 
-      {/* Ficha fiscal + contacto */}
+      {/* Ficha fiscal + contacto. El centinela "Local" no tiene datos de contacto
+          ni ficha fiscal: mostramos una tarjeta explicativa en su lugar. */}
+      {customer.is_sentinel ? (
+        <section className="rounded-lg border border-vk-border-w bg-vk-surface-w p-4">
+          <p className="text-sm text-vk-text-secondary">
+            <span className="font-medium text-vk-text-primary">
+              Cliente del sistema.
+            </span>{" "}
+            Agrupa las ventas realizadas sin cliente identificado.
+          </p>
+        </section>
+      ) : (
       <section className="rounded-lg border border-vk-border-w bg-vk-surface-w p-4">
         <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
           <div>
@@ -270,6 +281,7 @@ export default function CustomerDetailPage() {
           />
         </div>
       </section>
+      )}
 
       {/* Historial de compras */}
       <section className="space-y-3">

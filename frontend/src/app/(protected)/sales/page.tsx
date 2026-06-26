@@ -65,11 +65,13 @@ function buildColumns(
   catalogLabels: Record<string, string>,
   customerById: Map<string, CustomerResponse>,
 ) {
-  // Resuelve el nombre del cliente de una venta. El centinela "Local" se excluye
-  // de la lista de clientes, así que cualquier id no resoluble (o ausente) → "Local".
+  // Resuelve el nombre del cliente de una venta. El centinela "Local" entra al map
+  // (include_sentinel), así que sus ventas resuelven a "Local" por nombre. Venta sin
+  // cliente → "—"; id que no resuelve (cliente borrado) → "Cliente no identificado"
+  // (NO asumimos "Local").
   const customerDisplay = (id: string | null): string => {
-    if (!id) return LOCAL_CUSTOMER_LABEL;
-    return customerById.get(id)?.name ?? LOCAL_CUSTOMER_LABEL;
+    if (!id) return "—";
+    return customerById.get(id)?.name ?? "Cliente no identificado";
   };
   return [
   {
@@ -178,7 +180,9 @@ export default function SalesPage() {
 
   const { data: customers = [] } = useQuery({
     queryKey: ["customers-list"],
-    queryFn: () => customersService.getAllCustomers(),
+    // include_sentinel: el centinela "Local" entra al map para resolver el nombre
+    // de las ventas sin cliente en la columna Cliente. El picker del modal lo filtra.
+    queryFn: () => customersService.getAllCustomers({ include_sentinel: true }),
     staleTime: 2 * 60 * 1000,
   });
 
@@ -256,7 +260,10 @@ export default function SalesPage() {
       new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime(),
   );
   const productById = new Map(products.map((product) => [product.id, product]));
+  // customerById incluye el centinela "Local" (para resolver el nombre en la
+  // columna Cliente); realCustomers lo excluye (para el picker del modal de edición).
   const customerById = new Map(customers.map((c) => [c.id, c]));
+  const realCustomers = customers.filter((c) => !c.is_sentinel);
 
   const saveCustomField = useSaveCustomField({
     listKey: ["sales-entries"],
@@ -359,7 +366,7 @@ export default function SalesPage() {
         onClose={() => setEditing(null)}
         onSave={(sale) => updateMutation.mutate(sale)}
         products={products}
-        customers={customers}
+        customers={realCustomers}
       />
     </PageWrapper>
   );

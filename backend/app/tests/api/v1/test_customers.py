@@ -407,6 +407,73 @@ class TestLocalSentinel:
         assert listed.status_code == 200
         assert local_id not in {c["id"] for c in listed.json()}
 
+    async def test_local_included_with_include_sentinel(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        local_id = await self._orphan_sale_local_id(client, auth_headers)
+        listed = await client.get(
+            "/api/v1/customers?include_sentinel=true", headers=auth_headers
+        )
+        assert listed.status_code == 200
+        assert local_id in {c["id"] for c in listed.json()}
+
+    async def test_include_sentinel_does_not_create_when_absent(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        # Tenant con un cliente real pero SIN ventas huérfanas → no hay centinela.
+        # include_sentinel=true solo LISTA si existe; nunca lo crea (R1).
+        await client.post(
+            "/api/v1/customers", json=_person("Real"), headers=auth_headers
+        )
+        listed = await client.get(
+            "/api/v1/customers?include_sentinel=true", headers=auth_headers
+        )
+        assert listed.status_code == 200
+        body = listed.json()
+        assert len(body) == 1
+        assert all(c["is_sentinel"] is False for c in body)
+
+    async def test_include_sentinel_returns_both_real_and_local(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        real = await client.post(
+            "/api/v1/customers", json=_person("Real"), headers=auth_headers
+        )
+        real_id = real.json()["id"]
+        local_id = await self._orphan_sale_local_id(client, auth_headers)
+
+        with_sentinel = await client.get(
+            "/api/v1/customers?include_sentinel=true", headers=auth_headers
+        )
+        ids = {c["id"] for c in with_sentinel.json()}
+        assert real_id in ids and local_id in ids
+
+        without = await client.get("/api/v1/customers", headers=auth_headers)
+        ids_default = {c["id"] for c in without.json()}
+        assert real_id in ids_default and local_id not in ids_default
+
+    async def test_real_customer_named_local_is_normal(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        # Un cliente REAL llamado "Local" (sin el flag) es un cliente común:
+        # aparece siempre, no es centinela y es editable (R2 — identidad por flag).
+        created = await client.post(
+            "/api/v1/customers", json=_person("Local"), headers=auth_headers
+        )
+        assert created.status_code == 201
+        cid = created.json()["id"]
+        assert created.json()["is_sentinel"] is False
+
+        listed = await client.get("/api/v1/customers", headers=auth_headers)
+        assert cid in {c["id"] for c in listed.json()}
+
+        patched = await client.patch(
+            f"/api/v1/customers/{cid}",
+            json={"name": "Local Centro"},
+            headers=auth_headers,
+        )
+        assert patched.status_code == 200
+
     async def test_local_not_editable(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
