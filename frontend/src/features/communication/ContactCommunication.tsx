@@ -8,7 +8,7 @@ import { TableSearch } from "@/components/ui/TableSearch";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { formatDateTime } from "@/lib/datetime";
 import { isLikelyValidWhatsApp, whatsappDigits } from "@/lib/fiscal";
-import { matchesQuery, safeSearchValue } from "@/lib/search";
+import { matchesRow } from "@/lib/search";
 import {
   communicationService,
   type CommunicationChannel,
@@ -71,15 +71,13 @@ export function ContactCommunication({
   const filteredHistory = useMemo(
     () =>
       history.filter((log) =>
-        matchesQuery(
+        matchesRow(
           [
             formatDateTime(log.created_at),
             CHANNEL_LABELS[log.channel],
             log.subject ?? "",
             log.status === "sent" ? "enviado" : "falló",
-          ]
-            .map(safeSearchValue)
-            .join(" "),
+          ],
           search,
         ),
       ),

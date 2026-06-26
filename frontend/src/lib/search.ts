@@ -36,3 +36,12 @@ export function matchesQuery(haystack: string, query: string): boolean {
   if (!q) return true;
   return normalizeForSearch(haystack).includes(q);
 }
+
+/**
+ * True si alguna de las celdas de una fila matchea `query`.
+ * Contrato único de "armar haystack + matchear" reutilizado por SmartTable y
+ * las tablas a mano — cambiar el comportamiento (separador, multi-término) acá.
+ */
+export function matchesRow(values: unknown[], query: string): boolean {
+  return matchesQuery(values.map(safeSearchValue).join(" "), query);
+}

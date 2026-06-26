@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { Table } from "./Table";
 import type { TableColumn } from "./Table";
 import { TableSearch } from "./TableSearch";
-import { matchesQuery, safeSearchValue } from "@/lib/search";
+import { matchesRow } from "@/lib/search";
 
 export interface SmartColumn<T = Record<string, unknown>> extends TableColumn<T> {
   hideable?: boolean;
@@ -124,20 +124,24 @@ export function SmartTable<T extends object>({
 
   // Búsqueda client-side: recorre TODAS las columnas originales (incluidas las
   // ocultas), no solo las visibles. La columna sintética "__actions" no está en
-  // `columns`, así que queda naturalmente excluida.
+  // `columns`, así que queda naturalmente excluida. Contrato: una columna sin
+  // `csvValue` cuya `key` no sea propiedad real de la fila (key sintética) aporta
+  // "" → para que su valor sea buscable, definí `csvValue` en esa columna.
+  // Depende de `columnsSig` (firma estable de keys), NO de `columns`: los call
+  // sites pasan `columns` inline (identidad nueva cada render) y eso anularía el memo.
   const filteredData = useMemo(() => {
     if (!deferredSearch.trim()) return data;
-    return data.filter((row) => {
-      const joined = columns
-        .map((col) => {
+    return data.filter((row) =>
+      matchesRow(
+        columns.map((col) => {
           const raw = (row as Record<string, unknown>)[col.key];
-          const cell = col.csvValue ? col.csvValue(raw, row) : raw;
-          return safeSearchValue(cell);
-        })
-        .join(" ");
-      return matchesQuery(joined, deferredSearch);
-    });
-  }, [data, deferredSearch, columns]);
+          return col.csvValue ? col.csvValue(raw, row) : raw;
+        }),
+        deferredSearch,
+      ),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, deferredSearch, columnsSig]);
 
   // Volver a la primera página cuando cambia la búsqueda.
   useEffect(() => {

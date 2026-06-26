@@ -12,7 +12,7 @@ import {
 import { useToastStore } from "@/stores/toastStore";
 import { Modal } from "@/components/ui/Modal";
 import { TableSearch } from "@/components/ui/TableSearch";
-import { matchesQuery, safeSearchValue } from "@/lib/search";
+import { matchesRow } from "@/lib/search";
 import { ColumnMapperPanel } from "./ColumnMapperPanel";
 import { RereadDiff } from "./RereadDiff";
 import { RereadProgress } from "./RereadProgress";
@@ -96,15 +96,13 @@ export function FileListSection() {
   const filteredFiles = useMemo(
     () =>
       files.filter((f) =>
-        matchesQuery(
+        matchesRow(
           [
             f.original_filename,
             formatType(f.original_filename),
             STATUS_LABELS[f.processing_status] ?? f.processing_status,
             formatDate(f.created_at),
-          ]
-            .map(safeSearchValue)
-            .join(" "),
+          ],
           search,
         ),
       ),
@@ -316,13 +314,12 @@ export function FileListSection() {
         />
       )}
 
-      {!isLoading && files.length > 0 && filteredFiles.length === 0 && (
-        <p className="text-sm text-vk-text-muted">
-          No hay archivos que coincidan con la búsqueda.
-        </p>
-      )}
-
-      {!isLoading && filteredFiles.length > 0 && (
+      {!isLoading && files.length > 0 &&
+        (filteredFiles.length === 0 ? (
+          <p className="text-sm text-vk-text-muted">
+            No hay archivos que coincidan con la búsqueda.
+          </p>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -469,7 +466,7 @@ export function FileListSection() {
             </tbody>
           </table>
         </div>
-      )}
+        ))}
 
       <Modal
         isOpen={reread !== null}
