@@ -111,11 +111,17 @@ class TestSuppliersCRUD:
         resp = await client.delete(f"/api/v1/suppliers/{sid}", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["message"] == "Supplier deactivated."
-        # Ya no es accesible ni listado (soft-delete excluye deactivated).
+        # El detalle del inactivo sigue siendo abrible (historial read-only + reactivar).
         detail = await client.get(f"/api/v1/suppliers/{sid}", headers=auth_headers)
-        assert detail.status_code == 404
+        assert detail.status_code == 200
+        assert detail.json()["is_active"] is False
+        # La lista por defecto lo excluye; con include_inactive aparece.
         listed = await client.get("/api/v1/suppliers", headers=auth_headers)
         assert sid not in {s["id"] for s in listed.json()}
+        listed_all = await client.get(
+            "/api/v1/suppliers?include_inactive=true", headers=auth_headers
+        )
+        assert sid in {s["id"] for s in listed_all.json()}
 
 
 @pytest.mark.asyncio
@@ -315,6 +321,22 @@ class TestSupplierFiscalFields:
         assert patched.status_code == 200
         assert patched.json()["name"] == "Proveedor Real"
         assert patched.json()["custom_fields"] == {}
+
+    async def test_cannot_convert_supplier_to_sentinel(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Un proveedor normal NO puede convertirse en sentinela vía custom_fields
+        (rompería el invariante de un solo 'No identificado' por tenant)."""
+        created = await client.post(
+            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=auth_headers
+        )
+        sid = created.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/suppliers/{sid}",
+            json={"custom_fields": {"_sentinel": "true"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
 
 
 # ── FASE 4: remito (también puebla la tabla de FASE 3) ────────────────────────
