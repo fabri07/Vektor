@@ -10,6 +10,7 @@ Leé esto antes de tocar código. El detalle completo está más abajo.
 
 1. **Chat** entra siempre por `ChatOrchestrator` → AgentCEO clasifica → sub-agente. El cliente nunca elige el agente destino.
 2. **Aritmética financiera** SOLO por `DeterministicFinance`. Los LLM nunca calculan montos.
+2b. **Motor estadístico** (`shared/stats_engine.py`): calcula con numpy + numpy-financial; el LLM solo narra. scipy/statsmodels diferidos. Guardas de muestra (n < mínimo → `insufficient_data`, no-invention rule).
 3. **`tenant_id`** sale del JWT en cada query de negocio — nunca del body/path.
 4. **`ActionType`** es un set cerrado (28 valores en `shared/schemas.py`); agregar/quitar obliga a tocar `RiskEngine` + tests.
 5. **No-invention:** con `confidence == LOW` (`data_completeness < 50`) → empty state y pedir datos. Nunca maquillar scores con defaults (`or 70`, `or 50`); si `0` es válido, usar `if value is None`, no `or`.

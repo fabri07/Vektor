@@ -30,6 +30,10 @@ python-multipart==0.0.18         # file uploads
 # ── Storage ───────────────────────────────────────────────────────────────────
 boto3==1.35.87
 
+# ── Estadística / Finanzas determinísticas ────────────────────────────────────
+numpy>=1.26,<3                   # motor estadístico (stats_engine.py)
+numpy-financial>=1.0,<2          # NPV/IRR (stats_engine.npv_simple)
+
 # ── File parsing / ingestion ───────────────────────────────────────────────────
 openpyxl==3.1.5                  # read .xlsx
 python-docx==1.1.2               # read .docx; write .docx reports (Stage 5a)
