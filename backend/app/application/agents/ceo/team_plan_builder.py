@@ -457,7 +457,7 @@ INTENT_TO_AGENT: dict[str, str] = {
     "analizar_gastos": "agent_expense",
     "analizar_proveedores": "agent_supplier",
     "proyectar_caja": "agent_health",
-    "analizar_clientes": "agent_income",
+    "analizar_clientes": "agent_client",
     # ── Sentinels de aclaración ──
     "pedir_aclaracion_sobre_archivo": "agent_helper",
     "pedir_aclaracion_negocio": "agent_helper",

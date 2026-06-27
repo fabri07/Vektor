@@ -1,10 +1,12 @@
-"""Tests de la familia Clientes de AgentIncome (Fase 2 — chat).
+"""Tests de la familia Clientes de AgentClient (Véktor v4 — Fase 2 chat clientes).
 
 Cubre:
 - Funciones puras de `shared/analytics.py`: rank_customers, summarize_receivables.
 - Handler `analizar_clientes` (general) con clientes + ventas → nombres y montos.
 - Sub-análisis cuentas_por_cobrar (fiado) e inactivos.
 - Caso sin datos (no-invention): clientes sin ventas / sin clientes cargados.
+
+Nota: la lógica fue movida desde AgentClient a AgentClient en Fase 2 (Véktor v4).
 """
 
 import uuid
@@ -16,7 +18,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared import analytics
-from app.application.agents.income.agent import AgentIncome
+from app.application.agents.client.agent import AgentClient
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTask
 from app.persistence.models.customer import Customer
 from app.persistence.models.tenant import Tenant
@@ -68,7 +70,7 @@ def test_summarize_receivables_empty():
 
 def _task(intent: str) -> AgentTask:
     return AgentTask(
-        agent="agent_income",
+        agent="agent_client",
         action_type=ActionType.ANALYZE_SALES_DATA,
         entities={"_intent": intent},
     )
@@ -153,7 +155,7 @@ async def seeded_customers(db_session: AsyncSession) -> uuid.UUID:
 
 @pytest.mark.asyncio
 async def test_analizar_clientes_general(db_session, seeded_customers):
-    agent = AgentIncome(db=db_session)
+    agent = AgentClient(db=db_session)
     resp = await agent.process(_req(seeded_customers), task=_task("analizar_clientes"))
     assert resp.status == "success"
     assert resp.result["summary"] == "analizar_clientes"
@@ -169,7 +171,7 @@ async def test_analizar_clientes_general(db_session, seeded_customers):
 
 @pytest.mark.asyncio
 async def test_cuentas_por_cobrar(db_session, seeded_customers):
-    agent = AgentIncome(db=db_session)
+    agent = AgentClient(db=db_session)
     resp = await agent.process(
         _req(seeded_customers), task=_task("analizar_cuentas_por_cobrar")
     )
@@ -182,7 +184,7 @@ async def test_cuentas_por_cobrar(db_session, seeded_customers):
 
 @pytest.mark.asyncio
 async def test_priorizar_cobranza(db_session, seeded_customers):
-    agent = AgentIncome(db=db_session)
+    agent = AgentClient(db=db_session)
     resp = await agent.process(_req(seeded_customers), task=_task("priorizar_cobranza"))
     assert resp.status == "success"
     assert resp.result["summary"] == "priorizar_cobranza"
@@ -191,7 +193,7 @@ async def test_priorizar_cobranza(db_session, seeded_customers):
 
 @pytest.mark.asyncio
 async def test_clientes_inactivos(db_session, seeded_customers):
-    agent = AgentIncome(db=db_session)
+    agent = AgentClient(db=db_session)
     resp = await agent.process(
         _req(seeded_customers), task=_task("detectar_clientes_inactivos")
     )
@@ -207,7 +209,7 @@ async def test_clientes_inactivos(db_session, seeded_customers):
 @pytest.mark.asyncio
 async def test_clientes_sin_clientes_cargados(db_session):
     tid = await _mk_tenant(db_session)
-    agent = AgentIncome(db=db_session)
+    agent = AgentClient(db=db_session)
     resp = await agent.process(_req(tid), task=_task("analizar_clientes"))
     assert resp.status == "success"
     assert resp.result["summary"] == "clientes_sin_datos"
@@ -218,7 +220,7 @@ async def test_clientes_cargados_sin_ventas(db_session):
     tid = await _mk_tenant(db_session)
     db_session.add(Customer(tenant_id=tid, name="Sin Compras"))
     await db_session.commit()
-    agent = AgentIncome(db=db_session)
+    agent = AgentClient(db=db_session)
     resp = await agent.process(_req(tid), task=_task("analizar_clientes"))
     assert resp.status == "success"
     assert resp.result["summary"] == "clientes_sin_ventas"
@@ -227,7 +229,7 @@ async def test_clientes_cargados_sin_ventas(db_session):
 @pytest.mark.asyncio
 async def test_clientes_sin_db():
     """Sin DB → mensaje claro, sin crash (no-invention)."""
-    agent = AgentIncome(db=None)
+    agent = AgentClient(db=None)
     resp = await agent.process(
         _req(uuid.uuid4()), task=_task("analizar_clientes")
     )

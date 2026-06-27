@@ -91,6 +91,11 @@ def get_sub_agent(
 
         return AgentChat()
 
+    if name == "agent_client":
+        from app.application.agents.client.agent import AgentClient  # noqa: PLC0415
+
+        return AgentClient(db=db)
+
     # ── Alias deprecado (Stage 2a) ────────────────────────────────────────────
     if name == "agent_cash":
         logger.warning(
