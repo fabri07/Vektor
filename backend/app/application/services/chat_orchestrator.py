@@ -14,6 +14,7 @@ Flujo:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -206,16 +207,23 @@ class ChatOrchestrator:
 
         # 1b. Observabilidad de capas de contexto: se actualiza en cada except fail-silent.
         # Capas rastreadas: business_memory, agent_memory, file_context.
-        # Nota: la capa "conversation" (ConversationService) no tiene bloque try/except propio
-        # (se carga solo cuando hay conversation_id y no falla silenciosamente), por eso
-        # no se incluye como clave fail-silent en este dict.
         context_health: dict[str, str] = {
             "business_memory": "ok",
             "agent_memory": "ok",
             "file_context": "ok",
         }
 
-        # 1b. BusinessMemory — contexto acumulado del negocio (fail-silencioso)
+        # 3. Lanzar CEO como asyncio.Task en paralelo con la carga de contexto.
+        #
+        # El CEO NO toca la DB (guard explícito en ceo/agent.py); los servicios de
+        # contexto que siguen SÍ usan `db`, así que corren secuencialmente en este
+        # hilo mientras el CEO corre aislado con su propio cliente Anthropic.
+        # La AsyncSession NO se comparte con el task del CEO.
+        # attachment_meta ya está listo en request.context (se calculó arriba).
+        ceo = AgentCEO()
+        ceo_task: asyncio.Task[AgentResponse] = asyncio.create_task(ceo.process(request))
+
+        # 1b. BusinessMemory — contexto acumulado del negocio (fail-silencioso, usa db)
         bm_data: dict[str, Any] = {}
         try:
             bm_svc = BusinessMemoryService(db=db, redis=redis)
@@ -224,7 +232,7 @@ class ChatOrchestrator:
             logger.warning("business_memory_failed", tenant_id=str(tenant_id), error=str(exc))
             context_health["business_memory"] = "degraded"
 
-        # 1c. AgentMemory — patrones aprendidos del negocio (fail-silencioso)
+        # 1c. AgentMemory — patrones aprendidos del negocio (fail-silencioso, usa db)
         agent_memory_fragment = ""
         try:
             am_svc = AgentMemoryService(db=db, redis=redis)
@@ -233,16 +241,21 @@ class ChatOrchestrator:
             logger.warning("agent_memory_failed", tenant_id=str(tenant_id), error=str(exc))
             context_health["agent_memory"] = "degraded"
 
-        # 2. Historial conversacional
+        # 2. Historial conversacional (fail-silencioso para no dejar ceo_task huérfano
+        # ante un error inesperado del ConversationService antes del await ceo_task)
         conversation_ctx: dict[str, Any] = {}
         if request.conversation_id:
-            svc = ConversationService(redis, db)
-            conversation_ctx = await svc.get_context(request.conversation_id)
+            try:
+                svc = ConversationService(redis, db)
+                conversation_ctx = await svc.get_context(request.conversation_id)
+            except Exception as exc:
+                logger.warning(
+                    "conversation_context_failed", tenant_id=str(tenant_id), error=str(exc)
+                )
 
-        # 3. CEO clasifica intent
-        ceo = AgentCEO()
+        # Esperar al CEO — siempre awaited, sin excepción posible antes de este punto
         try:
-            ceo_response = await ceo.process(request)
+            ceo_response = await ceo_task
         except AnthropicConfigurationError:
             raise
         except Exception as exc:
