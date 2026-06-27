@@ -18,6 +18,7 @@ export interface CreateCustomerPayload {
   birthday?: string | null;
   notes?: string | null;
   custom_fields?: Record<string, unknown>;
+  credit_limit?: number | null;
 }
 
 export type UpdateCustomerPayload = Partial<CreateCustomerPayload>;
@@ -42,9 +43,19 @@ export interface CustomerResponse {
   birthday: string | null;
   notes: string | null;
   custom_fields?: Record<string, unknown>;
+  credit_limit: number | null;
   is_active: boolean;
   is_sentinel: boolean;
   created_at: string;
+}
+
+export interface CustomerBalanceResponse {
+  customer_id: string;
+  total_account: number;
+  total_paid: number;
+  balance: number;
+  credit_limit: number | null;
+  over_limit: boolean;
 }
 
 export interface CustomersListParams {
@@ -164,6 +175,11 @@ export const customersService = {
 
   async getCustomer(id: string): Promise<CustomerResponse> {
     const res = await api.get<CustomerResponse>(`/customers/${id}`);
+    return res.data;
+  },
+
+  async getCustomerBalance(id: string): Promise<CustomerBalanceResponse> {
+    const res = await api.get<CustomerBalanceResponse>(`/customers/${id}/balance`);
     return res.data;
   },
 

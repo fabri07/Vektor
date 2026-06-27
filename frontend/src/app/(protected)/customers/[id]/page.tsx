@@ -42,6 +42,17 @@ export default function CustomerDetailPage() {
   });
 
   const {
+    data: balance,
+    isLoading: balanceLoading,
+    isError: balanceError,
+  } = useQuery({
+    queryKey: ["customer-balance", customerId],
+    queryFn: () => customersService.getCustomerBalance(customerId),
+    enabled: !!customer && !customer.is_sentinel,
+    staleTime: 60 * 1000,
+  });
+
+  const {
     data: sales = [],
     isLoading: salesLoading,
     isError: salesError,
@@ -281,6 +292,58 @@ export default function CustomerDetailPage() {
           />
         </div>
       </section>
+      )}
+
+      {/* Panel de saldo — solo para clientes reales (no centinela) */}
+      {!customer.is_sentinel && (
+        <section className="space-y-3">
+          <h2 className="font-display text-base font-semibold text-vk-text-primary">
+            Cuenta corriente y fiado
+          </h2>
+          {balanceLoading ? (
+            <div className="h-24 animate-pulse rounded-lg border border-vk-border-w bg-vk-surface-w" />
+          ) : balanceError ? (
+            <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
+              No se pudo cargar el saldo del cliente.
+            </p>
+          ) : balance ? (
+            <div className="rounded-lg border border-vk-border-w bg-vk-surface-w p-4">
+              {balance.over_limit && (
+                <p className="mb-3 rounded border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-sm font-medium text-vk-danger">
+                  Supera el límite de crédito
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
+                <div>
+                  <p className="text-xs text-vk-text-muted">Fiado pendiente</p>
+                  <p className="mt-1 font-display text-lg font-semibold text-vk-text-primary">
+                    {formatARS(balance.balance)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-vk-text-muted">Total a cuenta corriente</p>
+                  <p className="mt-1 font-display text-base font-semibold text-vk-text-primary">
+                    {formatARS(balance.total_account)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-vk-text-muted">Total cobrado</p>
+                  <p className="mt-1 font-display text-base font-semibold text-vk-text-primary">
+                    {formatARS(balance.total_paid)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-vk-text-muted">Límite de crédito</p>
+                  <p className="mt-1 font-display text-base font-semibold text-vk-text-primary">
+                    {balance.credit_limit !== null
+                      ? formatARS(balance.credit_limit)
+                      : "Sin límite configurado"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </section>
       )}
 
       {/* Historial de compras */}

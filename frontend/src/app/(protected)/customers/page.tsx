@@ -415,6 +415,7 @@ interface CustomerFormState {
   birthday: string;
   telegram_username: string;
   notes: string;
+  credit_limit: string;
 }
 
 function toFormState(customer: CustomerResponse | null): CustomerFormState {
@@ -434,6 +435,10 @@ function toFormState(customer: CustomerResponse | null): CustomerFormState {
     birthday: customer?.birthday ?? "",
     telegram_username: customer?.telegram_username ?? "",
     notes: customer?.notes ?? "",
+    credit_limit:
+      customer?.credit_limit !== null && customer?.credit_limit !== undefined
+        ? String(customer.credit_limit)
+        : "",
   };
 }
 
@@ -455,6 +460,7 @@ function prefillToFormState(p: CustomerExtractionResponse): CustomerFormState {
     birthday: p.birthday ?? "",
     telegram_username: "",
     notes: "",
+    credit_limit: "",
   };
 }
 
@@ -531,6 +537,10 @@ function CustomerFormModal({
     // doc_type prioriza CUIT (fiscalmente más completo) cuando ambos están cargados.
     const docType = cuit ? "cuit" : dni ? "dni" : null;
 
+    const creditLimitRaw = form.credit_limit.trim();
+    const creditLimit =
+      creditLimitRaw !== "" ? Number(creditLimitRaw) : null;
+
     onSave({
       customer_type: form.customer_type,
       name,
@@ -548,6 +558,7 @@ function CustomerFormModal({
       birthday: form.birthday.trim() || null,
       telegram_username: form.telegram_username.trim() || null,
       notes: form.notes.trim() || null,
+      credit_limit: creditLimit,
     });
   }
 
@@ -688,6 +699,15 @@ function CustomerFormModal({
           placeholder="Ej: prefiere entregas a la tarde, compra mayorista..."
           value={form.notes}
           onChange={set("notes")}
+        />
+
+        {/* Límite de crédito para ventas fiadas */}
+        <Input
+          label="Límite de crédito (opcional)"
+          type="number"
+          placeholder="Opcional — dejar vacío para sin límite"
+          value={form.credit_limit}
+          onChange={set("credit_limit")}
         />
 
         {error && (
