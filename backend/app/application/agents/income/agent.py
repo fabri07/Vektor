@@ -532,6 +532,11 @@ class AgentIncome(BaseAgent):
             "payment_method": pre_entities.get("payment_method"),
             "notes": request.message.strip(),
         }
+        # Fase 2: vínculo cobro → cliente. Si el CEO/extractor resolvió un
+        # customer_id, lo propagamos a structured_data para que save_cash_inflow
+        # lo vincule. No inventamos uno si no viene.
+        if pre_entities.get("customer_id"):
+            entities["customer_id"] = pre_entities["customer_id"]
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,

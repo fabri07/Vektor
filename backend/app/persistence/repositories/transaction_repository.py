@@ -4,7 +4,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.customer import Customer
@@ -282,6 +282,103 @@ class SaleRepository:
             }
             for row in result.all()
         ]
+
+    async def get_balance_by_customer(
+        self,
+        tenant_id: UUID,
+        customer_id: UUID,
+    ) -> dict[str, float]:
+        """Saldo neto de un cliente: fiado acumulado menos cobros registrados.
+
+        Dos queries simples (account + inflow) para máxima claridad y portabilidad
+        entre Postgres y SQLite (tests en memoria).
+
+        Returns dict con claves: total_account, total_paid, balance.
+        Sin ventas → todos 0.0 (saldo real de cliente sin movimientos, no None).
+        Filtra voided_at IS NULL y tenant_id.
+        """
+        from app.domain.transaction import PaymentMethod  # noqa: PLC0415
+
+        account_q = select(func.sum(SaleEntry.amount)).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.customer_id == customer_id,
+            SaleEntry.payment_method == PaymentMethod.ACCOUNT.value,
+            SaleEntry.voided_at.is_(None),
+        )
+        paid_q = select(func.sum(SaleEntry.amount)).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.customer_id == customer_id,
+            SaleEntry.payment_method == "inflow",
+            SaleEntry.voided_at.is_(None),
+        )
+        total_account = float((await self._session.execute(account_q)).scalar() or 0)
+        total_paid = float((await self._session.execute(paid_q)).scalar() or 0)
+        return {
+            "total_account": total_account,
+            "total_paid": total_paid,
+            "balance": total_account - total_paid,
+        }
+
+    async def get_balances_by_customer(
+        self,
+        tenant_id: UUID,
+    ) -> list[dict[str, Any]]:
+        """Saldo neto por cada cliente que tiene fiado o cobros.
+
+        Usa agregación condicional (CASE WHEN) en una sola query para obtener
+        total_account (payment_method='account') y total_paid (payment_method='inflow')
+        en el mismo GROUP BY cliente. Excluye filas con customer_id IS NULL.
+        Ordenado por balance (total_account - total_paid) desc — calculado en Python
+        para mantener compatibilidad con SQLite.
+
+        Returns list[dict]: customer_id, customer_name, total_account, total_paid,
+        balance, n_sales.
+        """
+        from app.domain.transaction import PaymentMethod  # noqa: PLC0415
+
+        total_account_expr = func.sum(
+            case(
+                (SaleEntry.payment_method == PaymentMethod.ACCOUNT.value, SaleEntry.amount),
+                else_=0,
+            )
+        ).label("total_account")
+        total_paid_expr = func.sum(
+            case(
+                (SaleEntry.payment_method == "inflow", SaleEntry.amount),
+                else_=0,
+            )
+        ).label("total_paid")
+
+        q = (
+            select(
+                SaleEntry.customer_id,
+                Customer.name.label("customer_name"),
+                total_account_expr,
+                total_paid_expr,
+                func.count(SaleEntry.id).label("n_sales"),
+            )
+            .join(Customer, Customer.id == SaleEntry.customer_id)
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.customer_id.isnot(None),
+                SaleEntry.payment_method.in_([PaymentMethod.ACCOUNT.value, "inflow"]),
+            )
+            .group_by(SaleEntry.customer_id, Customer.name)
+        )
+        result = await self._session.execute(q)
+        rows = [
+            {
+                "customer_id": str(row.customer_id),
+                "customer_name": row.customer_name,
+                "total_account": float(row.total_account or 0),
+                "total_paid": float(row.total_paid or 0),
+                "balance": float(row.total_account or 0) - float(row.total_paid or 0),
+                "n_sales": int(row.n_sales or 0),
+            }
+            for row in result.all()
+        ]
+        return sorted(rows, key=lambda r: r["balance"], reverse=True)
 
     async def date_range(self, tenant_id: UUID) -> tuple[date | None, date | None]:
         """Fecha de la primera y última venta no anulada del tenant.

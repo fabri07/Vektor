@@ -1,6 +1,7 @@
 """Pydantic schemas for customer endpoints."""
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -71,6 +72,7 @@ class CustomerResponse(BaseModel):
     birthday: date | None = None
     notes: str | None
     custom_fields: dict[str, Any] = {}
+    credit_limit: Decimal | None = None
     created_at: datetime
     deactivated_at: datetime | None = None
 
@@ -103,6 +105,7 @@ class CreateCustomerRequest(BaseModel):
     birthday: date | None = None
     notes: str | None = Field(default=None, max_length=2000)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+    credit_limit: Decimal | None = None
 
     @field_validator("customer_type")
     @classmethod
@@ -254,6 +257,7 @@ class UpdateCustomerRequest(BaseModel):
     birthday: date | None = None
     notes: str | None = Field(default=None, max_length=2000)
     custom_fields: dict[str, Any] | None = None
+    credit_limit: Decimal | None = None
 
     @field_validator("customer_type")
     @classmethod
@@ -279,3 +283,21 @@ class UpdateCustomerRequest(BaseModel):
     @classmethod
     def _v_dni(cls, v: str | None) -> str | None:
         return validate_dni(v)
+
+
+# ── Saldo neto por cliente (Fase 2 — cobro→cliente) ──────────────────────────
+
+
+class CustomerBalanceResponse(BaseModel):
+    """Saldo neto del cliente: fiado acumulado menos cobros registrados.
+
+    ``over_limit``: True si hay ``credit_limit`` configurado y ``balance``
+    lo supera. False en todos los demás casos (sin límite, o balance <= límite).
+    """
+
+    customer_id: UUID
+    total_account: float
+    total_paid: float
+    balance: float
+    credit_limit: Decimal | None = None
+    over_limit: bool

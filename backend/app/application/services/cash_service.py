@@ -148,7 +148,20 @@ async def save_cash_inflow(
     tenant_id: uuid.UUID,
     db: AsyncSession,
 ) -> SaleEntry:
-    """Registra cobro de una venta en cuenta corriente como inflow en sales_entries."""
+    """Registra cobro de una venta en cuenta corriente como inflow en sales_entries.
+
+    Si ``entities`` trae ``customer_id``, se vincula el cobro al cliente (Fase 2).
+    Si no viene, ``customer_id`` queda NULL (comportamiento anterior).
+    """
+    # Vínculo al cliente (Fase 2): coercionar a UUID si viene como string.
+    raw_customer_id = entities.get("customer_id")
+    customer_id: uuid.UUID | None = None
+    if raw_customer_id is not None:
+        try:
+            customer_id = uuid.UUID(str(raw_customer_id))
+        except (ValueError, AttributeError):
+            customer_id = None
+
     entry = SaleEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
@@ -157,6 +170,7 @@ async def save_cash_inflow(
         payment_method="inflow",
         notes=entities.get("notes") or entities.get("linked_sale_id"),
         provenance="REAL",
+        customer_id=customer_id,
     )
     db.add(entry)
     await db.flush()

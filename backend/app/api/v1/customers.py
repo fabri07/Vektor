@@ -45,9 +45,11 @@ from app.persistence.models.customer import Customer
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.customer_repository import CustomerRepository
+from app.persistence.repositories.transaction_repository import SaleRepository
 from app.schemas.common import MessageResponse
 from app.schemas.customer import (
     CreateCustomerRequest,
+    CustomerBalanceResponse,
     CustomerExtractionResponse,
     CustomerImportConfirmRequest,
     CustomerImportConfirmResponse,
@@ -581,3 +583,46 @@ async def reactivate_customer(
         after=_customer_snapshot(saved),
     )
     return saved
+
+
+@router.get(
+    "/{customer_id}/balance",
+    response_model=CustomerBalanceResponse,
+    summary="Saldo neto del cliente (fiado - cobros)",
+)
+async def get_customer_balance(
+    customer_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> CustomerBalanceResponse:
+    """Devuelve el saldo neto del cliente: fiado acumulado menos cobros registrados.
+
+    ``total_account``: suma de ventas con payment_method='account' (fiado).
+    ``total_paid``: suma de entradas con payment_method='inflow' (cobros).
+    ``balance``: total_account - total_paid.
+    ``over_limit``: True si credit_limit está configurado y balance lo supera.
+
+    tenant_id viene del JWT — nunca del path/body.
+    404 si el cliente no existe o pertenece a otro tenant.
+    """
+    customer_repo = CustomerRepository(session)
+    customer = await customer_repo.get_by_id(customer_id, tenant.tenant_id, include_deactivated=True)
+    if not customer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+
+    sale_repo = SaleRepository(session)
+    balance_data = await sale_repo.get_balance_by_customer(tenant.tenant_id, customer_id)
+
+    credit_limit = customer.credit_limit
+    over_limit = (
+        credit_limit is not None and balance_data["balance"] > float(credit_limit)
+    )
+
+    return CustomerBalanceResponse(
+        customer_id=customer_id,
+        total_account=balance_data["total_account"],
+        total_paid=balance_data["total_paid"],
+        balance=balance_data["balance"],
+        credit_limit=credit_limit,
+        over_limit=over_limit,
+    )

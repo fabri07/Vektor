@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -9,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Numeric,
     String,
     Text,
 )
@@ -53,6 +55,8 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )
+    # Límite de crédito (Fase 2 — cobro→cliente). NULL = sin límite configurado.
+    credit_limit: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     # Soft-delete: NULL = activo; timestamp = desactivado.
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
