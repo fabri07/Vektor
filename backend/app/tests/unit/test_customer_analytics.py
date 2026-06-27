@@ -6,7 +6,7 @@ Cubre:
 - Sub-análisis cuentas_por_cobrar (fiado) e inactivos.
 - Caso sin datos (no-invention): clientes sin ventas / sin clientes cargados.
 
-Nota: la lógica fue movida desde AgentClient a AgentClient en Fase 2 (Véktor v4).
+Nota: la lógica fue movida desde AgentIncome a AgentClient en Fase 2 (Véktor v4).
 """
 
 import uuid
