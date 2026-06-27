@@ -36,4 +36,11 @@ def get_anthropic_async_client(
             "or in the deployment environment."
         )
 
-    return client_factory(api_key=api_key)
+    # timeout: acota cada llamada HTTP al LLM (F0.2).
+    # max_retries=0: el retry transitorio lo maneja el TeamPlanExecutor (F0.4);
+    # delegar al SDK mezclaría los dos niveles de retry.
+    return client_factory(
+        api_key=api_key,
+        timeout=settings.ANTHROPIC_TIMEOUT_SECONDS,
+        max_retries=0,
+    )

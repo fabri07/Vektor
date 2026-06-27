@@ -266,6 +266,13 @@ class Settings(BaseSettings):
 
     # ── LLM Providers ─────────────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = ""
+    # Timeout de la conexión HTTP al cliente Anthropic (segundos).
+    # El SDK 0.49+ acepta este kwarg en el constructor.
+    # max_retries=0 porque el retry transitorio lo maneja el executor (F0.4).
+    ANTHROPIC_TIMEOUT_SECONDS: float = 12.0
+    # Timeout máximo por task en el TeamPlanExecutor (F0.3).
+    # Un agente colgado cancela la coroutine dentro de este plazo.
+    AGENT_TASK_TIMEOUT_SECONDS: float = 20.0
 
     # ── Production secret validation ──────────────────────────────────────────
     @model_validator(mode="after")

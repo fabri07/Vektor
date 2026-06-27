@@ -25,6 +25,7 @@ from app.application.agents.shared.schemas import (
     AgentTask,
     AgentTeamPlan,
 )
+from app.config.settings import get_settings
 from app.observability.logger import get_logger
 from app.persistence.db.session import async_session_factory
 
@@ -44,6 +45,51 @@ _EXTERNAL_ACTION_TYPES: frozenset[str] = frozenset(
 )
 
 _RETRY_BACKOFF_SECONDS = 2.0  # espera entre intento 1 y retry 1
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Determina si una excepción es transitoria y elegible para retry.
+
+    Transitorio (reintentar): timeouts de asyncio, errores de conexión/timeout/
+    servidor interno del SDK Anthropic, errores de conexión de SQLAlchemy.
+
+    No transitorio (fallar inmediatamente): errores de negocio, validación,
+    lógica de la aplicación (ValueError, RuntimeError, etc.).
+
+    Los paquetes anthropic y sqlalchemy se importan con guard para que un
+    problema de importación no rompa el módulo; en ese caso se degrada a
+    no-retryable para esa clase específica.
+    """
+    # asyncio
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+
+    # SDK Anthropic: errores de infra/red
+    try:
+        import anthropic as _anthropic  # noqa: PLC0415
+
+        if isinstance(
+            exc,
+            (
+                _anthropic.APIConnectionError,
+                _anthropic.APITimeoutError,
+                _anthropic.InternalServerError,
+            ),
+        ):
+            return True
+    except ImportError:
+        pass
+
+    # SQLAlchemy: errores de conexión/driver
+    try:
+        import sqlalchemy.exc as _sqla_exc  # noqa: PLC0415
+
+        if isinstance(exc, (_sqla_exc.OperationalError, _sqla_exc.DBAPIError)):
+            return True
+    except ImportError:
+        pass
+
+    return False
 
 
 class InvalidPlanDAGError(ValueError):
@@ -256,16 +302,22 @@ class TeamPlanExecutor:
         return base_request.model_copy(update={"context": new_context})
 
     async def _run_task(self, task: AgentTask, request: AgentRequest) -> AgentResponse:
-        """Ejecuta una tarea con sesión DB propia.
+        """Ejecuta una tarea con sesión DB propia y timeout por intento.
 
-        Para tasks externas (MCP Google): 1 retry con backoff de _RETRY_BACKOFF_SECONDS
-        si el primer intento lanza una excepción (transient failure).
-        No reintenta si el agente retorna requires_google_auth — eso requiere intervención humana.
+        Política de retry (F0.4): se reintenta si:
+          - La acción es externa (MCP Google), O
+          - La excepción es transitoria según _is_retryable().
+        Siempre máximo 2 intentos (1 retry). Backoff de _RETRY_BACKOFF_SECONDS entre ellos.
+
+        No reintenta si el agente retorna requires_google_auth — eso requiere
+        intervención humana, no un segundo intento automático.
         """
         is_external = str(task.action_type) in _EXTERNAL_ACTION_TYPES
-        attempts = 2 if is_external else 1
+        max_attempts = 2  # 1 intento + 1 retry como máximo
+        task_timeout = get_settings().AGENT_TASK_TIMEOUT_SECONDS
+        last_exc: BaseException | None = None
 
-        for attempt in range(1, attempts + 1):
+        for attempt in range(1, max_attempts + 1):
             async with async_session_factory() as own_db:
                 agent = get_sub_agent(
                     task.agent,
@@ -290,7 +342,12 @@ class TeamPlanExecutor:
                         result={"task_id": task.task_id},
                     )
                 try:
-                    resp = await agent.process(request, task=task)
+                    # F0.3: acotar cada llamada al agente con un timeout.
+                    # asyncio.TimeoutError → es transitorio → elegible para retry (F0.4).
+                    resp = await asyncio.wait_for(
+                        agent.process(request, task=task),
+                        timeout=task_timeout,
+                    )
                     if attempt > 1:
                         logger.info(
                             "team_plan_executor_retry_succeeded",
@@ -300,7 +357,11 @@ class TeamPlanExecutor:
                         )
                     return resp
                 except Exception as exc:
-                    if attempt < attempts:
+                    last_exc = exc
+                    retryable = _is_retryable(exc)
+                    should_retry = attempt < max_attempts and (is_external or retryable)
+
+                    if should_retry:
                         logger.warning(
                             "team_plan_executor_agent_failed_retrying",
                             agent=task.agent,
@@ -308,9 +369,12 @@ class TeamPlanExecutor:
                             attempt=attempt,
                             error=str(exc),
                             error_type=type(exc).__name__,
+                            retryable=retryable,
                         )
                         await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
                         continue
+
+                    # Sin más intentos o error de negocio (no retryable): fallo definitivo.
                     logger.error(
                         "team_plan_executor_agent_failed",
                         agent=task.agent,
@@ -318,8 +382,11 @@ class TeamPlanExecutor:
                         attempt=attempt,
                         error=str(exc),
                         error_type=type(exc).__name__,
+                        retryable=retryable,
                         exc_info=True,
                     )
+                    # Distinguir timeout de otros errores en el resultado
+                    error_value = "timeout" if isinstance(exc, asyncio.TimeoutError) else str(exc)
                     return AgentResponse(
                         request_id=request.request_id,
                         agent_name=task.agent,
@@ -327,7 +394,21 @@ class TeamPlanExecutor:
                         risk_level="LOW",
                         confidence="LOW",
                         message="Error al ejecutar la tarea.",
-                        result={"error": str(exc), "task_id": task.task_id},
+                        result={"error": error_value, "task_id": task.task_id},
                     )
-        # unreachable — satisface type checker
-        raise RuntimeError("_run_task loop exited without return")
+
+        # Rama de escape: se agotaron los intentos (siempre se entra por el loop de arriba).
+        error_value = (
+            "timeout"
+            if isinstance(last_exc, asyncio.TimeoutError)
+            else str(last_exc) if last_exc is not None else "unknown"
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=task.agent,
+            status="error",
+            risk_level="LOW",
+            confidence="LOW",
+            message="Error al ejecutar la tarea.",
+            result={"error": error_value, "task_id": task.task_id},
+        )

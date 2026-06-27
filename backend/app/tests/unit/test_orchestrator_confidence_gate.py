@@ -153,7 +153,7 @@ async def test_gate_low_confidence_returns_clarification(mock_db, mock_redis):
 
 @pytest.mark.asyncio
 async def test_gate_low_confidence_question_mentions_alternatives(mock_db, mock_redis):
-    """El gate con ambiguous_with menciona las alternativas en la pregunta."""
+    """El gate usa las descripciones amigables del INTENT_CATALOG, no los keys técnicos."""
     request = _make_request()
 
     with (
@@ -178,12 +178,18 @@ async def test_gate_low_confidence_question_mentions_alternatives(mock_db, mock_
 
     assert response.status == "requires_clarification"
     assert response.question is not None
-    assert len(response.question) > 0
+    q = response.question
+    # Las descripciones amigables deben estar en la pregunta
+    assert "venta" in q.lower(), f"La pregunta debería mencionar 'venta': {q!r}"
+    assert "gasto" in q.lower(), f"La pregunta debería mencionar 'gasto': {q!r}"
+    # Los keys técnicos NO deben aparecer en la pregunta
+    assert "ingresar_venta" not in q, f"No debe exponer el key técnico: {q!r}"
+    assert "ingresar_gasto" not in q, f"No debe exponer el key técnico: {q!r}"
 
 
 @pytest.mark.asyncio
 async def test_gate_low_confidence_no_alternatives_generic_question(mock_db, mock_redis):
-    """El gate con ambiguous_with=[] devuelve una pregunta genérica."""
+    """El gate con ambiguous_with=[] devuelve una pregunta genérica pidiendo más detalle."""
     request = _make_request()
 
     with (
@@ -208,7 +214,54 @@ async def test_gate_low_confidence_no_alternatives_generic_question(mock_db, moc
 
     assert response.status == "requires_clarification"
     assert response.question is not None
-    assert len(response.question) > 0
+    q = response.question
+    # Sin alternativas: pregunta genérica que pide más detalle
+    assert len(q) > 10
+    # Debe pedir más información al usuario (alguna variante de "qué", "detalle", "entend")
+    q_lower = q.lower()
+    assert any(kw in q_lower for kw in ("qué", "que", "detalle", "entend", "necesit", "podés")), (
+        f"La pregunta genérica debería pedir más información: {q!r}"
+    )
+    # No debe exponer keys técnicos
+    assert "ingresar_venta" not in q, f"No debe exponer el key técnico: {q!r}"
+
+
+@pytest.mark.asyncio
+async def test_gate_more_than_two_alternatives(mock_db, mock_redis):
+    """Con >2 alternativas la pregunta usa join de descripciones amigables (no keys técnicos)."""
+    request = _make_request()
+
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor"),
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
+        patch(f"{ORCHESTRATOR}.AgentChat"),
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_response(
+                req.request_id,
+                intent="ingresar_venta",
+                confidence_float=0.35,
+                ambiguous_with=["ingresar_gasto", "actualizar_stock"],
+            )
+        )
+
+        orchestrator = ChatOrchestrator()
+        response = await orchestrator.handle(
+            request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4()
+        )
+
+    assert response.status == "requires_clarification"
+    assert response.question is not None
+    q = response.question
+    # Las tres descripciones deben estar presentes (la del intent detectado + las 2 alternativas)
+    assert "venta" in q.lower(), f"Debe mencionar 'venta': {q!r}"
+    assert "gasto" in q.lower(), f"Debe mencionar 'gasto': {q!r}"
+    assert "stock" in q.lower(), f"Debe mencionar 'stock': {q!r}"
+    # Los keys técnicos NO deben aparecer
+    assert "ingresar_venta" not in q
+    assert "ingresar_gasto" not in q
+    assert "actualizar_stock" not in q
 
 
 @pytest.mark.asyncio

@@ -135,7 +135,7 @@ async def test_classify_intent_confidence_absent_defaults_to_0_5():
 
 @pytest.mark.asyncio
 async def test_classify_intent_confidence_out_of_range_defaults_to_0_5():
-    """Cuando confidence está fuera de [0,1], usar 0.5."""
+    """Cuando confidence está fuera de [0,1] (>1), usar 0.5."""
     with unittest.mock.patch(
         "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
     ) as mock_cls:
@@ -143,7 +143,7 @@ async def test_classify_intent_confidence_out_of_range_defaults_to_0_5():
         mock_client.messages.create = AsyncMock(
             return_value=_mock_llm_response_with_confidence(
                 "ingresar_venta",
-                confidence=1.5,  # fuera de rango
+                confidence=1.5,  # fuera de rango por arriba
             )
         )
         mock_cls.return_value = mock_client
@@ -153,6 +153,30 @@ async def test_classify_intent_confidence_out_of_range_defaults_to_0_5():
         agent = AgentCEO()
         agent.client = mock_client
         result, _ = await agent.classify_intent("vendí algo")
+
+    assert result["confidence"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_classify_intent_confidence_negative_clamps_to_0_5():
+    """Cuando confidence es negativa (e.g. -0.5), debe defaultear a 0.5."""
+    with unittest.mock.patch(
+        "app.application.agents.ceo.agent.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(
+            return_value=_mock_llm_response_with_confidence(
+                "ingresar_venta",
+                confidence=-0.5,  # fuera de rango por abajo
+            )
+        )
+        mock_cls.return_value = mock_client
+
+        from app.application.agents.ceo.agent import AgentCEO
+
+        agent = AgentCEO()
+        agent.client = mock_client
+        result, _ = await agent.classify_intent("algo raro")
 
     assert result["confidence"] == 0.5
 
