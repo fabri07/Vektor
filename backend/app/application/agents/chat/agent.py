@@ -104,10 +104,16 @@ class AgentChat(BaseAgent):
         tenant_id: uuid.UUID | None = None,
         db: AsyncSession | None = None,
         redis: Redis | None = None,
+        degraded_notice: str | None = None,
     ) -> tuple[str, LLMCall]:
         """Genera la respuesta final al usuario en lenguaje natural.
 
         Retorna (texto_respuesta, LLMCall).
+
+        Args:
+            degraded_notice: Cuando el contexto de negocio no se pudo cargar, el
+                orchestrator pasa una nota que se antepone al system prompt para que el
+                LLM sea prudente y no afirme datos que no tiene.
         """
         system = await self._build_system_prompt(
             request=request,
@@ -122,6 +128,8 @@ class AgentChat(BaseAgent):
             db=db,
             redis=redis,
         )
+        if degraded_notice is not None:
+            system = f"{degraded_notice}\n\n{system}"
 
         user_content = (
             f"Mensaje del usuario: {wrap_user_input(request.message)}\n\n"

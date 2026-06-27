@@ -145,6 +145,12 @@ _NO_AGENT_MESSAGES: dict[str, str] = {
 # Umbral de confianza bajo el cual el orchestrator pide aclaración en vez de despachar
 _CLARIFICATION_CONFIDENCE_THRESHOLD = 0.72
 
+# Nota que se inyecta en el system prompt de AgentChat cuando business_memory falló.
+_DEGRADED_BUSINESS_MEMORY_NOTICE = (
+    "Nota: estás respondiendo sin el contexto histórico del negocio (no se pudo cargar). "
+    "Sé prudente y no afirmes datos que no tenés."
+)
+
 
 class ChatOrchestrator:
     def __init__(self) -> None:
@@ -198,6 +204,17 @@ class ChatOrchestrator:
             db,
         )
 
+        # 1b. Observabilidad de capas de contexto: se actualiza en cada except fail-silent.
+        # Capas rastreadas: business_memory, agent_memory, file_context.
+        # Nota: la capa "conversation" (ConversationService) no tiene bloque try/except propio
+        # (se carga solo cuando hay conversation_id y no falla silenciosamente), por eso
+        # no se incluye como clave fail-silent en este dict.
+        context_health: dict[str, str] = {
+            "business_memory": "ok",
+            "agent_memory": "ok",
+            "file_context": "ok",
+        }
+
         # 1b. BusinessMemory — contexto acumulado del negocio (fail-silencioso)
         bm_data: dict[str, Any] = {}
         try:
@@ -205,6 +222,7 @@ class ChatOrchestrator:
             bm_data = await bm_svc.get(tenant_id)
         except Exception as exc:
             logger.warning("business_memory_failed", tenant_id=str(tenant_id), error=str(exc))
+            context_health["business_memory"] = "degraded"
 
         # 1c. AgentMemory — patrones aprendidos del negocio (fail-silencioso)
         agent_memory_fragment = ""
@@ -213,6 +231,7 @@ class ChatOrchestrator:
             agent_memory_fragment = await am_svc.get_context_fragment(tenant_id)
         except Exception as exc:
             logger.warning("agent_memory_failed", tenant_id=str(tenant_id), error=str(exc))
+            context_health["agent_memory"] = "degraded"
 
         # 2. Historial conversacional
         conversation_ctx: dict[str, Any] = {}
@@ -327,6 +346,7 @@ class ChatOrchestrator:
             file_context = await self._load_file_context(tenant_id, db, request.attachments)
         except Exception as exc:
             logger.warning("file_context_failed", tenant_id=str(tenant_id), error=str(exc))
+            context_health["file_context"] = "degraded"
 
         # 3c. Cortes sin sub-agente: fuera de scope / pedido de aclaración ───────
         if ceo_intent in _NO_AGENT_INTENTS:
@@ -512,6 +532,11 @@ class ChatOrchestrator:
                 agent_response.message = self._strip_markdown(agent_response.message)
             else:
                 # success / requires_clarification → AgentChat genera texto rico con Sonnet
+                _degraded_notice: str | None = (
+                    _DEGRADED_BUSINESS_MEMORY_NOTICE
+                    if context_health["business_memory"] == "degraded"
+                    else None
+                )
                 try:
                     agent_response.message, orch_call = await self._agent_chat.generate_response(
                         request=request,
@@ -526,6 +551,7 @@ class ChatOrchestrator:
                         tenant_id=tenant_id,
                         db=db,
                         redis=redis,
+                        degraded_notice=_degraded_notice,
                     )
                     all_llm_calls.append(orch_call)
                 except AnthropicConfigurationError:
@@ -559,6 +585,11 @@ class ChatOrchestrator:
         # 7b. ayuda_plataforma via chat principal → sugerir /help
         if ceo_intent == "ayuda_plataforma" and "redirect_to" not in agent_response.result:
             agent_response.result["redirect_to"] = "help_chat"
+
+        # 7c. context_health — observabilidad de capas de contexto (additive, sin migración)
+        if agent_response.result is None:
+            agent_response.result = {}
+        agent_response.result["context_health"] = context_health
 
         # 8. Adjuntar usage acumulado
         agent_response.usage = UsageSummary(calls=all_llm_calls) if all_llm_calls else None
