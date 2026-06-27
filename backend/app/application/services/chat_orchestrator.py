@@ -141,6 +141,9 @@ _NO_AGENT_MESSAGES: dict[str, str] = {
     "pedir_aclaracion_negocio": _ACLARACION_NEGOCIO_MESSAGE,
 }
 
+# Umbral de confianza bajo el cual el orchestrator pide aclaración en vez de despachar
+_CLARIFICATION_CONFIDENCE_THRESHOLD = 0.72
+
 
 class ChatOrchestrator:
     def __init__(self) -> None:
@@ -354,6 +357,55 @@ class ChatOrchestrator:
                     request, out_of_scope_response.message or "", redis, db, tenant_id, user_id
                 )
             return out_of_scope_response
+
+        # 3d. Gate de confianza — si el CEO tuvo baja confianza, pedir aclaración
+        # sin despachar al sub-agente (sin tokens adicionales de LLM).
+        _confidence_float: float | None = ceo_response.result.get("confidence_float")
+        if (
+            _confidence_float is not None
+            and _confidence_float < _CLARIFICATION_CONFIDENCE_THRESHOLD
+            and ceo_intent not in _NO_AGENT_INTENTS
+        ):
+            _ambiguous_with: list[str] = ceo_response.result.get("ambiguous_with") or []
+            if _ambiguous_with:
+                _alts = [str(a) for a in _ambiguous_with]
+                if len(_alts) == 1:
+                    _question = (
+                        f"¿Querés {ceo_intent} o {_alts[0]}? "
+                        "Decímelo con un poco más de detalle y lo hago."
+                    )
+                else:
+                    _alts_str = ", ".join(_alts[:-1]) + f" o {_alts[-1]}"
+                    _question = (
+                        f"¿Querés {ceo_intent} o {_alts_str}? "
+                        "Decímelo con un poco más de detalle y lo hago."
+                    )
+            else:
+                _question = (
+                    "No entendí bien qué querés hacer. "
+                    "¿Me podés dar más detalle sobre lo que necesitás?"
+                )
+            _clarification_response = AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="requires_clarification",
+                risk_level=ceo_response.risk_level,
+                confidence=Confidence.LOW,
+                requires_approval=False,
+                question=_question,
+                result={
+                    "summary": "Se solicita aclaración al usuario.",
+                    "intent": ceo_intent,
+                    "target_agent": ceo_target,
+                    "confidence_float": _confidence_float,
+                },
+                usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
+            )
+            if request.conversation_id:
+                await self._save_turn(
+                    request, _question, redis, db, tenant_id, user_id
+                )
+            return _clarification_response
 
         # 4. Ejecutar plan via TeamPlanExecutor (single-task y multi-task)
         if plan is None or not plan.tasks:

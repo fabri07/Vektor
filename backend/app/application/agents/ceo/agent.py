@@ -49,6 +49,21 @@ for _f in _FORBIDDEN:
     assert _f not in sys.modules, f"AgentCEO no puede importar {_f}"
 
 
+def _confidence_from_float(x: float) -> Confidence:
+    """Mapea un score de confianza [0,1] al enum Confidence.
+
+    Tramos:
+      >= 0.85 → HIGH
+      >= 0.72 → MEDIUM
+      <  0.72 → LOW
+    """
+    if x >= 0.85:
+        return Confidence.HIGH
+    if x >= 0.72:
+        return Confidence.MEDIUM
+    return Confidence.LOW
+
+
 class AgentCEO(BaseAgent):
     agent_name = "agent_ceo"
 
@@ -164,14 +179,18 @@ class AgentCEO(BaseAgent):
             "Retorná SOLO un JSON con:\n"
             '{"intent": "<una de las intenciones válidas>", '
             '"entities": {...campos relevantes: monto, producto, proveedor, fecha, '
-            'porcentaje, analysis_type, etc.}}\n\n'
+            'porcentaje, analysis_type, etc.}, '
+            '"confidence": <float 0.0-1.0 de qué tan seguro estás de la clasificación>, '
+            '"reasoning": "<1 frase corta explicando el motivo>", '
+            '"ambiguous_with": ["<intent alternativo plausible>", ...]}\n\n'
             "Si no podés clasificar → "
-            '{"intent": "intent_desconocido", "entities": {}}\n'
+            '{"intent": "intent_desconocido", "entities": {}, "confidence": 0.3, '
+            '"reasoning": "No reconocí el intent", "ambiguous_with": []}\n'
             "NO retornes nada más que el JSON. Sin texto adicional."
         )
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=800,
+            max_tokens=1000,
             system=system,
             messages=[
                 {"role": "user", "content": f"{nlp_annotation}{wrap_user_input(normalized)}"}
@@ -190,6 +209,24 @@ class AgentCEO(BaseAgent):
 
         if parsed.get("intent") not in INTENT_CATALOG:
             parsed["intent"] = "intent_desconocido"
+
+        # ── Parseo defensivo de campos de confianza ──────────────────────────
+        raw_conf = parsed.get("confidence")
+        if raw_conf is None:
+            conf_float: float = 0.5
+        elif not isinstance(raw_conf, (int, float)):
+            conf_float = 0.5
+        elif not (0.0 <= float(raw_conf) <= 1.0):
+            conf_float = 0.5
+        else:
+            conf_float = float(raw_conf)
+        parsed["confidence"] = conf_float
+
+        if not parsed.get("reasoning"):
+            parsed["reasoning"] = ""
+        if parsed.get("ambiguous_with") is None:
+            parsed["ambiguous_with"] = []
+
         return parsed, llm_call
 
     def build_team_plan(self, intent: str, entities: dict[str, Any]) -> AgentTeamPlan:
@@ -232,19 +269,26 @@ class AgentCEO(BaseAgent):
         requires_approval = RiskEngine.requires_approval(action_type)
         status = "requires_approval" if requires_approval else "success"
 
+        # Confianza real desde el float devuelto por el LLM (ya no hardcodeado como HIGH)
+        conf_float: float = classified.get("confidence", 0.5)
+        confidence = _confidence_from_float(conf_float)
+
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,
             status=status,
             risk_level=risk_level,
             requires_approval=requires_approval,
-            confidence=Confidence.HIGH,
+            confidence=confidence,
             result={
                 "target_agent": target_agent,  # legacy — orchestrator lo lee si no hay plan
                 "intent": intent,
                 "entities": entities,
                 "action_type": str(action_type),
                 "plan": plan.model_dump(),  # Stage 1: plan single-task
+                "confidence_float": conf_float,
+                "reasoning": classified.get("reasoning", ""),
+                "ambiguous_with": classified.get("ambiguous_with", []),
             },
             usage=UsageSummary(calls=[ceo_call]),
         )
