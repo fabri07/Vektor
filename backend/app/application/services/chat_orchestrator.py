@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.ceo.agent import AgentCEO
 from app.application.agents.ceo.synthesis import synthesize_team_results
+from app.application.agents.ceo.team_plan_builder import INTENT_CATALOG
 from app.application.agents.chat.agent import AgentChat
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.agents.shared.schemas import (
@@ -364,20 +365,30 @@ class ChatOrchestrator:
         if (
             _confidence_float is not None
             and _confidence_float < _CLARIFICATION_CONFIDENCE_THRESHOLD
+            and ceo_intent is not None
             and ceo_intent not in _NO_AGENT_INTENTS
         ):
-            _ambiguous_with: list[str] = ceo_response.result.get("ambiguous_with") or []
+            _amb_raw = ceo_response.result.get("ambiguous_with")
+            _ambiguous_with: list[str] = _amb_raw if _amb_raw is not None else []
+
+            def _intent_friendly(key: str) -> str:
+                """Devuelve la descripción legible del intent o el key crudo como fallback."""
+                entry = INTENT_CATALOG.get(key, {})
+                raw_desc = entry.get("desc")
+                return str(raw_desc) if raw_desc is not None else key
+
             if _ambiguous_with:
-                _alts = [str(a) for a in _ambiguous_with]
+                _main_label = _intent_friendly(ceo_intent)
+                _alts = [_intent_friendly(str(a)) for a in _ambiguous_with]
                 if len(_alts) == 1:
                     _question = (
-                        f"¿Querés {ceo_intent} o {_alts[0]}? "
+                        f"¿Querés {_main_label} o {_alts[0]}? "
                         "Decímelo con un poco más de detalle y lo hago."
                     )
                 else:
                     _alts_str = ", ".join(_alts[:-1]) + f" o {_alts[-1]}"
                     _question = (
-                        f"¿Querés {ceo_intent} o {_alts_str}? "
+                        f"¿Querés {_main_label} o {_alts_str}? "
                         "Decímelo con un poco más de detalle y lo hago."
                     )
             else:

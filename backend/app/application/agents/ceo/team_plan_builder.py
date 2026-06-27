@@ -79,7 +79,7 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
         ],
     },
     "actualizar_stock": {
-        "desc": "Ajustar unidades en inventario",
+        "desc": "Ajustar stock de un producto",
         "triggers": [
             "tengo 50 unidades de Coca Cola",
             "ajustá el stock de jabón a 30 unidades",
