@@ -538,8 +538,13 @@ function CustomerFormModal({
     const docType = cuit ? "cuit" : dni ? "dni" : null;
 
     const creditLimitRaw = form.credit_limit.trim();
+    const creditLimitParsed = creditLimitRaw !== "" ? Number(creditLimitRaw) : null;
+    // Guard defensivo: un valor no numérico (copy-paste, input no validado) → null,
+    // nunca mandamos NaN al backend.
     const creditLimit =
-      creditLimitRaw !== "" ? Number(creditLimitRaw) : null;
+      creditLimitParsed !== null && !Number.isNaN(creditLimitParsed)
+        ? creditLimitParsed
+        : null;
 
     onSave({
       customer_type: form.customer_type,
