@@ -357,7 +357,11 @@ class SaleRepository:
                 total_paid_expr,
                 func.count(SaleEntry.id).label("n_sales"),
             )
-            .join(Customer, Customer.id == SaleEntry.customer_id)
+            .join(
+                Customer,
+                (Customer.id == SaleEntry.customer_id)
+                & (Customer.tenant_id == tenant_id),
+            )
             .where(
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
