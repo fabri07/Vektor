@@ -673,7 +673,9 @@ class AgentSupplier(BaseAgent):
             supplier = await sup_repo.find_by_name(
                 main_supplier_name.strip().lower(), tenant_id
             )
-            if supplier is not None:
+            # No atribuir el draft al centinela "No identificado": si el proveedor
+            # más frecuente es el sentinela, el pedido queda sin proveedor (NULL).
+            if supplier is not None and not supplier.is_sentinel:
                 supplier_id = supplier.id
 
         # Armar items con aritmética determinística (Decimal)
@@ -700,16 +702,38 @@ class AgentSupplier(BaseAgent):
             two_places, rounding=ROUND_HALF_UP
         )
 
-        po = PurchaseOrder(
-            tenant_id=tenant_id,
-            supplier_id=supplier_id,
-            status="draft",
-            total=total,
-            items=[item.model_dump(mode="json") for item in items],
-            notes=None,
-        )
         po_repo = PurchaseOrderRepository(self._session)
-        po = await po_repo.create(po)
+        # Dedup: si el usuario repite "armame un pedido" (mismo stock crítico →
+        # mismos items), no creamos drafts duplicados. Reusamos un draft abierto del
+        # tenant con la misma firma de contenido (proveedor + total + items).
+        new_items_json = [item.model_dump(mode="json") for item in items]
+
+        def _po_signature(supplier: uuid.UUID | None, total_v: Decimal, its: list[dict[str, Any]]) -> tuple[Any, ...]:
+            return (
+                str(supplier) if supplier else None,
+                str(total_v),
+                tuple(sorted((str(i.get("product_id")), str(i.get("quantity"))) for i in its)),
+            )
+
+        new_sig = _po_signature(supplier_id, total, new_items_json)
+        existing_draft: PurchaseOrder | None = None
+        for ex in await po_repo.list_by_tenant(tenant_id):
+            if ex.status == "draft" and _po_signature(ex.supplier_id, ex.total, ex.items or []) == new_sig:
+                existing_draft = ex
+                break
+
+        if existing_draft is not None:
+            po = existing_draft
+        else:
+            po = PurchaseOrder(
+                tenant_id=tenant_id,
+                supplier_id=supplier_id,
+                status="draft",
+                total=total,
+                items=new_items_json,
+                notes=None,
+            )
+            po = await po_repo.create(po)
 
         supplier_label = main_supplier_name or "tu proveedor habitual"
         n = len(items)

@@ -43,8 +43,16 @@ def test_no_duplica_54():
 def test_quita_guiones_y_espacios():
     """Guiones, espacios y paréntesis son eliminados antes de normalizar."""
     url = _build("(011) 15-3456-7890", "texto")
-    # Quita no-dígitos → "0111534567890" (13 dígitos) → sin 54 → "540111534567890"
-    assert "wa.me/540111534567890?" in url
+    # Quita no-dígitos → "0111534567890" → sin 54 → se quita el 0 troncal y se
+    # antepone 54 → "54111534567890" (el "0" de larga distancia NO va en E.164).
+    assert "wa.me/54111534567890?" in url
+
+
+def test_quita_cero_troncal():
+    """El '0' troncal de larga distancia se elimina antes de anteponer 54."""
+    url = _build("011-4567-8900", "texto")
+    assert "wa.me/541145678900?" in url
+    assert "wa.me/5401145678900?" not in url
 
 
 def test_encoding_espacios():

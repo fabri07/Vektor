@@ -160,9 +160,10 @@ class AgentClient(BaseAgent):
                     "corriente», la voy a sumar acá para que sepas a quién cobrarle.",
                 )
             total = summary["total_owed"]
+            total_str = f"${total:,.0f}".replace(",", ".")
             lines = [
-                f"Te deben ${total:,.0f} en total (fiado), "
-                f"repartido en {summary['n_customers']} cliente(s):".replace(",", ".")
+                f"Te deben {total_str} en total (fiado), "
+                f"repartido en {summary['n_customers']} cliente(s):"
             ]
             for r in summary["by_customer"][:10]:
                 name = r.get("customer_name") or "Cliente sin nombre"

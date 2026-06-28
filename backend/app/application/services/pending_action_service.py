@@ -507,7 +507,19 @@ async def execute_pending_action(
             logger.warning("execute_pending_action.biz_mem_sale_failed", action_id=str(action.id))
 
     elif action.action_type == ActionType.REGISTER_CASH_INFLOW:
-        await cash_service.save_cash_inflow(payload, action.tenant_id, db)
+        inflow = await cash_service.save_cash_inflow(payload, action.tenant_id, db)
+        if payload.get("conversation_id"):
+            await mem.record(
+                db=db,
+                redis=redis,
+                tenant_id=action.tenant_id,
+                session_id=conversation_id,
+                entry_type="DATA_LOADED",
+                description=f"Cobro registrado por chat: ${inflow.amount}",
+                entity_type="cash_inflow",
+                entity_count=1,
+                pending_action_id=action.id,
+            )
 
     elif action.action_type == ActionType.REGISTER_EXPENSE:
         expense = await cash_service.save_expense(payload, action.tenant_id, db)

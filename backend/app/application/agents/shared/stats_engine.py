@@ -129,9 +129,12 @@ def project_sales(
     else:
         r_squared = max(0.0, 1.0 - ss_res / ss_tot)
 
-    # Proyección: puntos futuros (x = n, n+1, ..., n+days_ahead-1)
+    # Proyección: puntos futuros (x = n, n+1, ..., n+days_ahead-1).
+    # Clamp a 0: una tendencia en caída pronunciada extrapola a valores negativos,
+    # pero "vender una cantidad negativa" no tiene sentido — se reporta 0 (no
+    # inventamos ventas, pero tampoco ventas negativas).
     future_x = np.arange(n, n + days_ahead, dtype=np.float64)
-    future_y = slope * future_x + intercept
+    future_y = np.maximum(slope * future_x + intercept, 0.0)
     projection_total = float(np.sum(future_y))
     projection_daily_avg = projection_total / days_ahead if days_ahead > 0 else 0.0
 

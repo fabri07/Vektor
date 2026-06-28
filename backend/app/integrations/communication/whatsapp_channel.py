@@ -39,14 +39,18 @@ class WhatsAppChannel(MessageChannel):
         `to` = teléfono AR; normaliza a dígitos con código de país.
         `body` se urlencodea con urllib.parse.quote. No hace HTTP.
 
-        Supuesto de normalización (espejo razonable de frontend/src/lib/fiscal.ts):
+        Normalización para Argentina:
         1. Quitar todo lo no-dígito del número.
-        2. Si el resultado no empieza con "54" (código de país Argentina), se
-           antepone "54". Cubre números locales como "1134567890" → "541134567890".
+        2. Si ya empieza con "54" (código de país), se deja como está.
+        3. Si no, quitar el "0" troncal inicial (los números se cargan como
+           "011-4567-8900" / "0351..." con el 0 de larga distancia, que NO va en
+           E.164) y anteponer "54": "01145678900" → "541145678900" en vez del
+           erróneo "5401145678900". (No agregamos el "9" de móvil: distinguir móvil
+           de fijo no es determinable solo desde los dígitos.)
         """
         digits = re.sub(r"\D", "", to)
         if not digits.startswith("54"):
-            digits = "54" + digits
+            digits = "54" + digits.lstrip("0")
         encoded_body = quote(body, safe="")
         return f"https://wa.me/{digits}?text={encoded_body}"
 
