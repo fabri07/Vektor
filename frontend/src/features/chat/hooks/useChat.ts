@@ -322,11 +322,17 @@ export function useChat() {
         const response = await confirmAction(pendingActionId);
         if (msg) {
           if (response.execution_status === "SUCCEEDED") {
+            if (response.whatsapp?.url) {
+              window.open(response.whatsapp.url, "_blank", "noopener,noreferrer");
+            }
+            const confirmedText = response.whatsapp?.url
+              ? "\n✓ Abrí WhatsApp para que mandes el recordatorio."
+              : "\n✓ Confirmado y guardado.";
             updateMessage(msg.id, {
               status: response.automation_offer ? "requires_approval" : "success",
               content: response.automation_offer
-                ? msg.content + "\n✓ Confirmado y guardado.\n\n" + response.automation_offer.message
-                : msg.content + "\n✓ Confirmado y guardado.",
+                ? msg.content + confirmedText + "\n\n" + response.automation_offer.message
+                : msg.content + confirmedText,
               automationOffer: response.automation_offer,
             });
           } else if (response.execution_status === "REQUIRES_RECONNECT") {

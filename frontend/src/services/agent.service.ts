@@ -33,6 +33,12 @@ export interface ConfirmActionResponse {
   execution_status: string;
   failure_code?: string | null;
   automation_offer?: AutomationOffer;
+  whatsapp?: {
+    url: string;
+    body: string;
+    to: string;
+    channel: string;
+  };
 }
 
 export async function sendMessage(
