@@ -605,7 +605,6 @@ class AgentSupplier(BaseAgent):
         )
         po_repo = PurchaseOrderRepository(self._session)
         po = await po_repo.create(po)
-        await self._session.commit()
 
         supplier_label = main_supplier_name or "tu proveedor habitual"
         n = len(items)

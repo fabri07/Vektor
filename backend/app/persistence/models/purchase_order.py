@@ -37,7 +37,7 @@ class PurchaseOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(20),
         nullable=False,
         default="draft",
-        server_default="draft",
+        server_default="'draft'",
     )
     total: Mapped[Decimal] = mapped_column(
         Numeric(14, 2),

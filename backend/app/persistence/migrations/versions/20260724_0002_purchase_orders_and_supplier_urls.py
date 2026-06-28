@@ -53,7 +53,7 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), nullable=False),
         sa.Column("tenant_id", UUID(as_uuid=True), nullable=False),
         sa.Column("supplier_id", UUID(as_uuid=True), nullable=True),
-        sa.Column("status", sa.String(20), nullable=False, server_default="draft"),
+        sa.Column("status", sa.String(20), nullable=False, server_default="'draft'"),
         sa.Column("total", sa.Numeric(14, 2), nullable=False, server_default="0"),
         sa.Column(
             "items",
