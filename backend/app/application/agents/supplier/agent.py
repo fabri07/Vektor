@@ -52,10 +52,16 @@ class AgentSupplier(BaseAgent):
             self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
         return self._client
 
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
+
     async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
         # ── Sprint 17: análisis de proveedores read-only ─────────────────────
         action_type = getattr(task, "action_type", None)
         analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+        if action_type == ActionType.ANSWER_DATA_QUERY:
+            return await self._handle_data_query(request, task)
         if action_type == ActionType.ANALYZE_SUPPLIER_DATA:
             return await self._handle_supplier_analysis(request, analysis_intent)
 
@@ -473,6 +479,105 @@ class AgentSupplier(BaseAgent):
             "analizar_proveedores",
             "\n".join(lines),
             {"suppliers": suppliers},
+        )
+
+    # ── F5b: ANSWER_DATA_QUERY — consulta libre sobre proveedores ────────────
+
+    async def _handle_data_query(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Consulta libre sobre proveedores: responde con datos determinísticos + narrador LLM.
+
+        Política no-invention: sin proveedores ni stock crítico → mensaje claro sin LLM.
+        """
+        from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
+            answer_data_query,
+        )
+
+        if self._session is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        suppliers = await self._supplier_totals(tenant_id, days=90)
+        critical = await self._critical_stock_for_order(tenant_id)
+
+        # Sin datos → nada que narrar
+        if not suppliers and not critical:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Todavía no tengo datos de proveedores ni stock crítico. "
+                    "Cuando registres compras con proveedor y configures tu catálogo, "
+                    "puedo responder consultas sobre ellos."
+                ),
+            )
+
+        # Serializable (no Decimal / date)
+        structured_data: dict[str, Any] = {
+            "proveedores": suppliers[:15],
+            "stock_critico": [
+                {
+                    "name": p["name"],
+                    "stock": p["stock"],
+                    "product_id": p["product_id"],
+                    "unit_cost": float(p["unit_cost"]),
+                    "threshold": p["threshold"],
+                }
+                for p in critical[:15]
+            ],
+        }
+
+        text, call = await answer_data_query(
+            question=request.message,
+            domain="proveedores",
+            structured_data=structured_data,
+            business_name="tu negocio",
+            client=self.client,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=Confidence.HIGH,
+            message=text,
+            result={
+                "summary": "Consulta respondida",
+                "structured_data": structured_data,
+                "analysis": True,
+            },
+            usage=UsageSummary(calls=[call]),
         )
 
     async def _critical_stock_for_order(self, tenant_id: uuid.UUID) -> list[dict[str, Any]]:

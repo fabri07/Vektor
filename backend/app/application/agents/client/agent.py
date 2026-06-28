@@ -15,6 +15,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
+import anthropic
+
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -22,7 +24,9 @@ from app.application.agents.shared.schemas import (
     AgentResponse,
     Confidence,
     RiskLevel,
+    UsageSummary,
 )
+from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +36,18 @@ class AgentClient(BaseAgent):
     agent_name = "agent_client"
 
     def __init__(self, db: AsyncSession | None = None) -> None:
+        self._client: Any | None = None
         self._db = db
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     async def process(
         self,
@@ -41,6 +56,9 @@ class AgentClient(BaseAgent):
     ) -> AgentResponse:
         action_type = getattr(task, "action_type", None)
         analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+
+        if action_type == ActionType.ANSWER_DATA_QUERY:
+            return await self._handle_data_query(request, task)
 
         if action_type == ActionType.ANALYZE_SALES_DATA:
             return await self._handle_customer_analysis(request, analysis_intent)
@@ -232,4 +250,122 @@ class AgentClient(BaseAgent):
                 "total_sales": ranking["total_sales"],
                 "top": ranking["top"],
             },
+        )
+
+    # ── F5b: ANSWER_DATA_QUERY — consulta libre sobre clientes ───────────────
+
+    async def _handle_data_query(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Consulta libre sobre clientes: responde con datos determinísticos + narrador LLM.
+
+        Política no-invention: sin clientes activos o sin ventas asociadas →
+        mensaje claro sin llamar al LLM (no inflar tokens sin datos que narrar).
+        """
+        from app.application.agents.shared import analytics  # noqa: PLC0415
+        from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
+            answer_data_query,
+        )
+        from app.persistence.repositories.customer_repository import (  # noqa: PLC0415
+            CustomerRepository,
+        )
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            SaleRepository,
+        )
+
+        tenant_id = await self._tenant_uuid(request)
+        if self._db is None or tenant_id is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        customer_repo = CustomerRepository(self._db)
+        sale_repo = SaleRepository(self._db)
+
+        n_active = await customer_repo.count_active(tenant_id)
+        if n_active == 0:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Todavía no tenés clientes cargados. "
+                    "Cuando registres clientes y les asociés ventas, "
+                    "puedo responderte sobre ellos."
+                ),
+            )
+
+        # Datos determinísticos desde repos
+        sales_by_customer = await sale_repo.get_sales_by_customer(tenant_id)
+        saldos_raw = await sale_repo.get_balances_by_customer(tenant_id)
+        inactive = await customer_repo.get_inactive_customers(tenant_id, days=60)
+
+        # Sin ventas ni saldos → nada que narrar
+        if not sales_by_customer and not saldos_raw:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    f"Tenés {n_active} cliente(s) cargado(s), pero todavía no hay ventas "
+                    "asociadas. Cuando registres ventas con el cliente identificado, "
+                    "puedo responder consultas sobre ellos."
+                ),
+            )
+
+        ranking = analytics.rank_customers(sales_by_customer)
+
+        # Serializable (no Decimal / date)
+        saldos: list[dict[str, Any]] = [
+            {
+                "customer_name": s.get("customer_name"),
+                "balance": float(s.get("balance", 0)),
+                "total_account": float(s.get("total_account", 0)),
+                "total_paid": float(s.get("total_paid", 0)),
+            }
+            for s in saldos_raw[:15]
+        ]
+
+        structured_data: dict[str, Any] = {
+            "saldos": saldos,
+            "ranking_top": ranking["top"][:10],
+            "inactivos_n": len(inactive),
+        }
+
+        text, call = await answer_data_query(
+            question=request.message,
+            domain="clientes",
+            structured_data=structured_data,
+            business_name="tu negocio",
+            client=self.client,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=Confidence.HIGH,
+            message=text,
+            result={
+                "summary": "Consulta respondida",
+                "structured_data": structured_data,
+                "analysis": True,
+            },
+            usage=UsageSummary(calls=[call]),
         )

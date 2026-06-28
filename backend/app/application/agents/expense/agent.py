@@ -18,6 +18,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+import anthropic
+
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -25,11 +27,13 @@ from app.application.agents.shared.schemas import (
     AgentResponse,
     Confidence,
     RiskLevel,
+    UsageSummary,
 )
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     normalize_expense_category,
 )
+from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -45,9 +49,20 @@ class AgentExpense(BaseAgent):
         redis: Redis | None = None,
         gateway: Any | None = None,
     ) -> None:
+        self._client: Any | None = None
         self._db = db
         self._redis = redis
         self._gateway = gateway
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     def _extract_amount(self, message: str) -> Decimal | None:
         match = re.search(r"(?<!\d)(?:\$?\s*)?(\d{1,3}(?:[.\s]\d{3})+|\d+)(?:,\d{1,2})?", message)
@@ -247,6 +262,10 @@ class AgentExpense(BaseAgent):
     ) -> AgentResponse:
         action_type = getattr(task, "action_type", None)
         analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+
+        # ── F5b: consulta libre sobre gastos ─────────────────────────────────────
+        if action_type == ActionType.ANSWER_DATA_QUERY:
+            return await self._handle_data_query(request, task)
 
         # ── Sprint 17: análisis de gastos read-only ──────────────────────────
         if action_type == ActionType.ANALYZE_EXPENSE_DATA:
@@ -1031,4 +1050,105 @@ class AgentExpense(BaseAgent):
                 "structured_data": entities,
                 "alerts": [],
             },
+        )
+
+    # ── F5b: ANSWER_DATA_QUERY — consulta libre sobre gastos ─────────────────
+
+    async def _handle_data_query(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Consulta libre sobre gastos: responde con datos determinísticos + narrador LLM.
+
+        Política no-invention: sin gastos → mensaje claro sin llamar al LLM.
+        """
+        from datetime import timedelta  # noqa: PLC0415
+
+        from app.application.agents.shared import analytics  # noqa: PLC0415
+        from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
+            answer_data_query,
+        )
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            ExpenseRepository,
+        )
+
+        if self._db is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        repo = ExpenseRepository(self._db)
+        cutoff = date.today() - timedelta(days=90)
+        by_cat = await repo.expenses_by_category(tenant_id, from_date=cutoff)
+
+        # Sin gastos → nada que narrar
+        if not by_cat:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Todavía no tengo gastos registrados para responderte. "
+                    "Cuando cargues gastos, puedo analizar categorías, "
+                    "costos y anomalías."
+                ),
+            )
+
+        total = round(sum(c["total"] for c in by_cat), 2)
+        stats = await repo.get_expense_stats_by_category(tenant_id, days=90)
+        anomalies = analytics.detect_expense_anomalies(stats, sigma=2.0)
+
+        structured_data: dict[str, Any] = {
+            "por_categoria": by_cat[:10],
+            "total": total,
+            "anomalias": anomalies[:5],
+        }
+
+        text, call = await answer_data_query(
+            question=request.message,
+            domain="gastos",
+            structured_data=structured_data,
+            business_name="tu negocio",
+            client=self.client,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=Confidence.HIGH,
+            message=text,
+            result={
+                "summary": "Consulta respondida",
+                "structured_data": structured_data,
+                "analysis": True,
+            },
+            usage=UsageSummary(calls=[call]),
         )

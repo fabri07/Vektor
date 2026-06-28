@@ -338,6 +338,10 @@ class AgentIncome(BaseAgent):
         action_type = getattr(task, "action_type", None)
         analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
 
+        # ── F5b: consulta libre sobre ventas ─────────────────────────────────────
+        if action_type == ActionType.ANSWER_DATA_QUERY:
+            return await self._handle_data_query(request, task)
+
         # ── Sprint 17: análisis read-only (NO importar — el usuario pidió analizar) ──
         if action_type == ActionType.ANALYZE_FILE:
             if analysis_intent == "limpiar_normalizar_archivo":
@@ -943,3 +947,110 @@ class AgentIncome(BaseAgent):
             return cfg.target_margin_pct, cfg.warning_margin_pct
         except Exception:
             return 40.0, 25.0
+
+    # ── F5b: ANSWER_DATA_QUERY — consulta libre sobre ventas ─────────────────
+
+    async def _handle_data_query(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Consulta libre sobre ventas: responde con datos determinísticos + narrador LLM.
+
+        Política no-invention: sin ventas → mensaje claro sin llamar al LLM.
+        """
+        from datetime import date as _date  # noqa: PLC0415
+        from datetime import timedelta as _timedelta
+
+        from app.application.agents.shared import analytics  # noqa: PLC0415
+        from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
+            answer_data_query,
+        )
+        from app.application.services.deterministic_finance import (  # noqa: PLC0415
+            calcular_ticket_promedio,
+        )
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            SaleRepository,
+        )
+
+        tenant_id = await self._tenant_uuid(request)
+        if self._db is None or tenant_id is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        sale_repo = SaleRepository(self._db)
+
+        # Datos determinísticos desde repos
+        sales_by_customer = await sale_repo.get_sales_by_customer(tenant_id)
+        to_date = _date.today()
+        from_date = to_date - _timedelta(days=30)
+        sales_by_product = await sale_repo.get_sales_by_product(tenant_id, from_date, to_date)
+
+        # Sin ventas → nada que narrar
+        if not sales_by_customer and not sales_by_product:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Todavía no tengo ventas registradas para responderte. "
+                    "Cuando registres ventas, puedo analizar clientes, "
+                    "productos y ticket promedio."
+                ),
+            )
+
+        ticket_data = await calcular_ticket_promedio(tenant_id, self._db)
+        ticket_promedio: float | None = (
+            float(ticket_data["ticket_promedio"])
+            if not ticket_data.get("sin_datos")
+            else None
+        )
+
+        ranking = analytics.rank_customers(sales_by_customer)
+
+        structured_data: dict[str, Any] = {
+            "ranking_clientes": ranking["top"][:10],
+            "ventas_por_producto": [
+                {
+                    "product_id": s.get("product_id"),
+                    "revenue": float(s.get("revenue", 0)),
+                    "units": int(s.get("units", 0)),
+                }
+                for s in sales_by_product[:10]
+            ],
+            "ticket_promedio": ticket_promedio,
+        }
+
+        text, call = await answer_data_query(
+            question=request.message,
+            domain="ventas",
+            structured_data=structured_data,
+            business_name="tu negocio",
+            client=self.client,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=Confidence.HIGH,
+            message=text,
+            result={
+                "summary": "Consulta respondida",
+                "structured_data": structured_data,
+                "analysis": True,
+            },
+            usage=UsageSummary(calls=[call]),
+        )
