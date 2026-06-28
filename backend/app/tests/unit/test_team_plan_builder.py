@@ -17,8 +17,9 @@ def test_intent_catalog_size():
     # Nivel 2: + reclasificar_gasto = 29.
     # v4 Fase 2: + analizar_clientes = 30.
     # v4 Fase 4: + analizar_marketing = 31.
+    # v4 Fase 5: + consulta_libre = 32.
     # Las 35 variantes analíticas viejas ahora son valores de `analysis_type`.
-    assert len(INTENT_CATALOG) == 31
+    assert len(INTENT_CATALOG) == 32
 
 
 def test_all_intents_have_agent_mapping():
@@ -320,3 +321,44 @@ def test_build_plan_analizar_marketing_sugerir_campana():
     """analizar_marketing con analysis_type='sugerir_campana' → _intent='sugerir_campana'."""
     plan = build_plan("analizar_marketing", {"analysis_type": "sugerir_campana"})
     assert plan.tasks[0].entities["_intent"] == "sugerir_campana"
+
+
+# ── v4 Fase 5: ANSWER_DATA_QUERY + consulta_libre ────────────────────────────
+
+
+def test_answer_data_query_in_action_type():
+    """ANSWER_DATA_QUERY está definido en ActionType."""
+    assert ActionType.ANSWER_DATA_QUERY == "ANSWER_DATA_QUERY"
+
+
+def test_answer_data_query_in_risk_engine_low():
+    """ANSWER_DATA_QUERY está en RiskEngine como LOW, sin aprobación."""
+    from app.application.agents.shared.risk_engine import ACTION_RISK_MAP, RiskEngine
+    from app.application.agents.shared.schemas import RiskLevel
+
+    assert ACTION_RISK_MAP[ActionType.ANSWER_DATA_QUERY] == RiskLevel.LOW
+    assert RiskEngine.evaluate(ActionType.ANSWER_DATA_QUERY) == RiskLevel.LOW
+    assert RiskEngine.requires_approval(ActionType.ANSWER_DATA_QUERY) is False
+
+
+def test_answer_data_query_in_intent_aware_action_types():
+    """ANSWER_DATA_QUERY está en _INTENT_AWARE_ACTION_TYPES."""
+    from app.application.agents.ceo.team_plan_builder import _INTENT_AWARE_ACTION_TYPES
+
+    assert ActionType.ANSWER_DATA_QUERY in _INTENT_AWARE_ACTION_TYPES
+
+
+def test_consulta_libre_in_intent_catalog():
+    """consulta_libre está en INTENT_CATALOG con triggers."""
+    assert "consulta_libre" in INTENT_CATALOG
+    assert len(INTENT_CATALOG["consulta_libre"]["triggers"]) > 0
+
+
+def test_consulta_libre_to_action_type():
+    """consulta_libre usa ANSWER_DATA_QUERY."""
+    assert INTENT_TO_ACTION_TYPE["consulta_libre"] == ActionType.ANSWER_DATA_QUERY
+
+
+def test_consulta_libre_to_agent_fallback():
+    """consulta_libre apunta a agent_helper como fallback en INTENT_TO_AGENT."""
+    assert INTENT_TO_AGENT["consulta_libre"] == "agent_helper"

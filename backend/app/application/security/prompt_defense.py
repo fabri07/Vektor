@@ -35,6 +35,8 @@ VALID_ACTION_TYPES: frozenset[str] = frozenset(
         "RECLASSIFY_EXPENSE",
         # v4: marketing analytics read-only
         "ANALYZE_MARKETING_DATA",
+        # Fase 5: consulta libre de datos del negocio (read-only, LOW)
+        "ANSWER_DATA_QUERY",
     }
 )
 

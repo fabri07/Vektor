@@ -59,6 +59,8 @@ class ActionType(StrEnum):
     #   - sku / product_name / unit_cost    — datos del producto vendible (solo target=reventa)
     # Compat: si llega `expense_ids` se procesan todos; si no, se usa `expense_id`/fallback.
     RECLASSIFY_EXPENSE = "RECLASSIFY_EXPENSE"  # reventa (COGS) | insumo (OPEX) | otra categoría
+    # Fase 5: consulta libre de datos del negocio (read-only, LOW, sin aprobación)
+    ANSWER_DATA_QUERY = "ANSWER_DATA_QUERY"
 
 
 class RiskLevel(StrEnum):

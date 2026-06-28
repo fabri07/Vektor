@@ -33,6 +33,8 @@ ACTION_RISK_MAP = {
     ActionType.ANALYZE_MARKETING_DATA: RiskLevel.LOW,
     # Nivel 2: reclasificar un gasto muta su clasificación contable → requiere aprobación
     ActionType.RECLASSIFY_EXPENSE: RiskLevel.MEDIUM,
+    # Fase 5: consulta libre read-only — LOW, sin aprobación
+    ActionType.ANSWER_DATA_QUERY: RiskLevel.LOW,
 }
 
 

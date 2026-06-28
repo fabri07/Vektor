@@ -329,6 +329,21 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
             "a qué clientes les hago una promo",
         ],
     },
+    # ── Consulta libre de datos del negocio (Fase 5) ─────────────────────────
+    "consulta_libre": {
+        "desc": "Responder una pregunta libre sobre los datos del negocio (clientes, ventas, "
+        "gastos, stock, proveedores, caja, marketing). "
+        "Extraé `domain` en entities: clientes | ventas | gastos | stock | proveedores | caja | marketing.",
+        "triggers": [
+            "cuánto me debe Juan",
+            "quién fue mi mejor cliente",
+            "cuánto le compré a la Serenísima",
+            "cuánto vendí ayer",
+            "qué producto se vende más",
+            "cuánto gasté en sueldos",
+            "cómo viene mi caja",
+        ],
+    },
     # ── Sentinels (no clasificables; sin triggers) ────────────────────────────
     "pedir_aclaracion_sobre_archivo": {
         "desc": "Solicitar aclaración sobre intención con archivo adjunto",
@@ -451,6 +466,18 @@ _LEGACY_INTENT_ALIASES: dict[str, str] = {
 }
 _LEGACY_INTENT_ALIASES["generar_informe"] = "consultar_estado_negocio"
 
+# ── Dominio de consulta_libre → agente responsable (Fase 5) ───────────────────
+# Fallback: "agent_helper" (si domain no se reconoce o no viene en entities).
+DOMAIN_TO_AGENT: dict[str, str] = {
+    "clientes": "agent_client",
+    "ventas": "agent_income",
+    "gastos": "agent_expense",
+    "stock": "agent_stock",
+    "proveedores": "agent_supplier",
+    "caja": "agent_health",
+    "marketing": "agent_marketing",
+}
+
 # ── Intent → agente especializado ─────────────────────────────────────────────
 # Stage 2: los intents nuevos rutean a agent_income/agent_expense/agent_google.
 # Los aliases legacy se conservan en registry.py para PendingActions históricas.
@@ -488,6 +515,8 @@ INTENT_TO_AGENT: dict[str, str] = {
     "proyectar_caja": "agent_health",
     "analizar_clientes": "agent_client",
     "analizar_marketing": "agent_marketing",
+    # ── Fase 5: consulta libre (fallback; el ruteo real lo hace build_plan por domain) ──
+    "consulta_libre": "agent_helper",
     # ── Sentinels de aclaración ──
     "pedir_aclaracion_sobre_archivo": "agent_helper",
     "pedir_aclaracion_negocio": "agent_helper",
@@ -525,6 +554,8 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "proyectar_caja": ActionType.SIMULATE_SCENARIO,
     "analizar_clientes": ActionType.ANALYZE_SALES_DATA,
     "analizar_marketing": ActionType.ANALYZE_MARKETING_DATA,
+    # ── Fase 5: consulta libre ──
+    "consulta_libre": ActionType.ANSWER_DATA_QUERY,
     # ── Sentinels de aclaración ──
     "pedir_aclaracion_sobre_archivo": ActionType.ANSWER_HELP_REQUEST,
     "pedir_aclaracion_negocio": ActionType.ANSWER_HELP_REQUEST,
@@ -546,6 +577,8 @@ _INTENT_AWARE_ACTION_TYPES: frozenset[ActionType] = frozenset(
         ActionType.SIMULATE_SCENARIO,
         ActionType.ANSWER_HELP_REQUEST,
         ActionType.ANALYZE_MARKETING_DATA,
+        # Fase 5: mantener el patrón de inyección de _intent para consistencia
+        ActionType.ANSWER_DATA_QUERY,
     }
 )
 
@@ -715,6 +748,23 @@ def build_plan(intent: str, entities: dict[str, Any]) -> AgentTeamPlan:
             plan_id=plan_id,
             intent=intent,
             tasks=[task_health, task_upload],
+            requires_synthesis=False,
+        )
+
+    # ── consulta_libre → single-task al agente del dominio (Fase 5) ──────────
+    if intent == "consulta_libre":
+        domain = entities.get("domain")
+        agent = DOMAIN_TO_AGENT.get(domain, "agent_helper")  # type: ignore[arg-type]
+        task = AgentTask(
+            task_id=str(uuid.uuid4()),
+            agent=agent,
+            action_type=ActionType.ANSWER_DATA_QUERY,
+            entities={**entities, "domain": domain},
+        )
+        return AgentTeamPlan(
+            plan_id=plan_id,
+            intent=intent,
+            tasks=[task],
             requires_synthesis=False,
         )
 
