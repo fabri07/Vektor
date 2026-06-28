@@ -51,7 +51,7 @@ async def answer_data_query(
         f"Dominio: {domain}\n"
         f"Pregunta del dueño: {safe_question}\n\n"
         f"Datos disponibles:\n"
-        f"{json.dumps(structured_data, ensure_ascii=False, indent=2)}"
+        f"{json.dumps(structured_data, ensure_ascii=False, indent=2, default=str)}"
     )
 
     response = await client.messages.create(
