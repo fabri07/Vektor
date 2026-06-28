@@ -1019,8 +1019,22 @@ class AgentIncome(BaseAgent):
 
         ranking = analytics.rank_customers(sales_by_customer)
 
+        # Serializable: coerce date → isoformat string (json.dumps no acepta date)
+        ranking_clientes: list[dict[str, Any]] = [
+            {
+                "customer_id": r.get("customer_id"),
+                "customer_name": r.get("customer_name"),
+                "total": float(r.get("total", 0)),
+                "n_sales": r.get("n_sales"),
+                "avg_ticket": float(r["avg_ticket"]) if r.get("avg_ticket") is not None else None,
+                "last_sale_date": r["last_sale_date"].isoformat()
+                if hasattr(r.get("last_sale_date"), "isoformat")
+                else r.get("last_sale_date"),
+            }
+            for r in ranking["top"][:10]
+        ]
         structured_data: dict[str, Any] = {
-            "ranking_clientes": ranking["top"][:10],
+            "ranking_clientes": ranking_clientes,
             "ventas_por_producto": [
                 {
                     "product_id": s.get("product_id"),

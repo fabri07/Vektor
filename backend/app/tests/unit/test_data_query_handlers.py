@@ -13,7 +13,10 @@ Patrón: cliente Anthropic mockeado, repos mockeados con patch.
 
 from __future__ import annotations
 
+import json
+from datetime import date
 from decimal import Decimal
+from uuid import UUID
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -217,6 +220,8 @@ async def test_client_cross_tenant_isolation() -> None:
     assert "Carlos A" in names
     # Datos de tenant B no deben aparecer
     assert "Carlos B" not in names
+    # El repo fue llamado con el tenant correcto
+    sr.get_sales_by_customer.assert_called_once_with(UUID(_TENANT_A))
 
 
 # ── agent_income ──────────────────────────────────────────────────────────────
@@ -362,6 +367,8 @@ async def test_income_cross_tenant_isolation() -> None:
     names = [r.get("customer_name") for r in resp_a.result["structured_data"]["ranking_clientes"]]
     assert "Laura A" in names
     assert "Laura B" not in names
+    # El repo fue llamado con el tenant correcto
+    sr.get_sales_by_customer.assert_called_once_with(UUID(_TENANT_A))
 
 
 # ── agent_expense ─────────────────────────────────────────────────────────────
@@ -483,6 +490,9 @@ async def test_expense_cross_tenant_isolation() -> None:
     assert sd["total"] == pytest.approx(50000.0)
     cats = [c["category"] for c in sd["por_categoria"]]
     assert "RENT" in cats
+    # El repo fue llamado con el tenant correcto
+    call_args = er.expenses_by_category.call_args
+    assert call_args.args[0] == UUID(_TENANT_A)
 
 
 # ── agent_supplier ────────────────────────────────────────────────────────────
@@ -608,7 +618,7 @@ async def test_supplier_cross_tenant_isolation() -> None:
     ]
 
     with (
-        patch.object(agent, "_supplier_totals", new_callable=AsyncMock, return_value=suppliers_a),
+        patch.object(agent, "_supplier_totals", new_callable=AsyncMock, return_value=suppliers_a) as mock_st,
         patch.object(agent, "_critical_stock_for_order", new_callable=AsyncMock, return_value=[]),
     ):
         resp_a = await agent.process(_req(tenant_id=_TENANT_A), task=_task("agent_supplier"))
@@ -616,6 +626,135 @@ async def test_supplier_cross_tenant_isolation() -> None:
     names = [s["name"] for s in resp_a.result["structured_data"]["proveedores"]]
     assert "Proveedor Alfa" in names
     assert "Proveedor Beta" not in names
+    # El método fue llamado con el tenant correcto
+    call_args = mock_st.call_args
+    assert call_args.args[0] == UUID(_TENANT_A)
+
+
+# ── Regresión: json.dumps(structured_data) no falla con datetime.date ────────
+
+
+@pytest.mark.asyncio
+async def test_client_ranking_date_is_json_serializable() -> None:
+    """last_sale_date como datetime.date → structured_data serializable con json.dumps.
+
+    Regresión F5b-1 Finding 1: rank_customers pasa last_sale_date como date object;
+    json.dumps levantaba TypeError antes del fix.
+    """
+    from app.application.agents.client.agent import AgentClient
+
+    mock_db = MagicMock()
+    agent = AgentClient(db=mock_db)
+    agent.client = _make_client()
+
+    # last_sale_date como datetime.date real — el bug original
+    sales_data = [
+        {
+            "customer_id": "a",
+            "customer_name": "Ana",
+            "total": 5000.0,
+            "n_sales": 5,
+            "last_sale_date": date(2026, 6, 15),  # objeto date, NO string
+        },
+        {
+            "customer_id": "b",
+            "customer_name": "Beto",
+            "total": 12000.0,
+            "n_sales": 3,
+            "last_sale_date": None,  # puede ser None también
+        },
+    ]
+    balances_data: list = []
+    inactive_data: list = []
+
+    with (
+        patch(
+            "app.persistence.repositories.customer_repository.CustomerRepository"
+        ) as MockCR,
+        patch(
+            "app.persistence.repositories.transaction_repository.SaleRepository"
+        ) as MockSR,
+    ):
+        cr = AsyncMock()
+        cr.count_active = AsyncMock(return_value=2)
+        cr.get_inactive_customers = AsyncMock(return_value=inactive_data)
+        MockCR.return_value = cr
+
+        sr = AsyncMock()
+        sr.get_sales_by_customer = AsyncMock(return_value=sales_data)
+        sr.get_balances_by_customer = AsyncMock(return_value=balances_data)
+        MockSR.return_value = sr
+
+        resp = await agent.process(_req(), task=_task("agent_client"))
+
+    assert resp.status == "success"
+    sd = resp.result["structured_data"]
+    # No debe lanzar TypeError
+    serialized = json.dumps(sd)
+    assert serialized  # no vacío
+    # last_sale_date de Ana debe ser string ISO
+    top = sd["ranking_top"]
+    ana = next((r for r in top if r.get("customer_name") == "Ana"), None)
+    assert ana is not None
+    assert ana["last_sale_date"] == "2026-06-15"
+    # None se preserva como null
+    beto = next((r for r in top if r.get("customer_name") == "Beto"), None)
+    assert beto is not None
+    assert beto["last_sale_date"] is None
+
+
+@pytest.mark.asyncio
+async def test_income_ranking_date_is_json_serializable() -> None:
+    """last_sale_date como datetime.date en ranking_clientes → json.dumps no falla.
+
+    Regresión F5b-1 Finding 1 (income domain).
+    """
+    from app.application.agents.income.agent import AgentIncome
+
+    mock_db = MagicMock()
+    agent = AgentIncome(db=mock_db)
+    agent.client = _make_client()
+
+    sales_by_customer = [
+        {
+            "customer_id": "m1",
+            "customer_name": "Mario",
+            "total": 15000.0,
+            "n_sales": 10,
+            "last_sale_date": date(2026, 5, 20),  # objeto date real
+        }
+    ]
+    sales_by_product: list = []
+    ticket_data = {"ticket_promedio": Decimal("1500.00"), "n_transacciones": 10}
+
+    with (
+        patch(
+            "app.persistence.repositories.transaction_repository.SaleRepository"
+        ) as MockSR,
+        patch(
+            "app.application.services.deterministic_finance.calcular_ticket_promedio",
+            new_callable=AsyncMock,
+            return_value=ticket_data,
+        ),
+    ):
+        sr = AsyncMock()
+        sr.get_sales_by_customer = AsyncMock(return_value=sales_by_customer)
+        sr.get_sales_by_product = AsyncMock(return_value=sales_by_product)
+        MockSR.return_value = sr
+
+        resp = await agent.process(
+            _req(message="¿cuánto vendí?"), task=_task("agent_income")
+        )
+
+    assert resp.status == "success"
+    sd = resp.result["structured_data"]
+    # No debe lanzar TypeError
+    serialized = json.dumps(sd)
+    assert serialized
+    # last_sale_date de Mario debe ser string ISO
+    mario = next((r for r in sd["ranking_clientes"] if r.get("customer_name") == "Mario"), None)
+    assert mario is not None
+    assert mario["last_sale_date"] == "2026-05-20"
 
 
 # ── client property en agent_client y agent_expense ──────────────────────────

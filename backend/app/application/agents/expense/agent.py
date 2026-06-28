@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import uuid
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -349,6 +349,25 @@ class AgentExpense(BaseAgent):
             result={"summary": summary, "structured_data": structured or {}, "analysis": True},
         )
 
+    async def _expense_stats_and_anomalies(
+        self, tenant_id: uuid.UUID
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Helper compartido: stats por categoría (90d) + anomalías (sigma=2).
+
+        Centraliza las dos llamadas que _handle_expense_analysis y
+        _handle_data_query duplicaban verbatim.
+        """
+        from app.application.agents.shared import analytics  # noqa: PLC0415
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            ExpenseRepository,
+        )
+
+        assert self._db is not None, "_expense_stats_and_anomalies requiere DB"
+        repo = ExpenseRepository(self._db)
+        stats = await repo.get_expense_stats_by_category(tenant_id, days=90)
+        anomalies = analytics.detect_expense_anomalies(stats, sigma=2.0)
+        return stats, anomalies
+
     async def _handle_expense_analysis(
         self, request: AgentRequest, intent: str | None
     ) -> AgentResponse:
@@ -375,9 +394,7 @@ class AgentExpense(BaseAgent):
 
         # ── detectar_gastos_anomalos ──────────────────────────────────────────
         if intent == "detectar_gastos_anomalos":
-            from app.application.agents.shared import analytics  # noqa: PLC0415
-
-            stats = await repo.get_expense_stats_by_category(tenant_id, days=90)
+            stats, anomalies = await self._expense_stats_and_anomalies(tenant_id)
             if not stats:
                 return self._analysis_response(
                     request,
@@ -385,7 +402,6 @@ class AgentExpense(BaseAgent):
                     "Todavía no tengo suficientes gastos cargados (últimos 90 días) para "
                     "detectar valores fuera de lo normal.",
                 )
-            anomalies = analytics.detect_expense_anomalies(stats, sigma=2.0)
             if not anomalies:
                 return self._analysis_response(
                     request,
@@ -1061,9 +1077,6 @@ class AgentExpense(BaseAgent):
 
         Política no-invention: sin gastos → mensaje claro sin llamar al LLM.
         """
-        from datetime import timedelta  # noqa: PLC0415
-
-        from app.application.agents.shared import analytics  # noqa: PLC0415
         from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
             answer_data_query,
         )
@@ -1121,8 +1134,7 @@ class AgentExpense(BaseAgent):
             )
 
         total = round(sum(c["total"] for c in by_cat), 2)
-        stats = await repo.get_expense_stats_by_category(tenant_id, days=90)
-        anomalies = analytics.detect_expense_anomalies(stats, sigma=2.0)
+        _, anomalies = await self._expense_stats_and_anomalies(tenant_id)
 
         structured_data: dict[str, Any] = {
             "por_categoria": by_cat[:10],
