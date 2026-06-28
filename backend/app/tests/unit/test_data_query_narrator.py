@@ -31,8 +31,10 @@ class _FakeResponse:
     usage = _FakeUsage()
 
 
-def _make_client(response: object = _FakeResponse()) -> MagicMock:
+def _make_client(response: object | None = None) -> MagicMock:
     """Devuelve un cliente Anthropic mockeado que retorna `response`."""
+    if response is None:
+        response = _FakeResponse()
     client = MagicMock()
     client.messages.create = AsyncMock(return_value=response)
     return client

@@ -754,7 +754,7 @@ def build_plan(intent: str, entities: dict[str, Any]) -> AgentTeamPlan:
     # ── consulta_libre → single-task al agente del dominio (Fase 5) ──────────
     if intent == "consulta_libre":
         domain = entities.get("domain")
-        agent = DOMAIN_TO_AGENT.get(domain, "agent_helper")  # type: ignore[arg-type]
+        agent = DOMAIN_TO_AGENT.get(domain or "", "agent_helper")
         task = AgentTask(
             task_id=str(uuid.uuid4()),
             agent=agent,
