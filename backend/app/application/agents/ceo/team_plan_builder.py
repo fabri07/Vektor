@@ -317,6 +317,18 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
             "a quién le cobro primero",
         ],
     },
+    "analizar_marketing": {
+        "desc": "Analizar marketing: rendimiento de redes/ads vs ventas, ROI de publicidad, "
+        "sugerir campañas",
+        "triggers": [
+            "cómo anduvo la publi",
+            "cuánto gasté en publicidad",
+            "me conviene la publicidad",
+            "rendimiento de mis redes",
+            "armame una campaña",
+            "a qué clientes les hago una promo",
+        ],
+    },
     # ── Sentinels (no clasificables; sin triggers) ────────────────────────────
     "pedir_aclaracion_sobre_archivo": {
         "desc": "Solicitar aclaración sobre intención con archivo adjunto",
@@ -416,6 +428,14 @@ _ANALYTIC_FAMILIES: dict[str, dict[str, Any]] = {
             "explicar_datos": "explicar_que_puedo_hacer_con_datos",
         },
     },
+    "analizar_marketing": {
+        "default": "analizar_marketing",
+        "types": {
+            "dashboard": "analizar_marketing",
+            "roi_ads": "analizar_roi_ads",
+            "sugerir_campana": "sugerir_campana",
+        },
+    },
 }
 
 # ── Aliases legacy → intent consolidado (red de seguridad para requests en vuelo) ──
@@ -467,6 +487,7 @@ INTENT_TO_AGENT: dict[str, str] = {
     "preparar_pedido_sugerido": "agent_supplier",
     "proyectar_caja": "agent_health",
     "analizar_clientes": "agent_client",
+    "analizar_marketing": "agent_marketing",
     # ── Sentinels de aclaración ──
     "pedir_aclaracion_sobre_archivo": "agent_helper",
     "pedir_aclaracion_negocio": "agent_helper",
@@ -503,6 +524,7 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "preparar_pedido_sugerido": ActionType.CREATE_PURCHASE_SUGGESTION,
     "proyectar_caja": ActionType.SIMULATE_SCENARIO,
     "analizar_clientes": ActionType.ANALYZE_SALES_DATA,
+    "analizar_marketing": ActionType.ANALYZE_MARKETING_DATA,
     # ── Sentinels de aclaración ──
     "pedir_aclaracion_sobre_archivo": ActionType.ANSWER_HELP_REQUEST,
     "pedir_aclaracion_negocio": ActionType.ANSWER_HELP_REQUEST,
@@ -523,6 +545,7 @@ _INTENT_AWARE_ACTION_TYPES: frozenset[ActionType] = frozenset(
         ActionType.ANALYZE_SUPPLIER_DATA,
         ActionType.SIMULATE_SCENARIO,
         ActionType.ANSWER_HELP_REQUEST,
+        ActionType.ANALYZE_MARKETING_DATA,
     }
 )
 

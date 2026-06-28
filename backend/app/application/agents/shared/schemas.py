@@ -46,6 +46,7 @@ class ActionType(StrEnum):
     )
     ANALYZE_SUPPLIER_DATA = "ANALYZE_SUPPLIER_DATA"  # ranking, dependencia, pedidos sugeridos
     SIMULATE_SCENARIO = "SIMULATE_SCENARIO"  # escenarios financieros what-if
+    ANALYZE_MARKETING_DATA = "ANALYZE_MARKETING_DATA"  # métricas redes, ads vs ventas, ROI
     # Nivel 2: reclasificación contable de un gasto (muta clasificación → MEDIUM)
     #
     # Payload de RECLASSIFY_EXPENSE (compatible singular + masivo):

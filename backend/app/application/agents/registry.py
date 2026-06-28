@@ -96,6 +96,11 @@ def get_sub_agent(
 
         return AgentClient(db=db)
 
+    if name == "agent_marketing":
+        from app.application.agents.marketing.agent import AgentMarketing  # noqa: PLC0415
+
+        return AgentMarketing(db=db)
+
     # ── Alias deprecado (Stage 2a) ────────────────────────────────────────────
     if name == "agent_cash":
         logger.warning(

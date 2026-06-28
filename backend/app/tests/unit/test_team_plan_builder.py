@@ -15,8 +15,10 @@ def test_intent_catalog_size():
     # Sprint 19: catálogo consolidado. 11 escritura + 2 informes + 3 google +
     # 1 ayuda + 1 desconocido + 8 familias analíticas + 2 sentinels aclaración = 28.
     # Nivel 2: + reclasificar_gasto = 29.
+    # v4 Fase 2: + analizar_clientes = 30.
+    # v4 Fase 4: + analizar_marketing = 31.
     # Las 35 variantes analíticas viejas ahora son valores de `analysis_type`.
-    assert len(INTENT_CATALOG) == 29
+    assert len(INTENT_CATALOG) == 31
 
 
 def test_all_intents_have_agent_mapping():
@@ -261,3 +263,60 @@ def test_tool_broker_importable():
     from app.application.agents.google.tool_broker import GoogleToolBroker
 
     assert GoogleToolBroker is not None
+
+
+# ── v4 Fase 4: analizar_marketing ────────────────────────────────────────────
+
+
+def test_analizar_marketing_in_intent_catalog():
+    """analizar_marketing está en INTENT_CATALOG con sus triggers."""
+    assert "analizar_marketing" in INTENT_CATALOG
+    assert len(INTENT_CATALOG["analizar_marketing"]["triggers"]) > 0
+
+
+def test_analizar_marketing_to_agent_mapping():
+    """analizar_marketing rutea a agent_marketing."""
+    assert INTENT_TO_AGENT["analizar_marketing"] == "agent_marketing"
+
+
+def test_analizar_marketing_to_action_type_mapping():
+    """analizar_marketing usa ANALYZE_MARKETING_DATA."""
+    assert INTENT_TO_ACTION_TYPE["analizar_marketing"] == ActionType.ANALYZE_MARKETING_DATA
+
+
+def test_analyze_marketing_data_in_risk_engine_low():
+    """ANALYZE_MARKETING_DATA está en RiskEngine como LOW, sin aprobación."""
+    from app.application.agents.shared.risk_engine import ACTION_RISK_MAP, RiskEngine
+    from app.application.agents.shared.schemas import RiskLevel
+
+    assert ACTION_RISK_MAP[ActionType.ANALYZE_MARKETING_DATA] == RiskLevel.LOW
+    assert RiskEngine.evaluate(ActionType.ANALYZE_MARKETING_DATA) == RiskLevel.LOW
+    assert RiskEngine.requires_approval(ActionType.ANALYZE_MARKETING_DATA) is False
+
+
+def test_analyze_marketing_data_in_intent_aware_action_types():
+    """ANALYZE_MARKETING_DATA está en _INTENT_AWARE_ACTION_TYPES."""
+    from app.application.agents.ceo.team_plan_builder import _INTENT_AWARE_ACTION_TYPES
+
+    assert ActionType.ANALYZE_MARKETING_DATA in _INTENT_AWARE_ACTION_TYPES
+
+
+def test_build_plan_analizar_marketing_default():
+    """build_plan('analizar_marketing') genera 1 tarea con agent_marketing."""
+    plan = build_plan("analizar_marketing", {})
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].agent == "agent_marketing"
+    assert plan.tasks[0].action_type == ActionType.ANALYZE_MARKETING_DATA
+    assert plan.tasks[0].entities["_intent"] == "analizar_marketing"
+
+
+def test_build_plan_analizar_marketing_roi_ads():
+    """analizar_marketing con analysis_type='roi_ads' → _intent='analizar_roi_ads'."""
+    plan = build_plan("analizar_marketing", {"analysis_type": "roi_ads"})
+    assert plan.tasks[0].entities["_intent"] == "analizar_roi_ads"
+
+
+def test_build_plan_analizar_marketing_sugerir_campana():
+    """analizar_marketing con analysis_type='sugerir_campana' → _intent='sugerir_campana'."""
+    plan = build_plan("analizar_marketing", {"analysis_type": "sugerir_campana"})
+    assert plan.tasks[0].entities["_intent"] == "sugerir_campana"

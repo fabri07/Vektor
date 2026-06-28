@@ -19,6 +19,22 @@ VALID_ACTION_TYPES: frozenset[str] = frozenset(
         "CLASSIFY_GMAIL_MESSAGE",
         "SYNC_TO_GOOGLE",
         "CREATE_CALENDAR_EVENT",
+        # Stage 4: Google writes via broker
+        "UPLOAD_TO_DRIVE",
+        "CREATE_GOOGLE_DOC",
+        "APPEND_TO_SHEET",
+        # Sprint 17: acciones analíticas read-only
+        "ANALYZE_FILE",
+        "ANALYZE_PRICES",
+        "ANALYZE_STOCK_DATA",
+        "ANALYZE_SALES_DATA",
+        "ANALYZE_EXPENSE_DATA",
+        "ANALYZE_SUPPLIER_DATA",
+        "SIMULATE_SCENARIO",
+        # Nivel 2: reclasificación contable
+        "RECLASSIFY_EXPENSE",
+        # v4: marketing analytics read-only
+        "ANALYZE_MARKETING_DATA",
     }
 )
 

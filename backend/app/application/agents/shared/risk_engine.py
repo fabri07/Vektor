@@ -30,6 +30,7 @@ ACTION_RISK_MAP = {
     ActionType.ANALYZE_EXPENSE_DATA: RiskLevel.LOW,
     ActionType.ANALYZE_SUPPLIER_DATA: RiskLevel.LOW,
     ActionType.SIMULATE_SCENARIO: RiskLevel.LOW,
+    ActionType.ANALYZE_MARKETING_DATA: RiskLevel.LOW,
     # Nivel 2: reclasificar un gasto muta su clasificación contable → requiere aprobación
     ActionType.RECLASSIFY_EXPENSE: RiskLevel.MEDIUM,
 }
