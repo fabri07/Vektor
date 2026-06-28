@@ -127,11 +127,12 @@ class TestResolveLegacyDiscriminatorByFamily:
             ("analizar_gastos", "anomalos", "detectar_gastos_anomalos"),
             ("analizar_gastos", "costos_fijos_variables", "analizar_costos_fijos_variables"),
             ("analizar_gastos", "punto_equilibrio", "calcular_punto_equilibrio"),
-            # analizar_proveedores (4 tipos)
+            # analizar_proveedores (3 tipos). El sub-tipo `pedido_sugerido` se
+            # promovió a intent top-level `preparar_pedido_sugerido` en F3 (Véktor v4)
+            # → ya NO es un sub-análisis de esta familia, por eso no figura acá.
             ("analizar_proveedores", "ranking", "analizar_proveedores"),
             ("analizar_proveedores", "comparacion_precios", "comparar_precios_proveedores"),
             ("analizar_proveedores", "dependencia", "detectar_dependencia_proveedor"),
-            ("analizar_proveedores", "pedido_sugerido", "preparar_pedido_sugerido"),
             # proyectar_caja (3 tipos)
             ("proyectar_caja", "proyeccion", "proyectar_caja"),
             ("proyectar_caja", "alerta_liquidez", "alertar_falta_liquidez"),

@@ -70,6 +70,51 @@ async def test_income_cash_inflow_from_task_entities():
 
 
 @pytest.mark.asyncio
+async def test_income_cash_inflow_resolves_customer_name_to_id(monkeypatch):
+    """Regresión (review C5): el cobro con `cliente` (nombre, lo que extrae el CEO)
+    resuelve el customer_id vía el repo y lo inyecta en structured_data.
+    """
+    import uuid as _uuid
+
+    from app.application.agents.income.agent import AgentIncome
+    from app.persistence.repositories import customer_repository as _cr
+
+    _cid = _uuid.uuid4()
+    _fake_customer = MagicMock()
+    _fake_customer.id = _cid
+
+    async def _fake_find_by_name(self, name_normalized, tenant_id):  # noqa: ANN001
+        return _fake_customer if name_normalized == "juan" else None
+
+    monkeypatch.setattr(_cr.CustomerRepository, "find_by_name", _fake_find_by_name)
+
+    agent = AgentIncome(db=MagicMock())
+    task = _task(ActionType.REGISTER_CASH_INFLOW, {"amount": "5000", "cliente": "Juan"})
+    result = await agent.process(_req("cobré $5000 a Juan"), task=task)
+
+    assert result.result["structured_data"]["customer_id"] == str(_cid)
+
+
+@pytest.mark.asyncio
+async def test_income_cash_inflow_unknown_customer_name_leaves_unlinked(monkeypatch):
+    """Si el nombre no matchea ningún cliente, el cobro NO se bloquea y queda sin vincular."""
+    from app.application.agents.income.agent import AgentIncome
+    from app.persistence.repositories import customer_repository as _cr
+
+    async def _fake_find_by_name(self, name_normalized, tenant_id):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(_cr.CustomerRepository, "find_by_name", _fake_find_by_name)
+
+    agent = AgentIncome(db=MagicMock())
+    task = _task(ActionType.REGISTER_CASH_INFLOW, {"amount": "5000", "cliente": "Inexistente"})
+    result = await agent.process(_req("cobré $5000 a Inexistente"), task=task)
+
+    assert result.status == "requires_approval"
+    assert "customer_id" not in result.result["structured_data"]
+
+
+@pytest.mark.asyncio
 async def test_income_cash_inflow_without_amount_asks_clarification():
     """Cobro sin monto en el mensaje ni en task → requires_clarification."""
     from app.application.agents.income.agent import AgentIncome

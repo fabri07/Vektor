@@ -537,10 +537,26 @@ class AgentIncome(BaseAgent):
             "notes": request.message.strip(),
         }
         # Fase 2: vínculo cobro → cliente. Si el CEO/extractor resolvió un
-        # customer_id, lo propagamos a structured_data para que save_cash_inflow
-        # lo vincule. No inventamos uno si no viene.
+        # customer_id, lo propagamos. Si solo trae el nombre del cliente
+        # (`cliente`/`customer_name`, lo usual desde el chat), lo resolvemos a un
+        # id determinísticamente vía el repo (match exacto, excluye centinela). Si
+        # es ambiguo o no existe, seguimos sin vincular — el cobro NO se bloquea.
         if pre_entities.get("customer_id"):
             entities["customer_id"] = pre_entities["customer_id"]
+        else:
+            _customer_name = pre_entities.get("customer_name") or pre_entities.get("cliente")
+            if _customer_name and self._db is not None:
+                _tenant_id = await self._tenant_uuid(request)
+                if _tenant_id is not None:
+                    from app.persistence.repositories.customer_repository import (  # noqa: PLC0415
+                        CustomerRepository,
+                    )
+
+                    _match = await CustomerRepository(self._db).find_by_name(
+                        str(_customer_name).strip().lower(), _tenant_id
+                    )
+                    if _match is not None:
+                        entities["customer_id"] = str(_match.id)
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,

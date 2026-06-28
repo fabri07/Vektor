@@ -45,6 +45,29 @@ class CustomerRepository:
         result = await self._session.execute(select(Customer).where(*conditions))
         return result.scalar_one_or_none()
 
+    async def find_by_name(
+        self,
+        name_normalized: str,
+        tenant_id: UUID,
+    ) -> Customer | None:
+        """Busca un cliente activo del tenant por nombre normalizado (lower+trim).
+
+        Excluye el centinela "Local". Devuelve el match exacto o None (sin fuzzy:
+        el llamador decide qué hacer ante ambigüedad). Usado por el vínculo
+        cobro→cliente (Fase 2) para resolver el nombre que extrae el CEO a un id.
+        """
+        result = await self._session.execute(
+            select(Customer)
+            .where(
+                func.lower(func.trim(Customer.name)) == name_normalized,
+                Customer.tenant_id == tenant_id,
+                Customer.deactivated_at.is_(None),
+                _not_sentinel(),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def list_by_tenant(
         self,
         tenant_id: UUID,

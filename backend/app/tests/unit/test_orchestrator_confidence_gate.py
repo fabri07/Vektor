@@ -382,6 +382,57 @@ async def test_gate_confidence_float_absent_dispatches_normally(mock_db, mock_re
 
 
 @pytest.mark.asyncio
+async def test_gate_does_not_clobber_successful_rescue(mock_db, mock_redis):
+    """Regresión (review B3): un intent_desconocido con confianza baja (0.3) que el
+    rescate determinístico convierte en un intent válido NO debe caer en el gate de
+    confianza — el `confidence_float` original era de la clasificación descartada.
+    """
+    request = _make_request()
+    _mock_llm_call = LLMCall(
+        source="agent_chat", model="claude-sonnet-4-6", input_tokens=100, output_tokens=200
+    )
+
+    with (
+        patch(f"{ORCHESTRATOR}.AgentCEO") as mock_ceo_cls,
+        patch(f"{ORCHESTRATOR}.TeamPlanExecutor") as mock_executor,
+        patch(f"{ORCHESTRATOR}.get_anthropic_async_client"),
+        patch(f"{ORCHESTRATOR}.AgentChat") as mock_agent_chat_cls,
+        patch(f"{ORCHESTRATOR}.ConversationService") as mock_conv_svc_cls,
+        patch.object(
+            ChatOrchestrator,
+            "_rescue_unknown_intent",
+            new=AsyncMock(return_value=("analizar_ventas", {})),
+        ),
+    ):
+        mock_ceo_cls.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_response(
+                req.request_id,
+                intent="intent_desconocido",
+                confidence_float=0.3,  # baja confianza de la clasificación original
+            )
+        )
+        sub_resp = _make_agent_response(request.request_id)
+        mock_executor.return_value.execute = AsyncMock(return_value=[sub_resp])
+        mock_agent_chat_cls.return_value.generate_response = AsyncMock(
+            return_value=("OK.", _mock_llm_call)
+        )
+        conv_svc = AsyncMock()
+        conv_svc.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        conv_svc.add_turn = AsyncMock()
+        conv_svc.persist = AsyncMock()
+        mock_conv_svc_cls.return_value = conv_svc
+
+        orchestrator = ChatOrchestrator()
+        response = await orchestrator.handle(
+            request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4()
+        )
+
+    # El rescate despachó al sub-agente; el gate NO cortó con requires_clarification.
+    mock_executor.return_value.execute.assert_awaited_once()
+    assert response.status != "requires_clarification"
+
+
+@pytest.mark.asyncio
 async def test_gate_exact_threshold_dispatches(mock_db, mock_redis):
     """confidence_float == 0.72 (umbral exacto) → despacha (no activa el gate)."""
     request = _make_request()

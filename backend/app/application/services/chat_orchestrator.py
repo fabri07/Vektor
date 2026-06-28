@@ -324,6 +324,11 @@ class ChatOrchestrator:
         _should_rescue = ceo_intent in ("intent_desconocido", "pedir_aclaracion_negocio") or (
             ceo_intent == "pedir_aclaracion_sobre_archivo" and bool(effective_attachments)
         )
+        # ¿El rescate determinístico resolvió la ambigüedad cambiando el intent a uno
+        # despachable? Si fue así, NO aplicamos el gate de confianza más abajo: el
+        # `confidence_float` que trae `ceo_response.result` es el de la clasificación
+        # ORIGINAL (p. ej. intent_desconocido con 0.3) y clobbearía el rescate.
+        _rescue_applied = False
         if _should_rescue:
             from app.application.agents.ceo.team_plan_builder import build_plan  # noqa: PLC0415
 
@@ -346,6 +351,7 @@ class ChatOrchestrator:
                 plan = build_plan(rescued_intent, rescued_entities)
                 raw_plan = plan.model_dump()
                 ceo_target = plan.tasks[0].agent if plan.tasks else ceo_target
+                _rescue_applied = rescued_intent != _original_intent
 
         if inherited_attachment_available and self._is_file_intent(ceo_intent):
             request.attachments = inherited_attachments
@@ -396,7 +402,8 @@ class ChatOrchestrator:
         # sin despachar al sub-agente (sin tokens adicionales de LLM).
         _confidence_float: float | None = ceo_response.result.get("confidence_float")
         if (
-            _confidence_float is not None
+            not _rescue_applied
+            and _confidence_float is not None
             and _confidence_float < _CLARIFICATION_CONFIDENCE_THRESHOLD
             and ceo_intent is not None
             and ceo_intent not in _NO_AGENT_INTENTS
