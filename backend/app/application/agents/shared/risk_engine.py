@@ -35,6 +35,8 @@ ACTION_RISK_MAP = {
     ActionType.RECLASSIFY_EXPENSE: RiskLevel.MEDIUM,
     # Fase 5: consulta libre read-only — LOW, sin aprobación
     ActionType.ANSWER_DATA_QUERY: RiskLevel.LOW,
+    # v4 F6a: recordatorio WhatsApp click-to-chat — LOCAL, MEDIUM (requiere aprobación)
+    ActionType.PREPARE_WHATSAPP_MESSAGE: RiskLevel.MEDIUM,
 }
 
 

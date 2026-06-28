@@ -18,8 +18,9 @@ def test_intent_catalog_size():
     # v4 Fase 2: + analizar_clientes = 30.
     # v4 Fase 4: + analizar_marketing = 31.
     # v4 Fase 5: + consulta_libre = 32.
+    # v4 F6a: + recordar_por_whatsapp = 33.
     # Las 35 variantes analíticas viejas ahora son valores de `analysis_type`.
-    assert len(INTENT_CATALOG) == 32
+    assert len(INTENT_CATALOG) == 33
 
 
 def test_all_intents_have_agent_mapping():

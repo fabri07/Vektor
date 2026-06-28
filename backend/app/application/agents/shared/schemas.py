@@ -61,6 +61,8 @@ class ActionType(StrEnum):
     RECLASSIFY_EXPENSE = "RECLASSIFY_EXPENSE"  # reventa (COGS) | insumo (OPEX) | otra categoría
     # Fase 5: consulta libre de datos del negocio (read-only, LOW, sin aprobación)
     ANSWER_DATA_QUERY = "ANSWER_DATA_QUERY"
+    # v4 F6a: recordatorio de cobranza por WhatsApp click-to-chat (LOCAL, MEDIUM)
+    PREPARE_WHATSAPP_MESSAGE = "PREPARE_WHATSAPP_MESSAGE"
 
 
 class RiskLevel(StrEnum):

@@ -9,7 +9,13 @@ Para activarlo en una fase posterior:
   1. Verificar la app en Meta Business + alta del número (WHATSAPP_PHONE_ID).
   2. Setear ENABLE_WHATSAPP=true + WHATSAPP_TOKEN + WHATSAPP_PHONE_ID.
   3. Implementar la llamada HTTP marcada con el TODO de abajo.
+
+`build_click_to_chat_link` es PURO (sin HTTP, sin feature flag): construye un link
+wa.me que el frontend abre para que el dueño envíe desde su teléfono (v4 F6a).
 """
+
+import re
+from urllib.parse import quote
 
 from app.config.settings import get_settings
 from app.integrations.communication.base import ChannelNotConfigured, MessageChannel
@@ -19,7 +25,30 @@ logger = get_logger(__name__)
 
 
 class WhatsAppChannel(MessageChannel):
-    """Canal WhatsApp dormido — skeleton sin envío HTTP real."""
+    """Canal WhatsApp dormido — skeleton sin envío HTTP real.
+
+    `build_click_to_chat_link` es estático y puro: no requiere instancia ni flag.
+    """
+
+    # ── Link builder — puro, sin HTTP, sin feature flag (v4 F6a) ─────────────
+
+    @staticmethod
+    def build_click_to_chat_link(to: str, body: str) -> str:
+        """Construye un link wa.me/<solo-digitos>?text=<urlencoded>.
+
+        `to` = teléfono AR; normaliza a dígitos con código de país.
+        `body` se urlencodea con urllib.parse.quote. No hace HTTP.
+
+        Supuesto de normalización (espejo razonable de frontend/src/lib/fiscal.ts):
+        1. Quitar todo lo no-dígito del número.
+        2. Si el resultado no empieza con "54" (código de país Argentina), se
+           antepone "54". Cubre números locales como "1134567890" → "541134567890".
+        """
+        digits = re.sub(r"\D", "", to)
+        if not digits.startswith("54"):
+            digits = "54" + digits
+        encoded_body = quote(body)
+        return f"https://wa.me/{digits}?text={encoded_body}"
 
     def __init__(self) -> None:
         self._settings = get_settings()

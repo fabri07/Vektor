@@ -37,6 +37,8 @@ VALID_ACTION_TYPES: frozenset[str] = frozenset(
         "ANALYZE_MARKETING_DATA",
         # Fase 5: consulta libre de datos del negocio (read-only, LOW)
         "ANSWER_DATA_QUERY",
+        # v4 F6a: recordatorio WhatsApp click-to-chat (LOCAL, MEDIUM)
+        "PREPARE_WHATSAPP_MESSAGE",
     }
 )
 

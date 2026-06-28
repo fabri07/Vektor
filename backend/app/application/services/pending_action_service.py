@@ -379,6 +379,90 @@ async def _execute_reclassify_expense(
     )
 
 
+async def _execute_prepare_whatsapp(
+    action: PendingAction,
+    db: AsyncSession,
+    payload: dict[str, Any],
+) -> None:
+    """Construye el link wa.me y registra CommunicationLog + ExternalOperationLog.
+
+    Gate de aislamiento: valida que el recipient_id pertenece al tenant antes de
+    continuar. Si no pertenece → ValueError("recipient_not_in_tenant") → FAILED.
+    No hace HTTP a Meta. El link wa.me lo abre el frontend.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services.external_operation_service import (  # noqa: PLC0415
+        record_external_operation,
+    )
+    from app.integrations.communication.whatsapp_channel import (  # noqa: PLC0415
+        WhatsAppChannel,
+    )
+    from app.persistence.models.communication_log import CommunicationLog  # noqa: PLC0415
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+
+    recipient_id = uuid.UUID(payload["recipient_id"])
+
+    # ── Gate de aislamiento: validar que el customer pertenece al tenant ──────
+    result = await db.execute(
+        select(Customer).where(
+            Customer.id == recipient_id,
+            Customer.tenant_id == action.tenant_id,
+        )
+    )
+    customer = result.scalar_one_or_none()
+    if customer is None:
+        logger.warning(
+            "execute_prepare_whatsapp: recipient_not_in_tenant",
+            action_id=str(action.id),
+            recipient_id=str(recipient_id),
+            tenant_id=str(action.tenant_id),
+        )
+        raise ValueError("recipient_not_in_tenant")
+
+    to = payload.get("to") or (customer.phone or "")
+    body = str(payload.get("body") or "")
+
+    # ── Construir link wa.me (sin HTTP) ──────────────────────────────────────
+    url = WhatsAppChannel.build_click_to_chat_link(to, body)
+
+    # ── Registrar en CommunicationLog ────────────────────────────────────────
+    comm_log = CommunicationLog(
+        tenant_id=action.tenant_id,
+        recipient_type="customer",
+        recipient_id=recipient_id,
+        channel="whatsapp",
+        body=body,
+        status="sent",
+    )
+    db.add(comm_log)
+
+    # ── Registrar en ExternalOperationLog ────────────────────────────────────
+    await record_external_operation(
+        db,
+        tenant_id=action.tenant_id,
+        operation_type="whatsapp_clicklink",
+        provider="whatsapp",
+        status="sent",
+        user_id=action.user_id,
+        request_payload={"to": to},
+        response_payload={"url": url},
+    )
+
+    # ── Stash del resultado para el frontend ─────────────────────────────────
+    action.payload = {
+        **(action.payload or {}),
+        "result": {"url": url, "body": body, "to": to, "channel": "whatsapp"},
+    }
+
+    logger.info(
+        "prepare_whatsapp_link_built",
+        action_id=str(action.id),
+        recipient_id=str(recipient_id),
+        tenant_id=str(action.tenant_id),
+    )
+
+
 async def execute_pending_action(
     action: PendingAction,
     db: AsyncSession,
@@ -784,6 +868,9 @@ async def execute_pending_action(
 
     elif action.action_type == ActionType.RECLASSIFY_EXPENSE:
         await _execute_reclassify_expense(action, db, payload)
+
+    elif action.action_type == ActionType.PREPARE_WHATSAPP_MESSAGE:
+        await _execute_prepare_whatsapp(action, db, payload)
 
     elif action.action_type == ActionType.UPLOAD_TO_DRIVE:
         broker = _make_google_broker(action)

@@ -1,13 +1,15 @@
-"""AgentClient — análisis de clientes para Véktor v4 (Fase 2).
+"""AgentClient — análisis de clientes para Véktor v4 (Fase 2) y cobranza WhatsApp (F6a).
 
 Responsabilidades:
 - Analizar clientes por facturación (analizar_clientes)
 - Detectar clientes inactivos (detectar_clientes_inactivos)
 - Analizar cuentas por cobrar (analizar_cuentas_por_cobrar)
 - Priorizar cobranza (priorizar_cobranza)
+- Preparar recordatorio de cobranza por WhatsApp click-to-chat (PREPARE_WHATSAPP_MESSAGE)
 
-Handler movido desde AgentIncome. Reusa ActionType.ANALYZE_SALES_DATA (LOW risk).
-No toca RiskEngine, sin ActionType nuevo, sin migración.
+F6a: PREPARE_WHATSAPP_MESSAGE es LOCAL y MEDIUM. El handler determina el destinatario
+(cliente con mayor saldo si no se especifica), arma el cuerpo determinístico y emite
+requires_approval. La ejecución (link wa.me) corre en PendingActionService.
 """
 
 from __future__ import annotations
@@ -62,6 +64,9 @@ class AgentClient(BaseAgent):
 
         if action_type == ActionType.ANALYZE_SALES_DATA:
             return await self._handle_customer_analysis(request, analysis_intent)
+
+        if action_type == ActionType.PREPARE_WHATSAPP_MESSAGE:
+            return await self._handle_whatsapp_reminder(request, task)
 
         # Fallback cortés para cualquier otra acción (no reventar)
         return self._analysis_response(
@@ -250,6 +255,151 @@ class AgentClient(BaseAgent):
                 "total_sales": ranking["total_sales"],
                 "top": ranking["top"],
             },
+        )
+
+    # ── F6a: PREPARE_WHATSAPP_MESSAGE — recordatorio de cobranza ─────────────
+
+    async def _handle_whatsapp_reminder(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Prepara un recordatorio de cobranza por WhatsApp para el mayor deudor (o el
+        especificado en entities). MEDIUM → requires_approval.
+
+        Política no-invention:
+        - Sin deudores (balance > 0): status="success", mensaje claro, sin PendingAction.
+        - Sin teléfono cargado: status="requires_clarification", pide completar ficha.
+
+        El cuerpo es DETERMINÍSTICO (template), nunca un LLM.
+        """
+        from app.persistence.repositories.customer_repository import (  # noqa: PLC0415
+            CustomerRepository,
+        )
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            SaleRepository,
+        )
+
+        tenant_id = await self._tenant_uuid(request)
+        if self._db is None or tenant_id is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.MEDIUM,
+                message="Necesito acceso a tus clientes para preparar el recordatorio.",
+            )
+
+        entities: dict[str, Any] = (getattr(task, "entities", {}) or {})
+        customer_id_raw = entities.get("customer_id")
+
+        sale_repo = SaleRepository(self._db)
+        customer_repo = CustomerRepository(self._db)
+
+        customer = None
+        balance = 0.0
+
+        # ── Resolver por customer_id explícito ───────────────────────────────
+        if customer_id_raw:
+            try:
+                c_id = uuid.UUID(str(customer_id_raw))
+                candidate = await customer_repo.get_by_id(c_id, tenant_id)
+                if candidate is not None and not candidate.is_sentinel:
+                    # Buscar su saldo en la lista de balances
+                    balances = await sale_repo.get_balances_by_customer(tenant_id)
+                    for b in balances:
+                        if str(b["customer_id"]) == str(c_id):
+                            balance = float(b.get("balance") or 0)
+                            break
+                    customer = candidate
+            except (ValueError, TypeError):
+                pass
+
+        # ── Si no se encontró, tomar el mayor deudor (excluir centinela) ────
+        if customer is None:
+            balances = await sale_repo.get_balances_by_customer(tenant_id)
+            debtors = [b for b in balances if float(b.get("balance") or 0) > 0]
+            if not debtors:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=self.agent_name,
+                    status="success",
+                    risk_level=RiskLevel.LOW,
+                    requires_approval=False,
+                    confidence=Confidence.HIGH,
+                    message="No tenés clientes con saldo pendiente.",
+                )
+            for debtor in debtors:
+                try:
+                    c_id = uuid.UUID(str(debtor["customer_id"]))
+                    candidate = await customer_repo.get_by_id(c_id, tenant_id)
+                    if candidate is not None and not candidate.is_sentinel:
+                        customer = candidate
+                        balance = float(debtor.get("balance") or 0)
+                        break
+                except (ValueError, TypeError):
+                    continue
+
+            if customer is None:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=self.agent_name,
+                    status="success",
+                    risk_level=RiskLevel.LOW,
+                    requires_approval=False,
+                    confidence=Confidence.HIGH,
+                    message="No tenés clientes con saldo pendiente.",
+                )
+
+        # ── Sin teléfono → pide completar la ficha ───────────────────────────
+        if not customer.phone:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.MEDIUM,
+                question=(
+                    "Ese cliente no tiene teléfono cargado. "
+                    "Agregalo en su ficha y lo reintento."
+                ),
+                message=(
+                    "Ese cliente no tiene teléfono cargado. "
+                    "Agregalo en su ficha y lo reintento."
+                ),
+            )
+
+        # ── Cuerpo determinístico (sin LLM) ──────────────────────────────────
+        nombre = customer.name or "cliente"
+        body = (
+            f"Hola {nombre}, te recuerdo que tenés un saldo pendiente de "
+            f"${balance:,.0f} con nosotros. ¡Gracias!"
+        ).replace(",", ".")  # formato AR de miles con punto
+
+        structured_data: dict[str, Any] = {
+            "recipient_type": "customer",
+            "recipient_id": str(customer.id),
+            "to": customer.phone,
+            "body": body,
+        }
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_approval",
+            risk_level=RiskLevel.MEDIUM,
+            requires_approval=True,
+            confidence=Confidence.HIGH,
+            result={
+                "action_type": ActionType.PREPARE_WHATSAPP_MESSAGE,
+                "summary": f"Enviar recordatorio de WhatsApp a {nombre}",
+                "structured_data": structured_data,
+            },
+            message=(
+                f"¿Querés que prepare el recordatorio de WhatsApp para {nombre} "
+                f"por un saldo de ${balance:,.0f}?".replace(",", ".")
+            ),
         )
 
     # ── F5b: ANSWER_DATA_QUERY — consulta libre sobre clientes ───────────────

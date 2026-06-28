@@ -1335,6 +1335,14 @@ async def _confirm_pending_action(
     }
     if get_settings().ENABLE_AGENT_AUTOMATIONS and action.execution_status == "SUCCEEDED":
         response["automation_offer"] = automation_offer_for_action(action)
+    # v4 F6a: exponer el link wa.me al frontend en la respuesta de confirmación
+    if (
+        str(action.action_type) == str(ActionType.PREPARE_WHATSAPP_MESSAGE)
+        and action.execution_status == "SUCCEEDED"
+    ):
+        whatsapp_result = (action.payload or {}).get("result")
+        if whatsapp_result:
+            response["whatsapp"] = whatsapp_result
     return response
 
 

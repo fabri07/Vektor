@@ -344,6 +344,16 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
             "cómo viene mi caja",
         ],
     },
+    # ── v4 F6a: recordatorio de cobranza por WhatsApp ────────────────────────
+    "recordar_por_whatsapp": {
+        "desc": "Preparar un recordatorio de cobranza por WhatsApp para un cliente que debe",
+        "triggers": [
+            "mandale un whatsapp a los que me deben",
+            "recordale por whatsapp a Juan que me debe",
+            "mandá un wpp de cobranza",
+            "avisale por whatsapp al que me debe plata",
+        ],
+    },
     # ── Sentinels (no clasificables; sin triggers) ────────────────────────────
     "pedir_aclaracion_sobre_archivo": {
         "desc": "Solicitar aclaración sobre intención con archivo adjunto",
@@ -517,6 +527,8 @@ INTENT_TO_AGENT: dict[str, str] = {
     "analizar_marketing": "agent_marketing",
     # ── Fase 5: consulta libre (fallback; el ruteo real lo hace build_plan por domain) ──
     "consulta_libre": "agent_helper",
+    # ── v4 F6a: recordatorio WhatsApp ──
+    "recordar_por_whatsapp": "agent_client",
     # ── Sentinels de aclaración ──
     "pedir_aclaracion_sobre_archivo": "agent_helper",
     "pedir_aclaracion_negocio": "agent_helper",
@@ -556,6 +568,8 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "analizar_marketing": ActionType.ANALYZE_MARKETING_DATA,
     # ── Fase 5: consulta libre ──
     "consulta_libre": ActionType.ANSWER_DATA_QUERY,
+    # ── v4 F6a: recordatorio WhatsApp ──
+    "recordar_por_whatsapp": ActionType.PREPARE_WHATSAPP_MESSAGE,
     # ── Sentinels de aclaración ──
     "pedir_aclaracion_sobre_archivo": ActionType.ANSWER_HELP_REQUEST,
     "pedir_aclaracion_negocio": ActionType.ANSWER_HELP_REQUEST,
