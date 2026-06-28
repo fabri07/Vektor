@@ -786,3 +786,613 @@ def test_agent_expense_has_client_property() -> None:
 def test_answer_data_query_action_type_exists() -> None:
     """ActionType.ANSWER_DATA_QUERY existe en el schema."""
     assert ActionType.ANSWER_DATA_QUERY == "ANSWER_DATA_QUERY"
+
+
+# ── F5b-2: agent_stock ────────────────────────────────────────────────────────
+
+
+def _task_stock() -> AgentTask:
+    return AgentTask(agent="agent_stock", action_type=ActionType.ANSWER_DATA_QUERY, entities={})
+
+
+@pytest.mark.asyncio
+async def test_stock_con_datos_llama_narrador() -> None:
+    """Con productos → structured_data correcto, 1 LLMCall, message del narrador."""
+    from app.application.agents.stock.agent import AgentStock
+
+    mock_db = MagicMock()
+    agent = AgentStock(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    products_data = [
+        {
+            "product_id": "p1",
+            "name": "Coca Cola 500ml",
+            "stock_units": 0,
+            "sale_price": 500.0,
+            "unit_cost": 300.0,
+            "margin_pct": 40.0,
+            "margin_abs": 200.0,
+            "sku": "CC500",
+            "category": "BEVERAGES",
+        },
+        {
+            "product_id": "p2",
+            "name": "Galletitas Oreo",
+            "stock_units": 50,
+            "sale_price": 400.0,
+            "unit_cost": 200.0,
+            "margin_pct": 50.0,
+            "margin_abs": 200.0,
+            "sku": "OREO",
+            "category": "SNACKS",
+        },
+    ]
+    velocity_data: dict = {"p1": 5.0, "p2": 0.5}
+
+    with (
+        patch(
+            "app.persistence.repositories.product_repository.ProductRepository"
+        ) as MockPR,
+        patch(
+            "app.persistence.repositories.transaction_repository.SaleRepository"
+        ) as MockSR,
+    ):
+        pr = AsyncMock()
+        pr.get_products_with_margin = AsyncMock(return_value=products_data)
+        MockPR.return_value = pr
+
+        sr = AsyncMock()
+        sr.get_daily_velocity = AsyncMock(return_value=velocity_data)
+        MockSR.return_value = sr
+
+        resp = await agent.process(
+            _req(message="¿qué productos me están por quedar sin stock?"),
+            task=_task_stock(),
+        )
+
+    assert resp.status == "success"
+    assert resp.message == _FakeContent.text
+    assert resp.usage is not None
+    assert len(resp.usage.calls) == 1
+    assert resp.usage.calls[0].source == "data_query_narrator"
+
+    sd = resp.result["structured_data"]
+    assert "total_productos" in sd
+    assert "stock_critico" in sd
+    assert "margenes_top" in sd
+    assert "sin_stock_n" in sd
+    # Coca Cola sin stock → crítica
+    assert sd["sin_stock_n"] == 1
+    assert sd["total_productos"] == 2
+    # Al menos Coca Cola en crítico
+    criticos = [c["name"] for c in sd["stock_critico"]]
+    assert "Coca Cola 500ml" in criticos
+    # Oreo tiene margen 50% → en margenes_top
+    assert len(sd["margenes_top"]) >= 1
+
+    # No debe fallar json.dumps (serialización)
+    assert json.dumps(sd)
+
+    mock_llm.messages.create.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stock_sin_productos_no_llama_llm() -> None:
+    """Sin productos → no-invention, SIN llamar al LLM."""
+    from app.application.agents.stock.agent import AgentStock
+
+    mock_db = MagicMock()
+    agent = AgentStock(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    with patch(
+        "app.persistence.repositories.product_repository.ProductRepository"
+    ) as MockPR:
+        pr = AsyncMock()
+        pr.get_products_with_margin = AsyncMock(return_value=[])
+        MockPR.return_value = pr
+
+        resp = await agent.process(
+            _req(message="¿qué stock tengo?"), task=_task_stock()
+        )
+
+    assert resp.status == "success"
+    assert resp.usage is None
+    mock_llm.messages.create.assert_not_called()
+    assert "producto" in resp.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_stock_sin_db_no_llama_llm() -> None:
+    """Sin DB → no-invention sin llamar al LLM."""
+    from app.application.agents.stock.agent import AgentStock
+
+    agent = AgentStock(db=None)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    resp = await agent.process(_req(message="¿cuánto stock tengo?"), task=_task_stock())
+
+    assert resp.status == "success"
+    assert resp.usage is None
+    mock_llm.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stock_cross_tenant_isolation() -> None:
+    """structured_data de tenant A no incluye datos de tenant B."""
+    from app.application.agents.stock.agent import AgentStock
+
+    mock_db = MagicMock()
+    agent = AgentStock(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    products_a = [
+        {
+            "product_id": "pa1",
+            "name": "Producto Alpha",
+            "stock_units": 10,
+            "sale_price": 200.0,
+            "unit_cost": 100.0,
+            "margin_pct": 50.0,
+            "margin_abs": 100.0,
+            "sku": "PA1",
+            "category": "OTHER",
+        }
+    ]
+
+    with (
+        patch(
+            "app.persistence.repositories.product_repository.ProductRepository"
+        ) as MockPR,
+        patch(
+            "app.persistence.repositories.transaction_repository.SaleRepository"
+        ) as MockSR,
+    ):
+        pr = AsyncMock()
+        pr.get_products_with_margin = AsyncMock(return_value=products_a)
+        MockPR.return_value = pr
+
+        sr = AsyncMock()
+        sr.get_daily_velocity = AsyncMock(return_value={})
+        MockSR.return_value = sr
+
+        resp_a = await agent.process(_req(tenant_id=_TENANT_A), task=_task_stock())
+
+    sd = resp_a.result["structured_data"]
+    assert sd["total_productos"] == 1
+    # El repo fue llamado con el tenant correcto
+    pr.get_products_with_margin.assert_called_once_with(UUID(_TENANT_A))
+
+
+@pytest.mark.asyncio
+async def test_stock_structured_data_json_serializable() -> None:
+    """structured_data de stock es JSON-serializable (sin Decimal ni date)."""
+    from app.application.agents.stock.agent import AgentStock
+
+    mock_db = MagicMock()
+    agent = AgentStock(db=mock_db)
+    agent.client = _make_client()
+
+    products_data = [
+        {
+            "product_id": "p1",
+            "name": "Producto Test",
+            "stock_units": 0,
+            "sale_price": 100.0,
+            "unit_cost": 50.0,
+            "margin_pct": 50.0,
+            "margin_abs": 50.0,
+            "sku": "PT",
+            "category": "OTHER",
+        }
+    ]
+
+    with (
+        patch(
+            "app.persistence.repositories.product_repository.ProductRepository"
+        ) as MockPR,
+        patch(
+            "app.persistence.repositories.transaction_repository.SaleRepository"
+        ) as MockSR,
+    ):
+        pr = AsyncMock()
+        pr.get_products_with_margin = AsyncMock(return_value=products_data)
+        MockPR.return_value = pr
+
+        sr = AsyncMock()
+        sr.get_daily_velocity = AsyncMock(return_value={})
+        MockSR.return_value = sr
+
+        resp = await agent.process(_req(), task=_task_stock())
+
+    assert resp.status == "success"
+    serialized = json.dumps(resp.result["structured_data"])
+    assert serialized
+
+
+def test_stock_has_client_property() -> None:
+    """AgentStock tiene la property client con getter/setter."""
+    from app.application.agents.stock.agent import AgentStock
+
+    agent = AgentStock(db=None)
+    mock = MagicMock()
+    agent.client = mock
+    assert agent.client is mock
+
+
+# ── F5b-2: agent_marketing ────────────────────────────────────────────────────
+
+
+def _task_marketing() -> AgentTask:
+    return AgentTask(
+        agent="agent_marketing", action_type=ActionType.ANSWER_DATA_QUERY, entities={}
+    )
+
+
+def _make_marketing_dashboard(has_data: bool = True) -> MagicMock:
+    """Dashboard de marketing mockeado."""
+    from decimal import Decimal
+
+    dashboard = MagicMock()
+    dashboard.has_data = has_data
+    dashboard.days = 30
+    dashboard.from_date = "2026-05-28"
+    dashboard.to_date = "2026-06-27"
+    dashboard.total_followers = 1500
+    dashboard.total_reach = 8000
+    dashboard.total_ads_spend_ars = Decimal("25000.00")
+
+    platform = MagicMock()
+    platform.platform = "instagram"
+    platform.followers = 1500
+    platform.reach = 8000
+    platform.ads_spend_ars = Decimal("25000.00")
+    dashboard.platforms = [platform]
+
+    avs = MagicMock()
+    avs.revenue_ars = Decimal("120000.00")
+    avs.ads_spend_ars = Decimal("25000.00")
+    avs.ratio = 0.208
+    dashboard.ads_vs_sales = avs
+
+    return dashboard
+
+
+@pytest.mark.asyncio
+async def test_marketing_con_datos_llama_narrador() -> None:
+    """Con métricas → structured_data correcto, 1 LLMCall, message del narrador."""
+    from app.application.agents.marketing.agent import AgentMarketing
+
+    mock_db = MagicMock()
+    agent = AgentMarketing(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    dashboard_mock = _make_marketing_dashboard(has_data=True)
+
+    with patch(
+        "app.application.services.marketing_service.MarketingService"
+    ) as MockMS:
+        ms = AsyncMock()
+        ms.get_dashboard = AsyncMock(return_value=dashboard_mock)
+        MockMS.return_value = ms
+
+        resp = await agent.process(
+            _req(message="¿cómo está mi marketing?"), task=_task_marketing()
+        )
+
+    assert resp.status == "success"
+    assert resp.message == _FakeContent.text
+    assert resp.usage is not None
+    assert len(resp.usage.calls) == 1
+    assert resp.usage.calls[0].source == "data_query_narrator"
+
+    sd = resp.result["structured_data"]
+    assert "has_data" in sd
+    assert sd["has_data"] is True
+    assert "total_followers" in sd
+    assert sd["total_followers"] == 1500
+    assert "total_ads_spend_ars" in sd
+    assert sd["total_ads_spend_ars"] == pytest.approx(25000.0)
+    assert isinstance(sd["total_ads_spend_ars"], float)
+    assert "revenue_ars" in sd
+    assert sd["revenue_ars"] == pytest.approx(120000.0)
+    assert "plataformas" in sd
+    assert sd["plataformas"][0]["platform"] == "instagram"
+
+    # JSON-serializable
+    assert json.dumps(sd)
+
+    mock_llm.messages.create.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_marketing_sin_datos_no_llama_llm() -> None:
+    """Sin métricas (has_data=False) → no-invention, SIN llamar al LLM."""
+    from app.application.agents.marketing.agent import AgentMarketing
+
+    mock_db = MagicMock()
+    agent = AgentMarketing(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    dashboard_mock = _make_marketing_dashboard(has_data=False)
+
+    with patch(
+        "app.application.services.marketing_service.MarketingService"
+    ) as MockMS:
+        ms = AsyncMock()
+        ms.get_dashboard = AsyncMock(return_value=dashboard_mock)
+        MockMS.return_value = ms
+
+        resp = await agent.process(
+            _req(message="¿cómo va mi publicidad?"), task=_task_marketing()
+        )
+
+    assert resp.status == "success"
+    assert resp.usage is None
+    mock_llm.messages.create.assert_not_called()
+    assert "marketing" in resp.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_marketing_sin_db_no_llama_llm() -> None:
+    """Sin DB → no-invention sin llamar al LLM."""
+    from app.application.agents.marketing.agent import AgentMarketing
+
+    agent = AgentMarketing(db=None)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    resp = await agent.process(_req(message="¿mi marketing?"), task=_task_marketing())
+
+    assert resp.status == "success"
+    assert resp.usage is None
+    mock_llm.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_marketing_cross_tenant_isolation() -> None:
+    """El servicio se llamó con el tenant_id correcto de tenant A."""
+    from app.application.agents.marketing.agent import AgentMarketing
+
+    mock_db = MagicMock()
+    agent = AgentMarketing(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    dashboard_mock = _make_marketing_dashboard(has_data=True)
+
+    with patch(
+        "app.application.services.marketing_service.MarketingService"
+    ) as MockMS:
+        ms = AsyncMock()
+        ms.get_dashboard = AsyncMock(return_value=dashboard_mock)
+        MockMS.return_value = ms
+
+        await agent.process(_req(tenant_id=_TENANT_A), task=_task_marketing())
+
+    # get_dashboard llamado con el UUID de tenant A
+    call_args = ms.get_dashboard.call_args
+    assert call_args.args[0] == UUID(_TENANT_A)
+
+
+def test_marketing_has_client_property() -> None:
+    """AgentMarketing tiene la property client con getter/setter."""
+    from app.application.agents.marketing.agent import AgentMarketing
+
+    agent = AgentMarketing(db=None)
+    mock = MagicMock()
+    agent.client = mock
+    assert agent.client is mock
+
+
+# ── F5b-2: agent_health ───────────────────────────────────────────────────────
+
+
+def _task_health() -> AgentTask:
+    return AgentTask(agent="agent_health", action_type=ActionType.ANSWER_DATA_QUERY, entities={})
+
+
+@pytest.mark.asyncio
+async def test_health_con_datos_llama_narrador() -> None:
+    """Con datos financieros → structured_data correcto, 1 LLMCall, message del narrador."""
+    from app.application.agents.health.agent import AgentHealth
+
+    mock_db = MagicMock()
+    agent = AgentHealth(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    from decimal import Decimal
+
+    financial_summary = {
+        "estado": "OK",
+        "flujo_neto_30d": {
+            "total_ventas": Decimal("150000.00"),
+            "total_gastos": Decimal("90000.00"),
+            "flujo_neto": Decimal("60000.00"),
+            "periodo_dias": 30,
+            "desde": "2026-05-28",
+            "hasta": "2026-06-27",
+        },
+        "margen": {
+            "margen_pct": Decimal("40.00"),
+            "margen_abs": Decimal("60000.00"),
+            "sin_datos": False,
+        },
+        "ticket_promedio": {
+            "ticket_promedio": Decimal("5000.00"),
+            "n_transacciones": 30,
+            "sin_datos": False,
+        },
+        "rotacion": {"sin_datos": True},
+    }
+
+    with patch(
+        "app.application.services.deterministic_finance.get_financial_summary",
+        new_callable=AsyncMock,
+        return_value=financial_summary,
+    ):
+        resp = await agent.process(
+            _req(message="¿cómo está mi caja?"), task=_task_health()
+        )
+
+    assert resp.status == "success"
+    assert resp.message == _FakeContent.text
+    assert resp.usage is not None
+    assert len(resp.usage.calls) == 1
+    assert resp.usage.calls[0].source == "data_query_narrator"
+
+    sd = resp.result["structured_data"]
+    assert "resumen_financiero" in sd
+    rf = sd["resumen_financiero"]
+    assert rf["total_ventas"] == pytest.approx(150000.0)
+    assert rf["total_gastos"] == pytest.approx(90000.0)
+    assert rf["flujo_neto"] == pytest.approx(60000.0)
+    assert rf["margen_pct"] == pytest.approx(40.0)
+    assert rf["ticket_promedio"] == pytest.approx(5000.0)
+    assert rf["n_transacciones"] == 30
+    # Todos float (no Decimal)
+    assert isinstance(rf["total_ventas"], float)
+    assert isinstance(rf["margen_pct"], float)
+
+    # JSON-serializable (no Decimal)
+    assert json.dumps(sd)
+
+    mock_llm.messages.create.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_health_sin_datos_no_llama_llm() -> None:
+    """Sin datos financieros (estado=SIN_DATOS) → no-invention, SIN llamar al LLM."""
+    from app.application.agents.health.agent import AgentHealth
+
+    mock_db = MagicMock()
+    agent = AgentHealth(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    financial_summary = {"estado": "SIN_DATOS", "mensaje": "sin datos cargados"}
+
+    with patch(
+        "app.application.services.deterministic_finance.get_financial_summary",
+        new_callable=AsyncMock,
+        return_value=financial_summary,
+    ):
+        resp = await agent.process(
+            _req(message="¿cuánto vendo?"), task=_task_health()
+        )
+
+    assert resp.status == "success"
+    assert resp.usage is None
+    mock_llm.messages.create.assert_not_called()
+    assert "30 días" in resp.message or "movimiento" in resp.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_health_sin_db_no_llama_llm() -> None:
+    """Sin DB → no-invention sin llamar al LLM."""
+    from app.application.agents.health.agent import AgentHealth
+
+    agent = AgentHealth(db=None)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    resp = await agent.process(_req(message="¿cómo está mi flujo?"), task=_task_health())
+
+    assert resp.status == "success"
+    assert resp.usage is None
+    mock_llm.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_health_cross_tenant_isolation() -> None:
+    """get_financial_summary se llamó con el UUID correcto del tenant A."""
+    from app.application.agents.health.agent import AgentHealth
+
+    mock_db = MagicMock()
+    agent = AgentHealth(db=mock_db)
+    mock_llm = _make_client()
+    agent.client = mock_llm
+
+    from decimal import Decimal
+
+    financial_summary = {
+        "estado": "OK",
+        "flujo_neto_30d": {
+            "total_ventas": Decimal("50000.00"),
+            "total_gastos": Decimal("30000.00"),
+            "flujo_neto": Decimal("20000.00"),
+            "periodo_dias": 30,
+            "desde": "2026-05-28",
+            "hasta": "2026-06-27",
+        },
+        "margen": {"sin_datos": False, "margen_pct": Decimal("40.00")},
+        "ticket_promedio": {"sin_datos": False, "ticket_promedio": Decimal("1000.00"), "n_transacciones": 50},
+        "rotacion": {"sin_datos": True},
+    }
+
+    with patch(
+        "app.application.services.deterministic_finance.get_financial_summary",
+        new_callable=AsyncMock,
+        return_value=financial_summary,
+    ) as mock_fs:
+        await agent.process(_req(tenant_id=_TENANT_A), task=_task_health())
+
+    # Verificar que fue llamado con el tenant correcto
+    mock_fs.assert_called_once_with(UUID(_TENANT_A), mock_db)
+
+
+@pytest.mark.asyncio
+async def test_health_structured_data_json_serializable() -> None:
+    """structured_data de health es JSON-serializable (sin Decimal)."""
+    from app.application.agents.health.agent import AgentHealth
+
+    mock_db = MagicMock()
+    agent = AgentHealth(db=mock_db)
+    agent.client = _make_client()
+
+    from decimal import Decimal
+
+    financial_summary = {
+        "estado": "OK",
+        "flujo_neto_30d": {
+            "total_ventas": Decimal("100000.00"),
+            "total_gastos": Decimal("70000.00"),
+            "flujo_neto": Decimal("30000.00"),
+            "periodo_dias": 30,
+            "desde": "2026-05-28",
+            "hasta": "2026-06-27",
+        },
+        "margen": {"margen_pct": Decimal("30.00"), "sin_datos": False},
+        "ticket_promedio": {"ticket_promedio": Decimal("3333.33"), "n_transacciones": 30, "sin_datos": False},
+        "rotacion": {"sin_datos": True},
+    }
+
+    with patch(
+        "app.application.services.deterministic_finance.get_financial_summary",
+        new_callable=AsyncMock,
+        return_value=financial_summary,
+    ):
+        resp = await agent.process(_req(message="¿cómo va el flujo?"), task=_task_health())
+
+    assert resp.status == "success"
+    # No debe lanzar TypeError por Decimal no serializable
+    serialized = json.dumps(resp.result["structured_data"])
+    assert serialized
+
+
+def test_health_has_client_property() -> None:
+    """AgentHealth tiene la property client con getter/setter."""
+    from app.application.agents.health.agent import AgentHealth
+
+    agent = AgentHealth(db=None)
+    mock = MagicMock()
+    agent.client = mock
+    assert agent.client is mock

@@ -103,6 +103,16 @@ class AgentHealth(BaseAgent):
         return suggestions[:3]
 
     async def process(self, request: AgentRequest, task: Any | None = None) -> AgentResponse:
+        # ── Sprint 17: flujo de caja / escenarios (SIMULATE_SCENARIO) ─────────
+        from app.application.agents.shared.schemas import ActionType  # noqa: PLC0415
+
+        action_type = getattr(task, "action_type", None)
+        analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+
+        # ANSWER_DATA_QUERY se despacha ANTES del check de _db (el handler lo gestiona propio)
+        if action_type == ActionType.ANSWER_DATA_QUERY:
+            return await self._handle_data_query(request, task)
+
         if self._db is None:
             return AgentResponse(
                 request_id=request.request_id,
@@ -113,11 +123,6 @@ class AgentHealth(BaseAgent):
                 result={"error": "AgentHealth requiere acceso a base de datos."},
             )
 
-        # ── Sprint 17: flujo de caja / escenarios (SIMULATE_SCENARIO) ─────────
-        from app.application.agents.shared.schemas import ActionType  # noqa: PLC0415
-
-        action_type = getattr(task, "action_type", None)
-        analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
         if action_type == ActionType.SIMULATE_SCENARIO:
             return await self._handle_cashflow_scenario(request, analysis_intent)
 
@@ -465,3 +470,119 @@ class AgentHealth(BaseAgent):
                 }
             )
         return alerts[:3]
+
+    # ── F5b-2: ANSWER_DATA_QUERY — consulta libre sobre caja/finanzas ─────────
+
+    async def _handle_data_query(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Consulta libre sobre caja y finanzas: datos determinísticos + narrador LLM.
+
+        Política no-invention: sin datos financieros (estado=SIN_DATOS) → mensaje
+        claro sin llamar al LLM.
+        structured_data siempre JSON-serializable (Decimal → float; date ya es str
+        en calcular_flujo_neto_30d).
+        """
+        from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
+            answer_data_query,
+        )
+        from app.application.services.deterministic_finance import (  # noqa: PLC0415
+            get_financial_summary,
+        )
+
+        if self._db is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence="LOW",
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence="LOW",
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        summary = await get_financial_summary(tenant_id, self._db)
+
+        # Sin datos → nada que narrar
+        if summary.get("estado") == "SIN_DATOS":
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence="LOW",
+                message=(
+                    "Todavía no tengo ventas ni gastos cargados en los últimos 30 días "
+                    "para responderte. Cargá tus movimientos y vuelvo a analizar."
+                ),
+            )
+
+        # Coerción Decimal → float para JSON-serializable
+        flujo_raw = summary.get("flujo_neto_30d", {})
+        margen_raw = summary.get("margen", {})
+        ticket_raw = summary.get("ticket_promedio", {})
+
+        def _to_float(v: Any) -> float | None:
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        structured_data: dict[str, Any] = {
+            "resumen_financiero": {
+                "total_ventas": _to_float(flujo_raw.get("total_ventas")),
+                "total_gastos": _to_float(flujo_raw.get("total_gastos")),
+                "flujo_neto": _to_float(flujo_raw.get("flujo_neto")),
+                "periodo_dias": flujo_raw.get("periodo_dias"),
+                "desde": flujo_raw.get("desde"),
+                "hasta": flujo_raw.get("hasta"),
+                "margen_pct": _to_float(margen_raw.get("margen_pct")),
+                "ticket_promedio": _to_float(ticket_raw.get("ticket_promedio")),
+                "n_transacciones": ticket_raw.get("n_transacciones"),
+            }
+        }
+
+        text, call = await answer_data_query(
+            question=request.message,
+            domain="caja",
+            structured_data=structured_data,
+            business_name="tu negocio",
+            client=self.client,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence="HIGH",
+            message=text,
+            result={
+                "summary": "Consulta respondida",
+                "structured_data": structured_data,
+                "analysis": True,
+            },
+            usage=UsageSummary(calls=[call]),
+        )

@@ -186,6 +186,8 @@ class AgentStock(BaseAgent):
         # ── Sprint 17: análisis read-only (sin LLM de clasificación) ──────────
         action_type = getattr(task, "action_type", None)
         analysis_intent = (getattr(task, "entities", {}) or {}).get("_intent")
+        if action_type == ActionType.ANSWER_DATA_QUERY:
+            return await self._handle_data_query(request, task)
         if action_type == ActionType.ANALYZE_PRICES:
             return await self._handle_price_analysis(request, analysis_intent)
         if action_type == ActionType.ANALYZE_STOCK_DATA:
@@ -1323,3 +1325,136 @@ class AgentStock(BaseAgent):
             except ValueError:
                 return None
         return None
+
+    # ── F5b-2: ANSWER_DATA_QUERY — consulta libre sobre stock ────────────────
+
+    async def _handle_data_query(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Consulta libre sobre stock: responde con datos determinísticos + narrador LLM.
+
+        Política no-invention: sin productos cargados → mensaje claro sin llamar al LLM.
+        structured_data siempre JSON-serializable (no Decimal ni date).
+        """
+        from app.application.agents.shared import analytics  # noqa: PLC0415
+        from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
+            answer_data_query,
+        )
+        from app.persistence.repositories.product_repository import (  # noqa: PLC0415
+            ProductRepository,
+        )
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            SaleRepository,
+        )
+
+        if self._db is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        tenant_id = await self._tenant_uuid(request)
+        if tenant_id is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        products = await ProductRepository(self._db).get_products_with_margin(tenant_id)
+
+        # Sin productos → nada que narrar
+        if not products:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Todavía no tenés productos cargados en el catálogo. "
+                    "Subí tu lista de precios o cargá productos para que pueda "
+                    "responder consultas sobre stock y márgenes."
+                ),
+            )
+
+        velocity = await SaleRepository(self._db).get_daily_velocity(tenant_id, days=30)
+
+        # Calcula días de stock reutilizando analytics (get_products_with_margin no trae threshold,
+        # así que detectamos crítico por stock_units == 0 o days_left <= 7)
+        products_for_analytics = [
+            {
+                "product_id": str(p.get("product_id", "")),
+                "name": p.get("name", ""),
+                "stock_units": int(p.get("stock_units") or 0),
+            }
+            for p in products
+        ]
+        days_left_rows = analytics.estimate_stock_days(products_for_analytics, velocity)
+        critical = [
+            {
+                "name": r["name"],
+                "stock_units": r["stock_units"],
+                "days_left": r.get("days_left"),
+            }
+            for r in days_left_rows
+            if r["stock_units"] == 0 or (r.get("days_left") is not None and r["days_left"] <= 7)
+        ]
+
+        # Márgenes top (con costo cargado)
+        ranked = analytics.rank_by_margin(products)
+        margenes_top: list[dict[str, Any]] = [
+            {
+                "name": p.get("name"),
+                "margin_pct": p.get("margin_pct"),
+                "sale_price": float(p["sale_price"]) if p.get("sale_price") is not None else None,
+                "unit_cost": float(p["unit_cost"]) if p.get("unit_cost") is not None else None,
+            }
+            for p in ranked.get("with_margin", [])[:10]
+        ]
+
+        structured_data: dict[str, Any] = {
+            "total_productos": len(products),
+            "stock_critico": critical[:10],
+            "margenes_top": margenes_top,
+            "sin_stock_n": sum(1 for p in products if not (p.get("stock_units") or 0)),
+        }
+
+        text, call = await answer_data_query(
+            question=request.message,
+            domain="stock",
+            structured_data=structured_data,
+            business_name="tu negocio",
+            client=self.client,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=Confidence.HIGH,
+            message=text,
+            result={
+                "summary": "Consulta respondida",
+                "structured_data": structured_data,
+                "analysis": True,
+            },
+            usage=UsageSummary(calls=[call]),
+        )

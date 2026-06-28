@@ -18,6 +18,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
+import anthropic
+
 from app.application.agents.base import BaseAgent
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -25,7 +27,9 @@ from app.application.agents.shared.schemas import (
     AgentResponse,
     Confidence,
     RiskLevel,
+    UsageSummary,
 )
+from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +39,18 @@ class AgentMarketing(BaseAgent):
     agent_name = "agent_marketing"
 
     def __init__(self, db: AsyncSession | None = None) -> None:
+        self._client: Any | None = None
         self._db = db
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = get_anthropic_async_client(anthropic.AsyncAnthropic)
+        return self._client
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._client = value
 
     async def process(
         self,
@@ -44,6 +59,9 @@ class AgentMarketing(BaseAgent):
     ) -> AgentResponse:
         action_type = getattr(task, "action_type", None)
         _intent = (getattr(task, "entities", {}) or {}).get("_intent")
+
+        if action_type == ActionType.ANSWER_DATA_QUERY:
+            return await self._handle_data_query(request, task)
 
         if action_type == ActionType.ANALYZE_MARKETING_DATA:
             return await self._handle_marketing_analysis(request, _intent)
@@ -321,4 +339,109 @@ class AgentMarketing(BaseAgent):
                 "total_revenue": ranking["total_revenue"],
                 "top": top[:10],
             },
+        )
+
+    # ── F5b-2: ANSWER_DATA_QUERY — consulta libre sobre marketing ─────────────
+
+    async def _handle_data_query(
+        self, request: AgentRequest, task: Any | None
+    ) -> AgentResponse:
+        """Consulta libre sobre marketing: responde con datos determinísticos + narrador LLM.
+
+        Política no-invention: sin métricas (has_data=False) → mensaje claro sin LLM.
+        structured_data siempre JSON-serializable (Decimal → float).
+        """
+        from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
+            answer_data_query,
+        )
+        from app.application.services.marketing_service import MarketingService  # noqa: PLC0415
+
+        if self._db is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        tenant_id = await self._tenant_uuid(request)
+        if tenant_id is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Necesito acceso a tus datos para responder eso. "
+                    "Cargá la info y vuelvo a intentar."
+                ),
+            )
+
+        dashboard = await MarketingService(self._db).get_dashboard(tenant_id, days=30)
+
+        # Sin métricas → nada que narrar
+        if not dashboard.has_data:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.LOW,
+                message=(
+                    "Todavía no hay datos de marketing para los últimos 30 días. "
+                    "Cargá métricas de redes sociales (seguidores, alcance, gasto en ads) "
+                    "desde el panel de marketing para que pueda responderte."
+                ),
+            )
+
+        avs = dashboard.ads_vs_sales
+        structured_data: dict[str, Any] = {
+            "has_data": True,
+            "days": dashboard.days,
+            "total_followers": dashboard.total_followers,
+            "total_reach": dashboard.total_reach,
+            "total_ads_spend_ars": float(dashboard.total_ads_spend_ars),
+            "revenue_ars": float(avs.revenue_ars),
+            "ratio_ads_ventas": avs.ratio,
+            "plataformas": [
+                {
+                    "platform": p.platform,
+                    "followers": p.followers,
+                    "reach": p.reach,
+                    "ads_spend_ars": float(p.ads_spend_ars),
+                }
+                for p in dashboard.platforms
+            ],
+        }
+
+        text, call = await answer_data_query(
+            question=request.message,
+            domain="marketing",
+            structured_data=structured_data,
+            business_name="tu negocio",
+            client=self.client,
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=Confidence.HIGH,
+            message=text,
+            result={
+                "summary": "Consulta respondida",
+                "structured_data": structured_data,
+                "analysis": True,
+            },
+            usage=UsageSummary(calls=[call]),
         )
