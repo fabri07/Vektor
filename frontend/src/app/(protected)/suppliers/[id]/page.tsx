@@ -191,11 +191,11 @@ export default function SupplierDetailPage() {
               <p className="text-vk-text-primary">{phoneValue || "—"}</p>
             )}
           </div>
-          {!supplier.is_sentinel && supplier.catalog_url?.trim() ? (
+          {!supplier.is_sentinel && /^https?:\/\//i.test(supplier.catalog_url?.trim() ?? "") ? (
             <div>
               <p className="text-xs text-vk-text-muted">Catálogo</p>
               <a
-                href={supplier.catalog_url}
+                href={supplier.catalog_url ?? undefined}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-vk-blue underline-offset-2 hover:underline"

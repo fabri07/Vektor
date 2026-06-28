@@ -494,7 +494,7 @@ function SupplierFormModal({
         <Input
           label="URL de catálogo (opcional)"
           type="url"
-          placeholder="https://... (opcional)"
+          placeholder="https://..."
           value={form.catalog_url}
           onChange={set("catalog_url")}
         />
