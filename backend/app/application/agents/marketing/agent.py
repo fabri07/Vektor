@@ -411,7 +411,7 @@ class AgentMarketing(BaseAgent):
             "total_reach": dashboard.total_reach,
             "total_ads_spend_ars": float(dashboard.total_ads_spend_ars),
             "revenue_ars": float(avs.revenue_ars),
-            "ratio_ads_ventas": avs.ratio,
+            "ratio_ads_ventas": float(avs.ratio) if avs.ratio is not None else None,
             "plataformas": [
                 {
                     "platform": p.platform,

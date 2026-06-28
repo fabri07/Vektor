@@ -1429,10 +1429,27 @@ class AgentStock(BaseAgent):
             for p in ranked.get("with_margin", [])[:10]
         ]
 
+        # Sobrestock: productos con cobertura > 90 días o sin rotación (capital inmovilizado).
+        # Umbral conservador de 90 días — no requiere cargar la config del vertical.
+        _OVERSTOCK_DAYS_DEFAULT = 90.0
+        sobrestock_raw = analytics.detect_overstock(
+            products_for_analytics, velocity, _OVERSTOCK_DAYS_DEFAULT
+        )
+        sobrestock: list[dict[str, Any]] = [
+            {
+                "name": r.get("name"),
+                "stock_units": int(r.get("stock_units") or 0),
+                "days_left": float(r["days_left"]) if r.get("days_left") is not None else None,
+                "reason": r.get("reason"),
+            }
+            for r in sobrestock_raw[:10]
+        ]
+
         structured_data: dict[str, Any] = {
             "total_productos": len(products),
             "stock_critico": critical[:10],
             "margenes_top": margenes_top,
+            "sobrestock": sobrestock,
             "sin_stock_n": sum(1 for p in products if not (p.get("stock_units") or 0)),
         }
 

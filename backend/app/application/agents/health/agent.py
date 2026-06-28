@@ -556,8 +556,16 @@ class AgentHealth(BaseAgent):
                 "total_gastos": _to_float(flujo_raw.get("total_gastos")),
                 "flujo_neto": _to_float(flujo_raw.get("flujo_neto")),
                 "periodo_dias": flujo_raw.get("periodo_dias"),
-                "desde": flujo_raw.get("desde"),
-                "hasta": flujo_raw.get("hasta"),
+                "desde": (
+                    flujo_raw.get("desde").isoformat()
+                    if hasattr(flujo_raw.get("desde"), "isoformat")
+                    else flujo_raw.get("desde")
+                ),
+                "hasta": (
+                    flujo_raw.get("hasta").isoformat()
+                    if hasattr(flujo_raw.get("hasta"), "isoformat")
+                    else flujo_raw.get("hasta")
+                ),
                 "margen_pct": _to_float(margen_raw.get("margen_pct")),
                 "ticket_promedio": _to_float(ticket_raw.get("ticket_promedio")),
                 "n_transacciones": ticket_raw.get("n_transacciones"),

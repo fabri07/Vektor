@@ -863,6 +863,7 @@ async def test_stock_con_datos_llama_narrador() -> None:
     assert "stock_critico" in sd
     assert "margenes_top" in sd
     assert "sin_stock_n" in sd
+    assert "sobrestock" in sd
     # Coca Cola sin stock → crítica
     assert sd["sin_stock_n"] == 1
     assert sd["total_productos"] == 2
@@ -871,6 +872,10 @@ async def test_stock_con_datos_llama_narrador() -> None:
     assert "Coca Cola 500ml" in criticos
     # Oreo tiene margen 50% → en margenes_top
     assert len(sd["margenes_top"]) >= 1
+    # Oreo: stock=50, velocity=0.5 → 100 días > 90 → sobrestock
+    assert len(sd["sobrestock"]) >= 1
+    sobrestock_names = [s["name"] for s in sd["sobrestock"]]
+    assert "Galletitas Oreo" in sobrestock_names
 
     # No debe fallar json.dumps (serialización)
     assert json.dumps(sd)
@@ -1190,6 +1195,56 @@ def test_marketing_has_client_property() -> None:
     mock = MagicMock()
     agent.client = mock
     assert agent.client is mock
+
+
+@pytest.mark.asyncio
+async def test_marketing_ratio_decimal_serializable() -> None:
+    """ratio_ads_ventas como Decimal → structured_data JSON-serializable sin TypeError.
+
+    Regresión F5b-2 Finding 2: avs.ratio devuelto como Decimal causa TypeError en json.dumps.
+    """
+    from app.application.agents.marketing.agent import AgentMarketing
+
+    mock_db = MagicMock()
+    agent = AgentMarketing(db=mock_db)
+    agent.client = _make_client()
+
+    # Dashboard con ratio como Decimal (el caso problemático)
+    dashboard_mock = MagicMock()
+    dashboard_mock.has_data = True
+    dashboard_mock.days = 30
+    dashboard_mock.from_date = "2026-05-28"
+    dashboard_mock.to_date = "2026-06-27"
+    dashboard_mock.total_followers = 2000
+    dashboard_mock.total_reach = 10000
+    dashboard_mock.total_ads_spend_ars = Decimal("30000.00")
+    dashboard_mock.platforms = []
+
+    avs = MagicMock()
+    avs.revenue_ars = Decimal("144000.00")
+    avs.ads_spend_ars = Decimal("30000.00")
+    avs.ratio = Decimal("0.208")  # ← Decimal, no float
+    dashboard_mock.ads_vs_sales = avs
+
+    with patch(
+        "app.application.services.marketing_service.MarketingService"
+    ) as MockMS:
+        ms = AsyncMock()
+        ms.get_dashboard = AsyncMock(return_value=dashboard_mock)
+        MockMS.return_value = ms
+
+        resp = await agent.process(
+            _req(message="¿cuánto gasto en publicidad?"), task=_task_marketing()
+        )
+
+    assert resp.status == "success"
+    sd = resp.result["structured_data"]
+    # ratio_ads_ventas debe ser float, no Decimal
+    assert isinstance(sd["ratio_ads_ventas"], float)
+    assert sd["ratio_ads_ventas"] == pytest.approx(0.208)
+    # El json.dumps no debe lanzar TypeError
+    serialized = json.dumps(sd)
+    assert serialized
 
 
 # ── F5b-2: agent_health ───────────────────────────────────────────────────────
