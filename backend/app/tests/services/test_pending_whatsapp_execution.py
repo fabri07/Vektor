@@ -152,7 +152,13 @@ async def test_url_contiene_telefono_y_cuerpo():
 
 @pytest.mark.asyncio
 async def test_cross_tenant_falla_sin_logs():
-    """recipient_id de otro tenant → ValueError, sin CommunicationLog, sin ExtOpLog."""
+    """recipient_id de otro tenant → execution_status=FAILED, sin CommunicationLog, sin ExtOpLog.
+
+    Se conduce a través de _execute_local_action (igual que el router de producción)
+    para verificar que el savepoint captura el ValueError y sella la acción como FAILED.
+    """
+    from app.api.v1.agent import _execute_local_action  # noqa: PLC0415
+
     recipient_id = uuid.uuid4()
     action = _make_action(
         {
@@ -162,6 +168,7 @@ async def test_cross_tenant_falla_sin_logs():
             "body": "Hola, te recuerdo que me debés.",
         }
     )
+    tenant_id: uuid.UUID = action.tenant_id
 
     # scalar_one_or_none devuelve None → el customer NO existe en este tenant
     mock_result = MagicMock()
@@ -172,12 +179,37 @@ async def test_cross_tenant_falla_sin_logs():
     added_objects: list[Any] = []
     db.add = MagicMock(side_effect=added_objects.append)
 
-    with patch(_PATCH_EXT_OP, new_callable=AsyncMock) as mock_ext_op:
-        # La ejecución debe levantarse con ValueError
-        with pytest.raises(ValueError, match="recipient_not_in_tenant"):
-            await execute_pending_action(action, db)
+    # Simular begin_nested(): context manager asíncrono que NO suprime excepciones
+    savepoint_mock = MagicMock()
+    savepoint_mock.__aenter__ = AsyncMock(return_value=None)
+    savepoint_mock.__aexit__ = AsyncMock(return_value=False)
+    db.begin_nested = MagicMock(return_value=savepoint_mock)
 
-    # No debe haberse escrito ningún log
+    redis = MagicMock()
+
+    with (
+        # No hay duplicado: dejar pasar la ejecución real
+        patch(
+            "app.api.v1.agent._register_operation_fingerprint",
+            new=AsyncMock(return_value=False),
+        ),
+        patch(_PATCH_EXT_OP, new_callable=AsyncMock) as mock_ext_op,
+    ):
+        result = await _execute_local_action(
+            action=action,
+            tenant_id=tenant_id,
+            db=db,
+            redis=redis,
+        )
+
+    # La acción debe quedar sellada como FAILED (el savepoint capturó el ValueError)
+    assert action.execution_status == "FAILED", (
+        f"execution_status esperado FAILED, obtenido: {action.execution_status}"
+    )
+    assert result is not None
+    assert result.get("execution_status") == "FAILED"
+
+    # No debe haberse escrito ningún log de comunicación ni de operación externa
     from app.persistence.models.communication_log import CommunicationLog  # noqa: PLC0415
 
     comm_logs = [o for o in added_objects if isinstance(o, CommunicationLog)]

@@ -351,6 +351,19 @@ class AgentClient(BaseAgent):
                     message="No tenés clientes con saldo pendiente.",
                 )
 
+        # Guard: no-invention para cliente nombrado con balance = 0
+        # (solo aplica cuando se resolvió por customer_id explícito y no hay saldo)
+        if balance <= 0:
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="success",
+                risk_level=RiskLevel.LOW,
+                requires_approval=False,
+                confidence=Confidence.HIGH,
+                message="Ese cliente no tiene saldo pendiente.",
+            )
+
         # ── Sin teléfono → pide completar la ficha ───────────────────────────
         if not customer.phone:
             return AgentResponse(
@@ -372,10 +385,12 @@ class AgentClient(BaseAgent):
 
         # ── Cuerpo determinístico (sin LLM) ──────────────────────────────────
         nombre = customer.name or "cliente"
+        # Formatear SOLO el número para no destruir la coma del saludo
+        balance_str = f"${balance:,.0f}".replace(",", ".")
         body = (
             f"Hola {nombre}, te recuerdo que tenés un saldo pendiente de "
-            f"${balance:,.0f} con nosotros. ¡Gracias!"
-        ).replace(",", ".")  # formato AR de miles con punto
+            f"{balance_str} con nosotros. ¡Gracias!"
+        )
 
         structured_data: dict[str, Any] = {
             "recipient_type": "customer",
@@ -398,7 +413,7 @@ class AgentClient(BaseAgent):
             },
             message=(
                 f"¿Querés que prepare el recordatorio de WhatsApp para {nombre} "
-                f"por un saldo de ${balance:,.0f}?".replace(",", ".")
+                f"por un saldo de {balance_str}?"
             ),
         )
 

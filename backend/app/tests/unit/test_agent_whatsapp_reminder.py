@@ -112,6 +112,10 @@ async def test_con_deudor_emite_requires_approval():
     # El cuerpo debe contener el nombre y el monto con formato AR
     assert "Juan" in sd["body"]
     assert "1.500" in sd["body"]  # formato AR: punto como separador de miles
+    # Regresión F6a Finding 1: la coma del saludo no debe ser reemplazada por punto
+    assert "Hola Juan, te recuerdo" in sd["body"], (
+        "La coma del saludo fue reemplazada por punto — revisar .replace(',', '.')"
+    )
 
 
 @pytest.mark.asyncio
@@ -152,6 +156,53 @@ async def test_body_determinista_contiene_nombre_y_monto():
     sd = resp.result["structured_data"]
     assert "María" in sd["body"]
     assert "3.000" in sd["body"]
+
+
+# ── Cliente nombrado con balance = 0 → no-invention (Finding 2) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_cliente_nombrado_con_balance_cero_no_crea_pending():
+    """Cliente específico resuelto por id pero con balance=0 → success sin PendingAction.
+
+    Regresión: el path de customer_id explícito no tenía guard de balance>0,
+    lo que permitía enviar 'saldo pendiente de $0'.
+    """
+    from app.application.agents.client.agent import AgentClient
+
+    mock_db = MagicMock()
+    agent = AgentClient(db=mock_db)
+
+    customer = _mock_customer(name="Juan", phone=_PHONE)
+
+    with (
+        patch(
+            "app.persistence.repositories.customer_repository.CustomerRepository"
+        ) as MockCR,
+        patch(
+            "app.persistence.repositories.transaction_repository.SaleRepository"
+        ) as MockSR,
+    ):
+        cr_instance = AsyncMock()
+        cr_instance.get_by_id = AsyncMock(return_value=customer)
+        MockCR.return_value = cr_instance
+
+        sr_instance = AsyncMock()
+        # Sin entradas en balances → balance queda en 0
+        sr_instance.get_balances_by_customer = AsyncMock(return_value=[])
+        MockSR.return_value = sr_instance
+
+        resp = await agent.process(
+            _req(), task=_task(entities={"customer_id": _CUSTOMER_ID})
+        )
+
+    assert resp.status == "success", f"Esperado success, obtenido: {resp.status}"
+    assert resp.requires_approval is False
+    assert "pendiente" in (resp.message or "").lower()
+    # No debe haber structured_data con body de recordatorio
+    if resp.result:
+        sd = (resp.result or {}).get("structured_data", {})
+        assert not sd.get("body"), "No debe generarse cuerpo de mensaje con balance=0"
 
 
 # ── Sin deudores → no-invention ───────────────────────────────────────────────

@@ -47,7 +47,7 @@ class WhatsAppChannel(MessageChannel):
         digits = re.sub(r"\D", "", to)
         if not digits.startswith("54"):
             digits = "54" + digits
-        encoded_body = quote(body)
+        encoded_body = quote(body, safe="")
         return f"https://wa.me/{digits}?text={encoded_body}"
 
     def __init__(self) -> None:
