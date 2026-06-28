@@ -27,6 +27,8 @@ class SupplierResponse(BaseModel):
     phone: str | None
     notes: str | None
     custom_fields: dict[str, Any] = {}
+    catalog_url: str | None = None
+    api_url: str | None = None
     created_at: datetime
     deactivated_at: datetime | None = None
 
@@ -55,6 +57,8 @@ class CreateSupplierRequest(BaseModel):
     phone: str | None = Field(default=None, max_length=50)
     notes: str | None = Field(default=None, max_length=2000)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+    catalog_url: str | None = None
+    api_url: str | None = None
 
     @field_validator("cuil")
     @classmethod
@@ -204,6 +208,8 @@ class UpdateSupplierRequest(BaseModel):
     phone: str | None = Field(default=None, max_length=50)
     notes: str | None = Field(default=None, max_length=2000)
     custom_fields: dict[str, Any] | None = None
+    catalog_url: str | None = None
+    api_url: str | None = None
 
     @field_validator("cuil")
     @classmethod

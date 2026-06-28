@@ -59,6 +59,10 @@ class AgentSupplier(BaseAgent):
         if action_type == ActionType.ANALYZE_SUPPLIER_DATA:
             return await self._handle_supplier_analysis(request, analysis_intent)
 
+        # ── F3a: persistir borrador de pedido desde stock crítico ─────────────
+        if action_type == ActionType.CREATE_PURCHASE_SUGGESTION:
+            return await self._handle_create_purchase_suggestion(request)
+
         message = request.message.lower()
         intent = self._classify_intent(message)
 
@@ -456,33 +460,6 @@ class AgentSupplier(BaseAgent):
                 {"top_supplier": top, "suppliers": suppliers},
             )
 
-        # ── preparar_pedido_sugerido ──────────────────────────────────────────
-        if intent == "preparar_pedido_sugerido":
-            critical = await self._critical_stock_for_order(tenant_id)
-            if not critical:
-                return self._analysis_response(
-                    request,
-                    "pedido_sin_quiebres",
-                    "No tenés productos en quiebre que requieran un pedido ahora. "
-                    "Tu stock está cubierto.",
-                    {"suppliers": suppliers[:5]},
-                )
-            main_supplier = suppliers[0]["name"] if suppliers else "tu proveedor habitual"
-            lines = [
-                f"Sugerencia de pedido para {main_supplier} (proveedor más frecuente):",
-            ]
-            for p in critical[:10]:
-                lines.append(f"- {p['name']}: {p['stock']} u. en stock")
-            lines.append(
-                "Revisá las cantidades y, si querés, te armo el borrador de email al proveedor."
-            )
-            return self._analysis_response(
-                request,
-                "preparar_pedido_sugerido",
-                "\n".join(lines),
-                {"critical_products": critical, "suggested_supplier": main_supplier},
-            )
-
         # ── analizar_proveedores (default) ────────────────────────────────────
         total = sum(s["total"] for s in suppliers)
         lines = [f"Tenés {len(suppliers)} proveedores activos (90 días), ${total:,.0f} en compras:"]
@@ -499,6 +476,15 @@ class AgentSupplier(BaseAgent):
         )
 
     async def _critical_stock_for_order(self, tenant_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Devuelve productos con stock <= umbral efectivo.
+
+        Claves devueltas (extendido en F3a — se agregaron sin romper callers existentes):
+          ``name``        — nombre del producto
+          ``stock``       — stock actual (int)
+          ``product_id``  — str(uuid) del producto
+          ``unit_cost``   — Decimal (unit_cost_ars o 0 si no configurado)
+          ``threshold``   — umbral efectivo (int)
+        """
         from app.domain.product import effective_threshold  # noqa: PLC0415
         from app.persistence.models.product import Product  # noqa: PLC0415
 
@@ -514,7 +500,139 @@ class AgentSupplier(BaseAgent):
             p for p in products if p.stock_units <= effective_threshold(p.low_stock_threshold_units)
         ]
         critical.sort(key=lambda p: p.stock_units)
-        return [{"name": p.name, "stock": p.stock_units} for p in critical]
+        return [
+            {
+                "name": p.name,
+                "stock": p.stock_units,
+                "product_id": str(p.id),
+                "unit_cost": p.unit_cost_ars if p.unit_cost_ars is not None else Decimal(0),
+                "threshold": effective_threshold(p.low_stock_threshold_units),
+            }
+            for p in critical
+        ]
+
+    async def _handle_create_purchase_suggestion(self, request: AgentRequest) -> AgentResponse:
+        """Persiste un borrador de PurchaseOrder desde el stock en quiebre.
+
+        Reglas:
+        - Sin quiebres → no crea PO, mensaje claro.
+        - Cantidad de reposición = max(threshold - stock, 1): repone hasta el umbral,
+          mínimo 1 unidad (garantiza que el pedido tenga sentido aunque el stock sea
+          igual al umbral exacto).
+        - Subtotales y total calculados con Decimal — el LLM nunca calcula montos.
+        - supplier_id se resuelve por nombre del proveedor más frecuente (fuzzy→exact).
+          Si no se resuelve, queda NULL (el usuario lo edita).
+        """
+        from decimal import ROUND_HALF_UP  # noqa: PLC0415
+
+        from app.persistence.models.purchase_order import PurchaseOrder  # noqa: PLC0415
+        from app.persistence.repositories.purchase_order_repository import (  # noqa: PLC0415
+            PurchaseOrderRepository,
+        )
+        from app.persistence.repositories.supplier_repository import (  # noqa: PLC0415
+            SupplierRepository,
+        )
+        from app.schemas.purchase_order import PurchaseOrderItem  # noqa: PLC0415
+
+        if self._session is None:
+            return self._analysis_response(
+                request,
+                "pedido_sin_sesion",
+                "Necesito acceso a la base de datos para armar el pedido.",
+            )
+
+        try:
+            tenant_id = uuid.UUID(request.business_id)
+        except (ValueError, TypeError):
+            return self._analysis_response(
+                request,
+                "pedido_sin_sesion",
+                "No pude identificar tu negocio.",
+            )
+
+        critical = await self._critical_stock_for_order(tenant_id)
+        if not critical:
+            return self._analysis_response(
+                request,
+                "pedido_sin_quiebres",
+                "No tenés productos en quiebre que requieran un pedido ahora. "
+                "Tu stock está cubierto.",
+            )
+
+        # Resolver el proveedor principal por nombre del más frecuente
+        suppliers = await self._supplier_totals(tenant_id)
+        main_supplier_name: str | None = suppliers[0]["name"] if suppliers else None
+        supplier_id: uuid.UUID | None = None
+        if main_supplier_name:
+            sup_repo = SupplierRepository(self._session)
+            supplier = await sup_repo.find_by_name(
+                main_supplier_name.strip().lower(), tenant_id
+            )
+            if supplier is not None:
+                supplier_id = supplier.id
+
+        # Armar items con aritmética determinística (Decimal)
+        two_places = Decimal("0.01")
+        items: list[PurchaseOrderItem] = []
+        for p in critical:
+            # Reposición: cuántas unidades se necesitan para llegar al umbral.
+            # Mínimo 1 — si stock == threshold exacto, igual pedimos 1 unidad.
+            quantity = max(p["threshold"] - p["stock"], 1)
+            unit_cost: Decimal = p["unit_cost"]
+            subtotal = (Decimal(quantity) * unit_cost).quantize(two_places, rounding=ROUND_HALF_UP)
+            items.append(
+                PurchaseOrderItem(
+                    product_id=p["product_id"],
+                    product_name=p["name"],
+                    sku=None,
+                    quantity=quantity,
+                    unit_cost=unit_cost,
+                    subtotal=subtotal,
+                )
+            )
+
+        total = sum((item.subtotal for item in items), Decimal(0)).quantize(
+            two_places, rounding=ROUND_HALF_UP
+        )
+
+        po = PurchaseOrder(
+            tenant_id=tenant_id,
+            supplier_id=supplier_id,
+            status="draft",
+            total=total,
+            items=[item.model_dump(mode="json") for item in items],
+            notes=None,
+        )
+        po_repo = PurchaseOrderRepository(self._session)
+        po = await po_repo.create(po)
+        await self._session.commit()
+
+        supplier_label = main_supplier_name or "tu proveedor habitual"
+        n = len(items)
+        message = (
+            f"Guardé un borrador de pedido para {supplier_label} con {n} producto(s) "
+            f"por ${float(total):,.2f}. Revisalo y ajustá las cantidades antes de enviarlo."
+        )
+
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="success",
+            risk_level=RiskLevel.LOW,
+            requires_approval=False,
+            confidence=Confidence.HIGH,
+            message=message,
+            result={
+                "summary": f"Borrador de pedido creado: {n} producto(s), total ${float(total):,.2f}",
+                "structured_data": {
+                    "purchase_order_id": str(po.id),
+                    "items": [item.model_dump(mode="json") for item in items],
+                    "total": str(total),
+                    "supplier": supplier_label,
+                },
+                "analysis": False,
+            },
+        )
 
     async def _handle_supplier_price_comparison(self, request: AgentRequest) -> AgentResponse:
         from app.application.agents.shared import analytics  # noqa: PLC0415

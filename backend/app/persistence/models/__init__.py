@@ -32,6 +32,7 @@ from app.persistence.models.notification import Notification
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.product import Product
+from app.persistence.models.purchase_order import PurchaseOrder
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.score import (
     HealthScoreSnapshot,
@@ -88,6 +89,7 @@ __all__ = [
     "VerticalFieldDefinition",
     "TenantCustomFieldDefinition",
     "TenantFieldChangeLog",
+    "PurchaseOrder",
     "DataRepairRun",
     "DataRepairItem",
     "PipelineEvent",

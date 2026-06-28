@@ -278,13 +278,22 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
         ],
     },
     "analizar_proveedores": {
-        "desc": "Analizar proveedores: ranking, comparación de precios, dependencia "
-        "o pedido sugerido",
+        "desc": "Analizar proveedores: ranking, comparación de precios o dependencia",
         "triggers": [
             "cómo están mis proveedores",
             "qué proveedor me conviene más",
             "dependo mucho de un solo proveedor",
-            "armame un pedido para el proveedor",
+        ],
+    },
+    "preparar_pedido_sugerido": {
+        "desc": "Armar y guardar un borrador de pedido al proveedor desde el stock en quiebre",
+        "triggers": [
+            "armame un pedido",
+            "preparame un pedido para el proveedor",
+            "necesito reponer stock con un pedido",
+            "armá un pedido a",
+            "haceme un pedido al proveedor",
+            "preparar un pedido de reposición",
         ],
     },
     "proyectar_caja": {
@@ -381,7 +390,6 @@ _ANALYTIC_FAMILIES: dict[str, dict[str, Any]] = {
             "ranking": "analizar_proveedores",
             "comparacion_precios": "comparar_precios_proveedores",
             "dependencia": "detectar_dependencia_proveedor",
-            "pedido_sugerido": "preparar_pedido_sugerido",
         },
     },
     "proyectar_caja": {
@@ -456,6 +464,7 @@ INTENT_TO_AGENT: dict[str, str] = {
     "analizar_ventas": "agent_income",
     "analizar_gastos": "agent_expense",
     "analizar_proveedores": "agent_supplier",
+    "preparar_pedido_sugerido": "agent_supplier",
     "proyectar_caja": "agent_health",
     "analizar_clientes": "agent_client",
     # ── Sentinels de aclaración ──
@@ -491,6 +500,7 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "analizar_ventas": ActionType.ANALYZE_SALES_DATA,
     "analizar_gastos": ActionType.ANALYZE_EXPENSE_DATA,
     "analizar_proveedores": ActionType.ANALYZE_SUPPLIER_DATA,
+    "preparar_pedido_sugerido": ActionType.CREATE_PURCHASE_SUGGESTION,
     "proyectar_caja": ActionType.SIMULATE_SCENARIO,
     "analizar_clientes": ActionType.ANALYZE_SALES_DATA,
     # ── Sentinels de aclaración ──

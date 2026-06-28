@@ -47,6 +47,9 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )
+    # URL del catálogo web o API de precios del proveedor (informativo, nullable).
+    catalog_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Soft-delete: NULL = activo; timestamp = desactivado.
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
