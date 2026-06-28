@@ -8,6 +8,8 @@ export interface CreateSupplierPayload {
   email?: string | null;
   phone?: string | null;
   notes?: string | null;
+  catalog_url?: string | null;
+  api_url?: string | null;
   custom_fields?: Record<string, unknown>;
 }
 
@@ -23,6 +25,8 @@ export interface SupplierResponse {
   email: string | null;
   phone: string | null;
   notes: string | null;
+  catalog_url: string | null;
+  api_url: string | null;
   custom_fields?: Record<string, unknown>;
   is_active: boolean;
   /** True si es el proveedor centinela "No identificado". Computado en el backend. */

@@ -335,6 +335,7 @@ interface SupplierFormState {
   email: string;
   phone: string;
   notes: string;
+  catalog_url: string;
 }
 
 function toFormState(supplier: SupplierResponse | null): SupplierFormState {
@@ -346,6 +347,7 @@ function toFormState(supplier: SupplierResponse | null): SupplierFormState {
     email: supplier?.email ?? "",
     phone: supplier?.phone ?? "",
     notes: supplier?.notes ?? "",
+    catalog_url: supplier?.catalog_url ?? "",
   };
 }
 
@@ -414,6 +416,7 @@ function SupplierFormModal({
       email: form.email.trim() || null,
       phone: form.phone.trim() || null,
       notes: form.notes.trim() || null,
+      catalog_url: form.catalog_url.trim() || null,
     });
   }
 
@@ -487,6 +490,13 @@ function SupplierFormModal({
           placeholder="Ej: entrega los martes, paga a 30 días..."
           value={form.notes}
           onChange={set("notes")}
+        />
+        <Input
+          label="URL de catálogo (opcional)"
+          type="url"
+          placeholder="https://... (opcional)"
+          value={form.catalog_url}
+          onChange={set("catalog_url")}
         />
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="secondary" size="sm" onClick={onClose}>
