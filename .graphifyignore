@@ -1,0 +1,21 @@
+# Tooling / agent infrastructure — NOT part of the Véktor codebase.
+# Keeps the knowledge graph focused on backend/, frontend/, mcp_server/ and real docs.
+.claude/
+.claude-plugin/
+.agents/
+.claude-flow/
+frontend/.claude-flow/
+backend/.claude-flow/
+
+# graphify's own outputs
+graphify-out/
+
+# build / dependency artifacts (belt-and-suspenders; graphify skips most by default)
+node_modules/
+.next/
+.venv/
+__pycache__/
+
+# generated previews / scratch
+backend/backfill_preview.csv
+backend/cleanup_preview.csv

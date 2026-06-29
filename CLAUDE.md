@@ -12,7 +12,7 @@ Leé esto antes de tocar código. El detalle completo está más abajo.
 2. **Aritmética financiera** SOLO por `DeterministicFinance`. Los LLM nunca calculan montos.
 2b. **Motor estadístico** (`shared/stats_engine.py`): calcula con numpy + numpy-financial; el LLM solo narra. scipy/statsmodels diferidos. Guardas de muestra (n < mínimo → `insufficient_data`, no-invention rule).
 3. **`tenant_id`** sale del JWT en cada query de negocio — nunca del body/path.
-4. **`ActionType`** es un set cerrado (28 valores en `shared/schemas.py`); agregar/quitar obliga a tocar `RiskEngine` + tests.
+4. **`ActionType`** es un set cerrado (31 valores en `shared/schemas.py`); agregar/quitar obliga a tocar `RiskEngine` + tests.
 5. **No-invention:** con `confidence == LOW` (`data_completeness < 50`) → empty state y pedir datos. Nunca maquillar scores con defaults (`or 70`, `or 50`); si `0` es válido, usar `if value is None`, no `or`.
 6. **Auditoría + defensa:** toda decisión → `decision_audit_log` (insert-only); todo input de usuario a un LLM → `wrap_user_input()`.
 7. **Mostrar plan antes de escribir código y esperar confirmación.** Responder en español (Argentina).
@@ -229,7 +229,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 
 ### Capa de Agentes LLM (`app/application/agents/`)
 
-8 sub-agentes coordinados por AgentCEO + AgentChat (capa de respuesta). El cliente NUNCA elige el agente destino. En el registry hay 9 entradas (`agent_cash` es alias de `agent_income`).
+10 sub-agentes coordinados por AgentCEO + AgentChat (capa de respuesta). El cliente NUNCA elige el agente destino. En el registry hay 11 entradas (`agent_cash` es alias de `agent_income`).
 
 | Agente | Context Budget | Responsabilidad |
 |--------|---------------|-----------------|
@@ -241,6 +241,8 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 | AgentHealth | 4.000 tokens | Score de salud, narrativa ejecutiva |
 | AgentHelper | 2.500 tokens | FAQ, manual, guía funcional |
 | AgentGoogle | 4.000 tokens | Google Calendar + Sheets + Docs vía MCP |
+| **AgentClient** (v4 F2/F6a) | — | Análisis de clientes (facturación, inactivos, cuentas por cobrar, priorizar cobranza) + cobranza WhatsApp (`PREPARE_WHATSAPP_MESSAGE`, LOCAL/MEDIUM, `requires_approval`; el link `wa.me` lo ejecuta `PendingActionService`). `agent_client` en el registry. |
+| **AgentMarketing** (v4 F4) | — | Marketing read-only y determinístico (`ANALYZE_MARKETING_DATA`): dashboard ads/ventas, ROI de ads, sugerir campaña. El LLM nunca calcula — cifras desde `MarketingService` + `shared/analytics`. `agent_marketing` en el registry. |
 | **AgentChat** | — | **Capa de respuesta (Sprint 18):** sintetiza el `AgentResponse` del sub-agente + contextos en lenguaje natural rioplatense. NUNCA accede a la DB. Reemplazó a `_generate_rich_response` del ChatOrchestrator. `agent_chat` en el registry. |
 
 > Verificar `backend/app/application/agents/<agent>/agent.py` antes de asumir estado del agente.
@@ -258,7 +260,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 - `confidence`: `"HIGH" | "MEDIUM" | "LOW"` — nunca float
 - `LLMCall`: `{ source, model, input_tokens, output_tokens }`. `UsageSummary`: `{ calls: list[LLMCall] }` + `total_input/output/total`.
 
-**ActionType** (`shared/schemas.py`) — catálogo cerrado de 28 valores:
+**ActionType** (`shared/schemas.py`) — catálogo cerrado de 31 valores:
 
 ```
 REGISTER_SALE          REGISTER_CASH_INFLOW    REGISTER_EXPENSE
@@ -275,6 +277,12 @@ ANALYZE_SALES_DATA     ANALYZE_EXPENSE_DATA    ANALYZE_SUPPLIER_DATA
 SIMULATE_SCENARIO
 # Reclasificación de gastos vía chat (MEDIUM, requiere aprobación)
 RECLASSIFY_EXPENSE
+# v4 — analítico de marketing read-only (LOW)
+ANALYZE_MARKETING_DATA
+# v4 F5 — capa consultiva (LOW, read-only, los LLM narran pero no calculan)
+ANSWER_DATA_QUERY
+# v4 F6a — cobranza WhatsApp click-to-chat (MEDIUM, requiere aprobación)
+PREPARE_WHATSAPP_MESSAGE
 ```
 
 Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
@@ -296,11 +304,15 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **HeuristicEngine** (`shared/heuristic_engine.py`): `get(business_type)` síncrono; `get_async(...)` aplica `BusinessHeuristicOverride` de la DB. `to_prompt_fragment()` genera valores numéricos para system prompts — nunca texto narrativo. Fallback a `kiosco_almacen`.
 
-**AgentCEO — flujo:** `nlp_preprocessor` (Sprint 18, `agents/shared/nlp_preprocessor.py`) normaliza lunfardo/rioplatense (merca, birra, remarcar, guita, etc.) antes del LLM; spacy (`es_core_news_sm`) opcional con fallback a regex puro; las entidades NLP se inyectan como anotación pre-análisis en el prompt del CEO. Luego `classify_intent()` → LLM (max_tokens=800) → **29 intents** del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido` y `reclasificar_gasto` → `agent_expense` → `RECLASSIFY_EXPENSE`). `INTENT_CATALOG` es `dict[str, {desc, triggers}]` y el CEO construye el system prompt dinámicamente desde el catálogo. **Sprint 19 (consolidación):** las 8 familias analíticas son UN intent cada una; el sub-análisis va en la entidad `analysis_type` (best-effort). `build_plan()` traduce `(intent, analysis_type)` → el `_intent` legacy que el handler espera vía `_resolve_legacy_discriminator()` (default por familia si falta `analysis_type`); el mapeo vive en `_ANALYTIC_FAMILIES`. `_LEGACY_INTENT_ALIASES` resuelve keys granulares en vuelo (red de seguridad). Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
+**AgentCEO — flujo:** `nlp_preprocessor` (Sprint 18, `agents/shared/nlp_preprocessor.py`) normaliza lunfardo/rioplatense (merca, birra, remarcar, guita, etc.) antes del LLM; spacy (`es_core_news_sm`) opcional con fallback a regex puro; las entidades NLP se inyectan como anotación pre-análisis en el prompt del CEO. Luego `classify_intent()` → LLM (max_tokens=800) → **33 intents** del `INTENT_CATALOG` en español rioplatense (incluye `intent_desconocido`, `reclasificar_gasto` → `agent_expense` → `RECLASSIFY_EXPENSE`, y los 4 de v4: `analizar_clientes`/`analizar_marketing` → familias analíticas, `consulta_libre` → `ANSWER_DATA_QUERY`, `recordar_por_whatsapp` → `PREPARE_WHATSAPP_MESSAGE`). `INTENT_CATALOG` es `dict[str, {desc, triggers}]` y el CEO construye el system prompt dinámicamente desde el catálogo. **Sprint 19 (consolidación):** las 8 familias analíticas son UN intent cada una; el sub-análisis va en la entidad `analysis_type` (best-effort). `build_plan()` traduce `(intent, analysis_type)` → el `_intent` legacy que el handler espera vía `_resolve_legacy_discriminator()` (default por familia si falta `analysis_type`); el mapeo vive en `_ANALYTIC_FAMILIES`. `_LEGACY_INTENT_ALIASES` resuelve keys granulares en vuelo (red de seguridad). Luego `INTENT_TO_ACTION_TYPE` + `INTENT_TO_AGENT` (determinísticos, en `ceo/team_plan_builder.py`) → `build_plan()` → `AgentTeamPlan` → `registry.get_sub_agent(name)`. Intent `actualizar_producto` → `agent_stock` → `UPDATE_PRODUCT` action.
 
 **Rescate de intent (Sprint 17):** cuando el CEO devuelve `intent_desconocido`, ChatOrchestrator NO corta inmediatamente. Aplica dos capas determinísticas (sin LLM) en `_rescue_unknown_intent()`: (1) `DataIntentExtractor` sobre los adjuntos parseados → si hay datos importables, mapea a `analizar_precios`(`analysis_type=lista`)/`analizar_archivo`; (2) `intent_rescue.rescue_intent()` (en `shared/intent_rescue.py`, devuelve `tuple[intent, entities]` con `analysis_type`) — scoring semántico de verbo ambiguo + objeto de negocio + tipo de adjunto, con normalización de voseo/tildes y fuzzy matching (`rapidfuzz`, umbral 85) para typos. Solo si ambas fallan corta: `out_of_scope` (off-topic claro → mensaje de scope) o `pedir_aclaracion_negocio`/`pedir_aclaracion_sobre_archivo` (suena a negocio pero ambiguo → pide detalle). Constantes `_NO_AGENT_INTENTS`/`_NO_AGENT_MESSAGES` en `chat_orchestrator.py`. Para los 7 ActionTypes analíticos (+`ANSWER_HELP_REQUEST`), `build_plan()` inyecta el sub-análisis en `entities["_intent"]` (resuelto desde `analysis_type`) para que el handler distinga sub-análisis dentro de un mismo ActionType.
 
 **Handlers analíticos (Sprint 17):** read-only, LOW risk, sin aprobación. Math determinística centralizada en `shared/analytics.py` (funciones puras: márgenes, días de stock, sobrestock, estrella/problemático, anomalías de gasto, punto de equilibrio). Los agentes cargan datos vía repos y arman un `message` determinístico — los LLM NUNCA calculan. Familias: AgentStock (`ANALYZE_PRICES`, `ANALYZE_STOCK_DATA`), AgentIncome (`ANALYZE_FILE`, `ANALYZE_SALES_DATA` + clientes stub), AgentExpense (`ANALYZE_EXPENSE_DATA`), AgentSupplier (`ANALYZE_SUPPLIER_DATA`), AgentHealth (`SIMULATE_SCENARIO`: proyección de caja vía ForecastService + what-if vía DeterministicFinance). Queries nuevas: `product_repository.get_products_with_margin`, `sale_repository.get_daily_velocity`/`get_sales_by_product`, `expense_repository.get_expense_stats_by_category`.
+
+**Capa consultiva v4 (F5) — `ANSWER_DATA_QUERY`:** consulta libre en lenguaje natural (LOW, read-only). 7 dominios, cada uno resuelto por su agente: caja/ventas (AgentIncome), gastos (AgentExpense), stock (AgentStock), proveedores (AgentSupplier), clientes (AgentClient), marketing (AgentMarketing), salud (AgentHealth). Intent `consulta_libre`. Los agentes cargan datos vía repos + `shared/stats_engine.py` (numpy/numpy-financial) e inyectan estadística determinística en `structured_data["analisis"]`; la narrativa la genera `shared/data_query_narrator.py` — **el LLM narra pero nunca calcula** (F7 cableó el `stats_engine` a los 7 dominios). `stats_enrichment.py` arma el enriquecimiento; STOCK concentra sobre valor `units×cost` (no `margin_pct`, porque HHI requiere montos aditivos).
+
+**Cobranza WhatsApp v4 (F6a) — `PREPARE_WHATSAPP_MESSAGE`:** LOCAL y MEDIUM (requiere aprobación). AgentClient determina el destinatario (cliente con mayor saldo si no se especifica), arma el cuerpo determinístico y emite `requires_approval`. La ejecución genera un link `wa.me` (click-to-chat, sin API de WhatsApp) en `PendingActionService`. Intent `recordar_por_whatsapp`.
 
 **AgentTeamPlan / AgentTask** (`shared/schemas.py`): `AgentTeamPlan { plan_id, intent, tasks: list[AgentTask], requires_synthesis, fallback_message? }`. `AgentTask { task_id, agent, action_type, entities, depends_on: list[task_id], approval_group? }`. Stage 3 completado: `build_plan()` soporta planes multi-task y DAGs; ejecución con skip-downstream ante fallo; `agents/ceo/synthesis.py` genera narrativa sintetizada de múltiples resultados (`claude-sonnet-4-6` desde Sprint 18).
 
@@ -464,7 +476,7 @@ El historial de sprints (1–21), los proyectos mergeados post-Sprint-21 y la ca
 - Scores recalculan solo ante cambios de datos (Celery async).
 - Toda decisión → `decision_audit_log` (insert-only).
 - Fail-closed en writes sensibles.
-- `ActionType` cerrado (28 valores) — cambiar requiere actualizar `RiskEngine` y tests.
+- `ActionType` cerrado (31 valores) — cambiar requiere actualizar `RiskEngine` y tests.
 - System prompts: heurísticas como valores numéricos, nunca texto narrativo.
 - Todo input de usuario a LLM pasa por `wrap_user_input()`.
 - Toda aritmética financiera va por `DeterministicFinance` — LLMs nunca calculan montos.

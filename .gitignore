@@ -65,6 +65,7 @@ coverage.xml
 .claude-flow/sessions/
 backend/.claude-flow/data/
 backend/.claude-flow/sessions/
+frontend/.claude-flow/
 
 # ── Secrets locales del MCP server ────────────────────────────────────────────
 mcp_server/.env
@@ -81,3 +82,7 @@ graphify-out/
 
 # Screenshots locales (no son artefactos del proyecto)
 capturas/
+
+# ── Scratch / dry-run previews y duplicados de Finder ─────────────────────────
+*_preview.csv
+CLAUDE [0-9]*.md
