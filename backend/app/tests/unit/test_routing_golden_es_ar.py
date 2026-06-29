@@ -28,7 +28,9 @@ def test_consulta_libre_routing_by_domain(domain: str, expected_agent: str) -> N
     plan = build_plan("consulta_libre", {"domain": domain})
     assert len(plan.tasks) == 1
     task = plan.tasks[0]
-    assert task.agent == expected_agent, f"domain={domain!r}: esperado {expected_agent!r}, obtuvo {task.agent!r}"
+    assert task.agent == expected_agent, (
+        f"domain={domain!r}: esperado {expected_agent!r}, obtuvo {task.agent!r}"
+    )
     assert task.action_type == ActionType.ANSWER_DATA_QUERY
     assert task.entities["domain"] == domain
     assert plan.requires_synthesis is False

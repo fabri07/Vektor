@@ -16,8 +16,9 @@ Migración ADDITIVE — Fase 2 (vínculo cobro→cliente). Agrega a ``customers`
 críticos todavía; reversible sin pérdida relevante).
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "20260724_0001"

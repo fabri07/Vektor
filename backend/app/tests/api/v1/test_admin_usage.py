@@ -321,7 +321,7 @@ async def test_unpriced_tokens_surfaced(
     resp = await client.get(_USAGE, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["totals"]["unpriced_tokens"] == 1_200_000  # 1M (modelo sin precio) + 200k (sin calls)
+    assert data["totals"]["unpriced_tokens"] == 1_200_000  # 1M sin precio + 200k sin calls
     assert data["totals"]["cost_usd"] == pytest.approx(0.0)
     by_model = {m["model"]: m for m in data["by_model"]}
     assert by_model["modelo-futuro-sin-precio"]["priced"] is False

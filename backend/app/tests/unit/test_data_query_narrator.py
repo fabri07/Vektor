@@ -13,7 +13,6 @@ from app.application.agents.shared.data_query_narrator import answer_data_query
 from app.application.agents.shared.schemas import LLMCall
 from app.application.security.prompt_defense import wrap_user_input
 
-
 # ── Fakes ─────────────────────────────────────────────────────────────────────
 
 
@@ -72,7 +71,10 @@ async def test_structured_data_in_prompt() -> None:
     await answer_data_query(
         question="¿Cuánto debo?",
         domain="caja",
-        structured_data={"saldo": 12345, "deudas": [{"proveedor": "Mayorista Norte", "monto": 5000}]},
+        structured_data={
+            "saldo": 12345,
+            "deudas": [{"proveedor": "Mayorista Norte", "monto": 5000}],
+        },
         business_name="Limpieza Pro",
         client=client,
     )
@@ -99,7 +101,9 @@ async def test_question_wrapped_with_user_input() -> None:
 
     call_kwargs = client.messages.create.call_args
     user_message: str = call_kwargs.kwargs["messages"][0]["content"]
-    assert wrap_user_input(question) in user_message, "La pregunta no fue envuelta con wrap_user_input"
+    assert wrap_user_input(question) in user_message, (
+        "La pregunta no fue envuelta con wrap_user_input"
+    )
 
 
 @pytest.mark.asyncio

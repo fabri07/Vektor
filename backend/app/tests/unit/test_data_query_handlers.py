@@ -16,8 +16,8 @@ from __future__ import annotations
 import json
 from datetime import date
 from decimal import Decimal
-from uuid import UUID
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 
@@ -25,7 +25,6 @@ from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
     AgentTask,
-    Confidence,
 )
 
 _TENANT_A = "00000000-0000-0000-0000-000000000001"
@@ -220,7 +219,7 @@ async def test_client_sin_clientes_no_llama_llm() -> None:
     assert resp.usage is None
     # No-invention: el LLM NO fue llamado
     mock_llm.messages.create.assert_not_called()
-    assert "clientes" in resp.message.lower()
+    assert "clientes" in (resp.message or "").lower()
 
 
 @pytest.mark.asyncio
@@ -384,7 +383,7 @@ async def test_income_sin_ventas_no_llama_llm() -> None:
     assert resp.status == "success"
     assert resp.usage is None
     mock_llm.messages.create.assert_not_called()
-    assert "ventas" in resp.message.lower()
+    assert "ventas" in (resp.message or "").lower()
 
 
 @pytest.mark.asyncio
@@ -515,7 +514,7 @@ async def test_expense_sin_gastos_no_llama_llm() -> None:
     assert resp.status == "success"
     assert resp.usage is None
     mock_llm.messages.create.assert_not_called()
-    assert "gastos" in resp.message.lower()
+    assert "gastos" in (resp.message or "").lower()
 
 
 @pytest.mark.asyncio
@@ -596,7 +595,9 @@ async def test_supplier_con_datos_llama_narrador() -> None:
     ]
 
     with (
-        patch.object(agent, "_supplier_totals", new_callable=AsyncMock, return_value=supplier_totals),
+        patch.object(
+            agent, "_supplier_totals", new_callable=AsyncMock, return_value=supplier_totals
+        ),
         patch.object(
             agent, "_critical_stock_for_order", new_callable=AsyncMock, return_value=critical_stock
         ),
@@ -649,7 +650,7 @@ async def test_supplier_sin_datos_no_llama_llm() -> None:
     assert resp.status == "success"
     assert resp.usage is None
     mock_llm.messages.create.assert_not_called()
-    assert "proveedor" in resp.message.lower()
+    assert "proveedor" in (resp.message or "").lower()
 
 
 @pytest.mark.asyncio
@@ -661,7 +662,9 @@ async def test_supplier_sin_session_no_llama_llm() -> None:
     mock_llm = _make_client()
     agent.client = mock_llm
 
-    resp = await agent.process(_req(message="cuéntame de mis proveedores"), task=_task("agent_supplier"))
+    resp = await agent.process(
+        _req(message="cuéntame de mis proveedores"), task=_task("agent_supplier")
+    )
 
     assert resp.status == "success"
     assert resp.usage is None
@@ -690,7 +693,9 @@ async def test_supplier_cross_tenant_isolation() -> None:
     ]
 
     with (
-        patch.object(agent, "_supplier_totals", new_callable=AsyncMock, return_value=suppliers_a) as mock_st,
+        patch.object(
+            agent, "_supplier_totals", new_callable=AsyncMock, return_value=suppliers_a
+        ) as mock_st,
         patch.object(agent, "_critical_stock_for_order", new_callable=AsyncMock, return_value=[]),
     ):
         resp_a = await agent.process(_req(tenant_id=_TENANT_A), task=_task("agent_supplier"))
@@ -979,7 +984,7 @@ async def test_stock_sin_productos_no_llama_llm() -> None:
     assert resp.status == "success"
     assert resp.usage is None
     mock_llm.messages.create.assert_not_called()
-    assert "producto" in resp.message.lower()
+    assert "producto" in (resp.message or "").lower()
 
 
 @pytest.mark.asyncio
@@ -1214,7 +1219,7 @@ async def test_marketing_sin_datos_no_llama_llm() -> None:
     assert resp.status == "success"
     assert resp.usage is None
     mock_llm.messages.create.assert_not_called()
-    assert "marketing" in resp.message.lower()
+    assert "marketing" in (resp.message or "").lower()
 
 
 @pytest.mark.asyncio
@@ -1426,7 +1431,7 @@ async def test_health_sin_datos_no_llama_llm() -> None:
     assert resp.status == "success"
     assert resp.usage is None
     mock_llm.messages.create.assert_not_called()
-    assert "30 días" in resp.message or "movimiento" in resp.message.lower()
+    assert "30 días" in (resp.message or "") or "movimiento" in (resp.message or "").lower()
 
 
 @pytest.mark.asyncio
@@ -1468,7 +1473,11 @@ async def test_health_cross_tenant_isolation() -> None:
             "hasta": "2026-06-27",
         },
         "margen": {"sin_datos": False, "margen_pct": Decimal("40.00")},
-        "ticket_promedio": {"sin_datos": False, "ticket_promedio": Decimal("1000.00"), "n_transacciones": 50},
+        "ticket_promedio": {
+            "sin_datos": False,
+            "ticket_promedio": Decimal("1000.00"),
+            "n_transacciones": 50,
+        },
         "rotacion": {"sin_datos": True},
     }
 
@@ -1509,7 +1518,11 @@ async def test_health_structured_data_json_serializable() -> None:
             "hasta": "2026-06-27",
         },
         "margen": {"margen_pct": Decimal("30.00"), "sin_datos": False},
-        "ticket_promedio": {"ticket_promedio": Decimal("3333.33"), "n_transacciones": 30, "sin_datos": False},
+        "ticket_promedio": {
+            "ticket_promedio": Decimal("3333.33"),
+            "n_transacciones": 30,
+            "sin_datos": False,
+        },
         "rotacion": {"sin_datos": True},
     }
 

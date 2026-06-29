@@ -28,7 +28,6 @@ from typing import Any
 import numpy as np
 import numpy_financial as npf
 
-
 # ── Estadística descriptiva ──────────────────────────────────────────────────
 
 
@@ -122,12 +121,8 @@ def project_sales(
     y_pred = slope * x + intercept
     ss_res = float(np.sum((arr - y_pred) ** 2))
     ss_tot = float(np.sum((arr - np.mean(arr)) ** 2))
-    r_squared: float
-    if ss_tot == 0.0:
-        # Serie perfectamente plana: ajuste perfecto
-        r_squared = 1.0
-    else:
-        r_squared = max(0.0, 1.0 - ss_res / ss_tot)
+    # r_squared=1.0 si la serie es perfectamente plana (ss_tot==0 → ajuste perfecto)
+    r_squared = 1.0 if ss_tot == 0.0 else max(0.0, 1.0 - ss_res / ss_tot)
 
     # Proyección: puntos futuros (x = n, n+1, ..., n+days_ahead-1).
     # Clamp a 0: una tendencia en caída pronunciada extrapola a valores negativos,
@@ -329,7 +324,7 @@ def detect_anomalies(
 
     z_scores = (arr - mean) / std
     anomalies: list[dict[str, Any]] = []
-    for i, (val, z) in enumerate(zip(values, z_scores)):
+    for i, (val, z) in enumerate(zip(values, z_scores, strict=False)):
         z_float = float(z)
         if abs(z_float) >= z_threshold:
             anomaly_type = "pico" if z_float > 0 else "caida"

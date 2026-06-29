@@ -273,7 +273,9 @@ class TestGetBalancesByCustomer:
         rows = await repo.get_balances_by_customer(sample_tenant.tenant_id)
         assert rows, "Debería haber al menos una fila"
         row = rows[0]
-        for key in ("customer_id", "customer_name", "total_account", "total_paid", "balance", "n_sales"):
+        for key in (
+            "customer_id", "customer_name", "total_account", "total_paid", "balance", "n_sales"
+        ):
             assert key in row, f"Falta clave: {key}"
 
 
@@ -348,7 +350,9 @@ class TestCustomerBalanceEndpoint:
         customer_id = uuid.UUID(cid)
 
         # Setear credit_limit directamente en DB
-        from app.persistence.repositories.customer_repository import CustomerRepository  # noqa: PLC0415
+        from app.persistence.repositories.customer_repository import (
+            CustomerRepository,  # noqa: PLC0415
+        )
         repo = CustomerRepository(db_session)
         customer = await repo.get_by_id(customer_id, sample_tenant.tenant_id)
         assert customer is not None
@@ -387,7 +391,9 @@ class TestCustomerBalanceEndpoint:
         cid = resp.json()["id"]
         customer_id = uuid.UUID(cid)
 
-        from app.persistence.repositories.customer_repository import CustomerRepository  # noqa: PLC0415
+        from app.persistence.repositories.customer_repository import (
+            CustomerRepository,  # noqa: PLC0415
+        )
         repo = CustomerRepository(db_session)
         customer = await repo.get_by_id(customer_id, sample_tenant.tenant_id)
         assert customer is not None

@@ -333,7 +333,8 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
     "consulta_libre": {
         "desc": "Responder una pregunta libre sobre los datos del negocio (clientes, ventas, "
         "gastos, stock, proveedores, caja, marketing). "
-        "Extraé `domain` en entities: clientes | ventas | gastos | stock | proveedores | caja | marketing.",
+        "Extraé `domain` en entities: clientes | ventas | gastos | stock | "
+        "proveedores | caja | marketing.",
         "triggers": [
             "cuánto me debe Juan",
             "quién fue mi mejor cliente",

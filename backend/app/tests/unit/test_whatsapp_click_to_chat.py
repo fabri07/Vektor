@@ -10,9 +10,6 @@ Verifica:
 
 from urllib.parse import unquote
 
-import pytest
-
-
 # ── Link builder ──────────────────────────────────────────────────────────────
 
 

@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.application.agents.shared.schemas import (
-    ActionType,
     AgentRequest,
     AgentResponse,
     Confidence,
@@ -74,7 +73,11 @@ def _make_ceo_response(
         status="success",
         risk_level=RiskLevel.LOW,
         requires_approval=False,
-        confidence=Confidence.LOW if (confidence_float is not None and confidence_float < 0.72) else Confidence.HIGH,
+        confidence=(
+            Confidence.LOW
+            if (confidence_float is not None and confidence_float < 0.72)
+            else Confidence.HIGH
+        ),
         result=result,
         usage=UsageSummary(calls=[
             LLMCall(source="ceo", model="claude-sonnet-4-6", input_tokens=50, output_tokens=20)

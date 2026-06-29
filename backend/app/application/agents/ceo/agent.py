@@ -172,8 +172,8 @@ class AgentCEO(BaseAgent):
             "Valores válidos: clientes, ventas, gastos, stock, proveedores, caja, marketing.\n"
             "ENTIDAD cliente (cobros y ventas): si el usuario menciona a QUIÉN le cobró o vendió "
             "(p. ej. 'cobré $5000 a Juan', 'me pagó la deuda Pérez'), incluí `cliente` en entities "
-            "con el nombre tal cual lo dijo. Sirve para vincular el cobro al cliente. Si no nombra a "
-            "nadie, omitilo.\n"
+            "con el nombre tal cual lo dijo. Sirve para vincular el cobro al cliente. "
+            "Si no nombra a nadie, omitilo.\n"
             f"{attachment_context}\n"
             "REGLA CRÍTICA — intent_desconocido:\n"
             "Usá 'intent_desconocido' si el mensaje NO está relacionado con:\n"
@@ -221,9 +221,7 @@ class AgentCEO(BaseAgent):
         raw_conf = parsed.get("confidence")
         if raw_conf is None:
             conf_float: float = 0.5
-        elif not isinstance(raw_conf, (int, float)):
-            conf_float = 0.5
-        elif not (0.0 <= float(raw_conf) <= 1.0):
+        elif not isinstance(raw_conf, int | float) or not (0.0 <= float(raw_conf) <= 1.0):
             conf_float = 0.5
         else:
             conf_float = float(raw_conf)

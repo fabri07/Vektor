@@ -178,8 +178,10 @@ async def _run(tenant_id_str: str) -> None:
                                 "- Usá los números dados para CONCLUIR vos (ej: 'tus ventas "
                                 "cayeron X%, parece baja de demanda'). NUNCA le pidas al usuario "
                                 "que 'analice', 'revise' o 'evalúe' — ese análisis lo hacés vos.\n"
-                                "- Cerrá siempre con una sugerencia de acción concreta y realista.\n"
-                                "- Máximo 3 párrafos. Priorizá lo urgente. Español argentino, directo."
+                                "- Cerrá siempre con una sugerencia de acción "
+                                "concreta y realista.\n"
+                                "- Máximo 3 párrafos. Priorizá lo urgente. "
+                                "Español argentino, directo."
                             ),
                             messages=[
                                 {

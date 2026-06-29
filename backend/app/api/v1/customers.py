@@ -606,7 +606,9 @@ async def get_customer_balance(
     404 si el cliente no existe o pertenece a otro tenant.
     """
     customer_repo = CustomerRepository(session)
-    customer = await customer_repo.get_by_id(customer_id, tenant.tenant_id, include_deactivated=True)
+    customer = await customer_repo.get_by_id(
+        customer_id, tenant.tenant_id, include_deactivated=True
+    )
     if not customer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
 

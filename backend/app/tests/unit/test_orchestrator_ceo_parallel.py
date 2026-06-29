@@ -72,7 +72,9 @@ def _make_ceo_response(request_id: str) -> AgentResponse:
             "plan": plan_dict,
         },
         usage=UsageSummary(
-            calls=[LLMCall(source="ceo", model="claude-sonnet-4-6", input_tokens=50, output_tokens=20)]
+            calls=[
+                LLMCall(source="ceo", model="claude-sonnet-4-6", input_tokens=50, output_tokens=20)
+            ]
         ),
     )
 
@@ -332,7 +334,12 @@ async def test_no_attachment_meta_has_attachment_false(
         sub_resp.requires_approval = False
         mock_executor.return_value.execute = AsyncMock(return_value=[sub_resp])
         mock_chat_cls.return_value.generate_response = AsyncMock(
-            return_value=("OK.", LLMCall(source="agent_chat", model="claude-sonnet-4-6", input_tokens=10, output_tokens=5))
+            return_value=(
+                "OK.",
+                LLMCall(
+                    source="agent_chat", model="claude-sonnet-4-6", input_tokens=10, output_tokens=5
+                ),
+            )
         )
         mock_bm.return_value.get = AsyncMock(return_value={})
         mock_am.return_value.get_context_fragment = AsyncMock(return_value="")

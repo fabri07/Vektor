@@ -8,7 +8,7 @@ interfaz mínima permite sumar canales nuevos sin tocar el servicio ni el router
 from abc import ABC, abstractmethod
 
 
-class ChannelNotConfigured(Exception):
+class ChannelNotConfigured(Exception):  # noqa: N818
     """El canal solicitado no está disponible/configurado.
 
     El router la traduce a 503 `{"code": "CHANNEL_NOT_CONFIGURED"}`. La levantan

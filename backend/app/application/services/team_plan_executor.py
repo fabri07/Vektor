@@ -70,11 +70,9 @@ def _is_retryable(exc: BaseException) -> bool:
 
         if isinstance(
             exc,
-            (
-                _anthropic.APIConnectionError,
-                _anthropic.APITimeoutError,
-                _anthropic.InternalServerError,
-            ),
+            _anthropic.APIConnectionError
+            | _anthropic.APITimeoutError
+            | _anthropic.InternalServerError,
         ):
             return True
     except ImportError:
@@ -84,7 +82,7 @@ def _is_retryable(exc: BaseException) -> bool:
     try:
         import sqlalchemy.exc as _sqla_exc  # noqa: PLC0415
 
-        if isinstance(exc, (_sqla_exc.OperationalError, _sqla_exc.DBAPIError)):
+        if isinstance(exc, _sqla_exc.OperationalError | _sqla_exc.DBAPIError):
             return True
     except ImportError:
         pass

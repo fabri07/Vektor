@@ -103,7 +103,7 @@ class TestIsRetryable:
     """Verifica la tabla completa del brief: qué excepciones son reintentables."""
 
     def test_asyncio_timeout_error_retryable(self) -> None:
-        assert _is_retryable(asyncio.TimeoutError()) is True
+        assert _is_retryable(TimeoutError()) is True
 
     def test_anthropic_api_connection_error_retryable(self) -> None:
         import anthropic
@@ -128,11 +128,11 @@ class TestIsRetryable:
         assert _is_retryable(exc) is True
 
     def test_sqlalchemy_operational_error_retryable(self) -> None:
-        exc = sqlalchemy.exc.OperationalError("select 1", {}, None)
+        exc = sqlalchemy.exc.OperationalError("select 1", {}, Exception("orig"))
         assert _is_retryable(exc) is True
 
     def test_sqlalchemy_dbapi_error_retryable(self) -> None:
-        exc = sqlalchemy.exc.DBAPIError("select 1", {}, None)
+        exc = sqlalchemy.exc.DBAPIError("select 1", {}, Exception("orig"))
         assert _is_retryable(exc) is True
 
     def test_value_error_not_retryable(self) -> None:
@@ -260,7 +260,7 @@ class TestRetryableErrors:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise sqlalchemy.exc.OperationalError("connection lost", {}, None)
+                raise sqlalchemy.exc.OperationalError("connection lost", {}, Exception("orig"))
             return _success_resp(request)
 
         mock_agent = MagicMock()
@@ -376,7 +376,7 @@ class TestRetryableErrors:
         async def always_operational_error(*args: object, **kwargs: object) -> AgentResponse:
             nonlocal call_count
             call_count += 1
-            raise sqlalchemy.exc.OperationalError("siempre falla", {}, None)
+            raise sqlalchemy.exc.OperationalError("siempre falla", {}, Exception("orig"))
 
         mock_agent = MagicMock()
         mock_agent.process = always_operational_error

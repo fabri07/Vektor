@@ -140,7 +140,9 @@ async def get_usage_dashboard(
                 # Atribución REAL por llamada: el `source` del LLMCall (ceo, agent_health,
                 # agent_stock, …). Fallback al agente de la fila si no viene.
                 source = call.get("source")
-                call_agent = source if isinstance(source, str) and source.strip() else fallback_agent
+                call_agent = (
+                    source if isinstance(source, str) and source.strip() else fallback_agent
+                )
                 in_tok = _coerce_int(call.get("input_tokens"))
                 out_tok = _coerce_int(call.get("output_tokens"))
                 call_tokens = in_tok + out_tok

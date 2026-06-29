@@ -270,7 +270,7 @@ class TestResolveLegacyDiscriminatorConsistency:
         """
         families = _ANALYTIC_FAMILIES
         for family_key, family_def in families.items():
-            mapped_intents = set(family_def["types"].values())
+            set(family_def["types"].values())
             default_intent = family_def["default"]
 
             # El default debe ser un string no vacío

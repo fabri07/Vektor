@@ -718,7 +718,9 @@ class AgentSupplier(BaseAgent):
         # tenant con la misma firma de contenido (proveedor + total + items).
         new_items_json = [item.model_dump(mode="json") for item in items]
 
-        def _po_signature(supplier: uuid.UUID | None, total_v: Decimal, its: list[dict[str, Any]]) -> tuple[Any, ...]:
+        def _po_signature(
+            supplier: uuid.UUID | None, total_v: Decimal, its: list[dict[str, Any]]
+        ) -> tuple[Any, ...]:
             return (
                 str(supplier) if supplier else None,
                 str(total_v),
@@ -728,7 +730,10 @@ class AgentSupplier(BaseAgent):
         new_sig = _po_signature(supplier_id, total, new_items_json)
         existing_draft: PurchaseOrder | None = None
         for ex in await po_repo.list_by_tenant(tenant_id):
-            if ex.status == "draft" and _po_signature(ex.supplier_id, ex.total, ex.items or []) == new_sig:
+            if (
+                ex.status == "draft"
+                and _po_signature(ex.supplier_id, ex.total, ex.items or []) == new_sig
+            ):
                 existing_draft = ex
                 break
 
@@ -761,7 +766,10 @@ class AgentSupplier(BaseAgent):
             confidence=Confidence.HIGH,
             message=message,
             result={
-                "summary": f"Borrador de pedido creado: {n} producto(s), total ${float(total):,.2f}",
+                "summary": (
+                    f"Borrador de pedido creado: {n} producto(s), "
+                    f"total ${float(total):,.2f}"
+                ),
                 "structured_data": {
                     "purchase_order_id": str(po.id),
                     "items": [item.model_dump(mode="json") for item in items],

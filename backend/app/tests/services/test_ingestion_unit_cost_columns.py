@@ -131,7 +131,9 @@ async def test_asteria_precio_compra_venta_disambiguation(
 
 def test_resolve_sale_price_col_helper() -> None:
     """Unit: prioridad venta > lista > precio, excluyendo compra/costo (sin DB)."""
-    headers = ["Tienda", "Productos", "Precio de compra", "Precio de lista", "Precio de venta final"]
+    headers = [
+        "Tienda", "Productos", "Precio de compra", "Precio de lista", "Precio de venta final"
+    ]
     # "venta" gana sobre "lista" y sobre el genérico "precio" de compra.
     assert importer._resolve_sale_price_col(headers, "Precio de compra") == "Precio de venta final"
     # Sin "venta": cae a "lista".

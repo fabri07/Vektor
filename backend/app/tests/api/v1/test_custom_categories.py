@@ -91,7 +91,9 @@ class TestProductCustomCategories:
     ) -> None:
         created = (
             await client.post(
-                "/api/v1/products/custom-categories", json={"label": "Mascotas"}, headers=auth_headers
+                "/api/v1/products/custom-categories",
+                json={"label": "Mascotas"},
+                headers=auth_headers,
             )
         ).json()
         resp = await client.post(

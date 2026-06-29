@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.application.agents.shared.schemas import Confidence, LLMCall, AgentRequest
+from app.application.agents.shared.schemas import AgentRequest, Confidence, LLMCall
 
 
 def _make_request(message: str = "test") -> AgentRequest:

@@ -11,7 +11,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"app/tests/**" = ["ANN", "S101"]
+"app/tests/**" = ["ANN", "S101", "N806"]
 "app/persistence/migrations/**" = ["ANN", "N999"]
 
 [tool.mypy]
@@ -27,11 +27,15 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["app.tests.*"]
 # Tests exentos de tipado estricto: las firmas usan fixtures sin tipar y los
-# cuerpos usan MagicMock/AsyncMock (tipo Any) extensamente. Relajar las 3 flags
-# hermanas mantiene los tests verdes sin ruido de type:ignore en cada mock.
+# cuerpos usan MagicMock/AsyncMock (tipo Any) extensamente. Relajar estas flags
+# de strict mantiene los tests verdes sin ruido de type:ignore en cada mock.
+# (union-attr/arg-type/operator NO se relajan: siguen cazando bugs reales.)
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 check_untyped_defs = false
+disallow_any_generics = false
+disallow_untyped_calls = false
+warn_return_any = false
 
 [[tool.mypy.overrides]]
 # Migraciones Alembic: archivos autogenerados, no se tipan.

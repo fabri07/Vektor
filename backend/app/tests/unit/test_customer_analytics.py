@@ -17,13 +17,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.agents.shared import analytics
 from app.application.agents.client.agent import AgentClient
+from app.application.agents.shared import analytics
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTask
 from app.persistence.models.customer import Customer
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
-
 
 # ── Funciones puras ───────────────────────────────────────────────────────────
 

@@ -28,11 +28,11 @@ _RECIPIENT_CUSTOMER = "customer"
 _RECIPIENT_SUPPLIER = "supplier"
 
 
-class RecipientNotFound(Exception):
+class RecipientNotFound(Exception):  # noqa: N818
     """El destinatario no existe o no pertenece al tenant."""
 
 
-class RecipientHasNoContact(Exception):
+class RecipientHasNoContact(Exception):  # noqa: N818
     """El destinatario no tiene el dato de contacto requerido por el canal (p. ej. email)."""
 
 

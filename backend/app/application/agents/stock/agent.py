@@ -1431,9 +1431,9 @@ class AgentStock(BaseAgent):
 
         # Sobrestock: productos con cobertura > 90 días o sin rotación (capital inmovilizado).
         # Umbral conservador de 90 días — no requiere cargar la config del vertical.
-        _OVERSTOCK_DAYS_DEFAULT = 90.0
+        overstock_days_default = 90.0
         sobrestock_raw = analytics.detect_overstock(
-            products_for_analytics, velocity, _OVERSTOCK_DAYS_DEFAULT
+            products_for_analytics, velocity, overstock_days_default
         )
         sobrestock: list[dict[str, Any]] = [
             {

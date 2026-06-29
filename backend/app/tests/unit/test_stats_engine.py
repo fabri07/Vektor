@@ -7,17 +7,15 @@ from __future__ import annotations
 
 import math
 import sys
-import importlib
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helper para importar el módulo limpio
 # ---------------------------------------------------------------------------
 
-def _import_stats_engine():  # type: ignore[return]
-    from app.application.agents.shared import stats_engine  # type: ignore[import]
+def _import_stats_engine():
+    from app.application.agents.shared import stats_engine
     return stats_engine
 
 
@@ -29,7 +27,7 @@ def _import_stats_engine():  # type: ignore[return]
 def test_stats_engine_no_llm() -> None:
     """El módulo stats_engine NO debe importar anthropic ni instanciar cliente LLM."""
     se = _import_stats_engine()
-    module_source = sys.modules.get(se.__name__)
+    sys.modules.get(se.__name__)
     # Verificamos que el namespace del módulo no contiene nada de anthropic
     members = dir(se)
     for name in members:
@@ -39,7 +37,10 @@ def test_stats_engine_no_llm() -> None:
             f"stats_engine expone '{name}' de un módulo anthropic ({module_name})"
         )
     # Tampoco debería existir "anthropic" en las importaciones del módulo
-    assert "anthropic" not in (se.__dict__.get("__spec__", None) or object()).__class__.__name__.lower()
+    assert (
+        "anthropic"
+        not in (se.__dict__.get("__spec__", None) or object()).__class__.__name__.lower()
+    )
     # Verificación directa: el atributo anthropic no está
     assert not hasattr(se, "anthropic"), "stats_engine no debe importar el módulo anthropic"
 

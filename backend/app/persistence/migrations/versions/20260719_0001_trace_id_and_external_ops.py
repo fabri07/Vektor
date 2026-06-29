@@ -10,8 +10,9 @@ Additive / reversible.
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "20260719_0001"
 down_revision = "20260718_0004"

@@ -5,7 +5,7 @@ Cubre:
 - test_supplier_catalog_url_persisted: catalog_url persiste y vuelve en SupplierResponse.
 - test_purchase_order_cross_tenant: list_by_tenant/list_by_supplier no devuelven PO de otro tenant.
 - test_purchase_order_routing: INTENT_TO_ACTION_TYPE y INTENT_TO_AGENT correctos.
-- test_agent_supplier_purchase_order_creates_draft: con quiebres → crea PO con items y total correcto.
+- test_agent_supplier_purchase_order_creates_draft: con quiebres → crea PO correcto.
 - test_agent_supplier_purchase_order_no_quiebres: sin quiebres → no crea PO, mensaje claro.
 """
 
@@ -14,17 +14,15 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.agents.shared.schemas import ActionType, AgentRequest
 from app.application.agents.ceo.team_plan_builder import INTENT_TO_ACTION_TYPE, INTENT_TO_AGENT
+from app.application.agents.shared.schemas import ActionType, AgentRequest
 from app.persistence.models.purchase_order import PurchaseOrder
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.repositories.purchase_order_repository import PurchaseOrderRepository
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -264,7 +262,9 @@ async def test_purchase_order_list_by_supplier_cross_tenant(
 
 def test_purchase_order_routing() -> None:
     """preparar_pedido_sugerido rutea a agent_supplier con CREATE_PURCHASE_SUGGESTION."""
-    assert INTENT_TO_ACTION_TYPE["preparar_pedido_sugerido"] == ActionType.CREATE_PURCHASE_SUGGESTION
+    assert (
+        INTENT_TO_ACTION_TYPE["preparar_pedido_sugerido"] == ActionType.CREATE_PURCHASE_SUGGESTION
+    )
     assert INTENT_TO_AGENT["preparar_pedido_sugerido"] == "agent_supplier"
 
 
@@ -286,8 +286,8 @@ async def test_agent_supplier_purchase_order_creates_draft(
     """Con productos en quiebre, el agente crea un PurchaseOrder(status='draft')."""
     from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
-    from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
     from app.application.agents.shared.schemas import AgentTask  # noqa: PLC0415
+    from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
 
     # Simular que hay ventas del supplier_fixture (para que _supplier_totals lo devuelva)
     # Usamos mock de _supplier_totals para no depender de ventas/gastos en la DB
@@ -358,8 +358,8 @@ async def test_agent_supplier_purchase_order_no_quiebres(
     product_ok_stock,
 ) -> None:
     """Sin productos en quiebre, no se crea PO y el mensaje es claro."""
-    from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
     from app.application.agents.shared.schemas import AgentTask  # noqa: PLC0415
+    from app.application.agents.supplier.agent import AgentSupplier  # noqa: PLC0415
 
     agent = AgentSupplier(session=db_session)
     request = AgentRequest(
@@ -380,7 +380,7 @@ async def test_agent_supplier_purchase_order_no_quiebres(
     response = await agent.process(request, task)
 
     assert response.status == "success"
-    assert "quiebre" in response.message.lower() or "pedido_sin_quiebres" in (
+    assert "quiebre" in (response.message or "").lower() or "pedido_sin_quiebres" in (
         response.result or {}
     ).get("summary", "")
 
