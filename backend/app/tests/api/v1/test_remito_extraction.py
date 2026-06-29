@@ -68,9 +68,9 @@ def _mock_anthropic_factory(tool_input: dict[str, Any]) -> tuple[Any, unittest.m
     client = unittest.mock.MagicMock()
     client.messages.create = create
 
-    def factory(*_args: Any, **_kwargs: Any) -> Any:
-        return client
-
+    # MagicMock (no función plana): _is_mock_factory lo reconoce y
+    # get_anthropic_async_client usa el factory sin exigir ANTHROPIC_API_KEY (CI).
+    factory = unittest.mock.MagicMock(return_value=client)
     return factory, create
 
 

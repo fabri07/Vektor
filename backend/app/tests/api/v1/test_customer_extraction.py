@@ -89,9 +89,11 @@ def _mock_anthropic_factory(
     client = unittest.mock.MagicMock()
     client.messages.create = create
 
-    def factory(*_args: Any, **_kwargs: Any) -> Any:
-        return client
-
+    # MagicMock (no función plana): _is_mock_factory lo reconoce por su __module__,
+    # así get_anthropic_async_client usa el factory SIN exigir ANTHROPIC_API_KEY
+    # (en CI no hay key; con una función plana el servicio caía a fail-soft y nunca
+    # llamaba a create).
+    factory = unittest.mock.MagicMock(return_value=client)
     return factory, create
 
 
@@ -205,9 +207,7 @@ class TestAIExtraction:
         create = unittest.mock.AsyncMock(side_effect=RuntimeError("boom"))
         client = unittest.mock.MagicMock()
         client.messages.create = create
-
-        def factory(*_a: Any, **_k: Any) -> Any:
-            return client
+        factory = unittest.mock.MagicMock(return_value=client)
 
         png = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 64
         extraction, usage = await extract_customer(png, "x.png", client_factory=factory)
