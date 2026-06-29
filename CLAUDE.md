@@ -495,7 +495,7 @@ El historial de sprints (1–21), los proyectos mergeados post-Sprint-21 y la ca
 | Redis | Railway managed | — |
 | Frontend | Vercel, root `frontend/` | `next start` |
 
-Alembic no corre al arrancar — migrations manuales contra Neon (`make migrate-neon`).
+**Migraciones automáticas (Railway pre-deploy):** `backend/railway.toml` define `preDeployCommand = "sh scripts/migrate.sh"` (→ `alembic upgrade head`), que corre UNA vez por deploy del servicio `vektor-api`, en un contenedor one-off con `DATABASE_URL` de Neon, ANTES de que la nueva versión reciba tráfico. Si una migración falla, Railway aborta el deploy y la versión vieja sigue sirviendo (fail-safe). El `startCommand` (`start_web.sh`) ya NO corre Alembic — solo uvicorn. `make migrate-neon` queda para aplicar manualmente desde el shell (local contra Neon) cuando haga falta fuera de un deploy.
 
 **Graceful bootstrap:** `app/bootstrap.py` captura errores DB/Redis → uvicorn arranca aunque estén caídos.
 - `/health` — liveness, siempre 200 (usado por `healthcheckPath` en `railway.toml`, timeout 120s).

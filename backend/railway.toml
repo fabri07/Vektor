@@ -3,6 +3,10 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
+# Migraciones automáticas: corre UNA vez antes de que la nueva versión reciba
+# tráfico (contra Neon vía DATABASE_URL). Si falla, Railway aborta el deploy y la
+# versión vieja sigue sirviendo. Reemplaza el paso manual `make migrate-neon`.
+preDeployCommand = "sh scripts/migrate.sh"
 startCommand = "sh scripts/start.sh"
 healthcheckPath = "/health"
 restartPolicyType = "on_failure"
