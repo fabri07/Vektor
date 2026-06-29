@@ -80,13 +80,17 @@ def test_heuristic_to_prompt_fragment_is_numeric():
 def test_action_type_enum_complete():
     # 20 previos + 7 analíticos Sprint 17 (ANALYZE_*, SIMULATE_SCENARIO) = 27
     # Nivel 2: + RECLASSIFY_EXPENSE = 28
-    assert len(ActionType) == 28
+    # v4: + ANALYZE_MARKETING_DATA (F4) + ANSWER_DATA_QUERY (F5)
+    #     + PREPARE_WHATSAPP_MESSAGE (F6) = 31
+    assert len(ActionType) == 31
 
 
 def test_intent_catalog_complete():
     # Sprint 19: catálogo consolidado a 28 (35 variantes analíticas → entidad analysis_type).
     # Nivel 2: + reclasificar_gasto = 29.
-    assert len(INTENT_CATALOG) == 29
+    # v4: + analizar_clientes (F2) + analizar_marketing (F4) + consulta_libre (F5)
+    #     + recordar_por_whatsapp (F6) = 33
+    assert len(INTENT_CATALOG) == 33
 
 
 def test_intent_catalog_spanish():

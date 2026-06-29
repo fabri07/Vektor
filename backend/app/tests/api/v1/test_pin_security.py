@@ -1,7 +1,7 @@
 """Tests de integración del step-up PIN: gating, permisos finos, borrado-con-historial."""
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -234,7 +234,9 @@ async def test_profit_withdrawal_creates_payroll(
 ) -> None:
     resp = await client.post(
         "/api/v1/expenses/profit-withdrawal",
-        json={"amount": "50000.00", "withdrawal_date": datetime.now(UTC).date().isoformat()},
+        # date.today() (local, igual que el validador del server) — no UTC, que
+        # cerca de la medianoche UTC/local caería como "fecha futura" y daría 422.
+        json={"amount": "50000.00", "withdrawal_date": date.today().isoformat()},
         headers=auth_headers,
     )
     assert resp.status_code == 201, resp.text
