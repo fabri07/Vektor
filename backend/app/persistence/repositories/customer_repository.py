@@ -45,6 +45,24 @@ class CustomerRepository:
         result = await self._session.execute(select(Customer).where(*conditions))
         return result.scalar_one_or_none()
 
+    async def get_sentinel_id(self, tenant_id: UUID) -> UUID | None:
+        """Read-only: id del centinela "Local" del tenant si existe (no lo crea).
+
+        Lo usan las métricas de clientes (p. ej. la concentración/dependencia) para
+        EXCLUIR las ventas anónimas/walk-in del análisis — si no, el centinela
+        domina y falsea la "dependencia de pocos clientes". Identifica por el flag
+        `_sentinel`, nunca por nombre.
+        """
+        result = await self._session.execute(
+            select(Customer.id).where(
+                Customer.tenant_id == tenant_id,
+                Customer.deactivated_at.is_(None),
+                func.coalesce(Customer.custom_fields[SENTINEL_FLAG_KEY].as_string(), "")
+                == "true",
+            )
+        )
+        return result.scalars().first()
+
     async def find_by_name(
         self,
         name_normalized: str,

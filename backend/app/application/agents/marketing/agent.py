@@ -423,6 +423,16 @@ class AgentMarketing(BaseAgent):
             ],
         }
 
+        # Concentración de gasto en ads por plataforma: ¿el presupuesto está en pocas?
+        # Con pocas plataformas (<5) devuelve insufficient_data — honesto, no fuerza stats.
+        from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
+            enrich_distribution,
+        )
+
+        structured_data["analisis"] = enrich_distribution(
+            [float(p.ads_spend_ars) for p in dashboard.platforms]
+        )
+
         text, call = await answer_data_query(
             question=request.message,
             domain="marketing",

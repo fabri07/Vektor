@@ -1,6 +1,6 @@
 """Repository for SaleEntry and ExpenseEntry."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -16,6 +16,56 @@ def _as_date(value: datetime | date | None) -> date | None:
     if value is None:
         return None
     return value.date() if isinstance(value, datetime) else value
+
+
+async def _daily_amount_series(
+    session: AsyncSession,
+    model: type[SaleEntry] | type[ExpenseEntry],
+    tenant_id: UUID,
+    from_date: date,
+    to_date: date,
+) -> list[float]:
+    """Serie diaria de montos con zero-fill sobre [from_date, to_date], cronológica.
+
+    Agrupa por `func.date(transaction_date)`, excluye `voided_at` y rellena con 0.0
+    los días sin movimiento. `str(row.day)` normaliza la clave entre Postgres
+    (devuelve `date`) y SQLite (devuelve `'YYYY-MM-DD'`). Compartido por las series
+    de ventas, gastos y caja neta para que el zero-fill y el rango sean idénticos.
+    """
+    day = func.date(model.transaction_date).label("day")
+    q = (
+        select(day, func.sum(model.amount).label("total"))
+        .where(
+            model.tenant_id == tenant_id,
+            model.voided_at.is_(None),
+            func.date(model.transaction_date) >= from_date,
+            func.date(model.transaction_date) <= to_date,
+        )
+        .group_by(day)
+        .order_by(day)
+    )
+    result = await session.execute(q)
+    by_day: dict[str, float] = {str(row.day): float(row.total or 0) for row in result.all()}
+    n_days = (to_date - from_date).days + 1
+    return [by_day.get(str(from_date + timedelta(days=i)), 0.0) for i in range(n_days)]
+
+
+async def get_daily_net_series(
+    session: AsyncSession,
+    tenant_id: UUID,
+    days: int = 60,
+) -> list[float]:
+    """Serie diaria de flujo neto (ventas - gastos) con zero-fill, rango único.
+
+    Calcula `[from_date, to_date]` UNA sola vez y arma ambas series con ese rango,
+    de modo que ventas y gastos quedan alineados día a día (evita la desalineación
+    si dos `date.today()` separados cruzaran la medianoche).
+    """
+    to_date = date.today()
+    from_date = to_date - timedelta(days=days - 1)
+    rev = await _daily_amount_series(session, SaleEntry, tenant_id, from_date, to_date)
+    exp = await _daily_amount_series(session, ExpenseEntry, tenant_id, from_date, to_date)
+    return [round(r - e, 2) for r, e in zip(rev, exp, strict=True)]
 
 
 class SaleRepository:
@@ -119,6 +169,20 @@ class SaleRepository:
             }
             for row in result.all()
         ]
+
+    async def get_daily_revenue_series(
+        self,
+        tenant_id: UUID,
+        days: int = 60,
+    ) -> list[float]:
+        """Facturación diaria con zero-fill (últimos `days` días, cronológica).
+
+        Serie continua `list[float]` (días sin venta = 0.0) que alimenta
+        `stats_enrichment.enrich_timeseries` (promedio diario, tendencia, anomalías).
+        """
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days - 1)
+        return await _daily_amount_series(self._session, SaleEntry, tenant_id, from_date, to_date)
 
     async def get_daily_velocity(
         self,
@@ -630,6 +694,22 @@ class ExpenseRepository:
             }
             for row in result.all()
         ]
+
+    async def get_daily_expense_series(
+        self,
+        tenant_id: UUID,
+        days: int = 60,
+    ) -> list[float]:
+        """Gasto diario con zero-fill (últimos `days` días, cronológica).
+
+        Serie continua `list[float]` (días sin gasto = 0.0) que alimenta
+        `stats_enrichment.enrich_timeseries`. Espeja `get_daily_revenue_series`.
+        """
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days - 1)
+        return await _daily_amount_series(
+            self._session, ExpenseEntry, tenant_id, from_date, to_date
+        )
 
     async def get_expense_stats_by_category(
         self,

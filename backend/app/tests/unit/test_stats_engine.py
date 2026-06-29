@@ -361,3 +361,75 @@ class TestDetectAnomalies:
             assert "value" in item
             assert "z_score" in item
             assert "type" in item
+
+
+# ---------------------------------------------------------------------------
+# concentration
+# ---------------------------------------------------------------------------
+
+
+class TestConcentration:
+    def test_empty_insufficient(self) -> None:
+        from app.application.agents.shared.stats_engine import concentration
+
+        result = concentration([])
+        assert result["status"] == "insufficient_data"
+        assert result["n"] == 0
+        assert result["min_required"] == 5
+
+    def test_n_less_than_min(self) -> None:
+        from app.application.agents.shared.stats_engine import concentration
+
+        result = concentration([100.0, 200.0, 300.0, 400.0])  # n=4 < 5
+        assert result["status"] == "insufficient_data"
+        assert result["n"] == 4
+
+    def test_total_zero(self) -> None:
+        from app.application.agents.shared.stats_engine import concentration
+
+        result = concentration([0.0, 0.0, 0.0, 0.0, 0.0])
+        assert result["zero_total"] is True
+        assert result["top1_share"] is None
+        assert result["top3_share"] is None
+        assert result["hhi"] is None
+        assert result["total"] == 0.0
+        # nunca inf/nan
+        assert "status" not in result
+
+    def test_normal_distribution(self) -> None:
+        from app.application.agents.shared.stats_engine import concentration
+
+        # total=1000; top1=500 → 0.5; top3 = 500+300+150 = 950 → 0.95
+        values = [500.0, 300.0, 150.0, 30.0, 20.0]
+        result = concentration(values)
+        assert result["n"] == 5
+        assert result["total"] == pytest.approx(1000.0)
+        assert result["top1_share"] == pytest.approx(0.5)
+        assert result["top3_share"] == pytest.approx(0.95)
+        # hhi = 0.5^2+0.3^2+0.15^2+0.03^2+0.02^2 = 0.25+0.09+0.0225+0.0009+0.0004
+        assert result["hhi"] == pytest.approx(0.3638, abs=1e-4)
+
+    def test_monopoly_hhi_one(self) -> None:
+        from app.application.agents.shared.stats_engine import concentration
+
+        values = [1000.0, 0.0, 0.0, 0.0, 0.0]
+        result = concentration(values)
+        assert result["top1_share"] == pytest.approx(1.0)
+        assert result["hhi"] == pytest.approx(1.0)
+
+    def test_negatives_clamped(self) -> None:
+        from app.application.agents.shared.stats_engine import concentration
+
+        # los negativos se clampean a 0 → total = 100+200+300+0+0 = 600
+        values = [100.0, 200.0, 300.0, -50.0, -10.0]
+        result = concentration(values)
+        assert result["total"] == pytest.approx(600.0)
+        assert result["top1_share"] == pytest.approx(0.5)
+
+    def test_no_inf_nan(self) -> None:
+        from app.application.agents.shared.stats_engine import concentration
+
+        for result in (concentration([0.0] * 5), concentration([10.0] * 5)):
+            for v in result.values():
+                if isinstance(v, float):
+                    assert not math.isinf(v) and not math.isnan(v)

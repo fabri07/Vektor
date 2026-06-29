@@ -139,6 +139,65 @@ async def test_client_con_datos_llama_narrador() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_concentration_excluye_sentinel() -> None:
+    """La concentración de clientes EXCLUYE el centinela "Local" (walk-in anónimo).
+
+    Si no, el centinela domina la facturación y el narrador diría "dependés de un
+    solo cliente" cuando en realidad son ventas anónimas. Debe concentrar solo
+    sobre los clientes identificados.
+    """
+    from app.application.agents.client.agent import AgentClient
+
+    mock_db = MagicMock()
+    agent = AgentClient(db=mock_db)
+    agent.client = _make_client()
+
+    # "Local" factura muchísimo más que cualquier cliente real
+    sales_data = [
+        {"customer_id": "local-uuid", "customer_name": "Local", "total": 900000.0, "n_sales": 500},
+        {"customer_id": "c1", "customer_name": "Ana", "total": 10000.0, "n_sales": 5},
+        {"customer_id": "c2", "customer_name": "Beto", "total": 8000.0, "n_sales": 4},
+        {"customer_id": "c3", "customer_name": "Caro", "total": 6000.0, "n_sales": 3},
+        {"customer_id": "c4", "customer_name": "Dani", "total": 4000.0, "n_sales": 2},
+        {"customer_id": "c5", "customer_name": "Eva", "total": 2000.0, "n_sales": 1},
+    ]
+
+    with (
+        patch(
+            "app.persistence.repositories.customer_repository.CustomerRepository"
+        ) as MockCR,
+        patch(
+            "app.persistence.repositories.transaction_repository.SaleRepository"
+        ) as MockSR,
+    ):
+        cr = AsyncMock()
+        cr.count_active = AsyncMock(return_value=6)
+        cr.get_inactive_customers = AsyncMock(return_value=[])
+        cr.get_sentinel_id = AsyncMock(return_value="local-uuid")
+        MockCR.return_value = cr
+
+        sr = AsyncMock()
+        sr.get_sales_by_customer = AsyncMock(return_value=sales_data)
+        sr.get_balances_by_customer = AsyncMock(return_value=[])
+        MockSR.return_value = sr
+
+        resp = await agent.process(_req(), task=_task("agent_client"))
+
+    analisis = resp.result["structured_data"]["analisis"]
+    conc = analisis["concentracion"]
+    # 5 clientes identificados (Local excluido), total 30000 (no 930000)
+    assert conc["n"] == 5
+    assert conc["total"] == pytest.approx(30000.0)
+    # top1 = 10000/30000 ≈ 0.33 (NO 900000/930000 ≈ 0.97 → NO es dependencia de uno)
+    assert conc["top1_share"] == pytest.approx(10000.0 / 30000.0, abs=1e-4)
+    # Participación de "Local" reportada como señal INFORMATIVA aparte
+    fl = analisis["facturacion_local"]
+    assert fl["local_total"] == pytest.approx(900000.0)
+    assert fl["total_general"] == pytest.approx(930000.0)
+    assert fl["local_pct"] == pytest.approx(96.8, abs=0.1)
+
+
+@pytest.mark.asyncio
 async def test_client_sin_clientes_no_llama_llm() -> None:
     """count_active==0 → no-invention, SIN llamar al LLM."""
     from app.application.agents.client.agent import AgentClient
@@ -258,6 +317,10 @@ async def test_income_con_datos_llama_narrador() -> None:
         sr = AsyncMock()
         sr.get_sales_by_customer = AsyncMock(return_value=sales_by_customer)
         sr.get_sales_by_product = AsyncMock(return_value=sales_by_product)
+        # serie diaria con tendencia creciente (60 días activos) → proyección ok
+        sr.get_daily_revenue_series = AsyncMock(
+            return_value=[float(1000 + i * 10) for i in range(60)]
+        )
         MockSR.return_value = sr
 
         resp = await agent.process(
@@ -280,6 +343,11 @@ async def test_income_con_datos_llama_narrador() -> None:
     assert sd["ticket_promedio"] == pytest.approx(1500.0)
     # Ventas por producto correctas
     assert sd["ventas_por_producto"][0]["revenue"] == 9000.0
+    # Análisis estadístico determinístico presente y con proyección
+    assert "analisis" in sd
+    assert sd["analisis"]["estadistica"]["n"] == 60
+    assert sd["analisis"]["proyeccion"]["status"] == "ok"
+    assert sd["analisis"]["proyeccion"]["trend_slope"] > 0
 
     mock_llm.messages.create.assert_called_once()
 
@@ -411,7 +479,9 @@ async def test_expense_con_datos_llama_narrador() -> None:
     sd = resp.result["structured_data"]
     assert "por_categoria" in sd
     assert "total" in sd
-    assert "anomalias" in sd
+    # anomalías por categoría renombradas (las temporales viven en `analisis`)
+    assert "anomalias_por_categoria" in sd
+    assert "analisis" in sd
     # Total correcto: 45000 + 15000 + 15000 = 75000
     assert sd["total"] == pytest.approx(75000.0)
     # Categorías presentes
@@ -509,14 +579,11 @@ async def test_supplier_con_datos_llama_narrador() -> None:
     agent.client = mock_llm
 
     supplier_totals = [
-        {
-            "name": "Distribuidora Norte",
-            "total": 80000.0,
-            "count": 5,
-            "last_purchase": "2026-06-01",
-            "days_since": 27,
-            "pct": 70.0,
-        }
+        {"name": "Distribuidora Norte", "total": 80000.0, "count": 5, "pct": 53.3},
+        {"name": "Mayorista Sur", "total": 40000.0, "count": 3, "pct": 26.7},
+        {"name": "Bebidas SA", "total": 20000.0, "count": 2, "pct": 13.3},
+        {"name": "Golosinas Centro", "total": 6000.0, "count": 1, "pct": 4.0},
+        {"name": "Limpieza Total", "total": 4000.0, "count": 1, "pct": 2.7},
     ]
     critical_stock = [
         {
@@ -552,6 +619,11 @@ async def test_supplier_con_datos_llama_narrador() -> None:
     # Stock crítico serializado (Decimal → float)
     assert sd["stock_critico"][0]["unit_cost"] == pytest.approx(350.0)
     assert isinstance(sd["stock_critico"][0]["unit_cost"], float)
+    # Concentración de compras (5 proveedores → muestra suficiente)
+    conc = sd["analisis"]["concentracion"]
+    assert conc["n"] == 5
+    assert conc["total"] == pytest.approx(150000.0)
+    assert conc["top1_share"] == pytest.approx(80000.0 / 150000.0, abs=1e-4)
 
     mock_llm.messages.create.assert_called_once()
 
@@ -1293,6 +1365,10 @@ async def test_health_con_datos_llama_narrador() -> None:
         "app.application.services.deterministic_finance.get_financial_summary",
         new_callable=AsyncMock,
         return_value=financial_summary,
+    ), patch(
+        "app.persistence.repositories.transaction_repository.get_daily_net_series",
+        new_callable=AsyncMock,
+        return_value=[float(1000 + i * 10) for i in range(60)],
     ):
         resp = await agent.process(
             _req(message="¿cómo está mi caja?"), task=_task_health()
@@ -1306,6 +1382,9 @@ async def test_health_con_datos_llama_narrador() -> None:
 
     sd = resp.result["structured_data"]
     assert "resumen_financiero" in sd
+    # análisis de la serie neta presente y con proyección (60 días activos)
+    assert "analisis" in sd
+    assert sd["analisis"]["proyeccion"]["status"] == "ok"
     rf = sd["resumen_financiero"]
     assert rf["total_ventas"] == pytest.approx(150000.0)
     assert rf["total_gastos"] == pytest.approx(90000.0)
@@ -1397,7 +1476,11 @@ async def test_health_cross_tenant_isolation() -> None:
         "app.application.services.deterministic_finance.get_financial_summary",
         new_callable=AsyncMock,
         return_value=financial_summary,
-    ) as mock_fs:
+    ) as mock_fs, patch(
+        "app.persistence.repositories.transaction_repository.get_daily_net_series",
+        new_callable=AsyncMock,
+        return_value=[0.0] * 60,
+    ):
         await agent.process(_req(tenant_id=_TENANT_A), task=_task_health())
 
     # Verificar que fue llamado con el tenant correcto
@@ -1434,11 +1517,15 @@ async def test_health_structured_data_json_serializable() -> None:
         "app.application.services.deterministic_finance.get_financial_summary",
         new_callable=AsyncMock,
         return_value=financial_summary,
+    ), patch(
+        "app.persistence.repositories.transaction_repository.get_daily_net_series",
+        new_callable=AsyncMock,
+        return_value=[100.0, 0.0, 200.0, -50.0, 300.0],
     ):
         resp = await agent.process(_req(message="¿cómo va el flujo?"), task=_task_health())
 
     assert resp.status == "success"
-    # No debe lanzar TypeError por Decimal no serializable
+    # No debe lanzar TypeError por Decimal no serializable (incluye `analisis`)
     serialized = json.dumps(resp.result["structured_data"])
     assert serialized
 

@@ -19,6 +19,11 @@ _SYSTEM = (
     "los datos provistos (structured_data). Son cifras ya calculadas — NO inventes "
     "ni recalcules. Si el dato para responder no está en structured_data, decílo con "
     "franqueza y sugerí qué cargar en Véktor para obtenerlo. "
+    "La clave 'analisis' es contexto de apoyo ya calculado (promedio diario, "
+    "tendencia, proyección, picos/caídas, concentración). Citá una métrica de ahí "
+    "SOLO si responde directamente la pregunta; no enumeres métricas que el dueño no "
+    "pidió. Si 'analisis' o una sub-clave trae status 'insufficient_data', decí con "
+    "franqueza que falta historial y sugerí cargar más datos — nunca inventes la cifra. "
     "Español de Argentina, conciso, sin tecnicismos."
 )
 

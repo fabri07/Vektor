@@ -980,6 +980,9 @@ class AgentIncome(BaseAgent):
         from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
             answer_data_query,
         )
+        from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
+            enrich_timeseries,
+        )
         from app.application.services.deterministic_finance import (  # noqa: PLC0415
             calcular_ticket_promedio,
         )
@@ -1061,6 +1064,10 @@ class AgentIncome(BaseAgent):
             ],
             "ticket_promedio": ticket_promedio,
         }
+
+        # Análisis estadístico determinístico (promedio diario, tendencia, anomalías)
+        revenue_series = await sale_repo.get_daily_revenue_series(tenant_id, days=60)
+        structured_data["analisis"] = enrich_timeseries(revenue_series)
 
         text, call = await answer_data_query(
             question=request.message,

@@ -557,6 +557,16 @@ class AgentSupplier(BaseAgent):
             ],
         }
 
+        # Concentración de compras por proveedor (todos, no solo el top 15):
+        # ¿dependo de pocos proveedores? (SUPPLIER_DEPENDENCY)
+        from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
+            enrich_distribution,
+        )
+
+        structured_data["analisis"] = enrich_distribution(
+            [float(s["total"]) for s in suppliers]
+        )
+
         text, call = await answer_data_query(
             question=request.message,
             domain="proveedores",

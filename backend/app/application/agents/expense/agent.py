@@ -1080,6 +1080,9 @@ class AgentExpense(BaseAgent):
         from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
             answer_data_query,
         )
+        from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
+            enrich_timeseries,
+        )
         from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
             ExpenseRepository,
         )
@@ -1136,10 +1139,16 @@ class AgentExpense(BaseAgent):
         total = round(sum(c["total"] for c in by_cat), 2)
         _, anomalies = await self._expense_stats_and_anomalies(tenant_id)
 
+        # Análisis estadístico determinístico de la serie diaria de gastos
+        expense_series = await repo.get_daily_expense_series(tenant_id, days=60)
+
         structured_data: dict[str, Any] = {
             "por_categoria": by_cat[:10],
             "total": total,
-            "anomalias": anomalies[:5],
+            # anomalías por CATEGORÍA (outliers de monto); distinto de las
+            # anomalías TEMPORALES (picos/caídas día a día) que van en `analisis`.
+            "anomalias_por_categoria": anomalies[:5],
+            "analisis": enrich_timeseries(expense_series),
         }
 
         text, call = await answer_data_query(

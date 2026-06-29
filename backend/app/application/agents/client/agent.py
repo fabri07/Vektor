@@ -527,6 +527,41 @@ class AgentClient(BaseAgent):
             "inactivos_n": len(inactive),
         }
 
+        from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
+            enrich_distribution,
+        )
+
+        sentinel_id = await customer_repo.get_sentinel_id(tenant_id)
+        sentinel_key = str(sentinel_id) if sentinel_id is not None else None
+
+        # Concentración SOLO sobre clientes IDENTIFICADOS (dependencia real). El
+        # centinela "Local" se excluye: agrupa ventas al paso anónimas, no es un
+        # cliente del que se "dependa".
+        identificados = [
+            float(s.get("total", 0))
+            for s in sales_by_customer
+            if str(s.get("customer_id")) != sentinel_key
+        ]
+        # Participación de "Local"/al paso: señal INFORMATIVA (qué parte de la
+        # facturación viene de clientes sin identificar), NUNCA llamada dependencia.
+        # Es relativa al rubro (kiosco/verdulería ≈ casi todo al paso es normal).
+        local_total = sum(
+            float(s.get("total", 0))
+            for s in sales_by_customer
+            if str(s.get("customer_id")) == sentinel_key
+        )
+        total_general = sum(float(s.get("total", 0)) for s in sales_by_customer)
+        local_pct = (
+            round(local_total / total_general * 100, 1) if total_general > 0 else None
+        )
+        analisis: dict[str, Any] = dict(enrich_distribution(identificados))
+        analisis["facturacion_local"] = {
+            "local_total": round(local_total, 2),
+            "total_general": round(total_general, 2),
+            "local_pct": local_pct,
+        }
+        structured_data["analisis"] = analisis
+
         text, call = await answer_data_query(
             question=request.message,
             domain="clientes",

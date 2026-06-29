@@ -1453,6 +1453,21 @@ class AgentStock(BaseAgent):
             "sin_stock_n": sum(1 for p in products if not (p.get("stock_units") or 0)),
         }
 
+        # Concentración del CAPITAL inmovilizado (stock_units × unit_cost) por producto:
+        # ¿el negocio depende de pocos productos? Solo productos con stock y costo.
+        from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
+            enrich_distribution,
+        )
+
+        stock_values = [
+            float(p["stock_units"]) * float(p["unit_cost"])
+            for p in products
+            if (p.get("stock_units") or 0) > 0
+            and p.get("unit_cost") is not None
+            and p["unit_cost"] > 0
+        ]
+        structured_data["analisis"] = enrich_distribution(stock_values)
+
         text, call = await answer_data_query(
             question=request.message,
             domain="stock",

@@ -486,8 +486,14 @@ class AgentHealth(BaseAgent):
         from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
             answer_data_query,
         )
+        from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
+            enrich_timeseries,
+        )
         from app.application.services.deterministic_finance import (  # noqa: PLC0415
             get_financial_summary,
+        )
+        from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
+            get_daily_net_series,
         )
 
         if self._db is None:
@@ -571,6 +577,10 @@ class AgentHealth(BaseAgent):
                 "n_transacciones": ticket_raw.get("n_transacciones"),
             }
         }
+
+        # Análisis estadístico de la serie diaria de flujo neto (ventas - gastos)
+        net_series = await get_daily_net_series(self._db, tenant_id, days=60)
+        structured_data["analisis"] = enrich_timeseries(net_series)
 
         text, call = await answer_data_query(
             question=request.message,

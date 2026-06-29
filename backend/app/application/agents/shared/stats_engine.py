@@ -343,3 +343,66 @@ def detect_anomalies(
             )
 
     return anomalies
+
+
+# ── Concentración (Pareto / dependencia) ─────────────────────────────────────
+
+_MIN_SAMPLE_CONCENTRATION = 5
+
+
+def concentration(
+    values: list[float],
+    *,
+    min_required: int = _MIN_SAMPLE_CONCENTRATION,
+) -> dict[str, Any]:
+    """Mide qué tan concentrado está un total en pocas entidades.
+
+    Pensado para distribuciones tipo Pareto (montos por cliente / proveedor /
+    plataforma), NO para series temporales. Responde "¿dependo de pocos?" con
+    top-share y HHI. Determinística, sin LLM.
+
+    Args:
+        values: montos por entidad (float). El orden no importa.
+        min_required: muestra mínima para reportar (default 5).
+
+    Returns:
+        {n, total, zero_total, top1_share, top3_share, hhi} con shares en [0, 1], o
+        {status: "insufficient_data", n, min_required} si n < min_required.
+
+    Notas:
+        - total == 0 → shares=None + zero_total=True (no dividir por cero; nunca
+          inf/nan — regla no-invention).
+        - Valores negativos se clampean a 0 (un monto por entidad no es negativo).
+        - hhi = Σ(share_i²): ~0 atomizado, 1.0 monopolio (una sola entidad).
+    """
+    n = len(values)
+    if n < min_required:
+        return {"status": "insufficient_data", "n": n, "min_required": min_required}
+
+    arr = np.maximum(np.array(values, dtype=np.float64), 0.0)
+    total = float(np.sum(arr))
+
+    if total == 0.0:
+        return {
+            "n": n,
+            "total": 0.0,
+            "zero_total": True,
+            "top1_share": None,
+            "top3_share": None,
+            "hhi": None,
+        }
+
+    ordered = np.sort(arr)[::-1]  # descendente
+    shares = ordered / total
+    top1 = float(shares[0])
+    top3 = float(np.sum(shares[:3]))
+    hhi = float(np.sum(shares**2))
+
+    return {
+        "n": n,
+        "total": round(total, 2),
+        "zero_total": False,
+        "top1_share": round(top1, 4),
+        "top3_share": round(top3, 4),
+        "hhi": round(hhi, 4),
+    }
