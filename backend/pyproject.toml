@@ -53,7 +53,9 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html:htmlcov",
     "--cov-fail-under=50",
-    "-v",
+    # Paralelizar por defecto (pytest-xdist): cada worker tiene su propia DB
+    # in-memory. Para debuggear secuencial: pytest -p no:xdist (o -n 0).
+    "-n", "auto",
 ]
 asyncio_default_fixture_loop_scope = "session"
 markers = [

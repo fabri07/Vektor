@@ -102,13 +102,13 @@ async def test_purchase_book_without_category_creates_product(
 
 @pytest.mark.asyncio
 async def test_purchase_new_product_gets_stock_without_autoflush(
-    db_engine: AsyncEngine,
+    isolated_db_engine: AsyncEngine,
 ) -> None:
     """Reproduce prod (``autoflush=False``): un producto NUEVO de una compra recibe
     su stock vía el ``product_cache``. Sin el cache, ``session.get`` no ve el
     producto pendiente (no flusheado) y el stock quedaba en 0."""
     factory = async_sessionmaker(
-        db_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+        isolated_db_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
     )
     async with factory() as session:
         tenant = Tenant(

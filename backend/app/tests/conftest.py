@@ -16,7 +16,6 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
-    async_sessionmaker,
     create_async_engine,
 )
 
@@ -29,6 +28,14 @@ from app.persistence.models.user import User
 from app.utils.security import create_access_token, hash_password
 
 settings = get_settings()
+
+# bcrypt con work factor 4 (mínimo válido) SOLO en tests: los fixtures hashean
+# passwords/PINs miles de veces por suite y rounds=12 (~0.3s por hash) era uno
+# de los cuellos del tiempo total. La seguridad de prod no cambia (security.py
+# sigue en 12); verify() sigue funcionando igual.
+from app.utils import security as _security  # noqa: E402
+
+_security._pwd_context.update(bcrypt__rounds=4)
 
 # PIN por defecto de los usuarios de prueba (los fixtures abren la ventana).
 TEST_PIN = "1234"
@@ -99,11 +106,71 @@ def fake_redis() -> FakeRedis:
     return FakeRedis()
 
 # ── Test database (SQLite in-memory for speed) ────────────────────────────────
+#
+# Patrón rápido (bajó el suite de ~2h30 a minutos):
+#   - `db_engine` es scope="session": el schema (~60 tablas) se crea UNA vez por
+#     proceso (por worker de xdist), no una vez por test.
+#   - `db_session` abre una transacción EXTERNA sobre la única conexión
+#     (StaticPool) y le da al test una AsyncSession con
+#     `join_transaction_mode="create_savepoint"`: los `commit()` del test son
+#     SAVEPOINTs; al terminar, el rollback externo deja la DB prístina.
+#   - Aislamiento entre tests = rollback; entre workers de xdist = proceso
+#     distinto (cada uno tiene su propia DB in-memory).
+#
+# Si un test necesita crear sus PROPIAS sesiones/factories sobre el engine
+# (commits reales fuera de la transacción del test), usá `isolated_db_engine`.
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
-@pytest_asyncio.fixture(scope="function")
-async def db_engine():
+@pytest_asyncio.fixture(scope="session")
+async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
+    from sqlalchemy import event  # noqa: PLC0415
+    from sqlalchemy.pool import StaticPool  # noqa: PLC0415
+
+    engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=StaticPool)
+
+    # Receta oficial de SQLAlchemy para SAVEPOINTs sobre pysqlite/aiosqlite:
+    # su emulación de transacciones comitea implícitamente (rompería el patrón
+    # rollback-por-test dejando fugas entre tests). Se desactiva y SQLAlchemy
+    # emite BEGIN explícito.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _do_connect(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _do_begin(conn):  # type: ignore[no-untyped-def]
+        conn.exec_driver_sql("BEGIN")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+    async with db_engine.connect() as conn:
+        trans = await conn.begin()
+        session = AsyncSession(
+            bind=conn,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            if trans.is_active:
+                await trans.rollback()
+
+
+@pytest_asyncio.fixture
+async def isolated_db_engine() -> AsyncGenerator[AsyncEngine, None]:
+    """Engine efímero con schema propio (el patrón viejo, LENTO — ~2s por test).
+
+    Solo para tests que crean sus propias sessions/factories sobre el engine y
+    commitean de verdad: en el engine compartido eso fugaría datos entre tests.
+    """
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -111,13 +178,6 @@ async def db_engine():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
-    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        yield session
 
 
 # ── Sample entities ───────────────────────────────────────────────────────────
