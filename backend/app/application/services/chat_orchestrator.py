@@ -594,6 +594,56 @@ class ChatOrchestrator:
                 )
             return _clarification_response
 
+        # 3e. Gate de domain para pedir_consejo (Advisory F1+F3) — EL CRUX ────────
+        # Todo el valor del advisory depende de citar el pack de hechos correcto
+        # ("cómo mejoro el margen" → rentabilidad, "mucho stock" → inventario).
+        # Si domain no vino o no es uno de los reconocidos (mismo vocabulario que
+        # consulta_libre, DOMAIN_TO_AGENT), NUNCA se despacha con un default
+        # silencioso — se pide aclaración con las opciones reales. Mismo altitude
+        # que el gate de confianza de arriba: deterministico, post-CEO, pre-dispatch.
+        if ceo_intent == "pedir_consejo":
+            from app.application.agents.ceo.team_plan_builder import (  # noqa: PLC0415
+                DOMAIN_TO_AGENT,
+            )
+
+            _advice_domain: str | None = None
+            if raw_plan and raw_plan.get("tasks"):
+                _advice_domain = raw_plan["tasks"][0].get("entities", {}).get("domain")
+            if _advice_domain not in DOMAIN_TO_AGENT:
+                await self._log_coverage_gap(
+                    request,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    fallback_reason="baja_confianza",
+                    classified_intent=ceo_intent,
+                    classified_domain=_advice_domain,
+                )
+                _domains_str = ", ".join(sorted(DOMAIN_TO_AGENT.keys()))
+                _advice_question = (
+                    f"¿Sobre qué tema querés el consejo — {_domains_str}? "
+                    "Decime el tema y te tiro una idea con tus números."
+                )
+                _advice_clarify = AgentResponse(
+                    request_id=request.request_id,
+                    agent_name="agent_ceo",
+                    status="requires_clarification",
+                    risk_level=ceo_response.risk_level,
+                    confidence=Confidence.LOW,
+                    requires_approval=False,
+                    question=_advice_question,
+                    result={
+                        "summary": "Se solicita el dominio del consejo al usuario.",
+                        "intent": ceo_intent,
+                        "target_agent": ceo_target,
+                    },
+                    usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
+                )
+                if request.conversation_id:
+                    await self._save_turn(
+                        request, _advice_question, redis, db, tenant_id, user_id
+                    )
+                return _advice_clarify
+
         # 4. Ejecutar plan via TeamPlanExecutor (single-task y multi-task)
         if plan is None or not plan.tasks:
             # Fallback defensivo: si no hay plan válido, crear uno single-task helper

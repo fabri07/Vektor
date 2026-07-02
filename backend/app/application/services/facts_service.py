@@ -558,6 +558,21 @@ class FactsService:
                 return f
         return None
 
+    # Vocabulario de dominio del chat (mismo que DOMAIN_TO_AGENT en
+    # ceo/team_plan_builder.py: ventas/caja/stock/gastos/proveedores/
+    # clientes/marketing) → paquete canónico de abajo. ÚNICO lugar donde se
+    # traduce domain→hechos — el chat (consulta_libre, pedir_consejo) llama
+    # `collect_for_advice(domain)` directo, sin una segunda tabla de mapeo.
+    _CHAT_DOMAIN_ALIASES: dict[str, str] = {
+        "caja": "flujo_caja",
+        "stock": "inventario",
+        "gastos": "rentabilidad",
+        # clientes: sin pack propio todavía — fiado_pendiente + ventas es lo
+        # más cercano (cuentas por cobrar). Ratificar si se agrega un pack
+        # dedicado de clientes.
+        "clientes": "flujo_caja",
+    }
+
     def collect_for_advice(self, tenant_id: str, domain: str, p: Period, *,
                            include_demo: bool = False) -> list[BusinessFact]:
         """Los HECHOS que Sonnet recibe para aconsejar (NUNCA filas crudas).
@@ -578,4 +593,5 @@ class FactsService:
             # DEBE avisar que se apoya en best-practice, no en datos del tenant.
             "marketing":    [base["ventas"], base["ticket_promedio"]],
         }
-        return packs.get(domain, [base["ventas"], base["margen_neto"]])
+        resolved = self._CHAT_DOMAIN_ALIASES.get(domain, domain)
+        return packs.get(resolved, [base["ventas"], base["margen_neto"]])

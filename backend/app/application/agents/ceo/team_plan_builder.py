@@ -345,6 +345,25 @@ INTENT_CATALOG: dict[str, dict[str, object]] = {
             "cómo viene mi caja",
         ],
     },
+    # ── Advisory: pedir un consejo/idea de negocio (F1+F3) ───────────────────
+    "pedir_consejo": {
+        "desc": "Pedir un consejo, idea o recomendación para mejorar el negocio "
+        "(no una consulta de datos puntual, sino '¿qué puedo hacer?'). "
+        "Extraé `domain` en entities: clientes | ventas | gastos | stock | "
+        "proveedores | caja | marketing. Si no podés inferirlo con confianza, "
+        "OMITILO.",
+        "triggers": [
+            "dame una idea para las ventas",
+            "qué me conviene hacer",
+            "cómo mejoro mis ventas",
+            "cómo mejoro el margen",
+            "dame un consejo",
+            "qué hago con el fiado",
+            "cómo hago para vender más",
+            "qué puedo hacer con tanto stock",
+            "alguna sugerencia para bajar gastos",
+        ],
+    },
     # ── v4 F6a: recordatorio de cobranza por WhatsApp ────────────────────────
     "recordar_por_whatsapp": {
         "desc": "Preparar un recordatorio de cobranza por WhatsApp para un cliente que debe",
@@ -528,6 +547,8 @@ INTENT_TO_AGENT: dict[str, str] = {
     "analizar_marketing": "agent_marketing",
     # ── Fase 5: consulta libre (fallback; el ruteo real lo hace build_plan por domain) ──
     "consulta_libre": "agent_helper",
+    # ── Advisory: mismo patrón que consulta_libre (fallback; ruteo real por domain) ──
+    "pedir_consejo": "agent_helper",
     # ── v4 F6a: recordatorio WhatsApp ──
     "recordar_por_whatsapp": "agent_client",
     # ── Sentinels de aclaración ──
@@ -569,6 +590,8 @@ INTENT_TO_ACTION_TYPE: dict[str, ActionType] = {
     "analizar_marketing": ActionType.ANALYZE_MARKETING_DATA,
     # ── Fase 5: consulta libre ──
     "consulta_libre": ActionType.ANSWER_DATA_QUERY,
+    # ── Advisory: reusa ANSWER_DATA_QUERY (LOW, read-only) — sin ActionType nuevo ──
+    "pedir_consejo": ActionType.ANSWER_DATA_QUERY,
     # ── v4 F6a: recordatorio WhatsApp ──
     "recordar_por_whatsapp": ActionType.PREPARE_WHATSAPP_MESSAGE,
     # ── Sentinels de aclaración ──
@@ -775,6 +798,29 @@ def build_plan(intent: str, entities: dict[str, Any]) -> AgentTeamPlan:
             agent=agent,
             action_type=ActionType.ANSWER_DATA_QUERY,
             entities={**entities, "domain": domain},
+        )
+        return AgentTeamPlan(
+            plan_id=plan_id,
+            intent=intent,
+            tasks=[task],
+            requires_synthesis=False,
+        )
+
+    # ── pedir_consejo → mismo patrón que consulta_libre (Advisory F1+F3) ─────
+    # `domain` faltante o no reconocido: SIGUE construyendo el task con el
+    # fallback agent_helper (nunca crashea el plan) — la verificación
+    # determinística que impide despachar sin domain válido vive en
+    # chat_orchestrator (gate previo al dispatch, mismo altitude que el gate
+    # de confianza), no acá. `_intent: "consejo"` distingue este camino de
+    # una consulta de datos común dentro del mismo ANSWER_DATA_QUERY.
+    if intent == "pedir_consejo":
+        domain = entities.get("domain")
+        agent = DOMAIN_TO_AGENT.get(domain or "", "agent_helper")
+        task = AgentTask(
+            task_id=str(uuid.uuid4()),
+            agent=agent,
+            action_type=ActionType.ANSWER_DATA_QUERY,
+            entities={**entities, "domain": domain, "_intent": "consejo"},
         )
         return AgentTeamPlan(
             plan_id=plan_id,

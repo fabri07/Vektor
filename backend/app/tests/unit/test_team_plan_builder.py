@@ -1,5 +1,7 @@
 """Tests para team_plan_builder — contrato del catálogo de intents y construcción de planes."""
 
+import pytest
+
 from app.application.agents.ceo.team_plan_builder import (
     INTENT_CATALOG,
     INTENT_TO_ACTION_TYPE,
@@ -19,8 +21,9 @@ def test_intent_catalog_size():
     # v4 Fase 4: + analizar_marketing = 31.
     # v4 Fase 5: + consulta_libre = 32.
     # v4 F6a: + recordar_por_whatsapp = 33.
+    # Advisory F1+F3: + pedir_consejo = 34.
     # Las 35 variantes analíticas viejas ahora son valores de `analysis_type`.
-    assert len(INTENT_CATALOG) == 33
+    assert len(INTENT_CATALOG) == 34
 
 
 def test_all_intents_have_agent_mapping():
@@ -363,3 +366,63 @@ def test_consulta_libre_to_action_type():
 def test_consulta_libre_to_agent_fallback():
     """consulta_libre apunta a agent_helper como fallback en INTENT_TO_AGENT."""
     assert INTENT_TO_AGENT["consulta_libre"] == "agent_helper"
+
+
+# ── Advisory (F1+F3): pedir_consejo ────────────────────────────────────────────
+
+
+def test_pedir_consejo_in_intent_catalog():
+    assert "pedir_consejo" in INTENT_CATALOG
+    assert len(INTENT_CATALOG["pedir_consejo"]["triggers"]) > 0
+
+
+def test_pedir_consejo_to_action_type():
+    """pedir_consejo reusa ANSWER_DATA_QUERY (LOW, read-only) — sin ActionType nuevo."""
+    assert INTENT_TO_ACTION_TYPE["pedir_consejo"] == ActionType.ANSWER_DATA_QUERY
+
+
+def test_pedir_consejo_to_agent_fallback():
+    assert INTENT_TO_AGENT["pedir_consejo"] == "agent_helper"
+
+
+def test_pedir_consejo_three_maps_consistent():
+    """Los 3 mapas (catálogo, action_type, agent) deben tener la misma entrada
+    — misma regla de consistencia que el resto del catálogo (comentario :35)."""
+    assert "pedir_consejo" in INTENT_CATALOG
+    assert "pedir_consejo" in INTENT_TO_ACTION_TYPE
+    assert "pedir_consejo" in INTENT_TO_AGENT
+
+
+@pytest.mark.parametrize(
+    "domain,expected_agent",
+    [
+        ("ventas", "agent_income"),
+        ("gastos", "agent_expense"),
+        ("stock", "agent_stock"),
+        ("caja", "agent_health"),
+        ("proveedores", "agent_supplier"),
+        ("clientes", "agent_client"),
+        ("marketing", "agent_marketing"),
+    ],
+)
+def test_build_plan_pedir_consejo_routes_by_domain(domain, expected_agent):
+    """Golden set de ruteo: cada dominio reconocido va al agente correcto,
+    con el marcador _intent='consejo' inyectado (distingue de consulta común)."""
+    plan = build_plan("pedir_consejo", {"domain": domain})
+    assert isinstance(plan, AgentTeamPlan)
+    assert len(plan.tasks) == 1
+    task = plan.tasks[0]
+    assert task.agent == expected_agent
+    assert task.action_type == ActionType.ANSWER_DATA_QUERY
+    assert task.entities["_intent"] == "consejo"
+    assert task.entities["domain"] == domain
+
+
+def test_build_plan_pedir_consejo_missing_domain_falls_back_to_helper():
+    """Sin domain, build_plan NO crashea — construye con el fallback agent_helper.
+    (La verificación que impide despachar sin domain válido vive en
+    chat_orchestrator, no acá — ver test_chat_orchestrator advisory gate.)"""
+    plan = build_plan("pedir_consejo", {})
+    assert plan.tasks[0].agent == "agent_helper"
+    assert plan.tasks[0].entities["domain"] is None
+    assert plan.tasks[0].entities["_intent"] == "consejo"
