@@ -10,6 +10,7 @@ import {
   getChatUsage,
   type AgentResponse,
   type ChatAttachment,
+  type ChatUiContext,
 } from "@/services/agent.service";
 import { automationsService } from "@/services/automations.service";
 import { useChatStore, type ChatMessage } from "@/stores/chatStore";
@@ -83,6 +84,7 @@ export function useChat() {
       text: string,
       attachments?: ChatAttachment[],
       displayText?: string,
+      uiContext?: ChatUiContext,
     ) => {
       const hasText = text.trim().length > 0;
       const hasAttachments = (attachments?.length ?? 0) > 0;
@@ -92,7 +94,7 @@ export function useChat() {
       setIsLoading(true);
 
       try {
-        const response = await sendMessage(text, conversationId, attachments);
+        const response = await sendMessage(text, conversationId, attachments, uiContext);
         setMessagesUsedToday((prev) => prev + 1);
 
         if (response.status === "requires_google_auth") {
@@ -164,6 +166,7 @@ export function useChat() {
       text: string,
       attachments?: ChatAttachment[],
       displayText?: string,
+      uiContext?: ChatUiContext,
     ) => {
       const hasText = text.trim().length > 0;
       const hasAttachments = (attachments?.length ?? 0) > 0;
@@ -194,6 +197,7 @@ export function useChat() {
             message: text,
             conversation_id: conversationId,
             attachments: attachments ?? [],
+            ...(uiContext ? { ui_context: uiContext } : {}),
           }),
         });
 

@@ -90,7 +90,8 @@ def test_intent_catalog_complete():
     # Nivel 2: + reclasificar_gasto = 29.
     # v4: + analizar_clientes (F2) + analizar_marketing (F4) + consulta_libre (F5)
     #     + recordar_por_whatsapp (F6) = 33
-    assert len(INTENT_CATALOG) == 33
+    # Advisory F1+F3: + pedir_consejo = 34
+    assert len(INTENT_CATALOG) == 34
 
 
 def test_intent_catalog_spanish():

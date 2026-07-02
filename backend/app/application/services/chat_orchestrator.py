@@ -146,6 +146,37 @@ _NO_AGENT_MESSAGES: dict[str, str] = {
 # Umbral de confianza bajo el cual el orchestrator pide aclaración en vez de despachar
 _CLARIFICATION_CONFIDENCE_THRESHOLD = 0.72
 
+# ── Explicación de alertas del dashboard (Parte B) ────────────────────────────
+# Detección determinística (sin LLM) de "explicame lo que veo en la pantalla":
+# verbo de explicación + referencia deíctica a la alerta/el cartel rojo.
+# Se aplica sobre intent_rescue.normalize(mensaje) (lowercase, sin tildes) —
+# por eso el patrón no lleva clases de acentos. Word boundaries obligatorias:
+# sin \b, "arroja" matchea "roja" (verificado).
+_ALERT_EXPLAIN_RE = re.compile(
+    r"(?:\bexplica?\w*|\bsignifica?\w*|\bpor\s?que\b|\bque\s+quiere\s+decir\b|\bque\s+es\b)"
+    r".{0,40}?"
+    r"(?:\broj[oa]s?\b|\balerta\b|\bcartel\b|\baviso\b|\bmensaje\b"
+    r"|\besto\s+que\s+veo\b|\blo\s+que\s+veo\b)"
+    r"|(?:\bmensaje\b|\bcartel\b|\balerta\b|\baviso\b)\s+(?:en\s+)?roj[oa]\b",
+)
+
+# El override SOLO puede pisar intents que iban a morir enlatados o a la
+# consulta genérica de datos. Un intent despachable (registrar_venta, importar
+# archivo...) SIEMPRE gana: el cliente nunca elige el agente destino
+# (invariante 1) — ui_context es una señal, no un canal de ruteo.
+_EXPLAIN_OVERRIDABLE_INTENTS: frozenset[str] = _NO_AGENT_INTENTS | {"consulta_libre"}
+
+# Cotas para active_alert_ids (payload controlado por el cliente).
+_MAX_ALERT_IDS = 8
+_MAX_ALERT_ID_LEN = 64
+
+_UI_CONTEXT_MISSING_MESSAGE = (
+    "Quiero explicarte exactamente lo que estás viendo, pero desde acá no sé "
+    "qué alerta tenés en pantalla. Abrí el chat desde la pantalla del tablero "
+    "(donde aparece el mensaje rojo) y preguntame de nuevo, así te lo explico "
+    "con tus números."
+)
+
 # Nota que se inyecta en el system prompt de AgentChat cuando business_memory falló.
 _DEGRADED_BUSINESS_MEMORY_NOTICE = (
     "Nota: estás respondiendo sin el contexto histórico del negocio (no se pudo cargar). "
@@ -367,8 +398,103 @@ class ChatOrchestrator:
             logger.warning("file_context_failed", tenant_id=str(tenant_id), error=str(exc))
             context_health["file_context"] = "degraded"
 
+        # 3c-pre. Explicación de alertas del dashboard (Parte B) ─────────────────
+        # Señal de UI (frontend mandó active_alert_ids) + mensaje que pide
+        # explicar lo que se ve → se explica con FactsService, fresco. SOLO
+        # cuando el CEO no encontró un intent despachable: un intent operativo
+        # ("vendí 3 gaseosas... y explicame el cartel") SIEMPRE se despacha —
+        # el cliente nunca elige el agente destino.
+        from app.application.agents.shared.intent_rescue import (  # noqa: PLC0415
+            normalize as _normalize_msg,
+        )
+
+        _explain_requested = bool(
+            _ALERT_EXPLAIN_RE.search(_normalize_msg(request.message or ""))
+        )
+        # Type-hardening: active_alert_ids viene del cliente — solo lista de
+        # escalares, acotada; cualquier otra forma se ignora (no 500 por payload
+        # schema-válido pero mal formado).
+        _raw_alert_ids = (request.ui_context or {}).get("active_alert_ids")
+        _ui_alert_ids: list[str] = (
+            [
+                str(a)[:_MAX_ALERT_ID_LEN]
+                for a in _raw_alert_ids[:_MAX_ALERT_IDS]
+                if isinstance(a, str | int) and str(a).strip()
+            ]
+            if isinstance(_raw_alert_ids, list)
+            else []
+        )
+        if (
+            _explain_requested
+            and _ui_alert_ids
+            and ceo_intent in _EXPLAIN_OVERRIDABLE_INTENTS
+        ):
+            return await self._handle_alert_explanation(
+                request,
+                db=db,
+                redis=redis,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                alert_ids=_ui_alert_ids,
+                business_name=business_name,
+                business_type=business_type,
+                prior_calls=all_llm_calls,
+            )
+        # Sin ui_context solo interviene cuando el mensaje iba a morir en el
+        # enlatado genérico. pedir_aclaracion_* NO: esas conservan su pregunta
+        # específica (ej. la aclaración sobre un archivo adjunto).
+        if _explain_requested and ceo_intent in ("out_of_scope", "intent_desconocido"):
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason="ui_context_missing",
+                classified_intent=ceo_intent,
+                confidence=ceo_response.result.get("confidence_float"),
+            )
+            _missing_ctx_response = AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                requires_approval=False,
+                message=_UI_CONTEXT_MISSING_MESSAGE,
+                result={
+                    "summary": "Pedido de explicación de alerta sin contexto de UI.",
+                    "intent": "explicar_alerta",
+                    "target_agent": None,
+                },
+                usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
+            )
+            if request.conversation_id:
+                await self._save_turn(
+                    request,
+                    _missing_ctx_response.message or "",
+                    redis,
+                    db,
+                    tenant_id,
+                    user_id,
+                )
+            return _missing_ctx_response
+
         # 3c. Cortes sin sub-agente: fuera de scope / pedido de aclaración ───────
         if ceo_intent in _NO_AGENT_INTENTS:
+            # Coverage gap (best-effort, no cambia la respuesta): lo que llega acá
+            # sobrevivió al rescate → es un gap real de cobertura, no ambigüedad
+            # rescatable. pedir_aclaracion_* se registra como baja_confianza.
+            from app.application.services.coverage_gap_service import (  # noqa: PLC0415
+                reason_for_intent,
+            )
+
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason=reason_for_intent(ceo_intent),
+                classified_intent=ceo_intent,
+                confidence=ceo_response.result.get("confidence_float"),
+            )
             _summary = (
                 "Consulta fuera del scope de Véktor."
                 if ceo_intent in ("out_of_scope", "intent_desconocido")
@@ -408,6 +534,16 @@ class ChatOrchestrator:
             and ceo_intent is not None
             and ceo_intent not in _NO_AGENT_INTENTS
         ):
+            # Coverage gap (best-effort): el CEO clasificó pero sin confianza para
+            # despachar — el fraseo del usuario no matchea bien ningún intent.
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason="baja_confianza",
+                classified_intent=ceo_intent,
+                confidence=_confidence_float,
+            )
             _amb_raw = ceo_response.result.get("ambiguous_with")
             _ambiguous_with: list[str] = _amb_raw if _amb_raw is not None else []
 
@@ -457,6 +593,56 @@ class ChatOrchestrator:
                     request, _question, redis, db, tenant_id, user_id
                 )
             return _clarification_response
+
+        # 3e. Gate de domain para pedir_consejo (Advisory F1+F3) — EL CRUX ────────
+        # Todo el valor del advisory depende de citar el pack de hechos correcto
+        # ("cómo mejoro el margen" → rentabilidad, "mucho stock" → inventario).
+        # Si domain no vino o no es uno de los reconocidos (mismo vocabulario que
+        # consulta_libre, DOMAIN_TO_AGENT), NUNCA se despacha con un default
+        # silencioso — se pide aclaración con las opciones reales. Mismo altitude
+        # que el gate de confianza de arriba: deterministico, post-CEO, pre-dispatch.
+        if ceo_intent == "pedir_consejo":
+            from app.application.agents.ceo.team_plan_builder import (  # noqa: PLC0415
+                DOMAIN_TO_AGENT,
+            )
+
+            _advice_domain: str | None = None
+            if raw_plan and raw_plan.get("tasks"):
+                _advice_domain = raw_plan["tasks"][0].get("entities", {}).get("domain")
+            if _advice_domain not in DOMAIN_TO_AGENT:
+                await self._log_coverage_gap(
+                    request,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    fallback_reason="baja_confianza",
+                    classified_intent=ceo_intent,
+                    classified_domain=_advice_domain,
+                )
+                _domains_str = ", ".join(sorted(DOMAIN_TO_AGENT.keys()))
+                _advice_question = (
+                    f"¿Sobre qué tema querés el consejo — {_domains_str}? "
+                    "Decime el tema y te tiro una idea con tus números."
+                )
+                _advice_clarify = AgentResponse(
+                    request_id=request.request_id,
+                    agent_name="agent_ceo",
+                    status="requires_clarification",
+                    risk_level=ceo_response.risk_level,
+                    confidence=Confidence.LOW,
+                    requires_approval=False,
+                    question=_advice_question,
+                    result={
+                        "summary": "Se solicita el dominio del consejo al usuario.",
+                        "intent": ceo_intent,
+                        "target_agent": ceo_target,
+                    },
+                    usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
+                )
+                if request.conversation_id:
+                    await self._save_turn(
+                        request, _advice_question, redis, db, tenant_id, user_id
+                    )
+                return _advice_clarify
 
         # 4. Ejecutar plan via TeamPlanExecutor (single-task y multi-task)
         if plan is None or not plan.tasks:
@@ -1068,6 +1254,191 @@ class ChatOrchestrator:
             sections.append(recent_lines)
 
         return "\n\n".join(section for section in sections if section).strip()
+
+    async def _handle_alert_explanation(
+        self,
+        request: AgentRequest,
+        *,
+        db: AsyncSession,
+        redis: Redis,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        alert_ids: list[str],
+        business_name: str,
+        business_type: str,
+        prior_calls: list[LLMCall],
+    ) -> AgentResponse:
+        """Explica el/los alert(s) del dashboard con el número fresco de FactsService.
+
+        Compone, no calcula: FactsService trae el BusinessFact (nunca cacheado),
+        alert_explainer aporta el significado funcional y redacta en llano.
+        """
+        from app.application.agents.shared.alert_explainer import (  # noqa: PLC0415
+            explain_alerts,
+            resolve_alert_facts,
+        )
+        from app.application.services.facts_provider import (  # noqa: PLC0415
+            build_facts_service,
+        )
+        from app.application.services.facts_service import Period  # noqa: PLC0415
+
+        period = Period.last_n_days(30)
+        blocks: list[dict[str, Any]] = []
+        facts_failed = False
+        try:
+            # include_demo: el health engine que pinta el banner no filtra
+            # provenance; en tenants demo (todo provenance='DEMO') el chat debe
+            # ver los MISMOS números que el dashboard.
+            tenant = await db.get(Tenant, tenant_id)
+            include_demo = bool(tenant and tenant.is_demo)
+            facts_service = await build_facts_service(
+                db, tenant_id, period, vertical_code=business_type
+            )
+            blocks = resolve_alert_facts(
+                facts_service,
+                str(tenant_id),
+                alert_ids,
+                period,
+                include_demo=include_demo,
+            )
+        except Exception as exc:
+            facts_failed = True
+            logger.warning(
+                "alert_explanation_facts_failed",
+                error=str(exc),
+                tenant_id=str(tenant_id),
+            )
+
+        calls: list[LLMCall] = list(prior_calls)
+        extra_result: dict[str, Any] = {}
+        if facts_failed:
+            # Error de infraestructura ≠ gap de producto: NO se loguea sin_datos
+            # (refrescar la pantalla no lo arregla; contaminaría el backlog).
+            confidence = Confidence.LOW
+            message = (
+                "Justo ahora tuve un problema para leer tus datos y no puedo "
+                "explicarte la alerta. Probá de nuevo en un ratito."
+            )
+            summary = "Explicación de alerta falló al leer datos."
+        elif not blocks:
+            # Ids que no pudimos resolver a ningún dato: honestidad + backlog.
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason="sin_datos",
+                classified_intent="explicar_alerta",
+            )
+            confidence = Confidence.LOW
+            message = (
+                "Veo que preguntás por una alerta del tablero, pero no encontré "
+                "los datos que la generaron. Puede que haya cambiado hace un "
+                "momento. Actualizá la pantalla y, si sigue apareciendo, "
+                "preguntame de nuevo."
+            )
+            summary = "Alerta no resuelta a datos."
+        else:
+            if any(b.get("fact") is None for b in blocks):
+                # Alerta sin BusinessFact que la respalde (ej. SUPPLIER_DEPENDENCY):
+                # se explica funcionalmente igual, pero queda como gap de producto.
+                await self._log_coverage_gap(
+                    request,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    fallback_reason="sin_datos",
+                    classified_intent="explicar_alerta",
+                )
+            try:
+                text, llm_call = await explain_alerts(
+                    request.message, blocks, business_name, self.client
+                )
+                calls.append(llm_call)
+                message = text
+                summary = "Explicación de alerta del dashboard."
+                extra_result = {"alert_explanation": True}
+                # Confianza honesta (no-invention): la mínima cobertura de los
+                # facts citados manda; sin fact que respalde → LOW, nunca HIGH.
+                facts_conf = [
+                    float(b["fact"]["confidence"])
+                    for b in blocks
+                    if b.get("fact") is not None
+                ]
+                if not facts_conf:
+                    confidence = Confidence.LOW
+                elif min(facts_conf) >= 0.7:
+                    confidence = Confidence.HIGH
+                else:
+                    confidence = Confidence.MEDIUM
+            except Exception as exc:
+                # Mismo degrade amable que el resto de los paths terminales: un
+                # 529 de Anthropic no puede escapar como 500 ni perder el turno.
+                logger.warning(
+                    "alert_explanation_llm_failed",
+                    error=str(exc),
+                    tenant_id=str(tenant_id),
+                )
+                confidence = Confidence.LOW
+                message = (
+                    "Justo ahora no pude armar la explicación. "
+                    "Probá de nuevo en unos segundos."
+                )
+                summary = "Explicación de alerta falló en la generación."
+
+        response = AgentResponse(
+            request_id=request.request_id,
+            agent_name="agent_ceo",
+            status="success",
+            risk_level=RiskLevel.LOW,
+            confidence=confidence,
+            requires_approval=False,
+            message=message,
+            result={
+                "summary": summary,
+                "intent": "explicar_alerta",
+                "target_agent": None,
+                "alert_ids": alert_ids,
+                **extra_result,
+            },
+            usage=UsageSummary(calls=calls) if calls else None,
+        )
+
+        if request.conversation_id:
+            await self._save_turn(
+                request, response.message or "", redis, db, tenant_id, user_id
+            )
+        return response
+
+    async def _log_coverage_gap(
+        self,
+        request: AgentRequest,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID | None,
+        fallback_reason: str,
+        classified_intent: str | None = None,
+        classified_domain: str | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        """Registra el rechazo como gap de producto. Best-effort: nunca lanza,
+        nunca cambia la respuesta al usuario (CoverageGapService ya es fail-silent
+        y usa sesión propia; este try/except es el cinturón extra del hot path)."""
+        try:
+            from app.application.services.coverage_gap_service import (  # noqa: PLC0415
+                CoverageGapService,
+            )
+
+            await CoverageGapService().log_gap(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                original_message=request.message,
+                fallback_reason=fallback_reason,
+                classified_intent=classified_intent,
+                classified_domain=classified_domain,
+                confidence=confidence,
+                ui_context=request.ui_context,
+            )
+        except Exception as exc:
+            logger.warning("coverage_gap_hook_failed", error=str(exc))
 
     async def _save_turn(
         self,

@@ -87,6 +87,10 @@ class AgentRequest(BaseModel):
     # context: outputs upstream del DAG multi-task. Llave reservada: "upstream_outputs"
     # → dict[task_id, result_dict]. Vacío en single-task y en el primer nivel.
     context: dict[str, Any] = Field(default_factory=dict)
+    # ui_context: contexto liviano de la pantalla desde la que se envió el mensaje
+    # (dashboard → {view, focused_widget, active_alert_ids, visible_metric_ids}).
+    # Opcional y retrocompatible: None = chat sin contexto de UI (comportamiento previo).
+    ui_context: dict[str, Any] | None = None
     # NOTA: NO hay agent_target — AgentCEO lo asigna internamente
 
 

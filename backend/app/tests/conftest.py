@@ -134,11 +134,11 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
     # rollback-por-test dejando fugas entre tests). Se desactiva y SQLAlchemy
     # emite BEGIN explícito.
     @event.listens_for(engine.sync_engine, "connect")
-    def _do_connect(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
+    def _do_connect(dbapi_connection, connection_record):
         dbapi_connection.isolation_level = None
 
     @event.listens_for(engine.sync_engine, "begin")
-    def _do_begin(conn):  # type: ignore[no-untyped-def]
+    def _do_begin(conn):
         conn.exec_driver_sql("BEGIN")
 
     async with engine.begin() as conn:

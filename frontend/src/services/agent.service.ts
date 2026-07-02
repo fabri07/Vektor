@@ -41,10 +41,21 @@ export interface ConfirmActionResponse {
   };
 }
 
+/** Contexto liviano de la pantalla desde la que se envía el mensaje.
+ * Cuando el chat se abre desde el dashboard, `active_alert_ids` lleva los
+ * risk_codes visibles (ej. CASH_LOW) para que el backend explique ESA alerta. */
+export interface ChatUiContext {
+  view?: string;
+  focused_widget?: string;
+  active_alert_ids?: string[];
+  visible_metric_ids?: string[];
+}
+
 export async function sendMessage(
   message: string,
   conversationId?: string,
   attachments?: ChatAttachment[],
+  uiContext?: ChatUiContext,
 ): Promise<AgentResponse> {
   const res = await api.post<AgentResponse>(
     "/agent/chat",
@@ -52,6 +63,7 @@ export async function sendMessage(
       message,
       conversation_id: conversationId,
       attachments: attachments ?? [],
+      ...(uiContext ? { ui_context: uiContext } : {}),
     },
     { timeout: 90_000 },
   );

@@ -1006,6 +1006,25 @@ class AgentIncome(BaseAgent):
                 ),
             )
 
+        # Advisory (F1+F3): "dame una idea para las ventas" viene marcado con
+        # _intent="consejo" desde build_plan — camino separado de la consulta
+        # de datos común (FactsService, no repos crudos; gate de honestidad
+        # propio). El marcador vive en entities, mismo mecanismo que el resto
+        # de los sub-análisis dentro de un ActionType.
+        if task is not None and task.entities.get("_intent") == "consejo":
+            from app.application.agents.shared.advisory import (  # noqa: PLC0415
+                handle_advice,
+            )
+
+            return await handle_advice(
+                request=request,
+                db=self._db,
+                client=self.client,
+                agent_name=self.agent_name,
+                domain="ventas",
+                tenant_id=tenant_id,
+            )
+
         sale_repo = SaleRepository(self._db)
 
         # Datos determinísticos desde repos
