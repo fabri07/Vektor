@@ -16,6 +16,7 @@ from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
+from app.domain.business_time import now_ar_naive
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -1244,7 +1245,7 @@ async def _insert_confirmed_data_impl(
 
     confirmed_fields = confirmed_fields or default_confirmed_fields(summary)
     # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
-    today = datetime.now()
+    today = now_ar_naive()
     counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0, "otros": 0}
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
@@ -2773,7 +2774,7 @@ async def import_receipt(
     """
     from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
-    tx_date = transaction_date or datetime.now()
+    tx_date = transaction_date or now_ar_naive()
     by_sku, by_name, by_token = await _load_product_index(session, tenant_id)
     balance_index = await _load_balance_index(session, tenant_id)
     product_cache: dict[uuid.UUID, Any] = {}

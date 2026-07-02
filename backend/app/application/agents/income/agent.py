@@ -32,6 +32,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
+from app.domain.business_time import now_ar_naive
 from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ class SaleEntity(BaseModel):
     amount: Decimal
     transaction_date: str = Field(
         # datetime ISO: captura la hora del registro en vivo (no solo la fecha).
-        default_factory=lambda: __import__("datetime").datetime.now().isoformat()
+        default_factory=lambda: now_ar_naive().isoformat()
     )
     payment_status: str
     payment_method: str | None = None
@@ -530,7 +531,7 @@ class AgentIncome(BaseAgent):
         entities: dict[str, Any] = {
             "amount": str(amount),
             "transaction_date": pre_entities.get(
-                "transaction_date", __import__("datetime").datetime.now().isoformat()
+                "transaction_date", now_ar_naive().isoformat()
             ),
             "description": pre_entities.get("description", "Cobro registrado"),
             "payment_method": pre_entities.get("payment_method"),

@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.business_time import now_ar_naive
 from app.domain.expense_categories import (
     infer_expense_type,
     normalize_expense_category,
@@ -84,8 +85,8 @@ def _coerce_transaction_date(value: object) -> datetime:
             try:
                 return datetime.combine(date.fromisoformat(value), datetime.min.time())
             except ValueError:
-                return datetime.now()
-    return datetime.now()
+                return now_ar_naive()
+    return now_ar_naive()
 
 
 async def save_sale(
@@ -166,7 +167,7 @@ async def save_cash_inflow(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
         quantity=1,
-        transaction_date=datetime.now(),
+        transaction_date=now_ar_naive(),
         payment_method="inflow",
         notes=entities.get("notes") or entities.get("linked_sale_id"),
         provenance="REAL",

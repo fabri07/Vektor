@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import uuid
 from calendar import monthrange
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +29,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
+from app.domain.business_time import now_ar_naive
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     normalize_expense_category,
@@ -140,7 +141,7 @@ class AgentExpense(BaseAgent):
             return date(year, month, min(today.day, last_day)).isoformat()
 
         # Sin fecha explícita en el mensaje: ahora (captura la hora del registro).
-        return datetime.now().isoformat()
+        return now_ar_naive().isoformat()
 
     def _month_from_spanish(self, value: str) -> int:
         month_map = {

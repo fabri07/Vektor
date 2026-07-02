@@ -13,12 +13,12 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.work_schedule_service import resolve_schedule
+from app.domain.business_time import AR_TZ
 from app.domain.fiscal_condition import (
     FiscalCondition,
     normalize_fiscal_condition,
@@ -41,7 +41,7 @@ from app.schemas.cash_close import (
 
 logger = get_logger(__name__)
 
-_ART = ZoneInfo("America/Argentina/Buenos_Aires")
+_ART = AR_TZ
 _CASH_METHOD = "cash"
 
 
