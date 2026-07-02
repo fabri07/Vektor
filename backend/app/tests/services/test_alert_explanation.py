@@ -100,7 +100,7 @@ def _fact(fact_id: str, metric: str, value: float | None, severity: str | None) 
         value=value,
         unit="ARS",
         period="últimos_30_días",
-        severity=severity,  # type: ignore[arg-type]
+        severity=severity,
         provenance=Provenance.REAL,
         confidence=1.0,
         sample_size=40,
@@ -217,7 +217,9 @@ async def test_explain_alerts_prompt_and_llm_call() -> None:
 
     assert text == "Tu caja tiene $15.000 …"
     assert call.source == "alert_explainer"
-    system = client.messages.create.await_args.kwargs["system"]
+    await_args = client.messages.create.await_args
+    assert await_args is not None
+    system = await_args.kwargs["system"]
     # No-invention + registro llano + el número real presente en el prompt
     assert "NO inventes" in system
     assert "Plata antes que porcentajes" in system
@@ -380,7 +382,8 @@ async def test_dispatchable_intent_is_never_hijacked(mock_db, mock_redis) -> Non
 @pytest.mark.asyncio
 async def test_malformed_alert_ids_do_not_crash(mock_db, mock_redis) -> None:
     """active_alert_ids no-lista (int) o string → se ignora, sin TypeError/500."""
-    for bad_ids in (42, "CASH_LOW", {"x": 1}, [None, "", {}]):
+    bad_ids_cases: list[object] = [42, "CASH_LOW", {"x": 1}, [None, "", {}]]
+    for bad_ids in bad_ids_cases:
         request = _make_request(
             "explicame el mensaje en rojo",
             ui_context={"active_alert_ids": bad_ids},
@@ -472,8 +475,9 @@ async def test_explain_without_ui_context_logs_gap(mock_db, mock_redis) -> None:
         )
 
     assert response.message == _UI_CONTEXT_MISSING_MESSAGE
-    kwargs = gap_cls.return_value.log_gap.await_args.kwargs
-    assert kwargs["fallback_reason"] == "ui_context_missing"
+    await_args = gap_cls.return_value.log_gap.await_args
+    assert await_args is not None
+    assert await_args.kwargs["fallback_reason"] == "ui_context_missing"
 
 
 @pytest.mark.asyncio
@@ -501,5 +505,6 @@ async def test_unresolvable_alert_ids_get_honest_message(mock_db, mock_redis) ->
         )
 
     assert "no encontré los datos" in (response.message or "").lower()
-    kwargs = gap_cls.return_value.log_gap.await_args.kwargs
-    assert kwargs["fallback_reason"] == "sin_datos"
+    await_args = gap_cls.return_value.log_gap.await_args
+    assert await_args is not None
+    assert await_args.kwargs["fallback_reason"] == "sin_datos"

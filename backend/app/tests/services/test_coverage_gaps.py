@@ -263,7 +263,9 @@ async def test_out_of_scope_logs_gap_and_keeps_message(mock_db, mock_redis) -> N
     # La respuesta al usuario es EXACTAMENTE la misma de siempre.
     assert response.message == _NO_AGENT_MESSAGES["out_of_scope"]
     gap_cls.return_value.log_gap.assert_awaited_once()
-    kwargs = gap_cls.return_value.log_gap.await_args.kwargs
+    await_args = gap_cls.return_value.log_gap.await_args
+    assert await_args is not None
+    kwargs = await_args.kwargs
     assert kwargs["fallback_reason"] == "out_of_scope"
     assert kwargs["original_message"] == "cuál es la capital de Francia"
 
@@ -300,7 +302,9 @@ async def test_low_confidence_gate_logs_baja_confianza(mock_db, mock_redis) -> N
 
     assert response.status == "requires_clarification"
     assert response.question  # el usuario recibe la pregunta de siempre
-    kwargs = gap_cls.return_value.log_gap.await_args.kwargs
+    await_args = gap_cls.return_value.log_gap.await_args
+    assert await_args is not None
+    kwargs = await_args.kwargs
     assert kwargs["fallback_reason"] == "baja_confianza"
     assert kwargs["confidence"] == 0.5
     assert kwargs["classified_intent"] == "consulta_libre"
