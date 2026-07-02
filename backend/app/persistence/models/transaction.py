@@ -88,6 +88,9 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         Index("ix_sales_entries_tenant_provenance", "tenant_id", "provenance"),
         Index("ix_sales_entries_tenant_voided_at", "tenant_id", "voided_at"),
+        # last_sold por producto (FactsProvider): max(transaction_date) GROUP BY
+        # product_id sobre el histórico del tenant, en cada snapshot de métricas.
+        Index("ix_sales_entries_tenant_product", "tenant_id", "product_id"),
     )
 
     def __repr__(self) -> str:
