@@ -1,11 +1,12 @@
 """alert_explainer — explica el alert rojo del dashboard con datos reales.
 
 Compone, no calcula:
-  - El NÚMERO sale de FactsService (get_alert_by_id / dashboard_snapshot),
-    fresco en cada consulta — NUNCA se cachea (quedaría stale al cambiar datos).
+  - El NÚMERO sale de FactsService (dashboard_snapshot + sobrestock), fresco
+    en cada consulta — NUNCA se cachea (quedaría stale al cambiar datos).
   - El SIGNIFICADO funcional (qué es la métrica, por qué Véktor la marca) sale
-    del manual de AgentHelper (help_documentation_service) con fallback a un
-    catálogo determinístico propio.
+    del catálogo determinístico _ALERT_MEANING de este módulo. Un test de
+    paridad lo ata a los risk codes canónicos de heuristics/insight_templates
+    (TEMPLATES): un risk code nuevo sin entrada acá rompe CI, no producción.
   - La REDACCIÓN la hace el LLM en lenguaje llano (registro compartido de
     plain_language.py). El LLM narra; no computa ni inventa.
 
@@ -14,6 +15,11 @@ engine (HealthAlertBanner usa `score.primary_risk_code`: CASH_LOW, MARGIN_LOW,
 STOCK_CRITICAL, SUPPLIER_DEPENDENCY). Este módulo acepta ESOS ids y también
 fact_ids de FactsService directos (forward-compatible para cuando el dashboard
 lea BusinessFact).
+
+Semántica de `still_alert`: para un risk_code el que manda es el health engine
+— si el banner está en pantalla, la alerta ESTÁ activa (los dos sistemas de
+severidad son intencionalmente distintos; ver CLAUDE.md). El severity del
+BusinessFact solo decide `still_alert` para fact_ids directos de FactsService.
 """
 
 from __future__ import annotations
@@ -67,39 +73,63 @@ def resolve_alert_facts(
     tenant_id: str,
     alert_ids: list[str],
     period: Period,
+    *,
+    include_demo: bool = False,
 ) -> list[dict[str, Any]]:
     """Resuelve cada alert_id a su BusinessFact fresco + significado funcional.
 
     Acepta fact_ids directos y risk_codes del health engine. Ids desconocidos
-    se saltan con gracia (no rompen la explicación de los demás). Si el fact ya
-    no está en rojo (los datos cambiaron), se informa el estado actual igual —
-    eso es honestidad, no un error.
+    se saltan con gracia (no rompen la explicación de los demás). Si un fact_id
+    directo ya no está en rojo (los datos cambiaron), se informa el estado
+    actual igual — eso es honestidad, no un error.
+
+    `include_demo`: los tenants demo tienen TODO con provenance='DEMO' y el
+    health engine que pinta el banner no filtra provenance — pasar
+    `tenant.is_demo` acá para que el chat vea los mismos números que el
+    dashboard (si no, en las cuentas demo todos los facts salen EMPTY).
+
+    El snapshot y el sobrestock se computan UNA vez para todos los alert_ids
+    (get_alert_by_id recomputaría el snapshot completo por id).
     """
-    snapshot = facts_service.dashboard_snapshot(tenant_id, period)
+    snapshot = facts_service.dashboard_snapshot(
+        tenant_id, period, include_demo=include_demo
+    )
+    sobres = facts_service.sobrestock(tenant_id, include_demo=include_demo)
+    by_fact_id: dict[str, BusinessFact] = {
+        f.fact_id: f for f in [*snapshot.values(), *sobres]
+    }
+    by_metric: dict[str, BusinessFact] = {f.metric: f for f in snapshot.values()}
+
     blocks: list[dict[str, Any]] = []
     for alert_id in alert_ids:
-        fact: BusinessFact | None = facts_service.get_alert_by_id(
-            tenant_id, alert_id, period
-        )
+        fact = by_fact_id.get(alert_id)
+        from_risk_code = False
         meaning = _ALERT_MEANING.get(alert_id)
         if fact is None and alert_id in _RISK_CODE_TO_METRICS:
-            # risk_code del health engine → buscar las métricas que lo fundamentan
+            # risk_code del health engine → la métrica que lo fundamenta
+            from_risk_code = True
             for metric in _RISK_CODE_TO_METRICS[alert_id]:
-                candidate = next(
-                    (f for f in snapshot.values() if f.metric == metric), None
-                )
+                candidate = by_metric.get(metric)
                 if candidate is not None:
                     fact = candidate
                     break
         if fact is None and meaning is None:
             # Id desconocido: ni fact ni significado — se salta, no se inventa.
             continue
+        # still_alert: para risk_codes manda el health engine (el banner está en
+        # pantalla → la alerta está activa; los facts de caja/stock no modelan
+        # ese severity). Para fact_ids directos decide el severity del fact.
+        still_alert = (
+            True
+            if from_risk_code
+            else bool(fact and fact.severity in ("warning", "critical"))
+        )
         blocks.append(
             {
                 "alert_id": alert_id,
                 "fact": fact.model_dump() if fact is not None else None,
                 "meaning": meaning,
-                "still_alert": bool(fact and fact.severity in ("warning", "critical")),
+                "still_alert": still_alert,
             }
         )
     return blocks
@@ -157,7 +187,7 @@ cargar en Véktor para tener el dato.
 {REGISTER_SIMPLE}
 
 ## Alertas activas en su pantalla (lo único que sabés)
-Negocio: {business_name}
+Negocio: {wrap_user_input(business_name)}
 {_facts_block(blocks)}
 
 Respondé corto, como una charla de mostrador. Sin títulos ni listas largas."""

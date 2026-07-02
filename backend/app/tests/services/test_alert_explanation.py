@@ -12,6 +12,7 @@ Cubre:
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from contextlib import ExitStack
 from typing import Any
@@ -20,9 +21,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.application.agents.shared.alert_explainer import (
+    _ALERT_MEANING,
+    _RISK_CODE_TO_METRICS,
     explain_alerts,
     resolve_alert_facts,
 )
+from app.application.agents.shared.intent_rescue import normalize
 from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
@@ -56,7 +60,8 @@ GAP_SERVICE = "app.application.services.coverage_gap_service"
     ],
 )
 def test_explain_regex_matches(message: str) -> None:
-    assert _ALERT_EXPLAIN_RE.search(message)
+    # El orchestrator aplica el regex sobre el mensaje NORMALIZADO (sin tildes).
+    assert _ALERT_EXPLAIN_RE.search(normalize(message))
 
 
 @pytest.mark.parametrize(
@@ -67,10 +72,21 @@ def test_explain_regex_matches(message: str) -> None:
         "configurame una alerta para stock bajo",
         "explicame el margen bruto",
         "cargá el gasto del alquiler",
+        # 'arroja' contiene 'roja' — sin word boundaries esto era un hijack real
+        "que es lo que arroja el reporte de ventas",
     ],
 )
 def test_explain_regex_no_false_positives(message: str) -> None:
-    assert not _ALERT_EXPLAIN_RE.search(message)
+    assert not _ALERT_EXPLAIN_RE.search(normalize(message))
+
+
+def test_meaning_catalog_parity_with_insight_templates() -> None:
+    """Un risk_code nuevo en insight_templates SIN entrada acá debe romper CI,
+    no degradar en producción a 'no encontré los datos'."""
+    from app.heuristics.insight_templates import TEMPLATES
+
+    assert set(TEMPLATES.keys()) == set(_RISK_CODE_TO_METRICS.keys())
+    assert set(TEMPLATES.keys()) == set(_ALERT_MEANING.keys())
 
 
 # ── resolve_alert_facts ───────────────────────────────────────────────────────
@@ -92,17 +108,13 @@ def _fact(fact_id: str, metric: str, value: float | None, severity: str | None) 
     )
 
 
-def _mock_facts_service(snapshot: dict[str, BusinessFact]) -> MagicMock:
+def _mock_facts_service(
+    snapshot: dict[str, BusinessFact],
+    sobrestock: list[BusinessFact] | None = None,
+) -> MagicMock:
     svc = MagicMock()
     svc.dashboard_snapshot.return_value = snapshot
-    # get_alert_by_id solo resuelve fact_ids exactos con severity activa
-    def _get(tenant_id: str, alert_id: str, p: Period) -> BusinessFact | None:
-        for f in snapshot.values():
-            if f.fact_id == alert_id and f.severity in ("warning", "critical"):
-                return f
-        return None
-
-    svc.get_alert_by_id.side_effect = _get
+    svc.sobrestock.return_value = sobrestock or []
     return svc
 
 
@@ -115,6 +127,27 @@ def test_resolve_risk_code_maps_to_fact() -> None:
     assert blocks[0]["fact"]["value"] == 15000.0
     assert blocks[0]["still_alert"] is True
     assert "Caja baja" in blocks[0]["meaning"]
+
+
+def test_resolve_risk_code_without_fact_severity_still_alert() -> None:
+    """EL bug del review: caja_liquida nunca setea severity → still_alert daba
+    False y el LLM decía 'ya no está en alerta' con el banner rojo en pantalla.
+    Para risk_codes manda el health engine: still_alert=True."""
+    caja = _fact("caja_liquida_últimos_30_días", "caja_liquida", 15000.0, None)
+    svc = _mock_facts_service({"caja_liquida": caja})
+    blocks = resolve_alert_facts(svc, "t1", ["CASH_LOW"], Period.last_n_days(30))
+    assert blocks[0]["still_alert"] is True
+
+
+def test_resolve_passes_include_demo() -> None:
+    """Tenants demo: el chat debe ver los MISMOS números que el dashboard."""
+    caja = _fact("caja_liquida_últimos_30_días", "caja_liquida", 15000.0, None)
+    svc = _mock_facts_service({"caja_liquida": caja})
+    resolve_alert_facts(
+        svc, "t1", ["CASH_LOW"], Period.last_n_days(30), include_demo=True
+    )
+    assert svc.dashboard_snapshot.call_args.kwargs["include_demo"] is True
+    assert svc.sobrestock.call_args.kwargs["include_demo"] is True
 
 
 def test_resolve_direct_fact_id() -> None:
@@ -144,14 +177,17 @@ def test_resolve_supplier_dependency_without_fact() -> None:
     assert "proveedor" in blocks[0]["meaning"].lower()
 
 
-def test_resolve_alert_no_longer_red() -> None:
-    """La alerta se apagó (datos cambiaron) → se informa el estado actual, no error."""
-    caja = _fact("caja_liquida_últimos_30_días", "caja_liquida", 90000.0, "info")
-    svc = _mock_facts_service({"caja_liquida": caja})
-    blocks = resolve_alert_facts(svc, "t1", ["CASH_LOW"], Period.last_n_days(30))
+def test_resolve_direct_fact_id_no_longer_red() -> None:
+    """fact_id directo que dejó de estar en rojo → se informa el estado actual
+    (still_alert=False), NUNCA se descarta con 'no encontré los datos'."""
+    margen = _fact("margen_neto_últimos_30_días", "margen_neto", 25.0, None)
+    svc = _mock_facts_service({"margen_neto": margen})
+    blocks = resolve_alert_facts(
+        svc, "t1", ["margen_neto_últimos_30_días"], Period.last_n_days(30)
+    )
     assert len(blocks) == 1
     assert blocks[0]["still_alert"] is False
-    assert blocks[0]["fact"]["value"] == 90000.0
+    assert blocks[0]["fact"]["value"] == 25.0
 
 
 # ── explain_alerts (narrador) ────────────────────────────────────────────────
@@ -267,7 +303,11 @@ async def test_explain_with_ui_context_returns_explanation(mock_db, mock_redis) 
     fake_blocks = [
         {
             "alert_id": "CASH_LOW",
-            "fact": {"fact_id": "caja_liquida_últimos_30_días", "value": 15000.0},
+            "fact": {
+                "fact_id": "caja_liquida_últimos_30_días",
+                "value": 15000.0,
+                "confidence": 1.0,
+            },
             "meaning": "Caja baja.",
             "still_alert": True,
         }
@@ -306,6 +346,117 @@ async def test_explain_with_ui_context_returns_explanation(mock_db, mock_redis) 
     assert response.message == "Tu caja tiene $15.000, por eso el aviso."
     assert response.result.get("alert_explanation") is True
     assert response.result.get("alert_ids") == ["CASH_LOW"]
+    assert response.confidence == Confidence.HIGH  # min(confidence)=1.0 → HIGH
+
+
+@pytest.mark.asyncio
+async def test_dispatchable_intent_is_never_hijacked(mock_db, mock_redis) -> None:
+    """Invariante 1: un intent despachable gana SIEMPRE, aunque el mensaje
+    matchee el regex y haya alertas activas en ui_context."""
+    request = _make_request(
+        "vendí 3 gaseosas a 2000, y explicame el cartel rojo",
+        ui_context={"active_alert_ids": ["CASH_LOW"]},
+    )
+    with ExitStack() as stack:
+        # CEO clasifica registrar_venta (despachable, no overridable)
+        _enter_common_patches(stack, "registrar_venta")
+        stack.enter_context(patch(f"{ORCHESTRATOR}.TeamPlanExecutor"))
+        explain_mock = stack.enter_context(
+            patch(
+                "app.application.services.facts_provider.build_facts_service",
+                AsyncMock(),
+            )
+        )
+        # El plan mockeado puede fallar aguas abajo; lo que importa es que NO
+        # se tomó el camino del explainer.
+        with contextlib.suppress(Exception):
+            await ChatOrchestrator().handle(
+                request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4()
+            )
+
+    explain_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_malformed_alert_ids_do_not_crash(mock_db, mock_redis) -> None:
+    """active_alert_ids no-lista (int) o string → se ignora, sin TypeError/500."""
+    for bad_ids in (42, "CASH_LOW", {"x": 1}, [None, "", {}]):
+        request = _make_request(
+            "explicame el mensaje en rojo",
+            ui_context={"active_alert_ids": bad_ids},
+        )
+        with ExitStack() as stack:
+            _enter_common_patches(stack, "out_of_scope")
+            gap_cls = stack.enter_context(patch(f"{GAP_SERVICE}.CoverageGapService"))
+            gap_cls.return_value.log_gap = AsyncMock()
+            response = await ChatOrchestrator().handle(
+                request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4()
+            )
+        # Sin ids válidos → cae al pedido amable de ui_context, nunca 500.
+        assert response.message == _UI_CONTEXT_MISSING_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_aclaracion_archivo_is_not_derailed(mock_db, mock_redis) -> None:
+    """pedir_aclaracion_sobre_archivo conserva su pregunta específica aunque el
+    mensaje matchee el regex de explicación y no haya ui_context."""
+    from app.application.services.chat_orchestrator import _NO_AGENT_MESSAGES
+
+    request = _make_request(
+        "explicame el mensaje de que el archivo necesita completar datos",
+        ui_context=None,
+    )
+    with ExitStack() as stack:
+        _enter_common_patches(stack, "pedir_aclaracion_sobre_archivo")
+        gap_cls = stack.enter_context(patch(f"{GAP_SERVICE}.CoverageGapService"))
+        gap_cls.return_value.log_gap = AsyncMock()
+        response = await ChatOrchestrator().handle(
+            request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4()
+        )
+
+    assert response.message == _NO_AGENT_MESSAGES["pedir_aclaracion_sobre_archivo"]
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_degrades_gracefully(mock_db, mock_redis) -> None:
+    """Un error de Anthropic en explain_alerts NO escapa como 500: respuesta
+    amable + confidence LOW, mismo degrade que el resto de los paths."""
+    request = _make_request(
+        "por qué está en rojo este mensaje",
+        ui_context={"active_alert_ids": ["CASH_LOW"]},
+    )
+    fake_blocks = [
+        {
+            "alert_id": "CASH_LOW",
+            "fact": {"fact_id": "x", "value": 1.0, "confidence": 1.0},
+            "meaning": "Caja baja.",
+            "still_alert": True,
+        }
+    ]
+    with ExitStack() as stack:
+        _enter_common_patches(stack, "intent_desconocido")
+        stack.enter_context(
+            patch(
+                "app.application.services.facts_provider.build_facts_service",
+                AsyncMock(return_value=MagicMock()),
+            )
+        )
+        stack.enter_context(
+            patch(f"{EXPLAINER}.resolve_alert_facts", return_value=fake_blocks)
+        )
+        stack.enter_context(
+            patch(
+                f"{EXPLAINER}.explain_alerts",
+                AsyncMock(side_effect=RuntimeError("anthropic 529")),
+            )
+        )
+        response = await ChatOrchestrator().handle(
+            request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4()
+        )
+
+    assert response.status == "success"
+    assert "no pude armar la explicación" in (response.message or "").lower()
+    assert response.confidence == Confidence.LOW
 
 
 @pytest.mark.asyncio

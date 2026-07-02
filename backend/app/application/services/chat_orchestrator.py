@@ -149,13 +149,26 @@ _CLARIFICATION_CONFIDENCE_THRESHOLD = 0.72
 # ── Explicación de alertas del dashboard (Parte B) ────────────────────────────
 # Detección determinística (sin LLM) de "explicame lo que veo en la pantalla":
 # verbo de explicación + referencia deíctica a la alerta/el cartel rojo.
+# Se aplica sobre intent_rescue.normalize(mensaje) (lowercase, sin tildes) —
+# por eso el patrón no lleva clases de acentos. Word boundaries obligatorias:
+# sin \b, "arroja" matchea "roja" (verificado).
 _ALERT_EXPLAIN_RE = re.compile(
-    r"(?:explic|signific|por\s?qu[eé]|qu[eé]\s+quiere\s+decir|qu[eé]\s+es)"
+    r"(?:\bexplica?\w*|\bsignifica?\w*|\bpor\s?que\b|\bque\s+quiere\s+decir\b|\bque\s+es\b)"
     r".{0,40}?"
-    r"(?:rojo|roja|alerta|cartel|aviso|mensaje|esto\s+que\s+veo|lo\s+que\s+veo)"
-    r"|(?:mensaje|cartel|alerta|aviso)\s+(?:en\s+)?roj[oa]",
-    re.IGNORECASE,
+    r"(?:\broj[oa]s?\b|\balerta\b|\bcartel\b|\baviso\b|\bmensaje\b"
+    r"|\besto\s+que\s+veo\b|\blo\s+que\s+veo\b)"
+    r"|(?:\bmensaje\b|\bcartel\b|\balerta\b|\baviso\b)\s+(?:en\s+)?roj[oa]\b",
 )
+
+# El override SOLO puede pisar intents que iban a morir enlatados o a la
+# consulta genérica de datos. Un intent despachable (registrar_venta, importar
+# archivo...) SIEMPRE gana: el cliente nunca elige el agente destino
+# (invariante 1) — ui_context es una señal, no un canal de ruteo.
+_EXPLAIN_OVERRIDABLE_INTENTS: frozenset[str] = _NO_AGENT_INTENTS | {"consulta_libre"}
+
+# Cotas para active_alert_ids (payload controlado por el cliente).
+_MAX_ALERT_IDS = 8
+_MAX_ALERT_ID_LEN = 64
 
 _UI_CONTEXT_MISSING_MESSAGE = (
     "Quiero explicarte exactamente lo que estás viendo, pero desde acá no sé "
@@ -386,17 +399,36 @@ class ChatOrchestrator:
             context_health["file_context"] = "degraded"
 
         # 3c-pre. Explicación de alertas del dashboard (Parte B) ─────────────────
-        # Señal fuerte de UI: el frontend mandó active_alert_ids y el mensaje
-        # pide explicar lo que se ve → se explica con FactsService, fresco.
-        # Sin ui_context, solo interviene si el mensaje iba a morir enlatado
-        # (no secuestra intents despachables).
-        _explain_requested = bool(_ALERT_EXPLAIN_RE.search(request.message or ""))
-        _ui_alert_ids: list[str] = [
-            str(a)
-            for a in ((request.ui_context or {}).get("active_alert_ids") or [])
-            if a
-        ]
-        if _explain_requested and _ui_alert_ids:
+        # Señal de UI (frontend mandó active_alert_ids) + mensaje que pide
+        # explicar lo que se ve → se explica con FactsService, fresco. SOLO
+        # cuando el CEO no encontró un intent despachable: un intent operativo
+        # ("vendí 3 gaseosas... y explicame el cartel") SIEMPRE se despacha —
+        # el cliente nunca elige el agente destino.
+        from app.application.agents.shared.intent_rescue import (  # noqa: PLC0415
+            normalize as _normalize_msg,
+        )
+
+        _explain_requested = bool(
+            _ALERT_EXPLAIN_RE.search(_normalize_msg(request.message or ""))
+        )
+        # Type-hardening: active_alert_ids viene del cliente — solo lista de
+        # escalares, acotada; cualquier otra forma se ignora (no 500 por payload
+        # schema-válido pero mal formado).
+        _raw_alert_ids = (request.ui_context or {}).get("active_alert_ids")
+        _ui_alert_ids: list[str] = (
+            [
+                str(a)[:_MAX_ALERT_ID_LEN]
+                for a in _raw_alert_ids[:_MAX_ALERT_IDS]
+                if isinstance(a, str | int) and str(a).strip()
+            ]
+            if isinstance(_raw_alert_ids, list)
+            else []
+        )
+        if (
+            _explain_requested
+            and _ui_alert_ids
+            and ceo_intent in _EXPLAIN_OVERRIDABLE_INTENTS
+        ):
             return await self._handle_alert_explanation(
                 request,
                 db=db,
@@ -408,7 +440,10 @@ class ChatOrchestrator:
                 business_type=business_type,
                 prior_calls=all_llm_calls,
             )
-        if _explain_requested and ceo_intent in _NO_AGENT_INTENTS:
+        # Sin ui_context solo interviene cuando el mensaje iba a morir en el
+        # enlatado genérico. pedir_aclaracion_* NO: esas conservan su pregunta
+        # específica (ej. la aclaración sobre un archivo adjunto).
+        if _explain_requested and ceo_intent in ("out_of_scope", "intent_desconocido"):
             await self._log_coverage_gap(
                 request,
                 tenant_id=tenant_id,
@@ -448,15 +483,15 @@ class ChatOrchestrator:
             # Coverage gap (best-effort, no cambia la respuesta): lo que llega acá
             # sobrevivió al rescate → es un gap real de cobertura, no ambigüedad
             # rescatable. pedir_aclaracion_* se registra como baja_confianza.
+            from app.application.services.coverage_gap_service import (  # noqa: PLC0415
+                reason_for_intent,
+            )
+
             await self._log_coverage_gap(
                 request,
                 tenant_id=tenant_id,
                 user_id=user_id,
-                fallback_reason=(
-                    ceo_intent
-                    if ceo_intent in ("out_of_scope", "intent_desconocido")
-                    else "baja_confianza"
-                ),
+                fallback_reason=reason_for_intent(ceo_intent),
                 classified_intent=ceo_intent,
                 confidence=ceo_response.result.get("confidence_float"),
             )
@@ -1199,19 +1234,43 @@ class ChatOrchestrator:
 
         period = Period.last_n_days(30)
         blocks: list[dict[str, Any]] = []
+        facts_failed = False
         try:
+            # include_demo: el health engine que pinta el banner no filtra
+            # provenance; en tenants demo (todo provenance='DEMO') el chat debe
+            # ver los MISMOS números que el dashboard.
+            tenant = await db.get(Tenant, tenant_id)
+            include_demo = bool(tenant and tenant.is_demo)
             facts_service = await build_facts_service(
                 db, tenant_id, period, vertical_code=business_type
             )
-            blocks = resolve_alert_facts(facts_service, str(tenant_id), alert_ids, period)
+            blocks = resolve_alert_facts(
+                facts_service,
+                str(tenant_id),
+                alert_ids,
+                period,
+                include_demo=include_demo,
+            )
         except Exception as exc:
+            facts_failed = True
             logger.warning(
                 "alert_explanation_facts_failed",
                 error=str(exc),
                 tenant_id=str(tenant_id),
             )
 
-        if not blocks:
+        calls: list[LLMCall] = list(prior_calls)
+        extra_result: dict[str, Any] = {}
+        if facts_failed:
+            # Error de infraestructura ≠ gap de producto: NO se loguea sin_datos
+            # (refrescar la pantalla no lo arregla; contaminaría el backlog).
+            confidence = Confidence.LOW
+            message = (
+                "Justo ahora tuve un problema para leer tus datos y no puedo "
+                "explicarte la alerta. Probá de nuevo en un ratito."
+            )
+            summary = "Explicación de alerta falló al leer datos."
+        elif not blocks:
             # Ids que no pudimos resolver a ningún dato: honestidad + backlog.
             await self._log_coverage_gap(
                 request,
@@ -1220,27 +1279,14 @@ class ChatOrchestrator:
                 fallback_reason="sin_datos",
                 classified_intent="explicar_alerta",
             )
-            response = AgentResponse(
-                request_id=request.request_id,
-                agent_name="agent_ceo",
-                status="success",
-                risk_level=RiskLevel.LOW,
-                confidence=Confidence.LOW,
-                requires_approval=False,
-                message=(
-                    "Veo que preguntás por una alerta del tablero, pero no encontré "
-                    "los datos que la generaron. Puede que haya cambiado hace un "
-                    "momento. Actualizá la pantalla y, si sigue apareciendo, "
-                    "preguntame de nuevo."
-                ),
-                result={
-                    "summary": "Alerta no resuelta a datos.",
-                    "intent": "explicar_alerta",
-                    "target_agent": None,
-                    "alert_ids": alert_ids,
-                },
-                usage=UsageSummary(calls=prior_calls) if prior_calls else None,
+            confidence = Confidence.LOW
+            message = (
+                "Veo que preguntás por una alerta del tablero, pero no encontré "
+                "los datos que la generaron. Puede que haya cambiado hace un "
+                "momento. Actualizá la pantalla y, si sigue apareciendo, "
+                "preguntame de nuevo."
             )
+            summary = "Alerta no resuelta a datos."
         else:
             if any(b.get("fact") is None for b in blocks):
                 # Alerta sin BusinessFact que la respalde (ej. SUPPLIER_DEPENDENCY):
@@ -1252,26 +1298,59 @@ class ChatOrchestrator:
                     fallback_reason="sin_datos",
                     classified_intent="explicar_alerta",
                 )
-            text, llm_call = await explain_alerts(
-                request.message, blocks, business_name, self.client
-            )
-            response = AgentResponse(
-                request_id=request.request_id,
-                agent_name="agent_ceo",
-                status="success",
-                risk_level=RiskLevel.LOW,
-                confidence=Confidence.HIGH,
-                requires_approval=False,
-                message=text,
-                result={
-                    "summary": "Explicación de alerta del dashboard.",
-                    "intent": "explicar_alerta",
-                    "target_agent": None,
-                    "alert_explanation": True,
-                    "alert_ids": alert_ids,
-                },
-                usage=UsageSummary(calls=[*prior_calls, llm_call]),
-            )
+            try:
+                text, llm_call = await explain_alerts(
+                    request.message, blocks, business_name, self.client
+                )
+                calls.append(llm_call)
+                message = text
+                summary = "Explicación de alerta del dashboard."
+                extra_result = {"alert_explanation": True}
+                # Confianza honesta (no-invention): la mínima cobertura de los
+                # facts citados manda; sin fact que respalde → LOW, nunca HIGH.
+                facts_conf = [
+                    float(b["fact"]["confidence"])
+                    for b in blocks
+                    if b.get("fact") is not None
+                ]
+                if not facts_conf:
+                    confidence = Confidence.LOW
+                elif min(facts_conf) >= 0.7:
+                    confidence = Confidence.HIGH
+                else:
+                    confidence = Confidence.MEDIUM
+            except Exception as exc:
+                # Mismo degrade amable que el resto de los paths terminales: un
+                # 529 de Anthropic no puede escapar como 500 ni perder el turno.
+                logger.warning(
+                    "alert_explanation_llm_failed",
+                    error=str(exc),
+                    tenant_id=str(tenant_id),
+                )
+                confidence = Confidence.LOW
+                message = (
+                    "Justo ahora no pude armar la explicación. "
+                    "Probá de nuevo en unos segundos."
+                )
+                summary = "Explicación de alerta falló en la generación."
+
+        response = AgentResponse(
+            request_id=request.request_id,
+            agent_name="agent_ceo",
+            status="success",
+            risk_level=RiskLevel.LOW,
+            confidence=confidence,
+            requires_approval=False,
+            message=message,
+            result={
+                "summary": summary,
+                "intent": "explicar_alerta",
+                "target_agent": None,
+                "alert_ids": alert_ids,
+                **extra_result,
+            },
+            usage=UsageSummary(calls=calls) if calls else None,
+        )
 
         if request.conversation_id:
             await self._save_turn(
@@ -1306,7 +1385,7 @@ class ChatOrchestrator:
                 classified_intent=classified_intent,
                 classified_domain=classified_domain,
                 confidence=confidence,
-                ui_context=getattr(request, "ui_context", None),
+                ui_context=request.ui_context,
             )
         except Exception as exc:
             logger.warning("coverage_gap_hook_failed", error=str(exc))

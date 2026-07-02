@@ -25,6 +25,49 @@ logger = get_logger(__name__)
 # El mensaje se trunca para que un paste gigante no infle la tabla de backlog.
 _MAX_MESSAGE_LEN = 4000
 
+# ui_context viene del cliente sin validación de forma: se persiste SOLO el
+# subset conocido, con cotas — mismo invariante que la truncación del mensaje.
+_UI_STR_KEYS = ("view", "focused_widget")
+_UI_LIST_KEYS = ("active_alert_ids", "visible_metric_ids")
+_MAX_UI_STR_LEN = 100
+_MAX_UI_LIST_ITEMS = 16
+_MAX_UI_ITEM_LEN = 64
+
+
+def _sanitize_ui_context(ui_context: Any) -> dict[str, Any] | None:
+    """Allowlist + cotas sobre el dict del cliente. Cualquier forma rara → None."""
+    if not isinstance(ui_context, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in _UI_STR_KEYS:
+        value = ui_context.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value[:_MAX_UI_STR_LEN]
+    for key in _UI_LIST_KEYS:
+        value = ui_context.get(key)
+        if isinstance(value, list):
+            items = [
+                str(v)[:_MAX_UI_ITEM_LEN]
+                for v in value[:_MAX_UI_LIST_ITEMS]
+                if isinstance(v, str | int)
+            ]
+            if items:
+                out[key] = items
+    return out or None
+
+
+def reason_for_intent(intent: str | None) -> str:
+    """Traducción única intent→fallback_reason para los cortes del orchestrator.
+
+    out_of_scope/intent_desconocido se registran literal; cualquier otro corte
+    (pedir_aclaracion_*, gate de confianza) es `baja_confianza`. Vive acá, al
+    lado del set cerrado, para que un intent de corte nuevo no invente una
+    reason fuera del CheckConstraint.
+    """
+    if intent in ("out_of_scope", "intent_desconocido"):
+        return intent
+    return "baja_confianza"
+
 
 class CoverageGapService:
     """Escritor insert-only de gaps de cobertura. Sesión propia por escritura."""
@@ -60,7 +103,7 @@ class CoverageGapService:
                         classified_domain=classified_domain,
                         confidence=confidence,
                         fallback_reason=fallback_reason,
-                        ui_context=ui_context,
+                        ui_context=_sanitize_ui_context(ui_context),
                     )
                 )
                 await session.commit()

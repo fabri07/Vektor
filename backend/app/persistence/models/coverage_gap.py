@@ -50,10 +50,12 @@ class ChatCoverageGap(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # created_at/updated_at vienen de TimestampMixin.
 
     __table_args__ = (
+        # Derivada de COVERAGE_GAP_REASONS: una sola lista que mantener (la
+        # migración replica el literal, como toda migración congelada).
         CheckConstraint(
             "fallback_reason IN ("
-            "'out_of_scope','intent_desconocido','baja_confianza',"
-            "'sin_datos','ui_context_missing','advice_blocked')",
+            + ", ".join(f"'{reason}'" for reason in COVERAGE_GAP_REASONS)
+            + ")",
             name="ck_chat_coverage_gaps_reason",
         ),
         # Backlog de producto: se consulta por tenant + pendientes de revisar.

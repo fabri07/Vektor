@@ -168,6 +168,44 @@ async def test_log_gap_unknown_reason_is_dropped(
     assert rows == []
 
 
+def test_reason_for_intent_mapping() -> None:
+    """Traducción única intent→reason: literal para los dos conocidos, el resto
+    colapsa a baja_confianza (nunca inventa una reason fuera del set cerrado)."""
+    from app.application.services.coverage_gap_service import reason_for_intent
+    from app.persistence.models.coverage_gap import COVERAGE_GAP_REASONS
+
+    assert reason_for_intent("out_of_scope") == "out_of_scope"
+    assert reason_for_intent("intent_desconocido") == "intent_desconocido"
+    assert reason_for_intent("pedir_aclaracion_negocio") == "baja_confianza"
+    assert reason_for_intent("intent_nuevo_futuro") == "baja_confianza"
+    assert reason_for_intent(None) == "baja_confianza"
+    for intent in ("out_of_scope", "intent_desconocido", "lo_que_sea"):
+        assert reason_for_intent(intent) in COVERAGE_GAP_REASONS
+
+
+def test_sanitize_ui_context_bounds_client_payload() -> None:
+    """ui_context del cliente: allowlist + cotas; formas raras → None."""
+    from app.application.services.coverage_gap_service import _sanitize_ui_context
+
+    # Payload gigante/hostil: keys desconocidas afuera, listas/strings acotados
+    hostile = {
+        "view": "x" * 5000,
+        "active_alert_ids": ["CASH_LOW"] + ["y" * 500] * 100,
+        "blob": "z" * 1_000_000,
+        "nested": {"a": [1] * 10000},
+    }
+    out = _sanitize_ui_context(hostile)
+    assert out is not None
+    assert set(out.keys()) <= {"view", "focused_widget", "active_alert_ids", "visible_metric_ids"}
+    assert len(out["view"]) == 100
+    assert len(out["active_alert_ids"]) == 16
+    assert all(len(i) <= 64 for i in out["active_alert_ids"])
+    # Formas no-dict o vacías → None
+    assert _sanitize_ui_context(42) is None
+    assert _sanitize_ui_context("CASH_LOW") is None
+    assert _sanitize_ui_context({"blob": object()}) is None
+
+
 @pytest.mark.asyncio
 async def test_log_gap_never_raises_on_db_error() -> None:
     """Fallo de commit → se traga: el contrato es best-effort."""
