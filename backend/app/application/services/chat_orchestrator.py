@@ -146,6 +146,24 @@ _NO_AGENT_MESSAGES: dict[str, str] = {
 # Umbral de confianza bajo el cual el orchestrator pide aclaración en vez de despachar
 _CLARIFICATION_CONFIDENCE_THRESHOLD = 0.72
 
+# ── Explicación de alertas del dashboard (Parte B) ────────────────────────────
+# Detección determinística (sin LLM) de "explicame lo que veo en la pantalla":
+# verbo de explicación + referencia deíctica a la alerta/el cartel rojo.
+_ALERT_EXPLAIN_RE = re.compile(
+    r"(?:explic|signific|por\s?qu[eé]|qu[eé]\s+quiere\s+decir|qu[eé]\s+es)"
+    r".{0,40}?"
+    r"(?:rojo|roja|alerta|cartel|aviso|mensaje|esto\s+que\s+veo|lo\s+que\s+veo)"
+    r"|(?:mensaje|cartel|alerta|aviso)\s+(?:en\s+)?roj[oa]",
+    re.IGNORECASE,
+)
+
+_UI_CONTEXT_MISSING_MESSAGE = (
+    "Quiero explicarte exactamente lo que estás viendo, pero desde acá no sé "
+    "qué alerta tenés en pantalla. Abrí el chat desde la pantalla del tablero "
+    "(donde aparece el mensaje rojo) y preguntame de nuevo, así te lo explico "
+    "con tus números."
+)
+
 # Nota que se inyecta en el system prompt de AgentChat cuando business_memory falló.
 _DEGRADED_BUSINESS_MEMORY_NOTICE = (
     "Nota: estás respondiendo sin el contexto histórico del negocio (no se pudo cargar). "
@@ -366,6 +384,64 @@ class ChatOrchestrator:
         except Exception as exc:
             logger.warning("file_context_failed", tenant_id=str(tenant_id), error=str(exc))
             context_health["file_context"] = "degraded"
+
+        # 3c-pre. Explicación de alertas del dashboard (Parte B) ─────────────────
+        # Señal fuerte de UI: el frontend mandó active_alert_ids y el mensaje
+        # pide explicar lo que se ve → se explica con FactsService, fresco.
+        # Sin ui_context, solo interviene si el mensaje iba a morir enlatado
+        # (no secuestra intents despachables).
+        _explain_requested = bool(_ALERT_EXPLAIN_RE.search(request.message or ""))
+        _ui_alert_ids: list[str] = [
+            str(a)
+            for a in ((request.ui_context or {}).get("active_alert_ids") or [])
+            if a
+        ]
+        if _explain_requested and _ui_alert_ids:
+            return await self._handle_alert_explanation(
+                request,
+                db=db,
+                redis=redis,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                alert_ids=_ui_alert_ids,
+                business_name=business_name,
+                business_type=business_type,
+                prior_calls=all_llm_calls,
+            )
+        if _explain_requested and ceo_intent in _NO_AGENT_INTENTS:
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason="ui_context_missing",
+                classified_intent=ceo_intent,
+                confidence=ceo_response.result.get("confidence_float"),
+            )
+            _missing_ctx_response = AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                requires_approval=False,
+                message=_UI_CONTEXT_MISSING_MESSAGE,
+                result={
+                    "summary": "Pedido de explicación de alerta sin contexto de UI.",
+                    "intent": "explicar_alerta",
+                    "target_agent": None,
+                },
+                usage=UsageSummary(calls=all_llm_calls) if all_llm_calls else None,
+            )
+            if request.conversation_id:
+                await self._save_turn(
+                    request,
+                    _missing_ctx_response.message or "",
+                    redis,
+                    db,
+                    tenant_id,
+                    user_id,
+                )
+            return _missing_ctx_response
 
         # 3c. Cortes sin sub-agente: fuera de scope / pedido de aclaración ───────
         if ceo_intent in _NO_AGENT_INTENTS:
@@ -1093,6 +1169,115 @@ class ChatOrchestrator:
             sections.append(recent_lines)
 
         return "\n\n".join(section for section in sections if section).strip()
+
+    async def _handle_alert_explanation(
+        self,
+        request: AgentRequest,
+        *,
+        db: AsyncSession,
+        redis: Redis,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        alert_ids: list[str],
+        business_name: str,
+        business_type: str,
+        prior_calls: list[LLMCall],
+    ) -> AgentResponse:
+        """Explica el/los alert(s) del dashboard con el número fresco de FactsService.
+
+        Compone, no calcula: FactsService trae el BusinessFact (nunca cacheado),
+        alert_explainer aporta el significado funcional y redacta en llano.
+        """
+        from app.application.agents.shared.alert_explainer import (  # noqa: PLC0415
+            explain_alerts,
+            resolve_alert_facts,
+        )
+        from app.application.services.facts_provider import (  # noqa: PLC0415
+            build_facts_service,
+        )
+        from app.application.services.facts_service import Period  # noqa: PLC0415
+
+        period = Period.last_n_days(30)
+        blocks: list[dict[str, Any]] = []
+        try:
+            facts_service = await build_facts_service(
+                db, tenant_id, period, vertical_code=business_type
+            )
+            blocks = resolve_alert_facts(facts_service, str(tenant_id), alert_ids, period)
+        except Exception as exc:
+            logger.warning(
+                "alert_explanation_facts_failed",
+                error=str(exc),
+                tenant_id=str(tenant_id),
+            )
+
+        if not blocks:
+            # Ids que no pudimos resolver a ningún dato: honestidad + backlog.
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason="sin_datos",
+                classified_intent="explicar_alerta",
+            )
+            response = AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                requires_approval=False,
+                message=(
+                    "Veo que preguntás por una alerta del tablero, pero no encontré "
+                    "los datos que la generaron. Puede que haya cambiado hace un "
+                    "momento. Actualizá la pantalla y, si sigue apareciendo, "
+                    "preguntame de nuevo."
+                ),
+                result={
+                    "summary": "Alerta no resuelta a datos.",
+                    "intent": "explicar_alerta",
+                    "target_agent": None,
+                    "alert_ids": alert_ids,
+                },
+                usage=UsageSummary(calls=prior_calls) if prior_calls else None,
+            )
+        else:
+            if any(b.get("fact") is None for b in blocks):
+                # Alerta sin BusinessFact que la respalde (ej. SUPPLIER_DEPENDENCY):
+                # se explica funcionalmente igual, pero queda como gap de producto.
+                await self._log_coverage_gap(
+                    request,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    fallback_reason="sin_datos",
+                    classified_intent="explicar_alerta",
+                )
+            text, llm_call = await explain_alerts(
+                request.message, blocks, business_name, self.client
+            )
+            response = AgentResponse(
+                request_id=request.request_id,
+                agent_name="agent_ceo",
+                status="success",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.HIGH,
+                requires_approval=False,
+                message=text,
+                result={
+                    "summary": "Explicación de alerta del dashboard.",
+                    "intent": "explicar_alerta",
+                    "target_agent": None,
+                    "alert_explanation": True,
+                    "alert_ids": alert_ids,
+                },
+                usage=UsageSummary(calls=[*prior_calls, llm_call]),
+            )
+
+        if request.conversation_id:
+            await self._save_turn(
+                request, response.message or "", redis, db, tenant_id, user_id
+            )
+        return response
 
     async def _log_coverage_gap(
         self,

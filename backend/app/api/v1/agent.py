@@ -169,6 +169,9 @@ class ChatRequest(BaseModel):
     message: str
     attachments: list[Any] = []
     conversation_id: str | None = None
+    # Contexto liviano de la pantalla (dashboard → active_alert_ids, etc.).
+    # Opcional: mensajes sin ui_context siguen funcionando idénticos.
+    ui_context: dict[str, Any] | None = None
 
 
 class ConversationSummary(BaseModel):
@@ -899,6 +902,7 @@ async def chat(
         message=body.message,
         attachments=body.attachments,
         conversation_id=body.conversation_id,
+        ui_context=body.ui_context,
     )
     try:
         orchestrator = ChatOrchestrator()
@@ -1083,6 +1087,7 @@ async def chat_stream(
         message=body.message,
         attachments=body.attachments,
         conversation_id=body.conversation_id,
+        ui_context=body.ui_context,
     )
 
     async def event_generator() -> AsyncGenerator[str, None]:
