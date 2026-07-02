@@ -16,6 +16,7 @@ from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.column_mapping import TenantColumnMapping
 from app.persistence.models.communication_log import CommunicationLog
 from app.persistence.models.conversation_context import AgentConversationContext
+from app.persistence.models.coverage_gap import ChatCoverageGap
 from app.persistence.models.customer import Customer
 from app.persistence.models.external_operation_log import ExternalOperationLog
 from app.persistence.models.field_definitions import (
@@ -84,6 +85,7 @@ __all__ = [
     "AgentMemory",
     "GoogleMcpConnection",
     "ChatSessionLog",
+    "ChatCoverageGap",
     "CashClose",
     "TenantColumnMapping",
     "VerticalFieldDefinition",

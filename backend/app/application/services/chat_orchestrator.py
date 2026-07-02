@@ -369,6 +369,21 @@ class ChatOrchestrator:
 
         # 3c. Cortes sin sub-agente: fuera de scope / pedido de aclaración ───────
         if ceo_intent in _NO_AGENT_INTENTS:
+            # Coverage gap (best-effort, no cambia la respuesta): lo que llega acá
+            # sobrevivió al rescate → es un gap real de cobertura, no ambigüedad
+            # rescatable. pedir_aclaracion_* se registra como baja_confianza.
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason=(
+                    ceo_intent
+                    if ceo_intent in ("out_of_scope", "intent_desconocido")
+                    else "baja_confianza"
+                ),
+                classified_intent=ceo_intent,
+                confidence=ceo_response.result.get("confidence_float"),
+            )
             _summary = (
                 "Consulta fuera del scope de Véktor."
                 if ceo_intent in ("out_of_scope", "intent_desconocido")
@@ -408,6 +423,16 @@ class ChatOrchestrator:
             and ceo_intent is not None
             and ceo_intent not in _NO_AGENT_INTENTS
         ):
+            # Coverage gap (best-effort): el CEO clasificó pero sin confianza para
+            # despachar — el fraseo del usuario no matchea bien ningún intent.
+            await self._log_coverage_gap(
+                request,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fallback_reason="baja_confianza",
+                classified_intent=ceo_intent,
+                confidence=_confidence_float,
+            )
             _amb_raw = ceo_response.result.get("ambiguous_with")
             _ambiguous_with: list[str] = _amb_raw if _amb_raw is not None else []
 
@@ -1068,6 +1093,38 @@ class ChatOrchestrator:
             sections.append(recent_lines)
 
         return "\n\n".join(section for section in sections if section).strip()
+
+    async def _log_coverage_gap(
+        self,
+        request: AgentRequest,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID | None,
+        fallback_reason: str,
+        classified_intent: str | None = None,
+        classified_domain: str | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        """Registra el rechazo como gap de producto. Best-effort: nunca lanza,
+        nunca cambia la respuesta al usuario (CoverageGapService ya es fail-silent
+        y usa sesión propia; este try/except es el cinturón extra del hot path)."""
+        try:
+            from app.application.services.coverage_gap_service import (  # noqa: PLC0415
+                CoverageGapService,
+            )
+
+            await CoverageGapService().log_gap(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                original_message=request.message,
+                fallback_reason=fallback_reason,
+                classified_intent=classified_intent,
+                classified_domain=classified_domain,
+                confidence=confidence,
+                ui_context=getattr(request, "ui_context", None),
+            )
+        except Exception as exc:
+            logger.warning("coverage_gap_hook_failed", error=str(exc))
 
     async def _save_turn(
         self,
