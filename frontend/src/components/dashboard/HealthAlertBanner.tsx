@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, TrendingDown, Package, Users, X } from "lucide-react";
+import { AlertTriangle, TrendingDown, Package, Users, X, MessageCircle } from "lucide-react";
 import type { HealthScoreV2Response } from "@/types/api";
+import { useChatWidgetStore } from "@/stores/chatWidgetStore";
 
 interface AlertConfig {
   icon: React.ReactNode;
@@ -11,6 +12,8 @@ interface AlertConfig {
   body: string;
   href: string;
   colorClass: string;
+  /** Pregunta que se manda al chat con "Preguntarle a Véktor". */
+  chatPrompt: string;
 }
 
 const ALERT_MAP: Record<string, AlertConfig> = {
@@ -20,6 +23,7 @@ const ALERT_MAP: Record<string, AlertConfig> = {
     body: "Tu cobertura de caja está por debajo del umbral saludable. Revisá tus egresos.",
     href: "/dashboard",
     colorClass: "border-vk-danger/60 bg-vk-danger/10 text-vk-danger",
+    chatPrompt: "Explicame por qué está en rojo la caja",
   },
   MARGIN_LOW: {
     icon: <AlertTriangle className="h-4 w-4" />,
@@ -27,6 +31,7 @@ const ALERT_MAP: Record<string, AlertConfig> = {
     body: "Tu rentabilidad está por debajo del rango esperado para tu rubro.",
     href: "/dashboard/analisis",
     colorClass: "border-amber-500/60 bg-amber-500/10 text-amber-400",
+    chatPrompt: "Explicame por qué está en rojo el margen",
   },
   STOCK_CRITICAL: {
     icon: <Package className="h-4 w-4" />,
@@ -34,6 +39,7 @@ const ALERT_MAP: Record<string, AlertConfig> = {
     body: "Más del 30% de tus productos están por debajo del umbral mínimo.",
     href: "/products?stock=low",
     colorClass: "border-orange-500/60 bg-orange-500/10 text-orange-400",
+    chatPrompt: "Explicame por qué está en rojo el stock",
   },
   SUPPLIER_DEPENDENCY: {
     icon: <Users className="h-4 w-4" />,
@@ -41,6 +47,7 @@ const ALERT_MAP: Record<string, AlertConfig> = {
     body: "Concentrás casi toda tu operación en un solo proveedor.",
     href: "/dashboard/analisis",
     colorClass: "border-yellow-500/60 bg-yellow-500/10 text-yellow-400",
+    chatPrompt: "Explicame esta alerta de dependencia de proveedor",
   },
 };
 
@@ -50,6 +57,7 @@ interface Props {
 
 export function HealthAlertBanner({ score }: Props) {
   const router = useRouter();
+  const openWithPrompt = useChatWidgetStore((s) => s.openWithPrompt);
   const [visible, setVisible] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
@@ -87,15 +95,33 @@ export function HealthAlertBanner({ score }: Props) {
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
-        <button
-          onClick={() => {
-            setDismissed(true);
-            router.push(config.href);
-          }}
-          className="mt-3 w-full rounded-lg border border-current/30 py-1.5 text-xs font-medium opacity-90 hover:opacity-100 transition-opacity"
-        >
-          Ver en el dashboard →
-        </button>
+        <div className="mt-3 flex gap-2">
+          <button
+            onClick={() => {
+              setDismissed(true);
+              router.push(config.href);
+            }}
+            className="flex-1 rounded-lg border border-current/30 py-1.5 text-xs font-medium opacity-90 hover:opacity-100 transition-opacity"
+          >
+            Ver en el dashboard →
+          </button>
+          <button
+            onClick={() => {
+              setDismissed(true);
+              openWithPrompt({
+                message: config.chatPrompt,
+                uiContext: {
+                  view: "dashboard",
+                  active_alert_ids: [score.primary_risk_code],
+                },
+              });
+            }}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-current/30 py-1.5 text-xs font-medium opacity-90 hover:opacity-100 transition-opacity"
+          >
+            <MessageCircle className="h-3.5 w-3.5" />
+            Preguntarle a Véktor
+          </button>
+        </div>
       </div>
     </div>
   );

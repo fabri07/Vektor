@@ -46,7 +46,8 @@ export function ChatWidget() {
   const router = useRouter();
   const pathname = usePathname();
   const queryClient = useQueryClient();
-  const { isOpen, open, close, posX, posY, setPosition } = useChatWidgetStore();
+  const { isOpen, open, close, posX, posY, setPosition, consumePendingPrompt } =
+    useChatWidgetStore();
 
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentFile[]>([]);
@@ -93,6 +94,15 @@ export function ChatWidget() {
   useEffect(() => {
     if (isOpen) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isOpen]);
+
+  // Mensaje en cola desde otra pantalla (ej. "Preguntarle a Véktor" del banner
+  // de alerta): se envía apenas el widget está abierto, una sola vez.
+  useEffect(() => {
+    if (!isOpen) return;
+    const prompt = consumePendingPrompt();
+    if (prompt) void send(prompt.message, undefined, undefined, prompt.uiContext);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   const isUploading = attachments.some((a) => a.uploading);
 
