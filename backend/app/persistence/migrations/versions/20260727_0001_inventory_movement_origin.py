@@ -22,6 +22,13 @@ inflaban el stock (movimientos duplicados). Se agregan:
 - ``voided_at``         — soft-delete (dedup/reread). Un movimiento voidado no cuenta.
 
 ``downgrade`` dropea los índices y las columnas (sin datos previos → reversible).
+
+Idempotente: cada paso chequea el estado actual antes de aplicarse (vía
+``sa.inspect``). Necesario porque más de un servicio de Railway puede correr
+``alembic upgrade head`` en paralelo contra la misma DB en un mismo deploy
+(cada uno con su propio ``preDeployCommand``) — sin esto, el segundo en
+llegar revienta con "column already exists" aunque la migración ya haya
+quedado aplicada por el primero.
 """
 
 import sqlalchemy as sa
@@ -35,62 +42,70 @@ down_revision = "20260726_0001"
 branch_labels = None
 depends_on = None
 
+_TABLE = "inventory_movements"
+
 
 def upgrade() -> None:
-    op.add_column(
-        "inventory_movements",
-        sa.Column("source_type", sa.String(length=40), nullable=True),
-    )
-    op.add_column(
-        "inventory_movements",
-        sa.Column("source_upload_id", UUID(as_uuid=True), nullable=True),
-    )
-    op.add_column(
-        "inventory_movements",
-        sa.Column("source_row_ref", sa.String(length=100), nullable=True),
-    )
-    op.add_column(
-        "inventory_movements",
-        sa.Column("source_row_hash", sa.String(length=64), nullable=True),
-    )
-    op.add_column(
-        "inventory_movements",
-        sa.Column("voided_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.create_foreign_key(
-        "fk_inventory_movements_source_upload",
-        "inventory_movements",
-        "uploaded_files",
-        ["source_upload_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-    op.create_index(
-        "ix_inventory_movements_source_upload_id",
-        "inventory_movements",
-        ["source_upload_id"],
-    )
-    op.create_index(
-        "ix_inventory_movements_source_row_hash",
-        "inventory_movements",
-        ["source_row_hash"],
-    )
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_columns = {c["name"] for c in inspector.get_columns(_TABLE)}
+    existing_fks = {fk["name"] for fk in inspector.get_foreign_keys(_TABLE)}
+    existing_indexes = {ix["name"] for ix in inspector.get_indexes(_TABLE)}
+
+    def _add_column(name: str, col_type: sa.types.TypeEngine) -> None:
+        if name not in existing_columns:
+            op.add_column(_TABLE, sa.Column(name, col_type, nullable=True))
+
+    _add_column("source_type", sa.String(length=40))
+    _add_column("source_upload_id", UUID(as_uuid=True))
+    _add_column("source_row_ref", sa.String(length=100))
+    _add_column("source_row_hash", sa.String(length=64))
+    _add_column("voided_at", sa.DateTime(timezone=True))
+
+    if "fk_inventory_movements_source_upload" not in existing_fks:
+        op.create_foreign_key(
+            "fk_inventory_movements_source_upload",
+            _TABLE,
+            "uploaded_files",
+            ["source_upload_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+    if "ix_inventory_movements_source_upload_id" not in existing_indexes:
+        op.create_index(
+            "ix_inventory_movements_source_upload_id",
+            _TABLE,
+            ["source_upload_id"],
+        )
+    if "ix_inventory_movements_source_row_hash" not in existing_indexes:
+        op.create_index(
+            "ix_inventory_movements_source_row_hash",
+            _TABLE,
+            ["source_row_hash"],
+        )
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_inventory_movements_source_row_hash", table_name="inventory_movements"
-    )
-    op.drop_index(
-        "ix_inventory_movements_source_upload_id", table_name="inventory_movements"
-    )
-    op.drop_constraint(
-        "fk_inventory_movements_source_upload",
-        "inventory_movements",
-        type_="foreignkey",
-    )
-    op.drop_column("inventory_movements", "voided_at")
-    op.drop_column("inventory_movements", "source_row_hash")
-    op.drop_column("inventory_movements", "source_row_ref")
-    op.drop_column("inventory_movements", "source_upload_id")
-    op.drop_column("inventory_movements", "source_type")
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_columns = {c["name"] for c in inspector.get_columns(_TABLE)}
+    existing_fks = {fk["name"] for fk in inspector.get_foreign_keys(_TABLE)}
+    existing_indexes = {ix["name"] for ix in inspector.get_indexes(_TABLE)}
+
+    if "ix_inventory_movements_source_row_hash" in existing_indexes:
+        op.drop_index("ix_inventory_movements_source_row_hash", table_name=_TABLE)
+    if "ix_inventory_movements_source_upload_id" in existing_indexes:
+        op.drop_index("ix_inventory_movements_source_upload_id", table_name=_TABLE)
+    if "fk_inventory_movements_source_upload" in existing_fks:
+        op.drop_constraint(
+            "fk_inventory_movements_source_upload", _TABLE, type_="foreignkey"
+        )
+    for col in (
+        "voided_at",
+        "source_row_hash",
+        "source_row_ref",
+        "source_upload_id",
+        "source_type",
+    ):
+        if col in existing_columns:
+            op.drop_column(_TABLE, col)
