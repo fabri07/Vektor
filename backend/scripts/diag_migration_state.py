@@ -8,13 +8,11 @@ ONLY runs SELECT statements. No writes. Safe against production.
 """
 
 import asyncio
-
-import asyncpg
-from _db import normalize_dsn
-
 import os
 import sys
 
+import asyncpg
+from _db import normalize_dsn
 
 EXPECTED_COLUMNS = {
     "source_type",
