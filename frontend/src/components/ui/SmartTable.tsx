@@ -7,6 +7,7 @@ import { Table } from "./Table";
 import type { TableColumn } from "./Table";
 import { TableSearch } from "./TableSearch";
 import { matchesRow } from "@/lib/search";
+import { downloadCSV } from "@/lib/csv";
 
 export interface SmartColumn<T = Record<string, unknown>> extends TableColumn<T> {
   hideable?: boolean;
@@ -37,14 +38,6 @@ const PAGE_SIZE_OPTIONS: { value: PageSize; label: string }[] = [
 ];
 
 const DEFAULT_PAGE_SIZE: PageSize = 25;
-
-function toCSVValue(val: unknown): string {
-  const s = val == null ? "" : String(val);
-  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
 
 export function SmartTable<T extends object>({
   columns,
@@ -159,23 +152,17 @@ export function SmartTable<T extends object>({
   const rangeEnd = pageSize === "all" ? total : Math.min((safePage + 1) * pageSize, total);
 
   const exportCSV = useCallback(() => {
-    const headers = visibleColumns.map((c) => toCSVValue(c.header));
+    // downloadCSV escapa cada valor (toCSVValue) y le agrega la fecha al filename;
+    // acá solo coerción a string preservando null → "" (no "null").
+    const headers = visibleColumns.map((c) => String(c.header ?? ""));
     const rows = filteredData.map((row) =>
       visibleColumns.map((col) => {
         const raw = (row as Record<string, unknown>)[col.key];
         const cell = col.csvValue ? col.csvValue(raw, row) : raw;
-        return toCSVValue(cell);
+        return cell == null ? "" : String(cell);
       }),
     );
-
-    const csv = [headers, ...rows].map((r) => r.join(",")).join("\n");
-    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${exportFilename}-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadCSV(exportFilename, headers, rows);
   }, [visibleColumns, filteredData, exportFilename]);
 
   return (

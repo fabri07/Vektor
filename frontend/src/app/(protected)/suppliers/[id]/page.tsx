@@ -9,56 +9,16 @@ import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { SmartTable } from "@/components/ui/SmartTable";
 import { ContactCommunication } from "@/features/communication/ContactCommunication";
 import { ReceiptModal } from "@/features/suppliers/ReceiptModal";
 import {
-  suppliersService,
-  type SupplierProductPurchase,
-} from "@/services/suppliers.service";
+  BrandGroupedProducts,
+  groupSubtotal,
+} from "@/features/suppliers/BrandGroupedProducts";
+import { suppliersService } from "@/services/suppliers.service";
 import { paymentLabel, whatsappDigits } from "@/lib/suppliers";
-import { formatDateTime } from "@/lib/datetime";
 import { formatARS } from "@/features/dashboard/dashboardData";
 import { useToastStore } from "@/stores/toastStore";
-
-const PRODUCT_COLUMNS = [
-  {
-    key: "name",
-    header: "Producto",
-    hideable: true,
-    render: (v: unknown) => (
-      <span className="font-medium text-vk-text-primary">{String(v)}</span>
-    ),
-    csvValue: (v: unknown) => String(v ?? ""),
-  },
-  {
-    key: "last_purchase_at",
-    header: "Última compra",
-    hideable: true,
-    render: (v: unknown) => (
-      <span className="text-vk-text-secondary">{formatDateTime(v)}</span>
-    ),
-    csvValue: (v: unknown) => formatDateTime(v),
-  },
-  {
-    key: "total_qty",
-    header: "Cantidad",
-    hideable: true,
-    render: (v: unknown) => (
-      <span className="text-vk-text-primary">{Number(v)}</span>
-    ),
-    csvValue: (v: unknown) => String(Number(v)),
-  },
-  {
-    key: "unit_price",
-    header: "Precio unit.",
-    hideable: true,
-    render: (v: unknown) => (
-      <span className="text-vk-text-primary">{formatARS(Number(v))}</span>
-    ),
-    csvValue: (v: unknown) => String(Number(v)),
-  },
-];
 
 export default function SupplierDetailPage() {
   const params = useParams<{ id: string }>();
@@ -78,7 +38,7 @@ export default function SupplierDetailPage() {
   });
 
   const {
-    data: products = [],
+    data: productsGrouped = { groups: [] },
     isLoading: productsLoading,
     isError: productsError,
   } = useQuery({
@@ -121,8 +81,8 @@ export default function SupplierDetailPage() {
   const phoneValue = supplier.phone?.trim() ?? "";
   const waDigits = whatsappDigits(phoneValue);
 
-  const totalPurchased = products.reduce(
-    (s: number, p: SupplierProductPurchase) => s + p.total_qty * p.unit_price,
+  const totalPurchased = productsGrouped.groups.reduce(
+    (s, g) => s + groupSubtotal(g),
     0,
   );
 
@@ -206,11 +166,19 @@ export default function SupplierDetailPage() {
           ) : null}
           <div>
             <p className="text-xs text-vk-text-muted">Estado</p>
-            <p>
+            <p className="flex flex-wrap items-center gap-1.5">
               {supplier.is_active ? (
                 <Badge variant="success">Activo</Badge>
               ) : (
                 <Badge variant="default">Inactivo</Badge>
+              )}
+              {supplier.is_provisional && (
+                <Badge
+                  variant="warning"
+                  title="Derivado de marca — validar o reasignar"
+                >
+                  Provisional
+                </Badge>
               )}
             </p>
           </div>
@@ -238,7 +206,7 @@ export default function SupplierDetailPage() {
           <h2 className="font-display text-base font-semibold text-vk-text-primary">
             Productos comprados
           </h2>
-          {products.length > 0 && (
+          {productsGrouped.groups.length > 0 && (
             <span className="text-sm text-vk-text-secondary">
               Total comprado · {formatARS(totalPurchased)}
             </span>
@@ -258,16 +226,15 @@ export default function SupplierDetailPage() {
           <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
             Error al cargar los productos comprados. Recargá la página.
           </p>
-        ) : products.length === 0 ? (
+        ) : productsGrouped.groups.length === 0 ? (
           <EmptyState
             title="Sin compras registradas"
             description="Cargá el primer remito de este proveedor con el botón 'Cargar remito'."
           />
         ) : (
-          <SmartTable
-            columns={PRODUCT_COLUMNS}
-            data={products as unknown as Record<string, unknown>[]}
-            exportFilename={`vektor-proveedor-${supplier.name}`}
+          <BrandGroupedProducts
+            groups={productsGrouped.groups}
+            supplierName={supplier.name}
           />
         )}
       </section>

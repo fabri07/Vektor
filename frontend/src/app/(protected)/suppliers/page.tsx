@@ -96,14 +96,28 @@ const COLUMNS = [
     key: "_status",
     header: "Estado",
     hideable: true,
-    render: (_: unknown, row: Record<string, unknown>) =>
-      (row as unknown as SupplierResponse).is_active ? (
-        <Badge variant="success">Activo</Badge>
-      ) : (
-        <Badge variant="danger">Inactivo</Badge>
-      ),
-    csvValue: (_: unknown, row: Record<string, unknown>) =>
-      (row as unknown as SupplierResponse).is_active ? "Activo" : "Inactivo",
+    render: (_: unknown, row: Record<string, unknown>) => {
+      const s = row as unknown as SupplierResponse;
+      return (
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          {s.is_active ? (
+            <Badge variant="success">Activo</Badge>
+          ) : (
+            <Badge variant="danger">Inactivo</Badge>
+          )}
+          {s.is_provisional && (
+            <Badge variant="warning" title="Derivado de marca — validar o reasignar">
+              Provisional
+            </Badge>
+          )}
+        </span>
+      );
+    },
+    csvValue: (_: unknown, row: Record<string, unknown>) => {
+      const s = row as unknown as SupplierResponse;
+      const status = s.is_active ? "Activo" : "Inactivo";
+      return s.is_provisional ? `${status} · Provisional` : status;
+    },
   },
   {
     key: "created_at",

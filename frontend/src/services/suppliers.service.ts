@@ -31,6 +31,11 @@ export interface SupplierResponse {
   is_active: boolean;
   /** True si es el proveedor centinela "No identificado". Computado en el backend. */
   is_sentinel: boolean;
+  /**
+   * True si es un proveedor provisional derivado de una marca por un script de
+   * reparación. El usuario debe validarlo o reasignarlo. Computado en el backend.
+   */
+  is_provisional: boolean;
   created_at: string;
 }
 
@@ -40,6 +45,19 @@ export interface SupplierProductPurchase {
   last_purchase_at: string | null;
   total_qty: number;
   unit_price: number;
+}
+
+/** Grupo de productos de un proveedor bajo una misma marca (o sin marca). */
+export interface SupplierBrandGroup {
+  /** Nombre de la marca; null = productos sin marca ("Productos genéricos"). */
+  brand: string | null;
+  /** True si el proveedor es "proveedor oficial" de esta marca (razón social == marca). */
+  is_official: boolean;
+  products: SupplierProductPurchase[];
+}
+
+export interface SupplierProductsGrouped {
+  groups: SupplierBrandGroup[];
 }
 
 export interface ReceiptLinePayload {
@@ -150,8 +168,8 @@ export const suppliersService = {
     return items;
   },
 
-  async getSupplierProducts(id: string): Promise<SupplierProductPurchase[]> {
-    const res = await api.get<SupplierProductPurchase[]>(`/suppliers/${id}/products`);
+  async getSupplierProducts(id: string): Promise<SupplierProductsGrouped> {
+    const res = await api.get<SupplierProductsGrouped>(`/suppliers/${id}/products`);
     return res.data;
   },
 
