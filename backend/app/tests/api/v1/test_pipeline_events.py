@@ -131,6 +131,7 @@ class TestReuploadDedup:
                 "/api/v1/ingestion/upload",
                 headers=auth_headers,
                 files={"file": ("ventas.xlsx", xlsx_bytes, "application/octet-stream")},
+                params={"allow_duplicate": "true"},
             )
         assert response.status_code == 201
         data = response.json()
