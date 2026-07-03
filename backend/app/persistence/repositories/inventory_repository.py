@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.text_norm import normalize_text
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.supplier import SENTINEL_FLAG_KEY, Supplier, is_sentinel_value
@@ -29,6 +30,18 @@ class SupplierProductPurchase:
     last_purchase_at: datetime | None
     total_qty: float
     unit_price: Decimal
+    # Marca del producto (``custom_fields['marca']``) o None si no tiene. A
+    # diferencia del breakdown contable, acá None viaja como null hasta el front.
+    brand: str | None = None
+
+
+@dataclass(frozen=True)
+class SupplierBrandGroup:
+    """Un grupo de productos de una misma marca comprados a un proveedor."""
+
+    brand: str | None
+    is_official: bool
+    products: list[SupplierProductPurchase]
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,103 @@ class SupplierPurchaseBreakdown:
     # % de movimientos de compra del proveedor con costo unitario conocido.
     coverage_pct: float
     products: list[SupplierBreakdownProduct] = field(default_factory=list)
+
+
+def _norm_official(s: str) -> str:
+    """Normaliza para comparar nombre de proveedor con marca (match oficial).
+
+    Delega en ``domain.text_norm.normalize_text`` (fuente única: NFKD + quitar
+    diacríticos + casefold + trim + colapso de espacios internos). Match EXACTO
+    tras normalizar — sin contains/fuzzy: "Distribuidora Coca Cola Norte" NO
+    matchea "Coca Cola".
+    """
+    return normalize_text(s)
+
+
+# Claves de ``custom_fields`` que pueden guardar la marca de un producto. ``marca``
+# es la canónica; ``proveedor`` es legacy (datos pre-rename marca≠proveedor) y se
+# usa solo como fallback si ``marca`` está vacía.
+_BRAND_KEYS = ("marca", "proveedor")
+
+
+def _brand_from_custom_fields(cf: dict[str, Any] | None) -> str | None:
+    """Marca del producto desde ``custom_fields``: ``marca`` y, si falta, ``proveedor``.
+
+    Devuelve el texto ya trimmeado, o None si ninguna clave tiene valor no vacío.
+    """
+    for key in _BRAND_KEYS:
+        value = str((cf or {}).get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def group_products_by_brand(
+    rows: list[SupplierProductPurchase], supplier_name: str
+) -> list[SupplierBrandGroup]:
+    """Agrupa las filas de compra de un proveedor por marca.
+
+    Read model del detalle de proveedor (``/suppliers/{id}/products``). A
+    diferencia del breakdown contable (dashboard), acá ``brand=None`` viaja como
+    null y el label del grupo sin marca es "Productos genéricos" (decisión de
+    producto, lo pone el frontend) — el backend NO materializa "Sin marca", que es
+    el label distinto que usa el breakdown del dashboard. Dos contextos: no
+    unificar sin decisión de producto.
+
+    - Agrupa por marca NORMALIZADA (``_norm_official``): "Coca Cola" y
+      " coca cola " caen en UN grupo. El label del grupo es la variante CRUDA más
+      frecuente entre sus filas (empate → la primera en orden de entrada).
+    - ``is_official``: el nombre del proveedor coincide EXACTO (normalizado, sin
+      contains/fuzzy) con la marca del grupo. Solo aplica a marcas de productos
+      comprados a ESTE proveedor. Se computa sobre la clave normalizada, así que
+      un solo grupo → a lo sumo un ``is_official=True``.
+    - Orden de grupos: Σ(total_qty × unit_price) desc → desempate alfabético por
+      marca normalizada → el grupo ``brand=None`` SIEMPRE último.
+    - Productos dentro del grupo conservan el orden de entrada (last_purchase_at
+      desc, tal como los devuelve el repo).
+    """
+    norm_supplier = _norm_official(supplier_name)
+
+    # Clave = marca normalizada (None = sin marca). Preserva orden de entrada.
+    grouped: dict[str | None, list[SupplierProductPurchase]] = {}
+    for row in rows:
+        key = _norm_official(row.brand) if row.brand is not None else None
+        grouped.setdefault(key, []).append(row)
+
+    def _group_value(products: list[SupplierProductPurchase]) -> float:
+        return sum(p.total_qty * float(p.unit_price) for p in products)
+
+    def _label(products: list[SupplierProductPurchase]) -> str | None:
+        """Variante cruda más frecuente de la marca; empate → primera en entrada."""
+        counts: dict[str, int] = {}
+        first_index: dict[str, int] = {}
+        for i, p in enumerate(products):
+            if p.brand is None:
+                continue
+            counts[p.brand] = counts.get(p.brand, 0) + 1
+            first_index.setdefault(p.brand, i)
+        if not counts:
+            return None
+        return max(counts, key=lambda b: (counts[b], -first_index[b]))
+
+    def _sort_key(
+        item: tuple[str | None, list[SupplierProductPurchase]],
+    ) -> tuple[bool, float, str]:
+        key, products = item
+        is_null = key is None
+        # key=None siempre último (is_null True ordena después); luego valor desc,
+        # desempate alfabético por marca normalizada (la key ya está normalizada).
+        return (is_null, -_group_value(products), key or "")
+
+    result: list[SupplierBrandGroup] = []
+    for key, products in sorted(grouped.items(), key=_sort_key):
+        is_official = key is not None and key == norm_supplier
+        result.append(
+            SupplierBrandGroup(
+                brand=_label(products), is_official=is_official, products=products
+            )
+        )
+    return result
 
 
 class InventoryRepository:
@@ -117,6 +227,7 @@ class InventoryRepository:
             select(
                 agg.c.product_id,
                 Product.name,
+                Product.custom_fields,
                 agg.c.last_purchase_at,
                 agg.c.total_qty,
                 latest_cost.c.unit_cost,
@@ -138,6 +249,7 @@ class InventoryRepository:
                 last_purchase_at=row.last_purchase_at,
                 total_qty=float(row.total_qty or 0),
                 unit_price=row.unit_cost if row.unit_cost is not None else Decimal("0"),
+                brand=_brand_from_custom_fields(row.custom_fields),
             )
             for row in rows
         ]

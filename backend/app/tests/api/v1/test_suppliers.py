@@ -55,6 +55,37 @@ class TestSuppliersCRUD:
         resp = await client.post("/api/v1/suppliers", json={"name": ""}, headers=auth_headers)
         assert resp.status_code == 422
 
+    async def test_is_provisional_false_by_default(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov Normal"}, headers=auth_headers
+        )
+        assert resp.status_code == 201
+        assert resp.json()["is_provisional"] is False
+
+    async def test_is_provisional_true_with_bool_flag(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/suppliers",
+            json={"name": "Marca Prov", "custom_fields": {"_provisional_from_brand": True}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        assert resp.json()["is_provisional"] is True
+
+    async def test_is_provisional_true_with_string_flag(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/suppliers",
+            json={"name": "Marca Prov 2", "custom_fields": {"_provisional_from_brand": "true"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        assert resp.json()["is_provisional"] is True
+
     async def test_list_suppliers(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
@@ -518,7 +549,13 @@ class TestSupplierProducts:
             f"/api/v1/suppliers/{sid}/products", headers=auth_headers
         )
         assert resp.status_code == 200
-        rows = resp.json()
+        body = resp.json()
+        # El remito no informa marca → un único grupo de genéricos (brand null).
+        assert len(body["groups"]) == 1
+        group = body["groups"][0]
+        assert group["brand"] is None
+        assert group["is_official"] is False
+        rows = group["products"]
         names = {r["name"] for r in rows}
         assert names == {"Yerba Playadito", "Azúcar Ledesma"}
         yerba = next(r for r in rows if r["name"] == "Yerba Playadito")
@@ -538,7 +575,7 @@ class TestSupplierProducts:
             f"/api/v1/suppliers/{sid}/products", headers=auth_headers
         )
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json() == {"groups": []}
 
     async def test_other_tenant_404(
         self,
@@ -554,3 +591,33 @@ class TestSupplierProducts:
             f"/api/v1/suppliers/{sid}/products", headers=second_auth_headers
         )
         assert resp.status_code == 404
+
+    async def test_products_of_deactivated_supplier_still_load(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Un proveedor dado de baja (p.ej. marca-proveedor sin revertir) sigue
+        mostrando sus productos: GET /products devuelve 200, no 404."""
+        sup = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov A Dar de Baja"}, headers=auth_headers
+        )
+        sid = sup.json()["id"]
+        # El remito puebla compras (la tabla de productos del proveedor).
+        await client.post(
+            f"/api/v1/suppliers/{sid}/receipts",
+            json=_RECEIPT_PAYLOAD,
+            headers=auth_headers,
+        )
+        # Baja del proveedor (soft-delete): tiene historial, se fuerza como OWNER.
+        deleted = await client.delete(
+            f"/api/v1/suppliers/{sid}?force=true", headers=auth_headers
+        )
+        assert deleted.status_code == 200
+        # El detalle de productos del inactivo sigue disponible.
+        resp = await client.get(
+            f"/api/v1/suppliers/{sid}/products", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        groups = resp.json()["groups"]
+        assert len(groups) == 1
+        names = {r["name"] for r in groups[0]["products"]}
+        assert names == {"Yerba Playadito", "Azúcar Ledesma"}
