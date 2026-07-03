@@ -84,6 +84,7 @@ class InventoryRepository:
                 InventoryMovement.tenant_id == tenant_id,
                 InventoryMovement.supplier_id == supplier_id,
                 InventoryMovement.movement_type == "purchase",
+                InventoryMovement.voided_at.is_(None),
             )
             .group_by(InventoryMovement.product_id)
             .subquery()
@@ -107,6 +108,7 @@ class InventoryRepository:
                 InventoryMovement.tenant_id == tenant_id,
                 InventoryMovement.supplier_id == supplier_id,
                 InventoryMovement.movement_type == "purchase",
+                InventoryMovement.voided_at.is_(None),
             )
             .subquery()
         )
@@ -187,6 +189,7 @@ class InventoryRepository:
             stmt = stmt.where(
                 InventoryMovement.tenant_id == tenant_id,
                 InventoryMovement.movement_type == "purchase",
+                InventoryMovement.voided_at.is_(None),
             )
             if from_date:
                 stmt = stmt.where(func.date(InventoryMovement.created_at) >= from_date)

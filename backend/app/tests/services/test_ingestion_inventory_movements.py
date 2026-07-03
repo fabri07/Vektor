@@ -30,9 +30,11 @@ def _stock_summary(rows: list[dict[str, object]]) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_new_product_import_records_purchase_movement(
+async def test_new_product_import_records_movement(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
+    # Import de catálogo SIN stock_treatment ⇒ saldo de apertura por default: el stock
+    # entra al inventario como AJUSTE (no compra) y deja su movimiento (historial).
     summary = _stock_summary(
         [{"producto": "Yerba 1kg", "precio": "2500", "costo": "1500", "stock": "10"}]
     )
@@ -43,9 +45,8 @@ async def test_new_product_import_records_purchase_movement(
     movements = (await db_session.execute(select(InventoryMovement))).scalars().all()
     assert len(movements) == 1
     mv = movements[0]
-    assert mv.movement_type == "purchase"
+    assert mv.movement_type == "adjustment"  # saldo de apertura, no compra
     assert mv.qty == 10
-    assert mv.source_event_id == "import"
 
     product = (await db_session.execute(select(Product))).scalar_one()
     assert product.stock_units == 10  # representación canónica intacta
@@ -76,7 +77,7 @@ async def test_stock_update_records_delta_adjustment(
     movements = (await db_session.execute(select(InventoryMovement))).scalars().all()
     assert len(movements) == 1
     assert movements[0].qty == 5
-    assert movements[0].movement_type == "purchase"
+    assert movements[0].movement_type == "adjustment"  # saldo de apertura por default
 
     await db_session.refresh(product)
     assert product.stock_units == 15

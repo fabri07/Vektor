@@ -7,6 +7,7 @@ asignado" vs sentinela con nombre, "Sin marca", y orden estable.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -43,6 +44,7 @@ async def _purchase(
     supplier_id: uuid.UUID | None,
     qty: int,
     unit_cost: Decimal | None,
+    voided: bool = False,
 ) -> None:
     session.add(
         InventoryMovement(
@@ -53,6 +55,7 @@ async def _purchase(
             movement_type="purchase",
             qty=qty,
             unit_cost=unit_cost,
+            voided_at=datetime.now(UTC) if voided else None,
         )
     )
 
@@ -138,3 +141,49 @@ async def test_null_and_sentinel_supplier_merge_into_one(
     assert s.total_purchased == pytest.approx(800.0)
     assert len(s.products) == 1
     assert s.products[0].total_qty == pytest.approx(8.0)
+
+
+@pytest.mark.asyncio
+async def test_breakdown_excludes_voided_movements(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Un movimiento con voided_at seteado (dedup/reread) NO cuenta para lo comprado."""
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Distribuidora Sur")
+    db_session.add(supplier)
+    await db_session.flush()
+    p1 = await _product(db_session, tid, "Azúcar")
+    # Compra válida (10*100=1000) + compra voidada (duplicado anulado) que NO debe sumar.
+    await _purchase(db_session, tid, p1.id, supplier.id, 10, Decimal("100"))
+    await _purchase(db_session, tid, p1.id, supplier.id, 10, Decimal("100"), voided=True)
+    await db_session.commit()
+
+    result = await InventoryRepository(db_session).suppliers_purchase_breakdown(tid)
+
+    assert len(result) == 1
+    s = result[0]
+    assert s.total_purchased == pytest.approx(1000.0)
+    assert len(s.products) == 1
+    assert s.products[0].total_qty == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_products_purchased_excludes_voided_movements(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """products_purchased_from_supplier ignora movimientos voidados en la cantidad."""
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Mayorista Centro")
+    db_session.add(supplier)
+    await db_session.flush()
+    p1 = await _product(db_session, tid, "Harina")
+    await _purchase(db_session, tid, p1.id, supplier.id, 7, Decimal("50"))
+    await _purchase(db_session, tid, p1.id, supplier.id, 7, Decimal("50"), voided=True)
+    await db_session.commit()
+
+    result = await InventoryRepository(db_session).products_purchased_from_supplier(
+        tid, supplier.id
+    )
+
+    assert len(result) == 1
+    assert result[0].total_qty == pytest.approx(7.0)

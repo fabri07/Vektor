@@ -16,6 +16,12 @@ from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
+from app.application.services.inventory_movement_origin import (
+    SOURCE_CATALOG_INITIAL_STOCK,
+    SOURCE_PURCHASE_IMPORT,
+    SOURCE_RECEIPT,
+    compute_source_row_hash,
+)
 from app.domain.business_time import now_ar_naive
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
@@ -283,6 +289,14 @@ def _audit_supplier_decision(
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
 
 _IMPORT_ROW_ACTION = "IMPORT_ROW"
+
+# Tratamiento del stock de un archivo de catálogo/lista (lo elige el usuario en el
+# confirm). "opening_balance" = saldo de apertura (activo que ya tenía, sin COGS/caja);
+# "purchase" = compra (COGS + baja de caja). Default conservador: apertura (no distorsiona
+# la caja registrando un egreso que quizá nunca ocurrió hoy).
+STOCK_TREATMENT_OPENING_BALANCE = "opening_balance"
+STOCK_TREATMENT_PURCHASE = "purchase"
+_VALID_STOCK_TREATMENTS = frozenset({STOCK_TREATMENT_OPENING_BALANCE, STOCK_TREATMENT_PURCHASE})
 
 
 async def _load_import_fingerprints(
@@ -643,9 +657,18 @@ async def _record_stock_movement(
     final_qty: int,
     balance_index: dict[uuid.UUID, Any] | None = None,
     supplier_id: uuid.UUID | None = None,
+    source_type: str | None = None,
+    source_upload_id: uuid.UUID | None = None,
+    source_row_ref: str | None = None,
+    source_row_hash: str | None = None,
 ) -> None:
     """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
     `InventoryBalance` por el import, dentro de la misma transacción.
+
+    A2: estampa el ORIGEN del movimiento (``source_type``/``source_upload_id``/
+    ``source_row_ref``/``source_row_hash`` — spec en ``inventory_movement_origin``)
+    para dedup, reversa del reread y reconciliación. Los valores los arma el caller
+    (el import conoce archivo, fila y campos de la fila de origen).
 
     `Product.stock_units` sigue siendo la representación canónica que lee la UI; el
     import la setea. Esta función:
@@ -678,6 +701,11 @@ async def _record_stock_movement(
             unit_cost=unit_cost,
             source_event_id="import",
             reason="Importado desde archivo",
+            # A2: origen del movimiento (traza + dedup + reversa del reread).
+            source_type=source_type,
+            source_upload_id=source_upload_id,
+            source_row_ref=source_row_ref,
+            source_row_hash=source_row_hash,
         )
     )
 
@@ -821,6 +849,8 @@ async def _apply_purchase_to_stock(
     unit_cost: Decimal | None,
     balance_index: dict[uuid.UUID, Any] | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
+    source_type: str = SOURCE_PURCHASE_IMPORT,
+    source_row_ref: str | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
 
@@ -857,6 +887,18 @@ async def _apply_purchase_to_stock(
     product.stock_units += qty
     if unit_cost is not None:
         product.unit_cost_ars = unit_cost
+    # A2: identidad lógica estable de la fila de origen (idempotencia + reconciliación).
+    _row_hash = compute_source_row_hash(
+        product_key=product.name,
+        qty=qty,
+        unit_cost=unit_cost,
+        movement_date=getattr(expense, "transaction_date", None),
+        supplier_key=(
+            getattr(expense, "supplier_name", None)
+            or getattr(expense, "supplier_id", None)
+        ),
+        upload_id=getattr(expense, "source_upload_id", None),
+    )
     await _record_stock_movement(
         session,
         tenant_id,
@@ -869,7 +911,134 @@ async def _apply_purchase_to_stock(
         # FASE 3: el movimiento de compra hereda el proveedor del gasto (real o
         # sentinela "No identificado"); NULL si la compra no traía proveedor.
         supplier_id=getattr(expense, "supplier_id", None),
+        # A2: origen de la compra (purchase_import por defecto; receipt para remitos).
+        source_type=source_type,
+        source_upload_id=getattr(expense, "source_upload_id", None),
+        source_row_ref=source_row_ref,
+        source_row_hash=_row_hash,
     )
+
+
+def _add_catalog_initial_stock_cogs(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    product_id: uuid.UUID,
+    product_name: str,
+    qty: int,
+    unit_cost: Decimal | None,
+    tx_date: datetime,
+    source_upload_id: uuid.UUID | None,
+    source_row_ref: str | None,
+) -> None:
+    """Crea el gasto de mercadería (COGS) de un stock de catálogo tratado como COMPRA.
+
+    Solo se invoca cuando el usuario marcó el stock como compra (``is_purchase`` en
+    ``_apply_catalog_stock``), NO para saldo de apertura. Regla contable: una compra de
+    mercadería se refleja como gasto ``INVENTORY``/``COGS`` (monto = ``unit_cost × qty``)
+    + salida de caja, ligado al producto, con la misma fila de origen.
+
+    Sin costo conocido no se puede valuar la compra → se omite el gasto (el producto
+    ya nace ``requires_completion=True`` y el usuario lo completa después).
+    ``qty <= 0`` → no-op (no entró stock nuevo; un ``_delta`` negativo es un ajuste,
+    no una compra).
+    """
+    if qty <= 0 or unit_cost is None or unit_cost <= 0:
+        return
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+    expense = ExpenseEntry(
+        tenant_id=tenant_id,
+        amount=(unit_cost * qty).quantize(Decimal("0.01")),
+        category="INVENTORY",
+        # Producto ligado + categoría INVENTORY ⇒ COGS (mismo helper que el resto).
+        expense_type=infer_expense_type("INVENTORY", product_id=product_id),
+        transaction_date=tx_date,
+        description=f"Stock inicial: {product_name}"[:500],
+        is_recurring=False,
+        payment_method="transfer",
+        provenance="REAL",
+        product_id=product_id,
+        source_upload_id=source_upload_id,
+    )
+    if source_row_ref is not None:
+        expense.source_row_ref = source_row_ref
+    session.add(expense)
+
+
+async def _apply_catalog_stock(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    product_id: uuid.UUID,
+    product_name: str,
+    delta: int,
+    final_qty: int,
+    unit_cost: Decimal | None,
+    store_name: str | None,
+    tx_date: datetime,
+    uploaded_file_id: uuid.UUID | None,
+    source_row_ref: str | None,
+    balance_index: dict[uuid.UUID, Any] | None,
+    is_purchase: bool = False,
+) -> None:
+    """Aplica el stock de una fila de CATÁLOGO al inventario, según su tratamiento.
+
+    Un archivo de catálogo/lista de stock es AMBIGUO: el stock puede ser **saldo de
+    apertura** (mercadería que el negocio YA tenía al empezar con Véktor — un activo,
+    no un gasto) o una **compra** (la adquirió ahora → gasto de mercadería + baja de
+    caja). El usuario lo aclara en el confirm (``stock_treatment``); ``is_purchase`` es
+    ese flag ya resuelto.
+
+    - ``is_purchase=False`` (saldo de apertura, DEFAULT): el stock entra al inventario
+      como **ajuste** (``movement_type='adjustment'``), SIN ``ExpenseEntry`` ni salida
+      de caja. No cuenta como "comprado".
+    - ``is_purchase=True`` (compra): ``movement_type='purchase'`` + su COGS
+      (``ExpenseEntry`` INVENTORY/COGS) cuando hay costo — como un libro de compras.
+
+    En ambos casos se registra el ``InventoryMovement`` estampado con origen (A2) para
+    traza/dedup/reversa. ``delta > 0`` = ingreso; ``delta < 0`` = baja (siempre ajuste,
+    sin COGS); ``delta == 0`` = no-op.
+    """
+    if delta == 0:
+        return
+    _row_hash = compute_source_row_hash(
+        product_key=product_name,
+        qty=delta,
+        unit_cost=unit_cost,
+        movement_date=tx_date,
+        supplier_key=store_name,
+        upload_id=uploaded_file_id,
+    )
+    movement_type = "purchase" if (is_purchase and delta > 0) else "adjustment"
+    await _record_stock_movement(
+        session,
+        tenant_id,
+        product_id,
+        delta,
+        unit_cost,
+        movement_type,
+        final_qty,
+        balance_index=balance_index,
+        source_type=SOURCE_CATALOG_INITIAL_STOCK,
+        source_upload_id=uploaded_file_id,
+        source_row_ref=source_row_ref,
+        source_row_hash=_row_hash,
+    )
+    # Solo una COMPRA genera gasto de mercadería + baja de caja. El saldo de apertura
+    # es un activo que el negocio ya tenía → no toca caja ni COGS.
+    if is_purchase:
+        _add_catalog_initial_stock_cogs(
+            session,
+            tenant_id,
+            product_id=product_id,
+            product_name=product_name,
+            qty=delta,
+            unit_cost=unit_cost,
+            tx_date=tx_date,
+            source_upload_id=uploaded_file_id,
+            source_row_ref=source_row_ref,
+        )
 
 
 _NOMBRE_COLS: set[str] = {
@@ -1185,6 +1354,7 @@ async def insert_confirmed_data(
     context_entity: dict[str, str] | None = None,
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
+    stock_treatment: str | None = None,
 ) -> dict[str, Any]:
     """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
 
@@ -1210,6 +1380,7 @@ async def insert_confirmed_data(
         context_entity=context_entity,
         source=source,
         uploaded_file_id=uploaded_file_id,
+        stock_treatment=stock_treatment,
     )
     await session.flush()
     await assign_orphan_sales_to_local(session, tenant_id)
@@ -1228,6 +1399,7 @@ async def _insert_confirmed_data_impl(
     context_entity: dict[str, str] | None = None,
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
+    stock_treatment: str | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -1244,6 +1416,15 @@ async def _insert_confirmed_data_impl(
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
     confirmed_fields = confirmed_fields or default_confirmed_fields(summary)
+    # Tratamiento del stock del catálogo (apertura vs compra). Prioridad: parámetro
+    # explícito (confirm) → lo guardado en el summary (relectura preserva la elección)
+    # → default apertura (no distorsiona caja). Ver STOCK_TREATMENT_*.
+    _treatment = (
+        stock_treatment
+        or summary.get("stock_treatment")
+        or STOCK_TREATMENT_OPENING_BALANCE
+    )
+    stock_is_purchase = _treatment == STOCK_TREATMENT_PURCHASE
     # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
     today = now_ar_naive()
     counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0, "otros": 0}
@@ -1289,6 +1470,7 @@ async def _insert_confirmed_data_impl(
                 uploaded_file_id=uploaded_file_id,
                 seen_fp=seen_fp,
                 product_cache=_product_cache,
+                stock_is_purchase=stock_is_purchase,
             )
             if seen_fp is not None and _preloaded_fp is not None:
                 await _persist_import_fingerprints(
@@ -1433,6 +1615,13 @@ async def _insert_confirmed_data_impl(
         # resueltos desde compras y si se usó el sentinela "No identificado".
         _real_suppliers: set[str] = set()
         _sentinel_used = False
+        # A4 (guarda RC2): índices de fila ya procesados como COMPRA DE MERCADERÍA
+        # en el bloque de gastos (crearon/repusieron producto + stock + COGS). El
+        # bloque de productos los saltea: reprocesarlos duplicaría el producto
+        # (autoflush=False oculta el pendiente al ``select``) y escribiría el stock
+        # dos veces sobre las MISMAS filas. ``wants_gastos`` y ``wants_productos``
+        # NO son mutuamente excluyentes y pueden correr sobre el mismo ``rows``.
+        _merch_purchase_rows: set[int] = set()
 
         for row_index, row in enumerate(rows):
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
@@ -1671,7 +1860,14 @@ async def _insert_confirmed_data_impl(
                         exp_unit_cost,
                         balance_index=_balance_index,
                         product_cache=_product_cache,
+                        source_row_ref=_source_row_ref(_row_anchor),
                     )
+                    # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
+                    # stock (producto ligado + cantidad>0), marcarla para que el
+                    # bloque de productos NO la reprocese (evita producto duplicado
+                    # y doble escritura de stock sobre la misma fila).
+                    if expense.product_id is not None and _has_qty:
+                        _merch_purchase_rows.add(row_index)
                     # Mejora D: trazabilidad import → fila origen.
                     if _row_anchor is not None:
                         expense.source_row_ref = _source_row_ref(_row_anchor)
@@ -1709,6 +1905,12 @@ async def _insert_confirmed_data_impl(
             assert nombre_col is not None  # wants_productos implica nombre_col presente
             _skipped_brands: set[str] = set()
             for _prod_index, row in enumerate(rows):
+                # A4 (RC2): fila ya importada como compra de mercadería en el bloque
+                # de gastos (creó producto + stock + COGS). Reprocesarla acá crearía
+                # un producto duplicado (autoflush=False oculta el pendiente al
+                # ``select``) y escribiría el stock dos veces. Se saltea.
+                if _prod_index in _merch_purchase_rows:
+                    continue
                 name = str(row.get(nombre_col, "")).strip()[:299]
                 if not name or name.lower() in {"none", "nan", ""}:
                     continue
@@ -1797,16 +1999,22 @@ async def _insert_confirmed_data_impl(
                     if stock_val > 0:
                         _delta = stock_val - existing.stock_units
                         existing.stock_units = stock_val
-                        # FASE 3: audit del cambio de stock + sync de balance.
-                        await _record_stock_movement(
+                        # FASE 3 + A2/A5: audit del cambio de stock + sync de balance;
+                        # y si entró stock real (_delta>0) con costo, su COGS.
+                        await _apply_catalog_stock(
                             session,
                             tenant_id,
-                            existing.id,
-                            _delta,
-                            cost,
-                            "purchase" if _delta > 0 else "adjustment",
-                            stock_val,
+                            product_id=existing.id,
+                            product_name=name,
+                            delta=_delta,
+                            final_qty=stock_val,
+                            unit_cost=cost,
+                            store_name=store_name,
+                            tx_date=today,
+                            uploaded_file_id=uploaded_file_id,
+                            source_row_ref=_prod_row_ref,
                             balance_index=_balance_index,
+                            is_purchase=stock_is_purchase,
                         )
                     if sku:
                         existing.sku = sku
@@ -1855,16 +2063,22 @@ async def _insert_confirmed_data_impl(
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
                     session.add(new_product)
-                    # FASE 3: audit del ingreso inicial de stock + balance (si trae stock).
-                    await _record_stock_movement(
+                    # FASE 3 + A2/A5: audit del ingreso inicial de stock + balance +,
+                    # si trae stock con costo, su COGS (stock inicial = compra real).
+                    await _apply_catalog_stock(
                         session,
                         tenant_id,
-                        new_product_id,
-                        stock_val,
-                        cost,
-                        "purchase",
-                        stock_val,
+                        product_id=new_product_id,
+                        product_name=name,
+                        delta=stock_val,
+                        final_qty=stock_val,
+                        unit_cost=cost,
+                        store_name=store_name,
+                        tx_date=today,
+                        uploaded_file_id=uploaded_file_id,
+                        source_row_ref=_prod_row_ref,
                         balance_index=_balance_index,
+                        is_purchase=stock_is_purchase,
                     )
                     if return_details:
                         product_details.append(
@@ -2051,6 +2265,7 @@ async def _insert_multisheet_data(
     uploaded_file_id: uuid.UUID | None = None,
     seen_fp: set[str] | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
+    stock_is_purchase: bool = False,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -2282,6 +2497,7 @@ async def _insert_multisheet_data(
             unit_cost,
             balance_index=_balance_index,
             product_cache=product_cache,
+            source_row_ref=row_ref,
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
@@ -2372,15 +2588,21 @@ async def _insert_multisheet_data(
             if stock_val > 0:
                 _delta = stock_val - existing.stock_units
                 existing.stock_units = stock_val
-                await _record_stock_movement(
+                # A2/A5: movimiento estampado catalog_initial_stock + COGS del delta.
+                await _apply_catalog_stock(
                     session,
                     tenant_id,
-                    existing.id,
-                    _delta,
-                    cost,
-                    "purchase" if _delta > 0 else "adjustment",
-                    stock_val,
+                    product_id=existing.id,
+                    product_name=name,
+                    delta=_delta,
+                    final_qty=stock_val,
+                    unit_cost=cost,
+                    store_name=store_name,
+                    tx_date=today,
+                    uploaded_file_id=uploaded_file_id,
+                    source_row_ref=row_ref,
                     balance_index=_balance_index,
+                    is_purchase=stock_is_purchase,
                 )
             if sku:
                 existing.sku = sku
@@ -2412,15 +2634,22 @@ async def _insert_multisheet_data(
                     source_row_ref=row_ref,  # Mejora D
                 )
             )
-            await _record_stock_movement(
+            # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
+            # = compra real, si trae costo).
+            await _apply_catalog_stock(
                 session,
                 tenant_id,
-                _new_id,
-                stock_val,
-                cost,
-                "purchase",
-                stock_val,
+                product_id=_new_id,
+                product_name=name,
+                delta=stock_val,
+                final_qty=stock_val,
+                unit_cost=cost,
+                store_name=store_name,
+                tx_date=today,
+                uploaded_file_id=uploaded_file_id,
+                source_row_ref=row_ref,
                 balance_index=_balance_index,
+                is_purchase=stock_is_purchase,
             )
         counts["productos"] += 1
 
@@ -2828,6 +3057,8 @@ async def import_receipt(
             line.unit_price,
             balance_index=balance_index,
             product_cache=product_cache,
+            # A2: el movimiento de un remito lleva origen ``receipt`` (no import).
+            source_type=SOURCE_RECEIPT,
         )
 
     shipping_expense_id: str | None = None

@@ -92,6 +92,7 @@ class SupplierRepository:
             select(func.count(InventoryMovement.id)).where(
                 InventoryMovement.supplier_id == supplier_id,
                 InventoryMovement.tenant_id == tenant_id,
+                InventoryMovement.voided_at.is_(None),
             )
         )
         return int(expenses.scalar_one() or 0) + int(movements.scalar_one() or 0)

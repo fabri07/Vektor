@@ -191,6 +191,59 @@ async def register_stock_loss(
     return movement
 
 
+async def void_movement(
+    movement: InventoryMovement,
+    db: AsyncSession,
+) -> None:
+    """Soft-delete de un movimiento revirtiendo EXACTAMENTE su efecto en stock/balance.
+
+    ``qty`` es con signo (compra +, venta/merma −), así que restar ``movement.qty``
+    deshace exactamente lo que ese movimiento aportó. Idempotente: si ya está voidado,
+    no hace nada. Lo usan el reread (borra la lectura anterior antes de reimportar) y la
+    reparación.
+
+    Reversa INCREMENTAL a propósito (no recomputar desde el ledger): ``stock_units`` NO
+    es siempre ``Σ(movimientos)`` — hay base no-ledger (alta manual vía POST /products,
+    chat, seed, y el catálogo que setea stock absoluto pero registra solo el delta).
+    Recomputar desde el ledger destruiría esa base. Tampoco se clampa a 0 acá: el clamp
+    intermedio se comería, por ejemplo, ventas posteriores a una compra que se relee
+    (void −100 sobre stock 60 ⇒ −40; el reimport +100 ⇒ 60). El piso a 0 va, si hace
+    falta, en el estado final del llamador, nunca en un paso de la reversa.
+    """
+    if movement.voided_at is not None:
+        return
+    product = await db.get(Product, movement.product_id)
+    if product is not None and product.tenant_id == movement.tenant_id:
+        # Sembrar el balance ANTES de mutar stock_units: _get_or_create_balance inicializa
+        # current_qty desde product.stock_units, así que si mutáramos primero el balance
+        # nuevo arrancaría ya descontado y la resta siguiente lo descontaría dos veces.
+        balance = await _get_or_create_balance(product, movement.tenant_id, db)
+        product.stock_units -= movement.qty
+        balance.current_qty -= movement.qty
+    movement.voided_at = datetime.now(UTC)
+    await db.flush()
+
+
+async def unvoid_movement(
+    movement: InventoryMovement,
+    db: AsyncSession,
+) -> None:
+    """Reversa de ``void_movement``: re-activa el movimiento y vuelve a aplicar su efecto.
+
+    Incremental (suma ``movement.qty`` de vuelta), por la misma razón que ``void_movement``
+    no recomputa: preserva la base no-ledger del stock. Idempotente si ya está vivo.
+    """
+    if movement.voided_at is None:
+        return
+    product = await db.get(Product, movement.product_id)
+    if product is not None and product.tenant_id == movement.tenant_id:
+        balance = await _get_or_create_balance(product, movement.tenant_id, db)
+        product.stock_units += movement.qty
+        balance.current_qty += movement.qty
+    movement.voided_at = None
+    await db.flush()
+
+
 async def get_low_stock_products(
     tenant_id: uuid.UUID,
     db: AsyncSession,

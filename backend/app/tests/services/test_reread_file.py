@@ -13,6 +13,7 @@ de fixture. Cubren:
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -32,6 +33,8 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
     UploadedFile,
 )
+from app.persistence.models.inventory import InventoryBalance, InventoryMovement
+from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 
@@ -460,3 +463,190 @@ async def test_background_apply_run_status_and_guard(
     assert (
         await reread_service.get_reread_run(db_session, run.id, uuid.uuid4()) is None
     )
+
+
+# ── Inventario: la relectura no debe duplicar movimientos ni inflar el stock ────
+#
+# El camino compra→stock es incremental. El bug: ``_reconcile`` reimportaba sin
+# revertir los ``InventoryMovement`` del import previo, así que cada relectura
+# duplicaba movimientos e inflaba ``stock_units`` (8,5x en prod). El fix voidea la
+# lectura anterior del lado inventario (``void_movement``) antes de reimportar.
+#
+# La creación real de movimientos con ``source_upload_id`` la cablea A2 en
+# ``ingestion_import_service._record_stock_movement`` (tarea aparte). Acá se STUBEA
+# ``insert_confirmed_data`` para simular ese import post-A2 (crea un movimiento
+# etiquetado + suma stock), aislando y probando la mitad de la relectura.
+
+_STOCK_QTY = 10
+
+
+async def _seed_inventory(
+    session: AsyncSession, tenant: Tenant, file: UploadedFile
+) -> uuid.UUID:
+    """Producto + balance + movimiento del import PREVIO (etiquetado con el archivo)."""
+    product = Product(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        name="Coca Cola",
+        sale_price_ars=Decimal("1500"),
+        unit_cost_ars=Decimal("1000"),
+        stock_units=_STOCK_QTY,
+    )
+    session.add(product)
+    session.add(
+        InventoryBalance(
+            tenant_id=tenant.tenant_id,
+            product_id=product.id,
+            current_qty=_STOCK_QTY,
+        )
+    )
+    session.add(
+        InventoryMovement(
+            tenant_id=tenant.tenant_id,
+            product_id=product.id,
+            movement_type="purchase",
+            qty=_STOCK_QTY,
+            source_upload_id=file.id,
+        )
+    )
+    await session.commit()
+    return product.id
+
+
+def _patch_import_creates_movement(
+    monkeypatch: pytest.MonkeyPatch, product_id: uuid.UUID
+) -> None:
+    """Stub de ``insert_confirmed_data``: simula el import de compra post-A2 —
+    crea UN movimiento etiquetado (qty=+_STOCK_QTY, ``source_upload_id``) y suma al
+    stock/balance, tal como hará ``_record_stock_movement`` cuando A2 lo cablee."""
+
+    async def _fake_insert(
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        fresh: dict,  # noqa: ARG001
+        confirmed_fields: dict,  # noqa: ARG001
+        *,
+        source: str,  # noqa: ARG001
+        uploaded_file_id: uuid.UUID | None = None,
+        **kwargs: object,  # tolera kwargs nuevos (p.ej. stock_treatment)  # noqa: ARG001
+    ) -> dict[str, int]:
+        product = await session.get(Product, product_id)
+        assert product is not None
+        product.stock_units += _STOCK_QTY
+        session.add(
+            InventoryMovement(
+                tenant_id=tenant_id,
+                product_id=product_id,
+                movement_type="purchase",
+                qty=_STOCK_QTY,
+                source_upload_id=uploaded_file_id,
+            )
+        )
+        balance = (
+            await session.execute(
+                select(InventoryBalance).where(
+                    InventoryBalance.tenant_id == tenant_id,
+                    InventoryBalance.product_id == product_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if balance is not None:
+            balance.current_qty += _STOCK_QTY
+        await session.flush()
+        return {"ventas": 0, "gastos": 0, "productos": 0}
+
+    monkeypatch.setattr(reread_service, "insert_confirmed_data", _fake_insert)
+
+
+async def _active_movement_state(
+    session: AsyncSession, tenant: Tenant, file: UploadedFile, product_id: uuid.UUID
+) -> tuple[int, int]:
+    """(# de movimientos vivos del archivo, stock_units del producto)."""
+    active = await session.scalar(
+        select(func.count())
+        .select_from(InventoryMovement)
+        .where(
+            InventoryMovement.tenant_id == tenant.tenant_id,
+            InventoryMovement.source_upload_id == file.id,
+            InventoryMovement.voided_at.is_(None),
+        )
+    )
+    product = await session.get(Product, product_id)
+    assert product is not None
+    return int(active or 0), product.stock_units
+
+
+@pytest.mark.asyncio
+async def test_reread_does_not_duplicate_inventory_movements(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Releer un archivo de compras N veces deja EL MISMO estado de inventario:
+    1 movimiento vivo y el stock original. Sin el fix, cada relectura sumaría otro
+    movimiento vivo (+_STOCK_QTY al stock)."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    product_id = await _seed_inventory(db_session, tenant, file)
+    _patch_import_creates_movement(monkeypatch, product_id)
+
+    # Estado base tras el import previo.
+    assert await _active_movement_state(db_session, tenant, file, product_id) == (
+        1,
+        _STOCK_QTY,
+    )
+
+    # Relectura #1.
+    await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+    assert await _active_movement_state(db_session, tenant, file, product_id) == (
+        1,
+        _STOCK_QTY,
+    )
+
+    # Relectura #2 → idempotente (NO se duplica ni infla el stock).
+    await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+    assert await _active_movement_state(db_session, tenant, file, product_id) == (
+        1,
+        _STOCK_QTY,
+    )
+
+    # El ledger insert-only conserva los voidados: 1 (previo, voidado) + 2 (uno por
+    # reread; el de #1 quedó voidado y el de #2 vivo) = 3 filas totales, pero solo 1
+    # cuenta para el stock.
+    total = await db_session.scalar(
+        select(func.count())
+        .select_from(InventoryMovement)
+        .where(InventoryMovement.source_upload_id == file.id)
+    )
+    assert total == 3
+
+
+@pytest.mark.asyncio
+async def test_undo_reread_restores_inventory(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deshacer una relectura deja el inventario como estaba: el movimiento previo
+    vuelve a estar vivo, el insertado por el reread queda voidado y el stock es el
+    original."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    product_id = await _seed_inventory(db_session, tenant, file)
+    _patch_import_creates_movement(monkeypatch, product_id)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    # Tras el apply: 1 movimiento vivo (el del reimport) y stock intacto.
+    assert await _active_movement_state(db_session, tenant, file, product_id) == (
+        1,
+        _STOCK_QTY,
+    )
+
+    await reread_service.undo_reread(db_session, result.run_id, tenant.tenant_id)
+    await db_session.commit()
+
+    # Sigue habiendo exactamente 1 movimiento vivo y el stock original: el previo
+    # se des-anuló y el insertado por el reread quedó voidado.
+    active, stock = await _active_movement_state(db_session, tenant, file, product_id)
+    assert active == 1
+    assert stock == _STOCK_QTY

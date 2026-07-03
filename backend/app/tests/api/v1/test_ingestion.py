@@ -12,6 +12,7 @@ Mocks:
   - pytesseract.image_to_string → no tesseract binary required in CI
 """
 
+import hashlib
 import io
 import unittest.mock
 import uuid
@@ -186,6 +187,125 @@ class TestUploadEndpoint:
         )
         assert response.status_code == 201
         mock_spreadsheet_delay.assert_called_once()
+
+    async def test_upload_duplicate_content_returns_409(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        csv_bytes: bytes,
+        mock_s3_upload: unittest.mock.AsyncMock,
+        mock_spreadsheet_delay: unittest.mock.MagicMock,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """A6: re-subir un archivo con contenido ya importado se bloquea con 409."""
+        content_hash = hashlib.sha256(csv_bytes).hexdigest()
+        prior = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas_previas.csv",
+            s3_key="uploads/test/prev/ventas.csv",
+            content_type="text/csv",
+            size_bytes=len(csv_bytes),
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+            content_hash=content_hash,
+        )
+        db_session.add(prior)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/ingestion/upload",
+            headers=auth_headers,
+            files={"file": ("ventas_enero.csv", csv_bytes, "application/octet-stream")},
+        )
+        assert response.status_code == 409
+        assert "ya fue importado" in response.json()["detail"]
+        # No se subió a S3 ni se encoló job: el duplicado se bloquea antes.
+        mock_s3_upload.assert_not_called()
+        mock_spreadsheet_delay.assert_not_called()
+
+    async def test_upload_duplicate_with_override_succeeds(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        csv_bytes: bytes,
+        mock_s3_upload: unittest.mock.AsyncMock,
+        mock_spreadsheet_delay: unittest.mock.MagicMock,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """A6: con allow_duplicate=true se permite reimportar (con aviso informativo)."""
+        content_hash = hashlib.sha256(csv_bytes).hexdigest()
+        prior = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas_previas.csv",
+            s3_key="uploads/test/prev/ventas.csv",
+            content_type="text/csv",
+            size_bytes=len(csv_bytes),
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+            content_hash=content_hash,
+        )
+        db_session.add(prior)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/ingestion/upload",
+            headers=auth_headers,
+            files={"file": ("ventas_enero.csv", csv_bytes, "application/octet-stream")},
+            params={"allow_duplicate": "true"},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "PROCESSING"
+        assert data["duplicate_of"] == str(prior.id)
+        assert data["warning"] is not None
+        mock_s3_upload.assert_called_once()
+        mock_spreadsheet_delay.assert_called_once()
+
+    async def test_upload_same_name_different_content_warns(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        csv_bytes: bytes,
+        mock_s3_upload: unittest.mock.AsyncMock,
+        mock_spreadsheet_delay: unittest.mock.MagicMock,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """C: resubir mismo NOMBRE con contenido distinto NO bloquea (201) pero avisa
+        del riesgo de duplicar filas repetidas; sugiere Releer / subir solo lo nuevo."""
+        prior = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",  # mismo nombre que se sube abajo
+            s3_key="uploads/test/prev/ventas.csv",
+            content_type="text/csv",
+            size_bytes=10,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+            content_hash="hash-viejo-distinto",  # contenido distinto ⇒ no es dup exacto
+        )
+        db_session.add(prior)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/ingestion/upload",
+            headers=auth_headers,
+            files={"file": ("ventas.csv", csv_bytes, "application/octet-stream")},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "PROCESSING"
+        assert data["duplicate_of"] is None  # no es dup exacto
+        assert data["warning"] is not None
+        assert "mismo" in data["warning"].lower() or "nombre" in data["warning"].lower()
+        mock_s3_upload.assert_called_once()  # no bloquea
 
     async def test_upload_txt_enqueues_text_job(
         self,
