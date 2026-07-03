@@ -34,11 +34,34 @@ CÓMO SE DEFINE HIGH_CONFIDENCE (B1) — se exige firma de relectura, no solo el
   2. TRIPLICATE_SAME_DAY: el cluster tiene n >= 3 movimientos idénticos el mismo día para
      el mismo producto/qty/costo. Nadie registra a mano la misma compra 3+ veces el mismo
      día; es firma de reread. Se conserva el más antiguo, se voidan los n-1 restantes.
-  MEDIUM/LOW (solo reporte, NO se toca):
-    - MEDIUM: n == 2 sin hash compartido, ambos con source_upload_id (pudo ser reread en
-      dos uploads, pero también dos entregas reales → revisión humana).
-    - LOW:    n == 2 sin hash compartido, con al menos uno manual (source_upload_id NULL)
-      → muy probablemente dos compras reales.
+  3. TIGHT_TIMING: cluster n==2 sin hash compartido, pero los 2 movimientos se crearon a
+     menos de _TIGHT_TIMING_SECONDS (5s) uno del otro. Ningún humano genera dos filas
+     idénticas (mismo producto/tipo/día/qty/costo) separadas por milisegundos — es doble
+     insert programático (retry, bug de loop, request duplicado).
+  4. BATCH_TIMING: cluster n==2 sin hash compartido y con timing NO ajustado, pero cuyo
+     delta (redondeado a ms) se repite en >= _BATCH_DELTA_MIN_OCCURRENCES clusters del
+     MISMO tenant. Un delta idéntico entre pares de movimientos DISTINTOS solo ocurre si
+     un job/script corrió dos veces sobre el mismo batch — es matemáticamente imposible
+     como coincidencia real. Requiere ver TODOS los clusters del tenant antes de decidir
+     (por eso B1 corre en dos pases: el segundo agrupa los "PENDING" por delta).
+     Caso real que motivó esto (2026-07): un tenant tenía 150 clusters LOW de tipo
+     'adjustment' (sin source_upload_id, así que invisibles al heurístico original) — 104
+     compartían el delta 1621.438s exacto y 46 tenían delta ~0s. Recién se pescaron
+     comparando manualmente el delta entre TODOS los clusters, algo que hoy hace
+     automáticamente esta sección y queda auditado en decision_data.by_reason.
+  MEDIUM/LOW (solo reporte, NO se toca) — lo que queda después de descartar 1-4:
+    - MEDIUM (reason=MANUAL_PAIR_MEDIUM): n == 2 sin hash, delta grande y no repetido,
+      ambos con source_upload_id (pudo ser reread en dos uploads distintos, pero también
+      dos entregas reales → revisión humana).
+    - LOW (reason=MANUAL_PAIR_LOW): n == 2 sin hash, delta grande y no repetido, con al
+      menos uno manual (source_upload_id NULL) → probablemente dos eventos reales.
+
+DETECCIÓN RÁPIDA A FUTURO: cada cluster reportado trae `reason` (y `delta_seconds` si
+aplica). El audit log de una corrida con --apply guarda `by_reason` (conteo por razón) en
+decision_data — si vuelve a aparecer un BATCH_TIMING con conteo alto, es la señal
+inmediata de "un job corrió dos veces": revisar decision_audit_log/pipeline_events/logs
+de Railway alrededor de los timestamps de esos movimientos (no hace falta re-derivar el
+delta a mano como la primera vez).
 
 CHECK DE "SIN GASTO COGS" (B2) — ROBUSTO, no solo mismo día. El movimiento se crea en
 fecha de import y el gasto en fecha de compra, así que se matchea por producto + monto
@@ -81,6 +104,7 @@ import sys
 import uuid
 from collections import Counter
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -99,6 +123,26 @@ _BACKFILL_FLAG = "_repair_backfill"
 _HIGH = "HIGH_CONFIDENCE"
 _MEDIUM = "MEDIUM"
 _LOW = "LOW"
+_PENDING = "_PENDING_TIMING"  # interno: n==2 sin hash, a la espera del pase 2 (batch delta)
+
+# Razón puntual de un HIGH/MEDIUM/LOW — para auditoría y detección rápida a futuro.
+_REASON_SHARED_HASH = "SHARED_ROW_HASH"
+_REASON_TRIPLICATE = "TRIPLICATE_SAME_DAY"
+_REASON_TIGHT_TIMING = "TIGHT_TIMING"  # par duplicado creado casi en el mismo instante
+_REASON_BATCH_TIMING = "BATCH_TIMING"  # delta que se repite en muchos clusters del tenant
+_REASON_MANUAL_PAIR_MEDIUM = "MANUAL_PAIR_MEDIUM"
+_REASON_MANUAL_PAIR_LOW = "MANUAL_PAIR_LOW"
+
+# Umbrales de detección de duplicados por TIMING (sin source_row_hash disponible, ej.
+# movement_type='adjustment' generado por jobs/scripts que no taggean origen). Cubre el
+# caso real detectado 2026-07: 150 clusters "LOW" en un tenant resultaron ser duplicados
+# de un script/job corrido dos veces — 104 compartían el MISMO delta de 1621.438s entre
+# sus 2 movimientos, y 46 tenían delta ~0s (mismo instante, doble insert). Ninguno tenía
+# source_upload_id, así que el heurístico original (que solo mira hash/upload_id) los
+# clasificaba LOW y quedaban invisibles sin horas de diagnóstico manual.
+_TIGHT_TIMING_SECONDS = 5.0
+_BATCH_DELTA_ROUND = 3  # precisión en ms al agrupar deltas entre clusters
+_BATCH_DELTA_MIN_OCCURRENCES = 3  # delta repetido ≥3 veces → job/script duplicado, no azar
 
 # Disposición de un movimiento de compra frente al backfill de COGS (B2).
 _B2_CREATE = "CREATE"
@@ -113,7 +157,10 @@ _B2_AMOUNT_MISMATCH = "AMOUNT_MISMATCH"  # hay COGS del producto pero el monto n
 async def _plan_b1_dedup(session: AsyncSession, tid: uuid.UUID) -> dict[str, Any]:
     """Plan de dedup del tenant (read-only). Clasifica clusters y elige los void_ids.
 
-    Devuelve {clusters: [...], void_ids: [...], affected_products: [...], by_conf: Counter}.
+    Dos pases: 1) hash compartido / triplicado / timing ajustado (por cluster, sin
+    contexto externo); 2) delta de timing compartido por ≥3 clusters del tenant (batch
+    duplicado — requiere ver TODOS los clusters primero). Devuelve {clusters: [...],
+    void_ids: [...], affected_products: [...], by_conf: Counter, by_reason: Counter}.
     """
     clusters = (
         await session.execute(
@@ -129,10 +176,8 @@ async def _plan_b1_dedup(session: AsyncSession, tid: uuid.UUID) -> dict[str, Any
         )
     ).mappings().all()
 
-    reported: list[dict[str, Any]] = []
-    void_ids: list[str] = []
-    affected: set[str] = set()
-    by_conf: Counter[str] = Counter()
+    resolved: list[dict[str, Any]] = []  # clusters ya clasificados (pase 1)
+    pending: list[dict[str, Any]] = []  # n==2 sin hash, esperan el pase 2
 
     for c in clusters:
         members = (
@@ -157,34 +202,88 @@ async def _plan_b1_dedup(session: AsyncSession, tid: uuid.UUID) -> dict[str, Any
             )
         ).mappings().all()
 
-        confidence, cluster_voids = _classify_cluster(members)
-        by_conf[confidence] += 1
-        row = {
+        base = {
             "product_id": str(c["product_id"]),
             "movement_type": str(c["movement_type"]),
             "day": str(c["d"]),
             "qty": int(c["qty"]),
             "n": int(c["n"]),
-            "confidence": confidence,
-            "void_count": len(cluster_voids),
         }
+        confidence, reason, cluster_voids, delta = _classify_cluster(members)
+        if confidence == _PENDING:
+            pending.append({**base, "members": members, "delta": delta})
+        else:
+            resolved.append(
+                {
+                    **base,
+                    "confidence": confidence,
+                    "reason": reason,
+                    "_void_ids": cluster_voids,
+                }
+            )
+
+    # Pase 2: entre los PENDING, un delta (redondeado a ms) que se repite ≥N veces es
+    # evidencia de un job/script corrido más de una vez — no de coincidencia manual.
+    delta_counts: Counter[float] = Counter(
+        round(p["delta"], _BATCH_DELTA_ROUND) for p in pending
+    )
+    for p in pending:
+        rounded = round(p["delta"], _BATCH_DELTA_ROUND)
+        members = p["members"]
+        if delta_counts[rounded] >= _BATCH_DELTA_MIN_OCCURRENCES:
+            confidence, reason = _HIGH, _REASON_BATCH_TIMING
+            cluster_voids = [str(members[1]["id"])]
+        else:
+            both_import = all(m["source_upload_id"] is not None for m in members)
+            confidence = _MEDIUM if both_import else _LOW
+            reason = _REASON_MANUAL_PAIR_MEDIUM if both_import else _REASON_MANUAL_PAIR_LOW
+            cluster_voids = []
+        resolved.append(
+            {
+                "product_id": p["product_id"],
+                "movement_type": p["movement_type"],
+                "day": p["day"],
+                "qty": p["qty"],
+                "n": p["n"],
+                "confidence": confidence,
+                "reason": reason,
+                "delta_seconds": rounded,
+                "_void_ids": cluster_voids,
+            }
+        )
+
+    void_ids: list[str] = []
+    affected: set[str] = set()
+    by_conf: Counter[str] = Counter()
+    by_reason: Counter[str] = Counter()
+    reported: list[dict[str, Any]] = []
+    for row in resolved:
+        by_conf[row["confidence"]] += 1
+        by_reason[row["reason"]] += 1
+        cluster_voids = row.pop("_void_ids")
+        row["void_count"] = len(cluster_voids)
         reported.append(row)
-        if confidence == _HIGH and cluster_voids:
+        if row["confidence"] == _HIGH and cluster_voids:
             void_ids.extend(cluster_voids)
-            affected.add(str(c["product_id"]))
+            affected.add(row["product_id"])
 
     return {
         "clusters": reported,
         "void_ids": void_ids,
         "affected_products": sorted(affected),
         "by_conf": by_conf,
+        "by_reason": by_reason,
     }
 
 
-def _classify_cluster(members: Sequence[Any]) -> tuple[str, list[str]]:
-    """Clasifica un cluster de movimientos idénticos y devuelve (confidence, void_ids).
+def _classify_cluster(
+    members: Sequence[Any],
+) -> tuple[str, str | None, list[str], float | None]:
+    """Clasifica un cluster de movimientos idénticos (pase 1, sin contexto externo).
 
-    void_ids solo se puebla para HIGH_CONFIDENCE (los extras a soft-deletear).
+    Devuelve (confidence, reason, void_ids, delta_seconds). ``confidence == _PENDING``
+    significa "n==2 sin hash compartido, no se puede decidir sin ver los demás
+    clusters del tenant" — el pase 2 (en ``_plan_b1_dedup``) lo resuelve.
     """
     # 1. SHARED_ROW_HASH: la misma fila lógica importada más de una vez.
     by_hash: dict[str, list[Any]] = {}
@@ -198,15 +297,23 @@ def _classify_cluster(members: Sequence[Any]) -> tuple[str, list[str]]:
             # conservar el más antiguo (ya vienen ORDER BY created_at ASC), voidar el resto
             hash_voids.extend(str(m["id"]) for m in group[1:])
     if hash_voids:
-        return _HIGH, hash_voids
+        return _HIGH, _REASON_SHARED_HASH, hash_voids, None
 
     # 2. TRIPLICATE_SAME_DAY: 3+ idénticos el mismo día → firma de reread.
     if len(members) >= 3:
-        return _HIGH, [str(m["id"]) for m in members[1:]]
+        return _HIGH, _REASON_TRIPLICATE, [str(m["id"]) for m in members[1:]], None
 
-    # 3. n == 2 sin hash compartido → solo reporte.
-    both_import = all(m["source_upload_id"] is not None for m in members)
-    return (_MEDIUM if both_import else _LOW), []
+    # 3. n == 2 sin hash: un delta de timing muy chico (segundos) entre los dos
+    # movimientos ya es, por sí solo, evidencia de doble-insert programático — ningún
+    # humano genera dos filas idénticas (mismo producto/tipo/día/qty/costo) separadas
+    # por milisegundos. No hace falta que se repita en otros clusters.
+    delta = abs((members[1]["created_at"] - members[0]["created_at"]).total_seconds())
+    if delta < _TIGHT_TIMING_SECONDS:
+        return _HIGH, _REASON_TIGHT_TIMING, [str(members[1]["id"])], None
+
+    # Delta más grande y aislado: puede ser timing de un job repetido (ver pase 2) o
+    # dos eventos reales — queda pendiente hasta comparar con el resto del tenant.
+    return _PENDING, None, [], delta
 
 
 async def _apply_b1_dedup(
@@ -233,6 +340,10 @@ async def _apply_b1_dedup(
             "voided_movement_ids": void_ids,
             "voided_count": len(void_ids),
             "by_confidence": dict(plan["by_conf"]),
+            # by_reason: para detectar rápido si esto vuelve a pasar. Un BATCH_TIMING
+            # con conteo alto en una corrida futura es la señal de "job corrido 2 veces"
+            # sin necesitar horas de diagnóstico manual como la vez que esto se descubrió.
+            "by_reason": dict(plan["by_reason"]),
         },
     )
     return len(void_ids)
@@ -281,8 +392,16 @@ async def _plan_b2_backfill(
         expected = Decimal(str(unit_cost)) * Decimal(int(m["qty"]))
         tol = max(Decimal("1"), (expected.copy_abs() * Decimal(str(tol_pct))))
 
+        # anchor puede venir de inventory_movements.created_at (timestamptz) o de
+        # products.acquired_at (naive) — expense_entries.transaction_date es naive
+        # (SIN timezone), así que asyncpg no puede bindear un datetime aware contra
+        # esa columna ("can't subtract offset-naive and offset-aware datetimes").
+        anchor: datetime = m["anchor"]
+        if anchor.tzinfo is not None:
+            anchor = anchor.astimezone(UTC).replace(tzinfo=None)
+
         disposition = await _cogs_disposition(
-            session, tid, str(m["product_id"]), expected, tol, m["anchor"], window_days
+            session, tid, str(m["product_id"]), expected, tol, anchor, window_days
         )
         by_disp[disposition] += 1
         if disposition == _B2_CREATE:
@@ -292,7 +411,7 @@ async def _plan_b2_backfill(
                     "product_id": str(m["product_id"]),
                     "supplier_id": str(m["supplier_id"]) if m["supplier_id"] else None,
                     "amount": str(expected),
-                    "transaction_date": m["anchor"],
+                    "transaction_date": anchor,
                 }
             )
 
@@ -309,7 +428,9 @@ async def _cogs_disposition(
     window_days: int,
 ) -> str:
     """Decide si un movimiento de compra necesita COGS. Ventana de fechas + tolerancia."""
-    window = f"{window_days} days"
+    # asyncpg bindea CAST(:window AS interval) esperando un timedelta de Python, no un
+    # string ("60 days") — el codec de interval llama .days sobre el parámetro.
+    window = timedelta(days=window_days)
     match = (
         await session.execute(
             text(
@@ -489,6 +610,7 @@ def _print_tenant(
     tid: uuid.UUID, b1: dict[str, Any], b2: dict[str, Any]
 ) -> None:
     by_conf = b1["by_conf"]
+    by_reason = b1["by_reason"]
     by_disp = b2["by_disposition"]
     print(f"tenant {tid}:")
     print(
@@ -496,6 +618,21 @@ def _print_tenant(
         f"→ {len(b1['void_ids'])} movimiento(s) a voidar (HIGH), "
         f"{len(b1['affected_products'])} producto(s) afectado(s)"
     )
+    print(f"  B1 por razón: {dict(by_reason)}")
+    batch_count = by_reason.get(_REASON_BATCH_TIMING, 0)
+    if batch_count:
+        deltas = sorted(
+            {
+                c["delta_seconds"]
+                for c in b1["clusters"]
+                if c["reason"] == _REASON_BATCH_TIMING
+            }
+        )
+        print(
+            f"  ⚠ ALERTA: {batch_count} cluster(s) con timing BATCH_TIMING "
+            f"(delta compartido: {deltas}s) — evidencia de un job/script corrido más "
+            "de una vez. Buscar en logs/decision_audit_log alrededor de esos horarios."
+        )
     print(
         f"  B2 backfill COGS: {len(b2['to_create'])} gasto(s) a crear — disposiciones "
         f"{dict(by_disp)}"
@@ -579,6 +716,10 @@ async def main() -> None:
                     "b1_low": b1["by_conf"].get(_LOW, 0),
                     "b1_movements_to_void": len(b1["void_ids"]),
                     "b1_affected_products": len(b1["affected_products"]),
+                    "b1_reason_shared_hash": b1["by_reason"].get(_REASON_SHARED_HASH, 0),
+                    "b1_reason_triplicate": b1["by_reason"].get(_REASON_TRIPLICATE, 0),
+                    "b1_reason_tight_timing": b1["by_reason"].get(_REASON_TIGHT_TIMING, 0),
+                    "b1_reason_batch_timing": b1["by_reason"].get(_REASON_BATCH_TIMING, 0),
                     "b2_to_create": len(b2["to_create"]),
                     "b2_has_cogs": b2["by_disposition"].get(_B2_HAS_COGS, 0),
                     "b2_no_cost": b2["by_disposition"].get(_B2_NO_COST, 0),
