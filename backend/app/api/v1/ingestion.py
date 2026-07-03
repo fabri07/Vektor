@@ -233,6 +233,13 @@ async def upload_file(
     file: UploadFile = File(...),
     file_hint: FileHint = Query(default="general"),
     force: bool = Query(default=False, description="Forzar ingestión aunque confidence=LOW"),
+    allow_duplicate: bool = Query(
+        default=False,
+        description=(
+            "Permitir reimportar un archivo cuyo contenido EXACTO ya fue importado. "
+            "Por defecto se bloquea con 409 para no duplicar datos."
+        ),
+    ),
     tenant: Tenant = Depends(get_current_tenant),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
@@ -257,6 +264,33 @@ async def upload_file(
             detail=str(exc),
         ) from exc
 
+    # A6: dedup de re-upload. Si este contenido EXACTO ya fue importado (DONE),
+    # BLOQUEAR (409) — reimportarlo duplica ventas/gastos/stock. El override
+    # explícito (allow_duplicate=true) permite reimportar a propósito. Se chequea
+    # ANTES de subir a S3 / crear el registro para no dejar objetos ni filas huérfanas.
+    content_hash = hashlib.sha256(content).hexdigest()
+    repo = FileRepository(session)
+    _dup = await repo.find_imported_by_content_hash(tenant.tenant_id, content_hash)
+    if _dup is not None and not allow_duplicate:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Este archivo ya fue importado antes ('{_dup.original_filename}'). "
+                "Reimportarlo duplicaría los datos. Si querés importarlo igual, "
+                "reintentá con allow_duplicate=true."
+            ),
+        )
+    # C: re-subida por NOMBRE (mismo nombre, contenido distinto = versión actualizada).
+    # No se bloquea, pero se avisa: reimportar todo duplica las filas repetidas. Solo si
+    # no es el caso de dup exacto (que ya se manejó arriba).
+    _name_dup = (
+        await repo.find_imported_by_filename(
+            tenant.tenant_id, filename, exclude_content_hash=content_hash
+        )
+        if _dup is None
+        else None
+    )
+
     # Build S3 key: uploads/{tenant_id}/{uuid}/{filename}
     file_uuid = uuid.uuid4()
     s3_key = f"uploads/{tenant.tenant_id}/{file_uuid}/{filename}"
@@ -264,9 +298,8 @@ async def upload_file(
     s3 = S3Client()
     stored_key = await s3.upload_to_key(content=content, key=s3_key, content_type=detected_mime)
 
-    # FASE 0: trazabilidad (trace_id agrupa el ciclo de vida) + hash para dedup.
+    # FASE 0: trazabilidad (trace_id agrupa el ciclo de vida).
     trace_id = uuid.uuid4()
-    content_hash = hashlib.sha256(content).hexdigest()
     bind_request_context(trace_id=trace_id)
 
     record = UploadedFile(
@@ -282,7 +315,6 @@ async def upload_file(
         trace_id=trace_id,
         content_hash=content_hash,
     )
-    repo = FileRepository(session)
     saved = await repo.save(record)
 
     await pipeline_event_service.emit_event(
@@ -300,17 +332,23 @@ async def upload_file(
         },
     )
 
-    # Dedup de re-upload: avisar (no bloquear) si este contenido ya fue importado.
-    _dup = await repo.find_imported_by_content_hash(
-        tenant.tenant_id, content_hash, exclude_id=saved.id
-    )
+    # Llegamos acá con un duplicado solo si allow_duplicate=true (override explícito):
+    # dejamos el aviso informativo en la respuesta para que el frontend lo muestre.
     dup_of = _dup.id if _dup else None
-    dup_warning = (
-        f"Este archivo ya fue importado antes ('{_dup.original_filename}'). "
-        "Si confirmás, podrías duplicar los datos."
-        if _dup
-        else None
-    )
+    if _dup:
+        dup_warning: str | None = (
+            f"Este archivo ya fue importado antes ('{_dup.original_filename}'). "
+            "Reimportación forzada: podrías estar duplicando datos."
+        )
+    elif _name_dup:
+        dup_warning = (
+            f"Ya importaste un archivo con este nombre ('{_name_dup.original_filename}'). "
+            "Si es una corrección del mismo archivo, usá 'Releer' sobre el original (lo "
+            "reemplaza sin duplicar). Si son datos nuevos, subí un archivo solo con las "
+            "filas nuevas — si reimportás todo, se duplican las filas repetidas."
+        )
+    else:
+        dup_warning = None
 
     if get_settings().USE_LOCAL_FALLBACK:
         await _process_file_sync(saved, session, force=force)
@@ -808,6 +846,10 @@ async def confirm_file(
     # Insert parsed rows into business tables, then mark done
     updated_summary = dict(record.parsed_summary_json or {})
     updated_summary["confirmed_fields"] = body.confirmed_fields
+    # Persistir la elección de tratamiento del stock (apertura vs compra) en el summary
+    # para que una relectura posterior conserve la decisión sin volver a preguntar.
+    if body.stock_treatment is not None:
+        updated_summary["stock_treatment"] = body.stock_treatment
 
     explicit_mappings: dict[str, str] | None = None
     if _flat_mappings:
@@ -834,6 +876,7 @@ async def confirm_file(
         context_entity=body.context_entity or None,
         source="ingestion",
         uploaded_file_id=file_id,
+        stock_treatment=body.stock_treatment,
     )
     _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
 

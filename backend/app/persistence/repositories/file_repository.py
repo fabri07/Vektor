@@ -38,6 +38,10 @@ class FileRepository(BaseRepository[UploadedFile]):
 
         Solo considera archivos no soft-deleted. Sirve para avisar al usuario que el
         archivo ya fue importado antes y evitar duplicar datos sin querer.
+
+        EXCLUYE los uploads de chat (``purpose == "chat"``): esos se parsean de forma
+        síncrona y llegan a DONE sin importarse a ventas/gastos, así que NO cuentan como
+        "ya importado" y no deben bloquear una primera ingestión legítima del mismo archivo.
         """
         from app.persistence.models.file import PROCESSING_STATUS_DONE  # noqa: PLC0415
 
@@ -45,10 +49,39 @@ class FileRepository(BaseRepository[UploadedFile]):
             UploadedFile.tenant_id == tenant_id,
             UploadedFile.content_hash == content_hash,
             UploadedFile.processing_status == PROCESSING_STATUS_DONE,
+            UploadedFile.purpose != "chat",
             UploadedFile.deleted_at.is_(None),
         )
         if exclude_id is not None:
             q = q.where(UploadedFile.id != exclude_id)
+        q = q.order_by(UploadedFile.created_at.desc()).limit(1)
+        result = await self._session.execute(q)
+        return result.scalar_one_or_none()
+
+    async def find_imported_by_filename(
+        self,
+        tenant_id: UUID,
+        original_filename: str,
+        exclude_content_hash: str | None = None,
+    ) -> UploadedFile | None:
+        """Busca un archivo YA importado (DONE) con el MISMO nombre pero contenido distinto.
+
+        Sirve para avisar (NO bloquear) cuando el usuario resube una versión actualizada de
+        un archivo ya importado: como el contenido difiere, el dedup por hash no lo frena, y
+        reimportar todo duplica las filas repetidas. Excluye chat y, si se pasa
+        ``exclude_content_hash``, el contenido idéntico (ese caso ya lo maneja el 409).
+        """
+        from app.persistence.models.file import PROCESSING_STATUS_DONE  # noqa: PLC0415
+
+        q = select(UploadedFile).where(
+            UploadedFile.tenant_id == tenant_id,
+            UploadedFile.original_filename == original_filename,
+            UploadedFile.processing_status == PROCESSING_STATUS_DONE,
+            UploadedFile.purpose != "chat",
+            UploadedFile.deleted_at.is_(None),
+        )
+        if exclude_content_hash is not None:
+            q = q.where(UploadedFile.content_hash != exclude_content_hash)
         q = q.order_by(UploadedFile.created_at.desc()).limit(1)
         result = await self._session.execute(q)
         return result.scalar_one_or_none()

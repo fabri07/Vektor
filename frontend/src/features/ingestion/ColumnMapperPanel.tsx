@@ -9,7 +9,9 @@ import {
   type ColumnMapping,
   type ColumnMappingSuggestion,
   type MappingContext,
+  type StockTreatment,
 } from "@/services/ingestion.service";
+import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 
 // Campos canónicos por entity_type (para los selects del panel derecho)
 const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> = {
@@ -478,6 +480,9 @@ function MultiContextMapper({
   const [entityByCtx, setEntityByCtx] = useState<Record<string, string>>(() =>
     Object.fromEntries(contexts.map((c) => [c.context_id, c.entity_type ?? "sale"])),
   );
+  // A: tratamiento del stock si alguna hoja incluida es de productos.
+  const [stockTreatment, setStockTreatment] =
+    useState<StockTreatment>("opening_balance");
   const mappingsRef = useRef<Record<string, Record<string, string>>>({});
 
   const handleIncludeChange = useCallback((ctxId: string, inc: boolean) => {
@@ -493,6 +498,13 @@ function MultiContextMapper({
       mappingsRef.current[ctxId] = mappings;
     },
     [],
+  );
+
+  // A: alguna hoja incluida es de productos → preguntar cómo tratar el stock.
+  const hasStock = contexts.some(
+    (c) =>
+      included[c.context_id] &&
+      (entityByCtx[c.context_id] ?? c.entity_type) === "product",
   );
 
   const confirmMutation = useMutation({
@@ -515,7 +527,14 @@ function MultiContextMapper({
           });
         }
       }
-      return ingestionService.confirmFile(fileId, {}, columnMappings, included, contextEntity);
+      return ingestionService.confirmFile(
+        fileId,
+        {},
+        columnMappings,
+        included,
+        contextEntity,
+        hasStock ? stockTreatment : undefined,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
@@ -572,6 +591,15 @@ function MultiContextMapper({
         ))}
       </div>
 
+      {/* A: tratamiento del stock cuando alguna hoja incluida es de productos. */}
+      {hasStock && (
+        <StockTreatmentChoice
+          value={stockTreatment}
+          onChange={setStockTreatment}
+          className="mt-4 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
+        />
+      )}
+
       {confirmMutation.isError && (
         <p className="mt-3 text-xs text-vk-danger">
           {errDetail ?? "Error al confirmar. Revisá los campos requeridos de cada hoja."}
@@ -619,6 +647,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const [initialized, setInitialized] = useState(false);
   // A3: cuando el tipo quedó ambiguo ("general"), el usuario elige el propósito aquí.
   const [purpose, setPurpose] = useState<string>("");
+  // A: tratamiento del stock cuando el archivo trae productos (default: saldo de apertura).
+  const [stockTreatment, setStockTreatment] =
+    useState<StockTreatment>("opening_balance");
 
   const { data: preview } = useQuery({
     queryKey: ["ingestion-preview", fileId],
@@ -642,6 +673,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const entityType = INFERRED_TO_ENTITY[effectiveInferred] ?? "sale";
   // columns_at_risk (Sprint 14): hasta ahora no se renderizaban en el panel.
   const columnsAtRisk = preview?.columns_at_risk ?? [];
+  // A: el archivo trae stock si el schema efectivo es de productos, si se tildó
+  // "productos", o si el summary detectó stock/productos.
+  const hasStock =
+    entityType === "product" ||
+    confirmedFields.productos ||
+    summaryHasStock(summary);
 
   function choosePurpose(value: string) {
     setPurpose(value);
@@ -684,7 +721,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
 
   const confirmMutation = useMutation({
     mutationFn: (columnMappings: ColumnMapping[]) =>
-      ingestionService.confirmFile(fileId, confirmedFields, columnMappings),
+      ingestionService.confirmFile(
+        fileId,
+        confirmedFields,
+        columnMappings,
+        undefined,
+        undefined,
+        hasStock ? stockTreatment : undefined,
+      ),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
       void queryClient.invalidateQueries({ queryKey: ["column-mappings-learned"] });
@@ -1058,6 +1102,15 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           <XCircle className="h-3.5 w-3.5 shrink-0" />
           Hay campos obligatorios sin mapear (indicados en rojo). Asignales un campo antes de confirmar.
         </div>
+      )}
+
+      {/* A: tratamiento del stock cuando el archivo trae productos. */}
+      {hasStock && !needsPurpose && (
+        <StockTreatmentChoice
+          value={stockTreatment}
+          onChange={setStockTreatment}
+          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
+        />
       )}
 
       {/* Error de API */}

@@ -43,7 +43,10 @@ from app.persistence.models.supplier import (
 )
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
-from app.persistence.repositories.inventory_repository import InventoryRepository
+from app.persistence.repositories.inventory_repository import (
+    InventoryRepository,
+    group_products_by_brand,
+)
 from app.persistence.repositories.supplier_repository import SupplierRepository
 from app.schemas.common import MessageResponse
 from app.schemas.supplier import (
@@ -52,7 +55,7 @@ from app.schemas.supplier import (
     ReceiptExtractionLine,
     ReceiptExtractionResponse,
     ReceiptResponse,
-    SupplierProductPurchaseResponse,
+    SupplierProductsGroupedResponse,
     SupplierResponse,
     UpdateSupplierRequest,
 )
@@ -175,25 +178,32 @@ async def get_supplier(
 
 @router.get(
     "/{supplier_id}/products",
-    response_model=list[SupplierProductPurchaseResponse],
-    summary="List products purchased from a supplier",
+    response_model=SupplierProductsGroupedResponse,
+    summary="List products purchased from a supplier, grouped by brand",
 )
 async def list_supplier_products(
     supplier_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[SupplierProductPurchaseResponse]:
+) -> SupplierProductsGroupedResponse:
     """FASE 3: productos comprados a un proveedor (última compra / cantidad / precio
-    unitario), desde ``inventory_movements``. Aislado por tenant del JWT: 404 si el
-    proveedor no pertenece al tenant.
+    unitario), desde ``inventory_movements``, agrupados por marca (jerarquía
+    Proveedor→Marca→Producto). Aislado por tenant del JWT: 404 si el proveedor no
+    pertenece al tenant.
     """
     repo = SupplierRepository(session)
-    supplier = await repo.get_by_id(supplier_id, tenant.tenant_id)
+    # include_deactivated: los proveedores inactivos son abribles (detalle read-only)
+    # y las marcas-proveedor aún no revertidas SON proveedores inactivos — su detalle
+    # de productos debe cargar, no dar 404 (coincide con GET /suppliers/{id}).
+    supplier = await repo.get_by_id(
+        supplier_id, tenant.tenant_id, include_deactivated=True
+    )
     if not supplier:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found.")
     inv = InventoryRepository(session)
     purchases = await inv.products_purchased_from_supplier(tenant.tenant_id, supplier_id)
-    return [SupplierProductPurchaseResponse.model_validate(p) for p in purchases]
+    groups = group_products_by_brand(purchases, supplier.name)
+    return SupplierProductsGroupedResponse.model_validate({"groups": groups})
 
 
 @router.post(

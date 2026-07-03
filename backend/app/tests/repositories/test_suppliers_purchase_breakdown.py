@@ -12,49 +12,10 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.models.inventory import InventoryMovement
-from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.repositories.inventory_repository import InventoryRepository
-
-
-async def _product(
-    session: AsyncSession, tenant_id: uuid.UUID, name: str, marca: str | None = None
-) -> Product:
-    p = Product(
-        id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        name=name,
-        sale_price_ars=Decimal("100"),
-        stock_units=5,
-        provenance="REAL",
-        custom_fields={"marca": marca} if marca else {},
-    )
-    session.add(p)
-    await session.flush()
-    return p
-
-
-async def _purchase(
-    session: AsyncSession,
-    tenant_id: uuid.UUID,
-    product_id: uuid.UUID,
-    supplier_id: uuid.UUID | None,
-    qty: int,
-    unit_cost: Decimal | None,
-) -> None:
-    session.add(
-        InventoryMovement(
-            id=uuid.uuid4(),
-            tenant_id=tenant_id,
-            product_id=product_id,
-            supplier_id=supplier_id,
-            movement_type="purchase",
-            qty=qty,
-            unit_cost=unit_cost,
-        )
-    )
+from app.tests.repositories._helpers import _product, _purchase
 
 
 @pytest.mark.asyncio
@@ -138,3 +99,49 @@ async def test_null_and_sentinel_supplier_merge_into_one(
     assert s.total_purchased == pytest.approx(800.0)
     assert len(s.products) == 1
     assert s.products[0].total_qty == pytest.approx(8.0)
+
+
+@pytest.mark.asyncio
+async def test_breakdown_excludes_voided_movements(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Un movimiento con voided_at seteado (dedup/reread) NO cuenta para lo comprado."""
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Distribuidora Sur")
+    db_session.add(supplier)
+    await db_session.flush()
+    p1 = await _product(db_session, tid, "Azúcar")
+    # Compra válida (10*100=1000) + compra voidada (duplicado anulado) que NO debe sumar.
+    await _purchase(db_session, tid, p1.id, supplier.id, 10, Decimal("100"))
+    await _purchase(db_session, tid, p1.id, supplier.id, 10, Decimal("100"), voided=True)
+    await db_session.commit()
+
+    result = await InventoryRepository(db_session).suppliers_purchase_breakdown(tid)
+
+    assert len(result) == 1
+    s = result[0]
+    assert s.total_purchased == pytest.approx(1000.0)
+    assert len(s.products) == 1
+    assert s.products[0].total_qty == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_products_purchased_excludes_voided_movements(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """products_purchased_from_supplier ignora movimientos voidados en la cantidad."""
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Mayorista Centro")
+    db_session.add(supplier)
+    await db_session.flush()
+    p1 = await _product(db_session, tid, "Harina")
+    await _purchase(db_session, tid, p1.id, supplier.id, 7, Decimal("50"))
+    await _purchase(db_session, tid, p1.id, supplier.id, 7, Decimal("50"), voided=True)
+    await db_session.commit()
+
+    result = await InventoryRepository(db_session).products_purchased_from_supplier(
+        tid, supplier.id
+    )
+
+    assert len(result) == 1
+    assert result[0].total_qty == pytest.approx(7.0)

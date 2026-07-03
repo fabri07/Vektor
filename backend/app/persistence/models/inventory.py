@@ -1,9 +1,10 @@
 """ORM models: inventory_balances, inventory_movements."""
 
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -68,6 +69,23 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     source_event_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Origen del movimiento (spec: app/application/services/inventory_movement_origin.py).
+    # source_type: semántica canónica (purchase_import, catalog_initial_stock, ...).
+    # source_upload_id / source_row_ref: archivo y fila que lo originaron (traza + reversa
+    #   del reread). source_row_hash: identidad lógica estable (idempotencia, no depende
+    #   del orden del Excel). voided_at: soft-delete (dedup, reread) — un movimiento
+    #   voidado NO cuenta para stock ni para "comprado".
+    source_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_upload_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_row_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_row_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:
         return (

@@ -110,6 +110,15 @@ class ConfirmIngestionRequest(BaseModel):
             "{context_id: sale|expense}. Permite reasignar un grupo detectado."
         ),
     )
+    stock_treatment: Literal["opening_balance", "purchase"] | None = Field(
+        default=None,
+        description=(
+            "Cómo tratar el stock de un archivo de catálogo/lista: 'opening_balance' "
+            "(saldo de apertura — mercadería que ya tenías, entra al inventario sin "
+            "gasto ni salida de caja) o 'purchase' (compra — genera gasto de mercadería "
+            "COGS + baja de caja). Si se omite, se asume saldo de apertura."
+        ),
+    )
 
 
 class ConfirmIngestionResponse(BaseModel):

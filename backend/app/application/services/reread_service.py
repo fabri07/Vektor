@@ -67,9 +67,14 @@ from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.application.services.stock_service import (
+    unvoid_movement,
+    void_movement,
+)
 from app.integrations.s3 import S3Client
 from app.observability.logger import get_logger
 from app.persistence.models.file import UploadedFile
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -180,6 +185,21 @@ def _snapshot_sale(s: SaleEntry) -> dict[str, Any]:
         "notes": s.notes,
         "source_row_ref": s.source_row_ref,
         "has_user_edits": s.has_user_edits,
+    }
+
+
+def _snapshot_movement(m: InventoryMovement) -> dict[str, Any]:
+    """Snapshot de un ``InventoryMovement`` para auditar la reversa de inventario
+    en el reread. ``kind='movement'`` distingue estas filas de las de venta/gasto
+    en ``DataRepairItem`` (reusan las mismas actions ``REREAD_VOID``/``REREAD_INSERT``,
+    ya permitidas por el CHECK, para no tocar el schema)."""
+    return {
+        "kind": "movement",
+        "id": str(m.id),
+        "product_id": str(m.product_id),
+        "qty": m.qty,
+        "movement_type": m.movement_type,
+        "source_upload_id": str(m.source_upload_id) if m.source_upload_id else None,
     }
 
 
@@ -379,6 +399,15 @@ async def _reconcile(
         if rec.source_row_ref
     }
 
+    # Refs de las filas EDITADAS (preservadas): el reimport las saltea, así que su
+    # InventoryMovement NO debe voidearse (si lo voidáramos sin recrearlo, el stock
+    # quedaría subestimado). Se preservan movimiento + registro juntos.
+    preserved_refs: set[str] = {
+        rec.source_row_ref
+        for rec in all_existing
+        if getattr(rec, "has_user_edits", False) and rec.source_row_ref
+    }
+
     # ── Fallback legacy: recomputar anchors del archivo y borrar los que NO
     # matcheen por contenido a un registro editado. (Best-effort; la primera
     # relectura migra todo a source_row_ref exacto.) ──
@@ -418,9 +447,47 @@ async def _reconcile(
     # Borrar fingerprints de los no-editados (preservando los editados).
     await _delete_fingerprints(session, tenant_id, fingerprints_to_delete)
 
+    # ── Inventario: borrar la lectura ANTERIOR también del lado stock ──
+    # El camino compra→stock es incremental (``_record_stock_movement`` suma). Si
+    # no voideamos los ``InventoryMovement`` del import previo antes de reimportar,
+    # cada relectura los DUPLICA e infla el stock (confirmado en prod: 8,5x).
+    # ``void_movement`` revierte el efecto de cada movimiento sobre
+    # ``product.stock_units`` + ``inventory_balances`` (qty con signo) y es
+    # idempotente; el reimport los vuelve a sumar ⇒ reread ×N = mismo estado.
+    prev_movements_res = await session.execute(
+        select(InventoryMovement).where(
+            InventoryMovement.tenant_id == tenant_id,
+            InventoryMovement.source_upload_id == file_id,
+            InventoryMovement.voided_at.is_(None),
+        )
+    )
+    for mov in prev_movements_res.scalars().all():
+        # No voidear el movimiento de una fila editada preservada: el reimport la saltea,
+        # así que su stock debe quedar intacto (si no, se subestimaría).
+        if mov.source_row_ref and mov.source_row_ref in preserved_refs:
+            continue
+        mov_snap = _snapshot_movement(mov)
+        await void_movement(mov, session)
+        if not dry_run:
+            session.add(
+                DataRepairItem(
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    sale_entry_id=None,
+                    action=ACTION_VOID,
+                    before_json=mov_snap,
+                    after_json=None,
+                    confidence="HIGH",
+                )
+            )
+
     # Re-importar: re-crea no-editados corregidos + filas nuevas; saltea editados
     # (los fingerprints de las filas editadas siguen presentes → insert los omite).
     await session.flush()
+    # Preservar la elección de tratamiento del stock (apertura vs compra) que el usuario
+    # hizo en el confirm original: vive en el summary guardado, no en el crudo re-parseado.
+    _stored_treatment = (file.parsed_summary_json or {}).get("stock_treatment")
     await insert_confirmed_data(
         session,
         tenant_id,
@@ -428,8 +495,34 @@ async def _reconcile(
         confirmed_fields,
         source="reread",
         uploaded_file_id=file_id,
+        stock_treatment=_stored_treatment,
     )
     await session.flush()
+
+    # Auditar los movimientos de inventario recién insertados por el reimport
+    # (tras el void anterior, cualquier movimiento vivo del archivo es nuevo). Se
+    # audita como REREAD_INSERT (kind=movement) para poder revertirlo en el undo.
+    if not dry_run:
+        new_movements_res = await session.execute(
+            select(InventoryMovement).where(
+                InventoryMovement.tenant_id == tenant_id,
+                InventoryMovement.source_upload_id == file_id,
+                InventoryMovement.voided_at.is_(None),
+            )
+        )
+        for mov in new_movements_res.scalars().all():
+            session.add(
+                DataRepairItem(
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    sale_entry_id=None,
+                    action=ACTION_INSERT,
+                    before_json=None,
+                    after_json=_snapshot_movement(mov),
+                    confidence="HIGH",
+                )
+            )
 
     # Auditar inserciones: registros recién creados por este reimport
     # (source_upload_id=file, voided_at NULL, y NO estaban antes).
@@ -1110,6 +1203,34 @@ async def undo_reread(
             if ref:
                 restored_refs.add(ref)
     await _restore_fingerprints(session, tenant_id, restored_refs)
+
+    # 4. Inventario: revertir el efecto del reread sobre stock. Los movimientos que
+    # el reread voideó se auditaron como REREAD_VOID (kind=movement) y los que
+    # insertó como REREAD_INSERT (kind=movement). Deshacer = un-void los primeros
+    # (vuelven a aplicar su qty) + void los segundos (revierten su qty). La reversa
+    # es INCREMENTAL vía void_movement/unvoid_movement: NO se recomputa desde el
+    # ledger porque stock_units tiene base no-ledger (alta manual, chat, seed, y el
+    # catálogo que setea stock absoluto y registra solo el delta) que un recompute
+    # destruiría.
+    for it in items:
+        after = it.after_json or {}
+        before = it.before_json or {}
+        if it.action == ACTION_INSERT and after.get("kind") == "movement":
+            snap, do_unvoid = after, False
+        elif it.action == ACTION_VOID and before.get("kind") == "movement":
+            snap, do_unvoid = before, True
+        else:
+            continue
+        raw_mid = snap.get("id")
+        if not raw_mid:
+            continue
+        mov = await session.get(InventoryMovement, uuid.UUID(raw_mid))
+        if mov is None or mov.tenant_id != tenant_id:
+            continue
+        if do_unvoid:
+            await unvoid_movement(mov, session)
+        else:
+            await void_movement(mov, session)
 
     run.status = "REVERTED"
     run.completed_at = datetime.now(UTC)

@@ -8,6 +8,8 @@ usuario confirma).
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,11 +73,12 @@ async def test_merchandise_import_creates_products_not_expenses(
             {"fecha": "2024-01-15", "mercaderia": "Agua 1.5L", "cantidad": "12", "costo": "500"},
         ],
     }
+    # DEFAULT (sin stock_treatment) = saldo de apertura: entra al inventario como
+    # activo, SIN gasto ni salida de caja. El movimiento es un ajuste, no una compra.
     counts = await importer.insert_confirmed_data(
         db_session, sample_tenant.tenant_id, summary, {"productos": True}
     )
 
-    # Va a inventario, NO a gastos.
     assert counts["productos"] == 2
     assert counts["gastos"] == 0
     products = (await db_session.execute(select(Product))).scalars().all()
@@ -84,10 +87,57 @@ async def test_merchandise_import_creates_products_not_expenses(
     coca = next(p for p in products if p.name == "Coca Cola 500ml")
     assert coca.stock_units == 24  # cantidad → stock
 
+    # Saldo de apertura ⇒ NINGÚN gasto (no distorsiona caja).
     expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
-    assert expenses == []  # NO se crean gastos
-
-    # Audit de inventario presente.
+    assert expenses == []
+    # Movimiento estampado catalog_initial_stock, pero como AJUSTE (no compra).
     movements = (await db_session.execute(select(InventoryMovement))).scalars().all()
     assert len(movements) == 2
     assert {m.qty for m in movements} == {24, 12}
+    assert {m.source_type for m in movements} == {"catalog_initial_stock"}
+    assert {m.movement_type for m in movements} == {"adjustment"}
+
+
+@pytest.mark.asyncio
+async def test_merchandise_import_as_purchase_creates_cogs(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Con stock_treatment='purchase', el catálogo SÍ genera COGS + movimiento de compra."""
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "has_producto": True,
+        "stock_detectado": [
+            {"fecha": "2024-01-15", "mercaderia": "Coca Cola 500ml", "cantidad": "24",
+             "costo": "800"},
+            {"fecha": "2024-01-15", "mercaderia": "Agua 1.5L", "cantidad": "12", "costo": "500"},
+        ],
+    }
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"productos": True},
+        stock_treatment="purchase",
+    )
+
+    assert counts["productos"] == 2
+    assert counts["gastos"] == 0  # el COGS de catálogo no infla el conteo de gastos
+    products = (await db_session.execute(select(Product))).scalars().all()
+    coca = next(p for p in products if p.name == "Coca Cola 500ml")
+    agua = next(p for p in products if p.name == "Agua 1.5L")
+
+    # Compra ⇒ cada línea con costo genera su ExpenseEntry COGS (INVENTORY/COGS).
+    expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
+    assert len(expenses) == 2
+    assert {e.category for e in expenses} == {"INVENTORY"}
+    assert {e.expense_type for e in expenses} == {"COGS"}
+    by_product = {e.product_id: e for e in expenses}
+    assert by_product[coca.id].amount == Decimal("19200")  # 24 × 800
+    assert by_product[agua.id].amount == Decimal("6000")  # 12 × 500
+
+    # Movimiento de COMPRA estampado con origen de catálogo.
+    movements = (await db_session.execute(select(InventoryMovement))).scalars().all()
+    assert len(movements) == 2
+    assert {m.movement_type for m in movements} == {"purchase"}
+    assert {m.source_type for m in movements} == {"catalog_initial_stock"}

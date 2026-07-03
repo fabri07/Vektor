@@ -21,10 +21,22 @@ from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKe
 # (``from app.persistence.models.supplier import SENTINEL_FLAG_KEY, is_sentinel_value``).
 from app.persistence.models._sentinel import (
     SENTINEL_FLAG_KEY,
+    is_flag_true,
     is_sentinel_value,
 )
 
-__all__ = ["SENTINEL_FLAG_KEY", "Supplier", "is_sentinel_value"]
+# Flag de proveedor provisional derivado de una marca: lo escribe
+# ``scripts/revert_brand_supplier_collapse.py`` cuando reconstruye un proveedor a
+# partir de la marca de un producto (reasignable a un proveedor real más tarde).
+PROVISIONAL_FLAG_KEY = "_provisional_from_brand"
+
+__all__ = [
+    "PROVISIONAL_FLAG_KEY",
+    "SENTINEL_FLAG_KEY",
+    "Supplier",
+    "is_flag_true",
+    "is_sentinel_value",
+]
 
 
 class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -59,6 +71,11 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     def is_sentinel(self) -> bool:
         """¿Es el proveedor sentinela 'No identificado' (agrupa compras sin proveedor)?"""
         return is_sentinel_value((self.custom_fields or {}).get(SENTINEL_FLAG_KEY))
+
+    @property
+    def is_provisional(self) -> bool:
+        """¿Es un proveedor provisional derivado de una marca (reasignable)?"""
+        return is_flag_true((self.custom_fields or {}).get(PROVISIONAL_FLAG_KEY))
 
     def __repr__(self) -> str:
         return f"<Supplier tenant={self.tenant_id} name={self.name!r}>"

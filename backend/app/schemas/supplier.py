@@ -11,6 +11,16 @@ from pydantic_core import PydanticCustomError
 # Validador de CUIT/CUIL (formato + dígito verificador módulo 11) ahora compartido
 # con clientes en schemas/_ar_fiscal. NULL/vacío se aceptan: la obligatoriedad la
 # aplica el formulario manual, no el schema.
+from app.persistence.models._sentinel import (
+    SENTINEL_FLAG_KEY,
+    is_flag_true,
+    is_sentinel_value,
+)
+
+# Literal del flag provisional: una sola definición en el modelo ORM (evita
+# re-hardcodear "_provisional_from_brand" acá). ``_sentinel`` es un módulo puro
+# (sin deps ORM), así que importarlo no arma ciclo.
+from app.persistence.models.supplier import PROVISIONAL_FLAG_KEY
 from app.schemas._ar_fiscal import validate_cuit as _validate_cuil
 
 
@@ -45,7 +55,17 @@ class SupplierResponse(BaseModel):
         Se identifica SOLO por el flag, nunca por el nombre: un proveedor real
         llamado "No identificado" es un proveedor común.
         """
-        return (self.custom_fields or {}).get("_sentinel") in ("true", True)
+        return is_sentinel_value((self.custom_fields or {}).get(SENTINEL_FLAG_KEY))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_provisional(self) -> bool:
+        """¿Es un proveedor provisional derivado de una marca (reasignable)?
+
+        Espejo de ``is_sentinel``: se identifica SOLO por el flag
+        ``_provisional_from_brand`` que escribe el script de reversión.
+        """
+        return is_flag_true((self.custom_fields or {}).get(PROVISIONAL_FLAG_KEY))
 
 
 class CreateSupplierRequest(BaseModel):
@@ -82,6 +102,27 @@ class SupplierProductPurchaseResponse(BaseModel):
         # Convención del repo (ver schemas/transaction.py): serializar Decimal como
         # número evita que el front reciba un string y rompa formatARS / los cálculos.
         return float(v)
+
+
+class SupplierBrandGroupResponse(BaseModel):
+    """Un grupo de productos de una misma marca comprados a un proveedor.
+
+    ``brand=None`` = productos sin marca; el label ("Productos genéricos") lo pone
+    el frontend. ``is_official`` = el nombre del proveedor coincide exacto con la
+    marca del grupo.
+    """
+
+    model_config = {"from_attributes": True}
+
+    brand: str | None
+    is_official: bool
+    products: list[SupplierProductPurchaseResponse]
+
+
+class SupplierProductsGroupedResponse(BaseModel):
+    """Respuesta agrupada de ``GET /suppliers/{id}/products`` (jerarquía marca)."""
+
+    groups: list[SupplierBrandGroupResponse]
 
 
 class ReceiptLineRequest(BaseModel):
