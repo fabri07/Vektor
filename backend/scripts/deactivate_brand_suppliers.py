@@ -126,6 +126,9 @@ _MERCH_SOURCE = "MERCH_SOURCE_NO_CONTACT"
 _NO_EXPENSES = "NO_EXPENSES"
 _REVIEW_MANUAL = "REVIEW_MANUAL"
 _EXCLUDED_SENTINEL = "EXCLUDED_SENTINEL"
+# Reactivado por revert_brand_supplier_collapse.py (flag _provisional_from_brand):
+# decisión humana de restaurar la marca-proveedor — este script no la vuelve a tocar.
+_EXCLUDED_PROVISIONAL = "EXCLUDED_PROVISIONAL"
 
 
 async def _resolve_or_create_sentinel(session: AsyncSession, tid: uuid.UUID) -> uuid.UUID:
@@ -196,6 +199,16 @@ async def _classify_tenant(
         # booleano JSON true (mismo criterio que la app, app/persistence/models/supplier.py).
         if cf.get("_sentinel") in (True, "true") or name == _SENTINEL_NAME:
             candidates.append(_row(tid, s, _EXCLUDED_SENTINEL, matches_brand=False))
+            continue
+
+        # Excluir proveedores provisionales reactivados por
+        # revert_brand_supplier_collapse.py: son marcas-proveedor que un humano decidió
+        # RESTAURAR (el colapso se revirtió a propósito). Sin esta guarda, re-correr
+        # este script después del revert los volvería a colapsar (ping-pong), y peor:
+        # los movimientos que el revert re-apuntó (ya no NULL) no se moverían al
+        # sentinela, dejando mercadería colgada de un proveedor desactivado.
+        if cf.get("_provisional_from_brand") in (True, "true"):
+            candidates.append(_row(tid, s, _EXCLUDED_PROVISIONAL, matches_brand=False))
             continue
 
         # ¿Cuántos productos de este tenant tienen esta marca/proveedor? Una marca real
