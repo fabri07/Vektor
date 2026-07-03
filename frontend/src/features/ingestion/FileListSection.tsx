@@ -76,6 +76,11 @@ export function FileListSection() {
 
   // Estado del modal de relectura (en memoria de sesión).
   const [reread, setReread] = useState<RereadState | null>(null);
+  // B: confirmación previa a arrancar la relectura (borra los datos cargados del
+  // archivo y lo vuelve a leer desde cero).
+  const [rereadConfirm, setRereadConfirm] = useState<UploadedFileItem | null>(
+    null,
+  );
   // Resultado de la última relectura aplicada por archivo → alimenta el badge
   // "Relectura" y permite re-abrir el diff sin volver a llamar al backend.
   const [rereadResults, setRereadResults] = useState<
@@ -421,7 +426,7 @@ export function FileListSection() {
                         {(file.processing_status === "DONE" ||
                           file.processing_status === "NEEDS_COMPLETION") && (
                           <button
-                            onClick={() => rereadPreviewMutation.mutate(file)}
+                            onClick={() => setRereadConfirm(file)}
                             disabled={
                               rereadPreviewMutation.isPending &&
                               rereadPreviewMutation.variables?.id === file.id
@@ -467,6 +472,49 @@ export function FileListSection() {
           </table>
         </div>
         ))}
+
+      {/* B: confirmación antes de arrancar la relectura. */}
+      <Modal
+        isOpen={rereadConfirm !== null}
+        onClose={() => setRereadConfirm(null)}
+        title="Volver a leer archivo"
+        size="md"
+      >
+        {rereadConfirm && (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-vektor-body">
+              Se van a{" "}
+              <span className="font-semibold text-vektor-white">
+                borrar los datos cargados
+              </span>{" "}
+              de{" "}
+              <span className="font-medium text-vektor-white">
+                {rereadConfirm.original_filename}
+              </span>{" "}
+              y volver a leerlo desde cero. ¿Confirmás?
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRereadConfirm(null)}
+                className="rounded-lg px-3 py-1.5 text-sm font-medium text-vektor-body hover:bg-vektor-surface transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  rereadPreviewMutation.mutate(rereadConfirm);
+                  setRereadConfirm(null);
+                }}
+                className="rounded-lg bg-vk-blue px-3 py-1.5 text-sm font-medium text-white hover:brightness-110 transition-colors"
+              >
+                Sí, releer
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal
         isOpen={reread !== null}

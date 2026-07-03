@@ -2,13 +2,16 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import type { AxiosError } from "axios";
 import { Button } from "@/components/ui/Button";
 import {
   ingestionService,
   type FilePreview,
+  type StockTreatment,
 } from "@/services/ingestion.service";
 import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
+import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 
 const ACCEPTED_EXTENSIONS = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
 const MAX_POLLS = 30;
@@ -19,6 +22,7 @@ type Phase =
   | "uploading"
   | "polling"
   | "needs_confirmation"
+  | "duplicate_blocked"
   | "done"
   | "failed";
 
@@ -60,6 +64,12 @@ export function FileUploadSection() {
   });
   const [isConfirming, setIsConfirming] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  // C: aviso no intrusivo (re-subida por nombre) + detalle del 409 (duplicado exacto).
+  const [warning, setWarning] = useState<string | null>(null);
+  const [duplicateDetail, setDuplicateDetail] = useState<string | null>(null);
+  // A: tratamiento del stock cuando el archivo trae productos (default: saldo de apertura).
+  const [stockTreatment, setStockTreatment] =
+    useState<StockTreatment>("opening_balance");
 
   const pollCount = useRef(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -119,21 +129,36 @@ export function FileUploadSection() {
     }, POLL_INTERVAL_MS);
   }
 
-  async function handleUpload() {
+  async function handleUpload(allowDuplicate = false) {
     if (!selectedFile) return;
     setPhase("uploading");
     setError(null);
+    setWarning(null);
+    setDuplicateDetail(null);
     setUploadProgress(0);
     try {
       const result = await ingestionService.upload(
         selectedFile,
         "general",
         (pct) => setUploadProgress(pct),
+        allowDuplicate,
       );
       setFileId(result.file_id);
+      if (result.warning) setWarning(result.warning);
       setPhase("polling");
       startPolling(result.file_id);
-    } catch {
+    } catch (err) {
+      const axiosErr = err as AxiosError<{ detail?: string }>;
+      // C: 409 = el contenido EXACTO ya fue importado. Mostramos el detalle del
+      // backend y ofrecemos "Importar igual" (reintenta con allow_duplicate=true).
+      if (axiosErr.response?.status === 409) {
+        setDuplicateDetail(
+          axiosErr.response.data?.detail ??
+            "Este archivo ya fue importado antes. Reimportarlo duplicaría los datos.",
+        );
+        setPhase("duplicate_blocked");
+        return;
+      }
       setPhase("failed");
       setError(
         "No se pudo subir el archivo. Verificá el formato (xlsx, csv, txt, docx, jpg, png) e intentá de nuevo.",
@@ -156,11 +181,26 @@ export function FileUploadSection() {
     startPolling(fileId);
   }
 
+  // A: el archivo trae stock si el summary lo indica o si se tildó "productos".
+  const hasStock =
+    (preview != null &&
+      summaryHasStock(
+        preview.parsed_summary_json as Record<string, unknown> | null,
+      )) ||
+    confirmedFields.productos;
+
   async function handleConfirm() {
     if (!fileId) return;
     setIsConfirming(true);
     try {
-      await ingestionService.confirmFile(fileId, confirmedFields);
+      await ingestionService.confirmFile(
+        fileId,
+        confirmedFields,
+        undefined,
+        undefined,
+        undefined,
+        hasStock ? stockTreatment : undefined,
+      );
       setPhase("done");
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
     } catch {
@@ -177,6 +217,9 @@ export function FileUploadSection() {
     setFileId(null);
     setPreview(null);
     setError(null);
+    setWarning(null);
+    setDuplicateDetail(null);
+    setStockTreatment("opening_balance");
     setUploadProgress(0);
     pollCount.current = 0;
     setConfirmedFields({ ventas: true, gastos: true, productos: true });
@@ -320,6 +363,30 @@ export function FileUploadSection() {
         </p>
       )}
 
+      {/* C: aviso no intrusivo — re-subida por nombre (versión actualizada). */}
+      {warning && (
+        <p className="mt-3 rounded-lg border border-vk-warning/20 bg-vk-warning-bg px-4 py-2.5 text-sm text-vk-warning">
+          {warning}
+        </p>
+      )}
+
+      {/* C: contenido EXACTO ya importado → 409. Detalle del backend + "Importar igual". */}
+      {phase === "duplicate_blocked" && (
+        <div className="mt-4 rounded-lg border border-vk-warning/30 bg-vk-warning-bg p-4">
+          <p className="mb-3 text-sm text-vk-warning">
+            {duplicateDetail}
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={() => void handleUpload(true)}>
+              Importar igual
+            </Button>
+            <Button size="sm" variant="secondary" onClick={handleReset}>
+              Cancelar
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Confirmation panel */}
       {phase === "needs_confirmation" && preview && (
         <div className="mt-4 rounded-lg border border-vk-warning/20 bg-vk-warning-bg p-4">
@@ -349,6 +416,15 @@ export function FileUploadSection() {
             ))}
           </div>
 
+          {/* A: si el archivo trae stock/productos, preguntar cómo tratarlo. */}
+          {hasStock && (
+            <StockTreatmentChoice
+              value={stockTreatment}
+              onChange={setStockTreatment}
+              className="mb-4"
+            />
+          )}
+
           <Button
             size="sm"
             loading={isConfirming}
@@ -371,7 +447,7 @@ export function FileUploadSection() {
       <div className="mt-4 flex gap-2">
         {phase === "idle" && selectedFile && (
           <>
-            <Button size="sm" onClick={handleUpload}>
+            <Button size="sm" onClick={() => void handleUpload()}>
               Subir archivo
             </Button>
             <Button

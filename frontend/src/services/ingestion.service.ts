@@ -35,6 +35,23 @@ export interface ConfirmIngestionResult {
   message: string;
 }
 
+/**
+ * Tratamiento del stock de un archivo de catálogo/lista al confirmar:
+ * - "opening_balance": saldo de apertura (ya lo tenía) → solo carga inventario,
+ *   sin gasto de mercadería ni salida de caja.
+ * - "purchase": compra → registra el gasto (COGS) y la baja de caja.
+ */
+export type StockTreatment = "opening_balance" | "purchase";
+
+// Respuesta del upload: incluye un aviso (warning) opcional — p. ej. re-subida
+// por nombre (versión actualizada) — y el id del archivo original si es duplicado.
+export interface UploadResult {
+  file_id: string;
+  status: string;
+  duplicate_of?: string | null;
+  warning?: string | null;
+}
+
 export interface ColumnMappingSuggestion {
   source_column: string;
   normalized_column: string;
@@ -146,11 +163,16 @@ export const ingestionService = {
     file: File,
     fileHint: string = "general",
     onProgress?: (percent: number) => void,
-  ): Promise<{ file_id: string; status: string }> {
+    // Override explícito: reimportar un archivo cuyo contenido EXACTO ya fue
+    // importado (el backend, por defecto, lo bloquea con 409 para no duplicar).
+    allowDuplicate: boolean = false,
+  ): Promise<UploadResult> {
     const fd = new FormData();
     fd.append("file", file);
-    const res = await api.post<{ file_id: string; status: string }>(
-      `/ingestion/upload?file_hint=${fileHint}`,
+    const qs = new URLSearchParams({ file_hint: fileHint });
+    if (allowDuplicate) qs.set("allow_duplicate", "true");
+    const res = await api.post<UploadResult>(
+      `/ingestion/upload?${qs.toString()}`,
       fd,
       {
         headers: { "Content-Type": "multipart/form-data" },
@@ -215,6 +237,8 @@ export const ingestionService = {
     columnMappings?: ColumnMapping[],
     contextConfirmed?: Record<string, boolean>,
     contextEntity?: Record<string, string>,
+    // Solo relevante cuando el archivo trae stock/productos: cómo tratar ese stock.
+    stockTreatment?: StockTreatment,
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
@@ -223,6 +247,7 @@ export const ingestionService = {
         column_mappings: columnMappings ?? [],
         context_confirmed: contextConfirmed ?? {},
         context_entity: contextEntity ?? {},
+        stock_treatment: stockTreatment ?? null,
       },
     );
     return res.data;
