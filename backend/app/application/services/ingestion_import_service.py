@@ -684,6 +684,12 @@ async def _record_stock_movement(
     """
     if qty == 0:
         return
+    if movement_type == "adjustment" and source_type is None:
+        raise ValueError(
+            "movement_type='adjustment' requiere source_type "
+            "(ver app/application/services/inventory_movement_origin.py) — "
+            "un ajuste sin origen trazable no puede reconciliarse ni auditarse."
+        )
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.inventory import (  # noqa: PLC0415

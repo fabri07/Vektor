@@ -23,6 +23,12 @@ from uuid import UUID
 SOURCE_PURCHASE_IMPORT = "purchase_import"          # libro de compras / gasto de mercadería
 SOURCE_CATALOG_INITIAL_STOCK = "catalog_initial_stock"  # stock inicial de un catálogo
 SOURCE_MANUAL_ADJUSTMENT = "manual_adjustment"      # ajuste manual de stock
+# RESERVADO: hoy ningún código usa este valor — UPDATE_STOCK vía chat produce
+# movement_type='purchase'/'sale' en stock_service.py, nunca 'adjustment' (ver
+# pending_action_service.py). Cuando exista un ajuste manual real (chat o
+# dashboard), ese writer DEBE setear source_type=SOURCE_MANUAL_ADJUSTMENT + un
+# actor/motivo — el CHECK ck_inventory_movements_adjustment_source_type (migración
+# 20260728_0001) ya lo exige a nivel DB para movement_type='adjustment'.
 SOURCE_RECEIPT = "receipt"                          # remito de proveedor
 SOURCE_RECONCILIATION = "reconciliation"            # reparación/reconciliación de datos
 

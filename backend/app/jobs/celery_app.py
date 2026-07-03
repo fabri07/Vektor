@@ -34,6 +34,7 @@ celery_app = Celery(
         "app.jobs.send_weekly_email",
         "app.application.services.score_trigger_service",
         "app.jobs.stock_tasks",
+        "app.jobs.inventory_integrity_check",
     ],
 )
 
@@ -69,6 +70,8 @@ celery_app.conf.update(
         "jobs.process_text_document": {"queue": "ingestion"},
         "jobs.process_image_ocr": {"queue": "ingestion"},
         "jobs.reread_apply": {"queue": "ingestion"},
+        "jobs.inventory_integrity_check": {"queue": "scores"},
+        "jobs.inventory_integrity_check_all_tenants": {"queue": "scores"},
     },
 )
 
@@ -94,5 +97,13 @@ celery_app.conf.beat_schedule = {
         # Every Monday at 08:30 ART (UTC-3 → 11:30 UTC), after momentum update.
         "schedule": _crontab(hour=11, minute=30, day_of_week=1),
         "options": {"queue": "notifications"},
+    },
+    "inventory-integrity-check-all-tenants": {
+        "task": "jobs.inventory_integrity_check_all_tenants",
+        # Every Wednesday at 03:00 ART (UTC-3 → 06:00 UTC) — semanal, fuera del
+        # horario del lunes (momentum/email) ya ocupado; no es una alerta
+        # accionable el mismo día, no necesita cadencia diaria.
+        "schedule": _crontab(hour=6, minute=0, day_of_week=3),
+        "options": {"queue": "scores"},
     },
 }
