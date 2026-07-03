@@ -83,15 +83,19 @@ async def get_momentum_profile(
             estimated_weeks=g.get("estimated_weeks", 0),
         )
 
-    # Milestones
-    milestones: list[MilestoneItem] = [
-        MilestoneItem(
-            code=m["code"],
-            label=m["label"],
-            unlocked_at=datetime.fromisoformat(m["unlocked_at"]),
+    # Milestones — se saltean entradas corruptas (sin code/label/unlocked_at) en vez
+    # de romper todo el perfil de momentum por un dato malformado.
+    milestones: list[MilestoneItem] = []
+    for m in mp.milestones_json or []:
+        if not m.get("code") or not m.get("label") or not m.get("unlocked_at"):
+            continue
+        milestones.append(
+            MilestoneItem(
+                code=m["code"],
+                label=m["label"],
+                unlocked_at=datetime.fromisoformat(m["unlocked_at"]),
+            )
         )
-        for m in (mp.milestones_json or [])
-    ]
 
     return MomentumProfileResponse(
         best_score_ever=mp.best_score_ever,

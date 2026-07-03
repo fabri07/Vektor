@@ -248,7 +248,9 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
 
     # ── 4. MILESTONES ─────────────────────────────────────────────────────────
 
-    already_unlocked: set[str] = {m["code"] for m in (mp.milestones_json or [])}
+    already_unlocked: set[str] = {
+        m["code"] for m in (mp.milestones_json or []) if m.get("code")
+    }
     new_milestones: list[dict[str, Any]] = list(mp.milestones_json or [])
     new_notifications: list[Notification] = []
 
