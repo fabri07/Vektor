@@ -100,6 +100,8 @@ class InventoryIntegrityDivergence(BaseModel):
     diff: int
     anchor_qty: int
     purchase_qty: int
+    tagged_adjustment_qty: int
+    loss_qty: int
     sales_qty: int
 
 

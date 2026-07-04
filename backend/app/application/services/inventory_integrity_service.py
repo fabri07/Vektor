@@ -12,6 +12,19 @@ ventas) para que corra sola, sin reconstrucción manual caso por caso.
 Sigue el patrón de query de `backend/scripts/diag_product_stock_reconstruction.py`
 (agrupa `inventory_movements` vivos por tipo + suma `sales_entries.quantity`).
 
+La fórmula suma, además del ancla y las compras:
+- `adjustment` con `source_type in (reconciliation, manual_adjustment)`: correcciones
+  deliberadas y auditadas — el CHECK `ck_inventory_movements_adjustment_source_type`
+  (migración `20260728_0001`) ya exige que todo `adjustment` tenga uno de estos dos
+  `source_type`, así que son confiables.
+- `loss` (merma): viene de `stock_service.register_stock_loss`, auditado, y su `qty`
+  ya es negativa en el ledger.
+
+Se sigue salteando (`skipped_complex_ledger`) cualquier producto con: `sale`/`return`
+en el ledger (las ventas se cuentan desde `sales_entries`, no desde
+`inventory_movements` — contarlas dos veces duplicaría), o un `adjustment` sin
+`source_type` tagueado (dato legacy previo al CHECK, no auditable con confianza).
+
 No-invention: nunca concluye ni corrige — solo reporta divergencias con sus números,
 para que un humano decida. La persistencia de la alerta (Notification/
 DecisionAuditLog) es responsabilidad del llamador (endpoint admin o job), no de esta
@@ -27,7 +40,13 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
+from app.application.services.inventory_movement_origin import (
+    SOURCE_CATALOG_INITIAL_STOCK,
+    SOURCE_MANUAL_ADJUSTMENT,
+    SOURCE_RECONCILIATION,
+)
+
+_TAGGED_ADJUSTMENT_SOURCES = frozenset({SOURCE_RECONCILIATION, SOURCE_MANUAL_ADJUSTMENT})
 
 _UUID_PARAM = PG_UUID(as_uuid=True)
 
@@ -99,15 +118,27 @@ async def check_tenant_inventory_integrity(
 
         anchor_qty = 0
         purchase_qty = 0
+        tagged_adjustment_qty = 0
+        loss_qty = 0
         has_other_movement_types = False
         for row in by_type:
-            if row["source_type"] == SOURCE_CATALOG_INITIAL_STOCK:
+            movement_type = row["movement_type"]
+            source_type = row["source_type"]
+            if source_type == SOURCE_CATALOG_INITIAL_STOCK:
                 anchor_qty += int(row["total_qty"])
-            elif row["movement_type"] == "purchase":
+            elif movement_type == "purchase":
                 purchase_qty += int(row["total_qty"])
+            elif movement_type == "adjustment" and source_type in _TAGGED_ADJUSTMENT_SOURCES:
+                # Correcciones deliberadas y auditadas (reconciliación o ajuste manual
+                # con procedencia) — blindadas por el CHECK de la migración 20260728_0001.
+                tagged_adjustment_qty += int(row["total_qty"])
+            elif movement_type == "loss":
+                # La merma ya viene negativa en el ledger.
+                loss_qty += int(row["total_qty"])
             else:
-                # loss / sale / adjustment (fuera de catalog_initial_stock): la fórmula
-                # simple no los contempla — saltear en vez de arriesgar falso positivo.
+                # sale/return (duplicaría sales_entries) o adjustment sin source_type
+                # tagueado (legacy, no auditable): la fórmula no los contempla —
+                # saltear en vez de arriesgar un falso positivo.
                 has_other_movement_types = True
 
         if has_other_movement_types:
@@ -127,7 +158,7 @@ async def check_tenant_inventory_integrity(
             )
         ).scalar_one()
 
-        stock_esperado = anchor_qty + purchase_qty - int(sales)
+        stock_esperado = anchor_qty + purchase_qty + tagged_adjustment_qty + loss_qty - int(sales)
         stock_units = int(prod["stock_units"])
         diff = stock_units - stock_esperado
         relative_base = max(1, abs(stock_esperado))
@@ -141,6 +172,8 @@ async def check_tenant_inventory_integrity(
                     "diff": diff,
                     "anchor_qty": anchor_qty,
                     "purchase_qty": purchase_qty,
+                    "tagged_adjustment_qty": tagged_adjustment_qty,
+                    "loss_qty": loss_qty,
                     "sales_qty": int(sales),
                 }
             )

@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.inventory_integrity_service import (
     check_tenant_inventory_integrity,
 )
-from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
+from app.application.services.inventory_movement_origin import (
+    SOURCE_CATALOG_INITIAL_STOCK,
+    SOURCE_MANUAL_ADJUSTMENT,
+    SOURCE_RECONCILIATION,
+)
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -119,15 +123,108 @@ async def test_skips_product_without_catalog_anchor(
     assert result["divergences"] == []
 
 
-async def test_skips_product_with_loss_movements_as_complex_ledger(
+async def test_loss_movement_is_now_included_in_the_formula(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Con merma (loss) registrada, la fórmula simple no aplica — se saltea con flag
-    separado en vez de reportar un falso positivo."""
+    """La merma (loss) ya NO saltea el producto — se suma (ya viene negativa) a la
+    fórmula. Con anchor=36 y loss=-5, esperado=31; stock_units=1000 diverge muy por
+    encima del umbral, así que se reporta (antes de esta tarea se salteaba como
+    ledger complejo)."""
     tid = sample_tenant.tenant_id
     product = await _make_product(db_session, tid, stock_units=1000, name="Con merma")
     db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
     db_session.add(_movement(tid, product.id, -5, "loss", None))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["checked"] == 1
+    assert result["skipped_complex_ledger"] == 0
+    assert len(result["divergences"]) == 1
+    div = result["divergences"][0]
+    assert div["stock_esperado"] == 31
+    assert div["loss_qty"] == -5
+    assert div["tagged_adjustment_qty"] == 0
+
+
+async def test_no_divergence_with_tagged_adjustment_and_loss_when_stock_matches(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Ancla + compra + adjustment taggeado `reconciliation` + loss: ya no se
+    saltea, y si `stock_units` coincide con la fórmula extendida no hay divergencia."""
+    tid = sample_tenant.tenant_id
+    # esperado = 36 + 217 + 50 (adjustment reconciliation) - 5 (loss) - 249 (ventas) = 49
+    product = await _make_product(db_session, tid, stock_units=49, name="Con ajuste y merma")
+    db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_movement(tid, product.id, 217, "purchase", "purchase_import"))
+    db_session.add(_movement(tid, product.id, 50, "adjustment", SOURCE_RECONCILIATION))
+    db_session.add(_movement(tid, product.id, -5, "loss", None))
+    db_session.add(_sale(tid, product.id, 249))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["checked"] == 1
+    assert result["skipped_complex_ledger"] == 0
+    assert result["divergences"] == []
+
+
+async def test_reports_divergence_with_tagged_adjustment_and_loss_in_payload(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Mismo ledger que el caso anterior (ancla + compra + adjustment taggeado
+    `manual_adjustment` + loss) pero `stock_units` no coincide: la divergencia debe
+    traer `tagged_adjustment_qty` y `loss_qty` en el payload."""
+    tid = sample_tenant.tenant_id
+    # esperado = 36 + 217 + 50 - 5 - 249 = 49; stock_units = 300 → diff = 251.
+    product = await _make_product(db_session, tid, stock_units=300, name="Con ajuste y merma 2")
+    db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_movement(tid, product.id, 217, "purchase", "purchase_import"))
+    db_session.add(_movement(tid, product.id, 50, "adjustment", SOURCE_MANUAL_ADJUSTMENT))
+    db_session.add(_movement(tid, product.id, -5, "loss", None))
+    db_session.add(_sale(tid, product.id, 249))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["checked"] == 1
+    assert result["skipped_complex_ledger"] == 0
+    assert len(result["divergences"]) == 1
+    div = result["divergences"][0]
+    assert div["stock_esperado"] == 49
+    assert div["diff"] == 251
+    assert div["tagged_adjustment_qty"] == 50
+    assert div["loss_qty"] == -5
+
+
+async def test_skips_product_with_untagged_adjustment_as_complex_ledger(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Un `adjustment` sin `source_type` (legacy, no auditable) sigue salteando el
+    producto — no es lo mismo que un ajuste taggeado `reconciliation`/`manual_adjustment`."""
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=100, name="Ajuste sin tag")
+    db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_movement(tid, product.id, 50, "adjustment", None))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["checked"] == 1
+    assert result["skipped_complex_ledger"] == 1
+    assert result["divergences"] == []
+
+
+async def test_skips_product_with_sale_movement_in_ledger_as_complex_ledger(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Un movimiento `sale` en el ledger de inventario sigue salteando el producto:
+    las ventas se cuentan desde `sales_entries`, contar el movimiento `sale` además
+    duplicaría el conteo."""
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=20, name="Con sale en ledger")
+    db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_movement(tid, product.id, -10, "sale", None))
     await db_session.flush()
 
     result = await check_tenant_inventory_integrity(db_session, tid)
