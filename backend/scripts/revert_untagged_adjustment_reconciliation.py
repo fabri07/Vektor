@@ -122,6 +122,8 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
 
     unvoided = 0
     untagged = 0
+    skipped_untag = 0
+    skipped_unvoid = 0
     products_restored: list[str] = []
 
     # 1. Des-taggear backfills (source_type → NULL; limpiar upload_id/row_ref si catalog).
@@ -132,7 +134,7 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
         st = bf.get("source_type")
         if bf.get("source_upload_id") is not None:
             # Caso catalog: limpiar los tres campos que la corrida seteó.
-            await session.execute(
+            result = await session.execute(
                 text(
                     "UPDATE inventory_movements "
                     "SET source_type = NULL, source_upload_id = NULL, source_row_ref = NULL "
@@ -143,7 +145,7 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
             )
         else:
             # Caso reconciliation: solo tocó source_type.
-            await session.execute(
+            result = await session.execute(
                 text(
                     "UPDATE inventory_movements SET source_type = NULL "
                     "WHERE id = CAST(:mid AS uuid) AND tenant_id = CAST(:tid AS uuid) "
@@ -151,14 +153,19 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
                 ),
                 {"mid": it["movement_id"], "tid": tid, "st": st},
             )
-        untagged += 1
+        # rowcount==0 → ya estaba des-tagueado (corrida ya revertida antes): no-op,
+        # no cuenta como mutación real.
+        if result.rowcount:
+            untagged += 1
+        else:
+            skipped_untag += 1
 
     # 2. Des-voidear movimientos.
     products_to_restore: set[str] = set()
     for it in items:
         if not it.get("voided"):
             continue
-        await session.execute(
+        result = await session.execute(
             text(
                 "UPDATE inventory_movements SET voided_at = NULL "
                 "WHERE id = CAST(:mid AS uuid) AND tenant_id = CAST(:tid AS uuid) "
@@ -166,8 +173,13 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
             ),
             {"mid": it["movement_id"], "tid": tid},
         )
-        unvoided += 1
-        products_to_restore.add(it["product_id"])
+        # rowcount==0 → ya estaba des-voideado (no-op): no cuenta, y no re-dispara la
+        # restauración de stock del producto (ya se restauró en la corrida anterior).
+        if result.rowcount:
+            unvoided += 1
+            products_to_restore.add(it["product_id"])
+        else:
+            skipped_unvoid += 1
 
     # 3. Restaurar stock ABSOLUTO por producto (una vez por producto, por el clamp).
     for pid in products_to_restore:
@@ -216,6 +228,8 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
         "reverted_audit_id": run["audit_id"],
         "unvoided_movements": unvoided,
         "untagged_movements": untagged,
+        "skipped_untag_noop": skipped_untag,
+        "skipped_unvoid_noop": skipped_unvoid,
         "products_restored": products_restored,
     }
     await session.execute(
@@ -236,6 +250,8 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
         "tenant_id": tid,
         "unvoided": unvoided,
         "untagged": untagged,
+        "skipped_untag_noop": skipped_untag,
+        "skipped_unvoid_noop": skipped_unvoid,
         "products_restored": len(products_restored),
     }
 
@@ -305,10 +321,17 @@ async def main() -> None:
             await session.commit()
             tot_unvoid = sum(r["unvoided"] for r in results)
             tot_untag = sum(r["untagged"] for r in results)
+            tot_skip_unvoid = sum(r["skipped_unvoid_noop"] for r in results)
+            tot_skip_untag = sum(r["skipped_untag_noop"] for r in results)
             print(
                 f"\nCOMMIT: {tot_unvoid} movimiento(s) des-voideado(s), {tot_untag} "
                 f"des-tagueado(s) (decision_type={_REVERT_DECISION})."
             )
+            if tot_skip_unvoid or tot_skip_untag:
+                print(
+                    f"    (no-op, ya revertidos antes: {tot_skip_unvoid} des-voideo(s) + "
+                    f"{tot_skip_untag} des-tagueo(s) omitidos)"
+                )
             if args.out:
                 _write_report(args.out, results)
         else:

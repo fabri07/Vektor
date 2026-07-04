@@ -399,6 +399,62 @@ async def _plan_tenant(
     return items
 
 
+def _compute_stock_after(stock_before: int, delta: float) -> tuple[int, bool]:
+    """Calcula el stock resultante de un ajuste incremental, clampeado a 0.
+
+    Pura y testeable — reusada por la mutación real (``_apply_tenant``) y por el
+    plan read-only de dry-run (``_plan_stock_changes``), para no duplicar la
+    aritmética del clamp en dos lugares.
+    """
+    raw_after = stock_before + delta
+    stock_after = max(0, raw_after)
+    clamped = raw_after < 0
+    return stock_after, clamped
+
+
+def _group_voids_by_product(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Agrupa los items con VOID planificado por producto (para el delta incremental)."""
+    voids_by_product: dict[str, list[dict[str, Any]]] = {}
+    for it in items:
+        if it["voided"]:
+            voids_by_product.setdefault(it["product_id"], []).append(it)
+    return voids_by_product
+
+
+async def _plan_stock_changes(
+    session: AsyncSession, tid: str, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Plan de stock (read-only) para los VOID planificados — usado en dry-run.
+
+    Mismo cálculo que ``_apply_tenant`` (delta incremental + clamp), pero SOLO
+    SELECT: no muta ``products`` ni ``inventory_balances``. Permite mostrar
+    stock_before/stock_after/clamped ANTES de aplicar.
+    """
+    stock_changes: list[dict[str, Any]] = []
+    for pid, prod_items in _group_voids_by_product(items).items():
+        delta = -sum((it["qty"] or 0) for it in prod_items)
+        stock_before = (
+            await session.execute(
+                text(
+                    "SELECT stock_units FROM products "
+                    "WHERE id = CAST(:pid AS uuid) AND tenant_id = CAST(:tid AS uuid)"
+                ),
+                {"pid": pid, "tid": tid},
+            )
+        ).scalar_one()
+        stock_before = int(stock_before)
+        stock_after, clamped = _compute_stock_after(stock_before, delta)
+        stock_changes.append(
+            {
+                "product_id": pid,
+                "stock_before": stock_before,
+                "stock_after": stock_after,
+                "clamped": clamped,
+            }
+        )
+    return stock_changes
+
+
 async def _apply_tenant(
     session: AsyncSession, tid: str, items: list[dict[str, Any]], window_hours: int
 ) -> dict[str, Any]:
@@ -432,10 +488,7 @@ async def _apply_tenant(
         backfilled += 1
 
     # 2. Voids, agrupados por producto para el ajuste incremental de stock.
-    voids_by_product: dict[str, list[dict[str, Any]]] = {}
-    for it in items:
-        if it["voided"]:
-            voids_by_product.setdefault(it["product_id"], []).append(it)
+    voids_by_product = _group_voids_by_product(items)
 
     stock_changes: list[dict[str, Any]] = []
     for pid, prod_items in voids_by_product.items():
@@ -486,9 +539,7 @@ async def _apply_tenant(
                 {"tid": tid, "pid": pid, "cq": stock_before},
             )
 
-        raw_after = stock_before + delta
-        stock_after = max(0, raw_after)
-        clamped = raw_after < 0
+        stock_after, clamped = _compute_stock_after(stock_before, delta)
 
         await session.execute(
             text(
@@ -558,12 +609,37 @@ def _counts_by_category(items: list[dict[str, Any]]) -> dict[str, int]:
     return dict(Counter(it["category"] for it in items))
 
 
-def _print_summary(tid: str, items: list[dict[str, Any]]) -> None:
+def _annotate_stock_changes(
+    items: list[dict[str, Any]], stock_changes: list[dict[str, Any]]
+) -> None:
+    """Adjunta stock_before/stock_after/clamped (del plan de su producto) a cada item
+    VOID, in-place. Items no-VOID quedan con esos campos en ``None`` (CSV vacío)."""
+    by_product = {sc["product_id"]: sc for sc in stock_changes}
+    for it in items:
+        sc = by_product.get(it["product_id"]) if it["voided"] else None
+        it["stock_before"] = sc["stock_before"] if sc else None
+        it["stock_after"] = sc["stock_after"] if sc else None
+        it["clamped"] = sc["clamped"] if sc else None
+
+
+def _print_summary(
+    tid: str, items: list[dict[str, Any]], stock_changes: list[dict[str, Any]] | None = None
+) -> None:
     counts = _counts_by_category(items)
     products = {it["product_id"] for it in items if it["voided"]}
     print(f"tenant {tid}: {len(items)} adjustment(s) sin procedencia — {counts}")
     if products:
         print(f"    {len(products)} producto(s) con VOID (ajuste incremental de stock)")
+    for sc in stock_changes or []:
+        flag = " [CLAMP]" if sc["clamped"] else ""
+        print(
+            f"      producto {sc['product_id']}: stock {sc['stock_before']} -> "
+            f"{sc['stock_after']}{flag}"
+        )
+
+
+def _csv_or_blank(value: Any) -> Any:
+    return "" if value is None else value
 
 
 def _write_report(path: str, items: list[dict[str, Any]]) -> None:
@@ -578,6 +654,9 @@ def _write_report(path: str, items: list[dict[str, Any]]) -> None:
         "category",
         "action",
         "evidence_json",
+        "stock_before",
+        "stock_after",
+        "clamped",
     ]
     action_by_cat = {
         _CAT_RECON: "backfill_reconciliation",
@@ -602,6 +681,9 @@ def _write_report(path: str, items: list[dict[str, Any]]) -> None:
                         "category": it["category"],
                         "action": action_by_cat.get(it["category"], ""),
                         "evidence_json": json.dumps(it["evidence"], ensure_ascii=False),
+                        "stock_before": _csv_or_blank(it.get("stock_before")),
+                        "stock_after": _csv_or_blank(it.get("stock_after")),
+                        "clamped": _csv_or_blank(it.get("clamped")),
                     }
                 )
     else:
@@ -653,15 +735,21 @@ async def main() -> None:
             items = await _plan_tenant(session, tid, args.window_hours)
             if not items:
                 continue
-            all_items.extend(items)
-            _print_summary(tid, items)
             if args.apply:
                 res = await _apply_tenant(session, tid, items, args.window_hours)
                 total_backfilled += res["backfilled"]
                 total_voided += res["voided"]
+                stock_changes = res["stock_changes"]
+            else:
+                # Dry-run: mismo plan de stock (read-only), para dar visibilidad de
+                # clamps ANTES de aplicar.
+                stock_changes = await _plan_stock_changes(session, tid, items)
+            _annotate_stock_changes(items, stock_changes)
+            all_items.extend(items)
+            _print_summary(tid, items, stock_changes)
             print()
 
-        if args.out and all_items:
+        if args.out:
             _write_report(args.out, all_items)
 
         if args.apply:

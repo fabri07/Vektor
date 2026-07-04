@@ -152,3 +152,31 @@ def test_qty_equal_stock_is_plausible_positive(mod):
     index = {"coca cola 1.5l": [_entry(_UPLOAD_A, _T0, 36)]}
     cat, _ = mod._classify_adjustment(mv, index, set(), _WINDOW)
     assert cat == mod._CAT_CATALOG
+
+
+def test_compute_stock_after_positive_delta_from_negative_qty(mod):
+    """qty voideada negativa (-36) → delta = -sum(qty) = +36 → sube el stock, sin clamp."""
+    stock_before = 10
+    qty_voided = -36
+    delta = -qty_voided  # como lo arma _apply_tenant/_plan_stock_changes: delta = -Σqty
+    stock_after, clamped = mod._compute_stock_after(stock_before, delta)
+    assert stock_after == 46
+    assert clamped is False
+
+
+def test_compute_stock_after_clamps_at_zero(mod):
+    """qty voideada positiva mayor al stock actual → delta negativo → clampea a 0."""
+    stock_before = 2
+    delta = -10  # voidear +10 unidades resta stock
+    stock_after, clamped = mod._compute_stock_after(stock_before, delta)
+    assert stock_after == 0
+    assert clamped is True
+
+
+def test_compute_stock_after_no_clamp_when_result_is_zero_exact(mod):
+    """Borde: resultado exacto en 0 (no negativo) → NO es clamp."""
+    stock_before = 5
+    delta = -5
+    stock_after, clamped = mod._compute_stock_after(stock_before, delta)
+    assert stock_after == 0
+    assert clamped is False
