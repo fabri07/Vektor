@@ -92,6 +92,16 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     source_row_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Fecha de NEGOCIO del movimiento (cuándo ocurrió la compra/venta/ajuste en el
+    # mundo real), NO cuándo se insertó (created_at = fecha de carga del archivo).
+    # Nullable: filas legacy no la tienen — SIEMPRE leer COALESCE(occurred_at,
+    # created_at). Incidente 2026-07 ("don pedro"): el dedup agrupó por
+    # date(created_at) y voideó compras reales de meses distintos cargadas el
+    # mismo día.
+    occurred_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     def __repr__(self) -> str:
         return (
             f"<InventoryMovement product={self.product_id}"
