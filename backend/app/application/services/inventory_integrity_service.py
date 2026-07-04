@@ -42,11 +42,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
-    SOURCE_MANUAL_ADJUSTMENT,
-    SOURCE_RECONCILIATION,
+    TAGGED_ADJUSTMENT_SOURCE_TYPES,
 )
-
-_TAGGED_ADJUSTMENT_SOURCES = frozenset({SOURCE_RECONCILIATION, SOURCE_MANUAL_ADJUSTMENT})
 
 _UUID_PARAM = PG_UUID(as_uuid=True)
 
@@ -124,11 +121,17 @@ async def check_tenant_inventory_integrity(
         for row in by_type:
             movement_type = row["movement_type"]
             source_type = row["source_type"]
-            if source_type == SOURCE_CATALOG_INITIAL_STOCK:
-                anchor_qty += int(row["total_qty"])
-            elif movement_type == "purchase":
+            if movement_type == "purchase":
+                # Una COMPRA cuenta como comprado sin importar su source_type — incluido
+                # 'catalog_initial_stock' (el stock inicial de catálogo ES una compra
+                # real). Chequear purchase ANTES que el ancla evita absorber una compra
+                # taggeada catalog en anchor_qty y dejar purchase_qty=0 en el breakdown.
                 purchase_qty += int(row["total_qty"])
-            elif movement_type == "adjustment" and source_type in _TAGGED_ADJUSTMENT_SOURCES:
+            elif source_type == SOURCE_CATALOG_INITIAL_STOCK:
+                # catalog_initial_stock que NO es purchase (típicamente un adjustment):
+                # el ancla inicial de stock del producto.
+                anchor_qty += int(row["total_qty"])
+            elif movement_type == "adjustment" and source_type in TAGGED_ADJUSTMENT_SOURCE_TYPES:
                 # Correcciones deliberadas y auditadas (reconciliación o ajuste manual
                 # con procedencia) — blindadas por el CHECK de la migración 20260728_0001.
                 tagged_adjustment_qty += int(row["total_qty"])

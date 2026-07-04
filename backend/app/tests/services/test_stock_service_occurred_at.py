@@ -18,8 +18,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.agents.stock.agent import AgentStock
 from app.application.services.stock_service import (
     decrement_stock,
     increment_stock,
@@ -27,8 +29,10 @@ from app.application.services.stock_service import (
     unvoid_movement,
     void_movement,
 )
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.models.transaction import SaleEntry
 
 
 async def _make_product(
@@ -163,6 +167,44 @@ async def test_register_stock_loss_sets_occurred_at_to_now(
     if occurred.tzinfo is None:
         occurred = occurred.replace(tzinfo=UTC)
     assert before <= occurred <= after
+
+
+@pytest.mark.asyncio
+async def test_on_sale_recorded_stamps_movement_with_sale_transaction_date(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """AgentStock.on_sale_recorded (path SALE_RECORDED del chat) debe estampar el
+    movimiento de inventario con la fecha de NEGOCIO de la venta (transaction_date),
+    no con la fecha de carga (now())."""
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=10)
+    backdated = datetime(2026, 2, 14, 10, 0)  # NAIVE, como se persiste transaction_date
+    sale = SaleEntry(
+        id=uuid.uuid4(),
+        tenant_id=tid,
+        product_id=product.id,
+        amount=Decimal("100"),
+        quantity=3,
+        transaction_date=backdated,
+    )
+    db_session.add(sale)
+    await db_session.flush()
+
+    agent = AgentStock(db=db_session)
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+        await agent.on_sale_recorded(str(sale.id), str(tid), db=db_session)
+
+    movement = (
+        await db_session.execute(
+            select(InventoryMovement).where(
+                InventoryMovement.tenant_id == tid,
+                InventoryMovement.product_id == product.id,
+                InventoryMovement.movement_type == "sale",
+            )
+        )
+    ).scalar_one()
+    assert movement.occurred_at is not None
+    assert movement.occurred_at.replace(tzinfo=None) == backdated
 
 
 @pytest.mark.asyncio

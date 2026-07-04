@@ -106,6 +106,31 @@ async def test_reports_divergence_matching_the_real_incident_shape(
     assert div["diff"] == 180
 
 
+async def test_purchase_tagged_catalog_counts_as_purchase_not_anchor(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Una COMPRA con source_type=catalog_initial_stock (el stock inicial de catálogo ES
+    una compra real) debe contar en purchase_qty, no en anchor_qty. El total no cambia;
+    el breakdown sí (antes se absorbía en el ancla y dejaba purchase_qty=0)."""
+    tid = sample_tenant.tenant_id
+    # esperado = 36 (compra catalog) + 30 (compra import) - 12 (venta) = 54;
+    # stock_units = 200 → diff = 146, reportado.
+    product = await _make_product(db_session, tid, stock_units=200, name="Compra tag catalog")
+    db_session.add(_movement(tid, product.id, 36, "purchase", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_movement(tid, product.id, 30, "purchase", "purchase_import"))
+    db_session.add(_sale(tid, product.id, 12))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["checked"] == 1
+    assert len(result["divergences"]) == 1
+    div = result["divergences"][0]
+    assert div["anchor_qty"] == 0
+    assert div["purchase_qty"] == 66
+    assert div["stock_esperado"] == 54
+
+
 async def test_skips_product_without_catalog_anchor(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

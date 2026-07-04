@@ -109,20 +109,14 @@ async def main() -> None:
                     )
                     voided_ids.append(str(r["id"]))
 
-                # Buscar qué corrida de reparación las anuló, filtrando en Python.
-                audits = [
-                    a
-                    for a in all_repair_audits
-                    if any(
-                        vid
-                        in (
-                            a["decision_data"]
-                            if isinstance(a["decision_data"], str)
-                            else json.dumps(a["decision_data"])
-                        )
-                        for vid in voided_ids
-                    )
-                ]
+                # Buscar qué corrida de reparación las anuló, filtrando en Python. El
+                # blob JSON de cada audit se serializa UNA vez por fila (no por vid).
+                audits = []
+                for a in all_repair_audits:
+                    dd = a["decision_data"]
+                    blob = dd if isinstance(dd, str) else json.dumps(dd)
+                    if any(vid in blob for vid in voided_ids):
+                        audits.append(a)
                 if audits:
                     print(f"  Referenciadas en {len(audits)} decision_audit_log:")
                     for a in audits:

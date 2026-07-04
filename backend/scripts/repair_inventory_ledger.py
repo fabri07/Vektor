@@ -16,7 +16,8 @@ de una misma reparación (misma corrida, misma transacción):
   B2 — BACKFILL del COGS faltante (regla contable: toda compra de mercadería es un gasto
        COGS que entra al stock). Por cada movimiento de COMPRA vivo sin un ExpenseEntry
        COGS que lo respalde, crea el gasto: amount = unit_cost × qty, fecha =
-       products.acquired_at (o created_at del movimiento), product_id ligado,
+       COALESCE(occurred_at, acquired_at, created_at) del movimiento (fecha de negocio
+       primero, igual que B1), product_id ligado,
        expense_type='COGS', category='INVENTORY', supplier_id del movimiento. Lo dudoso
        (unit_cost NULL, o hay un COGS del producto con monto que no matchea) se reporta y
        NO se crea a ciegas.
@@ -83,7 +84,8 @@ delta a mano como la primera vez).
 
 CHECK DE "SIN GASTO COGS" (B2) — ROBUSTO, no solo mismo día. El movimiento se crea en
 fecha de import y el gasto en fecha de compra, así que se matchea por producto + monto
-dentro de una VENTANA de fechas (--cogs-window-days, ancla = acquired_at o created_at):
+dentro de una VENTANA de fechas (--cogs-window-days, ancla = COALESCE(occurred_at,
+acquired_at, created_at)):
     NOT EXISTS un expense COGS vivo del mismo product_id con
     ABS(amount - unit_cost×qty) <= tolerancia (--amount-tol-pct, mínimo $1) dentro de la
     ventana. Si hay un COGS del producto en la ventana pero con monto que NO matchea →
@@ -419,7 +421,11 @@ async def _plan_b2_backfill(
         await session.execute(
             text(
                 "SELECT im.id, im.product_id, im.qty, im.unit_cost, im.supplier_id, "
-                "       COALESCE(p.acquired_at, im.created_at) AS anchor "
+                # Fecha de negocio primero (mismo criterio que B1): occurred_at es cuándo
+                # ocurrió la compra; acquired_at es el alta del producto; created_at es la
+                # fecha de CARGA del archivo (último recurso). Anclar el COGS a la fecha
+                # real evita ventanas de dedup falsas (incidente "don pedro", 2026-07).
+                "       COALESCE(im.occurred_at, p.acquired_at, im.created_at) AS anchor "
                 "FROM inventory_movements im "
                 "LEFT JOIN products p ON p.id = im.product_id "
                 "WHERE im.tenant_id = :tid AND im.movement_type = 'purchase' "
@@ -443,8 +449,8 @@ async def _plan_b2_backfill(
         expected = Decimal(str(unit_cost)) * Decimal(int(m["qty"]))
         tol = max(Decimal("1"), (expected.copy_abs() * Decimal(str(tol_pct))))
 
-        # anchor puede venir de inventory_movements.created_at (timestamptz) o de
-        # products.acquired_at (naive) — expense_entries.transaction_date es naive
+        # anchor puede venir de inventory_movements.occurred_at/created_at (timestamptz)
+        # o de products.acquired_at (naive) — expense_entries.transaction_date es naive
         # (SIN timezone), así que asyncpg no puede bindear un datetime aware contra
         # esa columna ("can't subtract offset-naive and offset-aware datetimes").
         anchor: datetime = m["anchor"]

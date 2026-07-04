@@ -98,6 +98,8 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # created_at). Incidente 2026-07 ("don pedro"): el dedup agrupó por
     # date(created_at) y voideó compras reales de meses distintos cargadas el
     # mismo día.
+    # NOTA: es wall-clock de negocio AR etiquetado UTC (la fecha del día es correcta
+    # para bucketing por día); NO convertir con astimezone para cómputos sub-día.
     occurred_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

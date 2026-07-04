@@ -48,6 +48,12 @@ PURCHASE_SOURCE_TYPES: frozenset[str] = frozenset(
     {SOURCE_PURCHASE_IMPORT, SOURCE_CATALOG_INITIAL_STOCK, SOURCE_RECEIPT}
 )
 
+# source_types de un movement_type='adjustment' con procedencia auditada (correcciones
+# deliberadas, blindadas por el CHECK ck_inventory_movements_adjustment_source_type).
+TAGGED_ADJUSTMENT_SOURCE_TYPES: frozenset[str] = frozenset(
+    {SOURCE_RECONCILIATION, SOURCE_MANUAL_ADJUSTMENT}
+)
+
 
 def _norm_text(value: object) -> str:
     """Normaliza texto para el hash: sin tildes, minúsculas, trim, espacios colapsados."""

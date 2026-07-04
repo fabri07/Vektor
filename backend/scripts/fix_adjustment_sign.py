@@ -21,6 +21,7 @@ Usage:
 import argparse
 import asyncio
 import csv
+import json
 import uuid
 
 from _db import async_engine_config
@@ -115,13 +116,14 @@ async def main() -> None:
             await session.execute(
                 text(
                     "INSERT INTO decision_audit_log "
-                    "(id, tenant_id, decision_type, decision_data, created_at) "
-                    "VALUES (gen_random_uuid(), :tid, :dtype, CAST(:data AS jsonb), now())"
+                    "(id, tenant_id, decision_type, decision_data, triggered_by, created_at) "
+                    "VALUES (gen_random_uuid(), :tid, :dtype, CAST(:data AS jsonb), :tb, now())"
                 ),
                 {
                     "tid": tid,
                     "dtype": _DECISION_TYPE,
-                    "data": __import__("json").dumps({"fixed": report_rows}),
+                    "data": json.dumps({"fixed": report_rows}),
+                    "tb": "script:fix_adjustment_sign",
                 },
             )
             await session.commit()

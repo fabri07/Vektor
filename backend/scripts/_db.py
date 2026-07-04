@@ -7,11 +7,16 @@ kwargs de DSN). NUNCA imprime la URL.
 
 from __future__ import annotations
 
+import json
 import os
 import ssl
 import sys
 from typing import Any
 from urllib.parse import parse_qs, urlparse, urlunparse
+
+# decision_types de reparaciones/reconciliaciones auditadas de inventario. Universo
+# compartido por los scripts que detectan/revierten voids de compras.
+REPAIR_DECISION_TYPES = ("INVENTORY_REPAIR", "INVENTORY_RECONCILIATION_FIX")
 
 
 def normalize_dsn(raw: str) -> tuple[str, ssl.SSLContext | bool]:
@@ -43,3 +48,39 @@ def async_engine_config() -> tuple[str, dict[str, Any]]:
     clean, sslarg = normalize_dsn(raw)
     url = clean.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url, {"ssl": sslarg}
+
+
+async def insert_decision_audit(
+    session: Any,
+    *,
+    tenant_id: str,
+    decision_type: str,
+    decision_data: dict[str, Any],
+    triggered_by: str,
+) -> str:
+    """INSERT canónico de un ``decision_audit_log`` (6 columnas) — devuelve el id.
+
+    Un solo lugar para el INSERT auditado de los scripts de inventario: mismo shape de
+    columnas (id/tenant_id/decision_type/decision_data/triggered_by/created_at), con
+    ``gen_random_uuid()``/``now()`` server-side y ``decision_data`` serializado a JSONB.
+    ``triggered_by`` es NOT NULL sin default, así que SIEMPRE se pasa.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    row = (
+        await session.execute(
+            text(
+                "INSERT INTO decision_audit_log "
+                "(id, tenant_id, decision_type, decision_data, triggered_by, created_at) "
+                "VALUES (gen_random_uuid(), CAST(:tid AS uuid), :dt, CAST(:dd AS jsonb), "
+                ":tb, now()) RETURNING id"
+            ),
+            {
+                "tid": tenant_id,
+                "dt": decision_type,
+                "dd": json.dumps(decision_data, default=str),
+                "tb": triggered_by,
+            },
+        )
+    ).first()
+    return str(row[0])

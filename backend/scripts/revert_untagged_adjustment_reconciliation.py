@@ -44,7 +44,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _db import async_engine_config  # noqa: E402
+from _db import async_engine_config, insert_decision_audit  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -60,10 +60,19 @@ _SOURCE_CATALOG_INITIAL_STOCK = "catalog_initial_stock"
 _SOURCE_RECONCILIATION = "reconciliation"
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
+def _as_dict(value: Any) -> dict[str, Any] | None:
+    """decision_data puede venir como dict (asyncpg JSONB) o str JSON. Defensivo: un
+    JSON corrupto/inesperado devuelve None (el caller saltea la fila) en vez de
+    crashear a mitad de la reversa (mismo patrón que detect_misvoided_purchases.py)."""
+    if isinstance(value, dict):
+        return value
     if isinstance(value, str):
-        return json.loads(value)  # type: ignore[no-any-return]
-    return value or {}
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 async def _check_constraint_applied(session: AsyncSession) -> bool:
@@ -80,7 +89,15 @@ async def _check_constraint_applied(session: AsyncSession) -> bool:
 async def _load_runs(
     session: AsyncSession, *, audit_id: str | None, tid: str | None
 ) -> list[dict[str, Any]]:
-    """Corridas a revertir (read-only). Por --audit-id (una) o --tenant (todas)."""
+    """Corridas a revertir (read-only). Por --audit-id (una) o --tenant (todas).
+
+    ORDER BY created_at DESC (newest-first) a propósito: cada corrida restaura
+    ``stock_before`` ABSOLUTO por producto. Si dos corridas tocaron el mismo producto,
+    revertir oldest-first dejaría el stock en el estado intermedio (el S0 de la corrida
+    vieja quedaría pisado por el de la nueva). Newest-first deshace primero la última
+    corrida y termina aplicando el ``stock_before`` de la más vieja — el S0 verdadero
+    previo a toda reconciliación.
+    """
     if audit_id:
         rows = (
             await session.execute(
@@ -97,19 +114,35 @@ async def _load_runs(
                 text(
                     "SELECT id, tenant_id, decision_data FROM decision_audit_log "
                     "WHERE tenant_id = CAST(:tid AS uuid) AND decision_type = :dt "
-                    "ORDER BY created_at ASC"
+                    # DESC: revertir newest-first para que el stock_before ABSOLUTO de la
+                    # corrida MÁS VIEJA (el S0 verdadero) sea el que pise último por
+                    # producto (ver docstring). ASC dejaría el estado intermedio.
+                    "ORDER BY created_at DESC"
                 ),
                 {"tid": tid, "dt": _DECISION_TYPE},
             )
         ).mappings().all()
-    return [
-        {
-            "audit_id": str(r["id"]),
-            "tenant_id": str(r["tenant_id"]),
-            "decision_data": _as_dict(r["decision_data"]),
-        }
-        for r in rows
-    ]
+    runs: list[dict[str, Any]] = []
+    skipped = 0
+    for r in rows:
+        dd = _as_dict(r["decision_data"])
+        if dd is None:
+            skipped += 1
+            print(
+                f"  ⚠ SALTEADA corrida audit={r['id']}: decision_data ilegible "
+                "(JSON corrupto/inesperado) — no se puede revertir con seguridad."
+            )
+            continue
+        runs.append(
+            {
+                "audit_id": str(r["id"]),
+                "tenant_id": str(r["tenant_id"]),
+                "decision_data": dd,
+            }
+        )
+    if skipped:
+        print(f"  ({skipped} corrida(s) salteada(s) por decision_data ilegible)")
+    return runs
 
 
 async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, Any]:
@@ -232,18 +265,12 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
         "skipped_unvoid_noop": skipped_unvoid,
         "products_restored": products_restored,
     }
-    await session.execute(
-        text(
-            "INSERT INTO decision_audit_log "
-            "(id, tenant_id, decision_type, decision_data, triggered_by, created_at) "
-            "VALUES (gen_random_uuid(), CAST(:tid AS uuid), :dt, CAST(:dd AS jsonb), :tb, now())"
-        ),
-        {
-            "tid": tid,
-            "dt": _REVERT_DECISION,
-            "dd": json.dumps(decision_data),
-            "tb": _TRIGGERED_BY,
-        },
+    await insert_decision_audit(
+        session,
+        tenant_id=tid,
+        decision_type=_REVERT_DECISION,
+        decision_data=decision_data,
+        triggered_by=_TRIGGERED_BY,
     )
     return {
         "audit_id": run["audit_id"],

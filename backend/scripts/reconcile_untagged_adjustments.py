@@ -68,7 +68,11 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _db import async_engine_config  # noqa: E402
+from _db import (  # noqa: E402
+    REPAIR_DECISION_TYPES,
+    async_engine_config,
+    insert_decision_audit,
+)
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -89,10 +93,10 @@ _CAT_UNMATCHED = "UNMATCHED_VOID"
 
 # decision_types de reparaciones auditadas cuyos movimientos, si aparecen, prueban
 # procedencia de reconciliación (R2). Se buscan como substring del JSON serializado
-# (mismo truco que diag_missing_purchases_scope.py).
+# (mismo truco que diag_missing_purchases_scope.py). Superset del universo compartido
+# (REPAIR_DECISION_TYPES) + dos tipos propios de este script.
 _REPAIR_DECISION_TYPES = (
-    "INVENTORY_REPAIR",
-    "INVENTORY_RECONCILIATION_FIX",
+    *REPAIR_DECISION_TYPES,
     "ADJUSTMENT_SIGN_FIX",
     "COMPRAS_MERCADERIA_FIX",
 )
@@ -586,19 +590,12 @@ async def _apply_tenant(
             ],
             "stock_changes": stock_changes,
         }
-        await session.execute(
-            text(
-                "INSERT INTO decision_audit_log "
-                "(id, tenant_id, decision_type, decision_data, triggered_by, created_at) "
-                "VALUES (gen_random_uuid(), CAST(:tid AS uuid), :dt, "
-                "CAST(:dd AS jsonb), :tb, now())"
-            ),
-            {
-                "tid": tid,
-                "dt": _DECISION_TYPE,
-                "dd": json.dumps(decision_data),
-                "tb": _TRIGGERED_BY,
-            },
+        await insert_decision_audit(
+            session,
+            tenant_id=tid,
+            decision_type=_DECISION_TYPE,
+            decision_data=decision_data,
+            triggered_by=_TRIGGERED_BY,
         )
     return {"backfilled": backfilled, "voided": voided, "stock_changes": stock_changes}
 
@@ -718,8 +715,8 @@ async def main() -> None:
         else:
             rows = await session.execute(
                 text(
-                    "SELECT tenant_id FROM tenants "
-                    "WHERE status IN ('active', 'trial', 'ACTIVE')"
+                    # Canónico uppercase: la app solo escribe 'ACTIVE'/'TRIAL' (ver deps.py).
+                    "SELECT tenant_id FROM tenants WHERE status IN ('ACTIVE', 'TRIAL')"
                 )
             )
             tids = [str(r[0]) for r in rows.all()]

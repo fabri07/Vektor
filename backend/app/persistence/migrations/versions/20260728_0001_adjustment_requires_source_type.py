@@ -1,7 +1,7 @@
 """CHECK: todo movimiento 'adjustment' debe tener source_type.
 
 Revision ID: 20260728_0001
-Revises: 20260727_0001
+Revises: 20260727_0002
 Create Date: 2026-07-28
 
 Contexto

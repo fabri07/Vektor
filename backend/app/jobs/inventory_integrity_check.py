@@ -175,8 +175,9 @@ def inventory_integrity_check_all_tenants() -> None:
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
         async with factory() as session:
+            # Canónico uppercase: la app solo escribe 'ACTIVE'/'TRIAL' (ver deps.py).
             result = await session.execute(
-                select(Tenant.tenant_id).where(Tenant.status.in_(["active", "trial", "ACTIVE"]))
+                select(Tenant.tenant_id).where(Tenant.status.in_(["ACTIVE", "TRIAL"]))
             )
             ids = [str(tid) for tid in result.scalars().all()]
 
