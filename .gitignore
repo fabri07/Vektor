@@ -86,3 +86,5 @@ capturas/
 # ── Scratch / dry-run previews y duplicados de Finder ─────────────────────────
 *_preview.csv
 CLAUDE [0-9]*.md
+# Reportes de scripts operativos con datos de producción — nunca commitear
+backend/*.csv
