@@ -557,7 +557,9 @@ async def execute_pending_action(
         # Compra de mercadería: categoría canónica + COGS (muere el literal
         # "compra_proveedor", que quedaba fuera del catálogo).
         purchase_payload = {**payload, "category": "INVENTORY", "expense_type": "COGS"}
-        await cash_service.save_expense(purchase_payload, action.tenant_id, db)
+        purchase_expense = await cash_service.save_expense(
+            purchase_payload, action.tenant_id, db
+        )
 
         product_id_str = payload.get("product_id")
         qty = int(payload.get("qty") or 0)
@@ -574,6 +576,9 @@ async def execute_pending_action(
                 unit_cost=unit_cost,
                 source_event_id=str(action.id),
                 db=db,
+                # Fecha de negocio de la compra: la misma que quedó en el gasto
+                # COGS recién creado (ya coercionada por cash_service).
+                occurred_at=purchase_expense.transaction_date,
             )
 
     elif action.action_type == ActionType.REGISTER_CASH_OUTFLOW:

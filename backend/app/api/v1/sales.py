@@ -310,7 +310,12 @@ async def create_manual_batch_sale(
             )
         )
         await stock_service.decrement_stock(
-            item.product_id, tenant.tenant_id, item.quantity, source_event, session
+            item.product_id,
+            tenant.tenant_id,
+            item.quantity,
+            source_event,
+            session,
+            occurred_at=body.transaction_date,
         )
         # Auditar cada línea con el mismo sale_group_id.
         snap = _sale_snapshot(entry)

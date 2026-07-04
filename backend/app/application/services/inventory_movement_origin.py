@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import unicodedata
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -66,6 +66,19 @@ def _norm_num(value: object) -> str:
         return f"{Decimal(str(value)):.2f}"
     except (ArithmeticError, ValueError):
         return _norm_text(value)
+
+
+def ensure_utc(dt: datetime | None) -> datetime | None:
+    """Normaliza a UTC ``occurred_at`` (fecha de negocio de un movimiento).
+
+    ``transaction_date`` de ventas/gastos se persiste NAIVE, mientras que
+    ``InventoryMovement.occurred_at`` es tz-aware. Un datetime sin tzinfo se asume
+    en UTC (no re-interpreta la hora, solo la etiqueta) para poder persistirlo en la
+    columna aware sin perder la fecha de negocio original.
+    """
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _norm_date(value: object) -> str:

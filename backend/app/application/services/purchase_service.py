@@ -135,6 +135,7 @@ async def register_manual_purchase(
             supplier_id=body.supplier_id,
             # Producto nuevo o con confirmación → actualizar costo de catálogo.
             update_product_cost=created or line.update_price,
+            occurred_at=body.transaction_date,
         )
         # Precio de venta: nuevo siempre; existente solo si lo confirma.
         if (created or line.update_price) and line.sale_price_ars > 0:

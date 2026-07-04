@@ -4,10 +4,14 @@ Sistémico, conservador, reversible, dry-run por defecto. Corre EN ORDEN los tre
 de una misma reparación (misma corrida, misma transacción):
 
   B1 — DEDUP de duplicados de relectura (AMBOS lados: compras Y ventas).
-       Cluster = (tenant_id, product_id, date(created_at), qty, unit_cost, movement_type)
-       con COUNT(*) > 1 sobre movimientos VIVOS (voided_at IS NULL). Solo se actúa sobre
-       clusters HIGH_CONFIDENCE; MEDIUM/LOW se reportan y NO se tocan. Los extras se
-       marcan con voided_at = now() (soft-delete), conservando el más antiguo.
+       Cluster = (tenant_id, product_id, date(COALESCE(occurred_at, created_at)), qty,
+       unit_cost, movement_type) con COUNT(*) > 1 sobre movimientos VIVOS (voided_at IS
+       NULL). La clave de cluster es la fecha de NEGOCIO del movimiento, no la fecha de
+       carga del archivo (``created_at``) — dos compras reales de meses distintos
+       cargadas el mismo día NO deben agruparse en el mismo cluster (incidente 2026-07,
+       "don pedro": el dedup por ``date(created_at)`` voideó compras válidas). Solo se
+       actúa sobre clusters HIGH_CONFIDENCE; MEDIUM/LOW se reportan y NO se tocan. Los
+       extras se marcan con voided_at = now() (soft-delete), conservando el más antiguo.
 
   B2 — BACKFILL del COGS faltante (regla contable: toda compra de mercadería es un gasto
        COGS que entra al stock). Por cada movimiento de COMPRA vivo sin un ExpenseEntry
@@ -188,11 +192,13 @@ async def _plan_b1_dedup(session: AsyncSession, tid: uuid.UUID) -> dict[str, Any
     clusters = (
         await session.execute(
             text(
-                "SELECT product_id, movement_type, date(created_at) AS d, qty, unit_cost, "
+                "SELECT product_id, movement_type, "
+                "       date(COALESCE(occurred_at, created_at)) AS d, qty, unit_cost, "
                 "       COUNT(*) AS n "
                 "FROM inventory_movements "
                 "WHERE tenant_id = :tid AND voided_at IS NULL "
-                "GROUP BY product_id, movement_type, date(created_at), qty, unit_cost "
+                "GROUP BY product_id, movement_type, "
+                "         date(COALESCE(occurred_at, created_at)), qty, unit_cost "
                 "HAVING COUNT(*) > 1"
             ),
             {"tid": tid},
@@ -210,7 +216,7 @@ async def _plan_b1_dedup(session: AsyncSession, tid: uuid.UUID) -> dict[str, Any
                     "FROM inventory_movements "
                     "WHERE tenant_id = :tid AND voided_at IS NULL "
                     "AND product_id = :pid AND movement_type = :mt "
-                    "AND date(created_at) = :d AND qty = :qty "
+                    "AND date(COALESCE(occurred_at, created_at)) = :d AND qty = :qty "
                     "AND unit_cost IS NOT DISTINCT FROM :uc "
                     "ORDER BY created_at ASC"
                 ),

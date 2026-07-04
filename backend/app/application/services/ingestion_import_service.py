@@ -21,6 +21,7 @@ from app.application.services.inventory_movement_origin import (
     SOURCE_PURCHASE_IMPORT,
     SOURCE_RECEIPT,
     compute_source_row_hash,
+    ensure_utc,
 )
 from app.domain.business_time import now_ar_naive
 from app.domain.expense_categories import (
@@ -661,6 +662,7 @@ async def _record_stock_movement(
     source_upload_id: uuid.UUID | None = None,
     source_row_ref: str | None = None,
     source_row_hash: str | None = None,
+    occurred_at: datetime | None = None,
 ) -> None:
     """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
     `InventoryBalance` por el import, dentro de la misma transacción.
@@ -669,6 +671,12 @@ async def _record_stock_movement(
     ``source_row_ref``/``source_row_hash`` — spec en ``inventory_movement_origin``)
     para dedup, reversa del reread y reconciliación. Los valores los arma el caller
     (el import conoce archivo, fila y campos de la fila de origen).
+
+    ``occurred_at``: fecha de NEGOCIO del movimiento (cuándo ocurrió la compra/ajuste
+    en el mundo real), NO la fecha de carga del archivo. El caller la arma desde la
+    fila de origen (``ExpenseEntry.transaction_date`` o la fecha del catálogo); si no
+    hay fecha disponible queda ``NULL`` a propósito (los lectores caen a
+    ``COALESCE(occurred_at, created_at)`` — nunca se inventa una fecha).
 
     `Product.stock_units` sigue siendo la representación canónica que lee la UI; el
     import la setea. Esta función:
@@ -712,6 +720,7 @@ async def _record_stock_movement(
             source_upload_id=source_upload_id,
             source_row_ref=source_row_ref,
             source_row_hash=source_row_hash,
+            occurred_at=ensure_utc(occurred_at),
         )
     )
 
@@ -922,6 +931,7 @@ async def _apply_purchase_to_stock(
         source_upload_id=getattr(expense, "source_upload_id", None),
         source_row_ref=source_row_ref,
         source_row_hash=_row_hash,
+        occurred_at=getattr(expense, "transaction_date", None),
     )
 
 
@@ -1030,6 +1040,7 @@ async def _apply_catalog_stock(
         source_upload_id=uploaded_file_id,
         source_row_ref=source_row_ref,
         source_row_hash=_row_hash,
+        occurred_at=tx_date,
     )
     # Solo una COMPRA genera gasto de mercadería + baja de caja. El saldo de apertura
     # es un activo que el negocio ya tenía → no toca caja ni COGS.
