@@ -195,16 +195,61 @@ def test_repair_audit_map_structured_extraction(mod):
     assert mapping == {mv_id: str(audit_id)}
 
 
-def test_repair_audit_map_fallback_substring_match(mod):
-    """Sin la clave estructurada 'voided_movement_ids' -> cae al substring match
-    (mismo truco que diag_missing_purchases_scope.py)."""
+def test_repair_audit_map_fallback_matches_disputed_movement_ids(mod):
+    """fix_reconciled_stock.py (INVENTORY_RECONCILIATION_FIX) audita el plan completo
+    bajo 'disputed_movement_ids' (los movimientos a los que _apply_product les setea
+    voided_at=now()) — no tiene 'voided_movement_ids', así que solo lo resuelve el
+    pase 2 (fallback acotado a _VOID_EVIDENCE_KEYS)."""
     mv_id = str(uuid.uuid4())
     audit_id = uuid.uuid4()
     audit_rows = [
-        {"id": audit_id, "decision_data": {"reason": "some_other_shape", "ids_touched": [mv_id]}}
+        {
+            "id": audit_id,
+            "decision_data": {
+                "product_id": "prod-1",
+                "diff": -3,
+                "disputed_movement_ids": [mv_id],
+                "disputed_sum": 3,
+            },
+        }
     ]
     mapping = mod._build_repair_audit_map({mv_id}, audit_rows)
     assert mapping == {mv_id: str(audit_id)}
+
+
+def test_repair_audit_map_excludes_b2_source_movement_ids(mod):
+    """B2 (backfill de COGS) audita 'source_movement_ids' = movimientos VIVOS (NO
+    voideados) que generaron el gasto. El pase 2 NO debe matchear contra esta key
+    (ni contra 'created_expense_ids', que son ids de ExpenseEntry, no de movements) —
+    de lo contrario una compra viva quedaría falsamente atribuida a esta fila."""
+    mv_id = str(uuid.uuid4())
+    audit_rows = [
+        {
+            "id": uuid.uuid4(),
+            "decision_data": {
+                "step": "B2",
+                "created_expense_ids": [str(uuid.uuid4())],
+                "created_count": 1,
+                "source_movement_ids": [mv_id],
+            },
+        }
+    ]
+    mapping = mod._build_repair_audit_map({mv_id}, audit_rows)
+    assert mapping == {}
+
+
+def test_repair_audit_map_ignores_arbitrary_non_void_keys(mod):
+    """Una key que no está en _VOID_EVIDENCE_KEYS (formato desconocido/no-void) no
+    debe producir match — el pase 2 ya no busca contra el blob completo."""
+    mv_id = str(uuid.uuid4())
+    audit_rows = [
+        {
+            "id": uuid.uuid4(),
+            "decision_data": {"reason": "some_other_shape", "ids_touched": [mv_id]},
+        }
+    ]
+    mapping = mod._build_repair_audit_map({mv_id}, audit_rows)
+    assert mapping == {}
 
 
 def test_repair_audit_map_unmatched_id_absent(mod):
@@ -212,3 +257,31 @@ def test_repair_audit_map_unmatched_id_absent(mod):
     audit_rows = [{"id": uuid.uuid4(), "decision_data": {"voided_movement_ids": []}}]
     mapping = mod._build_repair_audit_map({mv_id}, audit_rows)
     assert mapping == {}
+
+
+def test_repair_audit_map_b1_and_b2_same_run_only_voided_matches(mod):
+    """Escenario real: una corrida de repair_inventory_ledger.py audita B1 y B2 como
+    DOS filas separadas (mismo decision_type='INVENTORY_REPAIR'). Un movimiento
+    voideado por B1 debe mapear a la fila B1; un movimiento vivo que además aparece
+    en 'source_movement_ids' de la fila B2 (p.ej. un socio de cluster que quedó vivo
+    y generó backfill de COGS) NUNCA debe mapear a la fila B2."""
+    voided_mv = str(uuid.uuid4())
+    live_partner_mv = str(uuid.uuid4())
+    b1_audit_id = uuid.uuid4()
+    b2_audit_id = uuid.uuid4()
+    audit_rows = [
+        {
+            "id": b1_audit_id,
+            "decision_data": {"step": "B1", "voided_movement_ids": [voided_mv]},
+        },
+        {
+            "id": b2_audit_id,
+            "decision_data": {"step": "B2", "source_movement_ids": [live_partner_mv]},
+        },
+    ]
+    # Solo se pregunta por la compra efectivamente voideada (live_partner_mv nunca
+    # entraría al set de voided_purchase_ids en el flujo real, porque no tiene
+    # voided_at — se incluye acá solo para probar que, aunque compartiera id con una
+    # voideada, la fila B2 nunca sería la fuente del match).
+    mapping = mod._build_repair_audit_map({voided_mv, live_partner_mv}, audit_rows)
+    assert mapping == {voided_mv: str(b1_audit_id)}

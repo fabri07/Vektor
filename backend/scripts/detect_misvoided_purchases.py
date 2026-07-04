@@ -20,10 +20,16 @@ ALGORITMO (por tenant)
    (``decision_type IN ('INVENTORY_REPAIR', 'INVENTORY_RECONCILIATION_FIX')``):
    primero se intenta extracción ESTRUCTURADA — ``repair_inventory_ledger.py`` audita
    el paso B1 (dedup) con ``decision_data['voided_movement_ids']`` (lista de ids). Si
-   una corrida no tuviera esa clave (estructura distinta / solo agregados), se cae al
-   FALLBACK documentado: buscar el id del movimiento como substring de
-   ``json.dumps(decision_data)`` (mismo truco que ``diag_missing_purchases_scope.py``),
-   intersectado con el set de compras voideadas del tenant.
+   una corrida no tuviera esa clave exacta, se cae al FALLBACK documentado: buscar el
+   id del movimiento como substring, pero SOLO dentro de los campos que representan
+   evidencia de void (``_VOID_EVIDENCE_KEYS`` — ``voided_movement_ids`` de B1 y
+   ``disputed_movement_ids`` de ``fix_reconciled_stock.py``), NUNCA contra el blob
+   completo de ``decision_data``. Motivo: ``repair_inventory_ledger.py`` audita sus 3
+   sub-pasos (B1/B2/B3) bajo el MISMO ``decision_type='INVENTORY_REPAIR'``, y el paso
+   B2 (backfill de COGS) audita ``source_movement_ids`` — movimientos VIVOS (no
+   voideados) que generaron el gasto. Buscar el substring contra todo el JSON podía
+   matchear una compra viva citada en un B2 y atribuirle un ``repair_audit_id`` de una
+   fila que nunca la voideó (falsa atribución + contamina el insert de ``--audit``).
 3. Para cada compra voideada matcheada, se buscan los socios de cluster
    SOBREVIVIENTES: movimientos VIVOS del mismo
    ``(product_id, movement_type='purchase', date(COALESCE(occurred_at, created_at)),
@@ -106,9 +112,37 @@ def _as_dict(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _as_blob(value: Any) -> str:
-    """Serializa decision_data a texto para el fallback de substring match."""
-    return value if isinstance(value, str) else json.dumps(value, default=str)
+# Keys de decision_data que constituyen EVIDENCIA DE VOID (ids de movimientos a los
+# que efectivamente se les setea voided_at). Verificado leyendo los INSERT a
+# decision_audit_log de cada script:
+#   - repair_inventory_ledger.py, paso B1 (dedup, _apply_b1_dedup):
+#       decision_data['voided_movement_ids'] = void_ids  -> SÍ voideados.
+#   - repair_inventory_ledger.py, paso B2 (backfill COGS, _apply_b2_backfill):
+#       decision_data['source_movement_ids'] = ids de movimientos VIVOS (no
+#       voideados; solo generaron un gasto COGS de backfill) — EXCLUIDA a propósito.
+#       Mismo decision_type='INVENTORY_REPAIR' que B1, así que si no se filtrara por
+#       key una compra viva citada en un B2 podría matchear por accidente contra esa
+#       fila y quedar mal atribuida como "voideada por reparación".
+#       decision_data['created_expense_ids'] = ids de ExpenseEntry, no de
+#       inventory_movements — tampoco es evidencia de void de una compra.
+#   - repair_inventory_ledger.py, paso B3 (ajuste de stock, _apply_b3_adjust):
+#       decision_data no tiene ids de movimiento (solo agregados por producto).
+#   - fix_reconciled_stock.py (_apply_product): decision_data = plan completo, cuya
+#       única key con movimientos a los que se les setea voided_at=now() es
+#       'disputed_movement_ids' (ver _apply_product: UPDATE ... SET voided_at = now()
+#       ... WHERE id IN disputed_movement_ids). 'disputed_sum' es un agregado, no ids.
+_VOID_EVIDENCE_KEYS = ("voided_movement_ids", "disputed_movement_ids")
+
+
+def _void_evidence_blob(dd: dict[str, Any]) -> str | None:
+    """Serializa SOLO las keys de ``dd`` que son evidencia de void (ver
+    ``_VOID_EVIDENCE_KEYS``). Devuelve ``None`` si ninguna está presente (nada
+    matcheable en esta fila sin caer en el blob completo).
+    """
+    parts = [dd[key] for key in _VOID_EVIDENCE_KEYS if key in dd]
+    if not parts:
+        return None
+    return json.dumps(parts, default=str)
 
 
 def _build_repair_audit_map(
@@ -118,9 +152,12 @@ def _build_repair_audit_map(
 
     Pase 1 (estructurado): ``decision_data['voided_movement_ids']`` — la clave que
     ``repair_inventory_ledger.py`` audita en el paso B1 del dedup. Pase 2 (fallback,
-    solo para los ids que el pase 1 no resolvió): el id como substring del JSON
-    serializado — mismo truco que ``diag_missing_purchases_scope.py``, para no
-    depender de que TODA reparación audite una lista estructurada de ids.
+    solo para los ids que el pase 1 no resolvió): el id como substring, pero
+    ACOTADO a las keys de ``_VOID_EVIDENCE_KEYS`` (nunca el JSON completo de
+    ``decision_data``) — así una corrida con formato levemente distinto de
+    ``voided_movement_ids``/``disputed_movement_ids`` igual matchea, pero un id VIVO
+    citado en ``source_movement_ids`` (B2) o en cualquier otra key no-void jamás
+    produce un match espurio.
     """
     mapping: dict[str, str] = {}
 
@@ -141,7 +178,12 @@ def _build_repair_audit_map(
         for row in audit_rows:
             if not remaining:
                 break
-            blob = _as_blob(row["decision_data"])
+            dd = _as_dict(row["decision_data"])
+            if dd is None:
+                continue
+            blob = _void_evidence_blob(dd)
+            if blob is None:
+                continue
             for mid in list(remaining):
                 if mid in blob:
                     mapping[mid] = str(row["id"])
