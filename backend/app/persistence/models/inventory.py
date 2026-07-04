@@ -76,6 +76,11 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #   del reread). source_row_hash: identidad lógica estable (idempotencia, no depende
     #   del orden del Excel). voided_at: soft-delete (dedup, reread) — un movimiento
     #   voidado NO cuenta para stock ni para "comprado".
+    # Invariante de DB (migración 20260728_0001): un movement_type='adjustment' VIVO
+    # (voided_at IS NULL) EXIGE source_type no nulo (CHECK
+    # ck_inventory_movements_adjustment_source_type) — un ajuste sin procedencia
+    # rastreable no puede reconciliarse ni auditarse. Los voideados quedan exentos
+    # (ya no afectan stock). No aplica (todavía) a purchase/sale/loss.
     source_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     source_upload_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -86,6 +91,18 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     source_row_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_row_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Fecha de NEGOCIO del movimiento (cuándo ocurrió la compra/venta/ajuste en el
+    # mundo real), NO cuándo se insertó (created_at = fecha de carga del archivo).
+    # Nullable: filas legacy no la tienen — SIEMPRE leer COALESCE(occurred_at,
+    # created_at). Incidente 2026-07 ("don pedro"): el dedup agrupó por
+    # date(created_at) y voideó compras reales de meses distintos cargadas el
+    # mismo día.
+    # NOTA: es wall-clock de negocio AR etiquetado UTC (la fecha del día es correcta
+    # para bucketing por día); NO convertir con astimezone para cómputos sub-día.
+    occurred_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     def __repr__(self) -> str:
         return (

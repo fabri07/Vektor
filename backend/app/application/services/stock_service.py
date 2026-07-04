@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.services.inventory_movement_origin import ensure_utc
 from app.domain.product import effective_threshold
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
@@ -45,6 +46,8 @@ async def decrement_stock(
     qty: int,
     source_event_id: str | None,
     db: AsyncSession,
+    *,
+    occurred_at: datetime | None = None,
 ) -> InventoryMovement:
     product = await db.get(Product, product_id)
     if product is None or product.tenant_id != tenant_id:
@@ -63,6 +66,9 @@ async def decrement_stock(
         movement_type="sale",
         qty=-qty,
         source_event_id=source_event_id,
+        # Fecha de NEGOCIO del movimiento (venta): si el caller la conoce (fecha de
+        # la venta), se usa esa; si no, el momento del registro.
+        occurred_at=ensure_utc(occurred_at) or datetime.now(UTC),
     )
     db.add(movement)
     await db.flush()
@@ -101,6 +107,7 @@ async def increment_stock(
     *,
     supplier_id: uuid.UUID | None = None,
     update_product_cost: bool = True,
+    occurred_at: datetime | None = None,
 ) -> InventoryMovement:
     product = await db.get(Product, product_id)
     if product is None or product.tenant_id != tenant_id:
@@ -126,6 +133,9 @@ async def increment_stock(
         unit_cost=unit_cost,
         source_event_id=source_event_id,
         supplier_id=supplier_id,
+        # Fecha de NEGOCIO de la compra: si el caller la conoce, se usa esa; si no,
+        # el momento del registro.
+        occurred_at=ensure_utc(occurred_at) or datetime.now(UTC),
     )
     db.add(movement)
     await db.flush()
@@ -166,6 +176,9 @@ async def register_stock_loss(
         movement_type="loss",
         qty=-qty,
         reason=reason,
+        # La merma se registra cuando se DESCUBRE, no tiene fecha de negocio propia
+        # distinta del momento del registro.
+        occurred_at=datetime.now(UTC),
     )
     db.add(movement)
     await db.flush()

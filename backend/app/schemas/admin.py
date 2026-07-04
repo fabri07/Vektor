@@ -90,3 +90,30 @@ class DataRepairRunResponse(BaseModel):
     completed_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class InventoryIntegrityDivergence(BaseModel):
+    product_id: uuid.UUID
+    product_name: str
+    stock_units: int
+    stock_esperado: int
+    diff: int
+    anchor_qty: int
+    purchase_qty: int
+    tagged_adjustment_qty: int
+    loss_qty: int
+    sales_qty: int
+
+
+class InventoryIntegrityThreshold(BaseModel):
+    relative_pct: float
+    absolute_floor_units: int
+
+
+class InventoryIntegrityCheckResponse(BaseModel):
+    tenant_id: uuid.UUID
+    checked: int
+    divergences: list[InventoryIntegrityDivergence]
+    skipped_no_anchor: int
+    skipped_complex_ledger: int
+    threshold: InventoryIntegrityThreshold

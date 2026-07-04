@@ -106,6 +106,10 @@ class AgentStock(BaseAgent):
             qty=sale.quantity,
             source_event_id=sale_id,
             db=effective_db,
+            # Fecha de NEGOCIO de la venta (no la de carga): sin esto el movimiento de
+            # inventario quedaba con occurred_at=now() y el dedup por timing podía
+            # agruparlo mal (incidente "don pedro", 2026-07).
+            occurred_at=sale.transaction_date,
         )
 
     async def detect_stockout(

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import unicodedata
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -23,6 +23,12 @@ from uuid import UUID
 SOURCE_PURCHASE_IMPORT = "purchase_import"          # libro de compras / gasto de mercadería
 SOURCE_CATALOG_INITIAL_STOCK = "catalog_initial_stock"  # stock inicial de un catálogo
 SOURCE_MANUAL_ADJUSTMENT = "manual_adjustment"      # ajuste manual de stock
+# RESERVADO: hoy ningún código usa este valor — UPDATE_STOCK vía chat produce
+# movement_type='purchase'/'sale' en stock_service.py, nunca 'adjustment' (ver
+# pending_action_service.py). Cuando exista un ajuste manual real (chat o
+# dashboard), ese writer DEBE setear source_type=SOURCE_MANUAL_ADJUSTMENT + un
+# actor/motivo — el CHECK ck_inventory_movements_adjustment_source_type (migración
+# 20260728_0001) ya lo exige a nivel DB para movement_type='adjustment'.
 SOURCE_RECEIPT = "receipt"                          # remito de proveedor
 SOURCE_RECONCILIATION = "reconciliation"            # reparación/reconciliación de datos
 
@@ -40,6 +46,12 @@ SOURCE_TYPES: frozenset[str] = frozenset(
 # y deben tener su COGS). El stock inicial de catálogo ES una compra real.
 PURCHASE_SOURCE_TYPES: frozenset[str] = frozenset(
     {SOURCE_PURCHASE_IMPORT, SOURCE_CATALOG_INITIAL_STOCK, SOURCE_RECEIPT}
+)
+
+# source_types de un movement_type='adjustment' con procedencia auditada (correcciones
+# deliberadas, blindadas por el CHECK ck_inventory_movements_adjustment_source_type).
+TAGGED_ADJUSTMENT_SOURCE_TYPES: frozenset[str] = frozenset(
+    {SOURCE_RECONCILIATION, SOURCE_MANUAL_ADJUSTMENT}
 )
 
 
@@ -60,6 +72,19 @@ def _norm_num(value: object) -> str:
         return f"{Decimal(str(value)):.2f}"
     except (ArithmeticError, ValueError):
         return _norm_text(value)
+
+
+def ensure_utc(dt: datetime | None) -> datetime | None:
+    """Normaliza a UTC ``occurred_at`` (fecha de negocio de un movimiento).
+
+    ``transaction_date`` de ventas/gastos se persiste NAIVE, mientras que
+    ``InventoryMovement.occurred_at`` es tz-aware. Un datetime sin tzinfo se asume
+    en UTC (no re-interpreta la hora, solo la etiqueta) para poder persistirlo en la
+    columna aware sin perder la fecha de negocio original.
+    """
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _norm_date(value: object) -> str:

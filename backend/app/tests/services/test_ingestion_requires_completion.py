@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.application.services.ingestion_import_service as importer
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 
@@ -98,6 +99,45 @@ async def test_purchase_book_without_category_creates_product(
     expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
     assert expense.expense_type == "COGS"
     assert expense.product_id == product.id
+
+    # occurred_at (fecha de NEGOCIO) = fecha real de la fila del gasto (2026-03-10),
+    # NO la fecha de carga (created_at ≈ ahora): así el dedup por fecha de negocio
+    # nunca confunde esta compra con una cargada el mismo día pero ocurrida en otro mes.
+    movement = (await db_session.execute(select(InventoryMovement))).scalar_one()
+    assert movement.occurred_at is not None
+    assert movement.occurred_at.replace(tzinfo=None) == expense.transaction_date
+    assert movement.occurred_at.replace(tzinfo=None) != movement.created_at.replace(
+        tzinfo=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_catalog_stock_purchase_sets_occurred_at_from_tx_date(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Catálogo con stock marcado como COMPRA (``stock_treatment=purchase``): el
+    ``InventoryMovement`` queda estampado con la misma fecha de negocio (``tx_date``)
+    que el gasto COGS que genera — ambos derivan de la misma variable en el import."""
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+    summary = _stock_summary(
+        [{"producto": "Fernet 750ml", "precio": "3000", "costo": "1800", "stock": "6"}]
+    )
+    await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"productos": True},
+        stock_treatment="purchase",
+    )
+
+    expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
+    assert expense.expense_type == "COGS"
+
+    movement = (await db_session.execute(select(InventoryMovement))).scalar_one()
+    assert movement.movement_type == "purchase"
+    assert movement.occurred_at is not None
+    assert movement.occurred_at.replace(tzinfo=None) == expense.transaction_date
 
 
 @pytest.mark.asyncio

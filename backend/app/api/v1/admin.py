@@ -25,6 +25,7 @@ from app.schemas.admin import (
     BenchmarkThresholds,
     DataRepairItemResponse,
     DataRepairRunResponse,
+    InventoryIntegrityCheckResponse,
     JobStats,
     RepairRequest,
     VerticalBenchmarkItem,
@@ -302,6 +303,31 @@ async def get_repair_run_items(
     )
     items = list(result.scalars().all())
     return [DataRepairItemResponse.model_validate(item) for item in items]
+
+
+@router.get(
+    "/inventory-integrity/{tenant_id}",
+    response_model=InventoryIntegrityCheckResponse,
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Escaneo read-only de divergencias stock_units vs ledger (no auto-corrige)",
+)
+async def get_inventory_integrity_check(
+    tenant_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+) -> InventoryIntegrityCheckResponse:
+    """Fase 1 (manual) del chequeo de integridad de inventario: compara
+    ``stock_units`` contra ``inicial (catalog_initial_stock) + compras − ventas``
+    para productos con ancla confiable. Puramente de lectura — NUNCA escribe
+    ``stock_units`` ni persiste una alerta; eso lo hace el job de fase 2
+    (``jobs.inventory_integrity_check``) una vez validado el umbral contra datos
+    reales via este endpoint.
+    """
+    from app.application.services.inventory_integrity_service import (  # noqa: PLC0415
+        check_tenant_inventory_integrity,
+    )
+
+    result = await check_tenant_inventory_integrity(db, tenant_id)
+    return InventoryIntegrityCheckResponse.model_validate(result)
 
 
 # ── FASE 0: observabilidad del pipeline de ingestión ──────────────────────────
