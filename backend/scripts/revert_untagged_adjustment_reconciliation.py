@@ -11,6 +11,11 @@ QUÉ HACE POR CADA ITEM de la corrida:
     backfill       → vuelve ``source_type = NULL`` (y limpia ``source_upload_id`` /
         ``source_row_ref`` SOLO si la corrida los seteó — caso catalog).
 
+CORRIDAS ``--void-keep-stock`` (``void_stock_mode: "keep"``): el apply NO tocó stock y
+grabó ``stock_changes: []`` a propósito — esta reversa entonces solo des-voidea los
+movimientos y NO restaura stock (el paso 3 no encuentra ``stock_before`` para ningún
+producto). Es el comportamiento correcto: no hay nada de stock que deshacer.
+
 ⚠ ABORTA SI EL CHECK YA ESTÁ APLICADO. La constraint
 ``ck_inventory_movements_adjustment_source_type`` (migración 20260728_0001) exige que
 todo adjustment VIVO tenga ``source_type``. Des-taggear (source_type→NULL) o des-voidear

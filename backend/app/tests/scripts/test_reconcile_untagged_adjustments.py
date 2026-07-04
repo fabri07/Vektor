@@ -180,3 +180,32 @@ def test_compute_stock_after_no_clamp_when_result_is_zero_exact(mod):
     stock_after, clamped = mod._compute_stock_after(stock_before, delta)
     assert stock_after == 0
     assert clamped is False
+
+
+def test_void_delta_negates_sum_and_tolerates_none(mod):
+    """delta = -Σ(qty voideados); qty None cuenta como 0."""
+    items = [{"qty": -36}, {"qty": -4}, {"qty": None}]
+    assert mod._void_delta(items) == 40
+
+
+def test_stock_change_entry_undo_mode_applies_delta(mod):
+    """Modo default (undo): voidear qty negativa sube el stock (delta incremental)."""
+    entry = mod._stock_change_entry("pid", 10, 40, keep_stock=False)
+    assert entry == {
+        "product_id": "pid",
+        "stock_before": 10,
+        "stock_after": 50,
+        "clamped": False,
+    }
+
+
+def test_stock_change_entry_keep_stock_never_moves_stock(mod):
+    """--void-keep-stock: before == after y nunca clamp, sin importar el delta —
+    el void es ledger-only (caso don pedro: stock actual verificado correcto)."""
+    entry = mod._stock_change_entry("pid", 3, 625, keep_stock=True)
+    assert entry == {
+        "product_id": "pid",
+        "stock_before": 3,
+        "stock_after": 3,
+        "clamped": False,
+    }

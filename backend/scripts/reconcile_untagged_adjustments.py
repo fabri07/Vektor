@@ -31,6 +31,17 @@ seed, catálogo que setea stock absoluto). Por eso el ajuste de VOID es INCREMEN
 ``inventory_balances`` (INSERT con ``current_qty = stock_units`` actual) ANTES de
 mutar ``stock_units`` — igual que ``stock_service.void_movement``.
 
+MODO ``--void-keep-stock``: voidea SIN mutar stock (solo limpia el ledger). El ajuste
+incremental del default asume que el adjustment fue APLICADO a ``stock_units`` al
+crearse y que deshacerlo restaura el valor correcto. Para la población de don pedro
+esa premisa es FALSA: el fix puntual del incidente (``fix_reconciled_stock.py``,
+2026-07-04) verificó contra archivos fuente que los 92 productos restantes YA tienen
+el stock correcto CON estos adjustments ignorados — deshacerlos sumaría +29k unidades
+fantasma (re-crearía la inflación de inventario). En este modo el void es ledger-only:
+ni ``products.stock_units`` ni ``inventory_balances`` se tocan, y la auditoría graba
+``stock_changes: []`` + ``void_stock_mode: "keep"`` para que la reversa tampoco
+restaure stock (des-voidea y nada más).
+
 REVERSA: la corrida completa (before/after de cada producto + items) queda en
 ``decision_audit_log`` (decision_type='UNTAGGED_ADJUSTMENT_RECONCILIATION'). Ese
 before/after ES la fuente de la reversa. ``revert_untagged_adjustment_reconciliation.py``
@@ -52,6 +63,10 @@ Usage:
 
     # Aplicar (después de revisar el dry-run)
     ... scripts/reconcile_untagged_adjustments.py --tenant <uuid> --apply
+
+    # Caso don pedro: voidear sin tocar stock (stock actual verificado correcto)
+    ... scripts/reconcile_untagged_adjustments.py \
+        --tenant ee2625dc-96b7-464c-bda3-7f7018cc2a5b --void-keep-stock --apply
 """
 
 from __future__ import annotations
@@ -425,18 +440,48 @@ def _group_voids_by_product(items: list[dict[str, Any]]) -> dict[str, list[dict[
     return voids_by_product
 
 
+def _void_delta(prod_items: list[dict[str, Any]]) -> float:
+    """Delta incremental de deshacer los VOID de un producto: ``-Σ(qty voideados)``."""
+    return -sum((it["qty"] or 0) for it in prod_items)
+
+
+def _stock_change_entry(
+    pid: str, stock_before: int, delta: float, keep_stock: bool
+) -> dict[str, Any]:
+    """Entrada del plan de stock para los VOID de un producto (pura y testeable).
+
+    ``keep_stock=True`` (``--void-keep-stock``) → el void NO muta stock: before ==
+    after, nunca clamp. Es para poblaciones donde ``stock_units`` actual ya fue
+    verificado correcto CON los adjustments ignorados (ver docstring del módulo).
+    """
+    if keep_stock:
+        return {
+            "product_id": pid,
+            "stock_before": stock_before,
+            "stock_after": stock_before,
+            "clamped": False,
+        }
+    stock_after, clamped = _compute_stock_after(stock_before, delta)
+    return {
+        "product_id": pid,
+        "stock_before": stock_before,
+        "stock_after": stock_after,
+        "clamped": clamped,
+    }
+
+
 async def _plan_stock_changes(
-    session: AsyncSession, tid: str, items: list[dict[str, Any]]
+    session: AsyncSession, tid: str, items: list[dict[str, Any]], keep_stock: bool
 ) -> list[dict[str, Any]]:
     """Plan de stock (read-only) para los VOID planificados — usado en dry-run.
 
-    Mismo cálculo que ``_apply_tenant`` (delta incremental + clamp), pero SOLO
-    SELECT: no muta ``products`` ni ``inventory_balances``. Permite mostrar
-    stock_before/stock_after/clamped ANTES de aplicar.
+    Mismo cálculo que ``_apply_tenant`` (delta incremental + clamp, o before==after
+    en modo ``--void-keep-stock``), pero SOLO SELECT: no muta ``products`` ni
+    ``inventory_balances``. Permite mostrar stock_before/stock_after/clamped ANTES
+    de aplicar.
     """
     stock_changes: list[dict[str, Any]] = []
     for pid, prod_items in _group_voids_by_product(items).items():
-        delta = -sum((it["qty"] or 0) for it in prod_items)
         stock_before = (
             await session.execute(
                 text(
@@ -447,20 +492,18 @@ async def _plan_stock_changes(
             )
         ).scalar_one()
         stock_before = int(stock_before)
-        stock_after, clamped = _compute_stock_after(stock_before, delta)
         stock_changes.append(
-            {
-                "product_id": pid,
-                "stock_before": stock_before,
-                "stock_after": stock_after,
-                "clamped": clamped,
-            }
+            _stock_change_entry(pid, stock_before, _void_delta(prod_items), keep_stock)
         )
     return stock_changes
 
 
 async def _apply_tenant(
-    session: AsyncSession, tid: str, items: list[dict[str, Any]], window_hours: int
+    session: AsyncSession,
+    tid: str,
+    items: list[dict[str, Any]],
+    window_hours: int,
+    keep_stock: bool,
 ) -> dict[str, Any]:
     """Aplica backfills y voids del tenant. Reversible y auditado.
 
@@ -497,7 +540,7 @@ async def _apply_tenant(
     stock_changes: list[dict[str, Any]] = []
     for pid, prod_items in voids_by_product.items():
         # delta = -Σ(qty voideados): qty negativa ⇒ voidear SUBE el stock.
-        delta = -sum((it["qty"] or 0) for it in prod_items)
+        delta = _void_delta(prod_items)
 
         for it in prod_items:
             await session.execute(
@@ -510,7 +553,6 @@ async def _apply_tenant(
             )
             voided += 1
 
-        # Stock actual (before) + sembrar inventory_balances ANTES de mutar stock_units.
         stock_before = (
             await session.execute(
                 text(
@@ -522,52 +564,46 @@ async def _apply_tenant(
         ).scalar_one()
         stock_before = int(stock_before)
 
-        existing_balance = (
+        if not keep_stock:
+            # Sembrar inventory_balances ANTES de mutar stock_units.
+            existing_balance = (
+                await session.execute(
+                    text(
+                        "SELECT id FROM inventory_balances "
+                        "WHERE tenant_id = CAST(:tid AS uuid) "
+                        "AND product_id = CAST(:pid AS uuid)"
+                    ),
+                    {"tid": tid, "pid": pid},
+                )
+            ).first()
+            if existing_balance is None:
+                await session.execute(
+                    text(
+                        "INSERT INTO inventory_balances "
+                        "(id, tenant_id, product_id, current_qty, reserved_qty, "
+                        "created_at, updated_at) "
+                        "VALUES (gen_random_uuid(), CAST(:tid AS uuid), CAST(:pid AS uuid), "
+                        ":cq, 0, now(), now())"
+                    ),
+                    {"tid": tid, "pid": pid, "cq": stock_before},
+                )
+
             await session.execute(
                 text(
-                    "SELECT id FROM inventory_balances "
+                    "UPDATE products SET stock_units = GREATEST(0, stock_units + :delta) "
+                    "WHERE id = CAST(:pid AS uuid) AND tenant_id = CAST(:tid AS uuid)"
+                ),
+                {"delta": delta, "pid": pid, "tid": tid},
+            )
+            await session.execute(
+                text(
+                    "UPDATE inventory_balances "
+                    "SET current_qty = GREATEST(0, current_qty + :delta) "
                     "WHERE tenant_id = CAST(:tid AS uuid) AND product_id = CAST(:pid AS uuid)"
                 ),
-                {"tid": tid, "pid": pid},
+                {"delta": delta, "pid": pid, "tid": tid},
             )
-        ).first()
-        if existing_balance is None:
-            await session.execute(
-                text(
-                    "INSERT INTO inventory_balances "
-                    "(id, tenant_id, product_id, current_qty, reserved_qty, "
-                    "created_at, updated_at) "
-                    "VALUES (gen_random_uuid(), CAST(:tid AS uuid), CAST(:pid AS uuid), "
-                    ":cq, 0, now(), now())"
-                ),
-                {"tid": tid, "pid": pid, "cq": stock_before},
-            )
-
-        stock_after, clamped = _compute_stock_after(stock_before, delta)
-
-        await session.execute(
-            text(
-                "UPDATE products SET stock_units = GREATEST(0, stock_units + :delta) "
-                "WHERE id = CAST(:pid AS uuid) AND tenant_id = CAST(:tid AS uuid)"
-            ),
-            {"delta": delta, "pid": pid, "tid": tid},
-        )
-        await session.execute(
-            text(
-                "UPDATE inventory_balances "
-                "SET current_qty = GREATEST(0, current_qty + :delta) "
-                "WHERE tenant_id = CAST(:tid AS uuid) AND product_id = CAST(:pid AS uuid)"
-            ),
-            {"delta": delta, "pid": pid, "tid": tid},
-        )
-        stock_changes.append(
-            {
-                "product_id": pid,
-                "stock_before": stock_before,
-                "stock_after": stock_after,
-                "clamped": clamped,
-            }
-        )
+        stock_changes.append(_stock_change_entry(pid, stock_before, delta, keep_stock))
 
     # 3. Auditoría — UN insert por tenant con cambios. El before/after ES la reversa.
     changed_items = [it for it in items if it["backfill"] is not None or it["voided"]]
@@ -575,6 +611,7 @@ async def _apply_tenant(
         counts = _counts_by_category(items)
         decision_data = {
             "mode": "apply",
+            "void_stock_mode": "keep" if keep_stock else "undo",
             "window_hours": window_hours,
             "counts_by_category": counts,
             "items": [
@@ -588,7 +625,10 @@ async def _apply_tenant(
                 }
                 for it in changed_items
             ],
-            "stock_changes": stock_changes,
+            # En keep-stock el apply NO tocó stock → la reversa (que restaura
+            # stock_before ABSOLUTO por producto desde acá) tampoco debe tocarlo:
+            # se graba vacío a propósito y la reversa solo des-voidea.
+            "stock_changes": [] if keep_stock else stock_changes,
         }
         await insert_decision_audit(
             session,
@@ -620,13 +660,21 @@ def _annotate_stock_changes(
 
 
 def _print_summary(
-    tid: str, items: list[dict[str, Any]], stock_changes: list[dict[str, Any]] | None = None
+    tid: str,
+    items: list[dict[str, Any]],
+    stock_changes: list[dict[str, Any]] | None = None,
+    keep_stock: bool = False,
 ) -> None:
     counts = _counts_by_category(items)
     products = {it["product_id"] for it in items if it["voided"]}
     print(f"tenant {tid}: {len(items)} adjustment(s) sin procedencia — {counts}")
     if products:
-        print(f"    {len(products)} producto(s) con VOID (ajuste incremental de stock)")
+        nota = (
+            "stock INTACTO (--void-keep-stock)"
+            if keep_stock
+            else "ajuste incremental de stock"
+        )
+        print(f"    {len(products)} producto(s) con VOID ({nota})")
     for sc in stock_changes or []:
         flag = " [CLAMP]" if sc["clamped"] else ""
         print(
@@ -694,6 +742,14 @@ async def main() -> None:
     parser.add_argument("--tenant", help="UUID de tenant puntual")
     parser.add_argument("--all-active", action="store_true", help="Todos los tenants activos")
     parser.add_argument("--apply", action="store_true", help="Escribir cambios (default: dry-run)")
+    parser.add_argument(
+        "--void-keep-stock",
+        action="store_true",
+        help=(
+            "Voidear SIN mutar stock_units/inventory_balances: para poblaciones donde el "
+            "stock actual ya fue verificado correcto sin estos adjustments (caso don pedro)"
+        ),
+    )
     parser.add_argument("--out", default="reconcile_report.csv", help="Path del reporte (CSV/JSON)")
     parser.add_argument(
         "--window-hours",
@@ -722,8 +778,9 @@ async def main() -> None:
             tids = [str(r[0]) for r in rows.all()]
 
         mode = "APPLY" if args.apply else "DRY-RUN"
-        print(f"[{mode}] reconciliación de adjustments sin procedencia en {len(tids)} tenant(s) "
-              f"(ventana={args.window_hours}h)\n")
+        stock_mode = " · void-keep-stock" if args.void_keep_stock else ""
+        print(f"[{mode}{stock_mode}] reconciliación de adjustments sin procedencia en "
+              f"{len(tids)} tenant(s) (ventana={args.window_hours}h)\n")
 
         all_items: list[dict[str, Any]] = []
         total_backfilled = 0
@@ -733,17 +790,21 @@ async def main() -> None:
             if not items:
                 continue
             if args.apply:
-                res = await _apply_tenant(session, tid, items, args.window_hours)
+                res = await _apply_tenant(
+                    session, tid, items, args.window_hours, args.void_keep_stock
+                )
                 total_backfilled += res["backfilled"]
                 total_voided += res["voided"]
                 stock_changes = res["stock_changes"]
             else:
                 # Dry-run: mismo plan de stock (read-only), para dar visibilidad de
                 # clamps ANTES de aplicar.
-                stock_changes = await _plan_stock_changes(session, tid, items)
+                stock_changes = await _plan_stock_changes(
+                    session, tid, items, args.void_keep_stock
+                )
             _annotate_stock_changes(items, stock_changes)
             all_items.extend(items)
-            _print_summary(tid, items, stock_changes)
+            _print_summary(tid, items, stock_changes, keep_stock=args.void_keep_stock)
             print()
 
         if args.out:
