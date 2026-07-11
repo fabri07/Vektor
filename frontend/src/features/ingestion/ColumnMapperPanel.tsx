@@ -12,6 +12,7 @@ import {
   type StockTreatment,
 } from "@/services/ingestion.service";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
+import { useToastStore } from "@/stores/toastStore";
 
 // Campos canónicos por entity_type (para los selects del panel derecho)
 const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> = {
@@ -473,6 +474,7 @@ function MultiContextMapper({
   onDone: () => void;
 }) {
   const queryClient = useQueryClient();
+  const toast = useToastStore((s) => s.add);
   const [included, setIncluded] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(contexts.map((c) => [c.context_id, true])),
   );
@@ -536,9 +538,12 @@ function MultiContextMapper({
         hasStock ? stockTreatment : undefined,
       );
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
       void queryClient.invalidateQueries({ queryKey: ["column-mappings-learned"] });
+      // Avisos human-in-the-loop: el panel se cierra en onDone(), así que van como
+      // toasts (compras sin proveedor/producto, filas a "Otros").
+      for (const w of result.warnings ?? []) toast(w, "warning");
       onDone();
     },
   });
@@ -636,6 +641,7 @@ interface ColumnMapperPanelProps {
 
 export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const queryClient = useQueryClient();
+  const toast = useToastStore((s) => s.add);
   const [confirmedFields, setConfirmedFields] = useState({
     ventas: true,
     gastos: false,
@@ -729,9 +735,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         undefined,
         hasStock ? stockTreatment : undefined,
       ),
-    onSuccess: () => {
+    onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
       void queryClient.invalidateQueries({ queryKey: ["column-mappings-learned"] });
+      // Avisos human-in-the-loop: el panel se cierra en onDone(), así que van como
+      // toasts (compras sin proveedor/producto, filas a "Otros").
+      for (const w of result.warnings ?? []) toast(w, "warning");
       onDone();
     },
   });

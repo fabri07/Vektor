@@ -125,6 +125,10 @@ class ConfirmIngestionResponse(BaseModel):
     file_id: UUID
     status: str
     message: str
+    # Avisos human-in-the-loop tras confirmar: compras sin proveedor (→ sentinela "No
+    # identificado"), compras sin producto detallado (stock incompleto), filas a "Otros".
+    # No bloquean; el frontend los muestra en un banner para que el usuario revise.
+    warnings: list[str] = Field(default_factory=list)
 
 
 # ── Relectura de archivos (REREAD_FILE) ────────────────────────────────────────
