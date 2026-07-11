@@ -144,5 +144,7 @@ class AgentCash(BaseAgent):
         response.agent_name = self.agent_name  # preservar "agent_cash" para audit log legacy
         return response
 
-    async def on_confirmed_sale(self, sale_id: str, business_id: str) -> None:
-        EventBus.emit("SALE_RECORDED", {"sale_id": sale_id, "business_id": business_id})
+    async def on_confirmed_sale(self, sale_id: str, tenant_id: str) -> None:
+        # El task `events.sale_recorded` lee la clave `tenant_id` (emitir `business_id`
+        # dejaba el descuento de stock muerto). Backstop del descuento en vivo del chat.
+        EventBus.emit("SALE_RECORDED", {"sale_id": sale_id, "tenant_id": tenant_id})

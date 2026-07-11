@@ -89,5 +89,5 @@ async def test_sale_confirmed_emits_event(session: AsyncSession, tenant) -> None
         await agent.on_confirmed_sale("sale-123", str(tenant.tenant_id))
 
     mock_emit.assert_called_once_with(
-        "SALE_RECORDED", {"sale_id": "sale-123", "business_id": str(tenant.tenant_id)}
+        "SALE_RECORDED", {"sale_id": "sale-123", "tenant_id": str(tenant.tenant_id)}
     )

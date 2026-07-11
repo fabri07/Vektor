@@ -179,7 +179,14 @@ async def bulk_create_sales(
     tenant: Tenant = Depends(get_current_tenant),
     _: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> list[SaleEntry]:
+    # Idempotencia opcional: un reintento de red no debe duplicar ventas NI doble-descontar
+    # stock (ahora que la carga masiva mueve inventario). Mismo patrón que POST /sales.
+    if idempotency_key is not None and not await claim_idempotency_key(
+        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE_BULK"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = SaleRepository(session)
     # Carga masiva sin cliente (siempre "cash", nunca fiado): todas las entries van
     # al sentinela "Local" para que ninguna venta quede sin cliente.
@@ -210,6 +217,10 @@ async def bulk_create_sales(
             )
         ]
     saved = await repo.bulk_save(entries)
+    # Descontar stock por línea con producto (idempotente). Las entries de agregado sin
+    # product_id no-opean.
+    for e in saved:
+        await stock_service.decrement_for_sale(e, session)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "sales_bulk_created")
     return saved
 
@@ -291,7 +302,6 @@ async def create_manual_batch_sale(
 
     repo = SaleRepository(session)
     group_id = uuid.uuid4()
-    source_event = f"manual_batch:{group_id}"
     saved: list[SaleEntry] = []
     total = Decimal("0")
     for item in body.items:
@@ -309,14 +319,10 @@ async def create_manual_batch_sale(
                 custom_fields={"sale_group_id": str(group_id)},
             )
         )
-        await stock_service.decrement_stock(
-            item.product_id,
-            tenant.tenant_id,
-            item.quantity,
-            source_event,
-            session,
-            occurred_at=body.transaction_date,
-        )
+        # Descuento vía el helper compartido idempotente (source_event_id="sale:{id}"),
+        # por línea → habilita reversa exacta en PATCH/DELETE. El bloqueo por stock
+        # insuficiente (POS deliberado) ya se validó arriba con SELECT ... FOR UPDATE.
+        await stock_service.decrement_for_sale(entry, session)
         # Auditar cada línea con el mismo sale_group_id.
         snap = _sale_snapshot(entry)
         _audit_data_change(
@@ -377,6 +383,9 @@ async def create_sale(
         custom_fields=body.custom_fields,
     )
     saved = await repo.save(entry)
+    # Venta EN VIVO con producto → descontar stock (idempotente, sin bloquear: la venta
+    # ya ocurrió). Sin product_id/quantity → no-op. El import histórico NO pasa por acá.
+    await stock_service.decrement_for_sale(saved, session)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_created")
     return saved
 
@@ -407,6 +416,8 @@ async def update_sale(
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
     before = _sale_snapshot(entry)
+    _prev_product_id = entry.product_id
+    _prev_quantity = entry.quantity
     if body.amount is not None:
         entry.amount = body.amount
     if body.quantity is not None:
@@ -454,6 +465,17 @@ async def update_sale(
     if entry.source_upload_id is not None:
         entry.has_user_edits = True
     saved = await repo.save(entry)
+    # Ajuste de stock SOLO si cambió el producto o la cantidad (asociar/desasociar
+    # incluido). Monto/notas/pago/cliente no tocan stock. Reversa exacta del movimiento
+    # viejo + descuento nuevo con los valores actualizados (ambos idempotentes).
+    # Solo re-descontamos si REALMENTE había un movimiento previo (revert devolvió True):
+    # una venta histórica importada nunca descontó, y editarla no debe empezar a hacerlo.
+    if entry.product_id != _prev_product_id or entry.quantity != _prev_quantity:
+        had_movement = await stock_service.revert_sale_stock(
+            entry.id, tenant.tenant_id, session
+        )
+        if had_movement:
+            await stock_service.decrement_for_sale(entry, session)
     _audit_data_change(
         session,
         tenant_id=tenant.tenant_id,
@@ -481,6 +503,10 @@ async def delete_sale(
     entry.voided_at = datetime.now(UTC)
     entry.void_reason = VOID_REASON_MANUAL
     await repo.save(entry)
+    # Anular la venta repone el stock que había descontado (incremental). No-op si la
+    # venta no tenía movimiento (sin producto o histórica importada). Cierra el bug
+    # latente donde voidar una venta de manual-batch dejaba el stock bajo para siempre.
+    await stock_service.revert_sale_stock(entry.id, tenant.tenant_id, session)
     _audit_data_change(
         session,
         tenant_id=tenant.tenant_id,

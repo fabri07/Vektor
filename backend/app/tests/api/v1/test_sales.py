@@ -350,3 +350,111 @@ class TestManualBatchSale:
         # nada se persistió: stock intacto
         r1 = await client.get(f"/api/v1/products/{p1}", headers=auth_headers)
         assert r1.json()["stock_units"] == 10
+
+
+@pytest.mark.asyncio
+class TestLiveSaleStockDecrement:
+    """POST /sales y su ciclo de vida descuentan/reponen stock (antes solo manual-batch)."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def _stock(self, client: AsyncClient, headers: dict[str, Any], pid: str) -> int:
+        r = await client.get(f"/api/v1/products/{pid}", headers=headers)
+        return int(r.json()["stock_units"])
+
+    async def test_create_sale_with_product_decrements_stock(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 3, "product_id": pid}
+        resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert await self._stock(client, auth_headers, pid) == 7
+
+    async def test_create_sale_without_product_does_not_break(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+
+    async def test_bulk_with_product_decrements_stock_per_line(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Cola", stock=10, price="500.00")
+        payload = {
+            "period_type": "daily",
+            "period_date": _TODAY,
+            "total_amount_ars": "1500.00",
+            "entries": [{"amount_ars": "1500.00", "quantity": 3, "product_id": pid}],
+        }
+        resp = await client.post("/api/v1/sales/bulk", json=payload, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert await self._stock(client, auth_headers, pid) == 7
+
+    async def test_bulk_idempotency_key_prevents_double_decrement(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Té", stock=10, price="400.00")
+        payload = {
+            "period_type": "daily",
+            "period_date": _TODAY,
+            "total_amount_ars": "800.00",
+            "entries": [{"amount_ars": "800.00", "quantity": 2, "product_id": pid}],
+        }
+        headers = {**auth_headers, "Idempotency-Key": "bulk-key-1"}
+        r1 = await client.post("/api/v1/sales/bulk", json=payload, headers=headers)
+        assert r1.status_code == 201, r1.text
+        # reintento con la misma key → 409, sin segundo descuento
+        r2 = await client.post("/api/v1/sales/bulk", json=payload, headers=headers)
+        assert r2.status_code == 409
+        assert await self._stock(client, auth_headers, pid) == 8  # descontado una sola vez
+
+    async def test_delete_sale_restores_stock(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Fideos", stock=10, price="500.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 4, "product_id": pid}
+        sale_id = (
+            await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 6
+
+        resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 10  # repuesto
+
+    async def test_patch_quantity_adjusts_stock_differentially(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Agua", stock=10, price="200.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 3, "product_id": pid}
+        sale_id = (
+            await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 7
+
+        # subir la cantidad a 5 → debe descontar 2 más (10 − 5 = 5)
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"quantity": 5}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 5
+
+    async def test_patch_amount_only_leaves_stock_intact(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Pan", stock=10, price="300.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 2, "product_id": pid}
+        sale_id = (
+            await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 8
+
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"amount": "999.00"}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 8  # sin cambios
