@@ -222,7 +222,10 @@ class CreateExpenseRequest(BaseModel):
     category: str = Field(pattern=EXPENSE_CATEGORIES)
     # Solo se usa cuando category == OTHER: nombre personalizado de la categoría.
     category_label: str | None = Field(default=None, max_length=50)
-    expense_type: str = Field(default="OPEX", pattern=r"^(OPEX|COGS)$")
+    # None = el usuario NO eligió → el handler infiere COGS/OPEX por categoría
+    # (INVENTORY/mercadería → COGS). Un valor explícito gana. Antes defaulteaba a
+    # "OPEX", lo que hacía que una compra de mercadería manual quedara mal clasificada.
+    expense_type: str | None = Field(default=None, pattern=r"^(OPEX|COGS)$")
     expense_date: datetime
     notes: str | None = Field(default=None, max_length=1000)
     description: str = Field(default="", max_length=500)

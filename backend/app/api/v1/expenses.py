@@ -11,6 +11,7 @@ from app.api.v1.deps import get_current_tenant, require_modify_access, require_r
 from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.domain.expense_categories import infer_expense_type
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.tenant import Tenant
@@ -203,7 +204,10 @@ async def create_expense(
         tenant_id=tenant.tenant_id,
         amount=body.amount,
         category=body.category,
-        expense_type=body.expense_type,
+        # Discriminador canónico COGS/OPEX: un valor explícito del usuario gana; si no
+        # eligió (None), infiere por categoría (mercadería/INVENTORY → COGS). Antes se
+        # persistía el default "OPEX" y una compra de mercadería manual quedaba mal.
+        expense_type=infer_expense_type(body.category, explicit=body.expense_type),
         transaction_date=body.expense_date,
         description=body.description,
         is_recurring=body.is_recurring,
