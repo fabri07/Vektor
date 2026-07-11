@@ -19,9 +19,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.stock_service import (
+    InsufficientStockError,
+    check_stock_available,
     decrement_for_sale,
     revert_sale_stock,
     sale_source_event_id,
+    validate_sale_update_stock,
 )
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
@@ -181,17 +184,106 @@ async def test_revert_returns_false_for_sale_without_movement(
 
 
 @pytest.mark.asyncio
-async def test_oversell_goes_negative_and_void_restores_exactly(
+async def test_decrement_for_sale_rejects_when_insufficient_stock(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Venta en vivo > stock (no bloqueada): stock_units queda negativo (sin clamp) para
-    que la reversa del void sea EXACTA. stock 3 − venta 10 = −7; void → 3 de nuevo."""
+    """NO se permite stock negativo: venta EN VIVO > stock levanta InsufficientStockError
+    y NO crea movimiento ni toca el stock (stock 3, venta 10)."""
     tid = sample_tenant.tenant_id
     product = await _make_product(db_session, tid, stock_units=3)
     sale = await _make_sale(db_session, tid, product.id, quantity=10)
 
-    await decrement_for_sale(sale, db_session)
-    assert product.stock_units == -7  # sin clamp a 0
+    with pytest.raises(InsufficientStockError):
+        await decrement_for_sale(sale, db_session)
 
-    assert await revert_sale_stock(sale.id, tid, db_session) is True
-    assert product.stock_units == 3  # reversa exacta, no over-restore
+    assert product.stock_units == 3  # intacto
+    assert await _count_live_sale_movements(db_session, sale.id) == 0
+
+
+@pytest.mark.asyncio
+async def test_check_stock_available_passes_and_raises(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=5)
+
+    # Suficiente (incluye el borde exacto): devuelve el producto bloqueado.
+    assert (await check_stock_available(product.id, tid, 5, db_session)).id == product.id
+    # Insuficiente: levanta con los valores disponibles/pedidos.
+    with pytest.raises(InsufficientStockError) as exc:
+        await check_stock_available(product.id, tid, 6, db_session)
+    assert exc.value.available == 5
+    assert exc.value.requested == 6
+
+
+@pytest.mark.asyncio
+async def test_validate_sale_update_stock_incremental(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El validador de PATCH modela el efecto neto: subir la cantidad solo necesita el
+    delta (repone la cantidad vieja del mismo producto antes de exigir la nueva)."""
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=10)
+    sale = await _make_sale(db_session, tid, product.id, quantity=3)
+    await decrement_for_sale(sale, db_session)  # stock → 7, movimiento vivo de 3
+
+    # Subir de 3 a 10: repone 3 → disponible 7+3=10, alcanza justo. No levanta.
+    await validate_sale_update_stock(sale.id, tid, product.id, 3, product.id, 10, db_session)
+    # Subir de 3 a 11: 7+3=10 < 11 → rechaza.
+    with pytest.raises(InsufficientStockError):
+        await validate_sale_update_stock(sale.id, tid, product.id, 3, product.id, 11, db_session)
+    # Desasociar el producto (new_product_id None) → solo repone, nunca falta: no-op.
+    await validate_sale_update_stock(sale.id, tid, product.id, 3, None, 0, db_session)
+
+
+@pytest.mark.asyncio
+async def test_chat_register_sale_insufficient_stock_raises_and_creates_nothing(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Chat REGISTER_SALE con producto sin stock: levanta InsufficientStockError (mensaje
+    claro para el usuario) y, con el rollback del savepoint de _execute_local_action, NO
+    queda ninguna venta."""
+    from app.application.agents.shared.schemas import ActionType  # noqa: PLC0415
+    from app.application.services.pending_action_service import (  # noqa: PLC0415
+        execute_pending_action,
+    )
+    from app.application.services.stock_service import (  # noqa: PLC0415
+        INSUFFICIENT_STOCK_MESSAGE,
+    )
+    from app.persistence.models.pending_action import PendingAction  # noqa: PLC0415
+
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=2)
+
+    action = PendingAction()
+    action.id = uuid.uuid4()
+    action.tenant_id = tid
+    action.user_id = uuid.uuid4()
+    action.action_type = ActionType.REGISTER_SALE
+    action.payload = {
+        "amount": "1200",
+        "payment_method": "cash",
+        "product_id": str(product.id),
+        "quantity": 5,
+        "transaction_date": "2026-07-10",
+    }
+    action.risk_level = "MEDIUM"
+    action.status = "APPROVED"
+    action.external_system = None
+
+    # Espeja el savepoint de _execute_local_action (agent.py): el rollback deja 0 ventas.
+    with pytest.raises(InsufficientStockError) as exc:
+        async with db_session.begin_nested():
+            await execute_pending_action(action, db_session)
+    assert exc.value.user_message == INSUFFICIENT_STOCK_MESSAGE
+
+    remaining = (
+        await db_session.execute(
+            select(func.count(SaleEntry.id)).where(
+                SaleEntry.tenant_id == tid,
+                SaleEntry.product_id == product.id,
+            )
+        )
+    ).scalar_one()
+    assert remaining == 0
+    assert product.stock_units == 2  # intacto

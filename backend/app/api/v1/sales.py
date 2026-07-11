@@ -216,9 +216,22 @@ async def bulk_create_sales(
                 customer_id=local_id,
             )
         ]
+    # Validar stock ANTES de persistir: NO se permite stock negativo. Se valida contra la
+    # SUMA de cantidades por producto (varias líneas del mismo producto se acumulan), no
+    # por línea aislada. Si algún producto excede su stock → InsufficientStockError →
+    # handler global 400 y toda la carga aborta (rollback: no queda ninguna venta). Filas
+    # sin product_id (agregado) no tocan stock. Orden estable por id (anti-deadlock).
+    qty_by_product: dict[UUID, int] = {}
+    for item in body.entries or []:
+        if item.product_id is not None:
+            qty_by_product[item.product_id] = qty_by_product.get(item.product_id, 0) + item.quantity
+    for pid in sorted(qty_by_product, key=str):
+        await stock_service.check_stock_available(
+            pid, tenant.tenant_id, qty_by_product[pid], session
+        )
     saved = await repo.bulk_save(entries)
     # Descontar stock por línea con producto (idempotente). Las entries de agregado sin
-    # product_id no-opean.
+    # product_id no-opean. Ya validado arriba: el descuento no puede dejar stock negativo.
     for e in saved:
         await stock_service.decrement_for_sale(e, session)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "sales_bulk_created")
@@ -382,9 +395,16 @@ async def create_sale(
         notes=body.notes,
         custom_fields=body.custom_fields,
     )
+    # NO se permite stock negativo: validar ANTES de persistir. Si no alcanza, 400 (handler
+    # global) y no se crea la SaleEntry ni el movimiento. Sin product_id → no toca stock.
+    if body.product_id is not None:
+        await stock_service.check_stock_available(
+            body.product_id, tenant.tenant_id, body.quantity, session
+        )
     saved = await repo.save(entry)
-    # Venta EN VIVO con producto → descontar stock (idempotente, sin bloquear: la venta
-    # ya ocurrió). Sin product_id/quantity → no-op. El import histórico NO pasa por acá.
+    # Venta EN VIVO con producto → descontar stock (idempotente). Ya validado arriba, así
+    # que no puede dejar stock negativo. Sin product_id → no-op. El import histórico NO
+    # pasa por acá.
     await stock_service.decrement_for_sale(saved, session)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_created")
     return saved
@@ -418,6 +438,23 @@ async def update_sale(
     before = _sale_snapshot(entry)
     _prev_product_id = entry.product_id
     _prev_quantity = entry.quantity
+    # Efecto en stock SOLO para ventas EN VIVO (source_upload_id is None) y solo si cambia
+    # producto o cantidad. Se computa desde el body ANTES de mutar la entry para poder
+    # validar (NO stock negativo) sin dejar estado sucio si se rechaza.
+    _new_product_id = body.product_id if "product_id" in body.model_fields_set else _prev_product_id
+    _new_quantity = body.quantity if body.quantity is not None else _prev_quantity
+    _is_live_sale = entry.source_upload_id is None
+    _stock_changed = _new_product_id != _prev_product_id or _new_quantity != _prev_quantity
+    if _is_live_sale and _stock_changed:
+        await stock_service.validate_sale_update_stock(
+            entry.id,
+            tenant.tenant_id,
+            _prev_product_id,
+            _prev_quantity,
+            _new_product_id,
+            _new_quantity,
+            session,
+        )
     if body.amount is not None:
         entry.amount = body.amount
     if body.quantity is not None:
@@ -465,17 +502,15 @@ async def update_sale(
     if entry.source_upload_id is not None:
         entry.has_user_edits = True
     saved = await repo.save(entry)
-    # Ajuste de stock SOLO si cambió el producto o la cantidad (asociar/desasociar
-    # incluido). Monto/notas/pago/cliente no tocan stock. Reversa exacta del movimiento
-    # viejo + descuento nuevo con los valores actualizados (ambos idempotentes).
-    # Solo re-descontamos si REALMENTE había un movimiento previo (revert devolvió True):
-    # una venta histórica importada nunca descontó, y editarla no debe empezar a hacerlo.
-    if entry.product_id != _prev_product_id or entry.quantity != _prev_quantity:
-        had_movement = await stock_service.revert_sale_stock(
-            entry.id, tenant.tenant_id, session
-        )
-        if had_movement:
-            await stock_service.decrement_for_sale(entry, session)
+    # Ajuste de stock (ya validado arriba, no puede dejar negativo). Una venta histórica
+    # importada/releída (source_upload_id presente) NO arranca a descontar por editarla:
+    # su cantidad ya la cuenta la integridad desde sales_entries; descontar acá duplicaría.
+    # Efecto neto: reponer el movimiento viejo (si había) y descontar con los valores
+    # nuevos. decrement_for_sale no-opea si se desasoció el producto (product_id None) → en
+    # ese caso solo repone stock.
+    if _is_live_sale and _stock_changed:
+        await stock_service.revert_sale_stock(entry.id, tenant.tenant_id, session)
+        await stock_service.decrement_for_sale(entry, session)
     _audit_data_change(
         session,
         tenant_id=tenant.tenant_id,

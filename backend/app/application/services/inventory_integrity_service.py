@@ -20,10 +20,14 @@ La fórmula suma, además del ancla y las compras:
 - `loss` (merma): viene de `stock_service.register_stock_loss`, auditado, y su `qty`
   ya es negativa en el ledger.
 
-Se sigue salteando (`skipped_complex_ledger`) cualquier producto con: `sale`/`return`
-en el ledger (las ventas se cuentan desde `sales_entries`, no desde
-`inventory_movements` — contarlas dos veces duplicaría), o un `adjustment` sin
-`source_type` tagueado (dato legacy previo al CHECK, no auditable con confianza).
+Los movimientos `sale` del ledger se IGNORAN (no saltean el producto): las ventas se
+cuentan desde `sales_entries.quantity` — la fuente de verdad —, así que sumar también el
+movimiento del ledger duplicaría. Ignorarlos (en vez de saltear) deja a los productos
+vendidos EN VIVO evaluables por el chequeo.
+
+Se sigue salteando (`skipped_complex_ledger`) cualquier producto con: `return` en el
+ledger, o un `adjustment` sin `source_type` tagueado (dato legacy previo al CHECK, no
+auditable con confianza).
 
 No-invention: nunca concluye ni corrige — solo reporta divergencias con sus números,
 para que un humano decida. La persistencia de la alerta (Notification/
