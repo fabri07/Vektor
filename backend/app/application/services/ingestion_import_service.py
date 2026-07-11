@@ -1444,7 +1444,17 @@ async def _insert_confirmed_data_impl(
     stock_is_purchase = _treatment == STOCK_TREATMENT_PURCHASE
     # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
     today = now_ar_naive()
-    counts: dict[str, Any] = {"ventas": 0, "gastos": 0, "productos": 0, "otros": 0}
+    counts: dict[str, Any] = {
+        "ventas": 0,
+        "gastos": 0,
+        "productos": 0,
+        "otros": 0,
+        # Señales para el banner de avisos (human-in-the-loop) del frontend:
+        # sin_proveedor: compras de mercadería sin proveedor → sentinela "No identificado".
+        # sin_producto: compras sin producto detallado → Product incompleto (requires_completion).
+        "sin_proveedor": 0,
+        "sin_producto": 0,
+    }
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
 
@@ -1855,6 +1865,8 @@ async def _insert_confirmed_data_impl(
                             _by_token,
                             product_cache=_product_cache,
                         )
+                        if expense.product_id is not None:
+                            counts["sin_producto"] += 1
                     # FASE D: COGS si la fila es compra de mercadería (producto del
                     # catálogo/recién creado o categoría INVENTORY); suma stock si trae
                     # cantidad explícita.
@@ -1869,6 +1881,7 @@ async def _insert_confirmed_data_impl(
                             session, tenant_id, _supplier_index
                         )
                         _sentinel_used = True
+                        counts["sin_proveedor"] += 1
                     await _apply_purchase_to_stock(
                         session,
                         tenant_id,
@@ -2495,6 +2508,8 @@ async def _insert_multisheet_data(
                 _by_token,
                 product_cache=product_cache,
             )
+            if expense.product_id is not None:
+                counts["sin_producto"] += 1
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
@@ -2506,6 +2521,7 @@ async def _insert_multisheet_data(
                 session, tenant_id, _supplier_index
             )
             _sentinel_used = True
+            counts["sin_proveedor"] += 1
         await _apply_purchase_to_stock(
             session,
             tenant_id,

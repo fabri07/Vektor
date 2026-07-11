@@ -69,6 +69,22 @@ async def test_merch_purchase_without_supplier_uses_sentinel(
 
 
 @pytest.mark.asyncio
+async def test_import_surfaces_warning_counters(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Una compra de mercadería sin proveedor ni producto detallado incrementa los
+    contadores del banner: sin_proveedor (→ sentinela) y sin_producto (→ incompleto)."""
+    summary = _purchase_summary(
+        [{"fecha": "2024-01-15", "gasto": "5000", "producto": "Yerba", "cantidad": "10"}]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"gastos": True}
+    )
+    assert counts["sin_proveedor"] == 1
+    assert counts["sin_producto"] == 1
+
+
+@pytest.mark.asyncio
 async def test_two_imports_without_supplier_reuse_one_sentinel(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

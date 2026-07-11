@@ -33,6 +33,9 @@ export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
   message: string;
+  // Avisos human-in-the-loop tras confirmar (compras sin proveedor/producto, filas a
+  // "Otros"). No bloquean; se muestran en un banner para que el usuario los revise.
+  warnings?: string[];
 }
 
 /**

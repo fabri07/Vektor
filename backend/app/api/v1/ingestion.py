@@ -973,10 +973,29 @@ async def confirm_file(
         else "Datos confirmados. La puntuación de salud será recalculada."
     )
 
+    # Avisos human-in-the-loop: el import no bloquea, pero le señala al usuario qué
+    # quedó incompleto para que lo complete (proveedor, producto) o lo clasifique.
+    warnings: list[str] = []
+    if counts.get("sin_proveedor"):
+        warnings.append(
+            f"{counts['sin_proveedor']} compra(s) sin proveedor identificado se agruparon "
+            "en «No identificado». Asignales el proveedor real cuando puedas."
+        )
+    if counts.get("sin_producto"):
+        warnings.append(
+            f"{counts['sin_producto']} compra(s) sin producto detallado crearon un producto "
+            "incompleto. Completá precio de venta y datos en Productos."
+        )
+    if counts.get("otros"):
+        warnings.append(
+            f"{counts['otros']} fila(s) quedaron en «Otros» para que las revises y clasifiques."
+        )
+
     return ConfirmIngestionResponse(
         file_id=record.id,
         status=PROCESSING_STATUS_DONE,
         message=message,
+        warnings=warnings,
     )
 
 

@@ -67,6 +67,8 @@ export function FileUploadSection() {
   // C: aviso no intrusivo (re-subida por nombre) + detalle del 409 (duplicado exacto).
   const [warning, setWarning] = useState<string | null>(null);
   const [duplicateDetail, setDuplicateDetail] = useState<string | null>(null);
+  // Avisos human-in-the-loop del import confirmado (sin proveedor/producto, a "Otros").
+  const [confirmWarnings, setConfirmWarnings] = useState<string[]>([]);
   // A: tratamiento del stock cuando el archivo trae productos (default: saldo de apertura).
   const [stockTreatment, setStockTreatment] =
     useState<StockTreatment>("opening_balance");
@@ -193,7 +195,7 @@ export function FileUploadSection() {
     if (!fileId) return;
     setIsConfirming(true);
     try {
-      await ingestionService.confirmFile(
+      const result = await ingestionService.confirmFile(
         fileId,
         confirmedFields,
         undefined,
@@ -201,6 +203,7 @@ export function FileUploadSection() {
         undefined,
         hasStock ? stockTreatment : undefined,
       );
+      setConfirmWarnings(result.warnings ?? []);
       setPhase("done");
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
     } catch {
@@ -218,6 +221,7 @@ export function FileUploadSection() {
     setPreview(null);
     setError(null);
     setWarning(null);
+    setConfirmWarnings([]);
     setDuplicateDetail(null);
     setStockTreatment("opening_balance");
     setUploadProgress(0);
@@ -440,6 +444,18 @@ export function FileUploadSection() {
       {phase === "done" && (
         <div className="mt-4 rounded-lg border border-vk-success/20 bg-vk-success-bg px-4 py-3 text-sm text-vk-success">
           ✓ Archivo importado correctamente.
+        </div>
+      )}
+
+      {/* Avisos human-in-the-loop del import (revisá y completá) */}
+      {phase === "done" && confirmWarnings.length > 0 && (
+        <div className="mt-3 rounded-lg border border-vk-warning/20 bg-vk-warning-bg p-4">
+          <p className="mb-2 text-sm font-medium text-vk-warning">Revisá esto:</p>
+          <ul className="list-disc space-y-1 pl-5 text-sm text-vk-warning">
+            {confirmWarnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
         </div>
       )}
 
