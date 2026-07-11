@@ -32,6 +32,33 @@ class TestExpensesCRUD:
         # transaction_date ahora es datetime ISO; chequear solo la parte de fecha.
         assert data["transaction_date"].startswith(_TODAY)
 
+    async def test_merchandise_expense_without_type_infers_cogs(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Gasto manual de mercadería (INVENTORY) sin expense_type explícito → COGS
+        (antes defaulteaba a OPEX y quedaba mal clasificado)."""
+        payload = {**_EXPENSE_PAYLOAD, "category": "INVENTORY"}
+        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        assert resp.json()["expense_type"] == "COGS"
+
+    async def test_explicit_type_wins_over_inference(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Un expense_type explícito gana sobre la inferencia (INVENTORY + OPEX → OPEX)."""
+        payload = {**_EXPENSE_PAYLOAD, "category": "INVENTORY", "expense_type": "OPEX"}
+        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        assert resp.json()["expense_type"] == "OPEX"
+
+    async def test_non_merchandise_expense_defaults_to_opex(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Categoría no-mercadería sin expense_type → OPEX (default preservado)."""
+        resp = await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
+        assert resp.status_code == 201
+        assert resp.json()["expense_type"] == "OPEX"
+
     async def test_invalid_category_rejected(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:

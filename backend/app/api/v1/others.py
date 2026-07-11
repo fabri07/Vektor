@@ -25,6 +25,7 @@ from app.application.services.score_trigger_service import trigger_score_recalcu
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     classify_expense_with_vertical,
+    infer_expense_type,
     normalize_expense_category,
 )
 from app.domain.product_categories import (
@@ -228,7 +229,11 @@ async def reclassify_record(
                     tenant_id=tenant.tenant_id,
                     amount=exp_req.amount,
                     category=exp_req.category,
-                    expense_type=exp_req.expense_type,
+                    # Inferir COGS/OPEX (una fila de mercadería clasificada desde "Otros"
+                    # debe quedar COGS); un expense_type explícito del usuario gana.
+                    expense_type=infer_expense_type(
+                        exp_req.category, explicit=exp_req.expense_type
+                    ),
                     transaction_date=exp_req.expense_date,
                     description=exp_req.description,
                     is_recurring=exp_req.is_recurring,
