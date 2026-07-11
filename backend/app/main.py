@@ -21,6 +21,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from app.application.middleware.tenant import TenantMiddleware
+from app.application.services.stock_service import (
+    InsufficientStockError,
+    SaleProductNotFoundError,
+)
 from app.bootstrap import shutdown, startup
 from app.config.settings import get_settings
 from app.observability.logger import get_logger
@@ -168,6 +172,41 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"detail": exc.errors()},
+        )
+
+    @app.exception_handler(InsufficientStockError)
+    async def insufficient_stock_handler(
+        request: Request, exc: InsufficientStockError
+    ) -> JSONResponse:
+        # Venta EN VIVO sin stock suficiente: NO se permite stock negativo. 400 con el
+        # mensaje canónico. La transacción ya revirtió (get_db_session hace rollback ante
+        # la excepción), así que no queda SaleEntry ni movimiento persistido.
+        logger.info(
+            "sale.insufficient_stock",
+            path=str(request.url.path),
+            product_id=str(exc.product_id),
+            available=exc.available,
+            requested=exc.requested,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": exc.user_message},
+        )
+
+    @app.exception_handler(SaleProductNotFoundError)
+    async def sale_product_not_found_handler(
+        request: Request, exc: SaleProductNotFoundError
+    ) -> JSONResponse:
+        # product_id de una venta inexistente / de otro tenant → 400 (no 500), mismo
+        # criterio que manual-batch. La transacción revierte (get_db_session).
+        logger.info(
+            "sale.product_not_found",
+            path=str(request.url.path),
+            product_id=str(exc.product_id),
+        )
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": exc.user_message},
         )
 
     @app.exception_handler(Exception)

@@ -73,7 +73,6 @@ class AgentStock(BaseAgent):
     ) -> None:
         from app.application.services import stock_service  # noqa: PLC0415
         from app.observability.logger import get_logger  # noqa: PLC0415
-        from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
 
         logger = get_logger(__name__)
         effective_db = db or self._db
@@ -89,28 +88,11 @@ class AgentStock(BaseAgent):
             logger.warning("on_sale_recorded: invalid ids", sale_id=sale_id)
             return
 
-        result = await effective_db.execute(
-            select(SaleEntry).where(
-                SaleEntry.id == sale_uuid,
-                SaleEntry.tenant_id == tenant_uuid,
-                SaleEntry.voided_at.is_(None),
-            )
-        )
-        sale = result.scalar_one_or_none()
-        if sale is None or sale.product_id is None:
-            return
-
-        await stock_service.decrement_stock(
-            product_id=sale.product_id,
-            tenant_id=tenant_uuid,
-            qty=sale.quantity,
-            source_event_id=sale_id,
-            db=effective_db,
-            # Fecha de NEGOCIO de la venta (no la de carga): sin esto el movimiento de
-            # inventario quedaba con occurred_at=now() y el dedup por timing podía
-            # agruparlo mal (incidente "don pedro", 2026-07).
-            occurred_at=sale.transaction_date,
-        )
+        # Backstop del descuento en vivo: el path síncrono (chat/POST /sales) ya suele
+        # haber descontado; el helper es idempotente por source_event_id="sale:{id}"
+        # (índice único parcial 20260729_0001), así que este segundo intento no duplica.
+        # Variante por id: el evento solo tiene el id, así que carga la venta desde DB.
+        await stock_service.decrement_for_sale_id(sale_uuid, tenant_uuid, effective_db)
 
     async def detect_stockout(
         self,

@@ -521,14 +521,16 @@ async def test_cash_shim_dispatches_sale_to_income_agent():
 
 @pytest.mark.asyncio
 async def test_sale_emits_event_after_confirm():
-    """on_confirmed_sale → EventBus emite SALE_RECORDED."""
+    """on_confirmed_sale → EventBus emite SALE_RECORDED con la clave `tenant_id` (el
+    task `events.sale_recorded` la lee así; emitir `business_id` dejaba el descuento
+    de stock muerto)."""
     with unittest.mock.patch("app.application.agents.cash.agent.EventBus.emit") as mock_emit:
         from app.application.agents.cash.agent import AgentCash
 
         agent = AgentCash()
         await agent.on_confirmed_sale("sale-001", "tenant-001")
 
-    mock_emit.assert_any_call("SALE_RECORDED", {"sale_id": "sale-001", "business_id": "tenant-001"})
+    mock_emit.assert_any_call("SALE_RECORDED", {"sale_id": "sale-001", "tenant_id": "tenant-001"})
 
 
 @pytest.mark.asyncio

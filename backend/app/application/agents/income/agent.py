@@ -573,8 +573,11 @@ class AgentIncome(BaseAgent):
             },
         )
 
-    async def on_confirmed_sale(self, sale_id: str, business_id: str) -> None:
-        EventBus.emit("SALE_RECORDED", {"sale_id": sale_id, "business_id": business_id})
+    async def on_confirmed_sale(self, sale_id: str, tenant_id: str) -> None:
+        # El task `events.sale_recorded` lee la clave `tenant_id`. Emitir `business_id`
+        # (como hacía antes) dejaba el descuento de stock MUERTO (salía por "missing
+        # tenant_id"). Backstop del descuento en vivo del chat.
+        EventBus.emit("SALE_RECORDED", {"sale_id": sale_id, "tenant_id": tenant_id})
 
     # ── Sprint 17: handlers analíticos read-only ──────────────────────────────
 

@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.cash_service as cash_service
 import app.application.services.stock_service as stock_service
+from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.schemas import ActionType
 from app.application.services.automation_service import determine_external_system
 from app.application.services.chat_memory_service import ChatMemoryService
@@ -477,6 +478,10 @@ async def execute_pending_action(
 
     if action.action_type == ActionType.REGISTER_SALE:
         sale = await cash_service.save_sale(payload, action.tenant_id, action.user_id, db)
+        # Descuento de stock SÍNCRONO (primario), en la misma transacción que la venta.
+        # Idempotente por source_event_id="sale:{id}": el evento SALE_RECORDED (backstop)
+        # pasa por el mismo helper y no puede doble-descontar.
+        await stock_service.decrement_for_sale(sale, db)
         if payload.get("conversation_id"):
             await mem.record(
                 db=db,
@@ -489,9 +494,11 @@ async def execute_pending_action(
                 entity_count=1,
                 pending_action_id=action.id,
             )
-        from app.application.agents.income.agent import AgentIncome  # noqa: PLC0415
-
-        await AgentIncome().on_confirmed_sale(str(sale.id), str(action.tenant_id))
+        # Backstop del descuento: emitir DESPUÉS del commit (no antes) — si el task
+        # async corriera antes, no encontraría el SaleEntry y terminaría sin reintentar.
+        EventBus.emit_after_commit(
+            db, "SALE_RECORDED", {"sale_id": str(sale.id), "tenant_id": str(action.tenant_id)}
+        )
         try:
             if redis is not None:
                 from decimal import Decimal  # noqa: PLC0415

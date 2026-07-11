@@ -350,3 +350,261 @@ class TestManualBatchSale:
         # nada se persistió: stock intacto
         r1 = await client.get(f"/api/v1/products/{p1}", headers=auth_headers)
         assert r1.json()["stock_units"] == 10
+
+
+@pytest.mark.asyncio
+class TestLiveSaleStockDecrement:
+    """POST /sales y su ciclo de vida descuentan/reponen stock (antes solo manual-batch)."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def _stock(self, client: AsyncClient, headers: dict[str, Any], pid: str) -> int:
+        r = await client.get(f"/api/v1/products/{pid}", headers=headers)
+        return int(r.json()["stock_units"])
+
+    async def test_create_sale_with_product_decrements_stock(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 3, "product_id": pid}
+        resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert await self._stock(client, auth_headers, pid) == 7
+
+    async def test_create_sale_without_product_does_not_break(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+
+    async def test_bulk_with_product_decrements_stock_per_line(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Cola", stock=10, price="500.00")
+        payload = {
+            "period_type": "daily",
+            "period_date": _TODAY,
+            "total_amount_ars": "1500.00",
+            "entries": [{"amount_ars": "1500.00", "quantity": 3, "product_id": pid}],
+        }
+        resp = await client.post("/api/v1/sales/bulk", json=payload, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert await self._stock(client, auth_headers, pid) == 7
+
+    async def test_bulk_idempotency_key_prevents_double_decrement(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Té", stock=10, price="400.00")
+        payload = {
+            "period_type": "daily",
+            "period_date": _TODAY,
+            "total_amount_ars": "800.00",
+            "entries": [{"amount_ars": "800.00", "quantity": 2, "product_id": pid}],
+        }
+        headers = {**auth_headers, "Idempotency-Key": "bulk-key-1"}
+        r1 = await client.post("/api/v1/sales/bulk", json=payload, headers=headers)
+        assert r1.status_code == 201, r1.text
+        # reintento con la misma key → 409, sin segundo descuento
+        r2 = await client.post("/api/v1/sales/bulk", json=payload, headers=headers)
+        assert r2.status_code == 409
+        assert await self._stock(client, auth_headers, pid) == 8  # descontado una sola vez
+
+    async def test_delete_sale_restores_stock(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Fideos", stock=10, price="500.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 4, "product_id": pid}
+        sale_id = (
+            await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 6
+
+        resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 10  # repuesto
+
+    async def test_patch_quantity_adjusts_stock_differentially(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Agua", stock=10, price="200.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 3, "product_id": pid}
+        sale_id = (
+            await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 7
+
+        # subir la cantidad a 5 → debe descontar 2 más (10 − 5 = 5)
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"quantity": 5}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 5
+
+    async def test_patch_amount_only_leaves_stock_intact(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _create_product(client, auth_headers, "Pan", stock=10, price="300.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 2, "product_id": pid}
+        sale_id = (
+            await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 8
+
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"amount": "999.00"}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 8  # sin cambios
+
+    # ── NO se permite stock negativo: validación + rechazo ────────────────────
+
+    async def test_create_sale_insufficient_stock_rejected(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """POST con stock insuficiente → 400 y NO crea venta ni movimiento."""
+        pid = await _create_product(client, auth_headers, "Vino", stock=2, price="1000.00")
+        payload = {**_SINGLE_PAYLOAD, "quantity": 5, "product_id": pid}
+        resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        assert resp.status_code == 400, resp.text
+        assert "stock suficiente" in resp.json()["detail"].lower()
+        assert await self._stock(client, auth_headers, pid) == 2  # intacto
+        # No quedó ninguna venta de ese producto.
+        sales = (await client.get("/api/v1/sales", headers=auth_headers)).json()
+        assert all(s["product_id"] != pid for s in sales)
+
+    async def test_create_sale_unknown_product_returns_400_not_500(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """product_id inexistente/de otro tenant → 400 claro (no 500)."""
+        import uuid as _uuid  # noqa: PLC0415
+
+        payload = {**_SINGLE_PAYLOAD, "quantity": 1, "product_id": str(_uuid.uuid4())}
+        resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        assert resp.status_code == 400, resp.text
+
+    async def test_bulk_sums_quantities_per_product_and_blocks(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """/sales/bulk valida contra la SUMA por producto (no por línea): dos líneas de 3
+        del mismo producto con stock 5 → 400, y nada se persiste."""
+        pid = await _create_product(client, auth_headers, "Café", stock=5, price="500.00")
+        payload = {
+            "period_type": "daily",
+            "period_date": _TODAY,
+            "total_amount_ars": "3000.00",
+            "entries": [
+                {"amount_ars": "1500.00", "quantity": 3, "product_id": pid},
+                {"amount_ars": "1500.00", "quantity": 3, "product_id": pid},
+            ],
+        }
+        resp = await client.post("/api/v1/sales/bulk", json=payload, headers=auth_headers)
+        assert resp.status_code == 400, resp.text
+        assert await self._stock(client, auth_headers, pid) == 5  # intacto
+
+    async def test_patch_associate_product_decrements_when_enough(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """PATCH de sin-producto a con-producto con stock suficiente → descuenta."""
+        pid = await _create_product(client, auth_headers, "Sal", stock=10, price="100.00")
+        # Venta sin producto: no toca stock.
+        sale_id = (
+            await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        ).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}",
+            json={"product_id": pid, "quantity": 3},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 7  # descontó 3
+
+    async def test_patch_associate_product_rejected_when_insufficient(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """PATCH de sin-producto a con-producto sin stock suficiente → 400, stock intacto."""
+        pid = await _create_product(client, auth_headers, "Azúcar", stock=2, price="100.00")
+        sale_id = (
+            await client.post(
+                "/api/v1/sales",
+                json={**_SINGLE_PAYLOAD, "quantity": 5},
+                headers=auth_headers,
+            )
+        ).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}",
+            json={"product_id": pid},  # quantity queda en 5
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400, resp.text
+        assert await self._stock(client, auth_headers, pid) == 2  # intacto
+
+    async def test_patch_increase_quantity_rejected_when_insufficient(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """PATCH que sube la cantidad más allá del stock incremental → 400, sin cambios."""
+        pid = await _create_product(client, auth_headers, "Arroz", stock=5, price="100.00")
+        sale_id = (
+            await client.post(
+                "/api/v1/sales",
+                json={**_SINGLE_PAYLOAD, "quantity": 3, "product_id": pid},
+                headers=auth_headers,
+            )
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 2  # 5 − 3
+
+        # Subir a 10: repone 3 → disponible 5, sigue faltando → 400.
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"quantity": 10}, headers=auth_headers
+        )
+        assert resp.status_code == 400, resp.text
+        assert await self._stock(client, auth_headers, pid) == 2  # sin cambios
+
+    async def test_patch_disassociate_product_replenishes(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """PATCH de con-producto a sin-producto → repone el stock descontado."""
+        pid = await _create_product(client, auth_headers, "Leche", stock=10, price="100.00")
+        sale_id = (
+            await client.post(
+                "/api/v1/sales",
+                json={**_SINGLE_PAYLOAD, "quantity": 4, "product_id": pid},
+                headers=auth_headers,
+            )
+        ).json()["id"]
+        assert await self._stock(client, auth_headers, pid) == 6
+
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"product_id": None}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 10  # repuesto
+
+    async def test_patch_imported_sale_does_not_auto_decrement(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session
+    ) -> None:
+        """Editar una venta importada/releída (source_upload_id) NO arranca a descontar:
+        su cantidad ya la cuenta la integridad desde sales_entries."""
+        import uuid as _uuid  # noqa: PLC0415
+
+        from app.persistence.models.transaction import SaleEntry as _SaleEntry  # noqa: PLC0415
+
+        pid = await _create_product(client, auth_headers, "Aceite", stock=10, price="100.00")
+        # Venta sin producto (sin movimiento) → marcarla como importada en la DB.
+        sale_id = (
+            await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        ).json()["id"]
+        sale = await db_session.get(_SaleEntry, _uuid.UUID(sale_id))
+        sale.source_upload_id = _uuid.uuid4()
+        await db_session.flush()
+
+        # Asociar producto + cantidad: por ser importada NO debe descontar stock.
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}",
+            json={"product_id": pid, "quantity": 3},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert await self._stock(client, auth_headers, pid) == 10  # intacto

@@ -240,23 +240,46 @@ async def test_skips_product_with_untagged_adjustment_as_complex_ledger(
     assert result["divergences"] == []
 
 
-async def test_skips_product_with_sale_movement_in_ledger_as_complex_ledger(
+async def test_product_with_live_sale_movement_is_evaluated_not_skipped(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Un movimiento `sale` en el ledger de inventario sigue salteando el producto:
-    las ventas se cuentan desde `sales_entries`, contar el movimiento `sale` además
-    duplicaría el conteo."""
+    """La venta EN VIVO graba un movimiento `sale`, pero la cantidad vendida es la
+    fuente de verdad desde `sales_entries`. El movimiento `sale` del ledger se IGNORA
+    (no se duplica) y — a diferencia de antes — el producto ya NO se saltea: se evalúa
+    y reconcilia. anchor 36 − ventas(sales_entries) 10 = 26 == stock_units 26 → diff 0."""
     tid = sample_tenant.tenant_id
-    product = await _make_product(db_session, tid, stock_units=20, name="Con sale en ledger")
+    product = await _make_product(db_session, tid, stock_units=26, name="Vendido en vivo")
     db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
     db_session.add(_movement(tid, product.id, -10, "sale", None))
+    db_session.add(_sale(tid, product.id, 10))
     await db_session.flush()
 
     result = await check_tenant_inventory_integrity(db_session, tid)
 
     assert result["checked"] == 1
-    assert result["skipped_complex_ledger"] == 1
-    assert result["divergences"] == []
+    assert result["skipped_complex_ledger"] == 0  # ya no se saltea
+    assert result["divergences"] == []  # reconcilia a diff 0
+
+
+async def test_product_with_sale_movement_but_inflated_stock_is_flagged(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Prueba que el producto vendido se EVALÚA de verdad: si stock_units está inflado
+    respecto de anchor − ventas, la divergencia se reporta (antes quedaba oculta por el
+    skip). anchor 36 − ventas 10 = 26 esperado, pero stock_units 40 → diff +14."""
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=40, name="Inflado pese a venta")
+    db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_movement(tid, product.id, -10, "sale", None))
+    db_session.add(_sale(tid, product.id, 10))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["checked"] == 1
+    assert result["skipped_complex_ledger"] == 0
+    assert len(result["divergences"]) == 1
+    assert result["divergences"][0]["stock_esperado"] == 26
 
 
 async def test_small_diff_within_threshold_is_not_reported(
