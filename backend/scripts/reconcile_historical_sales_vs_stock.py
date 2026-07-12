@@ -84,8 +84,21 @@ _CSV_FIELDS = [
 ]
 
 
-def _print_summary(tenant_id: str, divergences: list[dict[str, Any]]) -> None:
-    print(f"\nTenant {tenant_id}: {len(divergences)} producto(s) con divergencia temporal")
+def _print_coverage(tenant_id: str, result: Any, divergences: list[dict[str, Any]]) -> None:
+    # SIEMPRE imprimir cobertura: un "0 divergencias" con checked=0 significa "nada
+    # evaluado por falta de ancla catalog_initial_stock", NO "todo sano". Sin estos
+    # contadores el 0 es un agregado engañoso.
+    print(
+        f"\nTenant {tenant_id}: {len(divergences)} divergencia(s) | "
+        f"checked={result.checked} "
+        f"skipped_no_anchor={result.skipped_no_anchor} "
+        f"skipped_complex_ledger={result.skipped_complex_ledger}"
+    )
+    if result.checked == 0:
+        print(
+            "  ⚠️ checked=0 — ningún producto tiene ancla viva 'catalog_initial_stock'; "
+            "el chequeo temporal no evaluó nada en este tenant (0 divergencias NO = sano)."
+        )
     for d in divergences:
         print(
             f"  - {d['product_name']}: cae a {d['min_balance']} el "
@@ -141,12 +154,18 @@ async def main() -> None:
 
         all_rows: list[dict[str, Any]] = []
         audited_tenants = 0
+        total_checked = 0
+        total_skipped_no_anchor = 0
         for tid in tids:
             result = await check_products_temporal_divergence(session, uuid.UUID(tid))
             divergences = result.divergences_as_dicts()
+            total_checked += result.checked
+            total_skipped_no_anchor += result.skipped_no_anchor
+            # SIEMPRE imprimir cobertura por tenant (incluso con 0 divergencias): así el
+            # 0 es interpretable (0-de-0 sin ancla vs 0-de-N evaluados).
+            _print_coverage(tid, result, divergences)
             if not divergences:
                 continue
-            _print_summary(tid, divergences)
             for d in divergences:
                 all_rows.append({"tenant_id": tid, **d})
             if args.audit:
@@ -162,6 +181,18 @@ async def main() -> None:
                     triggered_by=_TRIGGERED_BY,
                 )
                 audited_tenants += 1
+
+        print(
+            f"\n== TOTAL: {len(all_rows)} divergencia(s) | "
+            f"checked={total_checked} skipped_no_anchor={total_skipped_no_anchor} "
+            f"en {len(tids)} tenant(s) =="
+        )
+        if total_checked == 0:
+            print(
+                "⚠️ checked=0 GLOBAL — el chequeo temporal no evaluó ningún producto "
+                "(falta poblar el ancla 'catalog_initial_stock'). Un reporte de 0 filas "
+                "acá NO significa que el stock histórico esté sano."
+            )
 
         if args.out:
             _write_report(args.out, all_rows)
