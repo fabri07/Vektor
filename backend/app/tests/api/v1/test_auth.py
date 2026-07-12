@@ -10,6 +10,7 @@ Required tests:
   - test_me_with_invalid_token
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -18,9 +19,11 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.models.auth_token import PasswordResetToken
+from app.application.services import auth_service
+from app.persistence.models.auth_token import EmailVerificationToken, PasswordResetToken
+from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
-from app.utils.security import verify_password
+from app.utils.security import hash_password, verify_password
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -256,3 +259,164 @@ class TestForgotResetPassword:
         )
 
         assert response.status_code == 422
+
+
+# ── Demo tenant login guard ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestDemoTenantLoginGuard:
+    """Un tenant is_demo solo puede autenticarse en entornos local/demo, nunca en prod."""
+
+    _EMAIL = "demo.kiosco@vektor.app"
+    _PASSWORD = "Demo1234!"
+
+    async def _seed_demo_account(self, db_session: AsyncSession) -> None:
+        tenant = Tenant(
+            tenant_id=uuid.uuid4(),
+            legal_name="Kiosco Demo",
+            display_name="Kiosco Demo",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status="ACTIVE",
+            is_demo=True,
+        )
+        db_session.add(tenant)
+        db_session.add(
+            User(
+                user_id=uuid.uuid4(),
+                tenant_id=tenant.tenant_id,
+                email=self._EMAIL,
+                full_name="Demo Owner",
+                password_hash=hash_password(self._PASSWORD),
+                role_code="OWNER",
+                is_active=True,
+            )
+        )
+        await db_session.commit()
+
+    async def test_demo_login_blocked_in_prod(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """En producción (DEMO_MODE/DEBUG off) el login demo devuelve 401 genérico."""
+        monkeypatch.setattr(auth_service.settings, "DEMO_MODE", False)
+        monkeypatch.setattr(auth_service.settings, "DEBUG", False)
+        await self._seed_demo_account(db_session)
+
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": self._EMAIL, "password": self._PASSWORD},
+        )
+
+        assert response.status_code == 401
+
+    async def test_demo_login_allowed_in_demo_mode(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Con DEMO_MODE on (dev/local) el demo sigue logueando: 200 + token."""
+        monkeypatch.setattr(auth_service.settings, "DEMO_MODE", True)
+        monkeypatch.setattr(auth_service.settings, "DEBUG", False)
+        await self._seed_demo_account(db_session)
+
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": self._EMAIL, "password": self._PASSWORD},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["access_token"]
+
+    async def test_non_demo_login_unaffected_in_prod(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sanity: un tenant real (is_demo=False) loguea normalmente en prod."""
+        monkeypatch.setattr(auth_service.settings, "DEMO_MODE", False)
+        monkeypatch.setattr(auth_service.settings, "DEBUG", False)
+        tenant = Tenant(
+            tenant_id=uuid.uuid4(),
+            legal_name="Kiosco Real",
+            display_name="Kiosco Real",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status="ACTIVE",
+            is_demo=False,
+        )
+        db_session.add(tenant)
+        db_session.add(
+            User(
+                user_id=uuid.uuid4(),
+                tenant_id=tenant.tenant_id,
+                email="real.owner@kiosco.com",
+                full_name="Real Owner",
+                password_hash=hash_password("Secure123"),
+                role_code="OWNER",
+                is_active=True,
+            )
+        )
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "real.owner@kiosco.com", "password": "Secure123"},
+        )
+
+        assert response.status_code == 200
+
+    async def test_demo_verify_email_blocked_in_prod(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """verify-email tampoco autentica un tenant demo en prod, y no consume el token."""
+        monkeypatch.setattr(auth_service.settings, "DEMO_MODE", False)
+        monkeypatch.setattr(auth_service.settings, "DEBUG", False)
+        tenant = Tenant(
+            tenant_id=uuid.uuid4(),
+            legal_name="Kiosco Demo",
+            display_name="Kiosco Demo",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status="ACTIVE",
+            is_demo=True,
+        )
+        db_session.add(tenant)
+        user = User(
+            user_id=uuid.uuid4(),
+            tenant_id=tenant.tenant_id,
+            email="demo.pending@vektor.app",
+            full_name="Demo Pending",
+            password_hash=hash_password(self._PASSWORD),
+            role_code="OWNER",
+            is_active=False,
+        )
+        db_session.add(user)
+        token = EmailVerificationToken(
+            token_id=uuid.uuid4(),
+            user_id=user.user_id,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            used=False,
+        )
+        db_session.add(token)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/auth/verify-email",
+            json={"token": str(token.token_id)},
+        )
+
+        assert response.status_code == 400
+        # El rechazo ocurre antes de mutar: el usuario sigue inactivo y el token sin usar.
+        await db_session.refresh(user)
+        await db_session.refresh(token)
+        assert user.is_active is False
+        assert token.used is False
