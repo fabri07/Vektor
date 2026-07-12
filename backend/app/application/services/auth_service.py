@@ -50,6 +50,16 @@ _VERIFICATION_TOKEN_TTL_HOURS = 24
 _RESET_TOKEN_TTL_HOURS = 1
 
 
+def _is_demo_auth_blocked(tenant: Tenant) -> bool:
+    """Los tenants demo solo se autentican en entornos local/demo, nunca en producción.
+
+    En producción ``DEMO_MODE`` y ``DEBUG`` están en ``False`` (defaults), así que
+    cualquier intento de autenticación (login, refresh, verify-email) contra un
+    tenant ``is_demo`` queda rechazado.
+    """
+    return tenant.is_demo and not (settings.DEMO_MODE or settings.DEBUG)
+
+
 class AuthService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -183,6 +193,11 @@ class AuthService:
         if tenant is None or tenant.status not in ("ACTIVE", "TRIAL"):
             return None
 
+        if _is_demo_auth_blocked(tenant):
+            # Generic 401 (via None) — no revela que la cuenta existe ni que es demo.
+            logger.warning("auth.login.demo_blocked", tenant_id=str(tenant.tenant_id))
+            return None
+
         user.last_login_at = datetime.now(UTC)
         await self._user_repo.save(user)
 
@@ -229,17 +244,26 @@ class AuthService:
                 detail="invalid_or_expired_token",
             )
 
-        # Activate user and consume token atomically
-        token.used = True
-        user.is_active = True
-        await self._session.flush()
-
         tenant = await self._tenant_repo.get_by_id(user.tenant_id)
         if tenant is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="invalid_or_expired_token",
             )
+
+        if _is_demo_auth_blocked(tenant):
+            # Rechazo antes de consumir el token/activar: un tenant demo no se
+            # autentica en prod. Mismo 400 genérico del flujo (no revela el motivo).
+            logger.warning("auth.verify_email.demo_blocked", tenant_id=str(tenant.tenant_id))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid_or_expired_token",
+            )
+
+        # Activate user and consume token atomically
+        token.used = True
+        user.is_active = True
+        await self._session.flush()
 
         logger.info("auth.email_verified", user_id=str(user.user_id))
         return self._build_auth_response(user, tenant)
@@ -291,6 +315,11 @@ class AuthService:
 
         tenant = await self._tenant_repo.get_by_id(user.tenant_id)
         if tenant is None:
+            return None
+
+        if _is_demo_auth_blocked(tenant):
+            # Impide extender una sesión demo emitida antes del deploy del guard.
+            logger.warning("auth.refresh.demo_blocked", tenant_id=str(tenant.tenant_id))
             return None
 
         jwt_payload = {
