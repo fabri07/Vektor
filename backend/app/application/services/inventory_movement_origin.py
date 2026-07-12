@@ -54,6 +54,38 @@ TAGGED_ADJUSTMENT_SOURCE_TYPES: frozenset[str] = frozenset(
     {SOURCE_RECONCILIATION, SOURCE_MANUAL_ADJUSTMENT}
 )
 
+# ── Clasificación de un movimiento para RECONSTRUIR stock ─────────────────────────
+# Fuente ÚNICA para que el chequeo AGREGADO (inventory_integrity_service) y el TEMPORAL
+# (inventory_temporal_service) interpreten cada movimiento IDÉNTICO. Si divergieran, el
+# invariante `ending_balance (temporal) == stock_esperado (agregado)` se rompería y un
+# nuevo source_type se contaría distinto en cada chequeo.
+MOVEMENT_CLASS_PURCHASE = "purchase"  # + comprado
+MOVEMENT_CLASS_ANCHOR = "anchor"  # stock inicial conocido (opening)
+MOVEMENT_CLASS_TAGGED_ADJUSTMENT = "tagged_adjustment"  # ± ajuste auditado
+MOVEMENT_CLASS_LOSS = "loss"  # + (ya viene negativo en el ledger)
+MOVEMENT_CLASS_IGNORE_SALE = "ignore_sale"  # dedup: la venta se cuenta desde sales_entries
+MOVEMENT_CLASS_COMPLEX = "complex"  # return / adjustment sin tag → saltear el producto
+
+
+def classify_stock_movement(movement_type: str, source_type: str | None) -> str:
+    """Clasifica un movimiento vivo para la reconstrucción de stock (ver constantes).
+
+    El orden importa: ``purchase`` se evalúa ANTES que el ancla para que una compra con
+    ``source_type=catalog_initial_stock`` (el stock inicial de catálogo ES una compra
+    real) cuente como compra y no se absorba en el ancla.
+    """
+    if movement_type == "purchase":
+        return MOVEMENT_CLASS_PURCHASE
+    if source_type == SOURCE_CATALOG_INITIAL_STOCK:
+        return MOVEMENT_CLASS_ANCHOR
+    if movement_type == "adjustment" and source_type in TAGGED_ADJUSTMENT_SOURCE_TYPES:
+        return MOVEMENT_CLASS_TAGGED_ADJUSTMENT
+    if movement_type == "loss":
+        return MOVEMENT_CLASS_LOSS
+    if movement_type == "sale":
+        return MOVEMENT_CLASS_IGNORE_SALE
+    return MOVEMENT_CLASS_COMPLEX
+
 
 def _norm_text(value: object) -> str:
     """Normaliza texto para el hash: sin tildes, minúsculas, trim, espacios colapsados."""

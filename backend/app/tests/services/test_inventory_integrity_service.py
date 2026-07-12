@@ -282,6 +282,49 @@ async def test_product_with_sale_movement_but_inflated_stock_is_flagged(
     assert result["divergences"][0]["stock_esperado"] == 26
 
 
+async def test_response_includes_temporal_divergences_key(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El dict de retorno ahora trae `temporal_divergences` (consumidor 2). Con una compra
+    datada DESPUÉS de la venta, el agregado da consistente (no reporta) pero la pasada
+    temporal sí detecta el negativo por fechas."""
+    tid = sample_tenant.tenant_id
+    # anchor 2 + compra 20 - venta 10 = 12 == stock_units 12 → agregado NO reporta.
+    product = await _make_product(db_session, tid, stock_units=12, name="Compra tardía")
+    db_session.add(_movement(tid, product.id, 2, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    purchase = _movement(tid, product.id, 20, "purchase", "purchase_import")
+    purchase.occurred_at = datetime(2026, 2, 1, tzinfo=UTC)
+    db_session.add(purchase)
+    sale = _sale(tid, product.id, 10)
+    sale.transaction_date = datetime(2026, 1, 10, tzinfo=UTC)
+    db_session.add(sale)
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["divergences"] == []  # agregado consistente
+    assert len(result["temporal_divergences"]) == 1
+    temporal = result["temporal_divergences"][0]
+    assert temporal["cause"] == "PURCHASES_DATED_AFTER_SALES"
+    assert temporal["first_negative_at"] == "2026-01-10"
+
+
+async def test_response_temporal_divergences_empty_when_consistent(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Ledger consistente por fechas → temporal_divergences vacío."""
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=54, name="Consistente temporal")
+    db_session.add(_movement(tid, product.id, 36, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_movement(tid, product.id, 30, "purchase", "purchase_import"))
+    db_session.add(_sale(tid, product.id, 12))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["temporal_divergences"] == []
+
+
 async def test_small_diff_within_threshold_is_not_reported(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

@@ -991,6 +991,62 @@ async def confirm_file(
             f"{counts['otros']} fila(s) quedaron en «Otros» para que las revises y clasifiques."
         )
 
+    # Aviso temporal (human-in-the-loop): si las ventas recién importadas dejan el stock
+    # reconstruible en negativo por FECHAS (compras posteriores a las ventas, o compra sin
+    # registrar), advertir. Read-only, no bloquea y falla-silencioso (un aviso nunca debe
+    # romper un import ya persistido).
+    try:
+        from sqlalchemy import select as _select  # noqa: PLC0415
+
+        from app.application.services.inventory_temporal_service import (  # noqa: PLC0415
+            check_products_temporal_divergence,
+        )
+        from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+        affected_ids = [
+            pid
+            for pid in (
+                (
+                    await session.execute(
+                        _select(SaleEntry.product_id)
+                        .where(
+                            SaleEntry.tenant_id == tenant.tenant_id,
+                            SaleEntry.source_upload_id == file_id,
+                            SaleEntry.product_id.isnot(None),
+                        )
+                        .distinct()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if pid is not None
+        ]
+        # Cota de latencia: el chequeo corre SINCRÓNICO en el request de confirm (2 queries
+        # por producto). Un import masivo podría tocar cientos de productos → acotamos y lo
+        # logueamos (nunca un cap silencioso).
+        max_temporal_check = 200
+        if len(affected_ids) > max_temporal_check:
+            logger.info(
+                "ingestion.confirm.temporal_check_capped",
+                file_id=str(file_id),
+                affected=len(affected_ids),
+                cap=max_temporal_check,
+            )
+            affected_ids = affected_ids[:max_temporal_check]
+        if affected_ids:
+            temporal = await check_products_temporal_divergence(
+                session, tenant.tenant_id, product_ids=affected_ids
+            )
+            for div in temporal.divergences:
+                warnings.append(
+                    f"«{div.product_name}» registra ventas por fecha que superan el stock "
+                    "reconstruible (compras posteriores a las ventas o compra sin registrar). "
+                    "Revisá las fechas de compra o registrá la compra faltante."
+                )
+    except Exception:  # noqa: BLE001
+        logger.warning("ingestion.confirm.temporal_check_failed", file_id=str(file_id))
+
     return ConfirmIngestionResponse(
         file_id=record.id,
         status=PROCESSING_STATUS_DONE,

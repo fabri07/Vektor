@@ -45,8 +45,16 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.inventory_movement_origin import (
+    MOVEMENT_CLASS_ANCHOR,
+    MOVEMENT_CLASS_IGNORE_SALE,
+    MOVEMENT_CLASS_LOSS,
+    MOVEMENT_CLASS_PURCHASE,
+    MOVEMENT_CLASS_TAGGED_ADJUSTMENT,
     SOURCE_CATALOG_INITIAL_STOCK,
-    TAGGED_ADJUSTMENT_SOURCE_TYPES,
+    classify_stock_movement,
+)
+from app.application.services.inventory_temporal_service import (
+    check_products_temporal_divergence,
 )
 
 _UUID_PARAM = PG_UUID(as_uuid=True)
@@ -122,37 +130,24 @@ async def check_tenant_inventory_integrity(
         tagged_adjustment_qty = 0
         loss_qty = 0
         has_other_movement_types = False
+        # Clasificación compartida con el chequeo temporal (classify_stock_movement) para
+        # que ambos interpreten cada movimiento idéntico. `sale` se ignora (dedup: la venta
+        # se cuenta desde sales_entries, restada abajo); `complex` (return / adjustment sin
+        # tag legacy) saltea el producto en vez de arriesgar un falso positivo.
         for row in by_type:
-            movement_type = row["movement_type"]
-            source_type = row["source_type"]
-            if movement_type == "purchase":
-                # Una COMPRA cuenta como comprado sin importar su source_type — incluido
-                # 'catalog_initial_stock' (el stock inicial de catálogo ES una compra
-                # real). Chequear purchase ANTES que el ancla evita absorber una compra
-                # taggeada catalog en anchor_qty y dejar purchase_qty=0 en el breakdown.
-                purchase_qty += int(row["total_qty"])
-            elif source_type == SOURCE_CATALOG_INITIAL_STOCK:
-                # catalog_initial_stock que NO es purchase (típicamente un adjustment):
-                # el ancla inicial de stock del producto.
-                anchor_qty += int(row["total_qty"])
-            elif movement_type == "adjustment" and source_type in TAGGED_ADJUSTMENT_SOURCE_TYPES:
-                # Correcciones deliberadas y auditadas (reconciliación o ajuste manual
-                # con procedencia) — blindadas por el CHECK de la migración 20260728_0001.
-                tagged_adjustment_qty += int(row["total_qty"])
-            elif movement_type == "loss":
-                # La merma ya viene negativa en el ledger.
-                loss_qty += int(row["total_qty"])
-            elif movement_type == "sale":
-                # La venta EN VIVO ahora graba un movimiento 'sale', pero la fuente de
-                # verdad de la cantidad vendida es `sales_entries.quantity` (que la
-                # fórmula resta abajo). Ignorar el movimiento del ledger acá evita el
-                # doble conteo — y, a diferencia de antes, NO saltea el producto: los
-                # productos vendidos vuelven a ser evaluables por el chequeo.
+            movement_class = classify_stock_movement(row["movement_type"], row["source_type"])
+            qty = int(row["total_qty"])
+            if movement_class == MOVEMENT_CLASS_PURCHASE:
+                purchase_qty += qty
+            elif movement_class == MOVEMENT_CLASS_ANCHOR:
+                anchor_qty += qty
+            elif movement_class == MOVEMENT_CLASS_TAGGED_ADJUSTMENT:
+                tagged_adjustment_qty += qty
+            elif movement_class == MOVEMENT_CLASS_LOSS:
+                loss_qty += qty  # ya viene negativo en el ledger
+            elif movement_class == MOVEMENT_CLASS_IGNORE_SALE:
                 pass
             else:
-                # return o adjustment sin source_type tagueado (legacy, no auditable):
-                # la fórmula no los contempla — saltear en vez de arriesgar un falso
-                # positivo.
                 has_other_movement_types = True
 
         if has_other_movement_types:
@@ -192,10 +187,18 @@ async def check_tenant_inventory_integrity(
                 }
             )
 
+    # Pasada TEMPORAL (aislada): el chequeo agregado de arriba mira la MAGNITUD; ésta
+    # mira la SECUENCIA (ventas datadas antes que las compras que las cubren). No toca la
+    # lógica agregada probada — reconstruye por su cuenta desde los mismos candidatos.
+    temporal = await check_products_temporal_divergence(
+        session, tenant_id, absolute_floor_units=absolute_floor_units
+    )
+
     return {
         "tenant_id": str(tenant_id),
         "checked": total_candidates,
         "divergences": divergences,
+        "temporal_divergences": temporal.divergences_as_dicts(),
         "skipped_no_anchor": skipped_no_anchor,
         "skipped_complex_ledger": skipped_complex_ledger,
         "threshold": {

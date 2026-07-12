@@ -1,10 +1,10 @@
 """Pydantic schemas for the SUPERADMIN metrics and analytics endpoints."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class JobStats(BaseModel):
@@ -110,10 +110,34 @@ class InventoryIntegrityThreshold(BaseModel):
     absolute_floor_units: int
 
 
+class InventoryTemporalDivergence(BaseModel):
+    """Divergencia TEMPORAL: ventas datadas antes que el stock reconstruible por fechas.
+
+    Complementa a ``InventoryIntegrityDivergence`` (que mira magnitud): acá el path
+    reconstruido por fecha de negocio cae bajo 0 aunque el agregado dé positivo.
+    """
+
+    product_id: uuid.UUID
+    product_name: str
+    stock_units: int
+    ending_balance: int
+    opening_anchor_qty: int
+    min_balance: int
+    min_balance_at: date | None
+    first_negative_at: date | None
+    total_purchases: int
+    total_tagged_adjustments: int
+    total_loss: int
+    total_sales: int
+    event_count: int
+    cause: str
+
+
 class InventoryIntegrityCheckResponse(BaseModel):
     tenant_id: uuid.UUID
     checked: int
     divergences: list[InventoryIntegrityDivergence]
+    temporal_divergences: list[InventoryTemporalDivergence] = Field(default_factory=list)
     skipped_no_anchor: int
     skipped_complex_ledger: int
     threshold: InventoryIntegrityThreshold
