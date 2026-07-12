@@ -57,8 +57,9 @@ async def _run(tenant_id_str: str) -> None:
             async with session_factory() as session:
                 result = await check_tenant_inventory_integrity(session, tenant_id)
                 divergences = result["divergences"]
+                temporal_divergences = result.get("temporal_divergences", [])
 
-                if not divergences:
+                if not divergences and not temporal_divergences:
                     logger.info(
                         "inventory_integrity_check.clean",
                         tenant_id=tenant_id_str,
@@ -69,12 +70,24 @@ async def _run(tenant_id_str: str) -> None:
                     return
 
                 now = datetime.now(UTC)
-                body = "\n".join(
+                lines = [
                     f"- {d['product_name']}: sistema muestra {d['stock_units']}, "
                     f"esperado {d['stock_esperado']} (diferencia {d['diff']})"
                     for d in divergences
+                ]
+                lines += [
+                    f"- {d['product_name']}: ventas superan el stock reconstruible por "
+                    f"fechas (cae a {d['min_balance']} el {d['first_negative_at']})"
+                    for d in temporal_divergences
+                ]
+                body = "\n".join(lines)
+                # Un producto puede aparecer en ambas listas (inflado Y negativo por
+                # fechas): contar productos únicos, no sumar largos.
+                affected = len(
+                    {d["product_id"] for d in divergences}
+                    | {d["product_id"] for d in temporal_divergences}
                 )
-                title = f"Posible inconsistencia de stock en {len(divergences)} producto(s)"
+                title = f"Posible inconsistencia de stock en {affected} producto(s)"
 
                 owner_result = await session.execute(
                     select(User).where(
@@ -94,7 +107,10 @@ async def _run(tenant_id_str: str) -> None:
                             notification_type=_DECISION_TYPE,
                             channel="in_app",
                             is_read=False,
-                            metadata_={"divergences": divergences},
+                            metadata_={
+                                "divergences": divergences,
+                                "temporal_divergences": temporal_divergences,
+                            },
                             created_at=now,
                             updated_at=now,
                         )
@@ -107,6 +123,7 @@ async def _run(tenant_id_str: str) -> None:
                         decision_type=_DECISION_TYPE,
                         decision_data={
                             "divergences": divergences,
+                            "temporal_divergences": temporal_divergences,
                             "skipped_no_anchor": result["skipped_no_anchor"],
                             "skipped_complex_ledger": result["skipped_complex_ledger"],
                             "threshold": result["threshold"],
@@ -122,6 +139,7 @@ async def _run(tenant_id_str: str) -> None:
                     "inventory_integrity_check.divergences_found",
                     tenant_id=tenant_id_str,
                     divergence_count=len(divergences),
+                    temporal_divergence_count=len(temporal_divergences),
                 )
     finally:
         await engine.dispose()
