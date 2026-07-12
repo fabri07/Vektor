@@ -49,7 +49,10 @@ import sys
 import uuid
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS_DIR)  # para `import _db`
+# El root del backend (padre de scripts/) para poder `import app.*` sin PYTHONPATH.
+sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))
 
 from _db import async_engine_config, insert_decision_audit  # noqa: E402
 from sqlalchemy import text  # noqa: E402
