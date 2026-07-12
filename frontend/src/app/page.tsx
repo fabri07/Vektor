@@ -3,7 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { Activity, Boxes, ChevronDown, Truck, ShieldCheck, Volume2, VolumeX } from "lucide-react";
+import {
+  Activity,
+  Boxes,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Truck,
+  ShieldCheck,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { VektorLogo } from "@/components/ui/VektorLogo";
 
@@ -126,10 +136,10 @@ function VideoHero() {
               Empezar gratis
             </a>
             <a
-              href="/demo"
+              href="/login"
               className="inline-flex items-center justify-center rounded-full border border-white/25 px-8 py-3.5 text-sm font-semibold text-white/90 backdrop-blur-sm hover:border-white/50 hover:text-white"
             >
-              Ver demo
+              Ya tengo cuenta
             </a>
           </div>
         </div>
@@ -219,6 +229,152 @@ function FeatureHighlights() {
   );
 }
 
+const SCREENSHOTS = [
+  {
+    src: "/screenshots/dashboard-kiosco.png",
+    caption: "Salud del negocio: score, caja, margen y stock de un vistazo.",
+  },
+  {
+    src: "/screenshots/dashboard-limpieza.png",
+    caption: "El riesgo principal y la próxima acción concreta, siempre a la vista.",
+  },
+  {
+    src: "/screenshots/productos-kiosco.png",
+    caption: "Inventario con estado de stock y valor a precio de costo.",
+  },
+  {
+    src: "/screenshots/productos-deco.png",
+    caption: "Catálogo por categoría, adaptado a tu rubro.",
+  },
+  {
+    src: "/screenshots/gastos-kiosco.png",
+    caption: "Gastos categorizados y clasificados entre operativos y mercadería.",
+  },
+  {
+    src: "/screenshots/ventas-kiosco.png",
+    caption: "Ventas del período con ticket promedio y comparativo mensual.",
+  },
+];
+
+function ScreenshotCarousel() {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number | null>(null);
+  const [active, setActive] = useState(0);
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  function goTo(index: number) {
+    const track = trackRef.current;
+    if (!track) return;
+    const clamped = Math.max(0, Math.min(index, SCREENSHOTS.length - 1));
+    const slide = track.children[clamped] as HTMLElement | undefined;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    slide?.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      inline: "center",
+      block: "nearest",
+    });
+    setActive(clamped);
+  }
+
+  // Throttle scroll work to one layout read per animation frame.
+  function handleScroll() {
+    if (rafRef.current !== null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const track = trackRef.current;
+      if (!track) return;
+      const center = track.scrollLeft + track.clientWidth / 2;
+      let closest = 0;
+      let min = Infinity;
+      Array.from(track.children).forEach((child, i) => {
+        const el = child as HTMLElement;
+        const c = el.offsetLeft + el.clientWidth / 2;
+        const distance = Math.abs(c - center);
+        if (distance < min) {
+          min = distance;
+          closest = i;
+        }
+      });
+      setActive(closest);
+    });
+  }
+
+  return (
+    <div className="mt-8">
+      <div className="relative">
+        <div
+          ref={trackRef}
+          onScroll={handleScroll}
+          role="group"
+          aria-roledescription="Carrusel"
+          aria-label="Capturas de pantalla de Véktor"
+          className="flex snap-x snap-mandatory gap-4 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {SCREENSHOTS.map((shot, i) => (
+            <figure key={shot.src} className="w-full shrink-0 snap-center">
+              <div className="overflow-hidden rounded-[20px] border border-vektor-border bg-vektor-ink shadow-lg">
+                <Image
+                  src={shot.src}
+                  alt={shot.caption}
+                  width={2880}
+                  height={1800}
+                  className="h-auto w-full"
+                  sizes="(max-width: 1280px) 100vw, 1200px"
+                  priority={i === 0}
+                />
+              </div>
+              <figcaption className="mt-4 text-center text-sm leading-6 text-vektor-muted">
+                {shot.caption}
+              </figcaption>
+            </figure>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => goTo(active - 1)}
+          disabled={active === 0}
+          aria-label="Imagen anterior"
+          className="absolute left-3 top-[46%] flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-vektor-border bg-vektor-night/80 text-vektor-white backdrop-blur-sm transition hover:border-vektor-blue hover:text-vektor-blue disabled:pointer-events-none disabled:opacity-0"
+        >
+          <ChevronLeft className="h-5 w-5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => goTo(active + 1)}
+          disabled={active === SCREENSHOTS.length - 1}
+          aria-label="Imagen siguiente"
+          className="absolute right-3 top-[46%] flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-vektor-border bg-vektor-night/80 text-vektor-white backdrop-blur-sm transition hover:border-vektor-blue hover:text-vektor-blue disabled:pointer-events-none disabled:opacity-0"
+        >
+          <ChevronRight className="h-5 w-5" />
+        </button>
+      </div>
+
+      <div className="mt-6 flex items-center justify-center gap-2">
+        {SCREENSHOTS.map((shot, i) => (
+          <button
+            key={shot.src}
+            type="button"
+            onClick={() => goTo(i)}
+            aria-label={`Ir a la imagen ${i + 1}`}
+            aria-current={active === i}
+            className={`h-2 rounded-full transition-all ${
+              active === i ? "w-6 bg-vektor-blue" : "w-2 bg-vektor-border hover:bg-vektor-muted"
+            }`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WorkflowPreview() {
   return (
     <section className="bg-vektor-night pb-28">
@@ -238,26 +394,7 @@ function WorkflowPreview() {
             </p>
           </div>
 
-          {/* TODO: Replace with actual dashboard screenshot */}
-          <div className="mt-8 rounded-[28px] border border-vektor-border bg-[radial-gradient(circle_at_top_left,rgba(58,134,255,0.22),transparent_26%),linear-gradient(135deg,#101a2d_0%,#13223a_48%,#0c1422_100%)] p-8">
-            <div className="flex items-center gap-2">
-              <span className="h-3 w-3 rounded-full bg-vektor-red" />
-              <span className="h-3 w-3 rounded-full bg-vektor-amber" />
-              <span className="h-3 w-3 rounded-full bg-vektor-teal" />
-            </div>
-            <div className="mt-10 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-              <div className="rounded-2xl border border-vektor-border bg-vektor-ink/80 p-6">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-vektor-muted">
-                  Dashboard Preview
-                </p>
-                <div className="mt-6 h-56 rounded-2xl bg-[linear-gradient(135deg,rgba(58,134,255,0.15),rgba(39,199,184,0.08)),linear-gradient(180deg,rgba(255,255,255,0.02),transparent)]" />
-              </div>
-              <div className="grid gap-4">
-                <div className="rounded-2xl border border-vektor-border bg-vektor-ink/80 p-6" />
-                <div className="rounded-2xl border border-vektor-border bg-vektor-ink/80 p-6" />
-              </div>
-            </div>
-          </div>
+          <ScreenshotCarousel />
         </div>
       </div>
     </section>
