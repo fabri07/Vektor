@@ -628,5 +628,6 @@ class GoogleOAuthService:
                 full_name=user.full_name,
                 role_code=user.role_code,
                 tenant_id=tenant.tenant_id,
+                phone=user.phone,
             ),
         )

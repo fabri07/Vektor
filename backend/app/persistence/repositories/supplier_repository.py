@@ -4,12 +4,27 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
 
 from app.persistence.models.inventory import InventoryMovement
-from app.persistence.models.supplier import Supplier
+from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY, Supplier
 from app.persistence.models.transaction import ExpenseEntry
+from app.persistence.repositories._jsonb_flags import flag_not_true_sql
+
+
+def _not_brand_collapsed_or_active() -> ColumnElement[bool]:
+    """Filtro: excluir del listado las marcas colapsadas (baja por error de
+    clasificación, flag ``_brand_collapsed``) aun con ``include_inactive=True``.
+
+    Un desactivado solo entra si NO tiene el flag; un activo entra siempre
+    (si un colapsado se restaura vía script de revert, este le limpia el flag).
+    """
+    return or_(
+        Supplier.deactivated_at.is_(None),
+        flag_not_true_sql(Supplier.custom_fields, BRAND_COLLAPSED_FLAG_KEY),
+    )
 
 
 class SupplierRepository:
@@ -53,12 +68,15 @@ class SupplierRepository:
     ) -> list[Supplier]:
         """Lista proveedores del tenant.
 
-        ``include_inactive=True`` incluye los dados de baja (``deactivated_at``)
-        para mostrarlos en rojo en la UI.
+        ``include_inactive=True`` incluye los dados de baja REALES
+        (``deactivated_at``) para mostrarlos en rojo en la UI. Las marcas
+        colapsadas por error (flag ``_brand_collapsed``) nunca se listan.
         """
         conditions: list[Any] = [Supplier.tenant_id == tenant_id]
         if not include_inactive:
             conditions.append(Supplier.deactivated_at.is_(None))
+        else:
+            conditions.append(_not_brand_collapsed_or_active())
         q = (
             select(Supplier)
             .where(*conditions)

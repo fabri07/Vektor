@@ -18,12 +18,15 @@ def is_flag_true(value: object) -> bool:
     """Predicado genérico de flags de ``custom_fields`` con forma string-"true"/bool.
 
     Un flag "activo" puede llegar como string ``"true"`` (lo que escribe la
-    ingestión) o como booleano JSON ``true`` (si se edita la fila a mano). Fuente
-    única de verdad para reconocerlo — evita que cada call site invente su propia
-    comparación frágil. Reutilizable para cualquier flag con esta convención
-    (sentinela, provisional-desde-marca, etc.).
+    ingestión), como booleano JSON ``true`` (si se edita la fila a mano) o como
+    ``1``/``"1"`` (SQLite ``json_extract`` proyecta el booleano JSON como entero;
+    tooling que serializa a "1"). Fuente única de verdad para reconocerlo — evita
+    que cada call site invente su propia comparación frágil, y DEBE mantenerse en
+    espejo con su forma SQL (``repositories/_jsonb_flags.flag_is_true_sql``).
+    Reutilizable para cualquier flag con esta convención (sentinela,
+    provisional-desde-marca, marca-colapsada, etc.).
     """
-    return value in ("true", True)
+    return value in ("true", "1", True, 1)
 
 
 # Alias semántico: reconocer el flag de sentinela es el mismo predicado genérico.

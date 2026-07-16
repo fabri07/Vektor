@@ -61,6 +61,19 @@ export function isLikelyValidWhatsApp(phone: string | null | undefined): boolean
   return len >= 11 && len <= 15;
 }
 
+/** Mensaje canónico de teléfono inválido — compartido por registro y settings. */
+export const PHONE_FORMAT_ERROR = "Número inválido (ej: +54 9 11 1234 5678)";
+
+/**
+ * Valida un borrador de teléfono opcional: vacío es válido (campo opcional);
+ * si hay algo, debe pasar `isLikelyValidWhatsApp`. Devuelve el mensaje de
+ * error o null. Única regla de validez de phone en el frontend.
+ */
+export function validateOptionalPhone(value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  return isLikelyValidWhatsApp(value) ? null : PHONE_FORMAT_ERROR;
+}
+
 // ── Condición frente al IVA (canónica, espejo del backend) ─────────────────────
 
 export const IVA_CONDITION_LABELS: Record<string, string> = {

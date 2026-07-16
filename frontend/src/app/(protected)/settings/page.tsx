@@ -1,7 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { getMeRequest } from "@/services/auth.service";
+import { updateMeRequest } from "@/services/users.service";
+import { validateOptionalPhone } from "@/lib/fiscal";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
 import {
@@ -200,9 +203,71 @@ function AutomationsSection() {
 function GeneralTab() {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
+  const updateUser = useAuthStore((s) => s.updateUser);
   const addToast = useToastStore((s) => s.add);
   const [suggestion, setSuggestion] = useState("");
   const [sendingSuggestion, setSendingSuggestion] = useState(false);
+
+  // Teléfono / WhatsApp — edición inline.
+  const [editingPhone, setEditingPhone] = useState(false);
+  const [phoneDraft, setPhoneDraft] = useState("");
+  const [phoneError, setPhoneError] = useState("");
+
+  // Sesiones persistidas previas al campo: hidratar el phone desde /auth/me.
+  useEffect(() => {
+    if (user && user.phone === undefined) {
+      getMeRequest()
+        .then((me) => updateUser({ phone: me.phone ?? null }))
+        .catch(() => {
+          /* silencioso: el campo mostrará "—" hasta re-login */
+        });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const phoneMutation = useMutation({
+    mutationFn: (phone: string | null) => updateMeRequest({ phone }),
+    onSuccess: (me) => {
+      updateUser({ phone: me.phone });
+      setEditingPhone(false);
+      setPhoneError("");
+      addToast("Teléfono actualizado.", "success");
+    },
+    onError: () => {
+      addToast("No se pudo actualizar el teléfono. Intentá de nuevo.", "error");
+    },
+  });
+
+  const handlePhoneSave = () => {
+    const trimmed = phoneDraft.trim();
+    const error = validateOptionalPhone(trimmed);
+    if (error) {
+      setPhoneError(error);
+      return;
+    }
+    setPhoneError("");
+    phoneMutation.mutate(trimmed || null);
+  };
+
+  // No abrir el editor hasta conocer el valor real: si la sesión es vieja
+  // (phone === undefined) y la hidratación falló, un draft vacío guardado
+  // "para confirmar" pisaría con null un número que sí existe en la DB.
+  const openPhoneEditor = async () => {
+    let current = user?.phone;
+    if (current === undefined) {
+      try {
+        const me = await getMeRequest();
+        updateUser({ phone: me.phone ?? null });
+        current = me.phone ?? null;
+      } catch {
+        addToast("No se pudo cargar el teléfono actual. Probá de nuevo.", "error");
+        return;
+      }
+    }
+    setPhoneDraft(current ?? "");
+    setPhoneError("");
+    setEditingPhone(true);
+  };
 
   const initials = (user?.full_name ?? "")
     .split(" ")
@@ -281,6 +346,60 @@ function GeneralTab() {
             <span className="font-medium text-vk-text-primary">
               {user?.full_name ?? "—"}
             </span>
+          </div>
+          <div className="border-b border-vk-border-w py-2">
+            <div className="flex items-center justify-between">
+              <span className="text-vk-text-muted">Teléfono / WhatsApp</span>
+              {editingPhone ? (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="tel"
+                    autoComplete="tel"
+                    value={phoneDraft}
+                    onChange={(e) => setPhoneDraft(e.target.value)}
+                    placeholder="+54 9 11 1234 5678"
+                    className="w-48 rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-1.5 text-sm text-vk-text-primary placeholder:text-vk-text-placeholder focus:border-vk-blue/40 focus:outline-none"
+                    aria-label="Teléfono / WhatsApp"
+                  />
+                  <button
+                    type="button"
+                    onClick={handlePhoneSave}
+                    disabled={phoneMutation.isPending}
+                    className="rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-vk-blue-hover disabled:opacity-60"
+                  >
+                    {phoneMutation.isPending ? "Guardando…" : "Guardar"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingPhone(false);
+                      setPhoneError("");
+                    }}
+                    className="rounded-lg border border-vk-border-w px-3 py-1.5 text-xs font-medium text-vk-text-secondary transition-colors hover:bg-vk-bg-light"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-vk-text-primary">
+                    {user?.phone || "—"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void openPhoneEditor()}
+                    className="text-xs font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline"
+                  >
+                    Editar
+                  </button>
+                </div>
+              )}
+            </div>
+            {editingPhone && phoneError && (
+              <p role="alert" className="mt-1 text-right text-xs text-vk-danger">
+                {phoneError}
+              </p>
+            )}
           </div>
           <div className="flex items-center justify-between py-2">
             <span className="text-vk-text-muted">Rol</span>

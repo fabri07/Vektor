@@ -41,7 +41,13 @@ const initialTouched: TouchedFields = {
   full_name: false,
   business_name: false,
   vertical_code: false,
+  phone: false,
 };
+
+// Derivado de initialTouched: un campo nuevo solo se agrega en UN lugar.
+const allTouched = Object.fromEntries(
+  Object.keys(initialTouched).map((k) => [k, true]),
+) as TouchedFields;
 
 export function RegisterForm() {
   const router = useRouter();
@@ -53,6 +59,7 @@ export function RegisterForm() {
     full_name: "",
     business_name: "",
     vertical_code: "kiosco",
+    phone: "",
   });
   const [touched, setTouched] = useState<TouchedFields>(initialTouched);
   const [showPassword, setShowPassword] = useState(false);
@@ -84,13 +91,7 @@ export function RegisterForm() {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setTouched({
-      email: true,
-      password: true,
-      full_name: true,
-      business_name: true,
-      vertical_code: true,
-    });
+    setTouched(allTouched);
 
     const result = registerSchema.safeParse(values);
     if (!result.success) return;
@@ -181,6 +182,30 @@ export function RegisterForm() {
         {touched.vertical_code && fieldErrors.vertical_code && (
           <p id="reg-vertical-error" role="alert" className="mt-1 text-sm text-vk-danger">
             {fieldErrors.vertical_code}
+          </p>
+        )}
+      </div>
+
+      {/* Teléfono / WhatsApp (opcional) */}
+      <div>
+        <label htmlFor="reg-phone" className="mb-1.5 block text-sm font-medium text-vk-text-secondary">
+          Teléfono / WhatsApp <span className="text-vk-text-muted">(opcional)</span>
+        </label>
+        <input
+          id="reg-phone"
+          type="tel"
+          autoComplete="tel"
+          value={values.phone ?? ""}
+          onChange={(e) => handleChange("phone", e.target.value)}
+          onBlur={() => handleBlur("phone")}
+          placeholder="+54 9 11 1234 5678"
+          className={touched.phone && fieldErrors.phone ? inputErrorClass : inputClass}
+          aria-describedby={touched.phone && fieldErrors.phone ? "reg-phone-error" : undefined}
+          aria-invalid={touched.phone && !!fieldErrors.phone}
+        />
+        {touched.phone && fieldErrors.phone && (
+          <p id="reg-phone-error" role="alert" className="mt-1 text-sm text-vk-danger">
+            {fieldErrors.phone}
           </p>
         )}
       </div>

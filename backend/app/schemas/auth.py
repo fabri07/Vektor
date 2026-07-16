@@ -5,6 +5,8 @@ from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pydantic_core import PydanticCustomError
 
+from app.schemas._ar_fiscal import normalize_phone
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -17,6 +19,8 @@ class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=200)
     business_name: str = Field(min_length=2, max_length=200)
     vertical_code: str = Field(pattern=r"^(kiosco|decoracion_hogar|limpieza)$")
+    # Teléfono/WhatsApp de contacto (opcional). Editable después en /settings.
+    phone: str | None = Field(default=None, max_length=50)
 
     @field_validator("password")
     @classmethod
@@ -26,6 +30,11 @@ class RegisterRequest(BaseModel):
         if not any(c.isalpha() for c in v):
             raise ValueError("Password must contain at least one letter.")
         return v
+
+    @field_validator("phone")
+    @classmethod
+    def phone_strip(cls, v: str | None) -> str | None:
+        return normalize_phone(v)
 
 
 def validate_password_strength(value: str) -> str:
@@ -50,6 +59,7 @@ class UserInAuthResponse(BaseModel):
     full_name: str
     role_code: str
     tenant_id: UUID
+    phone: str | None = None
 
 
 class AuthResponse(BaseModel):
@@ -75,6 +85,7 @@ class MeResponse(BaseModel):
     full_name: str
     role_code: str
     tenant_id: UUID
+    phone: str | None = None
     subscription: SubscriptionInMeResponse | None
     onboarding_completed: bool
 

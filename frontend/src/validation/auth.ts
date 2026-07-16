@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateOptionalPhone } from "@/lib/fiscal";
 
 export const loginSchema = z.object({
   email: z.string().email("Email inválido"),
@@ -13,6 +14,13 @@ export const registerSchema = z.object({
   vertical_code: z.enum(["kiosco", "decoracion_hogar", "limpieza"], {
     errorMap: () => ({ message: "Seleccioná un rubro" }),
   }),
+  phone: z
+    .string()
+    .optional()
+    .superRefine((v, ctx) => {
+      const error = validateOptionalPhone(v);
+      if (error) ctx.addIssue({ code: z.ZodIssueCode.custom, message: error });
+    }),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;

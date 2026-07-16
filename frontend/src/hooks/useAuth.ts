@@ -15,6 +15,7 @@ export function useLogin() {
         full_name: user.full_name,
         role: user.role_code,
         tenant_id: user.tenant_id,
+        phone: user.phone ?? null,
       });
     },
   });
@@ -40,6 +41,7 @@ export function useVerifyEmail() {
         full_name: user.full_name,
         role: user.role_code,
         tenant_id: user.tenant_id,
+        phone: user.phone ?? null,
       });
     },
   });

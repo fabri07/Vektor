@@ -7,6 +7,8 @@ interface AuthUser {
   full_name: string;
   role: string;
   tenant_id: string;
+  // Opcional: las sesiones persistidas previas al campo no lo tienen.
+  phone?: string | null;
 }
 
 interface AuthState {
@@ -16,6 +18,7 @@ interface AuthState {
   _hasHydrated: boolean;
   setAuth: (token: string, refreshToken: string, user: AuthUser) => void;
   setTokens: (token: string, refreshToken: string) => void;
+  updateUser: (patch: Partial<AuthUser>) => void;
   setHasHydrated: (state: boolean) => void;
   logout: () => void;
 }
@@ -29,6 +32,8 @@ export const useAuthStore = create<AuthState>()(
       _hasHydrated: false,
       setAuth: (token, refreshToken, user) => set({ token, refreshToken, user }),
       setTokens: (token, refreshToken) => set({ token, refreshToken }),
+      updateUser: (patch) =>
+        set((state) => (state.user ? { user: { ...state.user, ...patch } } : {})),
       setHasHydrated: (state) => set({ _hasHydrated: state }),
       logout: () => {
         set({ token: null, refreshToken: null, user: null });

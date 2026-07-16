@@ -23,6 +23,9 @@ export async function registerRequest(data: RegisterInput): Promise<RegisterResp
     full_name: data.full_name,
     business_name: data.business_name,
     vertical_code: data.vertical_code,
+    // Omitir si quedó vacío: el backend lo normaliza a NULL igual, pero así
+    // el payload no arrastra strings en blanco.
+    phone: data.phone?.trim() || undefined,
   });
   return res.data;
 }

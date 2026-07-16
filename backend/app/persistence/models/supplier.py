@@ -30,7 +30,14 @@ from app.persistence.models._sentinel import (
 # partir de la marca de un producto (reasignable a un proveedor real más tarde).
 PROVISIONAL_FLAG_KEY = "_provisional_from_brand"
 
+# Flag de marca colapsada por error de clasificación: lo escribe
+# ``scripts/deactivate_brand_suppliers.py`` (y su backfill) al dar de baja un
+# "proveedor" que en realidad era una marca. Estas filas NO se listan ni se
+# reactivan desde la UI — la vía sancionada de restauración es el script de revert.
+BRAND_COLLAPSED_FLAG_KEY = "_brand_collapsed"
+
 __all__ = [
+    "BRAND_COLLAPSED_FLAG_KEY",
     "PROVISIONAL_FLAG_KEY",
     "SENTINEL_FLAG_KEY",
     "Supplier",
@@ -76,6 +83,11 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     def is_provisional(self) -> bool:
         """¿Es un proveedor provisional derivado de una marca (reasignable)?"""
         return is_flag_true((self.custom_fields or {}).get(PROVISIONAL_FLAG_KEY))
+
+    @property
+    def is_brand_collapsed(self) -> bool:
+        """¿Es una marca que fue confundida con proveedor y colapsada (baja por error)?"""
+        return is_flag_true((self.custom_fields or {}).get(BRAND_COLLAPSED_FLAG_KEY))
 
     def __repr__(self) -> str:
         return f"<Supplier tenant={self.tenant_id} name={self.name!r}>"

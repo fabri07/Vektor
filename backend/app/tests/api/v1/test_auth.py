@@ -51,6 +51,47 @@ class TestRegister:
         assert "requires_verification" in data
         assert "message" in data
 
+    async def test_register_persists_phone(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        payload = {
+            **_REGISTER_PAYLOAD,
+            "email": "conphone@kiosco.example.com",
+            "phone": "+54 9 11 5555 1234",
+        }
+        response = await client.post("/api/v1/auth/register", json=payload)
+        assert response.status_code == 201
+        user = (
+            await db_session.execute(select(User).where(User.email == payload["email"]))
+        ).scalar_one()
+        assert user.phone == "+54 9 11 5555 1234"
+
+    async def test_register_without_phone_is_null(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        payload = {**_REGISTER_PAYLOAD, "email": "sinphone@kiosco.example.com"}
+        response = await client.post("/api/v1/auth/register", json=payload)
+        assert response.status_code == 201
+        user = (
+            await db_session.execute(select(User).where(User.email == payload["email"]))
+        ).scalar_one()
+        assert user.phone is None
+
+    async def test_register_blank_phone_normalizes_to_null(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        payload = {
+            **_REGISTER_PAYLOAD,
+            "email": "blankphone@kiosco.example.com",
+            "phone": "   ",
+        }
+        response = await client.post("/api/v1/auth/register", json=payload)
+        assert response.status_code == 201
+        user = (
+            await db_session.execute(select(User).where(User.email == payload["email"]))
+        ).scalar_one()
+        assert user.phone is None
+
     async def test_register_duplicate_email(self, client: AsyncClient) -> None:
         """Second register with the same email must return 409."""
         await client.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)

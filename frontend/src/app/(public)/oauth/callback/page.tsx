@@ -54,7 +54,7 @@ export default function OAuthCallbackPage() {
           const auth = result as {
             access_token: string;
             refresh_token: string;
-            user: { user_id: string; email: string; full_name: string; role_code: string; tenant_id: string };
+            user: { user_id: string; email: string; full_name: string; role_code: string; tenant_id: string; phone?: string | null };
           };
           setAuth(auth.access_token, auth.refresh_token, {
             id: auth.user.user_id,
@@ -62,6 +62,7 @@ export default function OAuthCallbackPage() {
             full_name: auth.user.full_name,
             role: auth.user.role_code,
             tenant_id: auth.user.tenant_id,
+            phone: auth.user.phone ?? null,
           });
           router.replace("/dashboard");
         }
@@ -89,6 +90,7 @@ export default function OAuthCallbackPage() {
         full_name: auth.user.full_name,
         role: auth.user.role_code,
         tenant_id: auth.user.tenant_id,
+        phone: auth.user.phone ?? null,
       });
       router.replace("/dashboard");
     } catch {

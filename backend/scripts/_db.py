@@ -18,6 +18,15 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 # compartido por los scripts que detectan/revierten voids de compras.
 REPAIR_DECISION_TYPES = ("INVENTORY_REPAIR", "INVENTORY_RECONCILIATION_FIX")
 
+# Fragmento SET que marca un supplier como marca colapsada (una sola definición,
+# usada por deactivate_brand_suppliers y backfill_brand_collapsed_flag — si la
+# representación del flag cambia, cambia acá). Espejo del literal
+# BRAND_COLLAPSED_FLAG_KEY de app/persistence/models/supplier.py.
+SQL_SET_BRAND_COLLAPSED = (
+    "custom_fields = jsonb_set(coalesce(custom_fields, '{}'::jsonb), "
+    "'{_brand_collapsed}', '\"true\"'::jsonb)"
+)
+
 
 def normalize_dsn(raw: str) -> tuple[str, ssl.SSLContext | bool]:
     """Limpia sufijos de driver y extrae sslmode para asyncpg (vía urlparse)."""

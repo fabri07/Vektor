@@ -170,6 +170,7 @@ async def get_me(
         full_name=current_user.full_name,
         role_code=current_user.role_code,
         tenant_id=current_user.tenant_id,
+        phone=current_user.phone,
         subscription=(
             SubscriptionInMeResponse(
                 plan_code=subscription.plan_code,

@@ -211,7 +211,18 @@ export default function SuppliersPage() {
       toast("Proveedor reactivado.", "success");
       await queryClient.invalidateQueries({ queryKey: ["suppliers-list"] });
     },
-    onError: () => toast("No se pudo reactivar el proveedor.", "error"),
+    onError: (err) => {
+      const resp = (err as { response?: { status?: number; data?: { detail?: string } } })
+        .response;
+      // 409 BRAND_COLLAPSED: era una marca confundida con proveedor (baja por
+      // error de clasificación) — no se reactiva desde la app.
+      if (resp?.status === 409 && resp.data?.detail === "BRAND_COLLAPSED") {
+        toast("Este registro era una marca, no un proveedor. No se puede reactivar.", "error");
+        void queryClient.invalidateQueries({ queryKey: ["suppliers-list"] });
+        return;
+      }
+      toast("No se pudo reactivar el proveedor.", "error");
+    },
   });
 
   const tableData = suppliers.map((s) => ({ ...s, _status: null }));
