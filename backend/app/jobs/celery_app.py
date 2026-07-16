@@ -27,6 +27,7 @@ celery_app = Celery(
         "app.jobs.recalculate_health_score",
         "app.jobs.generate_insight",
         "app.jobs.notification_worker",
+        "app.jobs.contact_lead_worker",
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
         "app.jobs.reread_worker",

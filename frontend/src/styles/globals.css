@@ -198,6 +198,29 @@
     }
   }
 
+  /* Doodles del hero (SVG inline de Figma): "dibujado" del trazo + fade + flotar.
+     Cada path lleva pathLength=1, así dasharray/offset=1 dibuja de forma uniforme
+     sin importar el largo real del trazo. */
+  .doodle-path {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: doodle-draw 1.2s ease forwards;
+  }
+  .doodle-anim {
+    opacity: 0;
+    animation: doodle-fade 0.6s ease forwards, doodle-float 7s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .doodle-path {
+      stroke-dashoffset: 0;
+      animation: none;
+    }
+    .doodle-anim {
+      opacity: 1;
+      animation: none;
+    }
+  }
+
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: var(--vektor-border) transparent;
@@ -226,6 +249,20 @@
 @keyframes marquee {
   0% { transform: translateX(0); }
   100% { transform: translateX(-50%); }
+}
+
+@keyframes doodle-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes doodle-fade {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes doodle-float {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-6px); }
 }
 
 @keyframes mesh-shift {

@@ -197,6 +197,10 @@ class Settings(BaseSettings):
         ""  # alias legacy — se usa como RESEND_API_KEY si RESEND_API_KEY está vacío
     )
     SMTP_FROM_EMAIL: str = "noreply@vektor.app"
+    # Destinatario de los leads del formulario público de contacto. OBLIGATORIO
+    # en producción (ver validador abajo). En dev, si queda vacío, se usa
+    # SMTP_FROM_EMAIL como fallback. Poné acá el mail oficial de Véktor.
+    CONTACT_LEAD_EMAIL: str = ""
 
     # ── Comunicación: WhatsApp (DORMIDO — Fase posterior) ──────────────────────
     # Canal WhatsApp vía Meta Cloud API. Default OFF: requiere verificación de la
@@ -404,6 +408,21 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.ENVIRONMENT == "development"
+
+    @property
+    def contact_lead_recipient(self) -> str:
+        """Destinatario resuelto para los leads del formulario de contacto.
+
+        CONTACT_LEAD_EMAIL si está configurado; en dev cae a SMTP_FROM_EMAIL.
+        En producción sin CONTACT_LEAD_EMAIL devuelve "" a propósito: la tarea
+        de email lo trata como fallo (loguea + marca failed) SIN perder el lead,
+        en vez de mandar el aviso a una casilla no operativa.
+        """
+        if self.CONTACT_LEAD_EMAIL:
+            return self.CONTACT_LEAD_EMAIL
+        if self.is_development:
+            return self.SMTP_FROM_EMAIL
+        return ""
 
     @classmethod
     def settings_customise_sources(  # type: ignore[override]

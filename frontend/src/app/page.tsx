@@ -6,16 +6,14 @@ import { useRouter } from "next/navigation";
 import {
   Activity,
   Boxes,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Truck,
-  ShieldCheck,
-  Volume2,
-  VolumeX,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
-import { VektorLogo } from "@/components/ui/VektorLogo";
+import { PublicNav } from "@/components/public/PublicNav";
+import { PublicFooter } from "@/components/public/PublicFooter";
+import { DoodleHero } from "@/components/public/DoodleHero";
 
 const SOCIAL_PROOF_CARDS = [
   { seed: 11, caption: "Kiosco en Rosario" },
@@ -48,121 +46,6 @@ const FEATURE_HIGHLIGHTS = [
       "Concentrá compras, condiciones de pago y dependencia por proveedor para negociar mejor y evitar cuellos de botella.",
   },
 ];
-
-function Navbar() {
-  return (
-    <nav className="fixed inset-x-0 top-0 z-50 border-b border-white/10 bg-transparent">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
-        <VektorLogo variant="full" size="md" theme="dark" />
-        <div className="flex items-center gap-3">
-          <a
-            href="/login"
-            className="hidden rounded-full border border-white/20 px-4 py-2 text-sm font-medium text-white/80 backdrop-blur-sm hover:border-white/40 hover:text-white sm:inline-flex"
-          >
-            Iniciar sesión
-          </a>
-          <a
-            href="/register"
-            className="inline-flex rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-vektor-night hover:bg-white/90"
-          >
-            Empezar gratis
-          </a>
-        </div>
-      </div>
-    </nav>
-  );
-}
-
-function VideoHero() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [muted, setMuted] = useState(true);
-  const [videoError, setVideoError] = useState(false);
-
-  function toggleMute() {
-    if (!videoRef.current) return;
-    videoRef.current.muted = !videoRef.current.muted;
-    setMuted(videoRef.current.muted);
-  }
-
-  return (
-    <section className="relative h-screen w-full overflow-hidden bg-vektor-night">
-      {/* ── Video background ────────────────────────────────────────────
-          Drop the production video at: public/videos/hero.mp4
-          Concept: dueño de kiosco argentino abriendo su local al amanecer,
-          pone el mostrador en orden, abre su notebook y accede a Véktor.
-          Resolución recomendada: 1920×1080, H.264, ≤ 12 MB.
-      ────────────────────────────────────────────────────────────────── */}
-      {!videoError && (
-        <video
-          ref={videoRef}
-          autoPlay
-          muted
-          loop
-          playsInline
-          onError={() => setVideoError(true)}
-          className="absolute inset-0 h-full w-full object-cover"
-          poster="/videos/hero-poster.jpg"
-        >
-          <source src="/videos/hero.mp4" type="video/mp4" />
-        </video>
-      )}
-
-      {/* Gradient fallback (visible while no video or on error) */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_20%_30%,rgba(58,134,255,0.30),transparent_45%),radial-gradient(ellipse_at_80%_70%,rgba(39,199,184,0.18),transparent_40%),linear-gradient(170deg,#03070f_0%,#070f1e_40%,#04090e_100%)]" />
-
-      {/* Bottom fade to page background */}
-      <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-vektor-night to-transparent" />
-
-      {/* Cinematic top vignette */}
-      <div className="absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-vektor-night/60 to-transparent" />
-
-      {/* Content — bottom-left, SpaceX style */}
-      <div className="absolute bottom-28 left-0 right-0 px-6 sm:bottom-32 sm:px-12 lg:px-20">
-        <div className="max-w-2xl">
-          <p className="mb-4 text-xs font-semibold uppercase tracking-[0.22em] text-white/50">
-            <ShieldCheck className="mr-1.5 inline h-3.5 w-3.5 text-vektor-teal" />
-            Salud financiera para negocios argentinos
-          </p>
-          <h1 className="font-display text-[52px] font-bold uppercase leading-[0.92] tracking-tight text-white sm:text-[72px] lg:text-[88px]">
-            Tomá las<br />
-            mejores<br />
-            decisiones.
-          </h1>
-          <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
-            <a
-              href="/register"
-              className="inline-flex items-center justify-center rounded-full bg-white px-8 py-3.5 text-sm font-semibold text-vektor-night hover:-translate-y-0.5 hover:bg-white/90"
-            >
-              Empezar gratis
-            </a>
-            <a
-              href="/login"
-              className="inline-flex items-center justify-center rounded-full border border-white/25 px-8 py-3.5 text-sm font-semibold text-white/90 backdrop-blur-sm hover:border-white/50 hover:text-white"
-            >
-              Ya tengo cuenta
-            </a>
-          </div>
-        </div>
-      </div>
-
-      {/* Mute toggle — bottom right */}
-      <button
-        type="button"
-        onClick={toggleMute}
-        aria-label={muted ? "Activar sonido" : "Silenciar"}
-        className="absolute bottom-8 right-6 flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/30 text-white/70 backdrop-blur-sm hover:border-white/40 hover:text-white sm:right-12 lg:right-20"
-      >
-        {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-      </button>
-
-      {/* Scroll indicator */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-white/30">Scroll</span>
-        <ChevronDown className="h-4 w-4 animate-bounce text-white/30" />
-      </div>
-    </section>
-  );
-}
 
 function SocialProofStrip() {
   const cards = [...SOCIAL_PROOF_CARDS, ...SOCIAL_PROOF_CARDS];
@@ -401,26 +284,6 @@ function WorkflowPreview() {
   );
 }
 
-function Footer() {
-  return (
-    <footer className="border-t border-vektor-border bg-vektor-night py-10">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6 px-6 md:flex-row md:items-center md:justify-between">
-        <div>
-          <VektorLogo variant="wordmark" size="md" theme="dark" />
-          <p className="mt-2 text-sm text-vektor-muted">
-            Véktor te ayuda a decidir mejor sin vivir en planillas.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-5 text-sm text-vektor-muted">
-          <a href="/privacidad" className="hover:text-vektor-white">Privacidad</a>
-          <a href="/terminos" className="hover:text-vektor-white">Términos</a>
-          <a href="/contacto" className="hover:text-vektor-white">Contacto</a>
-        </div>
-      </div>
-    </footer>
-  );
-}
-
 export default function RootPage() {
   const router = useRouter();
   const token = useAuthStore((s) => s.token);
@@ -434,12 +297,12 @@ export default function RootPage() {
 
   return (
     <>
-      <Navbar />
-      <VideoHero />
+      <PublicNav />
+      <DoodleHero />
       <SocialProofStrip />
       <FeatureHighlights />
       <WorkflowPreview />
-      <Footer />
+      <PublicFooter />
     </>
   );
 }
