@@ -113,29 +113,15 @@ function FeatureHighlights() {
 }
 
 const SCREENSHOTS = [
+  { src: "/screenshots/kiosco.jpg", rubro: "Kiosco" },
+  { src: "/screenshots/verduleria.jpg", rubro: "Verdulería" },
+  { src: "/screenshots/peluqueria.jpg", rubro: "Peluquería" },
+  { src: "/screenshots/gimnasio.jpg", rubro: "Gimnasio" },
+  { src: "/screenshots/taller-mecanico.jpg", rubro: "Taller mecánico" },
+  { src: "/screenshots/tienda-de-decoracion.jpg", rubro: "Tienda de decoración" },
   {
-    src: "/screenshots/dashboard-kiosco.png",
-    caption: "Salud del negocio: score, caja, margen y stock de un vistazo.",
-  },
-  {
-    src: "/screenshots/dashboard-limpieza.png",
-    caption: "El riesgo principal y la próxima acción concreta, siempre a la vista.",
-  },
-  {
-    src: "/screenshots/productos-kiosco.png",
-    caption: "Inventario con estado de stock y valor a precio de costo.",
-  },
-  {
-    src: "/screenshots/productos-deco.png",
-    caption: "Catálogo por categoría, adaptado a tu rubro.",
-  },
-  {
-    src: "/screenshots/gastos-kiosco.png",
-    caption: "Gastos categorizados y clasificados entre operativos y mercadería.",
-  },
-  {
-    src: "/screenshots/ventas-kiosco.png",
-    caption: "Ventas del período con ticket promedio y comparativo mensual.",
+    src: "/screenshots/venta-de-articulos-de-limpieza.jpg",
+    rubro: "Venta de artículos de limpieza",
   },
 ];
 
@@ -205,16 +191,16 @@ function ScreenshotCarousel() {
               <div className="overflow-hidden rounded-[20px] border border-vektor-border bg-vektor-ink shadow-lg">
                 <Image
                   src={shot.src}
-                  alt={shot.caption}
-                  width={2880}
-                  height={1800}
+                  alt={`Véktor para ${shot.rubro}`}
+                  width={2000}
+                  height={1091}
                   className="h-auto w-full"
                   sizes="(max-width: 1280px) 100vw, 1200px"
                   priority={i === 0}
                 />
               </div>
-              <figcaption className="mt-4 text-center text-sm leading-6 text-vektor-muted">
-                {shot.caption}
+              <figcaption className="mt-4 text-center text-xs font-semibold uppercase tracking-[0.22em] text-vektor-muted">
+                {shot.rubro}
               </figcaption>
             </figure>
           ))}
