@@ -16,11 +16,16 @@ RESULTADOS (contados y reportados en --out):
                            traza), sin flag → se taggea (solo con --apply).
     SKIP_ACTIVE          → hoy está activo (fue restaurado a propósito) → no tocar.
     SKIP_ALREADY_FLAGGED → ya tiene el flag (idempotencia) → no tocar.
-    SKIP_PROVISIONAL     → tiene '_provisional_from_brand' (guarda defensiva) → no tocar.
     SKIP_REDEACTIVATED   → deactivated_at NO coincide con la traza del cleanup: fue
                            restaurado y vuelto a dar de baja por un humano (baja de
                            negocio real) → NO taggear; revisar a mano si hace falta.
     NOT_FOUND            → el supplier de la traza ya no existe → informativo.
+
+NOTA: tener '_provisional_from_brand' NO exime del tag — la población real de Neon
+son marcas que NACIERON provisionales (las creó el script de revert) y DESPUÉS las
+colapsó el cleanup: quedaron con ambos flags. Lo que decide es el match temporal
+de deactivated_at contra la traza (un provisional restaurado y activo cae en
+SKIP_ACTIVE; uno re-dado-de-baja por un humano, en SKIP_REDEACTIVATED).
 
 Usage:
     # Dry-run (default) de un tenant puntual:
@@ -68,10 +73,7 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
 from app.persistence.models._sentinel import is_flag_true  # noqa: E402
-from app.persistence.models.supplier import (  # noqa: E402
-    BRAND_COLLAPSED_FLAG_KEY,
-    PROVISIONAL_FLAG_KEY,
-)
+from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY  # noqa: E402
 
 _DECISION_TYPE = "SUPPLIER_BRAND_COLLAPSED_FLAG_BACKFILL"
 _SOURCE_DECISION_TYPES = ("SUPPLIER_BRAND_CLEANUP", "SUPPLIER_MERCH_SOURCE_COLLAPSE")
@@ -85,7 +87,6 @@ _TRACE_MATCH_TOLERANCE_S = 60
 _TAG = "TAG"
 _SKIP_ACTIVE = "SKIP_ACTIVE"
 _SKIP_ALREADY_FLAGGED = "SKIP_ALREADY_FLAGGED"
-_SKIP_PROVISIONAL = "SKIP_PROVISIONAL"
 _SKIP_REDEACTIVATED = "SKIP_REDEACTIVATED"
 _NOT_FOUND = "NOT_FOUND"
 
@@ -148,11 +149,11 @@ async def _plan_tenant(session: AsyncSession, tid: uuid.UUID) -> list[dict[str, 
                 reason = _SKIP_ACTIVE
             elif is_flag_true(cf.get(BRAND_COLLAPSED_FLAG_KEY)):
                 reason = _SKIP_ALREADY_FLAGGED
-            elif is_flag_true(cf.get(PROVISIONAL_FLAG_KEY)):
-                reason = _SKIP_PROVISIONAL
             elif not matches_trace:
                 reason = _SKIP_REDEACTIVATED
             else:
+                # Ojo: '_provisional_from_brand' NO exime — las 49 de don pedro
+                # nacieron provisionales y después las colapsó el cleanup.
                 reason = _TAG
 
         rows.append(
