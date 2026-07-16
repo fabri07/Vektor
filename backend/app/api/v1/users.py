@@ -16,7 +16,12 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.user_repository import UserRepository
 from app.schemas.common import MessageResponse
-from app.schemas.user import CreateUserRequest, UpdateUserRequest, UserResponse
+from app.schemas.user import (
+    CreateUserRequest,
+    UpdateMeRequest,
+    UpdateUserRequest,
+    UserResponse,
+)
 from app.utils.security import hash_password
 
 router = APIRouter()
@@ -25,6 +30,26 @@ router = APIRouter()
 @router.get("/me", response_model=UserResponse, summary="Get current user profile")
 async def get_me(current_user: User = Depends(get_current_user)) -> User:
     return current_user
+
+
+# Declarado ANTES de las rutas /{user_id}: FastAPI matchea en orden de registro
+# y "me" no parsea como UUID (daría 422 en vez de llegar acá).
+@router.patch("/me", response_model=UserResponse, summary="Update own profile")
+async def update_me(
+    body: UpdateMeRequest,
+    # Perfil propio sin campos sensibles (nombre + teléfono): no requiere PIN
+    # ni rol — cualquier usuario edita lo suyo. role/email quedan fuera del schema.
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> User:
+    if body.full_name is not None:
+        current_user.full_name = body.full_name
+    # ``phone: null`` explícito borra el número; omitido no toca nada.
+    # La normalización (strip → None) ya la hizo el validator del schema.
+    if "phone" in body.model_fields_set:
+        current_user.phone = body.phone
+    repo = UserRepository(session)
+    return await repo.save(current_user)
 
 
 @router.get("", response_model=list[UserResponse], summary="List all users in tenant")

@@ -31,6 +31,14 @@ export interface AuthUserResponse {
   full_name: string;
   role_code: string;
   tenant_id: string;
+  phone: string | null;
+}
+
+/** Respuesta de /users/* (UserResponse del backend). */
+export interface UserResponse extends AuthUserResponse {
+  is_active: boolean;
+  created_at: string;
+  last_login_at: string | null;
 }
 
 export interface MeResponse {
@@ -39,6 +47,7 @@ export interface MeResponse {
   full_name: string;
   role_code: string;
   tenant_id: string;
+  phone: string | null;
   subscription: {
     plan_code: string;
     status: string;

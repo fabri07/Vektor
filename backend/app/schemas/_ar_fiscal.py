@@ -59,3 +59,16 @@ def validate_dni(value: str | None) -> str | None:
             "dni_format", "DNI inválido: se esperan 7 u 8 dígitos."
         )
     return cleaned
+
+
+def normalize_phone(value: str | None) -> str | None:
+    """Normaliza un teléfono opcional: strip; vacío → None.
+
+    Única normalización de ``phone`` en el backend (registro y PATCH /users/me
+    la comparten) — si algún día se valida formato o se quitan separadores,
+    se hace acá y aplica a todos los writers.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None

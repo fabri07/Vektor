@@ -101,6 +101,7 @@ class AuthService:
             full_name=body.full_name,
             password_hash=hash_password(body.password),
             role_code="OWNER",
+            phone=body.phone,
             is_active=is_active,
         )
         await self._user_repo.save(user)
@@ -446,6 +447,7 @@ class AuthService:
                 full_name=user.full_name,
                 role_code=user.role_code,
                 tenant_id=tenant.tenant_id,
+                phone=user.phone,
             ),
         )
 
