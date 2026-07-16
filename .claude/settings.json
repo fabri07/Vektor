@@ -9,7 +9,7 @@
   "permissions": {
     "allow": [
       "Read(backend/.env)",
-      "Read(/Users/fabriziosola/Desktop/vektor/Vektor/backend/.env)",
+      "Read(/Users/fabriziosola/dev/vektor/Vektor/backend/.env)",
       "Bash(npx @claude-flow*)",
       "Bash(npx claude-flow*)",
       "Bash(node .claude/*)",

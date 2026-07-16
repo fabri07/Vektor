@@ -51,7 +51,7 @@ Requisitos:
 Instalación:
 
 ```bash
-cd /Users/fabriziosola/Desktop/vektor/Vektor/tools/stitch-proxy
+cd /Users/fabriziosola/dev/vektor/Vektor/tools/stitch-proxy
 npm install
 cp .env.example .env
 ```
@@ -67,13 +67,13 @@ Si ya guardaste `STITCH_API_KEY` en `backend/.env`, `run.sh` la va a leer autom�
 Este método no guarda secretos en `~/.codex/config.toml` si los dejás en `.env` o en `backend/.env`.
 
 ```bash
-/Users/fabriziosola/Desktop/vektor/Vektor/tools/stitch-proxy/register-codex.sh
+/Users/fabriziosola/dev/vektor/Vektor/tools/stitch-proxy/register-codex.sh
 ```
 
 Eso ejecuta internamente:
 
 ```bash
-codex mcp add stitch -- /Users/fabriziosola/Desktop/vektor/Vektor/tools/stitch-proxy/run.sh
+codex mcp add stitch -- /Users/fabriziosola/dev/vektor/Vektor/tools/stitch-proxy/run.sh
 ```
 
 Verificación:
@@ -95,14 +95,14 @@ Formato real de Codex para un servidor `stdio`:
 
 ```toml
 [mcp_servers.stitch]
-command = "/Users/fabriziosola/Desktop/vektor/Vektor/tools/stitch-proxy/run.sh"
+command = "/Users/fabriziosola/dev/vektor/Vektor/tools/stitch-proxy/run.sh"
 ```
 
 Si preferís guardar credenciales en la config de Codex:
 
 ```toml
 [mcp_servers.stitch]
-command = "/Users/fabriziosola/Desktop/vektor/Vektor/tools/stitch-proxy/run.sh"
+command = "/Users/fabriziosola/dev/vektor/Vektor/tools/stitch-proxy/run.sh"
 
 [mcp_servers.stitch.env]
 STITCH_API_KEY = "tu_api_key"
@@ -112,7 +112,7 @@ O con OAuth:
 
 ```toml
 [mcp_servers.stitch]
-command = "/Users/fabriziosola/Desktop/vektor/Vektor/tools/stitch-proxy/run.sh"
+command = "/Users/fabriziosola/dev/vektor/Vektor/tools/stitch-proxy/run.sh"
 
 [mcp_servers.stitch.env]
 STITCH_ACCESS_TOKEN = "tu_access_token"
