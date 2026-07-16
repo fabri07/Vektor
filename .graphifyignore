@@ -16,6 +16,17 @@ node_modules/
 .venv/
 __pycache__/
 
+# bundled local runtimes / toolchains — NOT part of the codebase
+.python312/
+.pgsql16/
+.vscode/
+.superpowers/
+
+# pytest coverage HTML reports (generated)
+htmlcov/
+backend/htmlcov/
+frontend/coverage/
+
 # generated previews / scratch
 backend/backfill_preview.csv
 backend/cleanup_preview.csv
