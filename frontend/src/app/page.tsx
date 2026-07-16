@@ -16,14 +16,16 @@ import { PublicFooter } from "@/components/public/PublicFooter";
 import { DoodleHero } from "@/components/public/DoodleHero";
 
 const SOCIAL_PROOF_CARDS = [
-  { seed: 11, caption: "Kiosco en Rosario" },
-  { seed: 12, caption: "Distribuidora en CABA" },
-  { seed: 13, caption: "Negocio familiar en Córdoba" },
-  { seed: 14, caption: "Local barrial en Mendoza" },
-  { seed: 15, caption: "Mayorista en La Plata" },
-  { seed: 16, caption: "Tienda de cercanía en Salta" },
-  { seed: 17, caption: "Autoservicio en Tucumán" },
-  { seed: 18, caption: "Despensa en Mar del Plata" },
+  { src: "/screenshots/kiosco.jpg", rubro: "Kiosco" },
+  { src: "/screenshots/verduleria.jpg", rubro: "Verdulería" },
+  { src: "/screenshots/peluqueria.jpg", rubro: "Peluquería" },
+  { src: "/screenshots/gimnasio.jpg", rubro: "Gimnasio" },
+  { src: "/screenshots/taller-mecanico.jpg", rubro: "Taller mecánico" },
+  { src: "/screenshots/tienda-de-decoracion.jpg", rubro: "Tienda de decoración" },
+  {
+    src: "/screenshots/venta-de-articulos-de-limpieza.jpg",
+    rubro: "Venta de artículos de limpieza",
+  },
 ];
 
 const FEATURE_HIGHLIGHTS = [
@@ -52,22 +54,21 @@ function SocialProofStrip() {
 
   return (
     <section className="overflow-hidden border-y border-vektor-border bg-vektor-night py-8">
-      {/* TODO: Replace picsum URLs with real customer photos */}
       <div className="group flex min-w-max animate-marquee gap-5 px-6 hover:[animation-play-state:paused]">
         {cards.map((card, index) => (
           <article
-            key={`${card.seed}-${index}`}
+            key={`${card.src}-${index}`}
             className="group/card relative h-[220px] w-[300px] overflow-hidden rounded-2xl border border-vektor-border bg-vektor-ink shadow-lg"
           >
             <Image
-              src={`https://picsum.photos/seed/${card.seed}/400/300`}
-              alt={card.caption}
+              src={card.src}
+              alt={`Véktor para ${card.rubro}`}
               fill
               sizes="300px"
               className="object-cover transition-all duration-300 group-hover/card:scale-[1.03]"
             />
             <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-vektor-night via-vektor-night/70 to-transparent px-4 pb-4 pt-10">
-              <p className="text-sm font-medium text-white">{card.caption}</p>
+              <p className="text-sm font-medium text-white">{card.rubro}</p>
             </div>
           </article>
         ))}
@@ -113,15 +114,29 @@ function FeatureHighlights() {
 }
 
 const SCREENSHOTS = [
-  { src: "/screenshots/kiosco.jpg", rubro: "Kiosco" },
-  { src: "/screenshots/verduleria.jpg", rubro: "Verdulería" },
-  { src: "/screenshots/peluqueria.jpg", rubro: "Peluquería" },
-  { src: "/screenshots/gimnasio.jpg", rubro: "Gimnasio" },
-  { src: "/screenshots/taller-mecanico.jpg", rubro: "Taller mecánico" },
-  { src: "/screenshots/tienda-de-decoracion.jpg", rubro: "Tienda de decoración" },
   {
-    src: "/screenshots/venta-de-articulos-de-limpieza.jpg",
-    rubro: "Venta de artículos de limpieza",
+    src: "/screenshots/dashboard-kiosco.png",
+    caption: "Salud del negocio: score, caja, margen y stock de un vistazo.",
+  },
+  {
+    src: "/screenshots/dashboard-limpieza.png",
+    caption: "El riesgo principal y la próxima acción concreta, siempre a la vista.",
+  },
+  {
+    src: "/screenshots/productos-kiosco.png",
+    caption: "Inventario con estado de stock y valor a precio de costo.",
+  },
+  {
+    src: "/screenshots/productos-deco.png",
+    caption: "Catálogo por categoría, adaptado a tu rubro.",
+  },
+  {
+    src: "/screenshots/gastos-kiosco.png",
+    caption: "Gastos categorizados y clasificados entre operativos y mercadería.",
+  },
+  {
+    src: "/screenshots/ventas-kiosco.png",
+    caption: "Ventas del período con ticket promedio y comparativo mensual.",
   },
 ];
 
@@ -191,16 +206,16 @@ function ScreenshotCarousel() {
               <div className="overflow-hidden rounded-[20px] border border-vektor-border bg-vektor-ink shadow-lg">
                 <Image
                   src={shot.src}
-                  alt={`Véktor para ${shot.rubro}`}
-                  width={2000}
-                  height={1091}
+                  alt={shot.caption}
+                  width={2880}
+                  height={1800}
                   className="h-auto w-full"
                   sizes="(max-width: 1280px) 100vw, 1200px"
                   priority={i === 0}
                 />
               </div>
-              <figcaption className="mt-4 text-center text-xs font-semibold uppercase tracking-[0.22em] text-vektor-muted">
-                {shot.rubro}
+              <figcaption className="mt-4 text-center text-sm leading-6 text-vektor-muted">
+                {shot.caption}
               </figcaption>
             </figure>
           ))}
