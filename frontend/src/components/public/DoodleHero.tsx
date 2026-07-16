@@ -2,32 +2,12 @@
  * DoodleHero — hero de la landing en tema dark, estructura estilo adhoc:
  * título grande a la IZQUIERDA + collage de doodles blancos a la DERECHA.
  *
- * Los doodles son SVG inline (`./doodles`) generados en Figma. Se embeben inline
- * — no vía <Image> — para que el CSS pueda animar el "dibujado" del trazo
- * (`.doodle-path`) además del fade + flotar del contenedor (`.doodle-anim`).
- * Todo respeta `prefers-reduced-motion` (ver globals.css).
+ * El collage vive en `./DoodleCollage`, compartido con el panel izquierdo del
+ * login para que ambos muestren exactamente el mismo dibujo.
  */
 
 import Link from "next/link";
-import {
-  DoodleChat,
-  DoodleCrecimiento,
-  DoodleDeco,
-  DoodleKiosco,
-  DoodleLimpieza,
-  DoodlePersonaLaptop,
-} from "./doodles";
-
-// Posiciones del collage (en %). `delay` escalona la entrada (fade) del doodle;
-// `drawDelay` arranca el "dibujado" de sus trazos en sincronía con esa entrada.
-const DOODLES = [
-  { Comp: DoodlePersonaLaptop, style: "left-[4%] top-[6%] w-[44%]", delay: 0 },
-  { Comp: DoodleKiosco, style: "right-[2%] top-[0%] w-[36%]", delay: 0.12 },
-  { Comp: DoodleCrecimiento, style: "right-[6%] top-[42%] w-[32%]", delay: 0.24 },
-  { Comp: DoodleLimpieza, style: "left-[0%] top-[52%] w-[30%]", delay: 0.36 },
-  { Comp: DoodleDeco, style: "left-[34%] top-[58%] w-[32%]", delay: 0.48 },
-  { Comp: DoodleChat, style: "right-[32%] top-[8%] w-[28%]", delay: 0.6 },
-];
+import { DoodleCollage } from "./DoodleCollage";
 
 export function DoodleHero() {
   return (
@@ -66,20 +46,7 @@ export function DoodleHero() {
         </div>
 
         {/* Doodles — derecha */}
-        <div
-          aria-hidden
-          className="relative mx-auto aspect-square w-full max-w-[520px]"
-        >
-          {DOODLES.map(({ Comp, style, delay }, i) => (
-            <div
-              key={i}
-              className={`doodle-anim absolute ${style}`}
-              style={{ animationDelay: `${delay}s` }}
-            >
-              <Comp drawDelay={delay} />
-            </div>
-          ))}
-        </div>
+        <DoodleCollage className="mx-auto aspect-square w-full max-w-[520px]" />
       </div>
     </section>
   );
