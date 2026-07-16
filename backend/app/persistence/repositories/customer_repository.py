@@ -10,20 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models._sentinel import SENTINEL_FLAG_KEY
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import SaleEntry
+from app.persistence.repositories._jsonb_flags import flag_not_true_sql
 
 
 def _not_sentinel() -> ColumnElement[bool]:
     """Filtro: excluir el cliente sentinela "Local" de toda métrica de clientes.
 
-    ``coalesce(..., '')`` es clave: los clientes reales tienen ``custom_fields={}``
-    (la key ausente → ``.as_string()`` es NULL), y ``NULL <> 'true'`` es NULL —
-    sin el coalesce, el filtro los descartaría a TODOS. ``.as_string()`` es
-    cross-dialect (PG + SQLite de tests).
+    Espejo SQL compartido en ``_jsonb_flags`` (cubre flag string Y booleano
+    JSON, que la copia anterior de este filtro no reconocía).
     """
-    return (
-        func.coalesce(Customer.custom_fields[SENTINEL_FLAG_KEY].as_string(), "")
-        != "true"
-    )
+    return flag_not_true_sql(Customer.custom_fields, SENTINEL_FLAG_KEY)
 
 
 class CustomerRepository:

@@ -54,8 +54,12 @@ CÓMO REVERTIR EL CLEANUP
 Todo cambio queda trazado en decision_audit_log (decision_type='SUPPLIER_BRAND_CLEANUP',
 decision_data con before/after y el supplier_id/product_ids afectados). Para revertir:
 
-  1. Reactivar el proveedor (deja de estar soft-deleted):
-       UPDATE suppliers SET deactivated_at = NULL WHERE id = '<supplier_id>';
+  1. Reactivar el proveedor (deja de estar soft-deleted) y quitar el flag de
+     marca colapsada (si queda, el listado lo seguiría ocultando):
+       UPDATE suppliers
+         SET deactivated_at = NULL,
+             custom_fields = custom_fields - '_brand_collapsed'
+         WHERE id = '<supplier_id>';
 
   2. Restaurar la marca en los productos (el valor previo quedó en '_marca_prev'):
        UPDATE products
@@ -109,7 +113,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _db import async_engine_config  # noqa: E402
+from _db import SQL_SET_BRAND_COLLAPSED, async_engine_config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -373,7 +377,7 @@ async def _apply_tenant(
         # Soft-delete del proveedor.
         await session.execute(
             text(
-                "UPDATE suppliers SET deactivated_at = now() "
+                f"UPDATE suppliers SET deactivated_at = now(), {SQL_SET_BRAND_COLLAPSED} "
                 "WHERE id = :sid AND tenant_id = :tid"
             ),
             {"sid": sid, "tid": tid},
@@ -384,7 +388,7 @@ async def _apply_tenant(
             "supplier_id": str(sid),
             "supplier_name": name,
             "before": {"deactivated_at": None},
-            "after": {"deactivated_at": "now()"},
+            "after": {"deactivated_at": "now()", "flags": {"_brand_collapsed": "true"}},
             "product_ids": product_ids,
             "reassigned_to_sentinel": str(sentinel_id) if sentinel_id else None,
         }
@@ -507,7 +511,7 @@ async def _apply_merch_source(
         # Soft-delete de la marca-proveedor.
         await session.execute(
             text(
-                "UPDATE suppliers SET deactivated_at = now() "
+                f"UPDATE suppliers SET deactivated_at = now(), {SQL_SET_BRAND_COLLAPSED} "
                 "WHERE id = :sid AND tenant_id = :tid"
             ),
             {"sid": sid, "tid": tid},
@@ -521,7 +525,7 @@ async def _apply_merch_source(
             "product_ids": product_ids,
             "movements_attributed": movements_attributed,
             "before": {"deactivated_at": None},
-            "after": {"deactivated_at": "now()"},
+            "after": {"deactivated_at": "now()", "flags": {"_brand_collapsed": "true"}},
         }
         await session.execute(
             text(

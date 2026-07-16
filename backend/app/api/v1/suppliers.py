@@ -1,6 +1,7 @@
 """Supplier (proveedores) CRUD endpoints."""
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import (
@@ -37,8 +38,10 @@ from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.supplier import (
+    BRAND_COLLAPSED_FLAG_KEY,
     SENTINEL_FLAG_KEY,
     Supplier,
+    is_flag_true,
     is_sentinel_value,
 )
 from app.persistence.models.tenant import Tenant
@@ -63,6 +66,21 @@ from app.schemas.supplier import (
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _reject_brand_collapsed_flag(custom_fields: dict[str, Any] | None) -> None:
+    """400 si el cliente intenta setear el flag interno ``_brand_collapsed``.
+
+    El flag oculta la fila del listado (aun con ``include_inactive``) y bloquea
+    la reactivación con 409: si entrara por datos de usuario, una baja posterior
+    dejaría un proveedor real irrecuperable desde la app. Solo lo escriben los
+    scripts de colapso/backfill.
+    """
+    if is_flag_true((custom_fields or {}).get(BRAND_COLLAPSED_FLAG_KEY)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="custom_fields contiene un flag interno reservado.",
+        )
 
 
 def _supplier_snapshot(supplier: Supplier) -> dict[str, object]:
@@ -148,6 +166,9 @@ async def create_supplier(
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = SupplierRepository(session)
+    # El flag interno de marca colapsada oculta la fila y bloquea reactivar:
+    # jamás debe entrar por datos de cliente (solo lo escriben los scripts).
+    _reject_brand_collapsed_flag(body.custom_fields)
     supplier = Supplier(tenant_id=tenant.tenant_id, **body.model_dump())
     saved = await repo.save(supplier)
     _audit_data_change(
@@ -451,6 +472,8 @@ async def update_supplier(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se puede convertir un proveedor en sentinela.",
         )
+    if "custom_fields" in updates:
+        _reject_brand_collapsed_flag(updates["custom_fields"])
     for field, value in updates.items():
         setattr(supplier, field, value)
     saved = await repo.save(supplier)
@@ -529,6 +552,11 @@ async def reactivate_supplier(
     supplier = await repo.get_by_id(supplier_id, tenant.tenant_id, include_deactivated=True)
     if not supplier:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found.")
+    # Marca colapsada por error de clasificación: no es una baja de negocio y no
+    # se reactiva desde la API (la vía sancionada es el script de revert, que
+    # además restaura marcas/gastos y limpia el flag).
+    if supplier.is_brand_collapsed and supplier.deactivated_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="BRAND_COLLAPSED")
     before = _supplier_snapshot(supplier)
     try:
         saved = await repo.reactivate(supplier)

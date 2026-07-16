@@ -427,6 +427,9 @@ async def _apply_revert(
         #    proveedor ya activo (puede haber sido validado a mano).
         if plan["reactivate"]:
             scf = _as_dict(sup["custom_fields"])
+            # Quitar el flag de marca colapsada: si quedara, el proveedor
+            # restaurado seguiría oculto en el listado y bloqueado de reactivar.
+            scf.pop("_brand_collapsed", None)
             scf[_PROVISIONAL_FLAG] = True
             await session.execute(
                 text(
@@ -435,6 +438,19 @@ async def _apply_revert(
                     "WHERE id = :sid AND tenant_id = :tid"
                 ),
                 {"cf": json.dumps(scf), "sid": sid, "tid": tid},
+            )
+        else:
+            # Aun sin reactivar (ya estaba activo), limpiar el flag residual de
+            # marca colapsada: si quedara puesto, una baja legítima FUTURA de ese
+            # proveedor lo escondería del listado y bloquearía su reactivación.
+            await session.execute(
+                text(
+                    "UPDATE suppliers "
+                    "SET custom_fields = custom_fields - '_brand_collapsed' "
+                    "WHERE id = :sid AND tenant_id = :tid "
+                    "AND custom_fields->>'_brand_collapsed' IS NOT NULL"
+                ),
+                {"sid": sid, "tid": tid},
             )
 
         # 2. Devolver los gastos a su proveedor original (ancla _supplier_prev).

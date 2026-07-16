@@ -20,7 +20,7 @@ from app.persistence.models._sentinel import (
 # Literal del flag provisional: una sola definición en el modelo ORM (evita
 # re-hardcodear "_provisional_from_brand" acá). ``_sentinel`` es un módulo puro
 # (sin deps ORM), así que importarlo no arma ciclo.
-from app.persistence.models.supplier import PROVISIONAL_FLAG_KEY
+from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY, PROVISIONAL_FLAG_KEY
 from app.schemas._ar_fiscal import validate_cuit as _validate_cuil
 
 
@@ -66,6 +66,16 @@ class SupplierResponse(BaseModel):
         ``_provisional_from_brand`` que escribe el script de reversión.
         """
         return is_flag_true((self.custom_fields or {}).get(PROVISIONAL_FLAG_KEY))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_brand_collapsed(self) -> bool:
+        """¿Es una marca confundida con proveedor y colapsada (baja por error)?
+
+        No se lista ni se reactiva desde la UI; queda expuesto para
+        debug/soporte en ``GET /suppliers/{id}``.
+        """
+        return is_flag_true((self.custom_fields or {}).get(BRAND_COLLAPSED_FLAG_KEY))
 
 
 class CreateSupplierRequest(BaseModel):

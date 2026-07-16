@@ -36,6 +36,11 @@ export interface SupplierResponse {
    * reparación. El usuario debe validarlo o reasignarlo. Computado en el backend.
    */
   is_provisional: boolean;
+  /**
+   * True si era una marca confundida con proveedor y colapsada por error.
+   * El backend nunca lo lista ni lo deja reactivar (409 BRAND_COLLAPSED).
+   */
+  is_brand_collapsed?: boolean;
   created_at: string;
 }
 

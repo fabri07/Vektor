@@ -156,6 +156,119 @@ class TestSuppliersCRUD:
 
 
 @pytest.mark.asyncio
+class TestBrandCollapsedSuppliers:
+    """Marcas confundidas con proveedores y colapsadas: no se listan ni se reactivan.
+
+    El flag ``_brand_collapsed`` NO es seteable vía API (solo lo escriben los
+    scripts), así que estos tests lo plantan directo en la DB, como haría el
+    script de colapso/backfill.
+    """
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def _flag_in_db(self, db_session: Any, sid: str) -> None:
+        from sqlalchemy import update  # noqa: PLC0415
+
+        from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+        await db_session.execute(
+            update(Supplier)
+            .where(Supplier.id == uuid.UUID(sid))
+            .values(custom_fields={"_brand_collapsed": "true"})
+        )
+        await db_session.commit()
+
+    async def _create_collapsed(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any
+    ) -> str:
+        created = await client.post(
+            "/api/v1/suppliers", json={"name": "Marca Fantasma"}, headers=auth_headers
+        )
+        assert created.status_code == 201
+        sid: str = created.json()["id"]
+        deleted = await client.delete(f"/api/v1/suppliers/{sid}", headers=auth_headers)
+        assert deleted.status_code == 200
+        await self._flag_in_db(db_session, sid)
+        return sid
+
+    async def test_flag_not_settable_via_create(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/suppliers",
+            json={"name": "Marca X", "custom_fields": {"_brand_collapsed": "true"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    async def test_flag_not_settable_via_patch(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        created = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov Sano"}, headers=auth_headers
+        )
+        sid = created.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/suppliers/{sid}",
+            json={"custom_fields": {"_brand_collapsed": True}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    async def test_is_brand_collapsed_computed_field(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any
+    ) -> None:
+        created = await client.post(
+            "/api/v1/suppliers", json={"name": "Marca X"}, headers=auth_headers
+        )
+        assert created.status_code == 201
+        assert created.json()["is_brand_collapsed"] is False
+        sid = created.json()["id"]
+        await self._flag_in_db(db_session, sid)
+        detail = await client.get(f"/api/v1/suppliers/{sid}", headers=auth_headers)
+        assert detail.json()["is_brand_collapsed"] is True
+
+    async def test_collapsed_hidden_even_with_include_inactive(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any
+    ) -> None:
+        sid = await self._create_collapsed(client, auth_headers, db_session)
+        listed = await client.get(
+            "/api/v1/suppliers?include_inactive=true", headers=auth_headers
+        )
+        assert sid not in {s["id"] for s in listed.json()}
+        # El detalle directo sigue abrible (debug/soporte).
+        detail = await client.get(f"/api/v1/suppliers/{sid}", headers=auth_headers)
+        assert detail.status_code == 200
+        assert detail.json()["is_brand_collapsed"] is True
+
+    async def test_reactivate_collapsed_returns_409(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any
+    ) -> None:
+        sid = await self._create_collapsed(client, auth_headers, db_session)
+        resp = await client.post(
+            f"/api/v1/suppliers/{sid}/reactivate", headers=auth_headers
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "BRAND_COLLAPSED"
+
+    async def test_reactivate_normal_deactivated_still_works(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        created = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov Baja Real"}, headers=auth_headers
+        )
+        sid = created.json()["id"]
+        await client.delete(f"/api/v1/suppliers/{sid}", headers=auth_headers)
+        resp = await client.post(
+            f"/api/v1/suppliers/{sid}/reactivate", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        assert resp.json()["is_active"] is True
+
+
+@pytest.mark.asyncio
 class TestSuppliersIdempotency:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
