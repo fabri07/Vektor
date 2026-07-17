@@ -990,6 +990,11 @@ async def confirm_file(
         warnings.append(
             f"{counts['otros']} fila(s) quedaron en «Otros» para que las revises y clasifiques."
         )
+    if counts.get("productos_ambiguos"):
+        warnings.append(
+            f"{counts['productos_ambiguos']} producto(s) con nombre duplicado quedaron "
+            "sin importar. Revisá y unificá esos productos en la sección Otros."
+        )
 
     # Aviso temporal (human-in-the-loop): si las ventas recién importadas dejan el stock
     # reconstruible en negativo por FECHAS (compras posteriores a las ventas, o compra sin
