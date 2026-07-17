@@ -784,25 +784,91 @@ def _resolve_product_identity(
             )
         return out
 
+    # FIX B (review de T2): ``match_candidates`` se armaba desde ``order``
+    # (la unión de TODOS los ids vistos en CUALQUIER tier) en vez del
+    # conjunto final post-intersección/narrowing (``candidate_set``) — un id
+    # que un tier posterior descartó por narrowing seguía apareciendo en
+    # ``match_candidates``, confundiendo la revisión manual en /otros. Se
+    # filtra ``order`` (preserva un orden estable) contra el ``candidate_set``
+    # final: exactamente los ids que causaron el ambiguous/conflict, ni más
+    # ni menos. ``matched_by`` de cada candidato sigue reflejando TODOS los
+    # tiers que lo matchearon (no solo los del conjunto final).
     if conflict:
-        return ProductResolution("conflict", None, _candidates(order))
+        final_ids = [pid for pid in order if pid in candidate_set]
+        return ProductResolution("conflict", None, _candidates(final_ids))
     if len(candidate_set) >= 2:
-        return ProductResolution("ambiguous", None, _candidates(order))
+        final_ids = [pid for pid in order if pid in candidate_set]
+        return ProductResolution("ambiguous", None, _candidates(final_ids))
     return ProductResolution("resolved", next(iter(candidate_set)), [])
 
 
-def _product_identity_cache_key(
+def _product_identity_lookup_keys(
     sku_n: str | None, name_n: str, brand_n: str | None
-) -> str:
-    """Clave de la caché intra-corrida (F2-T2): por IDENTIDAD de la fila, no
-    solo por nombre. Dos filas con el mismo SKU, o el mismo (nombre, marca),
-    resuelven al MISMO producto dentro de la misma corrida (con
-    ``autoflush=False`` el SELECT no ve lo pendiente sin flush — patrón F1).
-    Dos filas con el mismo nombre pero DISTINTA marca crean 2 productos.
+) -> list[str]:
+    """Claves de BÚSQUEDA en la caché intra-corrida (F2-T2, fix de review),
+    en el MISMO orden de prioridad que el motor (``_resolve_product_identity``):
+    sku → nombre+marca → nombre. Se prueban en orden, primer hit gana.
+
+    Replica la restricción del motor: si la fila TIENE marca, el tier
+    name-only NUNCA se consulta (con marca presente, el motor resuelve por
+    nombre+marca, jamás por nombre solo) — así dos filas del mismo archivo
+    con el mismo nombre pero DISTINTA marca no se fusionan vía la clave
+    name-only que dejó registrada un producto de otra marca.
     """
+    keys: list[str] = []
     if sku_n:
-        return f"sku:{sku_n}"
-    return f"nb:{name_n}|{brand_n or ''}"
+        keys.append(f"sku:{sku_n}")
+    if brand_n:
+        keys.append(f"nb:{name_n}|{brand_n}")
+    else:
+        keys.append(f"name:{name_n}")
+    return keys
+
+
+def _product_identity_register_keys(
+    sku_n: str | None, name_n: str, brand_n: str | None
+) -> list[str]:
+    """Claves bajo las que se REGISTRA en la caché un producto ya
+    resuelto/creado (F2-T2, fix de review): todas las aplicables, no una
+    sola. Bug corregido: la caché de una sola clave (``sku:`` si había sku,
+    si no ``nb:``) duplicaba productos cuando 2 filas del MISMO archivo son
+    el MISMO producto lógico pero difieren en si traen SKU — fila1 "Fideos"
+    con sku registraba solo ``sku:x1``; fila2 "Fideos" sin sku buscaba
+    ``nb:fideos|`` (miss) y creaba un segundo producto. Registrando bajo
+    TODAS las claves (sku si hay, nombre+marca, y nombre solo) una fila
+    posterior sin sku encuentra el producto vía ``name:fideos``.
+    """
+    keys: list[str] = []
+    if sku_n:
+        keys.append(f"sku:{sku_n}")
+    keys.append(f"nb:{name_n}|{brand_n or ''}")
+    keys.append(f"name:{name_n}")
+    return keys
+
+
+def _lookup_product_identity_cache(
+    cache: dict[str, Product], sku_n: str | None, name_n: str, brand_n: str | None
+) -> Product | None:
+    """Busca en la caché intra-corrida por las claves de la fila, en orden
+    de prioridad. Primer hit gana."""
+    for key in _product_identity_lookup_keys(sku_n, name_n, brand_n):
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _register_product_identity_cache(
+    cache: dict[str, Product],
+    product: Product,
+    sku_n: str | None,
+    name_n: str,
+    brand_n: str | None,
+) -> None:
+    """Registra el producto resuelto/creado bajo todas sus claves de
+    identidad aplicables."""
+    for key in _product_identity_register_keys(sku_n, name_n, brand_n):
+        cache[key] = product
 
 
 def _resolve_product(
@@ -2228,8 +2294,9 @@ async def _insert_confirmed_data_impl(
                 _sku_n = normalize_sku(sku)
                 _name_n = normalize_product_name(name)
                 _brand_n = normalize_brand(store_name)
-                _identity_key = _product_identity_cache_key(_sku_n, _name_n, _brand_n)
-                existing = products_by_identity_key.get(_identity_key)
+                existing = _lookup_product_identity_cache(
+                    products_by_identity_key, _sku_n, _name_n, _brand_n
+                )
                 if existing is None:
                     _resolution = _resolve_product_identity(
                         name, sku, store_name, indexes=_identity_indexes
@@ -2307,7 +2374,9 @@ async def _insert_confirmed_data_impl(
                         existing.sku = sku
                     if prod_cat and not existing.category:
                         existing.category = prod_cat
-                    products_by_identity_key[_identity_key] = existing
+                    _register_product_identity_cache(
+                        products_by_identity_key, existing, _sku_n, _name_n, _brand_n
+                    )
                     if return_details:
                         product_details.append(
                             {
@@ -2351,7 +2420,9 @@ async def _insert_confirmed_data_impl(
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
                     session.add(new_product)
-                    products_by_identity_key[_identity_key] = new_product
+                    _register_product_identity_cache(
+                        products_by_identity_key, new_product, _sku_n, _name_n, _brand_n
+                    )
                     # FASE 3 + A2/A5: audit del ingreso inicial de stock + balance +,
                     # si trae stock con costo, su COGS (stock inicial = compra real).
                     await _apply_catalog_stock(
@@ -2880,8 +2951,9 @@ async def _insert_multisheet_data(
         _sku_n = normalize_sku(sku)
         _name_n = normalize_product_name(name)
         _brand_n = normalize_brand(store_name)
-        _identity_key = _product_identity_cache_key(_sku_n, _name_n, _brand_n)
-        existing = products_by_identity_key.get(_identity_key)
+        existing = _lookup_product_identity_cache(
+            products_by_identity_key, _sku_n, _name_n, _brand_n
+        )
         if existing is None:
             _resolution = _resolve_product_identity(
                 name, sku, store_name, indexes=_identity_indexes
@@ -2950,7 +3022,9 @@ async def _insert_multisheet_data(
                 existing.sku = sku
             if cat and not existing.category:
                 existing.category = cat
-            products_by_identity_key[_identity_key] = existing
+            _register_product_identity_cache(
+                products_by_identity_key, existing, _sku_n, _name_n, _brand_n
+            )
         else:
             cf = _custom_fields(row, cf_cols)
             if cat_label:
@@ -2976,7 +3050,9 @@ async def _insert_multisheet_data(
                 source_row_ref=row_ref,  # Mejora D
             )
             session.add(new_product)
-            products_by_identity_key[_identity_key] = new_product
+            _register_product_identity_cache(
+                products_by_identity_key, new_product, _sku_n, _name_n, _brand_n
+            )
             # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
             # = compra real, si trae costo).
             await _apply_catalog_stock(

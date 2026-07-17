@@ -451,3 +451,258 @@ async def test_match_candidates_persisted_shape(
     assert by_id[str(product_a.id)]["barcode"] is None
     assert by_id[str(product_b.id)]["name"] == "Coca"
     assert by_id[str(product_b.id)]["sku"] is None
+
+
+# ── FIX A (Crítico, review de T2) ───────────────────────────────────────────
+# La caché intra-corrida de UNA sola clave (``sku:{sku_n}`` si hay sku, si no
+# ``nb:{name_n}|{brand_n}``) duplicaba productos cuando 2 filas del MISMO
+# archivo son el MISMO producto lógico pero difieren en si traen SKU: fila1
+# "Fideos" con sku="X1" registra ``sku:x1``; fila2 "Fideos" sin sku busca
+# ``nb:fideos|`` → miss → crea un SEGUNDO producto. La caché ahora es
+# multi-clave: registra el producto resuelto/creado bajo TODAS sus claves
+# aplicables y busca por las claves de la fila en el mismo orden de
+# prioridad del motor (sku → nombre+marca → nombre), cayendo a name-only
+# SOLO cuando la fila no trae marca (misma semántica que el motor).
+
+
+@pytest.mark.asyncio
+async def test_single_sheet_sku_then_no_sku_same_run_creates_one_product(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """fila1 ``sku="X1"`` + fila2 SIN sku, mismo nombre, sin marca, sin
+    producto preexistente (camino single-sheet in-place) → 1 solo producto."""
+    summary = _stock_summary(
+        [
+            {
+                "producto": "Fideos",
+                "sku": "X1",
+                "precio": "1000",
+                "costo": "600",
+                "stock": "5",
+            },
+            {"producto": "Fideos", "precio": "1000", "costo": "600", "stock": "3"},
+        ]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"productos": True}
+    )
+
+    assert counts["productos"] == 2  # ambas filas procesadas (create + update)
+    assert counts["otros"] == 0
+    assert counts["productos_ambiguos"] == 0
+
+    products = await _all_products(db_session, sample_tenant.tenant_id)
+    assert len(products) == 1  # NO se duplicó
+    assert products[0].sku == "X1"
+    assert products[0].stock_units == 3  # la 2da fila (sin sku) actualizó el mismo
+
+
+@pytest.mark.asyncio
+async def test_single_sheet_no_sku_then_sku_same_run_creates_one_product(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Caso inverso: fila1 SIN sku + fila2 CON sku, mismo nombre → 1 producto.
+
+    La detección de columnas de la hoja usa las keys de la PRIMERA fila
+    (``headers = list(rows[0].keys())`` — limitación preexistente, no parte
+    de este fix): fila1 incluye la columna "sku" con valor vacío para que se
+    detecte igual, replicando una planilla real (columna presente, celda en
+    blanco para ese producto puntual).
+    """
+    summary = _stock_summary(
+        [
+            {
+                "producto": "Fideos",
+                "sku": "",
+                "precio": "1000",
+                "costo": "600",
+                "stock": "5",
+            },
+            {
+                "producto": "Fideos",
+                "sku": "X1",
+                "precio": "1000",
+                "costo": "600",
+                "stock": "3",
+            },
+        ]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"productos": True}
+    )
+
+    assert counts["productos"] == 2
+    assert counts["otros"] == 0
+    assert counts["productos_ambiguos"] == 0
+
+    products = await _all_products(db_session, sample_tenant.tenant_id)
+    assert len(products) == 1
+    assert products[0].sku == "X1"
+    assert products[0].stock_units == 3
+
+
+@pytest.mark.asyncio
+async def test_multisheet_sku_then_no_sku_same_run_creates_one_product(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Mismo bug, camino multisheet (``_add_product``) — el otro call site
+    que consume la caché de identidad."""
+    summary = _multisheet_product_summary(
+        [
+            {
+                "producto": "Fideos",
+                "sku": "X1",
+                "precio": "1000",
+                "costo": "600",
+                "stock": "5",
+            },
+            {"producto": "Fideos", "precio": "1000", "costo": "600", "stock": "3"},
+        ]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"productos": True},
+        context_confirmed={"sheet:Productos": True},
+    )
+
+    assert counts["productos"] == 2
+    assert counts["otros"] == 0
+    assert counts["productos_ambiguos"] == 0
+
+    products = await _all_products(db_session, sample_tenant.tenant_id)
+    assert len(products) == 1
+    assert products[0].sku == "X1"
+    assert products[0].stock_units == 3
+
+
+@pytest.mark.asyncio
+async def test_single_sheet_two_brands_same_name_same_run_creates_two_products(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Regresión (el OJO del fix): 2 filas del MISMO archivo, mismo nombre
+    pero DISTINTA marca, sin producto preexistente → siguen creando 2
+    productos. La caché name-only NO debe fusionarlas: el lookup de una fila
+    CON marca nunca cae al tier name-only (misma restricción que el motor)."""
+    summary = _stock_summary(
+        [
+            {
+                "producto": "Agua",
+                "tienda": "MarcaX",
+                "precio": "1000",
+                "costo": "600",
+                "stock": "5",
+            },
+            {
+                "producto": "Agua",
+                "tienda": "MarcaY",
+                "precio": "1200",
+                "costo": "700",
+                "stock": "8",
+            },
+        ]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"productos": True}
+    )
+
+    assert counts["productos"] == 2
+    assert counts["otros"] == 0
+    assert counts["productos_ambiguos"] == 0
+
+    products = await _all_products(db_session, sample_tenant.tenant_id)
+    assert len(products) == 2  # NO se fusionaron
+    assert sorted(p.stock_units for p in products) == [5, 8]
+
+
+# ── FIX B (Important, review de T2) ─────────────────────────────────────────
+# ``match_candidates`` se armaba desde ``order`` (la unión de TODOS los ids
+# vistos en cualquier tier) en vez del conjunto final post-intersección
+# (``candidate_set``) — un id que un tier posterior descartó por narrowing
+# seguía apareciendo en ``match_candidates``, confundiendo la revisión manual
+# en /otros.
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_candidates_exclude_id_narrowed_out_by_other_tier(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """3 productos comparten el SKU "S1" (A, B, C) — el tier sku por sí solo
+    es ambiguo con 3 candidatos — pero el tier nombre+marca de la fila
+    (marca "MarcaX") solo matchea a A y B (C tiene otra marca): la
+    intersección deja el ``candidate_set`` final en {A, B}. C fue descartado
+    por narrowing y NO debe aparecer en ``match_candidates``."""
+    prod_a = await _create_product(
+        db_session, sample_tenant.tenant_id, "Fideos", sku="S1", marca="MarcaX"
+    )
+    prod_b = await _create_product(
+        db_session, sample_tenant.tenant_id, "Fideos", sku="S1", marca="MarcaX"
+    )
+    prod_c = await _create_product(
+        db_session, sample_tenant.tenant_id, "Fideos", sku="S1", marca="OtraMarca"
+    )
+
+    indexes = await importer._load_product_identity_indexes(
+        db_session, sample_tenant.tenant_id
+    )
+    resolution = importer._resolve_product_identity(
+        "Fideos", "S1", "MarcaX", indexes=indexes
+    )
+
+    assert resolution.status == "ambiguous"
+    assert resolution.product_id is None
+    candidate_ids = {c["id"] for c in resolution.candidates}
+    assert candidate_ids == {str(prod_a.id), str(prod_b.id)}
+    assert str(prod_c.id) not in candidate_ids  # descartado por narrowing
+
+
+@pytest.mark.asyncio
+async def test_conflict_candidates_are_exactly_the_conflicting_set(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Test de regresión/blindaje para status=conflict tras el refactor de
+    FIX B: con 2 tiers activos (barcode ambiguo [A, B] + sku disjunto [C],
+    sin tier de nombre) el conjunto de ``match_candidates`` debe seguir
+    siendo EXACTAMENTE {A, B, C} — ninguno de por medio se pierde."""
+    prod_a = Product(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        name="Gaseosa",
+        barcode="7790001",
+        sale_price_ars=Decimal("1000"),
+        unit_cost_ars=Decimal("600"),
+        stock_units=5,
+    )
+    prod_b = Product(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        name="Gaseosa Light",
+        barcode="7790001",
+        sale_price_ars=Decimal("1000"),
+        unit_cost_ars=Decimal("600"),
+        stock_units=5,
+    )
+    prod_c = Product(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        name="Otra Gaseosa",
+        sku="S9",
+        sale_price_ars=Decimal("1000"),
+        unit_cost_ars=Decimal("600"),
+        stock_units=5,
+    )
+    db_session.add_all([prod_a, prod_b, prod_c])
+    await db_session.commit()
+
+    indexes = await importer._load_product_identity_indexes(
+        db_session, sample_tenant.tenant_id
+    )
+    resolution = importer._resolve_product_identity(
+        None, "S9", None, indexes=indexes, barcode="7790001"
+    )
+
+    assert resolution.status == "conflict"
+    assert resolution.product_id is None
+    candidate_ids = {c["id"] for c in resolution.candidates}
+    assert candidate_ids == {str(prod_a.id), str(prod_b.id), str(prod_c.id)}
