@@ -987,13 +987,11 @@ async def confirm_file(
             "incompleto. Completá precio de venta y datos en Productos."
         )
     if counts.get("otros"):
+        # F1-fix: cubre también los productos con nombre ambiguo (F1) — ya no
+        # generan un warning propio, "otros" los cuenta porque la fila ambigua
+        # se persiste ahí (evita doble conteo/mensaje solapado).
         warnings.append(
             f"{counts['otros']} fila(s) quedaron en «Otros» para que las revises y clasifiques."
-        )
-    if counts.get("productos_ambiguos"):
-        warnings.append(
-            f"{counts['productos_ambiguos']} producto(s) con nombre duplicado quedaron "
-            "sin importar. Revisá y unificá esos productos en la sección Otros."
         )
 
     # Aviso temporal (human-in-the-loop): si las ventas recién importadas dejan el stock
