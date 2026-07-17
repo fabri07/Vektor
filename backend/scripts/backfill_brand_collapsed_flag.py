@@ -7,8 +7,10 @@ de "proveedor real dado de baja" por ``custom_fields['_brand_collapsed']``, así
 las bajas históricas del cleanup necesitan el flag. La fuente de verdad es la traza
 de la corrida original en ``decision_audit_log``:
 
-    decision_type IN ('SUPPLIER_BRAND_CLEANUP', 'SUPPLIER_MERCH_SOURCE_COLLAPSE')
-    AND triggered_by = 'script:deactivate_brand_suppliers'
+    decision_type IN ('SUPPLIER_BRAND_CLEANUP', 'SUPPLIER_MERCH_SOURCE_COLLAPSE',
+                      'SUPPLIER_PROVISIONAL_COLLAPSE')
+    AND triggered_by IN ('script:deactivate_brand_suppliers',
+                         'script:collapse_provisional_brand_suppliers')
     → decision_data->>'supplier_id'
 
 RESULTADOS (contados y reportados en --out):
@@ -16,11 +18,16 @@ RESULTADOS (contados y reportados en --out):
                            traza), sin flag → se taggea (solo con --apply).
     SKIP_ACTIVE          → hoy está activo (fue restaurado a propósito) → no tocar.
     SKIP_ALREADY_FLAGGED → ya tiene el flag (idempotencia) → no tocar.
-    SKIP_PROVISIONAL     → tiene '_provisional_from_brand' (guarda defensiva) → no tocar.
     SKIP_REDEACTIVATED   → deactivated_at NO coincide con la traza del cleanup: fue
                            restaurado y vuelto a dar de baja por un humano (baja de
                            negocio real) → NO taggear; revisar a mano si hace falta.
     NOT_FOUND            → el supplier de la traza ya no existe → informativo.
+
+NOTA: tener '_provisional_from_brand' NO exime del tag — la población real de Neon
+son marcas que NACIERON provisionales (las creó el script de revert) y DESPUÉS las
+colapsó el cleanup: quedaron con ambos flags. Lo que decide es el match temporal
+de deactivated_at contra la traza (un provisional restaurado y activo cae en
+SKIP_ACTIVE; uno re-dado-de-baja por un humano, en SKIP_REDEACTIVATED).
 
 Usage:
     # Dry-run (default) de un tenant puntual:
@@ -68,14 +75,23 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
 from app.persistence.models._sentinel import is_flag_true  # noqa: E402
-from app.persistence.models.supplier import (  # noqa: E402
-    BRAND_COLLAPSED_FLAG_KEY,
-    PROVISIONAL_FLAG_KEY,
-)
+from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY  # noqa: E402
 
 _DECISION_TYPE = "SUPPLIER_BRAND_COLLAPSED_FLAG_BACKFILL"
-_SOURCE_DECISION_TYPES = ("SUPPLIER_BRAND_CLEANUP", "SUPPLIER_MERCH_SOURCE_COLLAPSE")
-_SOURCE_TRIGGERED_BY = "script:deactivate_brand_suppliers"
+# Fuentes de traza de colapso de marcas. Incluye el colapso one-off de
+# marcas-provisionales de don pedro (2026-07-09, 49 filas,
+# 'script:collapse_provisional_brand_suppliers' — el script no vive en el repo,
+# pero su auditoría sí): esa corrida es la baja VIGENTE de esas 49, la traza del
+# cleanup de junio quedó obsoleta cuando el revert las restauró en el medio.
+_SOURCE_DECISION_TYPES = (
+    "SUPPLIER_BRAND_CLEANUP",
+    "SUPPLIER_MERCH_SOURCE_COLLAPSE",
+    "SUPPLIER_PROVISIONAL_COLLAPSE",
+)
+_SOURCE_TRIGGERED_BY = (
+    "script:deactivate_brand_suppliers",
+    "script:collapse_provisional_brand_suppliers",
+)
 
 # Tolerancia entre deactivated_at y el created_at de la traza para atribuir la
 # baja al cleanup: dentro de la misma transacción Postgres now() es constante,
@@ -85,7 +101,6 @@ _TRACE_MATCH_TOLERANCE_S = 60
 _TAG = "TAG"
 _SKIP_ACTIVE = "SKIP_ACTIVE"
 _SKIP_ALREADY_FLAGGED = "SKIP_ALREADY_FLAGGED"
-_SKIP_PROVISIONAL = "SKIP_PROVISIONAL"
 _SKIP_REDEACTIVATED = "SKIP_REDEACTIVATED"
 _NOT_FOUND = "NOT_FOUND"
 
@@ -100,11 +115,15 @@ async def _plan_tenant(session: AsyncSession, tid: uuid.UUID) -> list[dict[str, 
                 "FROM decision_audit_log "
                 "WHERE tenant_id = :tid "
                 "AND decision_type = ANY(:dts) "
-                "AND triggered_by = :tb "
+                "AND triggered_by = ANY(:tbs) "
                 "AND decision_data->>'supplier_id' IS NOT NULL "
                 "GROUP BY 1, 2"
             ),
-            {"tid": tid, "dts": list(_SOURCE_DECISION_TYPES), "tb": _SOURCE_TRIGGERED_BY},
+            {
+                "tid": tid,
+                "dts": list(_SOURCE_DECISION_TYPES),
+                "tbs": list(_SOURCE_TRIGGERED_BY),
+            },
         )
     ).mappings().all()
 
@@ -125,6 +144,8 @@ async def _plan_tenant(session: AsyncSession, tid: uuid.UUID) -> list[dict[str, 
             )
         ).mappings().first()
 
+        min_delta = None
+        deactivated_at = None
         if sup is None:
             reason, name = _NOT_FOUND, None
         else:
@@ -138,21 +159,26 @@ async def _plan_tenant(session: AsyncSession, tid: uuid.UUID) -> list[dict[str, 
             # fue constante, así que deactivated_at == created_at de la traza.
             # Si difiere, el supplier fue restaurado y vuelto a dar de baja por
             # un humano — baja de negocio real, NO se taggea.
-            matches_trace = deactivated_at is not None and any(
-                abs((deactivated_at - t["traced_at"]).total_seconds())
-                <= _TRACE_MATCH_TOLERANCE_S
-                for t in traces
+            deltas = (
+                [
+                    abs((deactivated_at - t["traced_at"]).total_seconds())
+                    for t in traces
+                ]
+                if deactivated_at is not None
+                else []
             )
+            min_delta = min(deltas) if deltas else None
+            matches_trace = min_delta is not None and min_delta <= _TRACE_MATCH_TOLERANCE_S
             if deactivated_at is None:
                 # Restaurado/reactivado a propósito (revert o humano): no re-ocultar.
                 reason = _SKIP_ACTIVE
             elif is_flag_true(cf.get(BRAND_COLLAPSED_FLAG_KEY)):
                 reason = _SKIP_ALREADY_FLAGGED
-            elif is_flag_true(cf.get(PROVISIONAL_FLAG_KEY)):
-                reason = _SKIP_PROVISIONAL
             elif not matches_trace:
                 reason = _SKIP_REDEACTIVATED
             else:
+                # Ojo: '_provisional_from_brand' NO exime — las 49 de don pedro
+                # nacieron provisionales y después las colapsó el cleanup.
                 reason = _TAG
 
         rows.append(
@@ -162,6 +188,10 @@ async def _plan_tenant(session: AsyncSession, tid: uuid.UUID) -> list[dict[str, 
                 "supplier_name": name,
                 "source_decision_type": ",".join(sorted({t["decision_type"] for t in traces})),
                 "reason": reason,
+                # Diagnóstico del match temporal (por qué TAG o SKIP_REDEACTIVATED).
+                "deactivated_at": str(deactivated_at) if deactivated_at else None,
+                "traced_at": ",".join(str(t["traced_at"]) for t in traces),
+                "delta_seconds": round(min_delta) if min_delta is not None else None,
             }
         )
     return rows
@@ -210,6 +240,15 @@ def _print_summary(tid: uuid.UUID, plan: list[dict[str, Any]]) -> None:
 
     by_reason = Counter(r["reason"] for r in plan)
     print(f"tenant {tid}: {len(plan)} supplier(s) en la traza del cleanup — {dict(by_reason)}")
+    # Muestra de diagnóstico del match temporal (primeros 3 SKIP_REDEACTIVATED):
+    # si el delta es ~horas constantes → problema de timezone; si es días → hubo
+    # de verdad otra baja posterior a la traza.
+    samples = [r for r in plan if r["reason"] == _SKIP_REDEACTIVATED][:3]
+    for r in samples:
+        print(
+            f"    · {r['supplier_name']!r}: deactivated_at={r['deactivated_at']} "
+            f"traza={r['traced_at']} delta={r['delta_seconds']}s"
+        )
 
 
 def _write_report(path: str, rows: list[dict[str, Any]]) -> None:
@@ -223,6 +262,9 @@ def _write_report(path: str, rows: list[dict[str, Any]]) -> None:
                     "supplier_name",
                     "source_decision_type",
                     "reason",
+                    "deactivated_at",
+                    "traced_at",
+                    "delta_seconds",
                 ],
             )
             writer.writeheader()
