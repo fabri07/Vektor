@@ -52,6 +52,11 @@ class UnclassifiedRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     resolved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Fase 2 (F2-T1) — candidatos de match para filas ambiguas (lo llena T2).
+    # Forma: [{id, matched_by, name, sku, barcode}].
+    match_candidates: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        PGJSONB, nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint(
