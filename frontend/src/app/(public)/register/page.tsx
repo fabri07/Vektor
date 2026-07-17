@@ -1,5 +1,6 @@
 import { RegisterForm } from "@/features/auth/RegisterForm";
 import { VektorLogo } from "@/components/ui/VektorLogo";
+import { WelcomeDoodle } from "@/components/public/WelcomeDoodle";
 
 const CHECK_ITEMS = [
   "Salud financiera en tiempo real",
@@ -7,18 +8,12 @@ const CHECK_ITEMS = [
   "Automatiza todas esas tareas aburridas, simple y claro",
 ];
 
-const TRUST_ITEMS = [
-  "Tus datos permanecen bajo tu control",
-  "Sin contabilidad obligatoria",
-  "Para negocios argentinos",
-];
-
 export default function RegisterPage() {
   return (
     <main className="min-h-screen md:grid md:grid-cols-2">
       {/* Left panel — desktop only */}
       <div className="hidden md:flex flex-col bg-vk-bg-dark px-12 py-12">
-        <div className="flex-1">
+        <div>
           <VektorLogo variant="full" size="lg" theme="dark" />
           <p className="mt-3 text-base text-vk-text-muted">
             Trabaja menos y toma las mejores decisiones.
@@ -39,13 +34,20 @@ export default function RegisterPage() {
           </ul>
         </div>
 
+        {/* Doodle de bienvenida — mismo hueco que el DoodleCollage de login,
+            pero con un dibujo y mensaje propios de "crear cuenta". */}
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+          <WelcomeDoodle className="w-full max-w-[380px]" />
+        </div>
+
         {/* Trust band */}
-        <div className="border-t border-vk-border-dark pt-6 space-y-2">
-          {TRUST_ITEMS.map((item) => (
-            <p key={item} className="text-xs text-vk-text-muted">
-              {item}
-            </p>
-          ))}
+        <div className="border-t border-vk-border-dark pt-6">
+          <p className="text-xs font-medium text-vk-text-light">
+            Tus datos permanecen bajo tu control
+          </p>
+          <p className="mt-1 text-xs text-vk-text-muted">
+            Sin contabilidad obligatoria. Para negocios en Argentina
+          </p>
         </div>
       </div>
 

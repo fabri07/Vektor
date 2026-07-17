@@ -1,14 +1,17 @@
 /**
- * doodles.tsx — 6 doodles line-art blancos generados en Figma, embebidos como
- * SVG inline (no <Image>) para que el CSS pueda animar el "dibujado" del trazo.
+ * doodles.tsx — 7 doodles line-art blancos, embebidos como SVG inline
+ * (no <Image>) para que el CSS pueda animar el "dibujado" del trazo.
  *
  * Cada <path> lleva `pathLength={1}` + clase `.doodle-path`
  * (`stroke-dasharray:1; stroke-dashoffset:1` → 1 en globals.css), de modo que el
  * trazo se dibuja de forma UNIFORME sin importar su largo real. El delay
  * escalonado por índice hace que los trazos aparezcan uno tras otro.
  *
- * Fuente de verdad de los paths: `frontend/public/doodles/*.svg` (export Figma).
- * Si se regeneran los assets, actualizar estas listas.
+ * 6 de los 7 fueron generados en Figma — fuente de verdad en
+ * `frontend/public/doodles/*.svg`; si se regeneran esos assets, actualizar
+ * las listas correspondientes acá. `NEGOCIO` es la excepción: escrito a mano
+ * matcheando el mismo sistema técnico (mismo viewBox, mismo grosor de trazo,
+ * mismo formato de paths), sin SVG fuente en Figma.
  */
 
 type PathList = readonly string[];
@@ -87,6 +90,26 @@ const CHAT: PathList = [
   "M206 116L210 126L220 130L210 134L206 144L202 134L192 130L202 126L206 116Z",
 ];
 
+// Local comercial genérico (fachada + toldo + puerta + vidriera + cartel colgante).
+// Distinto del DoodleKiosco (que muestra estanterías/heladeras) — pensado para
+// un mensaje de bienvenida, no para un rubro específico. Ver nota de cabecera:
+// escrito a mano, no viene de un export de Figma.
+const NEGOCIO: PathList = [
+  "M50 100H190V200H50V100Z",
+  "M38 100L120 52L202 100H38Z",
+  "M64 100L76 72M96 100L102 68M138 100L132 68M174 100L162 72",
+  "M100 200V138C100 135.239 102.239 133 105 133H135C137.761 133 140 135.239 140 138V200H100Z",
+  "M136 170C136 172.209 134.209 174 132 174C129.791 174 128 172.209 128 170C128 167.791 129.791 166 132 166C134.209 166 136 167.791 136 170Z",
+  "M56 144H92V182H56V144Z",
+  "M74 144V182M56 163H92",
+  "M148 144H184V182H148V144Z",
+  "M166 144V182M148 163H184",
+  "M120 52V38",
+  "M96 22H132V38H96V22Z",
+  "M132 24L146 30L132 36Z",
+  "M26 76L32 64L36 76M36 60L48 64L36 68",
+];
+
 /** Renderiza un doodle: trazo blanco, cada path se "dibuja" con delay escalonado. */
 function Doodle({ paths, drawDelay = 0 }: { paths: PathList; drawDelay?: number }) {
   return (
@@ -122,3 +145,4 @@ export const DoodleCrecimiento = (p: { drawDelay?: number }) => (
   <Doodle paths={CRECIMIENTO} {...p} />
 );
 export const DoodleChat = (p: { drawDelay?: number }) => <Doodle paths={CHAT} {...p} />;
+export const DoodleNegocio = (p: { drawDelay?: number }) => <Doodle paths={NEGOCIO} {...p} />;
