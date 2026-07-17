@@ -88,9 +88,13 @@ describe("ChatPanel", () => {
         screen.getByText("Venta registrada correctamente.")
       ).toBeInTheDocument();
     });
+    // Firma real: (message, conversationId?, attachments?, uiContext?). Sin
+    // adjuntos ni contexto de UI los dos últimos viajan undefined, pero igual
+    // cuentan para la aridad que compara toHaveBeenCalledWith.
     expect(mockSendMessage).toHaveBeenCalledWith(
       "Hoy vendí 50 mil",
       expect.any(String),
+      undefined,
       undefined,
     );
   });
