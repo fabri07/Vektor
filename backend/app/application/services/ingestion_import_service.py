@@ -7,10 +7,12 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from app.persistence.models.product import Product
 
 from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
@@ -587,6 +589,96 @@ async def _load_product_index(
         for tok in _product_name_tokens(pname or ""):
             by_token.setdefault(tok, set()).add(pid)
     return by_sku, by_name, by_token
+
+
+async def _load_product_name_lookup_indexes(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[dict[str, list[uuid.UUID]], dict[str, list[uuid.UUID]]]:
+    """Precarga (F1-fix) los índices de nombre de producto para el lookup
+    tolerante, UNA sola vez por corrida — nunca un ``select(Product)`` de
+    entidades completas por fila.
+
+    Devuelve ``(exact_index, norm_index)``:
+    - ``exact_index[name.strip().lower()] = [product_id, ...]`` — equivalente al
+      match SQL exacto original de F1 (``lower(trim(Product.name))``).
+    - ``norm_index[_normalize_name(name)] = [product_id, ...]`` — fallback
+      tolerante a guiones/underscores/espacios (ej. "Coca-Cola" ↔ "Coca Cola").
+
+    Ambos índices solo consideran productos ACTIVOS del tenant y están
+    ordenados por ``(created_at, id)`` ascendente — mismo criterio de
+    desempate que el lookup SQL original (el primero de la lista es el
+    "elegido" cuando hay un único candidato).
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    result = await session.execute(
+        select(Product.id, Product.name, Product.created_at)
+        .where(Product.tenant_id == tenant_id, Product.is_active.is_(True))
+        .order_by(Product.created_at.asc(), Product.id.asc())
+    )
+    exact_index: dict[str, list[uuid.UUID]] = {}
+    norm_index: dict[str, list[uuid.UUID]] = {}
+    for pid, pname, _created_at in result.all():
+        pname = pname or ""
+        exact_key = pname.strip().lower()
+        if exact_key:
+            exact_index.setdefault(exact_key, []).append(pid)
+        norm_key = _normalize_name(pname)
+        if norm_key:
+            norm_index.setdefault(norm_key, []).append(pid)
+    return exact_index, norm_index
+
+
+async def _find_product_by_name_tolerant(
+    session: AsyncSession,
+    name: str,
+    *,
+    exact_index: dict[str, list[uuid.UUID]],
+    norm_index: dict[str, list[uuid.UUID]],
+) -> tuple[Product | None, int, list[uuid.UUID], str]:
+    """Busca productos activos por nombre contra índices pre-cargados, sin
+    explotar ante duplicados.
+
+    F1 (hotfix puente): el lookup original usaba ``scalar_one_or_none()``, que
+    revienta con ``MultipleResultsFound`` si ≥2 productos activos colisionan en
+    ``lower(trim(name))``.
+
+    F1-fix (review): restaura además el fallback normalizado tolerante que
+    tenía el camino single-sheet ANTES de F1 ("Coca-Cola" ↔ "Coca Cola" ↔
+    "Coca_Cola" vía ``_normalize_name``), contra índices en memoria cargados
+    UNA vez por corrida (``_load_product_name_lookup_indexes``) — nunca un
+    SELECT de entidad completa por fila.
+
+    Orden de intento: (1) match exacto ``lower(trim(name))``
+    (``strategy="lower_trim"``); (2) si no hay exacto, fallback por
+    ``_normalize_name`` (``strategy="normalized_python"``); (3) sin match,
+    ``strategy="none"``. ``count`` es la cantidad EXACTA de candidatos de la
+    estrategia que matcheó (no truncada). Con ``count >= 2`` es ambiguo — el
+    llamador NO debe adivinar: no actualiza ni crea nada, la fila va a "Otros".
+    La entidad completa SOLO se materializa cuando ``count == 1``.
+
+    Devuelve ``(elegido_o_None, count_real, candidate_ids, strategy)``.
+    """
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    exact_key = name.strip().lower()
+    ids = exact_index.get(exact_key)
+    strategy = "lower_trim"
+    if not ids:
+        norm_key = _normalize_name(name)
+        ids = norm_index.get(norm_key) if norm_key else None
+        strategy = "normalized_python" if ids else "none"
+
+    if not ids:
+        return None, 0, [], "none"
+
+    count = len(ids)
+    if count == 1:
+        chosen = await session.get(Product, ids[0])
+        return chosen, 1, list(ids), strategy
+    return None, count, list(ids), strategy
 
 
 def _resolve_product(
@@ -1427,8 +1519,6 @@ async def _insert_confirmed_data_impl(
     importable se persisten en `unclassified_records` (bandeja "Otros") con
     ``source``/``uploaded_file_id`` — `counts["otros"]` las cuenta.
     """
-    from sqlalchemy import select  # noqa: PLC0415
-
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
@@ -1454,6 +1544,9 @@ async def _insert_confirmed_data_impl(
         # sin_producto: compras sin producto detallado → Product incompleto (requires_completion).
         "sin_proveedor": 0,
         "sin_producto": 0,
+        # F1 (hotfix puente): fila de producto ambigua (≥2 activos con el mismo
+        # nombre normalizado) — NO se importa, NO se toca ningún existente.
+        "productos_ambiguos": 0,
     }
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
@@ -1934,6 +2027,16 @@ async def _insert_confirmed_data_impl(
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
             _skipped_brands: set[str] = set()
+            # Caché intra-corrida por nombre normalizado: evita duplicar producto
+            # cuando 2 filas del MISMO archivo comparten nombre en un mismo bloque
+            # (<500) — con autoflush=False (prod) el SELECT no ve el pendiente sin
+            # flush. Poblada al crear O al resolver (count==1) un producto.
+            products_by_norm_name: dict[str, Product] = {}
+            # F1-fix: índices de nombre pre-cargados UNA vez para esta corrida
+            # (no un SELECT por fila) — alimentan el fallback normalizado tolerante.
+            _exact_name_index, _norm_name_index = await _load_product_name_lookup_indexes(
+                session, tenant_id
+            )
             for _prod_index, row in enumerate(rows):
                 # A4 (RC2): fila ya importada como compra de mercadería en el bloque
                 # de gastos (creó producto + stock + COGS). Reprocesarla acá crearía
@@ -1994,27 +2097,56 @@ async def _insert_confirmed_data_impl(
                         prod_cat_raw, _business_type
                     )
 
-                # Buscar por nombre normalizado: primero exacto case-insensitive,
-                # después normalización Python completa (cubre "Coca-Cola" vs "Coca Cola"
-                # en cualquier dirección: importado con guión, existente sin guión, o viceversa).
-                result = await session.execute(
-                    select(Product).where(
-                        Product.tenant_id == tenant_id,
-                        func.lower(func.trim(Product.name)) == name.lower(),
-                    )
-                )
-                existing = result.scalar_one_or_none()
+                # F1 (hotfix puente): primero la caché intra-corrida (evita duplicar
+                # con autoflush=False cuando 2 filas del archivo comparten nombre);
+                # si no está cacheado, el helper tolerante — NUNCA scalar_one_or_none()
+                # (revienta con MultipleResultsFound ante ≥2 activos con igual nombre).
+                # F1-fix: el helper ahora también intenta el fallback normalizado
+                # ("Coca-Cola" ↔ "Coca Cola") contra los índices pre-cargados arriba.
+                norm_name = _normalize_name(name)
+                existing = products_by_norm_name.get(norm_name) if norm_name else None
                 if existing is None:
-                    # Fallback: normalizar ambos lados en Python para capturar variantes
-                    # con guiones, underscores o espacios múltiples en cualquier sentido.
-                    all_result = await session.execute(
-                        select(Product).where(Product.tenant_id == tenant_id)
+                    (
+                        existing,
+                        _match_count,
+                        _candidate_ids,
+                        _match_strategy,
+                    ) = await _find_product_by_name_tolerant(
+                        session,
+                        name,
+                        exact_index=_exact_name_index,
+                        norm_index=_norm_name_index,
                     )
-                    normalized_input = _normalize_name(name)
-                    for prod in all_result.scalars().all():
-                        if _normalize_name(prod.name) == normalized_input:
-                            existing = prod
-                            break
+                    if _match_count >= 2:
+                        counts["productos_ambiguos"] += 1
+                        logger.warning(
+                            "ingestion.product_name_ambiguous",
+                            tenant_id=str(tenant_id),
+                            normalized_name=norm_name,
+                            row_ref=_prod_row_ref,
+                            uploaded_file_id=(
+                                str(uploaded_file_id) if uploaded_file_id else None
+                            ),
+                            count=_match_count,
+                            candidate_ids=[str(cid) for cid in _candidate_ids],
+                            match_strategy=_match_strategy,
+                        )
+                        # F1-fix: la fila ambigua NO se descarta en silencio — queda
+                        # en "Otros" (bandeja /otros) para revisión/unificación manual.
+                        counts["otros"] += _capture_unclassified(
+                            session,
+                            tenant_id,
+                            rows=[row],
+                            headers=headers,
+                            source=source,
+                            uploaded_file_id=uploaded_file_id,
+                            context_label=(
+                                f"Producto ambiguo: coincide con {_match_count} "
+                                "productos activos"
+                            ),
+                            suggested_entity="product",
+                        )
+                        continue  # ambiguo: no se importa, no se toca nada
                 if existing:
                     before_snap: dict[str, Any] | None = None
                     if return_details:
@@ -2050,6 +2182,8 @@ async def _insert_confirmed_data_impl(
                         existing.sku = sku
                     if prod_cat and not existing.category:
                         existing.category = prod_cat
+                    if norm_name:
+                        products_by_norm_name[norm_name] = existing
                     if return_details:
                         product_details.append(
                             {
@@ -2093,6 +2227,8 @@ async def _insert_confirmed_data_impl(
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
                     session.add(new_product)
+                    if norm_name:
+                        products_by_norm_name[norm_name] = new_product
                     # FASE 3 + A2/A5: audit del ingreso inicial de stock + balance +,
                     # si trae stock con costo, su COGS (stock inicial = compra real).
                     await _apply_catalog_stock(
@@ -2306,8 +2442,6 @@ async def _insert_multisheet_data(
     (`_row_val`). Si no hay `mapping_contexts` (summaries viejos), cae al path
     legacy por tipo con detección por keyword. Sin límite de filas.
     """
-    from sqlalchemy import func, select  # noqa: PLC0415
-
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
@@ -2328,6 +2462,17 @@ async def _insert_multisheet_data(
     _real_suppliers: set[str] = set()
     _skipped_brands: set[str] = set()
     _sentinel_used = False
+    # F1 (hotfix puente): caché intra-corrida por nombre normalizado, propia de
+    # esta función (no se comparte con _insert_confirmed_data_impl). Evita
+    # duplicar producto cuando 2 filas del MISMO archivo comparten nombre en un
+    # mismo bloque (<500) — con autoflush=False (prod) el SELECT no ve el
+    # pendiente sin flush. Poblada al crear O al resolver (count==1) un producto.
+    products_by_norm_name: dict[str, Product] = {}
+    # F1-fix: índices de nombre pre-cargados UNA vez para esta corrida (no un
+    # SELECT por fila) — alimentan el fallback normalizado tolerante en _add_product.
+    _exact_name_index, _norm_name_index = await _load_product_name_lookup_indexes(
+        session, tenant_id
+    )
 
     def _val(row: dict[str, Any], col: str | None, keywords: set[str] | tuple[str, ...]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
@@ -2606,13 +2751,52 @@ async def _insert_multisheet_data(
         cat_label: str | None = None
         if cat_raw:
             cat, cat_label = normalize_product_category(cat_raw, _business_type)
-        result = await session.execute(
-            select(Product).where(
-                Product.tenant_id == tenant_id,
-                func.lower(func.trim(Product.name)) == name.lower(),
+        # F1 (hotfix puente): caché intra-corrida primero; si no está cacheado, el
+        # helper tolerante — NUNCA scalar_one_or_none() (revienta con
+        # MultipleResultsFound ante ≥2 activos con igual nombre). F1-fix: el
+        # helper ahora también intenta el fallback normalizado ("Coca-Cola" ↔
+        # "Coca Cola") contra los índices pre-cargados al inicio de la función.
+        norm_name = _normalize_name(name)
+        existing = products_by_norm_name.get(norm_name) if norm_name else None
+        if existing is None:
+            (
+                existing,
+                _match_count,
+                _candidate_ids,
+                _match_strategy,
+            ) = await _find_product_by_name_tolerant(
+                session,
+                name,
+                exact_index=_exact_name_index,
+                norm_index=_norm_name_index,
             )
-        )
-        existing = result.scalar_one_or_none()
+            if _match_count >= 2:
+                counts["productos_ambiguos"] += 1
+                logger.warning(
+                    "ingestion.product_name_ambiguous",
+                    tenant_id=str(tenant_id),
+                    normalized_name=norm_name,
+                    row_ref=row_ref,
+                    uploaded_file_id=str(uploaded_file_id) if uploaded_file_id else None,
+                    count=_match_count,
+                    candidate_ids=[str(cid) for cid in _candidate_ids],
+                    match_strategy=_match_strategy,
+                )
+                # F1-fix: la fila ambigua NO se descarta en silencio — queda en
+                # "Otros" (bandeja /otros) para revisión/unificación manual.
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=None,  # sin headers de hoja disponibles en este scope
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=(
+                        f"Producto ambiguo: coincide con {_match_count} productos activos"
+                    ),
+                    suggested_entity="product",
+                )
+                return  # ambiguo: no se importa, no se toca nada
         if existing:
             if price:
                 existing.sale_price_ars = price
@@ -2641,6 +2825,8 @@ async def _insert_multisheet_data(
                 existing.sku = sku
             if cat and not existing.category:
                 existing.category = cat
+            if norm_name:
+                products_by_norm_name[norm_name] = existing
         else:
             cf = _custom_fields(row, cf_cols)
             if cat_label:
@@ -2648,25 +2834,26 @@ async def _insert_multisheet_data(
             if store_name:
                 cf = {**cf, "marca": store_name}
             _new_id = uuid.uuid4()
-            session.add(
-                Product(
-                    id=_new_id,
-                    tenant_id=tenant_id,
-                    name=name,
-                    sku=sku,
-                    # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
-                    sale_price_ars=price or Decimal("0"),
-                    unit_cost_ars=cost,
-                    stock_units=stock_val,
-                    category=cat,
-                    low_stock_threshold_units=None,
-                    provenance="REAL",
-                    # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
-                    requires_completion=not price or not cost,
-                    custom_fields=cf or None,
-                    source_row_ref=row_ref,  # Mejora D
-                )
+            new_product = Product(
+                id=_new_id,
+                tenant_id=tenant_id,
+                name=name,
+                sku=sku,
+                # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
+                sale_price_ars=price or Decimal("0"),
+                unit_cost_ars=cost,
+                stock_units=stock_val,
+                category=cat,
+                low_stock_threshold_units=None,
+                provenance="REAL",
+                # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
+                requires_completion=not price or not cost,
+                custom_fields=cf or None,
+                source_row_ref=row_ref,  # Mejora D
             )
+            session.add(new_product)
+            if norm_name:
+                products_by_norm_name[norm_name] = new_product
             # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
             # = compra real, si trae costo).
             await _apply_catalog_stock(

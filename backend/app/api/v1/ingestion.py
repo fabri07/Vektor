@@ -987,6 +987,9 @@ async def confirm_file(
             "incompleto. Completá precio de venta y datos en Productos."
         )
     if counts.get("otros"):
+        # F1-fix: cubre también los productos con nombre ambiguo (F1) — ya no
+        # generan un warning propio, "otros" los cuenta porque la fila ambigua
+        # se persiste ahí (evita doble conteo/mensaje solapado).
         warnings.append(
             f"{counts['otros']} fila(s) quedaron en «Otros» para que las revises y clasifiques."
         )
