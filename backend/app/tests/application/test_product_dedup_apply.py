@@ -19,6 +19,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import uuid
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -45,7 +46,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest_asyncio.fixture
-async def db_session(isolated_db_engine: AsyncEngine):  # type: ignore[no-untyped-def]
+async def db_session(isolated_db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     """Shadow del ``db_session`` de conftest con una session de COMMIT REAL sobre un
     engine aislado. El apply commitea por grupo (transacción propia) → releasea la
     barrera exclusive por grupo; el ``db_session`` compartido de conftest engancha un
@@ -288,11 +289,14 @@ async def test_apply_records_items_for_revert(
     assert "DEACTIVATE_DUPLICATE" in actions
     # El MERGE registra el delta aplicado real (para que T6 lo reste).
     merge = next(i for i in items if i.action == "MERGE_PRODUCT")
+    assert merge.after_json is not None
     assert merge.after_json["stock_delta_applied"] == 5
     assert merge.after_json["stock_units_before"] == 0
     assert merge.after_json["stock_units_after"] == 5
     # El REPOINT registra las filas y el nuevo product_id (reversa a old_product_id).
     repoint = next(i for i in items if i.action == "REPOINT_FK")
+    assert repoint.after_json is not None
+    assert repoint.before_json is not None
     assert repoint.after_json["new_product_id"] == str(canonical.id)
     assert repoint.before_json["rows"]
     assert all(r["old_product_id"] == str(dup.id) for r in repoint.before_json["rows"])
@@ -423,6 +427,7 @@ async def test_apply_repoint_count_mismatch_aborts_group(
             )
         )
     ).scalar_one()
+    assert merge.before_json is not None
     planned_fp = merge.before_json["plan"]["fingerprint"]
     monkeypatch.setattr(svc, "compute_group_fingerprint", lambda *a, **k: planned_fp)
 

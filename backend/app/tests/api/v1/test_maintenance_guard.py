@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import unittest.mock
 import uuid
+from collections.abc import Generator
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -231,7 +232,7 @@ class TestMaintenanceGuard423SalesPurchasesExpenses:
     """F3 review final: gap del guard 423 en venta/compra/gasto manual."""
 
     @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger: Any) -> None:
+    def patch_celery(self, mock_score_trigger: Any) -> Generator[None, None, None]:
         with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
             yield
 

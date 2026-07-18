@@ -20,6 +20,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import uuid
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -47,7 +48,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest_asyncio.fixture
-async def db_session(isolated_db_engine: AsyncEngine):  # type: ignore[no-untyped-def]
+async def db_session(isolated_db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     """Shadow del ``db_session`` de conftest con una session de COMMIT REAL sobre un
     engine aislado — mismo motivo que en el test de apply: el revert commitea por grupo
     (transacción propia) → releasea la barrera exclusive por grupo. Espeja producción."""

@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import product_dedup_service as svc
+from app.application.services.ingestion_import_service import ProductIdentityIndexes
 from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
     SOURCE_PURCHASE_IMPORT,
@@ -55,9 +56,7 @@ def _indexes(
     by_barcode: dict[str, list[uuid.UUID]] | None = None,
     by_sku: dict[str, list[uuid.UUID]] | None = None,
     by_name_brand: dict[tuple[str, str | None], list[uuid.UUID]] | None = None,
-) -> object:
-    from app.application.services.ingestion_import_service import ProductIdentityIndexes
-
+) -> ProductIdentityIndexes:
     return ProductIdentityIndexes(
         by_sku=by_sku or {},
         by_barcode=by_barcode or {},
@@ -576,6 +575,7 @@ async def test_plan_dedup_detects_sku_group_and_persists_plan(
     assert "DEACTIVATE_DUPLICATE" in actions
     # el fingerprint viaja en el bloque plan de cada item.
     merge_item = next(i for i in items if i.action == "MERGE_PRODUCT")
+    assert merge_item.before_json is not None
     assert merge_item.before_json["plan"]["fingerprint"] == group.fingerprint
     assert merge_item.before_json["plan"]["decision_version"] == DECISION_VERSION
 
