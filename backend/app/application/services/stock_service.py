@@ -193,9 +193,18 @@ async def increment_stock(
     supplier_id: uuid.UUID | None = None,
     update_product_cost: bool = True,
     occurred_at: datetime | None = None,
+    defer_event: bool = False,
 ) -> InventoryMovement:
-    product = await db.get(Product, product_id)
-    if product is None or product.tenant_id != tenant_id:
+    # Serializa compras concurrentes del mismo producto para no perder incrementos
+    # en ``stock_units``/``InventoryBalance.current_qty``.
+    product = (
+        await db.execute(
+            select(Product)
+            .where(Product.id == product_id, Product.tenant_id == tenant_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if product is None:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
 
     balance = await _get_or_create_balance(product, tenant_id, db)
@@ -225,14 +234,15 @@ async def increment_stock(
     db.add(movement)
     await db.flush()
 
-    EventBus.emit(
-        "STOCK_INCREASED",
-        {
-            "tenant_id": str(tenant_id),
-            "product_id": str(product_id),
-            "qty": qty,
-        },
-    )
+    event_payload = {
+        "tenant_id": str(tenant_id),
+        "product_id": str(product_id),
+        "qty": qty,
+    }
+    if defer_event:
+        EventBus.emit_after_commit(db, "STOCK_INCREASED", event_payload)
+    else:
+        EventBus.emit("STOCK_INCREASED", event_payload)
 
     return movement
 

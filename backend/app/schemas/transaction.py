@@ -12,6 +12,7 @@ from app.domain.expense_categories import EXPENSE_CATEGORIES_PATTERN
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
 _MAX_AMOUNT = Decimal("999999999")
+PAYMENT_METHOD_PATTERN = r"^(cash|debit_card|credit_card|transfer|qr|account|other)$"
 
 
 def _reject_nan_inf(v: Decimal | None, field_name: str = "amount") -> Decimal | None:
@@ -58,7 +59,7 @@ class CreateSaleRequest(BaseModel):
     quantity: int = Field(ge=1, default=1)
     transaction_date: datetime
     payment_method: str = Field(
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$", default="cash"
+        pattern=PAYMENT_METHOD_PATTERN, default="cash"
     )
     product_id: UUID | None = None
     customer_id: UUID | None = None
@@ -85,7 +86,7 @@ class UpdateSaleRequest(BaseModel):
     transaction_date: datetime | None = None
     payment_method: str | None = Field(
         default=None,
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$",
+        pattern=PAYMENT_METHOD_PATTERN,
     )
     product_id: UUID | None = None
     customer_id: UUID | None = None
@@ -138,7 +139,7 @@ class ManualBatchSaleRequest(BaseModel):
 
     customer_id: UUID | None = None
     payment_method: str = Field(
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$", default="cash"
+        pattern=PAYMENT_METHOD_PATTERN, default="cash"
     )
     transaction_date: datetime
     notes: str | None = Field(default=None, max_length=1000)
@@ -231,7 +232,7 @@ class CreateExpenseRequest(BaseModel):
     description: str = Field(default="", max_length=500)
     is_recurring: bool = False
     payment_method: str = Field(
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$",
+        pattern=PAYMENT_METHOD_PATTERN,
         default="transfer",
     )
     supplier_name: str | None = Field(default=None, max_length=300)
@@ -257,7 +258,7 @@ class ProfitWithdrawalRequest(BaseModel):
     amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     withdrawal_date: datetime
     payment_method: str = Field(
-        pattern=r"^(cash|debit_card|credit_card|transfer|qr|account|other)$",
+        pattern=PAYMENT_METHOD_PATTERN,
         default="cash",
     )
     notes: str | None = Field(default=None, max_length=1000)

@@ -9,18 +9,24 @@ venta/gasto/producto queda en ``unclassified_records``. Desde acá el tenant:
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_role
 from app.api.v1.expenses import _apply_category_label
-from app.api.v1.products import _tenant_business_type
+from app.api.v1.products import (
+    _duplicate_identity_conflict,
+    _find_active_product_by_identity,
+    _tenant_business_type,
+)
+from app.application.services import stock_service
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
@@ -33,6 +39,7 @@ from app.domain.product_categories import (
     _resolve_vertical,
     normalize_product_category,
 )
+from app.domain.product_completion import recompute_requires_completion
 from app.persistence.db.session import get_db_session
 from app.persistence.models.customer import Customer
 from app.persistence.models.product import Product
@@ -46,11 +53,16 @@ from app.persistence.models.unclassified_record import (
     UnclassifiedRecord,
 )
 from app.persistence.models.user import User
+from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
 from app.schemas.customer import CreateCustomerRequest
-from app.schemas.product import CreateProductRequest
+from app.schemas.product import CreateProductRequest, UpdateProductRequest
 from app.schemas.supplier import CreateSupplierRequest
-from app.schemas.transaction import CreateExpenseRequest, CreateSaleRequest
+from app.schemas.transaction import (
+    PAYMENT_METHOD_PATTERN,
+    CreateExpenseRequest,
+    CreateSaleRequest,
+)
 
 router = APIRouter()
 
@@ -69,6 +81,11 @@ class UnclassifiedRecordResponse(BaseModel):
     # canónicos del domain (catálogo de gastos o de productos según el destino).
     suggested_category: str | None = None
     suggested_category_label: str | None = None
+    # F2-T2b: candidatos de match para una fila de producto ambigua/en conflicto
+    # (forma ``{id, matched_by, name, sku, barcode}``). El frontend los ofrece
+    # para VINCULAR a un producto existente (POST reclassify con
+    # ``target_product_id``) en vez de crear un duplicado. None fuera de ese caso.
+    match_candidates: list[dict[str, Any]] | None = None
     status: str
     created_at: datetime
 
@@ -79,6 +96,31 @@ class ReclassifyRequest(BaseModel):
     # correspondiente (CreateSaleRequest / CreateExpenseRequest / CreateProductRequest /
     # CreateCustomerRequest / CreateSupplierRequest).
     fields: dict[str, Any]
+    # F2-T2b: solo para entity_type="product". Si viene, en vez de crear un
+    # producto nuevo se VINCULA el registro a este producto ya existente (elegido
+    # entre los `match_candidates` que armó T2 para un producto ambiguo). El id
+    # SIEMPRE se re-valida contra el tenant en el handler — nunca se confía en el
+    # id que manda el cliente.
+    target_product_id: UUID | None = None
+
+
+class ResolvePurchaseRequest(BaseModel):
+    target_product_id: UUID
+    amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    quantity: int = Field(gt=0)
+    unit_cost: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    transaction_date: datetime
+    payment_method: str = Field(pattern=PAYMENT_METHOD_PATTERN, default="transfer")
+    category: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=500)
+    supplier_name: str | None = Field(default=None, max_length=300)
+
+    @field_validator("transaction_date")
+    @classmethod
+    def transaction_date_not_future(cls, value: datetime) -> datetime:
+        if value.date() > date.today():
+            raise ValueError("transaction_date cannot be in the future.")
+        return value
 
 
 class BulkImportRequest(BaseModel):
@@ -161,14 +203,19 @@ async def count_unclassified(
 
 
 async def _get_pending_record(
-    session: AsyncSession, tenant_id: uuid.UUID, record_id: UUID
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    record_id: UUID,
+    *,
+    for_update: bool = False,
 ) -> UnclassifiedRecord:
-    result = await session.execute(
-        select(UnclassifiedRecord).where(
+    query = select(UnclassifiedRecord).where(
             UnclassifiedRecord.id == record_id,
             UnclassifiedRecord.tenant_id == tenant_id,
         )
-    )
+    if for_update:
+        query = query.with_for_update()
+    result = await session.execute(query)
     record = result.scalar_one_or_none()
     if record is None:
         raise HTTPException(
@@ -253,9 +300,51 @@ async def reclassify_record(
             sup_req = CreateSupplierRequest(**body.fields)
             session.add(Supplier(tenant_id=tenant.tenant_id, **sup_req.model_dump()))
             label = "proveedor"
-        else:  # "product"
+        elif body.target_product_id is not None:  # "product", vincular a existente
+            # Re-validación (seguridad, crítico): NUNCA confiar en el id que manda
+            # el cliente. Se re-carga filtrando por tenant_id + is_active — un id
+            # ajeno, inexistente o de un producto ya inactivo se rechaza.
+            product_repo = ProductRepository(session)
+            target = await product_repo.get_by_id(body.target_product_id, tenant.tenant_id)
+            if target is None or not target.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"code": "INVALID_TARGET_PRODUCT"},
+                )
+            # Solo los 3 campos ajustables desde el link (nunca None pisa lo existente:
+            # exclude_unset se queda solo con lo que el usuario mandó).
+            if "stock_units" in body.fields:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"code": "STOCK_VIA_LINK_FORBIDDEN"},
+                )
+            link_updates = UpdateProductRequest(
+                **{
+                    k: v
+                    for k, v in body.fields.items()
+                    if k in {"sale_price_ars", "unit_cost_ars"}
+                }
+            ).model_dump(exclude_unset=True)
+            for field_name, value in link_updates.items():
+                setattr(target, field_name, value)
+            recompute_requires_completion(target)
+            record.status = UNCLASSIFIED_STATUS_IMPORTED
+            record.resolved_at = datetime.now(UTC)
+            await session.flush()
+            trigger_score_recalculation.delay(
+                str(tenant.tenant_id), "unclassified_reclassified"
+            )
+            return MessageResponse(message="Registro vinculado al producto existente.")
+        else:  # "product", crear nuevo
             prod_req = CreateProductRequest(**body.fields)
             data = prod_req.model_dump()
+            existing_product = await _find_active_product_by_identity(
+                session, tenant.tenant_id, barcode=data.get("barcode"), sku=data.get("sku")
+            )
+            if existing_product is not None:
+                raise _duplicate_identity_conflict(
+                    existing_product, barcode=data.get("barcode"), sku=data.get("sku")
+                )
             # Misma normalización que POST /products (catálogo del vertical).
             if data.get("category"):
                 business_type = await _tenant_business_type(session, tenant.tenant_id)
@@ -279,6 +368,103 @@ async def reclassify_record(
     await session.flush()
     trigger_score_recalculation.delay(str(tenant.tenant_id), "unclassified_reclassified")
     return MessageResponse(message=f"Registro importado como {label}.")
+
+
+@router.post(
+    "/{record_id}/resolve-purchase",
+    response_model=MessageResponse,
+    summary="Resolver una compra ambigua vinculándola a un producto",
+)
+async def resolve_purchase(
+    record_id: UUID,
+    body: ResolvePurchaseRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    _: User = Depends(require_role("OWNER", "ADMIN")),
+    session: AsyncSession = Depends(get_db_session),
+) -> MessageResponse:
+    record = await _get_pending_record(
+        session, tenant.tenant_id, record_id, for_update=True
+    )
+    candidates = record.match_candidates or []
+    if record.suggested_entity != "expense" or not candidates:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "NOT_AMBIGUOUS_PURCHASE"},
+        )
+    candidate_ids = {str(candidate.get("id")) for candidate in candidates if candidate.get("id")}
+    if str(body.target_product_id) not in candidate_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "TARGET_NOT_A_CANDIDATE"},
+        )
+
+    target = await ProductRepository(session).get_by_id(
+        body.target_product_id, tenant.tenant_id
+    )
+    if target is None or not target.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_TARGET_PRODUCT"},
+        )
+
+    unit_cost = body.unit_cost
+    if unit_cost is None:
+        unit_cost = (body.amount / body.quantity).quantize(Decimal("0.01"))
+
+    code, category_label = normalize_expense_category(body.category or "INVENTORY")
+    supplier_index: dict[str, UUID]
+    if body.supplier_name and body.supplier_name.strip():
+        from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+            _load_supplier_index,
+            _resolve_or_create_supplier,
+        )
+
+        supplier_index = await _load_supplier_index(session, tenant.tenant_id)
+        supplier_id, supplier_name = await _resolve_or_create_supplier(
+            session, tenant.tenant_id, body.supplier_name, supplier_index
+        )
+    else:
+        from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+            _resolve_or_create_sentinel_supplier,
+        )
+
+        supplier_id = await _resolve_or_create_sentinel_supplier(
+            session, tenant.tenant_id, {}
+        )
+        supplier_name = None
+
+    session.add(
+        ExpenseEntry(
+            tenant_id=tenant.tenant_id,
+            amount=body.amount,
+            category=code,
+            expense_type=infer_expense_type(code, product_id=target.id),
+            transaction_date=body.transaction_date,
+            description=body.description or "Compra de mercadería",
+            payment_method=body.payment_method,
+            product_id=target.id,
+            supplier_id=supplier_id,
+            supplier_name=supplier_name,
+            custom_fields=_apply_category_label({}, code, category_label),
+            provenance="REAL",
+        )
+    )
+    record.status = UNCLASSIFIED_STATUS_IMPORTED
+    record.resolved_at = datetime.now(UTC)
+    await stock_service.increment_stock(
+        target.id,
+        tenant.tenant_id,
+        body.quantity,
+        unit_cost,
+        source_event_id=f"others:{record_id}",
+        db=session,
+        supplier_id=supplier_id,
+        update_product_cost=True,
+        occurred_at=body.transaction_date,
+        defer_event=True,
+    )
+    recompute_requires_completion(target)
+    return MessageResponse(message="Compra registrada y vinculada al producto.")
 
 
 @router.post(

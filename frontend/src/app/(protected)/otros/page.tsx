@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Trash2, Pencil, Zap } from "lucide-react";
+import type { AxiosError } from "axios";
+import { Trash2, Pencil, Zap, Link2, Package } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -10,6 +11,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Table } from "@/components/ui/Table";
 import {
   othersService,
+  type ProductMatchCandidate,
   type ReclassifyEntityType,
   type UnclassifiedRecordResponse,
 } from "@/services/others.service";
@@ -31,22 +33,42 @@ const ENTITY_LABELS: Record<ReclassifyEntityType, string> = {
   supplier: "Proveedor",
 };
 
+/** Extrae el `detail.code` de un error de axios (contrato del backend: `{detail:{code}}`). */
+function errorCode(error: unknown): string | null {
+  const detail = (error as AxiosError<{ detail?: { code?: string } }>)?.response?.data?.detail;
+  return detail?.code ?? null;
+}
+
+/** Etiqueta corta de un candidato de producto (nombre + sku/barcode si existen). */
+function candidateLabel(c: ProductMatchCandidate): string {
+  const parts: string[] = [];
+  if (c.sku) parts.push(`SKU ${c.sku}`);
+  if (c.barcode) parts.push(`EAN ${c.barcode}`);
+  return parts.join(" · ");
+}
+
 /** Heurística simple de prellenado desde la fila cruda (solo sugerencia visual). */
 function prefill(record: UnclassifiedRecordResponse): {
   amount: string;
   date: string;
   text: string;
+  quantity: string;
+  unitCost: string;
 } {
   let amount = "";
   let date = "";
   let text = "";
+  let quantity = "1";
+  let unitCost = "";
   for (const [key, value] of Object.entries(record.row_data)) {
     const k = key.toLowerCase();
     if (!amount && /(monto|importe|total|precio|valor)/.test(k)) amount = value;
     if (!date && /(fecha|date|dia)/.test(k)) date = value;
     if (!text && /(detalle|concepto|descripcion|nombre|producto|item)/.test(k)) text = value;
+    if (quantity === "1" && /^(cantidad|cant|unidades|qty)$/.test(k)) quantity = value;
+    if (!unitCost && /(costo|precio.?unit|unitario)/.test(k)) unitCost = value;
   }
-  return { amount, date, text };
+  return { amount, date, text, quantity, unitCost };
 }
 
 function rowPreview(record: UnclassifiedRecordResponse): string {
@@ -122,17 +144,95 @@ export default function OtrosPage() {
       id,
       entityType,
       fields,
+      targetProductId,
     }: {
       id: string;
       entityType: ReclassifyEntityType;
       fields: Record<string, unknown>;
-    }) => othersService.reclassify(id, { entity_type: entityType, fields }),
+      targetProductId?: string;
+    }) =>
+      othersService.reclassify(id, {
+        entity_type: entityType,
+        fields,
+        ...(targetProductId ? { target_product_id: targetProductId } : {}),
+      }),
     onSuccess: async (_, vars) => {
       setReclassifying(null);
-      toast(`Registro importado como ${ENTITY_LABELS[vars.entityType].toLowerCase()}.`, "success");
+      toast(
+        vars.targetProductId
+          ? "Registro vinculado al producto existente."
+          : `Registro importado como ${ENTITY_LABELS[vars.entityType].toLowerCase()}.`,
+        "success",
+      );
       await invalidate();
     },
-    onError: () => toast("No se pudo importar el registro. Revisá los campos.", "error"),
+    onError: async (error) => {
+      const code = errorCode(error);
+      if (code === "DUPLICATE_PRODUCT_IDENTITY") {
+        toast(
+          "Ya existe un producto activo con ese SKU o código de barras. " +
+            "Vinculalo a uno de los sugeridos en vez de crear uno nuevo.",
+          "error",
+        );
+      } else if (code === "INVALID_TARGET_PRODUCT") {
+        // El candidato ya no está disponible (borrado/inactivo): cerrar y refrescar.
+        toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
+        setReclassifying(null);
+        await invalidate();
+      } else {
+        toast("No se pudo importar el registro. Revisá los campos.", "error");
+      }
+    },
+  });
+
+  const resolvePurchaseMutation = useMutation({
+    mutationFn: ({
+      id,
+      targetProductId,
+      fields,
+    }: {
+      id: string;
+      targetProductId: string;
+      fields: {
+        amount: number;
+        quantity: number;
+        unitCost?: number;
+        transactionDate: string;
+        paymentMethod: string;
+        category: string;
+        description: string;
+      };
+    }) =>
+      othersService.resolvePurchase(id, {
+        target_product_id: targetProductId,
+        amount: fields.amount,
+        quantity: fields.quantity,
+        ...(fields.unitCost !== undefined ? { unit_cost: fields.unitCost } : {}),
+        transaction_date: fields.transactionDate,
+        payment_method: fields.paymentMethod,
+        category: fields.category,
+        description: fields.description || undefined,
+      }),
+    onSuccess: async () => {
+      setReclassifying(null);
+      toast("Compra registrada.", "success");
+      await invalidate();
+    },
+    onError: async (error) => {
+      const code = errorCode(error);
+      const httpStatus = (error as AxiosError)?.response?.status;
+      if (code === "INVALID_TARGET_PRODUCT" || code === "TARGET_NOT_A_CANDIDATE") {
+        toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
+        setReclassifying(null);
+        await invalidate();
+      } else if (httpStatus === 409) {
+        toast("Esta compra ya había sido registrada. Actualizamos la lista.", "info");
+        setReclassifying(null);
+        await invalidate();
+      } else {
+        toast("No se pudo registrar la compra. Revisá los campos.", "error");
+      }
+    },
   });
 
   const columns = [
@@ -293,29 +393,57 @@ export default function OtrosPage() {
       <ReclassifyModal
         record={reclassifying}
         productCategories={productCategories}
-        saving={reclassifyMutation.isPending}
+        saving={reclassifyMutation.isPending || resolvePurchaseMutation.isPending}
         onClose={() => setReclassifying(null)}
         onSave={(entityType, fields) =>
           reclassifying &&
           reclassifyMutation.mutate({ id: reclassifying.id, entityType, fields })
+        }
+        onLink={(targetProductId) =>
+          reclassifying &&
+          reclassifyMutation.mutate({
+            id: reclassifying.id,
+            entityType: "product",
+            fields: {},
+            targetProductId,
+          })
+        }
+        onResolvePurchase={(targetProductId, fields) =>
+          reclassifying &&
+          resolvePurchaseMutation.mutate({ id: reclassifying.id, targetProductId, fields })
         }
       />
     </PageWrapper>
   );
 }
 
-function ReclassifyModal({
+export function ReclassifyModal({
   record,
   productCategories,
   saving,
   onClose,
   onSave,
+  onLink,
+  onResolvePurchase,
 }: {
   record: UnclassifiedRecordResponse | null;
   productCategories: ProductCategoryOption[];
   saving: boolean;
   onClose: () => void;
   onSave: (entityType: ReclassifyEntityType, fields: Record<string, unknown>) => void;
+  onLink: (targetProductId: string) => void;
+  onResolvePurchase: (
+    targetProductId: string,
+    fields: {
+      amount: number;
+      quantity: number;
+      unitCost?: number;
+      transactionDate: string;
+      paymentMethod: string;
+      category: string;
+      description: string;
+    },
+  ) => void;
 }) {
   const [entityType, setEntityType] = useState<ReclassifyEntityType>("expense");
   const [amount, setAmount] = useState("");
@@ -326,6 +454,8 @@ function ReclassifyModal({
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [unitCost, setUnitCost] = useState("");
 
   useEffect(() => {
     if (!record) return;
@@ -337,7 +467,11 @@ function ReclassifyModal({
     setText(pre.text);
     // Prellenar con la categoría recomendada por el backend según el destino.
     setCategory(
-      entity === "expense" && record.suggested_category ? record.suggested_category : "OTHER",
+      entity === "expense" && record.suggested_category
+        ? record.suggested_category
+        : entity === "expense" && (record.match_candidates?.length ?? 0) > 0
+          ? "INVENTORY"
+          : "OTHER",
     );
     setProductCategory(
       entity === "product" && record.suggested_category ? record.suggested_category : "",
@@ -345,9 +479,17 @@ function ReclassifyModal({
     setPaymentMethod("cash");
     setEmail("");
     setPhone("");
+    setQuantity(pre.quantity.replace(/[^\d]/g, "") || "1");
+    setUnitCost(pre.unitCost.replace(/[^\d.,]/g, ""));
   }, [record]);
 
   if (!record) return null;
+
+  // F2-T2b: candidatos de producto existente para VINCULAR (solo filas de producto
+  // ambiguas/en conflicto). Fuera de ese caso el backend manda null.
+  const isPurchaseResolution =
+    record.suggested_entity === "expense" && (record.match_candidates?.length ?? 0) > 0;
+  const candidates = record.match_candidates ?? [];
 
   // Cliente y Proveedor son entidades de contacto: solo nombre + email/teléfono.
   const isContact = entityType === "customer" || entityType === "supplier";
@@ -393,6 +535,76 @@ function ReclassifyModal({
         <div className="rounded border border-vk-border-w bg-vk-bg-light p-3 text-xs text-vk-text-muted">
           {rowPreview(record)}
         </div>
+
+        {candidates.length > 0 ? (
+          <div className="grid gap-2 rounded-lg border border-vektor-teal/40 bg-vektor-teal/5 p-3">
+            <div className="flex items-center gap-1.5 text-sm font-medium text-vektor-teal">
+              <Link2 className="h-4 w-4" />
+              Este producto podría ya existir
+            </div>
+            <p className="text-xs text-vk-text-muted">
+              Vinculá el registro a uno de estos productos del catálogo en vez de crear un
+              duplicado.
+            </p>
+            <ul className="grid gap-1.5">
+              {candidates.map((c) => {
+                const meta = candidateLabel(c);
+                return (
+                  <li
+                    key={c.id}
+                    className="flex items-center justify-between gap-3 rounded border border-vk-border-w bg-vk-surface-w px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm text-vk-text-primary">
+                        {c.name ?? "Producto sin nombre"}
+                      </p>
+                      {meta ? (
+                        <p className="truncate text-xs text-vk-text-muted">{meta}</p>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => {
+                        if (isPurchaseResolution) {
+                          const parsedUnitCost = unitCost
+                            ? Number(unitCost.replace(",", "."))
+                            : undefined;
+                          onResolvePurchase(c.id, {
+                            amount: Number(amount.replace(",", ".")),
+                            quantity: Number(quantity),
+                            ...(parsedUnitCost !== undefined
+                              ? { unitCost: parsedUnitCost }
+                              : {}),
+                            transactionDate: date
+                              ? `${date}T00:00:00`
+                              : new Date().toISOString().slice(0, 19),
+                            paymentMethod,
+                            category: category || "INVENTORY",
+                            description: text,
+                          });
+                        } else {
+                          onLink(c.id);
+                        }
+                      }}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded border border-vektor-teal/40 px-2.5 py-1.5 text-xs font-medium text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
+                    >
+                      <Link2 className="h-3.5 w-3.5" />
+                      {isPurchaseResolution ? "Registrar compra" : "Vincular"}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="flex items-center gap-1.5 pt-1 text-xs text-vk-text-muted">
+              <Package className="h-3.5 w-3.5" />
+              {isPurchaseResolution
+                ? "Completá monto, fecha y unidades antes de registrar la compra."
+                : "…o completá el formulario de abajo para crear un producto nuevo."}
+            </div>
+          </div>
+        ) : null}
+
         <label className="grid gap-1 text-sm text-vektor-body">
           Importar como
           <select
@@ -433,6 +645,33 @@ function ReclassifyModal({
                 />
               </label>
             ) : null}
+          </div>
+        ) : null}
+        {isPurchaseResolution ? (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="grid gap-1 text-sm text-vektor-body">
+              Cantidad
+              <input
+                className={inputCls}
+                type="number"
+                min={1}
+                step={1}
+                required
+                value={quantity}
+                onChange={(e) => setQuantity(e.target.value)}
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-vektor-body">
+              Costo unitario (opcional)
+              <input
+                className={inputCls}
+                type="number"
+                min={0}
+                step="0.01"
+                value={unitCost}
+                onChange={(e) => setUnitCost(e.target.value)}
+              />
+            </label>
           </div>
         ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">
