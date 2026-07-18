@@ -783,6 +783,32 @@ async def _load_fk_counts(
     return dict(counts)
 
 
+async def _count_fk_3t(
+    session: AsyncSession, tenant_id: uuid.UUID, product_id: uuid.UUID
+) -> int:
+    """#FKs de un producto en las 3 tablas que el REPOINT_FK re-apunta (ventas +
+    gastos + movimientos). Excluye ``inventory_balances`` a propósito: el balance lo
+    manejan CONSOLIDATE/DELETE, no el REPOINT, y contarlo enturbiaría la reconstrucción
+    del baseline (el apply puede CREAR el balance del canónico). T5 lo snapshotea antes
+    del REPOINT (baseline); T6 lo revalida (baseline + filas re-apuntadas)."""
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    total = 0
+    for model in (SaleEntry, ExpenseEntry, InventoryMovement):
+        n = (
+            await session.execute(
+                select(func.count())
+                .select_from(model)
+                .where(model.tenant_id == tenant_id, model.product_id == product_id)
+            )
+        ).scalar_one()
+        total += int(n)
+    return total
+
+
 # ── Orquestación: plan (lectura, sin persistir) ──────────────────────────────────
 
 
@@ -1280,6 +1306,9 @@ async def _apply_one_group(
     stock_before = canonical_obj.stock_units
     rc_before = canonical_obj.requires_completion
     prev_cf = dict(canonical_obj.custom_fields or {})
+    # Baseline de FKs del canónico (pre-REPOINT) para que T6 detecte actividad posterior:
+    # tras el apply el canónico debe tener exactamente `baseline + Σ filas re-apuntadas`.
+    canonical_fk_3t_before = await _count_fk_3t(session, tenant_id, canonical_id)
 
     fields_completed: dict[str, Any] = {}
     for f in _MERGE_COMPLETABLE_FIELDS:
@@ -1331,6 +1360,7 @@ async def _apply_one_group(
                     "stock_units": stock_before,
                     "requires_completion": rc_before,
                     "custom_fields": prev_cf,
+                    "fk_count_3t": canonical_fk_3t_before,
                 },
             },
             after_json={
@@ -1733,6 +1763,489 @@ async def apply_dedup_plan(
         status=final_status,
         groups_total=groups_total,
         groups_applied=applied,
+        groups_skipped=skipped,
+        groups_failed=failed,
+        group_results=group_results,
+    )
+
+
+# ── REVERSA (--revert-run): inversa exacta de un run de APPLY (F3-T6) ─────────────
+#
+# Revierte SIEMPRE un run de APPLY (``dry_run==False``, ``source_run_id`` seteado),
+# NUNCA el source dry-run. Un source puede tener N runs de apply; se revierte el que se
+# pasa, con los ``DataRepairItem`` que ESE run registró (las mutaciones que hizo).
+#
+# Antes de tocar cada registro se valida que su estado ACTUAL coincide con el
+# ``after_json`` que el apply dejó. Divergencia → se ABORTA ese grupo (queda sin
+# revertir, se reporta) y el resto del run se revierte igual. Excepción de tolerancia:
+# reactivar un duplicado YA activo es un no-op idempotente (no aborta). NO existe
+# ``--force`` en v1 (forzar la reversa de inventario tras actividad real corrompe stock,
+# aunque sea incremental).
+#
+# La inversa es EXACTA e INCREMENTAL y se aplica en orden INVERSO al del apply
+# (DEACTIVATE → DELETE_BALANCE → CONSOLIDATE → REPOINT → MERGE): resta el delta
+# group-level de ``stock_units``/``current_qty``, re-inserta el balance del dup, mueve
+# las FKs registradas de vuelta al dup (check ``rowcount``), reactiva el dup y revierte
+# los campos completados + custom_fields agregadas. NUNCA recomputa stock desde el
+# ledger (invariante 2d); NUNCA clampea.
+
+_REVERT_STATE_DIVERGED = "state_diverged"          # el estado ACTUAL ≠ after_json
+_REVERT_FK_ACTIVITY = "fk_activity_after_apply"    # FKs nuevas/menos en el canónico
+_REVERT_REPOINT_DIVERGED = "repoint_rows_diverged"  # las filas re-apuntadas cambiaron
+_REVERT_BALANCE_DIVERGED = "balance_diverged"      # balance recreado/inconsistente
+_REVERT_CANONICAL_MISSING = "canonical_missing"    # el canónico ya no existe
+_REVERT_DUP_MISSING = "duplicate_missing"          # un duplicado ya no existe
+
+
+@dataclass
+class RevertResult:
+    """Resumen de un ``revert_dedup_run``: estado + conteo por grupo. ``status`` es a
+    nivel de resultado (``REVERTED`` full / ``PARTIALLY_REVERTED`` / ``FAILED``); el run
+    de apply solo pasa a ``REVERTED`` en la DB si se revirtió TODO."""
+
+    run_id: uuid.UUID
+    status: str
+    groups_total: int
+    groups_reverted: int
+    groups_skipped: int
+    groups_failed: int
+    group_results: list[dict[str, Any]] = field(default_factory=list)
+
+
+async def _validate_apply_run(
+    session: AsyncSession, tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> Any:
+    """Carga y valida el run a revertir: existe, tipo PRODUCT_DEDUP, tenant coincide, es
+    un run de APPLY (``dry_run==False`` + ``source_run_id`` seteado) y su ``status`` es
+    revertible. Aborta con ``ValueError`` (mensaje claro) si no cumple."""
+    from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
+
+    run = await session.get(DataRepairRun, run_id)
+    if run is None:
+        raise ValueError(f"run-id {run_id} no existe")
+    if run.repair_type != _REPAIR_TYPE:
+        raise ValueError(
+            f"run-id {run_id} no es un run {_REPAIR_TYPE} (es {run.repair_type!r})"
+        )
+    if run.tenant_id != tenant_id:
+        raise ValueError(
+            f"run-id {run_id} es de otro tenant ({run.tenant_id}), no de {tenant_id}"
+        )
+    if run.dry_run or run.source_run_id is None:
+        raise ValueError(
+            f"run-id {run_id} es un dry-run (plan), no un run de apply — "
+            f"la reversa opera SOLO sobre un run de apply"
+        )
+    if run.status == "REVERTED":
+        raise ValueError(f"run-id {run_id} ya fue REVERTED (nada que revertir)")
+    if run.status not in ("APPLIED", "PARTIALLY_APPLIED", "COMPLETED_WITH_ERRORS"):
+        raise ValueError(
+            f"run-id {run_id} tiene status {run.status!r}; solo se revierte un run "
+            f"de apply en APPLIED/PARTIALLY_APPLIED/COMPLETED_WITH_ERRORS"
+        )
+    return run
+
+
+def _group_revert_items(items: list[Any]) -> dict[str, dict[str, Any]]:
+    """Agrupa los ``DataRepairItem`` del run de apply por ``group_id`` (que viaja en
+    ``before_json["plan"]``) y extrae TODO a dicts planos ANTES del loop de reversa
+    (evita el ``MissingGreenlet`` de T5: tras un commit/rollback por grupo, el ORM del
+    run está expirado y volver a leerlo dispararía un lazy-load sync)."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for it in items:
+        before = it.before_json or {}
+        after = it.after_json or {}
+        plan = before.get("plan") or {}
+        gid = plan.get("group_id")
+        canon = plan.get("canonical_product_id")
+        if gid is None or canon is None:
+            continue
+        g = grouped.setdefault(
+            gid,
+            {
+                "group_id": gid,
+                "canonical_id": uuid.UUID(canon),
+                "plan_block": plan,
+                "merge": None,
+                "repoint": [],
+                "consolidate": None,
+                "delete_balance": [],
+                "deactivate": [],
+            },
+        )
+        if it.action == "MERGE_PRODUCT":
+            g["merge"] = {"before": before, "after": after}
+        elif it.action == "REPOINT_FK":
+            g["repoint"].append({"product_id": it.product_id, "before": before})
+        elif it.action == "CONSOLIDATE_BALANCE":
+            g["consolidate"] = {"before": before, "after": after}
+        elif it.action == "DELETE_BALANCE":
+            g["delete_balance"].append({"product_id": it.product_id, "before": before})
+        elif it.action == "DEACTIVATE_DUPLICATE":
+            g["deactivate"].append({"product_id": it.product_id, "before": before, "after": after})
+    return grouped
+
+
+async def _revert_one_group(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    gdata: dict[str, Any],
+    *,
+    lease_id: uuid.UUID | None,
+) -> tuple[str, str]:
+    """Revierte UN grupo (NO commitea — el caller maneja la txn). Valida el estado
+    ACTUAL contra ``after_json`` (read-only); si diverge → ``("skipped", motivo)`` sin
+    mutar. Si valida → aplica la inversa en orden INVERSO al apply y devuelve
+    ``("reverted", "")``. Levanta ``LeaseLostError``/``RepointCountMismatchError`` → el
+    caller hace rollback."""
+    from sqlalchemy import func, select, update  # noqa: PLC0415
+    from sqlalchemy.engine import CursorResult  # noqa: PLC0415
+
+    from app.application.services import maintenance_lock_service as mls  # noqa: PLC0415
+    from app.persistence.models.inventory import (  # noqa: PLC0415
+        InventoryBalance,
+        InventoryMovement,
+    )
+    from app.persistence.models.product import Product  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    canonical_id: uuid.UUID = gdata["canonical_id"]
+    merge = gdata["merge"]
+    if merge is None:  # pragma: no cover — todo grupo aplicado registró un MERGE
+        return ("skipped", "no_merge_item")
+    repoint_items: list[dict[str, Any]] = gdata["repoint"]
+    consolidate = gdata["consolidate"]
+    delete_balances: list[dict[str, Any]] = gdata["delete_balance"]
+    deactivates: list[dict[str, Any]] = gdata["deactivate"]
+
+    model_by_table: dict[str, Any] = {
+        "sales_entries": SaleEntry,
+        "expense_entries": ExpenseEntry,
+        "inventory_movements": InventoryMovement,
+    }
+
+    # (a) Barrera real (advisory exclusive; no-op SQLite) + fencing del lease.
+    await mls.acquire_maintenance_lock_exclusive(session, tenant_id)
+    if not await _lease_still_ours(session, tenant_id, lease_id):
+        raise LeaseLostError(f"lease {lease_id} ya no es de este run (tenant {tenant_id})")
+
+    # ── (b) VALIDACIÓN (read-only): estado ACTUAL == after_json ──────────────────
+    m_after = merge["after"]
+    m_before = merge["before"]
+    canonical_prev = m_before.get("canonical_prev") or {}
+
+    canon = await session.get(Product, canonical_id)
+    if canon is None:
+        return ("skipped", _REVERT_CANONICAL_MISSING)
+    if canon.stock_units != m_after.get("stock_units_after"):
+        return ("skipped", _REVERT_STATE_DIVERGED)
+    if canon.requires_completion != m_after.get("requires_completion_after"):
+        return ("skipped", _REVERT_STATE_DIVERGED)
+    for f, val in (m_after.get("fields_completed") or {}).items():
+        if _json_scalar(getattr(canon, f, None)) != val:
+            return ("skipped", _REVERT_STATE_DIVERGED)
+    canon_cf = canon.custom_fields or {}
+    for k, v in (m_after.get("custom_fields_added") or {}).items():
+        if canon_cf.get(k) != v:
+            return ("skipped", _REVERT_STATE_DIVERGED)
+
+    # FK baseline: el canónico debe tener exactamente `baseline + Σ filas re-apuntadas`.
+    fk_before = canonical_prev.get("fk_count_3t")
+    if fk_before is not None:
+        expected_fk = fk_before + sum(
+            len(rp["before"].get("rows") or []) for rp in repoint_items
+        )
+        if await _count_fk_3t(session, tenant_id, canonical_id) != expected_fk:
+            return ("skipped", _REVERT_FK_ACTIVITY)
+
+    # REPOINT: las filas registradas deben seguir apuntando al canónico (nadie las tocó).
+    for rp in repoint_items:
+        rows = rp["before"].get("rows") or []
+        if not rows:
+            continue
+        model = model_by_table[rp["before"]["table"]]
+        row_ids = [uuid.UUID(r["id"]) for r in rows]
+        cnt = (
+            await session.execute(
+                select(func.count())
+                .select_from(model)
+                .where(
+                    model.tenant_id == tenant_id,
+                    model.id.in_(row_ids),
+                    model.product_id == canonical_id,
+                )
+            )
+        ).scalar_one()
+        if int(cnt) != len(row_ids):
+            return ("skipped", _REVERT_REPOINT_DIVERGED)
+
+    # DELETE_BALANCE: el balance del dup fue borrado por el apply → no debe existir hoy.
+    for db_item in delete_balances:
+        dup_id = db_item["product_id"]
+        exists = (
+            await session.execute(
+                select(func.count())
+                .select_from(InventoryBalance)
+                .where(
+                    InventoryBalance.tenant_id == tenant_id,
+                    InventoryBalance.product_id == dup_id,
+                )
+            )
+        ).scalar_one()
+        if int(exists) != 0:
+            return ("skipped", _REVERT_BALANCE_DIVERGED)
+
+    # CONSOLIDATE: el balance del canónico debe coincidir con lo que dejó el apply.
+    if consolidate is not None:
+        after_current = consolidate["after"].get("canonical_current_qty_after")
+        canon_bal_row = (
+            await session.execute(
+                select(InventoryBalance).where(
+                    InventoryBalance.tenant_id == tenant_id,
+                    InventoryBalance.product_id == canonical_id,
+                )
+            )
+        ).scalar_one_or_none()
+        cur = canon_bal_row.current_qty if canon_bal_row is not None else None
+        if cur != after_current:
+            return ("skipped", _REVERT_BALANCE_DIVERGED)
+
+    # DEACTIVATE: por dup — tolerancia si ya está activo; si no, debe seguir como lo
+    # dejó el apply (is_active=False, reason=DUPLICATE).
+    dup_objs: dict[uuid.UUID, Any] = {}
+    for da in deactivates:
+        dup_id = da["product_id"]
+        dup = await session.get(Product, dup_id)
+        if dup is None:
+            return ("skipped", _REVERT_DUP_MISSING)
+        dup_objs[dup_id] = dup
+        if dup.is_active:
+            continue  # tolerancia: reactivación previa → no-op idempotente
+        if dup.deactivation_reason != da["after"].get("deactivation_reason"):
+            return ("skipped", _REVERT_STATE_DIVERGED)
+
+    # ── (c) MUTACIÓN (inversa exacta, orden INVERSO al apply) ────────────────────
+    # 1) DEACTIVATE⁻¹ — reactivar el dup (no-op si ya está activo).
+    for da in deactivates:
+        dup_obj = dup_objs[da["product_id"]]
+        if dup_obj.is_active:
+            continue
+        b = da["before"]
+        dup_obj.is_active = bool(b.get("is_active", True))
+        dup_obj.deactivated_at = None
+        dup_obj.deactivation_reason = b.get("deactivation_reason")
+
+    # 2) DELETE_BALANCE⁻¹ — re-insertar el balance del dup con sus valores originales.
+    for db_item in delete_balances:
+        b = db_item["before"]
+        session.add(
+            InventoryBalance(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                product_id=db_item["product_id"],
+                current_qty=int(b["current_qty"]),
+                reserved_qty=int(b["reserved_qty"]),
+            )
+        )
+
+    # 3) CONSOLIDATE⁻¹ — restar el delta del canónico (o borrar el balance que el apply
+    # CREÓ desde cero, cuando no había balance previo). Incremental, sin clamp.
+    if consolidate is not None:
+        cb = consolidate["before"]
+        before_current = cb.get("canonical_current_qty_before")
+        delta = int(cb.get("delta") or 0)
+        canon_bal_row = (
+            await session.execute(
+                select(InventoryBalance).where(
+                    InventoryBalance.tenant_id == tenant_id,
+                    InventoryBalance.product_id == canonical_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if before_current is None:
+            # No existía balance previo → el apply lo creó (o no hay). Inversa = borrarlo.
+            if canon_bal_row is not None:
+                await session.delete(canon_bal_row)
+        elif canon_bal_row is not None:
+            canon_bal_row.current_qty = canon_bal_row.current_qty - delta
+
+    # 4) REPOINT⁻¹ — mover las filas registradas de vuelta al dup. rowcount ≠ esperado
+    # (alguien las tocó entre validación y mutación bajo el lock) → abortar el grupo.
+    for rp in repoint_items:
+        b = rp["before"]
+        model = model_by_table[b["table"]]
+        dup_id = rp["product_id"]
+        row_ids = [uuid.UUID(r["id"]) for r in (b.get("rows") or [])]
+        if not row_ids:
+            continue
+        result = await session.execute(
+            update(model)
+            .where(
+                model.tenant_id == tenant_id,
+                model.id.in_(row_ids),
+                model.product_id == canonical_id,
+            )
+            .values(product_id=dup_id)
+        )
+        rowcount = cast("CursorResult[Any]", result).rowcount
+        if rowcount != len(row_ids):
+            raise RepointCountMismatchError(
+                f"revert {b['table']} chunk {b.get('chunk_index')} dup {dup_id}: "
+                f"esperado {len(row_ids)}, afectó {rowcount}"
+            )
+
+    # 5) MERGE⁻¹ — restar el delta de stock del canónico, revertir campos completados a
+    # NULL, quitar SOLO las custom_fields agregadas y restaurar requires_completion.
+    delta_stock = int(m_after.get("stock_delta_applied") or 0)
+    canon.stock_units = canon.stock_units - delta_stock  # incremental, sin clamp
+    for f in m_after.get("fields_completed") or {}:
+        setattr(canon, f, None)  # el campo completado (estaba vacío) vuelve a NULL
+    new_cf = dict(canon.custom_fields or {})
+    for k in m_after.get("custom_fields_added") or {}:
+        new_cf.pop(k, None)
+    canon.custom_fields = new_cf
+    if "requires_completion" in canonical_prev:
+        canon.requires_completion = bool(canonical_prev["requires_completion"])
+
+    return ("reverted", "")
+
+
+async def revert_dedup_run(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    *,
+    lease_id: uuid.UUID | None = None,
+    ttl_seconds: int = 300,
+    triggered_by: str = "script:dedupe_products_by_name",
+) -> RevertResult:
+    """Revierte un run de APPLY (T5), grupo por grupo en orden INVERSO, cada uno en su
+    PROPIA transacción (commit/rollback por grupo). Valida el estado ACTUAL contra el
+    ``after_json`` del apply antes de tocar cada grupo; divergencia → ese grupo se
+    ABORTA (queda sin revertir, se reporta) y el resto se revierte igual. El run de
+    apply pasa a ``REVERTED`` SOLO si se revirtió TODO; si quedó incompleto, su
+    ``status`` no cambia y ``details_json['revert']`` documenta qué se revirtió y qué no.
+    NO existe ``--force`` en v1."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services import maintenance_lock_service as mls  # noqa: PLC0415
+    from app.persistence.models.audit import DecisionAuditLog  # noqa: PLC0415
+    from app.persistence.models.repair import DataRepairItem, DataRepairRun  # noqa: PLC0415
+
+    await _validate_apply_run(session, tenant_id, run_id)
+
+    run_items = (
+        (
+            await session.execute(
+                select(DataRepairItem).where(DataRepairItem.run_id == run_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Extraé TODO a dicts planos ANTES del loop (evitá el MissingGreenlet de T5).
+    grouped = _group_revert_items(list(run_items))
+
+    groups_total = len(grouped)
+    reverted = skipped = failed = 0
+    group_results: list[dict[str, Any]] = []
+    lease_lost = False
+
+    # Orden INVERSO de grupos (el apply los recorrió en orden ascendente).
+    for gid in sorted(grouped, reverse=True):
+        gdata = grouped[gid]
+        if lease_id is not None:
+            renewed = await mls.renew(session, lease_id, ttl_seconds)
+            # Heartbeat en su propia txn committeada (independiente del ciclo del grupo).
+            await session.commit()
+            if not renewed:
+                group_results.append(
+                    {"group_id": gid, "status": "failed", "reason": _LEASE_LOST_REASON}
+                )
+                failed += 1
+                lease_lost = True
+                break
+        try:
+            status, reason = await _revert_one_group(
+                session, tenant_id, gdata, lease_id=lease_id
+            )
+        except LeaseLostError:
+            await session.rollback()
+            group_results.append(
+                {"group_id": gid, "status": "failed", "reason": _LEASE_LOST_REASON}
+            )
+            failed += 1
+            lease_lost = True
+            break
+        except Exception as exc:  # noqa: BLE001 — cualquier error del grupo → rollback aislado
+            await session.rollback()
+            group_results.append(
+                {"group_id": gid, "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+            )
+            failed += 1
+            continue
+        if status == "skipped":
+            await session.rollback()
+            group_results.append({"group_id": gid, "status": "skipped", "reason": reason})
+            skipped += 1
+        else:
+            await session.commit()
+            group_results.append({"group_id": gid, "status": "reverted", "reason": reason})
+            reverted += 1
+
+    fully_reverted = reverted == groups_total and skipped == 0 and failed == 0
+    if fully_reverted:
+        result_status = "REVERTED"
+    elif reverted == 0 and failed > 0 and skipped == 0:
+        result_status = "FAILED"
+    else:
+        result_status = "PARTIALLY_REVERTED"
+
+    # Finalización: re-fetch (los commits/rollbacks intermedios expiran el ORM). El run
+    # de apply solo pasa a REVERTED si se revirtió TODO; si no, se documenta en
+    # details_json['revert'] y el status NO cambia (PARTIALLY_APPLIED no aplica al revert).
+    apply_run = await session.get(DataRepairRun, run_id)
+    if apply_run is not None:
+        details = dict(apply_run.details_json or {})
+        details["revert"] = {
+            "decision_version": DECISION_VERSION,
+            "groups_total": groups_total,
+            "reverted": reverted,
+            "skipped": skipped,
+            "failed": failed,
+            "lease_lost": lease_lost,
+            "fully_reverted": fully_reverted,
+            "groups": group_results,
+        }
+        apply_run.details_json = details
+        if fully_reverted:
+            apply_run.status = "REVERTED"
+
+    session.add(
+        DecisionAuditLog(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            decision_type=_DECISION_TYPE,
+            decision_data={
+                "run_id": str(run_id),
+                "action": "revert",
+                "status": result_status,
+                "reverted": reverted,
+                "skipped": skipped,
+                "failed": failed,
+                "decision_version": DECISION_VERSION,
+            },
+            triggered_by=triggered_by,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+    return RevertResult(
+        run_id=run_id,
+        status=result_status,
+        groups_total=groups_total,
+        groups_reverted=reverted,
         groups_skipped=skipped,
         groups_failed=failed,
         group_results=group_results,

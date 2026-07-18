@@ -9,8 +9,11 @@ Toda la lógica vive en ``app/application/services/product_dedup_service.py`` (t
 sin CLI). Este script solo orquesta: precondición, plan, persistencia, CSV y auditoría.
 
 La EJECUCIÓN real de las mutaciones (fusionar, re-apuntar FKs, consolidar/borrar
-balances, desactivar duplicados) es **F3-T5** — ``--apply``. El revert
-(``--revert-run``) es F3-T6 (no implementado acá).
+balances, desactivar duplicados) es **F3-T5** — ``--apply``. La REVERSA
+(``--revert-run <run_uuid>``) es **F3-T6**: revierte un run de APPLY con la inversa
+exacta e incremental de cada mutación, validando el estado ACTUAL contra el
+``after_json`` que el apply dejó. Mutuamente excluyente con ``--apply``. NO existe
+``--force`` en v1 (forzar la reversa de inventario tras actividad real corrompe stock).
 
 ## Lease (advisory exclusive)
 
@@ -36,6 +39,9 @@ Usage:
 
     # Apply (ejecución): consume un run dry-run previo (revalida el fingerprint por grupo).
     ... scripts/dedupe_products_by_name.py --tenant <uuid> --apply --source-run-id <run_uuid>
+
+    # Revert (reversa): deshace un run de APPLY (valida el estado actual vs after_json).
+    ... scripts/dedupe_products_by_name.py --tenant <uuid> --revert-run <apply_run_uuid>
 
     # Escape hatch (NO es un run de dedup): completar identidad NULL (backfill mínimo).
     ... scripts/dedupe_products_by_name.py --tenant <uuid> --repair-missing-identity
@@ -220,6 +226,41 @@ async def _apply_tenant(
         await session.commit()
 
 
+async def _revert_tenant(
+    session: AsyncSession, tid: uuid.UUID, run_id: uuid.UUID
+) -> dedup.RevertResult | None:
+    """Reversa de un run de APPLY: toma el lease observable, ejecuta
+    ``revert_dedup_run`` (barrera exclusive + validación contra after_json por grupo) y
+    libera el lease en el ``finally``. NO existe ``--force`` (v1)."""
+    lease_id = await mls.acquire(
+        session,
+        tid,
+        reason="product_dedup_revert",
+        ttl_seconds=_LEASE_TTL_SECONDS,
+        created_by="script:dedupe_products_by_name",
+    )
+    if lease_id is None:
+        print(f"  ⚠ tenant {tid}: ya hay un lease de mantenimiento activo. Revert SALTEADO.")
+        return None
+    await session.commit()
+    try:
+        result = await dedup.revert_dedup_run(
+            session, tid, run_id, lease_id=lease_id, ttl_seconds=_LEASE_TTL_SECONDS
+        )
+        print(
+            f"tenant {tid}: run {result.run_id} → {result.status} "
+            f"(reverted={result.groups_reverted} skipped={result.groups_skipped} "
+            f"failed={result.groups_failed} de {result.groups_total})"
+        )
+        for gr in result.group_results:
+            if gr["status"] != "reverted":
+                print(f"    grupo {gr['group_id']}: {gr['status']} ({gr['reason']})")
+        return result
+    finally:
+        await mls.release(session, lease_id)
+        await session.commit()
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tenant", help="UUID de tenant puntual")
@@ -244,7 +285,36 @@ async def main() -> None:
         action="store_true",
         help="Fuerza grupos marcados review en T4 (NO saltea el fingerprint)",
     )
+    parser.add_argument(
+        "--revert-run",
+        help="UUID de un run de APPLY (T5) a revertir (inversa exacta validada contra "
+        "after_json). Mutuamente excluyente con --apply. NO existe --force en v1.",
+    )
     args = parser.parse_args()
+
+    # ── Camino REVERT (F3-T6) ─────────────────────────────────────────────────────
+    if args.revert_run:
+        if args.apply:
+            print("ERROR: --revert-run es mutuamente excluyente con --apply.")
+            sys.exit(2)
+        if not args.tenant:
+            print("ERROR: --revert-run exige --tenant <uuid> (la reversa es por tenant).")
+            sys.exit(2)
+        tid = uuid.UUID(args.tenant)
+        run_id = uuid.UUID(args.revert_run)
+        url, connect_args = async_engine_config()
+        engine = create_async_engine(url, connect_args=connect_args)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                print(f"[REVERT] revirtiendo run de apply {run_id} del tenant {tid}\n")
+                try:
+                    await _revert_tenant(session, tid, run_id)
+                except ValueError as exc:
+                    print(f"ERROR: {exc}")
+                    sys.exit(2)
+        finally:
+            await engine.dispose()
+        return
 
     if not args.tenant and not args.all_active:
         print("ERROR: indicá --tenant <uuid> o --all-active.")
