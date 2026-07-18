@@ -1,6 +1,7 @@
 """Product catalog endpoints."""
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -16,6 +17,8 @@ from app.domain.product_categories import (
     normalize_product_category,
     product_category_catalog,
 )
+from app.domain.product_completion import recompute_requires_completion
+from app.domain.text_norm import normalize_barcode, normalize_sku
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -49,6 +52,122 @@ async def _resolve_category(
     if custom is not None:
         return custom["code"], None
     return normalize_product_category(raw, business_type)
+
+
+async def _find_identity_matches(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    barcode: str | None,
+    sku: str | None,
+    exclude_id: UUID | None = None,
+) -> tuple[Product | None, Product | None]:
+    """Devuelve ``(barcode_match, sku_match)``: los productos ACTIVOS del tenant
+    que ya usan ese barcode y ese sku (por las columnas normalizadas de T1),
+    consultados por SEPARADO — nunca ``OR`` + ``.first()`` (review F2 #6): con un
+    ``OR`` un barcode que matchea A y un sku que matchea B devuelven arbitrariamente
+    uno, ocultando que es un CONFLICTO entre identidades, no un duplicado simple.
+
+    ``exclude_id`` excluye el propio producto (para el PATCH — no es duplicado de
+    sí mismo). Solo dispara con barcode/sku informados; un nombre repetido en
+    soledad es un homónimo legítimo, no un duplicado. ``.first()`` (no
+    ``scalar_one_or_none``): el índice único es Fase 5, todavía puede haber >1 fila.
+    """
+    barcode_norm = normalize_barcode(barcode)
+    sku_norm = normalize_sku(sku)
+
+    async def _first(condition: Any) -> Product | None:
+        stmt = select(Product).where(
+            Product.tenant_id == tenant_id,
+            Product.is_active.is_(True),
+            condition,
+        )
+        if exclude_id is not None:
+            stmt = stmt.where(Product.id != exclude_id)
+        return (await session.execute(stmt.limit(1))).scalars().first()
+
+    barcode_match = (
+        await _first(Product.barcode_normalized == barcode_norm)
+        if barcode_norm is not None
+        else None
+    )
+    sku_match = (
+        await _first(Product.sku_normalized == sku_norm) if sku_norm is not None else None
+    )
+    return barcode_match, sku_match
+
+
+def _identity_conflict_response(
+    barcode_match: Product | None,
+    sku_match: Product | None,
+    *,
+    barcode: str | None,
+    sku: str | None,
+) -> HTTPException | None:
+    """Traduce ``(barcode_match, sku_match)`` a la HTTPException 409 apropiada, o
+    ``None`` si no hay colisión.
+
+    - barcode y sku matchean productos DISTINTOS → ``IDENTITY_CONFLICT`` (409) con
+      AMBOS candidatos (review F2 #6: no elegir uno arbitrario).
+    - solo uno matchea (o ambos al MISMO producto) → ``DUPLICATE_PRODUCT_IDENTITY``.
+    """
+    if (
+        barcode_match is not None
+        and sku_match is not None
+        and barcode_match.id != sku_match.id
+    ):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "IDENTITY_CONFLICT",
+                "barcode_product_id": str(barcode_match.id),
+                "sku_product_id": str(sku_match.id),
+                "message": "El código de barras y el SKU apuntan a productos "
+                "distintos. Revisá cuál corresponde.",
+            },
+        )
+    existing = barcode_match or sku_match
+    if existing is not None:
+        return _duplicate_identity_conflict(existing, barcode=barcode, sku=sku)
+    return None
+
+
+async def _find_active_product_by_identity(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    barcode: str | None,
+    sku: str | None,
+) -> Product | None:
+    """Compat: primer producto activo que matchee barcode o sku (sin distinguir
+    conflicto). Reusado por ``/otros`` en el path de crear-nuevo."""
+    barcode_match, sku_match = await _find_identity_matches(
+        session, tenant_id, barcode=barcode, sku=sku
+    )
+    return barcode_match or sku_match
+
+
+def _duplicate_identity_conflict(
+    existing: Product, *, barcode: str | None, sku: str | None
+) -> HTTPException:
+    """Arma el 409 de identidad duplicada. Prioriza barcode como campo reportado
+    cuando ambos matchean (barcode es el identificador más fuerte)."""
+    barcode_norm = normalize_barcode(barcode)
+    field = (
+        "barcode"
+        if barcode_norm is not None and existing.barcode_normalized == barcode_norm
+        else "sku"
+    )
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "DUPLICATE_PRODUCT_IDENTITY",
+            "existing_id": str(existing.id),
+            "field": field,
+            "message": "Ya existe un producto activo con ese "
+            + ("código de barras." if field == "barcode" else "SKU."),
+        },
+    )
 
 
 def _product_snapshot(product: Product) -> dict[str, object]:
@@ -184,6 +303,14 @@ async def create_product(
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = ProductRepository(session)
     data = body.model_dump()
+    barcode_match, sku_match = await _find_identity_matches(
+        session, tenant.tenant_id, barcode=data.get("barcode"), sku=data.get("sku")
+    )
+    conflict = _identity_conflict_response(
+        barcode_match, sku_match, barcode=data.get("barcode"), sku=data.get("sku")
+    )
+    if conflict is not None:
+        raise conflict
     # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     if data.get("category"):
         business_type = await _tenant_business_type(session, tenant.tenant_id)
@@ -232,6 +359,25 @@ async def update_product(
     # permitiendo limpiar opcionales a null (ej. borrar acquired_at). Los campos no
     # enviados quedan intactos.
     updates = body.model_dump(exclude_unset=True)
+    # Review F2 #2: validar identidad duplicada ANTES de aplicar un cambio de
+    # sku/barcode (el PATCH aplicaba setattr directo → dos productos activos con
+    # el mismo SKU). Solo se chequea el identificador que efectivamente cambia,
+    # excluyendo el propio producto. Mismo criterio de conflicto que POST.
+    _new_barcode = updates.get("barcode") if "barcode" in updates else None
+    _new_sku = updates.get("sku") if "sku" in updates else None
+    if _new_barcode is not None or _new_sku is not None:
+        barcode_match, sku_match = await _find_identity_matches(
+            session,
+            tenant.tenant_id,
+            barcode=_new_barcode,
+            sku=_new_sku,
+            exclude_id=product.id,
+        )
+        conflict = _identity_conflict_response(
+            barcode_match, sku_match, barcode=_new_barcode, sku=_new_sku
+        )
+        if conflict is not None:
+            raise conflict
     # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     if updates.get("category"):
         business_type = await _tenant_business_type(session, tenant.tenant_id)
@@ -248,13 +394,7 @@ async def update_product(
         setattr(product, field, value)
     # FASE 3 (B2): si el producto estaba marcado para completar y ya tiene precio
     # y costo, se considera completo (cierra el ciclo del auto-creado por import).
-    if (
-        product.requires_completion
-        and product.sale_price_ars
-        and product.sale_price_ars > 0
-        and product.unit_cost_ars is not None
-    ):
-        product.requires_completion = False
+    recompute_requires_completion(product)
     # Relectura de archivos: Product no tiene `source_upload_id`, así que cualquier
     # edición manual lo marca como editado (la re-importación no debe pisarlo).
     product.has_user_edits = True
