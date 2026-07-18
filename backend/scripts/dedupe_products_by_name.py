@@ -46,8 +46,7 @@ Usage:
     # Escape hatch (NO es un run de dedup): completar identidad NULL (backfill mínimo).
     ... scripts/dedupe_products_by_name.py --tenant <uuid> --repair-missing-identity
 
-``--force-group`` es para forzar grupos marcados review en T4; NUNCA saltea el
-fingerprint (guarda de seguridad). NUNCA imprime la connection URL. Correr desde backend/.
+NUNCA imprime la connection URL. Correr desde backend/.
 """
 
 from __future__ import annotations
@@ -188,7 +187,7 @@ async def _run_tenant(session: AsyncSession, tid: uuid.UUID) -> dedup.DedupPlan 
 
 
 async def _apply_tenant(
-    session: AsyncSession, tid: uuid.UUID, source_run_id: uuid.UUID, *, force_group: bool
+    session: AsyncSession, tid: uuid.UUID, source_run_id: uuid.UUID
 ) -> dedup.ApplyResult | None:
     """Apply de un tenant: toma el lease observable, ejecuta ``apply_dedup_plan``
     (barrera exclusive + fingerprint por grupo) y libera el lease en el ``finally``."""
@@ -209,7 +208,6 @@ async def _apply_tenant(
             tid,
             source_run_id,
             lease_id=lease_id,
-            force_group=force_group,
             ttl_seconds=_LEASE_TTL_SECONDS,
         )
         print(
@@ -281,11 +279,6 @@ async def main() -> None:
         help="UUID del run dry-run (T4) a aplicar (obligatorio con --apply)",
     )
     parser.add_argument(
-        "--force-group",
-        action="store_true",
-        help="Fuerza grupos marcados review en T4 (NO saltea el fingerprint)",
-    )
-    parser.add_argument(
         "--revert-run",
         help="UUID de un run de APPLY (T5) a revertir (inversa exacta validada contra "
         "after_json). Mutuamente excluyente con --apply. NO existe --force en v1.",
@@ -336,7 +329,7 @@ async def main() -> None:
             async with AsyncSession(engine, expire_on_commit=False) as session:
                 print(f"[APPLY] ejecutando plan {source_run_id} del tenant {tid}\n")
                 try:
-                    await _apply_tenant(session, tid, source_run_id, force_group=args.force_group)
+                    await _apply_tenant(session, tid, source_run_id)
                 except ValueError as exc:
                     print(f"ERROR: {exc}")
                     sys.exit(2)

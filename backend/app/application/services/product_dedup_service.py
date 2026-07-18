@@ -1234,7 +1234,6 @@ async def _apply_one_group(
     gdata: dict[str, Any],
     *,
     lease_id: uuid.UUID | None,
-    force_group: bool,
 ) -> tuple[str, str]:
     """Aplica las mutaciones de UN grupo (NO commitea — el caller maneja la txn).
 
@@ -1270,11 +1269,8 @@ async def _apply_one_group(
     if not await _lease_still_ours(session, tenant_id, lease_id):
         raise LeaseLostError(f"lease {lease_id} ya no es de este run (tenant {tenant_id})")
 
-    # (b) Revalidar el fingerprint desde el estado ACTUAL. --force-group NO lo saltea:
-    # el fingerprint es una guarda de seguridad (cierra el hueco dry-run↔apply), no un
-    # conflicto de review. force_group es para los grupos marcados review en T4 (que ni
-    # generan items) — acá se acepta pero no debilita el fingerprint.
-    _ = force_group
+    # (b) Revalidar el fingerprint desde el estado ACTUAL: es una guarda de seguridad
+    # (cierra el hueco dry-run↔apply) que nunca se saltea.
     records = await load_product_records(session, tenant_id, set(member_ids))
     if canonical_id not in records or len(records) != len(member_ids):
         return ("skipped", _FINGERPRINT_CHANGED_REASON)
@@ -1593,7 +1589,6 @@ async def apply_dedup_plan(
     source_run_id: uuid.UUID,
     *,
     lease_id: uuid.UUID | None = None,
-    force_group: bool = False,
     ttl_seconds: int = 300,
     triggered_by: str = "script:dedupe_products_by_name",
 ) -> ApplyResult:
@@ -1671,7 +1666,7 @@ async def apply_dedup_plan(
                 break
         try:
             status, reason = await _apply_one_group(
-                session, run_id, tenant_id, gdata, lease_id=lease_id, force_group=force_group
+                session, run_id, tenant_id, gdata, lease_id=lease_id
             )
         except LeaseLostError:
             await session.rollback()
