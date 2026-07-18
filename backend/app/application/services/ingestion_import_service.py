@@ -96,8 +96,18 @@ def check_nonempty_import(
 
 
 def _normalize_name(name: str) -> str:
-    """Normaliza nombre de producto para comparación: lower, sin guiones, espacios únicos."""
-    return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", name.strip().lower()))
+    """Normaliza nombre de producto para comparación (matching de ventas/gastos/
+    compras contra el catálogo).
+
+    F2-T4 (unificación de resolución): delega en el normalizador canónico
+    ``normalize_product_name`` (``text_norm``) — la MISMA clave que usa el motor
+    de identidad del bucket de productos. Antes hacía solo ``lower`` + colapso de
+    guiones y NO sacaba acentos, así que una venta "Cafe Molido" no matcheaba un
+    producto de catálogo "Café Molido" pese a que el import de catálogo sí los
+    trataba como el mismo. Con la delegación, los tres caminos comparten una única
+    normalización (NFKD + sin diacríticos + casefold).
+    """
+    return normalize_product_name(name)
 
 
 def _normalize_supplier_name(raw: str) -> str:
@@ -592,8 +602,11 @@ async def _load_product_index(
     by_name: dict[str, uuid.UUID | None] = {}
     by_token: dict[str, set[uuid.UUID]] = {}
     for pid, pname, psku in result.all():
-        if psku:
-            by_sku[str(psku).strip().lower()] = pid
+        # F2-T4: clave de SKU canónica (``normalize_sku``), misma que el motor de
+        # identidad — antes era ``str(psku).strip().lower()`` (sin NFKD/colapso).
+        sku_key = normalize_sku(psku)
+        if sku_key:
+            by_sku[sku_key] = pid
         norm = _normalize_name(pname or "")
         if norm:
             by_name[norm] = pid if norm not in by_name else None  # None = ambiguo
@@ -667,6 +680,7 @@ async def _load_product_identity_indexes(
             Product.name,
             Product.sku,
             Product.barcode,
+            Product.custom_fields,
             Product.sku_normalized,
             Product.name_normalized,
             Product.brand_normalized,
@@ -686,6 +700,7 @@ async def _load_product_identity_indexes(
         pname,
         psku,
         pbarcode,
+        pcustom,
         sku_n,
         name_n,
         brand_n,
@@ -693,6 +708,23 @@ async def _load_product_identity_indexes(
         _created_at,
     ) in result.all():
         by_id[pid] = {"name": pname, "sku": psku, "barcode": pbarcode}
+        # Defensa contra el bloqueante de review: los productos LEGACY (previos
+        # al listener de T1) tienen las columnas ``*_normalized`` en NULL y sin
+        # esto quedarían fuera de todo índice → una importación los daría por
+        # inexistentes y crearía un duplicado. Si la columna persistida vino
+        # NULL, se computa la clave on-the-fly con los MISMOS normalizadores
+        # canónicos del listener (misma fuente de cálculo). La migración de
+        # backfill (20260731_0002) hace esto permanente en la DB; este fallback
+        # cubre la ventana previa a su corrida y cualquier drift.
+        if not name_n:
+            name_n = normalize_product_name(pname) or None
+        if not sku_n:
+            sku_n = normalize_sku(psku)
+        if not barcode_n:
+            barcode_n = normalize_barcode(pbarcode)
+        if not brand_n:
+            marca = pcustom.get("marca") if isinstance(pcustom, dict) else None
+            brand_n = normalize_brand(marca)
         if sku_n:
             by_sku.setdefault(sku_n, []).append(pid)
         if barcode_n:
@@ -803,11 +835,11 @@ def _resolve_product_identity(
 
 
 def _product_identity_lookup_keys(
-    sku_n: str | None, name_n: str, brand_n: str | None
+    sku_n: str | None, name_n: str, brand_n: str | None, barcode_n: str | None = None
 ) -> list[str]:
     """Claves de BÚSQUEDA en la caché intra-corrida (F2-T2, fix de review),
     en el MISMO orden de prioridad que el motor (``_resolve_product_identity``):
-    sku → nombre+marca → nombre. Se prueban en orden, primer hit gana.
+    barcode → sku → nombre+marca → nombre. Se prueban en orden, primer hit gana.
 
     Replica la restricción del motor: si la fila TIENE marca, el tier
     name-only NUNCA se consulta (con marca presente, el motor resuelve por
@@ -816,6 +848,8 @@ def _product_identity_lookup_keys(
     name-only que dejó registrada un producto de otra marca.
     """
     keys: list[str] = []
+    if barcode_n:
+        keys.append(f"barcode:{barcode_n}")
     if sku_n:
         keys.append(f"sku:{sku_n}")
     if brand_n:
@@ -826,7 +860,7 @@ def _product_identity_lookup_keys(
 
 
 def _product_identity_register_keys(
-    sku_n: str | None, name_n: str, brand_n: str | None
+    sku_n: str | None, name_n: str, brand_n: str | None, barcode_n: str | None = None
 ) -> list[str]:
     """Claves bajo las que se REGISTRA en la caché un producto ya
     resuelto/creado (F2-T2, fix de review): todas las aplicables, no una
@@ -835,10 +869,12 @@ def _product_identity_register_keys(
     el MISMO producto lógico pero difieren en si traen SKU — fila1 "Fideos"
     con sku registraba solo ``sku:x1``; fila2 "Fideos" sin sku buscaba
     ``nb:fideos|`` (miss) y creaba un segundo producto. Registrando bajo
-    TODAS las claves (sku si hay, nombre+marca, y nombre solo) una fila
-    posterior sin sku encuentra el producto vía ``name:fideos``.
+    TODAS las claves (barcode si hay, sku si hay, nombre+marca, y nombre
+    solo) una fila posterior sin sku encuentra el producto vía ``name:fideos``.
     """
     keys: list[str] = []
+    if barcode_n:
+        keys.append(f"barcode:{barcode_n}")
     if sku_n:
         keys.append(f"sku:{sku_n}")
     keys.append(f"nb:{name_n}|{brand_n or ''}")
@@ -847,11 +883,15 @@ def _product_identity_register_keys(
 
 
 def _lookup_product_identity_cache(
-    cache: dict[str, Product], sku_n: str | None, name_n: str, brand_n: str | None
+    cache: dict[str, Product],
+    sku_n: str | None,
+    name_n: str,
+    brand_n: str | None,
+    barcode_n: str | None = None,
 ) -> Product | None:
     """Busca en la caché intra-corrida por las claves de la fila, en orden
     de prioridad. Primer hit gana."""
-    for key in _product_identity_lookup_keys(sku_n, name_n, brand_n):
+    for key in _product_identity_lookup_keys(sku_n, name_n, brand_n, barcode_n):
         hit = cache.get(key)
         if hit is not None:
             return hit
@@ -864,11 +904,125 @@ def _register_product_identity_cache(
     sku_n: str | None,
     name_n: str,
     brand_n: str | None,
+    barcode_n: str | None = None,
 ) -> None:
     """Registra el producto resuelto/creado bajo todas sus claves de
     identidad aplicables."""
-    for key in _product_identity_register_keys(sku_n, name_n, brand_n):
+    for key in _product_identity_register_keys(sku_n, name_n, brand_n, barcode_n):
         cache[key] = product
+
+
+# ── F2-T4/T5: resolución de identidad UNIFICADA para VINCULAR transacciones ────
+# El mismo motor (``_resolve_product_identity``) que usa el bucket de catálogo se
+# comparte ahora para ventas, gastos y compras (review F2 #1/#5). Antes esos
+# caminos usaban ``_resolve_product`` (solo sku+nombre, sin barcode/marca, sin
+# distinguir ambiguo de inexistente) → una compra ambigua se interpretaba como
+# "no existe" y creaba un TERCER producto duplicado.
+
+
+def _resolve_link(
+    name: str | None,
+    sku: str | None,
+    brand: str | None,
+    barcode: str | None,
+    *,
+    indexes: ProductIdentityIndexes,
+    cache: dict[str, Product],
+) -> ProductResolution:
+    """Resuelve la identidad de un producto para VINCULAR una transacción. Consulta
+    primero la caché intra-corrida (productos creados/resueltos en esta corrida) y,
+    en miss, el motor de identidad. Devuelve el ``ProductResolution`` tal cual — el
+    caller decide qué hacer con ``resolved``/``create``/``ambiguous``/``conflict``.
+    """
+    sku_n = normalize_sku(sku)
+    name_n = normalize_product_name(name)
+    brand_n = normalize_brand(brand)
+    bc_n = normalize_barcode(barcode)
+    hit = _lookup_product_identity_cache(cache, sku_n, name_n, brand_n, bc_n)
+    if hit is not None:
+        return ProductResolution("resolved", hit.id, [])
+    return _resolve_product_identity(name, sku, brand, indexes=indexes, barcode=barcode)
+
+
+def _resolve_purchase_identity(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    name: str | None,
+    sku: str | None,
+    brand: str | None,
+    barcode: str | None,
+    unit_cost: Decimal | None,
+    indexes: ProductIdentityIndexes,
+    cache: dict[str, Product],
+    product_cache: dict[uuid.UUID, Any] | None = None,
+) -> tuple[str, uuid.UUID | None, list[dict[str, Any]]]:
+    """Resuelve el producto de una COMPRA de mercadería con el motor unificado.
+
+    Devuelve ``(action, product_id, candidates)``:
+      - ``("linked", id, [])``  → producto existente (``resolved``): vincular.
+      - ``("created", id, [])`` → ningún match (``create``): crea producto incompleto
+        (con barcode) y lo registra en la caché intra-corrida.
+      - ``("otros", None, cands)`` → ``ambiguous``/``conflict``: NO crea (evita el
+        3er duplicado del review F2 #1) — el caller rutea la fila a "Otros".
+    """
+    res = _resolve_link(name, sku, brand, barcode, indexes=indexes, cache=cache)
+    if res.status == "resolved":
+        return "linked", res.product_id, []
+    if res.status in ("ambiguous", "conflict"):
+        return "otros", None, res.candidates
+    new_id = build_incomplete_product(
+        session, tenant_id, name, sku, unit_cost, product_cache, barcode=barcode
+    )
+    if new_id is None:
+        return "otros", None, []  # sin nombre utilizable: nada que crear ni linkear
+    # ``build_incomplete_product`` cachea el ORM recién creado por id en
+    # ``product_cache``; lo registramos en la caché de identidad para que filas
+    # POSTERIORES del mismo archivo reusen el producto (no dupliquen).
+    created = product_cache.get(new_id) if product_cache is not None else None
+    if created is not None:
+        _register_product_identity_cache(
+            cache,
+            created,
+            normalize_sku(sku),
+            normalize_product_name(name),
+            normalize_brand(brand),
+            normalize_barcode(barcode),
+        )
+    return "created", new_id, []
+
+
+def _register_product_transaction_indexes(
+    product_id: uuid.UUID,
+    name: str | None,
+    sku: str | None,
+    by_sku: dict[str, uuid.UUID],
+    by_name: dict[str, uuid.UUID | None],
+    by_token: dict[str, set[uuid.UUID]],
+) -> None:
+    """Registra un producto (creado o resuelto por compra) en los índices
+    transaccionales del `_resolve_product` para que ventas/gastos POSTERIORES del
+    MISMO archivo puedan encontrarlo (review F2 #2). El motor de compras solo
+    puebla `products_by_identity_key`; sin esto, `_resolve_product` (que usa estos
+    índices) no ve el producto y una venta same-file queda sin vincular.
+
+    Ambiguity-safe (a diferencia del viejo `_ensure_product_for_purchase`, que
+    sobrescribía a ciegas): si el nombre normalizado ya apuntaba a OTRO producto,
+    queda marcado ambiguo (`None`) en vez de resolverse arbitrariamente al nuevo.
+    """
+    sku_key = normalize_sku(sku)
+    if sku_key:
+        by_sku[sku_key] = product_id
+    clean_name = _clean_str(name, 299)
+    if clean_name:
+        norm = _normalize_name(clean_name)
+        if norm:
+            if norm not in by_name:
+                by_name[norm] = product_id
+            elif by_name[norm] != product_id:
+                by_name[norm] = None  # nombre ya ambiguo → no resolver a ciegas
+        for tok in _product_name_tokens(clean_name):
+            by_token.setdefault(tok, set()).add(product_id)
 
 
 def _resolve_product(
@@ -877,16 +1031,27 @@ def _resolve_product(
     name: str | None,
     sku: str | None,
     by_token: dict[str, set[uuid.UUID]] | None = None,
+    *,
+    by_barcode: dict[str, list[uuid.UUID]] | None = None,
+    barcode: str | None = None,
 ) -> uuid.UUID | None:
-    """Resuelve product_id desde el índice en memoria.
+    """Resuelve product_id desde el índice en memoria (link de ventas/gastos/
+    compras contra el catálogo).
 
-    Tres tiers, en orden: (1) SKU exacto, (2) nombre normalizado exacto,
-    (3) Mejora B: intersección conservadora de tokens. El 3er tier solo acepta
-    cuando la intersección de los productos que comparten los tokens del nombre
-    de entrada tiene EXACTAMENTE un id (0 o >1 → abstención, sin inventar).
+    Tiers, en orden de prioridad: (0) F2-T5 barcode exacto (EAN/UPC — el
+    identificador más fuerte; solo si matchea a un único producto), (1) SKU
+    exacto, (2) nombre normalizado exacto, (3) Mejora B: intersección
+    conservadora de tokens. El tier de tokens solo acepta cuando la intersección
+    de los productos que comparten los tokens del nombre de entrada tiene
+    EXACTAMENTE un id (0 o >1 → abstención, sin inventar). El barcode/sku ganan
+    sobre el nombre — un identificador fuerte desambigua un nombre repetido.
     """
+    if barcode and by_barcode is not None:
+        bc_ids = by_barcode.get(normalize_barcode(barcode) or "")
+        if bc_ids and len(bc_ids) == 1:  # único → clave fuerte; ambiguo → no inventar
+            return bc_ids[0]
     if sku:
-        hit = by_sku.get(str(sku).strip().lower())
+        hit = by_sku.get(normalize_sku(sku) or "")  # F2-T4: clave canónica
         if hit:
             return hit
     if name:
@@ -1049,6 +1214,8 @@ def build_incomplete_product(
     sku: str | None,
     unit_cost: Decimal | None,
     product_cache: dict[uuid.UUID, Any] | None = None,
+    *,
+    barcode: str | None = None,
 ) -> uuid.UUID | None:
     """Construye y agrega a la sesión un ``Product`` vendible INCOMPLETO desde una
     compra de mercadería, devolviendo su id (o ``None`` si no hay nombre utilizable).
@@ -1071,6 +1238,7 @@ def build_incomplete_product(
     if not clean_name:
         return None
     clean_sku = _clean_str(sku, 99)
+    clean_barcode = _clean_str(barcode, 64)  # F2-T5
 
     new_id = uuid.uuid4()
     product = Product(
@@ -1078,6 +1246,7 @@ def build_incomplete_product(
         tenant_id=tenant_id,
         name=clean_name,
         sku=clean_sku,
+        barcode=clean_barcode,  # F2-T5
         sale_price_ars=Decimal("0"),  # una compra no trae precio de venta
         unit_cost_ars=unit_cost,
         stock_units=0,  # el incremento lo hace quien corresponda después
@@ -1126,8 +1295,10 @@ def _ensure_product_for_purchase(
     clean_name = _clean_str(name, 299)
     clean_sku = _clean_str(sku, 99)
     # Cachear para que filas repetidas del mismo SKU/nombre no dupliquen producto.
-    if clean_sku:
-        by_sku[clean_sku.lower()] = new_id
+    # F2-T4: clave canónica (``normalize_sku``), consistente con _load_product_index.
+    sku_key = normalize_sku(clean_sku)
+    if sku_key:
+        by_sku[sku_key] = new_id
     if clean_name:
         norm = _normalize_name(clean_name)
         if norm:
@@ -1394,6 +1565,13 @@ _STOCK_COLS: set[str] = {
     "stock", "cantidad", "inventario", "units", "qty", "existencia", "stock_actual",
 }
 _SKU_COLS: set[str] = {"sku", "codigo", "código", "code", "ref", "id_producto"}
+# F2-T5: columnas de código de barras (EAN/UPC/GTIN). Tokens distintivos para no
+# colisionar con el "codigo" genérico de _SKU_COLS; "barras" alcanza (substring)
+# para "codigo de barras"/"cod. barras". La colisión residual (un header que
+# matchea ambos) se resuelve dando prioridad a barcode sobre sku en la detección.
+_BARCODE_COLS: set[str] = {
+    "barcode", "ean", "upc", "gtin", "barras", "cod_barra", "codigo_barra",
+}
 _PROVEEDOR_COLS: set[str] = {
     "proveedor",
     "proveedores",
@@ -1818,7 +1996,13 @@ async def _insert_confirmed_data_impl(
         # resuelta). Antes el genérico "precio" tomaba "Precio de compra".
         precio_col = _resolve_sale_price_col(headers, costo_col)
         stock_col = _find_col(headers, _STOCK_COLS)
+        # F2-T5: barcode ANTES que sku para poder desambiguar la colisión ("código
+        # de barras" matchea también "codigo" de _SKU_COLS). Si el único header
+        # tipo-código es el barcode, gana barcode (no es un SKU).
+        barcode_col = _find_col(headers, _BARCODE_COLS)
         sku_col = _find_col(headers, _SKU_COLS)
+        if sku_col is not None and sku_col == barcode_col:
+            sku_col = None
         supplier_col = _find_col(headers, _PROVEEDOR_COLS)
 
         # Columnas extra (solo disponibles con column_mappings explícitos)
@@ -1860,6 +2044,9 @@ async def _insert_confirmed_data_impl(
             costo_col = target_to_col.get("unit_cost_ars") or costo_col
             stock_col = target_to_col.get("stock_units") or stock_col
             sku_col = target_to_col.get("sku") or sku_col
+            barcode_col = target_to_col.get("barcode") or barcode_col
+            if sku_col is not None and sku_col == barcode_col:
+                sku_col = None
             supplier_col = target_to_col.get("supplier_name") or supplier_col
 
             # Campos extra solo disponibles con mapeo explícito
@@ -1890,13 +2077,24 @@ async def _insert_confirmed_data_impl(
             and nombre_col
         )
 
-        # FASE 3: índice de catálogo en memoria para vincular ventas y gastos
-        # (B1) al producto. Una sola carga; vacío si no hay columnas de nombre/sku.
+        # FASE 3: índice de catálogo en memoria para el LINK de ventas/gastos/compras
+        # (tiers sku exacto → nombre → tokens, con SKU-que-gana-sobre-nombre). Una
+        # sola carga; vacío si no hay columnas de nombre/sku.
         _by_sku, _by_name, _by_token = (
             await _load_product_index(session, tenant_id)
             if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
             else ({}, {}, {})
         )
+        # F2-T4/T5: índices de identidad + caché intra-corrida COMPARTIDOS por el
+        # bucket de productos, la decisión de CREAR de compras (motor con detección
+        # de ambiguo/conflicto → Otros) y el tier de BARCODE del link de
+        # ventas/gastos (``_identity_indexes.by_barcode``). Una carga por corrida.
+        _identity_indexes = (
+            await _load_product_identity_indexes(session, tenant_id)
+            if (wants_ventas or wants_gastos or wants_productos)
+            else ProductIdentityIndexes({}, {}, {}, {}, {})
+        )
+        products_by_identity_key: dict[str, Product] = {}
         # Índice de proveedores para find-or-create en COMPRAS. Una sola carga;
         # vacío salvo en el path de compras (gastos con columna de proveedor) o
         # cuando hay que asignar el sentinela a compras de mercadería sin proveedor.
@@ -1932,6 +2130,12 @@ async def _insert_confirmed_data_impl(
         # dos veces sobre las MISMAS filas. ``wants_gastos`` y ``wants_productos``
         # NO son mutuamente excluyentes y pueden correr sobre el mismo ``rows``.
         _merch_purchase_rows: set[int] = set()
+        # Review F2 #1: filas de COMPRA ruteadas a "Otros" (producto ambiguo/en
+        # conflicto). El bucket de productos también las saltea — si no, con
+        # wants_gastos+wants_productos sobre las mismas rows, la fila se capturaría
+        # a Otros dos veces. Set aparte de _merch_purchase_rows: acá NO se aplicó
+        # una compra (no se creó producto ni stock), solo se difirió a revisión.
+        _captured_to_otros_rows: set[int] = set()
 
         for row_index, row in enumerate(rows):
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
@@ -1950,6 +2154,10 @@ async def _insert_confirmed_data_impl(
             ):
                 continue
             _inserted_before = counts["ventas"] + counts["gastos"]
+            # Review F2 #4/#6: resultado "captura a Otros" de esta fila. Se trata
+            # como output persistido (registra fingerprint) sin usar `continue`,
+            # para no saltear el bloque de idempotencia del final de la iteración.
+            _captured_to_otros = False
 
             raw_date = row.get(fecha_col) if fecha_col else None
             tx_date = _parse_date(raw_date) if fecha_col else None
@@ -2011,13 +2219,15 @@ async def _insert_confirmed_data_impl(
                     )
                     if cf:
                         entry.custom_fields = cf
-                    # FASE 3: vincular al producto del catálogo (por SKU/nombre de la fila).
+                    # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
                     entry.product_id = _resolve_product(
                         _by_sku,
                         _by_name,
                         row.get(nombre_col) if nombre_col else None,
                         row.get(sku_col) if sku_col else None,
                         _by_token,
+                        by_barcode=_identity_indexes.by_barcode,
+                        barcode=row.get(barcode_col) if barcode_col else None,
                     )
                     # Mejora D: trazabilidad import → fila origen.
                     if _row_anchor is not None:
@@ -2096,13 +2306,18 @@ async def _insert_confirmed_data_impl(
                         )
                         if expense.supplier_name:
                             _real_suppliers.add(expense.supplier_name)
-                    # FASE 3 (B1): vincular el gasto al producto del catálogo.
+                    # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
+                    _exp_name = str(row.get(nombre_col)) if nombre_col else None
+                    _exp_sku = str(row.get(sku_col)) if sku_col else None
+                    _exp_barcode = row.get(barcode_col) if barcode_col else None
                     expense.product_id = _resolve_product(
                         _by_sku,
                         _by_name,
-                        str(row.get(nombre_col)) if nombre_col else None,
-                        str(row.get(sku_col)) if sku_col else None,
+                        _exp_name,
+                        _exp_sku,
                         _by_token,
+                        by_barcode=_identity_indexes.by_barcode,
+                        barcode=_exp_barcode,
                     )
                     # FASE D: COGS si la fila es compra de mercadería (producto
                     # del catálogo o categoría INVENTORY); además suma stock si
@@ -2131,68 +2346,103 @@ async def _insert_confirmed_data_impl(
                     # orden inverso dejaba los productos nuevos como OPEX y nunca se
                     # creaban. Gate por (nombre + cantidad>0) o categoría INVENTORY:
                     # los gastos de servicio/alquiler (sin cantidad) NO crean producto.
-                    exp_name = str(row.get(nombre_col)) if nombre_col else None
                     _has_qty = _parse_qty(exp_qty_raw) > 0
-                    _is_merch_purchase = bool(_clean_str(exp_name, 299)) and _has_qty
+                    _is_merch_purchase = bool(_clean_str(_exp_name, 299)) and _has_qty
                     if expense.product_id is None and (
                         _is_merch_purchase or (cat_code == "INVENTORY" and _has_qty)
                     ):
-                        expense.product_id = _ensure_product_for_purchase(
+                        _action, _pid, _cands = _resolve_purchase_identity(
                             session,
                             tenant_id,
-                            exp_name,
-                            str(row.get(sku_col)) if sku_col else None,
-                            exp_unit_cost,
-                            _by_sku,
-                            _by_name,
-                            _by_token,
+                            name=_exp_name,
+                            sku=_exp_sku,
+                            brand=None,
+                            barcode=_exp_barcode,
+                            unit_cost=exp_unit_cost,
+                            indexes=_identity_indexes,
+                            cache=products_by_identity_key,
                             product_cache=_product_cache,
                         )
-                        if expense.product_id is not None:
-                            counts["sin_producto"] += 1
-                    # FASE D: COGS si la fila es compra de mercadería (producto del
-                    # catálogo/recién creado o categoría INVENTORY); suma stock si trae
-                    # cantidad explícita.
-                    expense.expense_type = infer_expense_type(
-                        cat_code, product_id=expense.product_id
-                    )
-                    # Sentinela: una compra de mercadería (tiene product_id) SIN
-                    # proveedor informado se agrupa en "No identificado" — UNO por
-                    # tenant. NO se aplica a OPEX (gastos operativos sin producto).
-                    if expense.supplier_id is None and expense.product_id is not None:
-                        expense.supplier_id = await _resolve_or_create_sentinel_supplier(
-                            session, tenant_id, _supplier_index
+                        if _action == "otros":
+                            # Review F2 #1/#3: compra con producto ambiguo/en conflicto
+                            # NO crea un 3er producto — la fila va a "Otros" (con
+                            # match_candidates), el gasto NO se registra, y se marca la
+                            # fila para que el bucket de productos NO la recapture.
+                            counts["otros"] += _capture_unclassified(
+                                session,
+                                tenant_id,
+                                rows=[row],
+                                headers=headers,
+                                source=source,
+                                uploaded_file_id=uploaded_file_id,
+                                context_label="Compra de producto ambiguo: coincide "
+                                "con varios productos del catálogo",
+                                suggested_entity="expense",
+                                match_candidates=_cands,
+                            )
+                            _captured_to_otros_rows.add(row_index)
+                            _captured_to_otros = True
+                        else:
+                            expense.product_id = _pid
+                            # Review F2 #3: solo "created" creó un producto incompleto;
+                            # "linked" reusó uno ya creado en la corrida (no cuenta).
+                            if _action == "created":
+                                counts["sin_producto"] += 1
+                            # Review F2 #2: registrar en los índices transaccionales
+                            # (los de _resolve_product) para que ventas/gastos
+                            # POSTERIORES del mismo archivo puedan vincularlo.
+                            if _pid is not None:
+                                _register_product_transaction_indexes(
+                                    _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token
+                                )
+                    # Review F2 #4: la cola de "aplicar el gasto" se saltea SIN
+                    # `continue` (así el bloque de fingerprint del final igual corre).
+                    if not _captured_to_otros:
+                        # FASE D: COGS si la fila es compra de mercadería (producto del
+                        # catálogo/recién creado o categoría INVENTORY); suma stock si
+                        # trae cantidad explícita.
+                        expense.expense_type = infer_expense_type(
+                            cat_code, product_id=expense.product_id
                         )
-                        _sentinel_used = True
-                        counts["sin_proveedor"] += 1
-                    await _apply_purchase_to_stock(
-                        session,
-                        tenant_id,
-                        expense,
-                        exp_qty_raw,
-                        exp_unit_cost,
-                        balance_index=_balance_index,
-                        product_cache=_product_cache,
-                        source_row_ref=_source_row_ref(_row_anchor),
-                    )
-                    # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
-                    # stock (producto ligado + cantidad>0), marcarla para que el
-                    # bloque de productos NO la reprocese (evita producto duplicado
-                    # y doble escritura de stock sobre la misma fila).
-                    if expense.product_id is not None and _has_qty:
-                        _merch_purchase_rows.add(row_index)
-                    # Mejora D: trazabilidad import → fila origen.
-                    if _row_anchor is not None:
-                        expense.source_row_ref = _source_row_ref(_row_anchor)
-                    session.add(expense)
-                    counts["gastos"] += 1
+                        # Sentinela: una compra de mercadería (tiene product_id) SIN
+                        # proveedor informado se agrupa en "No identificado" — UNO por
+                        # tenant. NO se aplica a OPEX (gastos operativos sin producto).
+                        if expense.supplier_id is None and expense.product_id is not None:
+                            expense.supplier_id = await _resolve_or_create_sentinel_supplier(
+                                session, tenant_id, _supplier_index
+                            )
+                            _sentinel_used = True
+                            counts["sin_proveedor"] += 1
+                        await _apply_purchase_to_stock(
+                            session,
+                            tenant_id,
+                            expense,
+                            exp_qty_raw,
+                            exp_unit_cost,
+                            balance_index=_balance_index,
+                            product_cache=_product_cache,
+                            source_row_ref=_source_row_ref(_row_anchor),
+                        )
+                        # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
+                        # stock (producto ligado + cantidad>0), marcarla para que el
+                        # bloque de productos NO la reprocese (evita producto duplicado
+                        # y doble escritura de stock sobre la misma fila).
+                        if expense.product_id is not None and _has_qty:
+                            _merch_purchase_rows.add(row_index)
+                        # Mejora D: trazabilidad import → fila origen.
+                        if _row_anchor is not None:
+                            expense.source_row_ref = _source_row_ref(_row_anchor)
+                        session.add(expense)
+                        counts["gastos"] += 1
 
-            # B1: registrar la huella SOLO si la fila produjo ≥1 registro
-            # (venta/gasto). Si no insertó nada (sin monto parseable, mapeo
-            # incorrecto, etc.) NO se quema y podrá reintentarse corregida.
-            if (
-                _row_anchor is not None
-                and counts["ventas"] + counts["gastos"] > _inserted_before
+            # B1: registrar la huella si la fila produjo output (venta/gasto O
+            # captura a Otros — review F2 #6: una captura a Otros es un resultado
+            # PERSISTIDO; sin esto, re-subir el archivo re-crea el UnclassifiedRecord).
+            # Si no produjo nada (sin monto parseable, mapeo incorrecto) NO se quema
+            # y podrá reintentarse corregida.
+            if _row_anchor is not None and (
+                counts["ventas"] + counts["gastos"] > _inserted_before
+                or _captured_to_otros
             ):
                 await _register_import_row_fingerprint(
                     session, tenant_id, _row_anchor, seen_fp
@@ -2217,22 +2467,21 @@ async def _insert_confirmed_data_impl(
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
             _skipped_brands: set[str] = set()
-            # F2-T2: caché intra-corrida por CLAVE DE IDENTIDAD de la fila (sku
-            # o nombre+marca) — no solo nombre. Evita duplicar producto cuando
-            # 2 filas del MISMO archivo comparten identidad en un mismo bloque
-            # (<500) — con autoflush=False (prod) el SELECT no ve el pendiente
-            # sin flush. Poblada al crear O al resolver (status=resolved).
-            products_by_identity_key: dict[str, Product] = {}
-            # F2-T2: índices de identidad pre-cargados UNA vez para esta
-            # corrida (no un SELECT por fila) — alimentan el motor de
-            # resolución por barcode/sku/nombre+marca.
-            _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
+            # F2-T4/T5: ``_identity_indexes`` y ``products_by_identity_key`` ya se
+            # cargaron/crearon hoisteados arriba (compartidos con el link de
+            # ventas/gastos/compras — motor unificado). La caché de identidad es la
+            # MISMA: un producto creado por una compra en el bloque de gastos ya
+            # quedó registrado y una fila de catálogo posterior lo reusa.
             for _prod_index, row in enumerate(rows):
                 # A4 (RC2): fila ya importada como compra de mercadería en el bloque
-                # de gastos (creó producto + stock + COGS). Reprocesarla acá crearía
-                # un producto duplicado (autoflush=False oculta el pendiente al
-                # ``select``) y escribiría el stock dos veces. Se saltea.
-                if _prod_index in _merch_purchase_rows:
+                # de gastos (creó producto + stock + COGS) → reprocesarla duplicaría
+                # producto/stock. Review F2 #1: o ya fue capturada a "Otros" por
+                # ambigüedad en compras → recapturarla acá crearía un 2º
+                # UnclassifiedRecord para la misma fila. En ambos casos se saltea.
+                if (
+                    _prod_index in _merch_purchase_rows
+                    or _prod_index in _captured_to_otros_rows
+                ):
                     continue
                 name = str(row.get(nombre_col, "")).strip()[:299]
                 if not name or name.lower() in {"none", "nan", ""}:
@@ -2274,6 +2523,8 @@ async def _insert_confirmed_data_impl(
                     if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"}
                     else None
                 )
+                # F2-T5: código de barras de la fila (si el archivo trae la columna).
+                barcode = _clean_str(row.get(barcode_col), 64) if barcode_col else None
                 # FASE E: categoría canónica del vertical (antes se ignoraba en
                 # este path). Sin columna de categoría → None (sin categoría).
                 prod_cat_raw = _clean_str(
@@ -2294,12 +2545,13 @@ async def _insert_confirmed_data_impl(
                 _sku_n = normalize_sku(sku)
                 _name_n = normalize_product_name(name)
                 _brand_n = normalize_brand(store_name)
+                _bc_n = normalize_barcode(barcode)
                 existing = _lookup_product_identity_cache(
-                    products_by_identity_key, _sku_n, _name_n, _brand_n
+                    products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
                 )
                 if existing is None:
                     _resolution = _resolve_product_identity(
-                        name, sku, store_name, indexes=_identity_indexes
+                        name, sku, store_name, indexes=_identity_indexes, barcode=barcode
                     )
                     if _resolution.status in ("ambiguous", "conflict"):
                         counts["productos_ambiguos"] += 1
@@ -2372,10 +2624,14 @@ async def _insert_confirmed_data_impl(
                         )
                     if sku:
                         existing.sku = sku
+                    # F2-T5: completar barcode solo si el producto no tenía (no pisar
+                    # un barcode ya cargado con el de una fila de reposición).
+                    if barcode and not existing.barcode:
+                        existing.barcode = barcode
                     if prod_cat and not existing.category:
                         existing.category = prod_cat
                     _register_product_identity_cache(
-                        products_by_identity_key, existing, _sku_n, _name_n, _brand_n
+                        products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
                     )
                     if return_details:
                         product_details.append(
@@ -2408,6 +2664,7 @@ async def _insert_confirmed_data_impl(
                         # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                         sale_price_ars=price or Decimal("0"),
                         sku=sku,
+                        barcode=barcode,  # F2-T5
                         unit_cost_ars=cost,
                         stock_units=stock_val,
                         category=prod_cat,
@@ -2421,7 +2678,7 @@ async def _insert_confirmed_data_impl(
                     )
                     session.add(new_product)
                     _register_product_identity_cache(
-                        products_by_identity_key, new_product, _sku_n, _name_n, _brand_n
+                        products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
                     )
                     # FASE 3 + A2/A5: audit del ingreso inicial de stock + balance +,
                     # si trae stock con costo, su COGS (stock inicial = compra real).
@@ -2643,7 +2900,7 @@ async def _insert_multisheet_data(
     context_mappings = context_mappings or {}
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
 
-    # FASE 3: índice de catálogo para vincular ventas/gastos a producto (en memoria).
+    # FASE 3: índice de catálogo para el LINK de ventas/gastos/compras (en memoria).
     _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
     # Índice de proveedores para find-or-create en compras (una carga).
     _supplier_index = await _load_supplier_index(session, tenant_id)
@@ -2727,13 +2984,15 @@ async def _insert_multisheet_data(
         cf = _custom_fields(row, cf_cols)
         if cf:
             entry.custom_fields = cf
-        # FASE 3: vincular al producto del catálogo.
+        # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         entry.product_id = _resolve_product(
             _by_sku,
             _by_name,
             _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
             _val(row, cols.get("sku"), _SKU_COLS),
             _by_token,
+            by_barcode=_identity_indexes.by_barcode,
+            barcode=_val(row, cols.get("barcode"), _BARCODE_COLS),
         )
         if row_ref is not None:
             entry.source_row_ref = row_ref  # Mejora D
@@ -2801,13 +3060,18 @@ async def _insert_multisheet_data(
             )
             if expense.supplier_name:
                 _real_suppliers.add(expense.supplier_name)
-        # FASE 3 (B1): vincular el gasto al producto del catálogo (compra de mercadería).
+        # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
+        _exp_name = _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
+        _exp_sku = _val(row, cols.get("sku"), _SKU_COLS)
+        _exp_barcode = _val(row, cols.get("barcode"), _BARCODE_COLS)
         expense.product_id = _resolve_product(
             _by_sku,
             _by_name,
-            _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
-            _val(row, cols.get("sku"), _SKU_COLS),
+            _exp_name,
+            _exp_sku,
             _by_token,
+            by_barcode=_identity_indexes.by_barcode,
+            barcode=_exp_barcode,
         )
         # Costo unitario: columna inequívoca y DISTINTA de la del monto ("costo"
         # a secas suele ser el total de la línea — no es unit_cost).
@@ -2829,25 +3093,52 @@ async def _insert_multisheet_data(
         # producto ANTES de inferir expense_type para que un producto NUEVO (no en
         # catálogo, sin categoría) quede COGS por su product_id — el orden inverso lo
         # dejaba OPEX y nunca se creaba. Servicios/alquiler (sin cantidad) NO crean.
-        _exp_name = _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
         _has_qty = _parse_qty(exp_qty_raw) > 0
         _is_merch_purchase = bool(_clean_str(_exp_name, 299)) and _has_qty
         if expense.product_id is None and (
             _is_merch_purchase or (cat_code == "INVENTORY" and _has_qty)
         ):
-            expense.product_id = _ensure_product_for_purchase(
+            _action, _pid, _cands = _resolve_purchase_identity(
                 session,
                 tenant_id,
-                _exp_name,
-                _val(row, cols.get("sku"), _SKU_COLS),
-                unit_cost,
-                _by_sku,
-                _by_name,
-                _by_token,
+                name=_exp_name,
+                sku=_exp_sku,
+                brand=None,
+                barcode=_exp_barcode,
+                unit_cost=unit_cost,
+                indexes=_identity_indexes,
+                cache=products_by_identity_key,
                 product_cache=product_cache,
             )
-            if expense.product_id is not None:
+            if _action == "otros":
+                # Review F2 #1: compra ambigua/en conflicto NO crea un 3er producto
+                # duplicado — la fila va a "Otros" y el gasto NO se registra.
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=None,  # sin headers de hoja en este scope
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label="Compra de producto ambiguo: coincide con "
+                    "varios productos del catálogo",
+                    suggested_entity="expense",
+                    match_candidates=_cands,
+                )
+                # Review F2 #6: la captura a Otros es output PERSISTIDO → devolver
+                # True para que el caller registre el fingerprint (re-subir el
+                # archivo no debe re-crear el UnclassifiedRecord).
+                return True
+            expense.product_id = _pid
+            # Review F2 #3: solo "created" creó un producto incompleto.
+            if _action == "created":
                 counts["sin_producto"] += 1
+            # Review F2 #2: registrar en los índices transaccionales para que
+            # ventas/gastos POSTERIORES del mismo archivo puedan vincularlo.
+            if _pid is not None:
+                _register_product_transaction_indexes(
+                    _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token
+                )
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
@@ -2935,6 +3226,8 @@ async def _insert_multisheet_data(
         except (ValueError, TypeError):
             stock_val = 0
         sku = _clean_str(_val(row, cols.get("sku"), _SKU_COLS), 99)
+        # F2-T5: código de barras (columna mapeada o detección por keyword).
+        barcode = _clean_str(_val(row, cols.get("barcode"), _BARCODE_COLS), 64)
         # FASE E: categoría canónica del vertical; sin columna → None.
         cat_raw = _clean_str(
             row.get(cols["category"]) if cols.get("category") else _row_val_categoria(row),
@@ -2951,12 +3244,13 @@ async def _insert_multisheet_data(
         _sku_n = normalize_sku(sku)
         _name_n = normalize_product_name(name)
         _brand_n = normalize_brand(store_name)
+        _bc_n = normalize_barcode(barcode)
         existing = _lookup_product_identity_cache(
-            products_by_identity_key, _sku_n, _name_n, _brand_n
+            products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
         )
         if existing is None:
             _resolution = _resolve_product_identity(
-                name, sku, store_name, indexes=_identity_indexes
+                name, sku, store_name, indexes=_identity_indexes, barcode=barcode
             )
             if _resolution.status in ("ambiguous", "conflict"):
                 counts["productos_ambiguos"] += 1
@@ -3020,10 +3314,12 @@ async def _insert_multisheet_data(
                 )
             if sku:
                 existing.sku = sku
+            if barcode and not existing.barcode:  # F2-T5: completar sin pisar
+                existing.barcode = barcode
             if cat and not existing.category:
                 existing.category = cat
             _register_product_identity_cache(
-                products_by_identity_key, existing, _sku_n, _name_n, _brand_n
+                products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
             )
         else:
             cf = _custom_fields(row, cf_cols)
@@ -3037,6 +3333,7 @@ async def _insert_multisheet_data(
                 tenant_id=tenant_id,
                 name=name,
                 sku=sku,
+                barcode=barcode,  # F2-T5
                 # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                 sale_price_ars=price or Decimal("0"),
                 unit_cost_ars=cost,
@@ -3051,7 +3348,7 @@ async def _insert_multisheet_data(
             )
             session.add(new_product)
             _register_product_identity_cache(
-                products_by_identity_key, new_product, _sku_n, _name_n, _brand_n
+                products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
             )
             # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
             # = compra real, si trae costo).
@@ -3282,6 +3579,8 @@ async def bulk_import_unclassified(
         return counts
 
     _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
+    # F2-T5: índices de identidad solo para el tier de barcode del link.
+    _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
     _business_type = await _load_business_type(session, tenant_id)
     _flush_every = 500
 
@@ -3314,6 +3613,8 @@ async def bulk_import_unclassified(
             _clean_str(_row_val(row, _NOMBRE_COLS), 299),
             _clean_str(_row_val(row, _SKU_COLS), 99),
             _by_token,
+            by_barcode=_identity_indexes.by_barcode,
+            barcode=_clean_str(_row_val(row, _BARCODE_COLS), 64),
         )
 
         if rec.suggested_entity == "sale":
@@ -3423,6 +3724,9 @@ async def import_receipt(
     from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
     tx_date = transaction_date or now_ar_naive()
+    # F2-T4: ``_resolve_product`` normaliza canónicamente (accent/dash-aware),
+    # compartido con el import; un remito es human-in-the-loop y SIEMPRE crea el
+    # producto incompleto si no resuelve.
     by_sku, by_name, by_token = await _load_product_index(session, tenant_id)
     balance_index = await _load_balance_index(session, tenant_id)
     product_cache: dict[uuid.UUID, Any] = {}

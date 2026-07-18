@@ -33,6 +33,7 @@ const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> 
   ],
   product: [
     { value: "sku", label: "Código (SKU)" },
+    { value: "barcode", label: "Código de barras (EAN/UPC)" },
     { value: "name", label: "Nombre" },
     { value: "sale_price_ars", label: "Precio de venta" },
     { value: "unit_cost_ars", label: "Costo unitario" },

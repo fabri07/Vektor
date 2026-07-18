@@ -34,6 +34,7 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
     },
     "product": {
         "sku": "Código (SKU)",
+        "barcode": "Código de barras (EAN/UPC)",
         "name": "Nombre",
         "sale_price_ars": "Precio de venta",
         "unit_cost_ars": "Costo unitario",
@@ -118,6 +119,12 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
     },
     "product": {
         "sku": {"sku", "codigo", "código", "code", "ref", "id_producto"},
+        # Tokens distintivos de código de barras. "codigo_de_barras" (más largo)
+        # le gana a "codigo" de sku en el desempate por longitud de _heuristic_match.
+        "barcode": {
+            "barcode", "ean", "upc", "gtin", "barras",
+            "codigo_de_barras", "cod_barra", "codigo_barra",
+        },
         "name": {
             "producto",
             "descripcion",

@@ -65,6 +65,17 @@ def test_heuristic_match_product() -> None:
     assert _heuristic_match("stock", "product") == "stock_units"
 
 
+def test_heuristic_match_product_barcode() -> None:
+    # Review F2 #4: barcode mapeable. El header llega YA normalizado (underscores)
+    # del caller (_normalize_col). "codigo_de_barras" matchea exacto → barcode;
+    # "codigo" a secas sigue siendo sku.
+    assert _heuristic_match("ean", "product") == "barcode"
+    assert _heuristic_match("codigo_de_barras", "product") == "barcode"
+    assert _heuristic_match("upc", "product") == "barcode"
+    assert _heuristic_match("barras", "product") == "barcode"
+    assert _heuristic_match("codigo", "product") == "sku"
+
+
 def test_heuristic_match_none_for_unknown() -> None:
     assert _heuristic_match("xyz_desconocido_123", "sale") is None
     assert _heuristic_match("color", "product") is None
