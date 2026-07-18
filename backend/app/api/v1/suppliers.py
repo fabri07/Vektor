@@ -233,13 +233,15 @@ async def list_supplier_products(
     response_model=ReceiptResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Import a supplier receipt (remito)",
-    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def create_receipt(
     supplier_id: UUID,
     body: CreateReceiptRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
+    # lockeado recibiría 423 en vez de 403.
     user: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ReceiptResponse:

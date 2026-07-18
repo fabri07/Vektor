@@ -83,6 +83,10 @@ async def check_stock_available(
     Devuelve el ``Product`` bloqueado (queda en el identity map: ``decrement_stock`` lo
     reusa sin reconsultar). Reusable por todos los caminos de venta en vivo.
     """
+    # F3-T3 review: el advisory shared SIEMPRE antes que cualquier FOR UPDATE — si un
+    # writer tomara la fila primero y pidiera el advisory después, podría deadlockear
+    # contra el dedup (que toma el exclusive y luego intentaría lockear la misma fila).
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     product = (
         await db.execute(
             select(Product)
@@ -136,6 +140,8 @@ async def decrement_stock(
     *,
     occurred_at: datetime | None = None,
 ) -> InventoryMovement:
+    # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     product = await db.get(Product, product_id)
     if product is None or product.tenant_id != tenant_id:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
@@ -202,6 +208,9 @@ async def increment_stock(
     occurred_at: datetime | None = None,
     defer_event: bool = False,
 ) -> InventoryMovement:
+    # F3-T3 review: advisory shared ANTES del FOR UPDATE de fila (orden fijo, evita
+    # deadlock AB-BA contra el exclusive del dedup).
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     # Serializa compras concurrentes del mismo producto para no perder incrementos
     # en ``stock_units``/``InventoryBalance.current_qty``.
     product = (
@@ -263,6 +272,8 @@ async def register_stock_loss(
     db: AsyncSession,
 ) -> InventoryMovement:
     """HIGH risk: decrements stock and creates a reinforced audit entry."""
+    # F3-T3 review: acquire al tope del entry point.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     product = await db.get(Product, product_id)
     if product is None or product.tenant_id != tenant_id:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
@@ -327,6 +338,8 @@ async def void_movement(
     """
     if movement.voided_at is not None:
         return
+    # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
+    await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
     product = await db.get(Product, movement.product_id)
     if product is not None and product.tenant_id == movement.tenant_id:
         # Sembrar el balance ANTES de mutar stock_units: _get_or_create_balance inicializa
@@ -350,6 +363,8 @@ async def unvoid_movement(
     """
     if movement.voided_at is None:
         return
+    # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
+    await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
     product = await db.get(Product, movement.product_id)
     if product is not None and product.tenant_id == movement.tenant_id:
         balance = await _get_or_create_balance(product, movement.tenant_id, db)
@@ -430,6 +445,10 @@ async def decrement_for_sale(
         return None
     if await _live_sale_movement(sale.id, sale.tenant_id, db) is not None:
         return None
+    # F3-T3 review: acquire explícito acá también (aunque check_stock_available ya lo
+    # toma) para que el orden quede garantizado en este entry point sin depender de
+    # que el próximo cambio en check_stock_available lo preserve.
+    await maintenance_lock_service.acquire_write_lock_shared(db, sale.tenant_id)
     # NO se permite stock negativo: validar (con lock) antes de descontar. Si no alcanza,
     # levanta InsufficientStockError y la venta NO se descuenta (ni se persiste: el request
     # revierte). El producto bloqueado queda en el identity map → decrement_stock lo reusa.
@@ -469,6 +488,9 @@ async def revert_sale_stock(
     movement = await _live_sale_movement(sale_id, tenant_id, db)
     if movement is None:
         return False
+    # F3-T3 review: acquire explícito acá también (void_movement ya lo toma) para
+    # fijar el orden en este entry point independientemente de void_movement.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     await void_movement(movement, db)
     return True
 

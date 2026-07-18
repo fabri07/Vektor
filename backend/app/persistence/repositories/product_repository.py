@@ -6,6 +6,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# F3-T3 review (MINOR, no bloqueante): import de Application desde Persistence,
+# viola la dirección de capas del repo. Evaluado mover el acquire a cada caller de
+# save() (4 call sites: products.py x3, pending_action_service.py x1) pero se
+# decidió mantenerlo ACÁ a propósito: save() es el único chokepoint común de TODA
+# creación/actualización de producto vía repo, y un futuro caller que se agregue
+# sin acordarse del acquire rompería silenciosamente la barrera de exclusión mutua
+# contra el dedup. El riesgo de un import cruzado puntual es menor que el riesgo de
+# una regresión de correctness no cubierta por tests. Revisar si en algún momento
+# `maintenance_lock_service` se muda a un paquete neutral (ni app ni persistence).
 from app.application.services import maintenance_lock_service
 from app.persistence.models.product import Product
 

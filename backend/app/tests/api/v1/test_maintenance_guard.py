@@ -28,6 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services import maintenance_lock_service
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_STATUS_PENDING,
+    UnclassifiedRecord,
+)
 from app.persistence.repositories.product_repository import ProductRepository
 
 _PRODUCT_PAYLOAD = {
@@ -134,6 +138,64 @@ class TestMaintenanceGuard423:
         )
         resp = await client.get("/api/v1/products", headers=auth_headers)
         assert resp.status_code == 200
+
+    async def test_post_others_reclassify_423_when_locked(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        auth_headers: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """CRITICAL 1 (review): reclassify_record muta Product (crea/vincula) y
+        quedaba sin gatear. Con el tenant lockeado, un POST reclassify hacia
+        entity_type="product" debe cortar en 423 antes de crear el producto."""
+        record = UnclassifiedRecord(
+            id=uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            source="ingestion",
+            row_data={"nombre": "Yerba 1kg", "precio": "2500"},
+            suggested_entity="product",
+            status=UNCLASSIFIED_STATUS_PENDING,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        monkeypatch.setattr(
+            maintenance_lock_service,
+            "is_locked",
+            unittest.mock.AsyncMock(return_value=True),
+        )
+        resp = await client.post(
+            f"/api/v1/others/{record.id}/reclassify",
+            json={
+                "entity_type": "product",
+                "fields": {**_PRODUCT_PAYLOAD, "name": "Yerba 1kg Reclasificada"},
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 423
+        assert "mantenimiento" in resp.json()["detail"].lower()
+
+    async def test_post_products_403_for_viewer_even_when_locked(
+        self,
+        client: AsyncClient,
+        viewer_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """IMPORTANT 3 (review): la auth de rol corre ANTES que el guard 423 — un
+        VIEWER con el tenant lockeado tiene que ver 403 (sin permiso), no 423
+        (que filtraría el estado de mantenimiento a alguien sin acceso de
+        escritura)."""
+        monkeypatch.setattr(
+            maintenance_lock_service,
+            "is_locked",
+            unittest.mock.AsyncMock(return_value=True),
+        )
+        resp = await client.post(
+            "/api/v1/products", json=_PRODUCT_PAYLOAD, headers=viewer_headers
+        )
+        assert resp.status_code == 403
 
 
 @pytest.mark.asyncio

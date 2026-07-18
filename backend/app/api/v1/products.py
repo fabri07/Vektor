@@ -291,12 +291,16 @@ async def create_product_category(
     response_model=ProductResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a product",
-    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def create_product(
     body: CreateProductRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3-T3 review: la auth (rol) va ANTES que el guard 423 — si no, un VIEWER con
+    # el tenant lockeado recibiría 423 en vez de 403 (filtra estado de mantenimiento
+    # a un usuario sin permiso). El guard 423 es solo UX fast-fail; la garantía real
+    # es el advisory lock que toma ProductRepository.save().
     _: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> Product:
@@ -352,13 +356,14 @@ async def get_product(
     "/{product_id}",
     response_model=ProductResponse,
     summary="Update a product",
-    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def update_product(
     product_id: UUID,
     body: UpdateProductRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3-T3 review: auth ANTES que el guard 423 (ver nota en create_product).
     user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> Product:
     repo = ProductRepository(session)

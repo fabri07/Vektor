@@ -26,7 +26,7 @@ from app.api.v1.products import (
     _find_active_product_by_identity,
     _tenant_business_type,
 )
-from app.application.services import stock_service
+from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
@@ -238,7 +238,11 @@ async def reclassify_record(
     record_id: UUID,
     body: ReclassifyRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3-T3 review: auth ANTES que el guard 423 (ver nota en resolve_purchase). Este
+    # endpoint puede crear/mutar Product (ramas "product" abajo) — CRITICAL sin
+    # tocar del cableado original de F3-T3.
     _: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     record = await _get_pending_record(session, tenant.tenant_id, record_id)
@@ -318,6 +322,10 @@ async def reclassify_record(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail={"code": "STOCK_VIA_LINK_FORBIDDEN"},
                 )
+            # CRITICAL (F3-T3 review): shared lock ANTES de mutar el producto existente
+            # vía setattr (no pasa por ProductRepository.save()) — barrera real contra
+            # el dedup, que toma el exclusive.
+            await maintenance_lock_service.acquire_write_lock_shared(session, tenant.tenant_id)
             link_updates = UpdateProductRequest(
                 **{
                     k: v
@@ -336,6 +344,10 @@ async def reclassify_record(
             )
             return MessageResponse(message="Registro vinculado al producto existente.")
         else:  # "product", crear nuevo
+            # CRITICAL (F3-T3 review): shared lock ANTES de mutar catálogo — el
+            # session.add(Product(...)) de abajo NO pasa por ProductRepository.save(),
+            # así que no queda cubierto por el acquire de ese chokepoint.
+            await maintenance_lock_service.acquire_write_lock_shared(session, tenant.tenant_id)
             prod_req = CreateProductRequest(**body.fields)
             data = prod_req.model_dump()
             existing_product = await _find_active_product_by_identity(
@@ -374,13 +386,15 @@ async def reclassify_record(
     "/{record_id}/resolve-purchase",
     response_model=MessageResponse,
     summary="Resolver una compra ambigua vinculándola a un producto",
-    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def resolve_purchase(
     record_id: UUID,
     body: ResolvePurchaseRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
+    # lockeado recibiría 423 en vez de 403.
     _: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     record = await _get_pending_record(
@@ -472,12 +486,13 @@ async def resolve_purchase(
     "/bulk-import",
     response_model=BulkImportResponse,
     summary="Importar en lote los registros de Otros sugeridos como venta/gasto",
-    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def bulk_import_records(
     body: BulkImportRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3-T3 review: auth ANTES que el guard 423 (ver nota en resolve_purchase).
     _: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> BulkImportResponse:
     """Importa cada PENDING con `suggested_entity` venta/gasto cuya fila cruda
