@@ -62,7 +62,11 @@ def _expires_expr(dialect: str, ttl_seconds: int) -> ColumnElement[Any]:
     upsert.
     """
     if dialect == "postgresql":
-        return func.now() + func.make_interval(secs=ttl_seconds)
+        # make_interval(years, months, weeks, days, hours, mins, secs) — secs es el 7º.
+        # Se pasa POSICIONAL a propósito: los kwargs a func.* NO se traducen a args SQL
+        # con nombre en SQLAlchemy 2.0 (se interpretan como opciones de Function y
+        # revientan con TypeError). Ver test de integración PG del lease (F3-T8).
+        return func.now() + func.make_interval(0, 0, 0, 0, 0, 0, ttl_seconds)
     return func.datetime(func.now(), f"+{int(ttl_seconds)} seconds")
 
 
