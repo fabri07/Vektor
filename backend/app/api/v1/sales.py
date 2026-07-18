@@ -9,8 +9,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
-from app.application.services import stock_service
+from app.api.v1.deps import (
+    ensure_tenant_not_under_maintenance,
+    get_current_tenant,
+    require_modify_access,
+    require_role,
+)
+from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.customer_sentinel import (
     resolve_or_create_local_sentinel,
 )
@@ -177,7 +182,10 @@ async def list_sales(
 async def bulk_create_sales(
     body: BulkSaleRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
+    # products/others/suppliers (ver create_product).
     _: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> list[SaleEntry]:
@@ -247,7 +255,10 @@ async def bulk_create_sales(
 async def create_manual_batch_sale(
     body: ManualBatchSaleRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
+    # products/others/suppliers (ver create_product).
     user: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ManualBatchSaleResponse:
@@ -266,6 +277,12 @@ async def create_manual_batch_sale(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE_BATCH"
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+
+    # F3 review final: el advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila
+    # (acá abajo) — si no, deadlockea AB-BA contra el exclusive del script de dedup. Antes
+    # el shared recién se tomaba en decrement_for_sale, después del FOR UPDATE de este
+    # handler. Idempotente dentro de la txn: no molesta que stock_service lo pida de nuevo.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant.tenant_id)
 
     # Rechazar productos duplicados (evita ambigüedad de stock agregado por línea).
     product_ids = [item.product_id for item in body.items]

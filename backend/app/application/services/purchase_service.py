@@ -18,7 +18,11 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services import stock_service, tenant_categories_service
+from app.application.services import (
+    maintenance_lock_service,
+    stock_service,
+    tenant_categories_service,
+)
 from app.domain.product_categories import normalize_product_category
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -93,6 +97,12 @@ async def register_manual_purchase(
     ).scalar_one_or_none()
     if supplier is None:
         raise PurchaseError("Proveedor no encontrado para este negocio.")
+
+    # F3 review final: el advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila
+    # (acá abajo) — si no, deadlockea AB-BA contra el exclusive del script de dedup. Antes
+    # el shared recién se tomaba en increment_stock, después del FOR UPDATE de este método.
+    # Idempotente dentro de la txn: no molesta que stock_service lo pida de nuevo.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
 
     # Rechazar productos existentes repetidos en el comprobante.
     existing_ids = [line.product_id for line in body.lines if line.product_id is not None]
