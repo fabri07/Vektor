@@ -45,9 +45,9 @@ import json
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
@@ -1069,3 +1069,638 @@ async def persist_dedup_plan(
     )
     await session.flush()
     return run.id
+
+
+# ── EJECUCIÓN (--apply): mutaciones reales del plan (F3-T5) ───────────────────────
+#
+# Consume los ``DataRepairItem`` del run dry-run de T4 (fuente de verdad de las
+# formas), revalida el fingerprint por grupo desde el estado ACTUAL de la DB y
+# ejecuta las mutaciones en su PROPIA transacción por grupo (no una gigante). El
+# delta de stock group-level (``MERGE_PRODUCT.before_json["stock_decision"]["delta"]``)
+# se aplica UNA vez a ``stock_units`` Y a ``current_qty`` del canónico. NUNCA
+# recomputa el saldo desde el ledger (invariante 2d). El revert es F3-T6.
+
+# Campos que el MERGE completa en el canónico SOLO si están NULL/"" — completa desde
+# los duplicados (orden determinístico por str(id), gana el primero no vacío). El
+# listener before_update de Product re-sincroniza ``*_normalized`` al setear barcode/sku.
+_MERGE_COMPLETABLE_FIELDS = (
+    "unit_cost_ars",
+    "category",
+    "low_stock_threshold_units",
+    "acquired_at",
+    "barcode",
+    "sku",
+    "description",
+    "expiry_date",
+)
+
+# Orden seguro de re-apunte de FKs (el mismo que T6 revierte en inverso).
+_REPOINT_TABLE_ORDER = ("sales_entries", "expense_entries", "inventory_movements")
+
+_LEASE_LOST_REASON = "lease_lost"
+_FINGERPRINT_CHANGED_REASON = "fingerprint_changed"
+
+
+class RepointCountMismatchError(RuntimeError):
+    """El ``rowcount`` de un REPOINT_FK no coincidió con el conteo planificado del
+    chunk (alguien movió/borró filas de FK) → abortar el grupo (rollback)."""
+
+
+class LeaseLostError(RuntimeError):
+    """El lease de mantenimiento dejó de ser de este run (expiró o lo robaron) →
+    no hay exclusión mutua garantizada; abortar el grupo y detener el run."""
+
+
+@dataclass
+class ApplyResult:
+    """Resumen de un ``apply_dedup_plan``: estado del run + conteo por grupo."""
+
+    run_id: uuid.UUID
+    status: str
+    groups_total: int
+    groups_applied: int
+    groups_skipped: int
+    groups_failed: int
+    group_results: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _is_empty(value: Any) -> bool:
+    """Un campo es 'completable' si es ``None`` o string vacío/espacios."""
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _json_scalar(value: Any) -> Any:
+    """Serializa un valor de columna a algo JSON-safe para before/after_json."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    return value
+
+
+async def _lease_still_ours(
+    session: AsyncSession, tenant_id: uuid.UUID, lease_id: uuid.UUID | None
+) -> bool:
+    """Fencing: ¿el lease vivo del tenant sigue siendo el de este run? (``True`` si
+    ``lease_id`` es ``None`` — corridas sin lease, p.ej. tests unitarios directos)."""
+    if lease_id is None:
+        return True
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.persistence.models.maintenance_lock import TenantMaintenanceLock  # noqa: PLC0415
+
+    row = (
+        await session.execute(
+            select(TenantMaintenanceLock.lease_id).where(
+                TenantMaintenanceLock.tenant_id == tenant_id,
+                TenantMaintenanceLock.expires_at > func.now(),
+            )
+        )
+    ).scalar_one_or_none()
+    return row == lease_id
+
+
+def _group_source_items(items: list[Any]) -> dict[str, dict[str, Any]]:
+    """Agrupa los ``DataRepairItem`` del source dry-run por ``group_id`` (que viaja en
+    ``before_json["plan"]`` de cada item). Extrae canónico, fingerprint, duplicados y
+    la decisión de stock del ``MERGE_PRODUCT``; junta los ``REPOINT_FK`` por grupo."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for it in items:
+        before = it.before_json or {}
+        plan = before.get("plan") or {}
+        gid = plan.get("group_id")
+        canon = plan.get("canonical_product_id")
+        if gid is None or canon is None:
+            continue
+        g = grouped.setdefault(
+            gid,
+            {
+                "plan_block": plan,
+                "canonical_id": uuid.UUID(canon),
+                "fingerprint": plan.get("fingerprint"),
+                "merge": None,
+                "repoint": [],
+                "duplicate_ids": [],
+                "stock_decision": None,
+            },
+        )
+        if it.action == "MERGE_PRODUCT":
+            g["merge"] = it
+            g["duplicate_ids"] = [uuid.UUID(x) for x in before.get("duplicate_ids", [])]
+            g["stock_decision"] = before.get("stock_decision")
+        elif it.action == "REPOINT_FK":
+            g["repoint"].append(it)
+    return grouped
+
+
+async def _apply_one_group(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    gdata: dict[str, Any],
+    *,
+    lease_id: uuid.UUID | None,
+    force_group: bool,
+) -> tuple[str, str]:
+    """Aplica las mutaciones de UN grupo (NO commitea — el caller maneja la txn).
+
+    Devuelve ``("applied", kind)`` o ``("skipped", motivo)``. Levanta
+    ``RepointCountMismatch`` o ``LeaseLost`` (o cualquier error) → el caller hace
+    rollback del grupo. Orden de mutaciones (T6 revierte en inverso): MERGE_PRODUCT
+    → REPOINT_FK → CONSOLIDATE_BALANCE → DELETE_BALANCE → DEACTIVATE_DUPLICATE.
+    """
+    from sqlalchemy import func, select, update  # noqa: PLC0415
+    from sqlalchemy.engine import CursorResult  # noqa: PLC0415
+
+    from app.application.services import maintenance_lock_service as mls  # noqa: PLC0415
+    from app.domain.product_completion import recompute_requires_completion  # noqa: PLC0415
+    from app.persistence.models.inventory import (  # noqa: PLC0415
+        InventoryBalance,
+        InventoryMovement,
+    )
+    from app.persistence.models.product import Product  # noqa: PLC0415
+    from app.persistence.models.repair import DataRepairItem  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    canonical_id: uuid.UUID = gdata["canonical_id"]
+    duplicate_ids: list[uuid.UUID] = gdata["duplicate_ids"]
+    planned_fp: str | None = gdata["fingerprint"]
+    plan_block: dict[str, Any] = gdata["plan_block"]
+    stock_dec: dict[str, Any] = gdata.get("stock_decision") or {}
+    delta = int(stock_dec.get("delta") or 0)
+    member_ids = [canonical_id, *duplicate_ids]
+    ordered_dups = sorted(duplicate_ids, key=str)
+
+    # (a) Barrera real (advisory exclusive; no-op SQLite) + fencing del lease.
+    await mls.acquire_maintenance_lock_exclusive(session, tenant_id)
+    if not await _lease_still_ours(session, tenant_id, lease_id):
+        raise LeaseLostError(f"lease {lease_id} ya no es de este run (tenant {tenant_id})")
+
+    # (b) Revalidar el fingerprint desde el estado ACTUAL. --force-group NO lo saltea:
+    # el fingerprint es una guarda de seguridad (cierra el hueco dry-run↔apply), no un
+    # conflicto de review. force_group es para los grupos marcados review en T4 (que ni
+    # generan items) — acá se acepta pero no debilita el fingerprint.
+    _ = force_group
+    records = await load_product_records(session, tenant_id, set(member_ids))
+    if canonical_id not in records or len(records) != len(member_ids):
+        return ("skipped", _FINGERPRINT_CHANGED_REASON)
+    canonical_rec = records[canonical_id]
+    dup_recs = [records[d] for d in duplicate_ids if d in records]
+    current_decision = classify_group_stock_decision(canonical_rec, dup_recs)
+    current_fp = compute_group_fingerprint(list(records.values()), canonical_id, current_decision)
+    if current_fp != planned_fp:
+        return ("skipped", _FINGERPRINT_CHANGED_REASON)
+
+    # ── (c) MUTACIONES ───────────────────────────────────────────────────────────
+    # 1) MERGE_PRODUCT — completa NULLs del canónico desde los duplicados + delta stock.
+    canonical_obj = await session.get(Product, canonical_id)
+    if canonical_obj is None:  # pragma: no cover — el fingerprint ya lo garantiza
+        return ("skipped", _FINGERPRINT_CHANGED_REASON)
+    dup_objs = {
+        o.id: o
+        for o in (
+            await session.execute(
+                select(Product).where(
+                    Product.tenant_id == tenant_id, Product.id.in_(duplicate_ids)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
+
+    stock_before = canonical_obj.stock_units
+    rc_before = canonical_obj.requires_completion
+    prev_cf = dict(canonical_obj.custom_fields or {})
+
+    fields_completed: dict[str, Any] = {}
+    for f in _MERGE_COMPLETABLE_FIELDS:
+        if not _is_empty(getattr(canonical_obj, f)):
+            continue
+        for d in ordered_dups:
+            dup = dup_objs.get(d)
+            if dup is None:
+                continue
+            val = getattr(dup, f)
+            if not _is_empty(val):
+                setattr(canonical_obj, f, val)
+                fields_completed[f] = _json_scalar(val)
+                break
+
+    # custom_fields: shallow merge, canónico gana, excluí claves internas ("_"-prefijo).
+    new_cf = dict(prev_cf)
+    cf_added: dict[str, Any] = {}
+    for d in ordered_dups:
+        dup = dup_objs.get(d)
+        if dup is None:
+            continue
+        dcf = dup.custom_fields or {}
+        if not isinstance(dcf, dict):
+            continue
+        for k, v in dcf.items():
+            if k.startswith("_") or k in new_cf:
+                continue
+            new_cf[k] = v
+            cf_added[k] = v
+    if cf_added:
+        canonical_obj.custom_fields = new_cf
+
+    # Delta de stock group-level: UNA vez a stock_units (y más abajo a current_qty).
+    canonical_obj.stock_units = stock_before + delta
+    recompute_requires_completion(canonical_obj)
+
+    session.add(
+        DataRepairItem(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            product_id=canonical_id,
+            action="MERGE_PRODUCT",
+            before_json={
+                "plan": plan_block,
+                "duplicate_ids": [str(d) for d in duplicate_ids],
+                "stock_decision": stock_dec,
+                "canonical_prev": {
+                    "stock_units": stock_before,
+                    "requires_completion": rc_before,
+                    "custom_fields": prev_cf,
+                },
+            },
+            after_json={
+                "plan": plan_block,
+                "fields_completed": fields_completed,
+                "custom_fields_added": cf_added,
+                "stock_units_before": stock_before,
+                "stock_units_after": canonical_obj.stock_units,
+                "stock_delta_applied": delta,
+                "requires_completion_after": canonical_obj.requires_completion,
+            },
+            confidence="HIGH",
+        )
+    )
+
+    # 2) REPOINT_FK — re-apunta EXACTAMENTE las filas planificadas (id ∈ chunk AND
+    # product_id == dup) e incluye activas y anuladas. rowcount ≠ esperado → abortar.
+    model_by_table: dict[str, Any] = {
+        "sales_entries": SaleEntry,
+        "expense_entries": ExpenseEntry,
+        "inventory_movements": InventoryMovement,
+    }
+
+    def _repoint_sort_key(it: Any) -> tuple[int, str, int]:
+        before = it.before_json or {}
+        table = before.get("table", "")
+        order = (
+            _REPOINT_TABLE_ORDER.index(table) if table in _REPOINT_TABLE_ORDER else len(
+                _REPOINT_TABLE_ORDER
+            )
+        )
+        return (order, str(it.product_id), int(before.get("chunk_index", 0)))
+
+    for item in sorted(gdata["repoint"], key=_repoint_sort_key):
+        before = item.before_json or {}
+        table = before["table"]
+        model = model_by_table[table]
+        dup_id = item.product_id
+        row_ids = [uuid.UUID(r["id"]) for r in before.get("rows", [])]
+        if not row_ids:
+            continue
+        result = await session.execute(
+            update(model)
+            .where(
+                model.tenant_id == tenant_id,
+                model.id.in_(row_ids),
+                model.product_id == dup_id,
+            )
+            .values(product_id=canonical_id)
+        )
+        rowcount = cast("CursorResult[Any]", result).rowcount
+        if rowcount != len(row_ids):
+            raise RepointCountMismatchError(
+                f"{table} chunk {before.get('chunk_index')} dup {dup_id}: "
+                f"esperado {len(row_ids)}, afectó {rowcount}"
+            )
+        session.add(
+            DataRepairItem(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                product_id=dup_id,
+                action="REPOINT_FK",
+                before_json={
+                    "plan": plan_block,
+                    "table": table,
+                    "chunk_index": before.get("chunk_index"),
+                    "rows": [
+                        {"id": r["id"], "old_product_id": str(dup_id)} for r in before["rows"]
+                    ],
+                },
+                after_json={
+                    "plan": plan_block,
+                    "table": table,
+                    "chunk_index": before.get("chunk_index"),
+                    "new_product_id": str(canonical_id),
+                    "rowcount": rowcount,
+                },
+                confidence="HIGH",
+            )
+        )
+
+    # 3/4) Balances: consolidar el delta group-level UNA vez en el canónico + borrar
+    # los balances de los duplicados (registrando su estado real para la reversa).
+    bal_by_pid = {
+        b.product_id: b
+        for b in (
+            await session.execute(
+                select(InventoryBalance).where(
+                    InventoryBalance.tenant_id == tenant_id,
+                    InventoryBalance.product_id.in_(member_ids),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
+    canon_bal = bal_by_pid.get(canonical_id)
+    prev_current = canon_bal.current_qty if canon_bal is not None else None
+    if canon_bal is not None:
+        canon_bal.current_qty = canon_bal.current_qty + delta
+        new_current: int | None = canon_bal.current_qty
+    elif delta != 0:
+        canon_bal = InventoryBalance(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            product_id=canonical_id,
+            current_qty=delta,
+            reserved_qty=0,
+        )
+        session.add(canon_bal)
+        new_current = delta
+    else:
+        new_current = None
+    session.add(
+        DataRepairItem(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            product_id=canonical_id,
+            action="CONSOLIDATE_BALANCE",
+            before_json={
+                "plan": plan_block,
+                "canonical_current_qty_before": prev_current,
+                "delta": delta,
+                "duplicate_ids": [str(d) for d in duplicate_ids],
+            },
+            after_json={"plan": plan_block, "canonical_current_qty_after": new_current},
+            confidence="HIGH",
+        )
+    )
+    for d in ordered_dups:
+        dbal = bal_by_pid.get(d)
+        if dbal is None:
+            continue
+        session.add(
+            DataRepairItem(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                product_id=d,
+                action="DELETE_BALANCE",
+                before_json={
+                    "plan": plan_block,
+                    "duplicate_id": str(d),
+                    "current_qty": dbal.current_qty,
+                    "reserved_qty": dbal.reserved_qty,
+                },
+                after_json={"plan": plan_block},
+                confidence="HIGH",
+            )
+        )
+        await session.delete(dbal)
+
+    # 5) DEACTIVATE_DUPLICATE — soft-delete con reloj de la DB. NO se pone stock en 0
+    # (queda como estaba; la reversa reactiva y resta el delta del canónico).
+    for d in ordered_dups:
+        dup = dup_objs.get(d)
+        dup_stock = dup.stock_units if dup is not None else None
+        await session.execute(
+            update(Product)
+            .where(Product.tenant_id == tenant_id, Product.id == d)
+            .values(is_active=False, deactivated_at=func.now(), deactivation_reason="DUPLICATE")
+        )
+        session.add(
+            DataRepairItem(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                product_id=d,
+                action="DEACTIVATE_DUPLICATE",
+                before_json={
+                    "plan": plan_block,
+                    "is_active": True,
+                    "deactivated_at": None,
+                    "deactivation_reason": None,
+                    "stock_units": dup_stock,
+                },
+                after_json={
+                    "plan": plan_block,
+                    "is_active": False,
+                    "deactivation_reason": "DUPLICATE",
+                },
+                confidence="HIGH",
+            )
+        )
+
+    return ("applied", str(stock_dec.get("kind") or ""))
+
+
+async def _validate_source_run(
+    session: AsyncSession, tenant_id: uuid.UUID, source_run_id: uuid.UUID
+) -> Any:
+    """Carga y valida el run dry-run source: tipo PRODUCT_DEDUP, dry_run, status
+    COMPLETED (no APPLIED — idempotencia) y tenant coincidente. Aborta con
+    ``ValueError`` si no cumple."""
+    from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
+
+    source = await session.get(DataRepairRun, source_run_id)
+    if source is None:
+        raise ValueError(f"source-run-id {source_run_id} no existe")
+    if source.repair_type != _REPAIR_TYPE:
+        raise ValueError(
+            f"source-run-id {source_run_id} no es un run {_REPAIR_TYPE} (es {source.repair_type!r})"
+        )
+    if not source.dry_run:
+        raise ValueError(f"source-run-id {source_run_id} no es un dry-run")
+    if source.status != "COMPLETED":
+        raise ValueError(
+            f"source-run-id {source_run_id} tiene status {source.status!r} "
+            f"(se esperaba 'COMPLETED'; ¿ya se aplicó?)"
+        )
+    if source.tenant_id != tenant_id:
+        raise ValueError(
+            f"source-run-id {source_run_id} es de otro tenant ({source.tenant_id}), "
+            f"no de {tenant_id}"
+        )
+    return source
+
+
+async def apply_dedup_plan(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    source_run_id: uuid.UUID,
+    *,
+    lease_id: uuid.UUID | None = None,
+    force_group: bool = False,
+    ttl_seconds: int = 300,
+    triggered_by: str = "script:dedupe_products_by_name",
+) -> ApplyResult:
+    """Ejecuta las mutaciones planificadas por un run dry-run (T4), grupo por grupo,
+    cada uno en su PROPIA transacción (commit/rollback por grupo — no una gigante).
+
+    - Revalida el fingerprint de cada grupo contra el estado ACTUAL: si cambió, saltea
+      el grupo (``PARTIALLY_APPLIED``) sin mutar.
+    - El delta de stock group-level se aplica UNA vez a ``stock_units`` y a
+      ``current_qty`` del canónico. NUNCA recomputa desde el ledger.
+    - Los ``DataRepairItem`` del run de apply son el REGISTRO real (before/after) que
+      T6 revierte en orden inverso.
+    - Marca el source dry-run como ``APPLIED`` al terminar (lo consume — un re-apply
+      del mismo source aborta en la validación; correr de nuevo exige un dry-run nuevo).
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services import maintenance_lock_service as mls  # noqa: PLC0415
+    from app.persistence.models.audit import DecisionAuditLog  # noqa: PLC0415
+    from app.persistence.models.repair import DataRepairItem, DataRepairRun  # noqa: PLC0415
+
+    await _validate_source_run(session, tenant_id, source_run_id)
+
+    source_items = (
+        (
+            await session.execute(
+                select(DataRepairItem).where(DataRepairItem.run_id == source_run_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    grouped = _group_source_items(list(source_items))
+
+    # Run de apply (fuente de verdad para T6). Se commitea ANTES de los grupos: así el
+    # rollback de un grupo fallido NO borra el run ni los items de los grupos previos.
+    run = DataRepairRun(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        repair_type=_REPAIR_TYPE,
+        status="RUNNING",
+        dry_run=False,
+        source_run_id=source_run_id,
+        candidates_found=len(grouped),
+        created_at=datetime.now(UTC),
+    )
+    session.add(run)
+    await session.flush()
+    run_id = run.id
+    await session.commit()
+
+    groups_total = len(grouped)
+    applied = skipped = failed = 0
+    group_results: list[dict[str, Any]] = []
+    lease_lost = False
+
+    for gid in sorted(grouped):
+        gdata = grouped[gid]
+        if gdata.get("merge") is None:  # pragma: no cover — todo grupo mergeable trae MERGE
+            continue
+        if lease_id is not None and not await mls.renew(session, lease_id, ttl_seconds):
+            await session.rollback()
+            group_results.append(
+                {"group_id": gid, "status": "failed", "reason": _LEASE_LOST_REASON}
+            )
+            failed += 1
+            lease_lost = True
+            break
+        try:
+            status, reason = await _apply_one_group(
+                session, run_id, tenant_id, gdata, lease_id=lease_id, force_group=force_group
+            )
+        except LeaseLostError:
+            await session.rollback()
+            group_results.append(
+                {"group_id": gid, "status": "failed", "reason": _LEASE_LOST_REASON}
+            )
+            failed += 1
+            lease_lost = True
+            break
+        except Exception as exc:  # noqa: BLE001 — cualquier error del grupo → rollback aislado
+            await session.rollback()
+            group_results.append(
+                {"group_id": gid, "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+            )
+            failed += 1
+            continue
+        if status == "skipped":
+            await session.rollback()
+            group_results.append({"group_id": gid, "status": "skipped", "reason": reason})
+            skipped += 1
+        else:
+            await session.commit()
+            group_results.append({"group_id": gid, "status": "applied", "reason": reason})
+            applied += 1
+
+    if applied == groups_total and failed == 0 and skipped == 0:
+        final_status = "APPLIED"
+    elif applied == 0 and failed > 0 and skipped == 0:
+        final_status = "FAILED"
+    else:
+        final_status = "PARTIALLY_APPLIED"
+
+    # Finalización: re-fetch (los commits/rollbacks intermedios pudieron expirar el ORM).
+    apply_run = await session.get(DataRepairRun, run_id)
+    if apply_run is not None:
+        apply_run.status = final_status
+        apply_run.products_updated = applied
+        apply_run.products_skipped = skipped
+        apply_run.completed_at = datetime.now(UTC)
+        apply_run.details_json = {
+            "decision_version": DECISION_VERSION,
+            "source_run_id": str(source_run_id),
+            "groups_total": groups_total,
+            "applied": applied,
+            "skipped": skipped,
+            "failed": failed,
+            "lease_lost": lease_lost,
+            "groups": group_results,
+        }
+
+    # Consume el source dry-run (idempotencia: un re-apply aborta en la validación).
+    source = await session.get(DataRepairRun, source_run_id)
+    if source is not None and source.dry_run and source.status == "COMPLETED":
+        source.status = "APPLIED"
+
+    session.add(
+        DecisionAuditLog(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            decision_type=_DECISION_TYPE,
+            decision_data={
+                "run_id": str(run_id),
+                "source_run_id": str(source_run_id),
+                "dry_run": False,
+                "status": final_status,
+                "applied": applied,
+                "skipped": skipped,
+                "failed": failed,
+                "decision_version": DECISION_VERSION,
+            },
+            triggered_by=triggered_by,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+    return ApplyResult(
+        run_id=run_id,
+        status=final_status,
+        groups_total=groups_total,
+        groups_applied=applied,
+        groups_skipped=skipped,
+        groups_failed=failed,
+        group_results=group_results,
+    )

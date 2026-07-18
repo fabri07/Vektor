@@ -9,16 +9,22 @@ Toda la lógica vive en ``app/application/services/product_dedup_service.py`` (t
 sin CLI). Este script solo orquesta: precondición, plan, persistencia, CSV y auditoría.
 
 La EJECUCIÓN real de las mutaciones (fusionar, re-apuntar FKs, consolidar/borrar
-balances, desactivar duplicados) es **F3-T5** — este script NO la implementa
-(``--apply`` está reservado y aborta con un mensaje claro).
+balances, desactivar duplicados) es **F3-T5** — ``--apply``. El revert
+(``--revert-run``) es F3-T6 (no implementado acá).
 
 ## Lease (advisory exclusive)
 
-En T4 (dry-run puro) NO se toma el advisory lock EXCLUSIVE de reparación: el plan
-solo lee negocio y escribe audit/plan. El gancho ya está preparado para T5
-(``maintenance_lock_service.acquire`` para el lease observable +
-``acquire_maintenance_lock_exclusive`` para la barrera transaccional). Documentado a
-propósito: tomar el exclusive en dry-run bloquearía writers sin necesidad.
+En el dry-run (T4) NO se toma el advisory lock EXCLUSIVE de reparación: el plan solo
+lee negocio y escribe audit/plan. El ``--apply`` (T5) sí:
+
+- Toma el **lease observable** (``maintenance_lock_service.acquire``) al inicio y lo
+  ``release`` en el ``finally`` (si el proceso muere, el lease expira solo por TTL).
+- Lo ``renew`` (heartbeat) antes de cada grupo, para runs largos.
+- Toma la **barrera transaccional real** (``acquire_maintenance_lock_exclusive``)
+  DENTRO de la transacción de cada grupo (se libera al commit/rollback del grupo).
+
+Cada grupo se aplica en su PROPIA transacción (no una gigante): un grupo que falla o
+cuyo fingerprint cambió NO tumba a los demás → el run termina ``PARTIALLY_APPLIED``.
 
 Usage:
     # Dry-run (default) de un tenant: detecta, planifica y persiste el plan.
@@ -28,10 +34,14 @@ Usage:
     # Dry-run global (todos los tenants activos):
     ... scripts/dedupe_products_by_name.py --all-active --out plan.csv
 
+    # Apply (ejecución): consume un run dry-run previo (revalida el fingerprint por grupo).
+    ... scripts/dedupe_products_by_name.py --tenant <uuid> --apply --source-run-id <run_uuid>
+
     # Escape hatch (NO es un run de dedup): completar identidad NULL (backfill mínimo).
     ... scripts/dedupe_products_by_name.py --tenant <uuid> --repair-missing-identity
 
-NUNCA borra filas ni imprime la connection URL. Correr desde backend/.
+``--force-group`` es para forzar grupos marcados review en T4; NUNCA saltea el
+fingerprint (guarda de seguridad). NUNCA imprime la connection URL. Correr desde backend/.
 """
 
 from __future__ import annotations
@@ -49,6 +59,7 @@ from _db import async_engine_config  # noqa: E402
 from sqlalchemy import select, text, update  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
+from app.application.services import maintenance_lock_service as mls  # noqa: E402
 from app.application.services import product_dedup_service as dedup  # noqa: E402
 from app.domain.text_norm import (  # noqa: E402
     normalize_barcode,
@@ -59,6 +70,8 @@ from app.domain.text_norm import (  # noqa: E402
 from app.persistence.models.product import Product  # noqa: E402
 
 _REPAIR_MISSING_BATCH = 500
+# TTL del lease de mantenimiento (se renueva —heartbeat— antes de cada grupo).
+_LEASE_TTL_SECONDS = 300
 
 
 async def _repair_missing_identity(session: AsyncSession, tid: uuid.UUID) -> int:
@@ -168,6 +181,45 @@ async def _run_tenant(session: AsyncSession, tid: uuid.UUID) -> dedup.DedupPlan 
     return plan
 
 
+async def _apply_tenant(
+    session: AsyncSession, tid: uuid.UUID, source_run_id: uuid.UUID, *, force_group: bool
+) -> dedup.ApplyResult | None:
+    """Apply de un tenant: toma el lease observable, ejecuta ``apply_dedup_plan``
+    (barrera exclusive + fingerprint por grupo) y libera el lease en el ``finally``."""
+    lease_id = await mls.acquire(
+        session,
+        tid,
+        reason="product_dedup",
+        ttl_seconds=_LEASE_TTL_SECONDS,
+        created_by="script:dedupe_products_by_name",
+    )
+    if lease_id is None:
+        print(f"  ⚠ tenant {tid}: ya hay un lease de mantenimiento activo. Apply SALTEADO.")
+        return None
+    await session.commit()
+    try:
+        result = await dedup.apply_dedup_plan(
+            session,
+            tid,
+            source_run_id,
+            lease_id=lease_id,
+            force_group=force_group,
+            ttl_seconds=_LEASE_TTL_SECONDS,
+        )
+        print(
+            f"tenant {tid}: run {result.run_id} → {result.status} "
+            f"(applied={result.groups_applied} skipped={result.groups_skipped} "
+            f"failed={result.groups_failed} de {result.groups_total})"
+        )
+        for gr in result.group_results:
+            if gr["status"] != "applied":
+                print(f"    grupo {gr['group_id']}: {gr['status']} ({gr['reason']})")
+        return result
+    finally:
+        await mls.release(session, lease_id)
+        await session.commit()
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tenant", help="UUID de tenant puntual")
@@ -181,16 +233,46 @@ async def main() -> None:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="RESERVADO para F3-T5 (ejecución) — no implementado en T4",
+        help="Ejecuta las mutaciones planificadas por un run dry-run (exige --source-run-id)",
+    )
+    parser.add_argument(
+        "--source-run-id",
+        help="UUID del run dry-run (T4) a aplicar (obligatorio con --apply)",
+    )
+    parser.add_argument(
+        "--force-group",
+        action="store_true",
+        help="Fuerza grupos marcados review en T4 (NO saltea el fingerprint)",
     )
     args = parser.parse_args()
 
-    if args.apply:
-        print("ERROR: --apply (ejecución de mutaciones) es F3-T5, no implementado en T4.")
-        sys.exit(2)
     if not args.tenant and not args.all_active:
         print("ERROR: indicá --tenant <uuid> o --all-active.")
         sys.exit(2)
+
+    # ── Camino APPLY (F3-T5) ──────────────────────────────────────────────────────
+    if args.apply:
+        if not args.source_run_id:
+            print("ERROR: --apply exige --source-run-id <run_uuid> (el run dry-run de T4).")
+            sys.exit(2)
+        if not args.tenant:
+            print("ERROR: --apply exige --tenant <uuid> (el apply es por tenant).")
+            sys.exit(2)
+        tid = uuid.UUID(args.tenant)
+        source_run_id = uuid.UUID(args.source_run_id)
+        url, connect_args = async_engine_config()
+        engine = create_async_engine(url, connect_args=connect_args)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                print(f"[APPLY] ejecutando plan {source_run_id} del tenant {tid}\n")
+                try:
+                    await _apply_tenant(session, tid, source_run_id, force_group=args.force_group)
+                except ValueError as exc:
+                    print(f"ERROR: {exc}")
+                    sys.exit(2)
+        finally:
+            await engine.dispose()
+        return
 
     url, connect_args = async_engine_config()
     engine = create_async_engine(url, connect_args=connect_args)
