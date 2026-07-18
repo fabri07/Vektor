@@ -347,29 +347,156 @@ def test_stock_review_mixed_provenance() -> None:
     assert dec.reason == svc.STOCK_REASON_MIXED
 
 
+# ── Decisión de stock a NIVEL DE GRUPO (no pairwise) ─────────────────────────────
+
+
+def test_group_stock_three_catalog_members_takes_latest_not_pairwise_sum() -> None:
+    # C día1 qty5, D1 día10 qty8, D2 día5 qty6 (residuo 0 c/u). El verdadero saldo
+    # catálogo más reciente del grupo es 8. La decisión pairwise sumaría deltas
+    # (3 + 1) → 5+4 = 9 (sobre-conteo). La group-level da UN delta = 3 → total 8.
+    canonical = _record(
+        1,
+        stock_units=5,
+        movements=(_mov(5, source_type=SOURCE_CATALOG_INITIAL_STOCK, occurred_offset_days=1),),
+    )
+    d1 = _record(
+        2,
+        stock_units=8,
+        movements=(_mov(8, source_type=SOURCE_CATALOG_INITIAL_STOCK, occurred_offset_days=10),),
+    )
+    d2 = _record(
+        3,
+        stock_units=6,
+        movements=(_mov(6, source_type=SOURCE_CATALOG_INITIAL_STOCK, occurred_offset_days=5),),
+    )
+    dec = svc.classify_group_stock_decision(canonical, [d1, d2])
+    assert dec.kind == STOCK_MOST_RECENT
+    assert dec.delta == 3  # ancla más reciente (día10, qty8) − canonical(5) = 3
+
+
+def test_group_stock_sum_shared_hash_between_duplicates_counts_once() -> None:
+    # hS aparece en D1 y D2 pero no en el canónico → cuenta UNA sola vez (dedup global
+    # del grupo). Pairwise contaría hS dos veces (9 + 11 = 20) → sobre-conteo.
+    canonical = _record(1, stock_units=0)
+    d1 = _record(
+        2,
+        stock_units=9,
+        movements=(
+            _mov(5, source_type=SOURCE_PURCHASE_IMPORT, source_row_hash="hA"),
+            _mov(4, source_type=SOURCE_RECEIPT, source_row_hash="hS"),
+        ),
+    )
+    d2 = _record(
+        3,
+        stock_units=11,
+        movements=(
+            _mov(4, source_type=SOURCE_RECEIPT, source_row_hash="hS"),
+            _mov(7, source_type=SOURCE_PURCHASE_IMPORT, source_row_hash="hB"),
+        ),
+    )
+    dec = svc.classify_group_stock_decision(canonical, [d1, d2])
+    assert dec.kind == STOCK_SUM
+    assert dec.delta == 16  # hA(5) + hS(4, una vez) + hB(7)
+
+
+def test_group_stock_mixed_catalog_and_purchase_across_members_is_review() -> None:
+    # Un miembro catálogo (MOST_RECENT) y otro compra (SUM) en el mismo grupo → ambiguo.
+    canonical = _record(1, stock_units=0)
+    d1 = _record(
+        2, stock_units=5, movements=(_mov(5, source_type=SOURCE_CATALOG_INITIAL_STOCK),)
+    )
+    d2 = _record(
+        3, stock_units=7, movements=(_mov(7, source_type=SOURCE_PURCHASE_IMPORT),)
+    )
+    dec = svc.classify_group_stock_decision(canonical, [d1, d2])
+    assert dec.kind == STOCK_REVIEW
+    assert dec.reason == svc.STOCK_REASON_MIXED
+
+
+def test_group_stock_decision_and_fingerprint_stable_under_movement_reorder() -> None:
+    # Dos anclas con el MISMO timestamp; el desempate por qty hace el delta (y el
+    # fingerprint) independiente del orden de la lista de movimientos (MINOR 2).
+    canonical = _record(
+        1,
+        stock_units=5,
+        movements=(
+            _mov(5, source_type=SOURCE_CATALOG_INITIAL_STOCK, occurred_offset_days=1,
+                 source_row_hash="c"),
+        ),
+    )
+    m_a = _mov(8, source_type=SOURCE_CATALOG_INITIAL_STOCK, occurred_offset_days=10,
+               source_row_hash="a")
+    m_b = _mov(3, source_type=SOURCE_CATALOG_INITIAL_STOCK, occurred_offset_days=10,
+               source_row_hash="b")
+    dup = _record(2, stock_units=11, movements=(m_a, m_b))
+    dup_rev = _record(2, stock_units=11, movements=(m_b, m_a))
+
+    dec = svc.classify_group_stock_decision(canonical, [dup])
+    dec_rev = svc.classify_group_stock_decision(canonical, [dup_rev])
+    assert dec == dec_rev
+    assert dec.kind == STOCK_MOST_RECENT
+    assert dec.delta == 3  # ancla más reciente día10, mayor qty(8) − canonical(5)
+
+    fp = svc.compute_group_fingerprint([canonical, dup], _id(1), dec)
+    fp_rev = svc.compute_group_fingerprint([canonical, dup_rev], _id(1), dec_rev)
+    assert fp == fp_rev
+
+
+# ── Conflicto de identidad — excepción SKU-bridge "todos" (MINOR 3) ──────────────
+
+
+def test_identity_sku_divergence_not_bridged_when_a_member_lacks_barcode() -> None:
+    # A(sku=a, barcode=B1), B(sku=b, SIN barcode): B no está puenteado → review.
+    recs = [
+        _record(1, barcode="7790001", sku="sku-a"),
+        _record(2, sku="sku-b"),
+    ]
+    review, reasons = svc.classify_identity_conflict(recs)
+    assert review is True
+    assert svc.REVIEW_SKU_DIVERGENCE in reasons
+
+
+# ── Doble pertenencia a grupo (MINOR 4) ──────────────────────────────────────────
+
+
+def test_weak_edge_touching_merge_member_is_not_double_counted() -> None:
+    # A y B unidos por barcode (merge). A—nombre—X (débil) hacia afuera: A ya está en
+    # un grupo de merge → NO debe formar además un WEAK_REVIEW (doble conteo).
+    edges = [
+        Edge(_id(1), _id(2), EDGE_STRONG, "barcode:b"),
+        Edge(_id(1), _id(3), EDGE_WEAK, "name+brand:x|y"),
+    ]
+    groups = svc.build_groups(edges)
+    assert len(groups) == 1
+    assert groups[0].kind == GROUP_MERGE
+    assert set(groups[0].member_ids) == {_id(1), _id(2)}
+    plan = svc.DedupPlan(groups=groups, records={})
+    assert plan.coverage()["products_in_groups"] == 2  # X no infla el conteo
+
+
 # ── Fingerprint ──────────────────────────────────────────────────────────────────
 
 
 def test_fingerprint_is_deterministic_same_input_same_hash() -> None:
     recs = [_record(1, stock_units=10, fk_count=3), _record(2, stock_units=5)]
-    decisions = {_id(2): StockDecision(STOCK_SUM, 5, "x")}
-    h1 = svc.compute_group_fingerprint(recs, _id(1), decisions)
-    h2 = svc.compute_group_fingerprint(list(reversed(recs)), _id(1), decisions)
+    decision = StockDecision(STOCK_SUM, 5, "x")
+    h1 = svc.compute_group_fingerprint(recs, _id(1), decision)
+    h2 = svc.compute_group_fingerprint(list(reversed(recs)), _id(1), decision)
     assert h1 == h2  # orden de records no importa (se ordena internamente)
 
 
 def test_fingerprint_changes_when_input_changes() -> None:
     recs = [_record(1, stock_units=10), _record(2, stock_units=5)]
-    decisions = {_id(2): StockDecision(STOCK_SUM, 5, "x")}
-    base = svc.compute_group_fingerprint(recs, _id(1), decisions)
+    decision = StockDecision(STOCK_SUM, 5, "x")
+    base = svc.compute_group_fingerprint(recs, _id(1), decision)
 
     recs2 = [_record(1, stock_units=11), _record(2, stock_units=5)]  # stock cambió
-    assert svc.compute_group_fingerprint(recs2, _id(1), decisions) != base
+    assert svc.compute_group_fingerprint(recs2, _id(1), decision) != base
 
-    decisions2 = {_id(2): StockDecision(STOCK_SUM, 6, "x")}  # delta cambió
-    assert svc.compute_group_fingerprint(recs, _id(1), decisions2) != base
+    decision2 = StockDecision(STOCK_SUM, 6, "x")  # delta cambió
+    assert svc.compute_group_fingerprint(recs, _id(1), decision2) != base
 
-    assert svc.compute_group_fingerprint(recs, _id(1), decisions, decision_version=2) != base
+    assert svc.compute_group_fingerprint(recs, _id(1), decision, decision_version=2) != base
 
 
 # ── Dry-run (SQLite) ─────────────────────────────────────────────────────────────
@@ -429,7 +556,8 @@ async def test_plan_dedup_detects_sku_group_and_persists_plan(
     assert len(plan.merge_groups) == 1
     group = plan.merge_groups[0]
     assert group.canonical_id == canonical.id
-    assert dup.id in group.stock_decisions
+    assert dup.id != group.canonical_id
+    assert group.stock_decision is not None  # UNA decisión por grupo
     assert group.fingerprint is not None
 
     run_id = await svc.persist_dedup_plan(db_session, tid, plan)

@@ -112,7 +112,7 @@ def _write_csv(path: str, plans: list[tuple[uuid.UUID, dedup.DedupPlan]]) -> Non
         "member_ids",
         "edges",
         "review_reasons",
-        "stock_decisions",
+        "stock_decision",
         "fingerprint",
     ]
     total = 0
@@ -131,9 +131,10 @@ def _write_csv(path: str, plans: list[tuple[uuid.UUID, dedup.DedupPlan]]) -> Non
                         "member_ids": ";".join(str(m) for m in g.member_ids),
                         "edges": ";".join(f"{e.kind}:{e.reason}" for e in g.edges),
                         "review_reasons": ";".join(g.review_reasons),
-                        "stock_decisions": ";".join(
-                            f"{dup_id}={d.kind}:{d.delta}"
-                            for dup_id, d in g.stock_decisions.items()
+                        "stock_decision": (
+                            f"{g.stock_decision.kind}:{g.stock_decision.delta}"
+                            if g.stock_decision is not None
+                            else ""
                         ),
                         "fingerprint": g.fingerprint or "",
                     }

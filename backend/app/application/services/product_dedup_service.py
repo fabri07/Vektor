@@ -16,20 +16,26 @@ Reusa el motor de identidad de F2 (``_load_product_identity_indexes`` +
 
 ## Contrato para T5/T6 (consumen estas dos funciones puras)
 
-``classify_stock_decision(duplicate, canonical) -> StockDecision``
-    Descompone el stock del DUPLICADO sin recomputar el saldo desde el ledger
-    (invariante 2d: NUNCA recomputar ``stock_units``/``current_qty`` desde el
-    ledger; el delta al canónico es SIEMPRE incremental). Devuelve
-    ``StockDecision(kind, delta, reason)`` donde ``delta`` es el entero que T5
-    SUMA al ``stock_units`` Y al ``current_qty`` del canónico (misma política para
-    ambos), o ``None`` si ``kind == REVIEW`` (no se toca nada).
+``classify_group_stock_decision(canonical, duplicates) -> StockDecision``
+    Decisión de stock a NIVEL DE GRUPO (canónico + TODOS los duplicados): devuelve
+    UN solo ``StockDecision(kind, delta, reason)`` ya total y sumable-safe. ``delta``
+    (``canonical_delta``) es el ÚNICO entero que T5 aplica INCREMENTALMENTE al
+    ``stock_units`` Y al ``current_qty`` del canónico (misma política para ambos), o
+    ``None`` si ``kind == REVIEW`` (no se toca nada). NUNCA recomputa el saldo desde
+    el ledger (invariante 2d) — la descomposición residuo=stock_units−Σledger es solo
+    para DECIDIR, no para asignar el saldo. **T5 aplica UN delta por GRUPO**, no uno
+    por duplicado (la decisión pairwise NO era sumable: sobre-contaba catálogos
+    repetidos y filas compartidas entre duplicados hermanos).
 
-``compute_group_fingerprint(records, canonical_id, stock_decisions) -> str``
+    ``classify_stock_decision(duplicate, canonical)`` queda como envoltorio del caso
+    de un solo duplicado (``classify_group_stock_decision(canonical, [duplicate])``).
+
+``compute_group_fingerprint(records, canonical_id, stock_decision) -> str``
     sha256 de un JSON canónico ordenado del estado ACTUAL relevante del grupo
-    (ids, canónico, #FKs, stock/balance, hashes de movimientos-evidencia, decisión
-    de stock y ``DECISION_VERSION``). T5 lo recomputa justo antes de aplicar y
-    ABORTA el grupo si cambió (cierra el hueco dry-run↔apply). Determinístico:
-    NO usa ``datetime.now()`` ni ``random``.
+    (ids, canónico, #FKs, stock/balance, hashes de movimientos-evidencia, la ÚNICA
+    decisión de stock group-level y ``DECISION_VERSION``). T5 lo recomputa justo
+    antes de aplicar y ABORTA el grupo si cambió (cierra el hueco dry-run↔apply).
+    Determinístico: NO usa ``datetime.now()`` ni ``random``.
 """
 
 from __future__ import annotations
@@ -141,8 +147,10 @@ class Edge:
 
 @dataclass(frozen=True)
 class StockDecision:
-    """Resultado de ``classify_stock_decision``. ``delta`` = lo que T5 SUMA al
-    canónico (``stock_units`` y ``current_qty``); ``None`` si ``kind == REVIEW``."""
+    """Decisión de stock a NIVEL DE GRUPO. ``delta`` (``canonical_delta``) = el ÚNICO
+    entero que T5 aplica incremental al canónico (``stock_units`` y ``current_qty``);
+    ``None`` si ``kind == REVIEW``. Ya total y sumable-safe: NO se suman deltas por
+    duplicado."""
 
     kind: str
     delta: int | None
@@ -161,7 +169,8 @@ class DedupGroup:
     canonical_id: uuid.UUID | None = None
     requires_review: bool = False
     review_reasons: list[str] = field(default_factory=list)
-    stock_decisions: dict[uuid.UUID, StockDecision] = field(default_factory=dict)
+    # UNA sola decisión de stock por GRUPO (canonical_delta), no una por duplicado.
+    stock_decision: StockDecision | None = None
     fingerprint: str | None = None
 
     @property
@@ -303,9 +312,20 @@ def build_groups(edges: list[Edge]) -> list[DedupGroup]:
                 seen.add(node)
                 merge_members[merge_uf.find(node)].append(node)
 
-    # Aristas débiles "no unidas" por fuerte+medio (extremos en componentes distintos).
+    # Ids que YA quedan en un grupo de merge (size≥2): se excluyen de weak-review para
+    # que un producto no cuente en dos grupos a la vez (MINOR 4). Todo nodo tocado por
+    # una arista fuerte/medio queda en un componente de size≥2 (la arista une dos).
+    merged_ids = {nid for members in merge_members.values() for nid in members if len(members) >= 2}
+
+    # Aristas débiles "no unidas" por fuerte+medio (extremos en componentes distintos)
+    # y que NO tocan un id ya mergeado (si no, ese id se doble-contaría).
     weak_leftover = [
-        e for e in edges if e.kind == EDGE_WEAK and merge_root(e.from_id) != merge_root(e.to_id)
+        e
+        for e in edges
+        if e.kind == EDGE_WEAK
+        and merge_root(e.from_id) != merge_root(e.to_id)
+        and e.from_id not in merged_ids
+        and e.to_id not in merged_ids
     ]
     weak_uf = _UnionFind()
     for e in weak_leftover:
@@ -392,9 +412,11 @@ def classify_identity_conflict(records: list[ProductRecord]) -> tuple[bool, list
     - ≥2 ``barcode_normalized`` válidos DISTINTOS → review (identidades fuertes en
       conflicto; ni siquiera un SKU compartido las reconcilia).
     - ≥2 ``sku_normalized`` DISTINTOS → review, SALVO la EXCEPCIÓN de barcode
-      fuerte: si el grupo tiene exactamente UN barcode válido distinto y ≥2
-      miembros lo comparten, ese barcode fuerte puentea la divergencia de SKU
-      (dos etiquetas de SKU para el mismo código de barras físico) → NO es review.
+      fuerte: si el grupo tiene exactamente UN barcode válido distinto y **TODOS**
+      los miembros con SKU lo comparten (cada miembro con SKU divergente tiene ese
+      barcode fuerte), ese barcode puentea la divergencia (dos etiquetas de SKU para
+      el mismo código de barras físico) → NO es review. Si algún miembro con SKU NO
+      lleva el barcode, no está puenteado → review.
     - Costo divergente: ≥2 ``unit_cost_ars`` NO nulos DISTINTOS (igualdad exacta de
       ``Decimal``) → review. ``NULL`` vs valor = completable (NO divergencia).
     """
@@ -405,10 +427,16 @@ def classify_identity_conflict(records: list[ProductRecord]) -> tuple[bool, list
     if len(distinct_barcodes) >= 2:
         reasons.append(REVIEW_BARCODE_DIVERGENCE)
 
-    distinct_skus = {r.sku_normalized for r in records if r.sku_normalized}
+    members_with_sku = [r for r in records if r.sku_normalized]
+    distinct_skus = {r.sku_normalized for r in members_with_sku}
     if len(distinct_skus) >= 2:
-        # Excepción: un único barcode fuerte compartido por ≥2 miembros puentea.
-        bridged_by_barcode = len(distinct_barcodes) == 1 and len(barcodes) >= 2
+        # Excepción: un único barcode fuerte que comparten TODOS los miembros con SKU
+        # (cada miembro con SKU divergente debe llevar ese barcode) puentea.
+        bridged_by_barcode = (
+            len(distinct_barcodes) == 1
+            and len(members_with_sku) >= 2
+            and all(r.barcode_normalized for r in members_with_sku)
+        )
         if not bridged_by_barcode:
             reasons.append(REVIEW_SKU_DIVERGENCE)
 
@@ -429,74 +457,120 @@ def _movement_time(m: MovementRow) -> datetime:
     return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
+def _anchor_sort_key(m: MovementRow) -> tuple[datetime, int]:
+    """Orden TOTAL para elegir el ancla catálogo más reciente de forma
+    determinística: (tiempo, qty). Ante empate de tiempo gana la mayor qty; y si
+    también empata la qty, el ``delta`` resultante es idéntico (solo se usa ``.qty``),
+    así ``max`` no depende del orden de la lista (MINOR 2 del review)."""
+    return (_movement_time(m), m.qty)
+
+
+def classify_group_stock_decision(
+    canonical: ProductRecord, duplicates: list[ProductRecord]
+) -> StockDecision:
+    """Decisión de stock a NIVEL DE GRUPO: UN solo ``canonical_delta`` sumable-safe.
+
+    Recibe el canónico + TODOS los duplicados del grupo y devuelve la ÚNICA
+    ``StockDecision`` que T5 aplica incremental al canónico (``stock_units`` Y
+    ``current_qty``). NUNCA recomputa el saldo desde el ledger (invariante 2d).
+
+    Para cada duplicado descompone (sin recalcular el saldo):
+
+        ledger_identificable = Σ qty de movimientos VIVOS con ``source_type``
+                               reconocido (SOURCE_TYPES).
+        residuo_no_ledger    = duplicado.stock_units − ledger_identificable
+
+    Semántica group-level (evita el sobre-conteo de la decisión pairwise):
+    - CUALQUIER duplicado con ``reserved_qty`` ≠ 0 o ``residuo_no_ledger`` ≠ 0 no
+      atribuible → GRUPO REVIEW (delta=None, conservador: no perder ni doble-contar).
+    - Un mismo duplicado con anclas Y no-anclas → REVIEW (procedencia no atribuible).
+    - MEZCLAR semántica de catálogo (MOST_RECENT) con compras (SUM) en el MISMO
+      grupo → REVIEW (ambiguo).
+    - Toda la evidencia no-canónica es catálogo (``catalog_initial_stock``):
+      MOST_RECENT — ``target`` = qty del ancla catálogo MÁS RECIENTE de TODO el grupo
+      (canónico + duplicados, por COALESCE(occurred_at, created_at));
+      ``delta`` = ``target`` − ``canonical.stock_units`` (puede ser 0 o negativo).
+    - Compras distintas (SUM): ``delta`` = Σ qty vivos de los duplicados dedup-eados
+      por ``source_row_hash`` a nivel de TODO el grupo (una fila compartida por varios
+      miembros —canónico o duplicados hermanos— cuenta UNA sola vez).
+    - Sin ledger vivo en ningún duplicado (stock 0) → KEEP_ONE (delta=0).
+
+    El mismo ``delta`` aplica a ``stock_units`` Y ``current_qty`` en T5.
+    """
+    # Orden determinístico de los duplicados (dedup global de source_row_hash estable).
+    ordered = sorted(duplicates, key=lambda r: str(r.id))
+
+    dup_live_by_id: dict[uuid.UUID, list[MovementRow]] = {}
+    for dup in ordered:
+        if (dup.reserved_qty or 0) != 0:
+            return StockDecision(STOCK_REVIEW, None, STOCK_REASON_RESERVED)
+        dup_live = [m for m in dup.movements if m.source_type in SOURCE_TYPES]
+        residuo_no_ledger = dup.stock_units - sum(m.qty for m in dup_live)
+        if residuo_no_ledger != 0:
+            return StockDecision(STOCK_REVIEW, None, STOCK_REASON_RESIDUO)
+        has_anchor = any(m.source_type == SOURCE_CATALOG_INITIAL_STOCK for m in dup_live)
+        has_non_anchor = any(m.source_type != SOURCE_CATALOG_INITIAL_STOCK for m in dup_live)
+        if has_anchor and has_non_anchor:
+            # Mezcla dentro de un mismo duplicado → no atribuible limpio.
+            return StockDecision(STOCK_REVIEW, None, STOCK_REASON_MIXED)
+        dup_live_by_id[dup.id] = dup_live
+
+    group_has_catalog = any(
+        m.source_type == SOURCE_CATALOG_INITIAL_STOCK
+        for movs in dup_live_by_id.values()
+        for m in movs
+    )
+    group_has_purchase = any(
+        m.source_type != SOURCE_CATALOG_INITIAL_STOCK
+        for movs in dup_live_by_id.values()
+        for m in movs
+    )
+
+    # Mezclar catálogo (MOST_RECENT) con compras (SUM) en el mismo grupo → ambiguo.
+    if group_has_catalog and group_has_purchase:
+        return StockDecision(STOCK_REVIEW, None, STOCK_REASON_MIXED)
+
+    # Catálogo puro → el canónico toma el ancla MÁS RECIENTE de TODO el grupo.
+    if group_has_catalog:
+        all_anchors = [
+            m for m in canonical.movements if m.source_type == SOURCE_CATALOG_INITIAL_STOCK
+        ]
+        for movs in dup_live_by_id.values():
+            all_anchors.extend(
+                m for m in movs if m.source_type == SOURCE_CATALOG_INITIAL_STOCK
+            )
+        target = max(all_anchors, key=_anchor_sort_key).qty
+        return StockDecision(
+            STOCK_MOST_RECENT, target - canonical.stock_units, STOCK_REASON_MOST_RECENT
+        )
+
+    # Compras puras → SUM con dedup GLOBAL de source_row_hash (canónico + hermanos).
+    if group_has_purchase:
+        seen_hashes = {m.source_row_hash for m in canonical.movements if m.source_row_hash}
+        total = 0
+        for dup in ordered:
+            for m in dup_live_by_id[dup.id]:
+                if m.source_row_hash and m.source_row_hash in seen_hashes:
+                    continue  # fila ya contada por el canónico o un hermano previo.
+                if m.source_row_hash:
+                    seen_hashes.add(m.source_row_hash)
+                total += m.qty
+        if total == 0:
+            # Todo compartido con el canónico (misma fila importada 2×) → no sumar.
+            return StockDecision(STOCK_KEEP_ONE, 0, STOCK_REASON_KEEP_ONE)
+        return StockDecision(STOCK_SUM, total, STOCK_REASON_SUM)
+
+    # Sin ledger vivo en ningún duplicado → stock 0, nada que sumar.
+    return StockDecision(STOCK_KEEP_ONE, 0, STOCK_REASON_EMPTY)
+
+
 def classify_stock_decision(
     duplicate: ProductRecord, canonical: ProductRecord
 ) -> StockDecision:
-    """Decide qué SUMAR (incremental) del stock del DUPLICADO al canónico.
-
-    NUNCA recomputa el saldo desde el ledger (invariante 2d). Descompone:
-
-        ledger_identificable = Σ qty de movimientos VIVOS del duplicado con
-                               ``source_type`` reconocido (SOURCE_TYPES).
-        residuo_no_ledger    = duplicate.stock_units − ledger_identificable
-
-    - ``reserved_qty`` del duplicado ≠ 0 → REVIEW (reservas no atribuibles a las
-      FKs que se re-apuntan; conservador, no perder reservas).
-    - ``residuo_no_ledger`` ≠ 0 → REVIEW (stock manual no atribuible: no sabemos si
-      el canónico ya lo tiene → no doble-contar ni perder).
-    - ``residuo_no_ledger`` == 0:
-        * solo anclas (catalog_initial_stock) → MOST_RECENT: el canónico toma el
-          saldo del catálogo MÁS RECIENTE (por COALESCE(occurred_at, created_at))
-          entre C y D; ``delta`` = ese valor − ``canonical.stock_units`` (puede ser
-          0 o negativo; incremental).
-        * anclas Y no-anclas mezcladas → REVIEW (procedencia no atribuible limpio).
-        * solo no-anclas:
-            - todas comparten ``source_row_hash`` con un movimiento vivo del
-              canónico (misma fila importada 2×) → KEEP_ONE (``delta`` = 0).
-            - alguna NO compartida → SUM (``delta`` = Σ qty de las NO compartidas):
-              compras reales distintas, sumar incremental.
-        * sin ledger identificable y stock 0 → KEEP_ONE (``delta`` = 0, nada que sumar).
-
-    La MISMA decisión (``delta``) aplica a ``stock_units`` Y ``current_qty`` en T5.
-    """
-    if (duplicate.reserved_qty or 0) != 0:
-        return StockDecision(STOCK_REVIEW, None, STOCK_REASON_RESERVED)
-
-    dup_live = [m for m in duplicate.movements if m.source_type in SOURCE_TYPES]
-    ledger_identificable = sum(m.qty for m in dup_live)
-    residuo_no_ledger = duplicate.stock_units - ledger_identificable
-    if residuo_no_ledger != 0:
-        return StockDecision(STOCK_REVIEW, None, STOCK_REASON_RESIDUO)
-
-    anchors = [m for m in dup_live if m.source_type == SOURCE_CATALOG_INITIAL_STOCK]
-    non_anchors = [m for m in dup_live if m.source_type != SOURCE_CATALOG_INITIAL_STOCK]
-
-    if anchors and non_anchors:
-        return StockDecision(STOCK_REVIEW, None, STOCK_REASON_MIXED)
-
-    if anchors:
-        canon_anchors = [
-            m for m in canonical.movements if m.source_type == SOURCE_CATALOG_INITIAL_STOCK
-        ]
-        most_recent = max(anchors + canon_anchors, key=_movement_time)
-        delta = most_recent.qty - canonical.stock_units
-        return StockDecision(STOCK_MOST_RECENT, delta, STOCK_REASON_MOST_RECENT)
-
-    if non_anchors:
-        canon_hashes = {
-            m.source_row_hash for m in canonical.movements if m.source_row_hash
-        }
-        non_shared = [
-            m
-            for m in non_anchors
-            if not (m.source_row_hash and m.source_row_hash in canon_hashes)
-        ]
-        if not non_shared:
-            return StockDecision(STOCK_KEEP_ONE, 0, STOCK_REASON_KEEP_ONE)
-        return StockDecision(STOCK_SUM, sum(m.qty for m in non_shared), STOCK_REASON_SUM)
-
-    # residuo == 0 y sin ledger identificable → stock_units == 0, nada que sumar.
-    return StockDecision(STOCK_KEEP_ONE, 0, STOCK_REASON_EMPTY)
+    """Envoltorio del caso de UN solo duplicado — delega en el motor group-level
+    (``classify_group_stock_decision(canonical, [duplicate])``). Se mantiene para
+    testear un duplicado aislado; el plan real SIEMPRE decide a nivel de grupo."""
+    return classify_group_stock_decision(canonical, [duplicate])
 
 
 # ── Fingerprint por grupo (función pura) ─────────────────────────────────────────
@@ -505,7 +579,7 @@ def classify_stock_decision(
 def compute_group_fingerprint(
     records: list[ProductRecord],
     canonical_id: uuid.UUID,
-    stock_decisions: dict[uuid.UUID, StockDecision],
+    stock_decision: StockDecision | None,
     decision_version: int = DECISION_VERSION,
 ) -> str:
     """sha256 determinístico del estado ACTUAL relevante del grupo.
@@ -514,8 +588,8 @@ def compute_group_fingerprint(
     aborta el grupo si cambió (alguien tocó un producto/movimiento/balance entre el
     plan y la ejecución). Incluye: ids ordenados, canónico, ``#FKs`` por producto,
     ``stock_units``/balance (``current_qty``/``reserved_qty``) por producto, los
-    ``source_row_hash`` de los movimientos-evidencia, la decisión de stock
-    (kind+delta) por duplicado y ``DECISION_VERSION``. NO usa ``datetime.now()``/
+    ``source_row_hash`` de los movimientos-evidencia, la ÚNICA decisión de stock
+    group-level (kind+delta) y ``DECISION_VERSION``. NO usa ``datetime.now()``/
     ``random`` (romperían el determinismo).
     """
     products_payload = [
@@ -531,19 +605,16 @@ def compute_group_fingerprint(
         }
         for r in sorted(records, key=lambda r: str(r.id))
     ]
-    decisions_payload = [
-        {
-            "duplicate_id": str(dup_id),
-            "kind": dec.kind,
-            "delta": dec.delta,
-        }
-        for dup_id, dec in sorted(stock_decisions.items(), key=lambda kv: str(kv[0]))
-    ]
+    decision_payload = (
+        {"kind": stock_decision.kind, "delta": stock_decision.delta}
+        if stock_decision is not None
+        else None
+    )
     payload = {
         "decision_version": decision_version,
         "canonical_id": str(canonical_id),
         "products": products_payload,
-        "stock_decisions": decisions_payload,
+        "stock_decision": decision_payload,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -638,10 +709,18 @@ async def load_product_records(
                 InventoryMovement.source_row_hash,
                 InventoryMovement.occurred_at,
                 InventoryMovement.created_at,
-            ).where(
+            )
+            .where(
                 InventoryMovement.tenant_id == tenant_id,
                 InventoryMovement.product_id.in_(id_list),
                 InventoryMovement.voided_at.is_(None),
+            )
+            # Orden determinístico (MINOR 2): la selección del ancla más reciente y el
+            # fingerprint no pueden depender del orden físico de las filas.
+            .order_by(
+                InventoryMovement.occurred_at,
+                InventoryMovement.created_at,
+                InventoryMovement.id,
             )
         )
     ).all():
@@ -740,19 +819,15 @@ async def plan_dedup(session: AsyncSession, tenant_id: uuid.UUID) -> DedupPlan:
         identity_review, identity_reasons = classify_identity_conflict(group_records)
         group.review_reasons.extend(identity_reasons)
 
-        for dup in group_records:
-            if dup.id == canonical_id:
-                continue
-            decision = classify_stock_decision(dup, canonical)
-            group.stock_decisions[dup.id] = decision
-            if decision.kind == STOCK_REVIEW:
-                group.review_reasons.append(f"stock:{dup.id}:{decision.reason}")
+        duplicates = [r for r in group_records if r.id != canonical_id]
+        decision = classify_group_stock_decision(canonical, duplicates)
+        group.stock_decision = decision
+        if decision.kind == STOCK_REVIEW:
+            group.review_reasons.append(f"stock:{decision.reason}")
 
-        group.requires_review = identity_review or any(
-            d.kind == STOCK_REVIEW for d in group.stock_decisions.values()
-        )
+        group.requires_review = identity_review or decision.kind == STOCK_REVIEW
         group.fingerprint = compute_group_fingerprint(
-            group_records, canonical_id, group.stock_decisions
+            group_records, canonical_id, decision
         )
 
     return DedupPlan(groups=groups, records=records)
@@ -883,6 +958,13 @@ async def persist_dedup_plan(
             products_skipped += len(group.member_ids)
             continue
 
+        decision = group.stock_decision
+        # UN solo delta group-level que T5 aplica al canónico (stock_units Y current_qty).
+        stock_decision_json = (
+            {"kind": decision.kind, "delta": decision.delta, "reason": decision.reason}
+            if decision is not None
+            else None
+        )
         session.add(
             DataRepairItem(
                 run_id=run.id,
@@ -894,10 +976,8 @@ async def persist_dedup_plan(
                     "duplicate_ids": [
                         str(m) for m in group.member_ids if m != group.canonical_id
                     ],
-                    "stock_decisions": {
-                        str(dup_id): {"kind": d.kind, "delta": d.delta, "reason": d.reason}
-                        for dup_id, d in group.stock_decisions.items()
-                    },
+                    # UNA decisión por GRUPO (canonical_delta), no una por duplicado.
+                    "stock_decision": stock_decision_json,
                 },
                 after_json={"plan": _plan_block(group)},
                 confidence="HIGH",
@@ -908,7 +988,6 @@ async def persist_dedup_plan(
             if dup_id == group.canonical_id:
                 continue
             dup = plan.records.get(dup_id)
-            decision = group.stock_decisions.get(dup_id)
 
             # REPOINT_FK chunked (sales / expenses / movements).
             for item in await _build_repoint_items(
@@ -916,7 +995,8 @@ async def persist_dedup_plan(
             ):
                 session.add(item)
 
-            # Balance: consolidar (delta al canónico) + borrar el del duplicado.
+            # Balance: consolidar + borrar el del duplicado. El delta de stock es
+            # group-level (viaja en MERGE_PRODUCT) — acá NO hay delta por duplicado.
             if dup is not None and dup.current_qty is not None:
                 session.add(
                     DataRepairItem(
@@ -928,7 +1008,6 @@ async def persist_dedup_plan(
                             "plan": _plan_block(group),
                             "duplicate_id": str(dup_id),
                             "duplicate_current_qty": dup.current_qty,
-                            "stock_delta": decision.delta if decision else None,
                         },
                         after_json={"plan": _plan_block(group)},
                         confidence="HIGH",
