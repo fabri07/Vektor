@@ -29,6 +29,7 @@ from app.persistence.models.file import UploadedFile
 from app.persistence.models.google_mcp_connection import GoogleMcpConnection
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
+from app.persistence.models.maintenance_lock import TenantMaintenanceLock
 from app.persistence.models.memory import AgentMemory, BusinessMemory, OperationFingerprint
 from app.persistence.models.notification import Notification
 from app.persistence.models.pending_action import PendingAction
@@ -100,4 +101,5 @@ __all__ = [
     "ContactLead",
     "ExternalOperationLog",
     "SocialMetric",
+    "TenantMaintenanceLock",
 ]
