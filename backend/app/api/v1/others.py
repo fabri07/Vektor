@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_role
+from app.api.v1.deps import ensure_tenant_not_under_maintenance, get_current_tenant, require_role
 from app.api.v1.expenses import _apply_category_label
 from app.api.v1.products import (
     _duplicate_identity_conflict,
@@ -374,6 +374,7 @@ async def reclassify_record(
     "/{record_id}/resolve-purchase",
     response_model=MessageResponse,
     summary="Resolver una compra ambigua vinculándola a un producto",
+    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def resolve_purchase(
     record_id: UUID,
@@ -471,6 +472,7 @@ async def resolve_purchase(
     "/bulk-import",
     response_model=BulkImportResponse,
     summary="Importar en lote los registros de Otros sugeridos como venta/gasto",
+    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def bulk_import_records(
     body: BulkImportRequest,

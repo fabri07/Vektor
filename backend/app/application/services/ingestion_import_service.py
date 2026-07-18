@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
+from app.application.services import maintenance_lock_service
 from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
@@ -1845,6 +1846,10 @@ async def insert_confirmed_data(
         assign_orphan_sales_to_local,
     )
 
+    # F3-T3: chokepoint de bulk-import (crea productos/stock por fuera de
+    # ProductRepository.save). Shared lock ANTES de mutar. No-op en SQLite.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+
     counts = await _insert_confirmed_data_impl(
         session,
         tenant_id,
@@ -3560,6 +3565,10 @@ async def bulk_import_unclassified(
         UnclassifiedRecord,
     )
 
+    # F3-T3: importación en lote crea productos/stock por fuera de
+    # ProductRepository.save. Shared lock ANTES de mutar. No-op en SQLite.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+
     entities = [entity_filter] if entity_filter else ["sale", "expense"]
     records = (
         (
@@ -3722,6 +3731,10 @@ async def import_receipt(
     fail-closed. Devuelve un summary de lo creado.
     """
     from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+    # F3-T3: el remito crea productos/stock por fuera de ProductRepository.save.
+    # Shared lock ANTES de mutar. No-op en SQLite.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
 
     tx_date = transaction_date or now_ar_naive()
     # F2-T4: ``_resolve_product`` normaliza canónicamente (accent/dash-aware),

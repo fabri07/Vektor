@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
+    ensure_tenant_not_under_maintenance,
     get_current_tenant,
     require_modify_access,
     require_owner_stepup,
@@ -232,6 +233,7 @@ async def list_supplier_products(
     response_model=ReceiptResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Import a supplier receipt (remito)",
+    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def create_receipt(
     supplier_id: UUID,

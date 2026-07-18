@@ -9,7 +9,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
+from app.api.v1.deps import (
+    ensure_tenant_not_under_maintenance,
+    get_current_tenant,
+    require_modify_access,
+    require_role,
+)
 from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
@@ -286,6 +291,7 @@ async def create_product_category(
     response_model=ProductResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a product",
+    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def create_product(
     body: CreateProductRequest,
@@ -342,7 +348,12 @@ async def get_product(
     return product
 
 
-@router.patch("/{product_id}", response_model=ProductResponse, summary="Update a product")
+@router.patch(
+    "/{product_id}",
+    response_model=ProductResponse,
+    summary="Update a product",
+    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
+)
 async def update_product(
     product_id: UUID,
     body: UpdateProductRequest,

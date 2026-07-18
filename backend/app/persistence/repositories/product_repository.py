@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import maintenance_lock_service
 from app.persistence.models.product import Product
 
 
@@ -78,6 +79,11 @@ class ProductRepository:
         return out
 
     async def save(self, product: Product) -> Product:
+        # F3-T3: shared lock ANTES de crear/actualizar el producto — barrera de
+        # exclusión mutua real contra el dedup (que toma el exclusive). No-op en SQLite.
+        await maintenance_lock_service.acquire_write_lock_shared(
+            self._session, product.tenant_id
+        )
         self._session.add(product)
         await self._session.flush()
         return product

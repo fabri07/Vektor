@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.services import maintenance_lock_service
 from app.application.services.inventory_movement_origin import ensure_utc
 from app.domain.product import effective_threshold
 from app.persistence.models.audit import DecisionAuditLog
@@ -101,6 +102,12 @@ async def _get_or_create_balance(
     tenant_id: uuid.UUID,
     db: AsyncSession,
 ) -> InventoryBalance:
+    # F3-T3: chokepoint COMÚN de toda mutación de balance/stock (decrement_stock,
+    # increment_stock, register_stock_loss, void_movement, unvoid_movement — y
+    # transitivamente decrement_for_sale/revert_sale_stock, que pasan por acá).
+    # Shared lock ANTES de mutar: barrera de exclusión mutua real contra el dedup
+    # (que toma el exclusive). No-op en SQLite.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     result = await db.execute(
         select(InventoryBalance).where(
             InventoryBalance.product_id == product.id,

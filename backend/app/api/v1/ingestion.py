@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
+    ensure_tenant_not_under_maintenance,
     get_current_tenant,
     get_current_user,
     require_modify_access,
@@ -725,6 +726,7 @@ async def delete_column_mapping(
     "/files/{file_id}/confirm",
     response_model=ConfirmIngestionResponse,
     summary="Confirm ingestion of parsed data",
+    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
 )
 async def confirm_file(
     file_id: uuid.UUID,
@@ -1094,7 +1096,10 @@ async def reread_preview(
     response_model=RereadApplyStartResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Encola el apply de la relectura en background (devuelve run_id para polling)",
-    dependencies=[Depends(require_modify_access)],
+    dependencies=[
+        Depends(require_modify_access),
+        Depends(ensure_tenant_not_under_maintenance),
+    ],
 )
 async def reread_apply(
     file_id: uuid.UUID,
