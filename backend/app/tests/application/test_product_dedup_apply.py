@@ -7,9 +7,11 @@ transacción por grupo, aplicando el delta de stock group-level UNA sola vez.
 
 Cubre contra SQLite: apply SUM simple, apply catálogo MOST_RECENT (no pairwise),
 aborto por fingerprint (PARTIALLY_APPLIED), aborto por rowcount de REPOINT_FK,
-completar SOLO NULLs en el MERGE (custom_fields shallow sin claves "_"), idempotencia
-(re-apply del source ya consumido aborta), guarda del lease (heartbeat), y el guard de
-CLI ``--apply`` sin ``--source-run-id``.
+guard de balance NUEVO negativo (skip balance_inconsistency), completar SOLO NULLs en
+el MERGE (custom_fields shallow sin claves "_"), idempotencia (re-apply de un source
+full-APPLIED aborta), reintento seguro (un run PARTIALLY_APPLIED deja el source
+re-aplicable), guarda del lease (heartbeat), y el guard de CLI ``--apply`` sin
+``--source-run-id``.
 """
 
 from __future__ import annotations
@@ -442,6 +444,51 @@ async def test_apply_repoint_count_mismatch_aborts_group(
     assert rc is not None and rc.stock_units == 0
 
 
+# ── Guard de balance negativo (crear balance NUEVO con current_qty<0) ────────────
+
+
+async def test_apply_skips_group_when_new_balance_would_be_negative(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    # Catálogo puro (MOST_RECENT): el canónico gana por barcode y arrastra stock_units=10,
+    # pero el ancla MÁS RECIENTE del grupo es qty=3 → delta = 3 - 10 = -7 (< 0). El canónico
+    # NO tiene balance (= 0 implícito) → crear uno con current_qty<0 sería inconsistente.
+    canonical = await _add_product(
+        db_session, tid, name="Sal", sku="SAL", barcode="7790099990009", stock_units=10
+    )
+    dup = await _add_product(db_session, tid, name="Sal x", sku="SAL", stock_units=3)
+    await _add_movement(
+        db_session, tid, canonical.id, 3, SOURCE_CATALOG_INITIAL_STOCK, "c", occurred_offset_days=1
+    )
+    await _add_movement(
+        db_session, tid, dup.id, 3, SOURCE_CATALOG_INITIAL_STOCK, "d", occurred_offset_days=0
+    )
+    await _add_balance(db_session, tid, dup.id, 3)  # el canónico queda SIN balance a propósito
+    await db_session.flush()
+    canonical_id, dup_id = canonical.id, dup.id
+
+    source_run_id = await _plan_and_persist(db_session, tid)
+    result = await svc.apply_dedup_plan(db_session, tid, source_run_id, lease_id=None)
+    assert result.status == "PARTIALLY_APPLIED"
+    assert result.groups_applied == 0
+    assert result.groups_skipped == 1
+    assert result.group_results[0]["reason"] == "balance_inconsistency"
+
+    db_session.expunge_all()
+    # Rollback total del grupo: dup activo, canónico sin delta y sin balance nuevo negativo.
+    rd = await db_session.get(Product, dup_id)
+    assert rd is not None and rd.is_active is True
+    rc = await db_session.get(Product, canonical_id)
+    assert rc is not None and rc.stock_units == 10
+    canon_bal = (
+        await db_session.execute(
+            select(InventoryBalance).where(InventoryBalance.product_id == canonical_id)
+        )
+    ).scalar_one_or_none()
+    assert canon_bal is None
+
+
 # ── MERGE_PRODUCT: solo completa NULLs, custom_fields shallow sin "_"-claves ─────
 
 
@@ -509,6 +556,73 @@ async def test_reapply_consumed_source_raises(
     with pytest.raises(ValueError, match="status"):
         await svc.apply_dedup_plan(db_session, tid, source_run_id, lease_id=None)
     _ = canonical
+
+
+async def test_partial_apply_leaves_source_reappliable(
+    db_session: AsyncSession, isolated_db_engine: AsyncEngine, sample_tenant: Tenant
+) -> None:
+    """Un run que termina PARTIALLY_APPLIED (un grupo salteado por fingerprint) deja el
+    source dry-run en COMPLETED → re-aplicable. Un 2º apply (con el estado ya estable)
+    toma el grupo que había quedado pendiente; el grupo ya aplicado cae solo por skip.
+    El 2º apply corre en una session NUEVA (espeja producción: otra corrida del script)."""
+    tid = sample_tenant.tenant_id
+    # Grupo A (SUM, delta=7).
+    canon_a = await _add_product(
+        db_session, tid, name="Coca", sku="COCA", barcode="7790011110001", stock_units=10
+    )
+    dup_a = await _add_product(db_session, tid, name="Coca x", sku="COCA", stock_units=7)
+    await _add_movement(db_session, tid, canon_a.id, 10, SOURCE_PURCHASE_IMPORT, "a1")
+    await _add_movement(db_session, tid, dup_a.id, 7, SOURCE_RECEIPT, "a2")
+    await _add_balance(db_session, tid, canon_a.id, 10)
+    await _add_balance(db_session, tid, dup_a.id, 7)
+    await _add_sale(db_session, tid, dup_a.id)
+    # Grupo B (SUM, delta=5) — independiente.
+    await _add_product(
+        db_session, tid, name="Agua", sku="AGUA", barcode="7790022220002", stock_units=0
+    )
+    dup_b = await _add_product(db_session, tid, name="Agua x", sku="AGUA", stock_units=5)
+    await _add_movement(db_session, tid, dup_b.id, 5, SOURCE_PURCHASE_IMPORT, "b1")
+    await _add_balance(db_session, tid, dup_b.id, 5)
+    await _add_sale(db_session, tid, dup_b.id)
+    await db_session.flush()
+    canon_a_id, dup_a_id, dup_b_id = canon_a.id, dup_a.id, dup_b.id
+
+    source_run_id = await _plan_and_persist(db_session, tid)
+
+    from sqlalchemy import update
+
+    # Alguien tocó el grupo A entre el dry-run y el 1er apply → A se saltea por fingerprint.
+    await db_session.execute(
+        update(Product).where(Product.id == canon_a_id).values(stock_units=999)
+    )
+    await db_session.commit()
+
+    first = await svc.apply_dedup_plan(db_session, tid, source_run_id, lease_id=None)
+    assert first.status == "PARTIALLY_APPLIED"
+    assert first.groups_applied == 1  # B aplicado
+    assert first.groups_skipped == 1  # A salteado (fingerprint)
+
+    # El source NO se marca APPLIED (no terminó full-APPLIED) → queda re-aplicable.
+    src = await db_session.get(DataRepairRun, source_run_id)
+    assert src is not None and src.status == "COMPLETED"
+
+    # 2º apply del MISMO source en una session NUEVA (otra corrida del script): estabilizamos
+    # A (vuelve a su estado del plan → su fingerprint matchea) y re-aplicamos. A ahora aplica;
+    # B cae solo (ya aplicado en el 1º → su fingerprint cambió).
+    async with AsyncSession(isolated_db_engine, expire_on_commit=False) as s2:
+        await s2.execute(
+            update(Product).where(Product.id == canon_a_id).values(stock_units=10)
+        )
+        await s2.commit()
+        second = await svc.apply_dedup_plan(s2, tid, source_run_id, lease_id=None)
+        assert second.status == "PARTIALLY_APPLIED"
+        assert second.groups_applied == 1  # A
+        assert second.groups_skipped == 1  # B (ya aplicado antes)
+
+        rd_a = await s2.get(Product, dup_a_id)
+        assert rd_a is not None and rd_a.is_active is False  # A se aplicó en el 2º apply
+        rd_b = await s2.get(Product, dup_b_id)
+        assert rd_b is not None and rd_b.is_active is False  # B se aplicó en el 1º apply
 
 
 async def test_apply_nonexistent_source_raises(

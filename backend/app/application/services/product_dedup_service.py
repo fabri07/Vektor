@@ -1099,6 +1099,7 @@ _REPOINT_TABLE_ORDER = ("sales_entries", "expense_entries", "inventory_movements
 
 _LEASE_LOST_REASON = "lease_lost"
 _FINGERPRINT_CHANGED_REASON = "fingerprint_changed"
+_BALANCE_INCONSISTENCY_REASON = "balance_inconsistency"
 
 
 class RepointCountMismatchError(RuntimeError):
@@ -1187,11 +1188,16 @@ def _group_source_items(items: list[Any]) -> dict[str, dict[str, Any]]:
             },
         )
         if it.action == "MERGE_PRODUCT":
-            g["merge"] = it
+            g["merge"] = True  # marca de presencia (los datos ya se extrajeron a plano)
             g["duplicate_ids"] = [uuid.UUID(x) for x in before.get("duplicate_ids", [])]
             g["stock_decision"] = before.get("stock_decision")
         elif it.action == "REPOINT_FK":
-            g["repoint"].append(it)
+            # Extraemos a plano AHORA (product_id + before_json): los ORM ``DataRepairItem``
+            # del source se EXPIRAN cuando un grupo PREVIO hace ``rollback`` (skip por
+            # fingerprint / fallo) → acceder ``it.product_id``/``it.before_json`` en un grupo
+            # posterior dispararía un lazy-load sync → ``MissingGreenlet``. Con dicts planos,
+            # ``_apply_one_group`` nunca toca el ORM del source tras un rollback intermedio.
+            g["repoint"].append({"product_id": it.product_id, "before_json": before})
     return grouped
 
 
@@ -1348,21 +1354,21 @@ async def _apply_one_group(
         "inventory_movements": InventoryMovement,
     }
 
-    def _repoint_sort_key(it: Any) -> tuple[int, str, int]:
-        before = it.before_json or {}
+    def _repoint_sort_key(rp: dict[str, Any]) -> tuple[int, str, int]:
+        before = rp["before_json"] or {}
         table = before.get("table", "")
         order = (
             _REPOINT_TABLE_ORDER.index(table) if table in _REPOINT_TABLE_ORDER else len(
                 _REPOINT_TABLE_ORDER
             )
         )
-        return (order, str(it.product_id), int(before.get("chunk_index", 0)))
+        return (order, str(rp["product_id"]), int(before.get("chunk_index", 0)))
 
-    for item in sorted(gdata["repoint"], key=_repoint_sort_key):
-        before = item.before_json or {}
+    for rp in sorted(gdata["repoint"], key=_repoint_sort_key):
+        before = rp["before_json"] or {}
         table = before["table"]
         model = model_by_table[table]
-        dup_id = item.product_id
+        dup_id = rp["product_id"]
         row_ids = [uuid.UUID(r["id"]) for r in before.get("rows", [])]
         if not row_ids:
             continue
@@ -1424,8 +1430,18 @@ async def _apply_one_group(
     canon_bal = bal_by_pid.get(canonical_id)
     prev_current = canon_bal.current_qty if canon_bal is not None else None
     if canon_bal is not None:
+        # Balance existente: incremental. NUNCA se clampea stock existente (regla dura):
+        # incluso si el delta lo dejara negativo, se aplica tal cual (la reversa lo deshace).
         canon_bal.current_qty = canon_bal.current_qty + delta
         new_current: int | None = canon_bal.current_qty
+    elif delta < 0:
+        # No existía balance (= 0 implícito) y el delta lo dejaría negativo: crear un
+        # balance NUEVO con current_qty<0 desde cero es una inconsistencia (no había
+        # balance previo que "clampear"). Conservador (no-invention): saltear el grupo →
+        # el caller hace rollback de TODO (MERGE/REPOINT incluidos) y el negocio de ese
+        # grupo queda intacto. NO es un clamp de stock existente (esto es sólo el caso de
+        # CREAR un balance desde cero).
+        return ("skipped", _BALANCE_INCONSISTENCY_REASON)
     elif delta != 0:
         canon_bal = InventoryBalance(
             id=uuid.uuid4(),
@@ -1560,8 +1576,10 @@ async def apply_dedup_plan(
       ``current_qty`` del canónico. NUNCA recomputa desde el ledger.
     - Los ``DataRepairItem`` del run de apply son el REGISTRO real (before/after) que
       T6 revierte en orden inverso.
-    - Marca el source dry-run como ``APPLIED`` al terminar (lo consume — un re-apply
-      del mismo source aborta en la validación; correr de nuevo exige un dry-run nuevo).
+    - Marca el source dry-run como ``APPLIED`` SOLO si el run terminó full-``APPLIED``.
+      Si quedó ``PARTIALLY_APPLIED``/``FAILED``, el source queda en ``COMPLETED`` →
+      re-aplicable: re-correr ``--apply`` con el mismo source toma los grupos salteados
+      por fingerprint (idempotente; los grupos ya aplicados caen solos por skip).
     """
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -1608,14 +1626,19 @@ async def apply_dedup_plan(
         gdata = grouped[gid]
         if gdata.get("merge") is None:  # pragma: no cover — todo grupo mergeable trae MERGE
             continue
-        if lease_id is not None and not await mls.renew(session, lease_id, ttl_seconds):
-            await session.rollback()
-            group_results.append(
-                {"group_id": gid, "status": "failed", "reason": _LEASE_LOST_REASON}
-            )
-            failed += 1
-            lease_lost = True
-            break
+        if lease_id is not None:
+            renewed = await mls.renew(session, lease_id, ttl_seconds)
+            # Heartbeat en su PROPIA transacción committeada, independiente del ciclo del
+            # grupo: si el grupo se saltea/falla y hacemos rollback, la renovación del lease
+            # YA quedó persistida → el lease no expira a mitad de un run largo con muchos skips.
+            await session.commit()
+            if not renewed:
+                group_results.append(
+                    {"group_id": gid, "status": "failed", "reason": _LEASE_LOST_REASON}
+                )
+                failed += 1
+                lease_lost = True
+                break
         try:
             status, reason = await _apply_one_group(
                 session, run_id, tenant_id, gdata, lease_id=lease_id, force_group=force_group
@@ -1669,9 +1692,19 @@ async def apply_dedup_plan(
             "groups": group_results,
         }
 
-    # Consume el source dry-run (idempotencia: un re-apply aborta en la validación).
+    # Consume el source dry-run SOLO si el run terminó full-APPLIED. Si quedó
+    # PARTIALLY_APPLIED/FAILED, dejamos el source en COMPLETED → re-aplicable: se puede
+    # re-correr `--apply --source-run-id <mismo>` para tomar los grupos salteados por
+    # fingerprint. El re-apply es idempotente y seguro: los grupos ya aplicados caen
+    # solos (su duplicado quedó is_active=False y el fingerprint/#FKs cambió → skip).
+    # Contrato para T6: T6 revierte SIEMPRE un run de APPLY, nunca el source dry-run.
     source = await session.get(DataRepairRun, source_run_id)
-    if source is not None and source.dry_run and source.status == "COMPLETED":
+    if (
+        source is not None
+        and source.dry_run
+        and source.status == "COMPLETED"
+        and final_status == "APPLIED"
+    ):
         source.status = "APPLIED"
 
     session.add(
