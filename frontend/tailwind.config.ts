@@ -88,11 +88,19 @@ const config: Config = {
           "0%": { opacity: "0", transform: "translateY(8px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
+        // Barra de progreso REALMENTE indeterminada (sin porcentaje): un segmento
+        // que recorre el track en loop. No "miente" con un % inventado.
+        indeterminate: {
+          "0%": { left: "-35%", right: "100%" },
+          "60%": { left: "100%", right: "-90%" },
+          "100%": { left: "100%", right: "-90%" },
+        },
       },
       animation: {
         marquee: "marquee 28s linear infinite",
         mesh: "mesh 18s ease-in-out infinite alternate",
         "fade-slide-up": "fade-slide-up 150ms ease-out",
+        indeterminate: "indeterminate 1.4s ease-in-out infinite",
       },
     },
   },
