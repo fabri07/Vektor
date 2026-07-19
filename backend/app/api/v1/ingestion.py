@@ -12,9 +12,11 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import func, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
@@ -44,6 +46,12 @@ from app.application.services.ingestion_import_service import (
     check_nonempty_import,
     insert_confirmed_data,
 )
+from app.application.services.ingestion_lease_service import (
+    ImportLeaseLostError,
+    acquire_import_lease,
+    finalize_import_lease,
+    release_import_lease,
+)
 from app.application.services.llm_file_type_detector import maybe_detect_file_type
 from app.config.settings import get_settings
 from app.integrations.s3 import S3Client
@@ -58,6 +66,7 @@ from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
     PROCESSING_STATUS_FAILED,
+    PROCESSING_STATUS_IMPORTING,
     PROCESSING_STATUS_NEEDS_COMPLETION,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     PROCESSING_STATUS_PENDING,
@@ -538,10 +547,34 @@ async def delete_file(
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
-    # FASE 0: soft delete — el crudo en R2 se preserva (input para ML + respaldo).
-    # El archivo deja de aparecer en la UI pero el registro y el objeto persisten.
-    record.deleted_at = datetime.now(UTC)
-    await repo.save(record)
+    # F4: soft-delete ATÓMICO (CAS) — cierra la carrera delete↔confirm. Un check en
+    # Python (leer estado → borrar) deja un TOCTOU: el confirm podría tomar el lease
+    # entre el check y el UPDATE. El CAS `WHERE deleted_at IS NULL AND status !=
+    # IMPORTING` garantiza que NO se borra un archivo con import en curso, y el CAS
+    # del lease (que exige `deleted_at IS NULL`) garantiza lo simétrico.
+    # FASE 0: el crudo en R2 se preserva (input para ML + respaldo).
+    result = await session.execute(
+        update(UploadedFile)
+        .where(
+            UploadedFile.id == file_id,
+            UploadedFile.tenant_id == tenant.tenant_id,
+            UploadedFile.deleted_at.is_(None),
+            UploadedFile.processing_status != PROCESSING_STATUS_IMPORTING,
+        )
+        .values(deleted_at=func.now())
+    )
+    if cast("CursorResult[Any]", result).rowcount == 0:
+        # rowcount 0 sólo se alcanza por una carrera: el archivo estaba vivo en el
+        # `get_by_id` de arriba pero para el CAS ya está IMPORTING (confirm ganó) o
+        # borrado (otro delete ganó). Re-consultar para distinguir 409 de 204.
+        # (Un re-delete SECUENCIAL de un archivo ya borrado corta antes, en el 404
+        # del `get_by_id`, porque filtra `deleted_at IS NULL`.)
+        current = await repo.get_by_id(file_id, tenant.tenant_id)
+        if current is not None and current.processing_status == PROCESSING_STATUS_IMPORTING:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No se puede eliminar un archivo mientras se importa.",
+            )
     await session.commit()
 
 
@@ -739,7 +772,14 @@ async def confirm_file(
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
-    if record.processing_status != PROCESSING_STATUS_NEEDS_CONFIRMATION:
+    # Pre-check barato: sólo NEEDS_CONFIRMATION (confirm normal) e IMPORTING
+    # (candidato a takeover si el lease quedó stale) llegan al CAS del lease.
+    # DONE/PROCESSING/etc. se rechazan acá con un mensaje claro. El guard real
+    # de concurrencia es el CAS atómico de `acquire_import_lease`.
+    if record.processing_status not in (
+        PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        PROCESSING_STATUS_IMPORTING,
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -827,121 +867,163 @@ async def confirm_file(
                         ),
                     )
 
-    # Crear definiciones de campos personalizados para mapeos custom_field:{key}
-    # — idempotente, sin commit propio; el commit final cierra la transacción completa.
-    if body.column_mappings:
-        from app.application.services.field_definition_service import (  # noqa: PLC0415
-            ensure_custom_field_exists,
-        )
-
-        for _mapping in body.column_mappings:
-            if _mapping.target_field.startswith("custom_field:"):
-                _field_key = _mapping.target_field[len("custom_field:"):]
-                await ensure_custom_field_exists(
-                    session,
-                    tenant.tenant_id,
-                    _entity_for(_mapping),
-                    _field_key,
-                    _mapping.source_column,  # nombre de la columna como label inicial
-                )
-
-    # Insert parsed rows into business tables, then mark done
-    updated_summary = dict(record.parsed_summary_json or {})
-    updated_summary["confirmed_fields"] = body.confirmed_fields
-    # Persistir la elección de tratamiento del stock (apertura vs compra) en el summary
-    # para que una relectura posterior conserve la decisión sin volver a preguntar.
-    if body.stock_treatment is not None:
-        updated_summary["stock_treatment"] = body.stock_treatment
-
-    explicit_mappings: dict[str, str] | None = None
-    if _flat_mappings:
-        explicit_mappings = {m.source_column: m.target_field for m in _flat_mappings}
-
-    context_mappings: dict[str, dict[str, str]] | None = None
-    if _ctx_mappings:
-        _cm: dict[str, dict[str, str]] = defaultdict(dict)
-        for m in _ctx_mappings:
-            _cm[m.context_id or ""][m.source_column] = m.target_field
-        context_mappings = dict(_cm)
-
-    _trace_id = record.trace_id or record.id
-    bind_request_context(trace_id=_trace_id)
-    _t0 = time.monotonic()
-    counts = await insert_confirmed_data(
-        session,
-        tenant.tenant_id,
-        updated_summary,
-        body.confirmed_fields,
-        column_mappings=explicit_mappings,
-        context_mappings=context_mappings,
-        context_confirmed=body.context_confirmed or None,
-        context_entity=body.context_entity or None,
-        source="ingestion",
-        uploaded_file_id=file_id,
-        stock_treatment=body.stock_treatment,
-    )
-    _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
-
-    # El rollback de get_db_session deja el archivo en NEEDS_CONFIRMATION para
-    # reintentar con mapeo manual.
-    try:
-        check_nonempty_import(
-            counts, updated_summary, body.confirmed_fields, body.context_confirmed
-        )
-    except EmptyImportError as exc:
-        logger.warning(
-            "ingestion.confirm.zero_inserted",
-            file_id=str(file_id),
-            row_count=updated_summary.get("row_count"),
-        )
+    # ── F4: tomar el lease per-file ANTES de cualquier escritura ────────────────
+    # CAS atómico NEEDS_CONFIRMATION→IMPORTING (o takeover si quedó stale),
+    # commiteado sobre la sesión del request → el IMPORTING queda visible para un
+    # confirm concurrente (que bloquea en el row-lock y luego ve IMPORTING → 409).
+    # rowcount==0 → otro intento tiene el lease vivo → 409. Se toma DESPUÉS de las
+    # validaciones puras (una request que va a rebotar por 422 nunca lo toma) y
+    # ANTES de la creación de custom fields (primera escritura).
+    _import_token = uuid.uuid4()
+    if not await acquire_import_lease(session, tenant.tenant_id, file_id, _import_token):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=exc.user_message,
-        ) from exc
-
-    # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
-    # Para archivos grandes (multi-hoja o muchas filas) el JSONB puede pesar 10+ MB;
-    # guardar solo metadata compacta evita un UPDATE lento en Neon.
-    compact_summary: dict[str, Any] = {
-        k: v
-        for k, v in updated_summary.items()
-        if k
-        not in (
-            "ventas_detectadas",
-            "gastos_detectados",
-            "stock_detectado",
-            "otros_detectados",
-            "preview_rows",
-            "mapping_contexts",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El archivo ya se está importando o ya se importó.",
         )
-    }
-    compact_summary["imported_counts"] = counts
 
-    # Guardar aprendizaje de mapeos confirmados — agrupado por entity_type del contexto
-    if body.column_mappings:
-        mapping_svc = ColumnMappingService(session)
-        _learn: dict[str, list[dict[str, str]]] = defaultdict(list)
-        for m in body.column_mappings:
-            _learn[_entity_for(m)].append(
-                {"source_column": m.source_column, "target_field": m.target_field}
+    # Savepoint que aísla TODO el import: ante cualquier fallo se revierte solo
+    # (async-aware, sin `session.rollback()` manual — que rompería el re-arme del
+    # savepoint del request), dejando la sesión viva para el UPDATE de
+    # compensación. El commit final del request cierra la transacción completa.
+    _import_sp = await session.begin_nested()
+    try:
+        # Crear definiciones de campos personalizados para mapeos custom_field:{key}
+        # — idempotente, sin commit propio; el commit final cierra la transacción completa.
+        if body.column_mappings:
+            from app.application.services.field_definition_service import (  # noqa: PLC0415
+                ensure_custom_field_exists,
             )
-        for _ent, _confirmed in _learn.items():
-            await mapping_svc.save_mappings(tenant.tenant_id, _ent, _confirmed)
 
-    record.parsed_summary_json = compact_summary
-    record.processing_status = PROCESSING_STATUS_DONE
-    await repo.save(record)
+            for _mapping in body.column_mappings:
+                if _mapping.target_field.startswith("custom_field:"):
+                    _field_key = _mapping.target_field[len("custom_field:"):]
+                    await ensure_custom_field_exists(
+                        session,
+                        tenant.tenant_id,
+                        _entity_for(_mapping),
+                        _field_key,
+                        _mapping.source_column,  # nombre de la columna como label inicial
+                    )
 
-    await pipeline_event_service.emit_event(
-        session,
-        trace_id=_trace_id,
-        tenant_id=tenant.tenant_id,
-        stage=STAGE_CONFIRM,
-        file_id=file_id,
-        rows_out=counts["ventas"] + counts["gastos"] + counts["productos"],
-        latency_ms=_confirm_latency_ms,
-        detail={"imported_counts": counts, "confirmed_fields": body.confirmed_fields},
-    )
+        # Insert parsed rows into business tables, then mark done
+        updated_summary = dict(record.parsed_summary_json or {})
+        updated_summary["confirmed_fields"] = body.confirmed_fields
+        # Persistir la elección de tratamiento del stock (apertura vs compra) en el summary
+        # para que una relectura posterior conserve la decisión sin volver a preguntar.
+        if body.stock_treatment is not None:
+            updated_summary["stock_treatment"] = body.stock_treatment
+
+        explicit_mappings: dict[str, str] | None = None
+        if _flat_mappings:
+            explicit_mappings = {m.source_column: m.target_field for m in _flat_mappings}
+
+        context_mappings: dict[str, dict[str, str]] | None = None
+        if _ctx_mappings:
+            _cm: dict[str, dict[str, str]] = defaultdict(dict)
+            for m in _ctx_mappings:
+                _cm[m.context_id or ""][m.source_column] = m.target_field
+            context_mappings = dict(_cm)
+
+        _trace_id = record.trace_id or record.id
+        bind_request_context(trace_id=_trace_id)
+        _t0 = time.monotonic()
+        counts = await insert_confirmed_data(
+            session,
+            tenant.tenant_id,
+            updated_summary,
+            body.confirmed_fields,
+            column_mappings=explicit_mappings,
+            context_mappings=context_mappings,
+            context_confirmed=body.context_confirmed or None,
+            context_entity=body.context_entity or None,
+            source="ingestion",
+            uploaded_file_id=file_id,
+            stock_treatment=body.stock_treatment,
+        )
+        _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
+
+        # Import vacío → 422; el compensador (except) restaura NEEDS_CONFIRMATION
+        # y limpia el lease para reintentar con mapeo manual.
+        try:
+            check_nonempty_import(
+                counts, updated_summary, body.confirmed_fields, body.context_confirmed
+            )
+        except EmptyImportError as exc:
+            logger.warning(
+                "ingestion.confirm.zero_inserted",
+                file_id=str(file_id),
+                row_count=updated_summary.get("row_count"),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=exc.user_message,
+            ) from exc
+
+        # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
+        # Para archivos grandes (multi-hoja o muchas filas) el JSONB puede pesar 10+ MB;
+        # guardar solo metadata compacta evita un UPDATE lento en Neon.
+        compact_summary: dict[str, Any] = {
+            k: v
+            for k, v in updated_summary.items()
+            if k
+            not in (
+                "ventas_detectadas",
+                "gastos_detectados",
+                "stock_detectado",
+                "otros_detectados",
+                "preview_rows",
+                "mapping_contexts",
+            )
+        }
+        compact_summary["imported_counts"] = counts
+
+        # Guardar aprendizaje de mapeos confirmados — agrupado por entity_type del contexto
+        if body.column_mappings:
+            mapping_svc = ColumnMappingService(session)
+            _learn: dict[str, list[dict[str, str]]] = defaultdict(list)
+            for m in body.column_mappings:
+                _learn[_entity_for(m)].append(
+                    {"source_column": m.source_column, "target_field": m.target_field}
+                )
+            for _ent, _confirmed in _learn.items():
+                await mapping_svc.save_mappings(tenant.tenant_id, _ent, _confirmed)
+
+        # Transición final IMPORTING→DONE, token-checked, en la MISMA transacción
+        # que los inserts. Si un takeover nos robó el lease → ImportLeaseLostError
+        # → rollback de todo (no queda dato a medias).
+        await finalize_import_lease(
+            session, tenant.tenant_id, file_id, _import_token, compact_summary
+        )
+
+        await pipeline_event_service.emit_event(
+            session,
+            trace_id=_trace_id,
+            tenant_id=tenant.tenant_id,
+            stage=STAGE_CONFIRM,
+            file_id=file_id,
+            rows_out=counts["ventas"] + counts["gastos"] + counts["productos"],
+            latency_ms=_confirm_latency_ms,
+            detail={"imported_counts": counts, "confirmed_fields": body.confirmed_fields},
+        )
+        # Import OK: liberar el savepoint (los cambios quedan en la transacción del
+        # request, que los commitea al final).
+        await _import_sp.commit()
+    except ImportLeaseLostError:
+        # Un takeover ya tomó el lease con otro token. Descartar nuestro import
+        # parcial (rollback del savepoint) y NO compensar (el estado es del nuevo dueño).
+        await _import_sp.rollback()
+        logger.warning("ingestion.confirm.lease_lost", file_id=str(file_id))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El import fue retomado por otro proceso. Volvé a intentar.",
+        ) from None
+    except Exception:
+        # Cualquier fallo post-lease (incl. el 422 de import vacío): revertir el
+        # savepoint del import PRIMERO (descarta lo parcial sin tocar la sesión del
+        # request) y RECIÉN compensar el lease → NEEDS_CONFIRMATION.
+        await _import_sp.rollback()
+        await release_import_lease(session, tenant.tenant_id, file_id, _import_token)
+        raise
 
     logger.info(
         "ingestion.confirm.done",

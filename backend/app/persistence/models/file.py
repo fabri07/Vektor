@@ -15,6 +15,8 @@ PROCESSING_STATUS_PENDING = "PENDING"
 PROCESSING_STATUS_PROCESSING = "PROCESSING"
 PROCESSING_STATUS_NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
 PROCESSING_STATUS_NEEDS_COMPLETION = "NEEDS_COMPLETION"
+# F4: el confirm tomó el lease y está insertando los datos (import inline en curso).
+PROCESSING_STATUS_IMPORTING = "IMPORTING"
 PROCESSING_STATUS_DONE = "DONE"
 PROCESSING_STATUS_FAILED = "FAILED"
 PROCESSING_STATUS_REJECTED = "REJECTED"
@@ -59,6 +61,21 @@ class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
+
+    # ── F4: lease del confirm (concurrencia) ──────────────────────────────────
+    # Token del intento de import en curso. El confirm hace un CAS
+    # NEEDS_CONFIRMATION→IMPORTING seteando este token; la transición final a
+    # DONE lo verifica (fencing). NULL = sin import en vuelo.
+    import_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, default=None
+    )
+    # Momento en que se tomó el lease — SEPARADO de updated_at (que se mueve con
+    # cualquier escritura). Se usa para el takeover por staleness. Reloj de PG.
+    import_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    # Fase del import en curso (inserting/finalizing) — trazabilidad opcional.
+    import_phase: Mapped[str | None] = mapped_column(String(30), nullable=True, default=None)
 
     def __repr__(self) -> str:
         return (

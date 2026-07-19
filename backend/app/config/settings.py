@@ -236,6 +236,11 @@ class Settings(BaseSettings):
     # Configurable por env para no hardcodear el id del modelo en el código.
     LLM_INGESTION_MODEL: str = "claude-sonnet-4-6"
     SCORE_RECALC_COOLDOWN_SECONDS: int = 300
+    # F4: TTL del lease per-file del confirm de ingestión. Un IMPORTING con
+    # import_started_at más viejo que esto es candidato a takeover. CONSERVADOR y
+    # por encima del máximo operativo esperado (un import grande sobre Neon puede
+    # tardar minutos): un TTL corto arriesga interrumpir un import legítimo.
+    INGESTION_IMPORT_LEASE_TTL_SECONDS: int = 900  # 15 min
 
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False
