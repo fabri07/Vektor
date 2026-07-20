@@ -625,6 +625,7 @@ async def test_single_sheet_two_brands_same_name_same_run_creates_two_products(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_ambiguous_candidates_exclude_id_narrowed_out_by_other_tier(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -658,6 +659,7 @@ async def test_ambiguous_candidates_exclude_id_narrowed_out_by_other_tier(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_conflict_candidates_are_exactly_the_conflicting_set(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

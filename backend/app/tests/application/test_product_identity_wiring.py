@@ -21,16 +21,14 @@ no un atajo del test.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.products import DEACTIVATION_REASON_MANUAL
@@ -44,33 +42,6 @@ from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryBalance
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
-
-_DDL = (
-    "CREATE UNIQUE INDEX uq_products_tenant_barcode_norm ON products "
-    "(tenant_id, barcode_normalized) WHERE is_active "
-    "AND barcode_normalized IS NOT NULL AND barcode_normalized <> ''",
-    "CREATE UNIQUE INDEX uq_products_tenant_sku_norm ON products "
-    "(tenant_id, sku_normalized) WHERE is_active "
-    "AND sku_normalized IS NOT NULL AND sku_normalized <> ''",
-    "CREATE UNIQUE INDEX uq_inventory_balances_tenant_product ON inventory_balances "
-    "(tenant_id, product_id)",
-)
-_INDEX_NAMES = (
-    "uq_products_tenant_barcode_norm",
-    "uq_products_tenant_sku_norm",
-    "uq_inventory_balances_tenant_product",
-)
-
-
-@pytest_asyncio.fixture
-async def f5_indexes(db_session: AsyncSession) -> AsyncGenerator[None, None]:
-    """Los tres uniques de F5-B, dentro de la transacción del test."""
-    for stmt in _DDL:
-        await db_session.execute(text(stmt))
-    await db_session.flush()
-    yield
-    for name in _INDEX_NAMES:
-        await db_session.execute(text(f"DROP INDEX IF EXISTS {name}"))
 
 
 def _product(tenant_id: uuid.UUID, **kw: Any) -> Product:
@@ -86,7 +57,6 @@ def _product(tenant_id: uuid.UUID, **kw: Any) -> Product:
 # ── build_incomplete_product ─────────────────────────────────────────────────
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_build_incomplete_product_reusa_el_sku_ocupado(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -104,7 +74,6 @@ async def test_build_incomplete_product_reusa_el_sku_ocupado(
     assert created is False, "reusar NO es crear: el import lo reportaría como creado"
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_build_incomplete_product_crea_cuando_la_clave_esta_libre(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -116,7 +85,6 @@ async def test_build_incomplete_product_crea_cuando_la_clave_esta_libre(
     assert created is True
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_build_incomplete_product_cachea_el_producto_reusado(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -140,7 +108,6 @@ async def test_build_incomplete_product_cachea_el_producto_reusado(
     assert cache[pid].id == ocupante.id
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_build_incomplete_product_ambiguo_no_elige_ninguno(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -169,7 +136,6 @@ async def test_build_incomplete_product_ambiguo_no_elige_ninguno(
 # ── _resolve_purchase_identity ───────────────────────────────────────────────
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_compra_reusada_se_reporta_como_linked_no_created(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -212,7 +178,6 @@ async def test_compra_reusada_se_reporta_como_linked_no_created(
 # ── stock_service._get_or_create_balance ─────────────────────────────────────
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_balance_duplicado_se_resuelve_al_existente(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -292,7 +257,6 @@ _PAYLOAD: dict[str, Any] = {
 }
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_post_products_perdiendo_la_carrera_devuelve_409_no_500(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -321,7 +285,6 @@ async def test_post_products_perdiendo_la_carrera_devuelve_409_no_500(
     assert detail["existing_id"] == resp1.json()["id"]
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_patch_products_perdiendo_la_carrera_devuelve_409_no_500(
     client: AsyncClient, auth_headers: dict[str, Any], mock_score_trigger: Any
 ) -> None:
@@ -351,7 +314,6 @@ async def test_patch_products_perdiendo_la_carrera_devuelve_409_no_500(
     assert resp.json()["detail"]["code"] == "DUPLICATE_PRODUCT_IDENTITY"
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_post_products_ambiguo_devuelve_los_dos_candidatos(
     client: AsyncClient, auth_headers: dict[str, Any], mock_score_trigger: Any
 ) -> None:
@@ -421,7 +383,6 @@ async def _crear_y_dar_de_baja(
     return producto
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_reactivar_con_sku_ya_ocupado_devuelve_409_no_500(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -448,7 +409,6 @@ async def test_reactivar_con_sku_ya_ocupado_devuelve_409_no_500(
     assert resp.json()["detail"]["code"] == "DUPLICATE_PRODUCT_IDENTITY"
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_reactivar_con_barcode_ya_ocupado_devuelve_409_no_500(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -475,7 +435,6 @@ async def test_reactivar_con_barcode_ya_ocupado_devuelve_409_no_500(
     assert resp.json()["detail"]["code"] == "DUPLICATE_PRODUCT_IDENTITY"
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_reactivacion_fallida_no_deja_rastro(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -530,7 +489,6 @@ async def test_reactivacion_fallida_no_deja_rastro(
     assert otro.status_code == 201
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_reactivar_sin_colision_funciona_y_limpia_la_baja(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -559,7 +517,6 @@ async def test_reactivar_sin_colision_funciona_y_limpia_la_baja(
     assert baja.deactivation_reason is None
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_reactivar_cambiando_a_un_sku_libre_funciona(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -591,7 +548,6 @@ async def test_reactivar_cambiando_a_un_sku_libre_funciona(
     assert baja.sku == "REACT-NUEVO"
 
 
-@pytest.mark.usefixtures("f5_indexes")
 async def test_reactivar_perdiendo_la_carrera_llega_al_guard_y_da_409(
     client: AsyncClient,
     auth_headers: dict[str, Any],

@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     event,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, Mapper, mapped_column
@@ -91,10 +92,43 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_products_deactivation_reason",
         ),
         Index("ix_products_tenant_provenance", "tenant_id", "provenance"),
-        # Índices de BÚSQUEDA (NO únicos — la unicidad es Fase 5).
+        # Índices de BÚSQUEDA (NO únicos — la unicidad la imponen los uq_* de abajo).
         Index("ix_products_tenant_barcode_norm", "tenant_id", "barcode_normalized"),
         Index("ix_products_tenant_sku_norm", "tenant_id", "sku_normalized"),
         Index("ix_products_tenant_name_norm", "tenant_id", "name_normalized"),
+        # F5-B — UNICIDAD de identidad fuerte. Parciales: solo entre ACTIVOS y solo
+        # con la clave presente. Un tenant puede tener N inactivos con el mismo SKU
+        # (historial de bajas) y N activos sin SKU.
+        #
+        # ``sqlite_where`` ADEMÁS de ``postgresql_where`` no es cosmético: sin él
+        # SQLite ignora el predicado y crea un único TOTAL, que prohibiría los
+        # duplicados entre inactivos —legales— y haría fallar tests con un modo de
+        # falla que en Postgres no existe. El espejo de estos dos índices es la
+        # migración 20260802_0001; si cambia el predicado, cambian los dos.
+        Index(
+            "uq_products_tenant_barcode_norm",
+            "tenant_id",
+            "barcode_normalized",
+            unique=True,
+            postgresql_where=text(
+                "is_active AND barcode_normalized IS NOT NULL AND barcode_normalized <> ''"
+            ),
+            sqlite_where=text(
+                "is_active AND barcode_normalized IS NOT NULL AND barcode_normalized <> ''"
+            ),
+        ),
+        Index(
+            "uq_products_tenant_sku_norm",
+            "tenant_id",
+            "sku_normalized",
+            unique=True,
+            postgresql_where=text(
+                "is_active AND sku_normalized IS NOT NULL AND sku_normalized <> ''"
+            ),
+            sqlite_where=text(
+                "is_active AND sku_normalized IS NOT NULL AND sku_normalized <> ''"
+            ),
+        ),
     )
 
     def __repr__(self) -> str:

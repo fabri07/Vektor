@@ -188,6 +188,7 @@ async def _plan_and_persist(session: AsyncSession, tenant_id: uuid.UUID) -> uuid
 # ── Apply SUM simple (2 productos) ───────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_simple_sum_group(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -257,6 +258,7 @@ async def test_apply_simple_sum_group(
     assert src is not None and src.status == "APPLIED"
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_records_items_for_revert(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -305,6 +307,7 @@ async def test_apply_records_items_for_revert(
 # ── Apply catálogo 3 miembros (MOST_RECENT, no pairwise) ─────────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_catalog_three_members_most_recent(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -359,6 +362,7 @@ async def test_apply_catalog_three_members_most_recent(
 # ── Aborto por fingerprint (estado cambió entre plan y apply) ────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_fingerprint_abort_skips_group(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -400,6 +404,7 @@ async def test_apply_fingerprint_abort_skips_group(
 # ── Aborto por rowcount de REPOINT_FK (guarda de segunda capa) ───────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_repoint_count_mismatch_aborts_group(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -452,6 +457,7 @@ async def test_apply_repoint_count_mismatch_aborts_group(
 # ── Guard de balance negativo (crear balance NUEVO con current_qty<0) ────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_skips_group_when_new_balance_would_be_negative(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -497,6 +503,7 @@ async def test_apply_skips_group_when_new_balance_would_be_negative(
 # ── MERGE_PRODUCT: solo completa NULLs, custom_fields shallow sin "_"-claves ─────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_merge_completes_only_nulls_and_filters_internal_custom_fields(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -543,6 +550,7 @@ async def test_apply_merge_completes_only_nulls_and_filters_internal_custom_fiel
 # ── Idempotencia / validación del source run ─────────────────────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_reapply_consumed_source_raises(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -563,6 +571,7 @@ async def test_reapply_consumed_source_raises(
     _ = canonical
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_partial_apply_leaves_source_reappliable(
     db_session: AsyncSession, isolated_db_engine: AsyncEngine, sample_tenant: Tenant
 ) -> None:
@@ -642,6 +651,7 @@ async def test_apply_nonexistent_source_raises(
 # ── Guarda del lease (heartbeat pierde el lease → run FAILED, nada aplicado) ──────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_apply_lost_lease_fails_without_mutating(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

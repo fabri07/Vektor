@@ -10,6 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -527,6 +528,7 @@ async def _add_product(
     return p
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_plan_dedup_detects_sku_group_and_persists_plan(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -580,6 +582,7 @@ async def test_plan_dedup_detects_sku_group_and_persists_plan(
     assert merge_item.before_json["plan"]["decision_version"] == DECISION_VERSION
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_dry_run_does_not_mutate_business_tables(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -629,6 +632,7 @@ async def test_dry_run_does_not_mutate_business_tables(
     assert refreshed_canon.stock_units == 10
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_review_group_generates_no_items(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

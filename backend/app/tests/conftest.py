@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -162,6 +163,42 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
             await session.close()
             if trans.is_active:
                 await trans.rollback()
+
+
+# Los tres uniques que declara F5-B en el ORM (products ×2 + inventory_balances).
+# Los NOMBRES se leen de los propios objetos Index para no versionar una 4ª copia
+# del DDL: antes de F5-B había tres copias sueltas en tres archivos de test y ya
+# habían divergido (una creaba 2 índices, las otras 3).
+_F5_UNIQUE_INDEXES = (
+    "uq_products_tenant_barcode_norm",
+    "uq_products_tenant_sku_norm",
+    "uq_inventory_balances_tenant_product",
+)
+
+
+@pytest_asyncio.fixture
+async def legacy_pre_f5_schema(db_session: AsyncSession) -> AsyncGenerator[None, None]:
+    """Dropea los uniques de F5-B: esquema PRE-migración, para escenarios históricos.
+
+    Explícita a propósito (nunca ``autouse``): el default del suite es el esquema
+    POST-F5, que es el que corre en producción una vez aplicada ``20260802_0001``.
+    Solo la piden los tests cuyo escenario **no puede existir** con los índices
+    puestos — dos productos ACTIVOS compartiendo sku/barcode, que es justamente lo
+    que el dedup de F3 fusiona y lo que el índice vuelve imposible.
+
+    NO recrea los índices en el teardown, y es deliberado: en SQLite el DDL es
+    transaccional y el ``DROP`` corre DENTRO de la transacción externa de
+    ``db_session``, así que el rollback de fin de test los restaura solo (probado en
+    ``test_legacy_pre_f5_schema_no_contamina``). Recrearlos a mano acá sería peor
+    que redundante: el teardown de la fixture corre ANTES de ese rollback, con las
+    filas duplicadas del test todavía vivas, así que el ``CREATE UNIQUE INDEX``
+    fallaría con IntegrityError exactamente en los tests de dedup — los únicos que
+    necesitan esta fixture.
+    """
+    for name in _F5_UNIQUE_INDEXES:
+        await db_session.execute(text(f"DROP INDEX IF EXISTS {name}"))
+    await db_session.flush()
+    yield
 
 
 @pytest_asyncio.fixture

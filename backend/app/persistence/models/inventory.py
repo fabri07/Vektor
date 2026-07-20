@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,6 +30,14 @@ class InventoryBalance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     current_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reserved_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        # F5-B — un solo balance por (tenant, producto). No es parcial: acá NO hay
+        # concepto de baja, un segundo balance para el mismo producto es siempre un
+        # bug (el dedup de F3 los fusiona antes de que este índice pueda crearse).
+        # Sostiene el ON CONFLICT del sync de balances.
+        Index("uq_inventory_balances_tenant_product", "tenant_id", "product_id", unique=True),
+    )
 
     def __repr__(self) -> str:
         return (

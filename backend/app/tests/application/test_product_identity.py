@@ -9,12 +9,10 @@ PR B los declare en el ORM, este fixture desaparece.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator
 from decimal import Decimal
 
 import pytest
-import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,26 +25,6 @@ from app.application.services.product_identity import (
 )
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
-
-_DDL = (
-    "CREATE UNIQUE INDEX uq_products_tenant_barcode_norm ON products "
-    "(tenant_id, barcode_normalized) WHERE is_active "
-    "AND barcode_normalized IS NOT NULL AND barcode_normalized <> ''",
-    "CREATE UNIQUE INDEX uq_products_tenant_sku_norm ON products "
-    "(tenant_id, sku_normalized) WHERE is_active "
-    "AND sku_normalized IS NOT NULL AND sku_normalized <> ''",
-)
-
-
-@pytest_asyncio.fixture
-async def f5_indexes(db_session: AsyncSession) -> AsyncGenerator[None, None]:
-    """Crea los uniques parciales de F5 en la DB del test (SQLite los impone)."""
-    for stmt in _DDL:
-        await db_session.execute(text(stmt))
-    await db_session.flush()
-    yield
-    for name in ("uq_products_tenant_barcode_norm", "uq_products_tenant_sku_norm"):
-        await db_session.execute(text(f"DROP INDEX IF EXISTS {name}"))
 
 
 def _product(tenant_id: uuid.UUID, **kw: object) -> Product:
@@ -110,7 +88,7 @@ async def test_find_respeta_exclude_id_y_tenant(
 
 
 async def test_add_camino_feliz(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     product, creado = await add_product_or_reuse(
         db_session, _product(sample_tenant.tenant_id, sku="NUEVO")
@@ -120,7 +98,7 @@ async def test_add_camino_feliz(
 
 
 async def test_add_reusa_ante_colision_de_sku(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Colisión por clave fuerte = match exacto, no ambigüedad → se reusa."""
     tid = sample_tenant.tenant_id
@@ -139,7 +117,7 @@ async def test_add_reusa_ante_colision_de_sku(
 
 
 async def test_add_raise_levanta_conflicto(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     tid = sample_tenant.tenant_id
     existente = _product(tid, barcode="7790011110001")
@@ -155,7 +133,7 @@ async def test_add_raise_levanta_conflicto(
 
 
 async def test_add_con_barcode_libre_resuelve_al_dueño_del_sku(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Colisión sólo de sku, con barcode propio libre → reusa al dueño del sku.
 
@@ -177,7 +155,7 @@ async def test_add_con_barcode_libre_resuelve_al_dueño_del_sku(
 
 
 async def test_add_no_reusa_cuando_barcode_y_sku_son_de_productos_distintos(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Regresión del relookup: el candidato "es" dos productos a la vez.
 
@@ -213,7 +191,7 @@ async def test_add_exige_producto_transient(
 
 
 async def test_add_deja_la_sesion_usable_y_no_pierde_pendientes(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Tras la colisión la transacción sigue viva y lo pendiente ajeno sobrevive."""
     tid = sample_tenant.tenant_id
@@ -237,7 +215,7 @@ async def test_add_deja_la_sesion_usable_y_no_pierde_pendientes(
 
 
 async def test_add_no_traga_violaciones_ajenas(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Un NOT NULL roto no puede convertirse en 'ya existía, lo reuso'.
 
@@ -265,7 +243,7 @@ async def test_add_no_traga_violaciones_ajenas(
 
 
 async def test_guard_traduce_colision_en_patch(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """PATCH que mueve el SKU a uno ocupado → conflicto, con la mutación DENTRO."""
     tid = sample_tenant.tenant_id
@@ -285,7 +263,7 @@ async def test_guard_traduce_colision_en_patch(
 
 
 async def test_guard_camino_feliz_persiste_la_mutacion(
-    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+    db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     tid = sample_tenant.tenant_id
     producto = _product(tid, name="Original", sku="ANTES")

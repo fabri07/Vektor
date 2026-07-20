@@ -235,6 +235,7 @@ async def _free_identities(session: AsyncSession, product_ids: list[uuid.UUID]) 
 # ── Round-trip SUM simple ────────────────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_simple_sum_roundtrip(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -319,6 +320,7 @@ async def test_revert_simple_sum_roundtrip(
 # ── Round-trip catálogo MOST_RECENT (3 miembros) ─────────────────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_catalog_most_recent_roundtrip(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -376,6 +378,7 @@ async def test_revert_catalog_most_recent_roundtrip(
 # ── Bloqueo: campo fusionado modificado tras el apply ────────────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_blocked_by_modified_merged_field(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -424,6 +427,7 @@ async def test_revert_blocked_by_modified_merged_field(
 # ── Bloqueo: FK nueva apuntando al canónico tras el apply ────────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_blocked_by_new_fk_on_canonical(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -460,6 +464,7 @@ async def test_revert_blocked_by_new_fk_on_canonical(
 # ── Tolerancia: dup reactivado a mano → reversa idempotente (no aborta) ───────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_tolerates_manually_reactivated_dup(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -511,6 +516,7 @@ async def test_revert_tolerates_manually_reactivated_dup(
 # ── Reversa parcial: un grupo bloqueado, el resto se revierte ─────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_partial_one_group_blocked_rest_reverts(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -570,6 +576,7 @@ async def test_revert_partial_one_group_blocked_rest_reverts(
 # ── Validación del run: dry-run / ya REVERTED / inexistente ──────────────────────
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_dry_run_source_raises(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -588,6 +595,7 @@ async def test_revert_dry_run_source_raises(
         await svc.revert_dedup_run(db_session, tid, source_run_id, lease_id=None)
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_bloqueado_por_identidad_es_atomico(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -654,6 +662,7 @@ async def test_revert_bloqueado_por_identidad_es_atomico(
     assert run is not None and run.status != "REVERTED"
 
 
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_revert_already_reverted_raises(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

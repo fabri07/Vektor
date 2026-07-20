@@ -23,14 +23,13 @@ valiendo igual.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import Generator
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
@@ -38,33 +37,6 @@ from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
-
-_DDL = (
-    "CREATE UNIQUE INDEX uq_products_tenant_barcode_norm ON products "
-    "(tenant_id, barcode_normalized) WHERE is_active "
-    "AND barcode_normalized IS NOT NULL AND barcode_normalized <> ''",
-    "CREATE UNIQUE INDEX uq_products_tenant_sku_norm ON products "
-    "(tenant_id, sku_normalized) WHERE is_active "
-    "AND sku_normalized IS NOT NULL AND sku_normalized <> ''",
-    "CREATE UNIQUE INDEX uq_inventory_balances_tenant_product ON inventory_balances "
-    "(tenant_id, product_id)",
-)
-_INDEX_NAMES = (
-    "uq_products_tenant_barcode_norm",
-    "uq_products_tenant_sku_norm",
-    "uq_inventory_balances_tenant_product",
-)
-
-
-@pytest_asyncio.fixture
-async def f5_indexes(db_session: AsyncSession) -> AsyncGenerator[None, None]:
-    """Los tres uniques de F5-B, dentro de la transacción del test."""
-    for stmt in _DDL:
-        await db_session.execute(text(stmt))
-    await db_session.flush()
-    yield
-    for name in _INDEX_NAMES:
-        await db_session.execute(text(f"DROP INDEX IF EXISTS {name}"))
 
 
 @pytest.fixture
@@ -134,7 +106,7 @@ def _compra_row(**kw: Any) -> dict[str, Any]:
 # ── SKU repetido: el import no duplica y no explota ──────────────────────────
 
 
-@pytest.mark.usefixtures("f5_indexes", "stale_identity_index")
+@pytest.mark.usefixtures("stale_identity_index")
 async def test_import_de_compras_con_sku_ocupado_vincula_sin_duplicar(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -216,7 +188,7 @@ async def test_dos_filas_con_el_mismo_sku_nuevo_reusan_por_cache(
 # ── created vs linked: los counts no pueden mentir ───────────────────────────
 
 
-@pytest.mark.usefixtures("f5_indexes", "stale_identity_index")
+@pytest.mark.usefixtures("stale_identity_index")
 async def test_reuso_por_indice_no_se_reporta_como_producto_creado(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -237,7 +209,7 @@ async def test_reuso_por_indice_no_se_reporta_como_producto_creado(
     assert counts["sin_producto"] == 0, "reuso no es creación"
 
 
-@pytest.mark.usefixtures("f5_indexes", "stale_identity_index")
+@pytest.mark.usefixtures("stale_identity_index")
 async def test_creacion_genuina_si_se_reporta_como_producto_creado(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -269,7 +241,7 @@ async def test_creacion_genuina_si_se_reporta_como_producto_creado(
 # ── conflicto real detectado por la DB → "Otros" ─────────────────────────────
 
 
-@pytest.mark.usefixtures("f5_indexes", "stale_identity_index")
+@pytest.mark.usefixtures("stale_identity_index")
 async def test_conflicto_barcode_vs_sku_detectado_por_la_db_va_a_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
