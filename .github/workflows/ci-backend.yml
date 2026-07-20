@@ -128,8 +128,9 @@ jobs:
         run: alembic upgrade head
 
       # ── 6c. pytest — tests de concurrencia contra Postgres real ───────────────
-      # Corre SOLO los tests marcados `postgres` (advisory locks F3 + lease F4)
-      # con TEST_PG_DSN apuntando al service, sobre el schema recién migrado.
+      # Corre SOLO los tests marcados `postgres` (advisory locks F3 + lease F4 +
+      # contención de savepoints F5-A) con TEST_PG_DSN apuntando al service, sobre
+      # el schema recién migrado.
       # Sin cobertura (subconjunto acotado; la cobertura la mide el paso 6).
       - name: pytest — integración Postgres (concurrencia)
         env:

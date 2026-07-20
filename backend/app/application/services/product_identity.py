@@ -61,12 +61,20 @@ class ProductIdentityConflictError(Exception):
     """Otro producto ACTIVO del tenant ya ocupa esta clave fuerte.
 
     ``existing`` es el ocupante; ``matched_by`` es ``"barcode"`` o ``"sku"``.
+    ``ambiguous`` marca el caso en que barcode y sku apuntan a productos DISTINTOS:
+    ahí no hay reuso posible y ni siquiera con ``on_conflict="reuse"`` se elige uno.
     """
 
-    def __init__(self, existing: Product, matched_by: MatchedBy) -> None:
-        super().__init__(f"identidad de producto ya ocupada por {matched_by}: {existing.id}")
+    def __init__(
+        self, existing: Product, matched_by: MatchedBy, *, ambiguous: bool = False
+    ) -> None:
+        detalle = " (barcode y sku apuntan a productos distintos)" if ambiguous else ""
+        super().__init__(
+            f"identidad de producto ya ocupada por {matched_by}: {existing.id}{detalle}"
+        )
         self.existing = existing
         self.matched_by = matched_by
+        self.ambiguous = ambiguous
 
 
 def _violated_identity_index(exc: IntegrityError) -> MatchedBy | None:
@@ -112,21 +120,86 @@ async def find_active_by_identity(
     tiene prioridad: es la clave más fuerte (identifica el artículo físico, no el
     código interno del comercio).
     """
-    for kind, value in (("barcode", normalize_barcode(barcode)), ("sku", normalize_sku(sku))):
+    candidates: tuple[tuple[MatchedBy, str | None], ...] = (
+        ("barcode", normalize_barcode(barcode)),
+        ("sku", normalize_sku(sku)),
+    )
+    for kind, value in candidates:
         if not value:
             continue
-        column = Product.barcode_normalized if kind == "barcode" else Product.sku_normalized
-        stmt = select(Product).where(
-            Product.tenant_id == tenant_id,
-            Product.is_active.is_(True),
-            column == value,
-        )
-        if exclude_id is not None:
-            stmt = stmt.where(Product.id != exclude_id)
-        found = (await session.execute(stmt)).scalars().first()
+        found = await _find_by_key(session, tenant_id, kind, value, exclude_id=exclude_id)
         if found is not None:
-            return found, kind  # type: ignore[return-value]
+            return found, kind
     return None, None
+
+
+async def _find_by_key(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    kind: MatchedBy,
+    normalized: str,
+    *,
+    exclude_id: uuid.UUID | None = None,
+) -> Product | None:
+    """Dueño ACTIVO de UNA clave normalizada concreta (sin prioridades)."""
+    column = Product.barcode_normalized if kind == "barcode" else Product.sku_normalized
+    stmt = select(Product).where(
+        Product.tenant_id == tenant_id,
+        Product.is_active.is_(True),
+        column == normalized,
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Product.id != exclude_id)
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def _resolve_conflict_owner(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    matched_by: MatchedBy,
+    *,
+    barcode: str | None,
+    sku: str | None,
+    exclude_id: uuid.UUID | None = None,
+) -> tuple[Product, bool]:
+    """Ubica al ocupante de la clave que la DB reportó, y detecta ambigüedad.
+
+    Consulta EXCLUSIVAMENTE ``matched_by``: reconsultar con las dos claves y dejar
+    que gane la prioridad de barcode devuelve el producto equivocado cuando el
+    barcode pertenece a A, el sku a B y lo que violamos fue el índice de sku.
+
+    Después chequea la OTRA clave: si tiene un dueño ACTIVO distinto, el candidato
+    "es" dos productos a la vez. Eso es ambigüedad real y no se resuelve reusando
+    ninguno — se marca ``ambiguous`` para que el import lo mande a "Otros".
+
+    Returns:
+        ``(ocupante, ambiguo)``.
+
+    Raises:
+        LookupError: la clave reportada no tiene dueño (no debería pasar: el índice
+            garantiza que exista; el caller re-propaga el IntegrityError original).
+    """
+    keys: dict[MatchedBy, str | None] = {
+        "barcode": normalize_barcode(barcode),
+        "sku": normalize_sku(sku),
+    }
+    reported = keys[matched_by]
+    owner = (
+        await _find_by_key(session, tenant_id, matched_by, reported, exclude_id=exclude_id)
+        if reported
+        else None
+    )
+    if owner is None:
+        raise LookupError(matched_by)
+
+    other_kind: MatchedBy = "sku" if matched_by == "barcode" else "barcode"
+    other_value = keys[other_kind]
+    if not other_value:
+        return owner, False
+    other_owner = await _find_by_key(
+        session, tenant_id, other_kind, other_value, exclude_id=exclude_id
+    )
+    return owner, other_owner is not None and other_owner.id != owner.id
 
 
 async def add_product_or_reuse(
@@ -146,7 +219,9 @@ async def add_product_or_reuse(
         ``(existente, False)``.
 
     Raises:
-        ProductIdentityConflictError: con ``on_conflict="raise"``.
+        ProductIdentityConflictError: con ``on_conflict="raise"``, y SIEMPRE que
+            barcode y sku pertenezcan a productos distintos (ambigüedad real: no hay
+            un "el existente" que reusar — el import debe mandarlo a "Otros").
         IntegrityError: si la violación no era de identidad (FK, NOT NULL, ...).
     """
     state = sa_inspect(product)
@@ -163,18 +238,20 @@ async def add_product_or_reuse(
             session.add(product)
     except SavepointConflictError as conflict:
         matched_by: MatchedBy = conflict.constraint  # type: ignore[assignment]
-        existing, hit_by = await find_active_by_identity(
-            session, tenant_id, barcode=barcode, sku=sku
-        )
-        if existing is None:  # pragma: no cover — el índice garantiza que exista
+        try:
+            existing, ambiguous = await _resolve_conflict_owner(
+                session, tenant_id, matched_by, barcode=barcode, sku=sku
+            )
+        except LookupError:  # pragma: no cover — el índice garantiza que exista
             raise conflict.original from conflict
-        resolved: MatchedBy = hit_by or matched_by
-        if on_conflict == "raise":
-            raise ProductIdentityConflictError(existing, resolved) from conflict.original
+        if ambiguous or on_conflict == "raise":
+            raise ProductIdentityConflictError(
+                existing, matched_by, ambiguous=ambiguous
+            ) from conflict.original
         logger.warning(
             "product_identity.create_race",
             tenant_id=str(tenant_id),
-            matched_by=resolved,
+            matched_by=matched_by,
             existing_id=str(existing.id),
         )
         return existing, False
@@ -209,9 +286,12 @@ async def product_identity_guard(
             yield
     except SavepointConflictError as conflict:
         matched_by: MatchedBy = conflict.constraint  # type: ignore[assignment]
-        existing, hit_by = await find_active_by_identity(
-            session, tenant_id, barcode=barcode, sku=sku, exclude_id=exclude_id
-        )
-        if existing is None:  # pragma: no cover — el índice garantiza que exista
+        try:
+            existing, ambiguous = await _resolve_conflict_owner(
+                session, tenant_id, matched_by, barcode=barcode, sku=sku, exclude_id=exclude_id
+            )
+        except LookupError:  # pragma: no cover — el índice garantiza que exista
             raise conflict.original from conflict
-        raise ProductIdentityConflictError(existing, hit_by or matched_by) from conflict.original
+        raise ProductIdentityConflictError(
+            existing, matched_by, ambiguous=ambiguous
+        ) from conflict.original

@@ -154,6 +154,52 @@ async def test_add_raise_levanta_conflicto(
     assert caught.value.existing.id == existente.id
 
 
+async def test_add_con_barcode_libre_resuelve_al_dueño_del_sku(
+    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+) -> None:
+    """Colisión sólo de sku, con barcode propio libre → reusa al dueño del sku.
+
+    Nota: este caso NO discrimina la corrección del relookup (con el barcode libre,
+    consultar ambas claves también cae al sku). Es cobertura del camino feliz; el
+    caso que sí discrimina es el de ambigüedad, abajo.
+    """
+    tid = sample_tenant.tenant_id
+    a = _product(tid, name="A", barcode="7790011110001")
+    b = _product(tid, name="B", sku="SKU-B")
+    db_session.add_all([a, b])
+    await db_session.flush()
+
+    product, creado = await add_product_or_reuse(
+        db_session, _product(tid, name="Candidato", barcode="7790099990009", sku="SKU-B")
+    )
+    assert creado is False
+    assert product.id == b.id
+
+
+async def test_add_no_reusa_cuando_barcode_y_sku_son_de_productos_distintos(
+    db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
+) -> None:
+    """Regresión del relookup: el candidato "es" dos productos a la vez.
+
+    Barcode de A, sku de B. El código anterior reconsultaba con AMBAS claves y la
+    prioridad de barcode devolvía A, así que el import reusaba A aunque el índice
+    violado pudiera ser el de B — fusionando identidades distintas en silencio.
+    Ahora es ambigüedad explícita: no se reusa ninguno ni siquiera en modo ``reuse``,
+    para que el import lo mande a "Otros" en vez de decidir por su cuenta.
+    """
+    tid = sample_tenant.tenant_id
+    dueño_barcode = _product(tid, name="A", barcode="7790011110001")
+    dueño_sku = _product(tid, name="B", sku="SKU-B")
+    db_session.add_all([dueño_barcode, dueño_sku])
+    await db_session.flush()
+
+    with pytest.raises(ProductIdentityConflictError) as caught:
+        await add_product_or_reuse(
+            db_session, _product(tid, name="Candidato", barcode="7790011110001", sku="SKU-B")
+        )
+    assert caught.value.ambiguous is True
+
+
 async def test_add_exige_producto_transient(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

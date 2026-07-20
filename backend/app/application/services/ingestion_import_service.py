@@ -15,6 +15,11 @@ if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
 from app.application.services import maintenance_lock_service
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+    unique_violation_classifier,
+)
 from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
@@ -209,6 +214,11 @@ async def _resolve_or_create_supplier(
 # garantiza el invariante. NO se aplica a OPEX (gastos operativos) sin proveedor:
 # solo a compras de mercadería (fila con product_id, ``_is_merch_purchase``).
 _SENTINEL_SUPPLIER_NAME = "No identificado"
+# Índice PARCIAL (WHERE custom_fields->>'_sentinel' = 'true') → PG-only: en SQLite
+# no existe y esta rama no se ejercita. Sin `columns` por eso mismo.
+_SUPPLIER_SENTINEL_CONFLICT = unique_violation_classifier(
+    "sentinel", constraint="uq_suppliers_sentinel_per_tenant"
+)
 # Key cacheada en supplier_index para el sentinela (el nombre podría editarse,
 # pero el flag es el identificador canónico).
 _SENTINEL_INDEX_KEY = "__sentinel__"
@@ -229,7 +239,6 @@ async def _resolve_or_create_sentinel_supplier(
     vez, el índice único parcial dispara ``IntegrityError`` → re-query.
     """
     from sqlalchemy import select  # noqa: PLC0415
-    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
 
     from app.persistence.models.supplier import Supplier  # noqa: PLC0415
 
@@ -255,17 +264,12 @@ async def _resolve_or_create_sentinel_supplier(
         return found
 
     new_id = uuid.uuid4()
-    # Drenar lo pendiente ANTES del try: ``begin_nested()`` flushea INCONDICIONALMENTE
-    # al crear el savepoint (``_take_snapshot``), y el import acumula decenas de
-    # objetos con ``autoflush=False`` — sin esto se emitirían dentro del bloque y su
-    # fallo se atribuiría al sentinela.
-    await session.flush()
     try:
-        # El ``add`` va DENTRO del savepoint. Si se hiciera antes, el flush de
-        # ``_take_snapshot`` emitiría el INSERT en la transacción EXTERNA y el
-        # IntegrityError la abortaría entera → el ``_find()`` de abajo reventaría con
-        # InFailedSQLTransaction en PostgreSQL. Ver services/_savepoint.py.
-        async with session.begin_nested():
+        # `guarded_savepoint` aporta el ordenamiento (drenar fuera del try —crítico
+        # acá: el import acumula decenas de objetos con `autoflush=False`— y agregar
+        # DENTRO del savepoint) más el clasificador del índice del sentinela.
+        # Ver services/_savepoint.py.
+        async with guarded_savepoint(session, _SUPPLIER_SENTINEL_CONFLICT):
             session.add(
                 Supplier(
                     id=new_id,
@@ -274,8 +278,7 @@ async def _resolve_or_create_sentinel_supplier(
                     custom_fields={"_sentinel": "true"},
                 )
             )
-            await session.flush()
-    except IntegrityError:
+    except SavepointConflictError:
         existing = await _find()
         if existing is None:  # pragma: no cover — el índice garantiza que exista
             raise
@@ -316,6 +319,11 @@ def _audit_supplier_decision(
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
 
 _IMPORT_ROW_ACTION = "IMPORT_ROW"
+_ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
+    "fingerprint",
+    constraint="uq_operation_fingerprints_tenant_fp",
+    columns=("operation_fingerprints.tenant_id", "operation_fingerprints.fingerprint"),
+)
 
 # Tratamiento del stock de un archivo de catálogo/lista (lo elige el usuario en el
 # confirm). "opening_balance" = saldo de apertura (activo que ya tenía, sin COGS/caja);
@@ -424,7 +432,6 @@ async def _register_import_row_fingerprint(
     Devuelve ``True`` si la fila ya estaba registrada (skip), ``False`` si es
     nueva (procesar).
     """
-    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
 
     from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
 
@@ -435,13 +442,11 @@ async def _register_import_row_fingerprint(
         # Solo se trackea en memoria; se persiste en lote al final (idempotente).
         seen.add(fingerprint)
         return False
-    # El ``add`` ya va DENTRO del savepoint (correcto). Falta solo drenar antes:
-    # ``begin_nested()`` flushea incondicionalmente al crear el savepoint, y el import
-    # acumula objetos con ``autoflush=False`` — sin esto, el fallo de uno ajeno se
-    # leería como "fila ya importada". Ver services/_savepoint.py.
-    await session.flush()
+    # `guarded_savepoint`: ordenamiento + clasificador. Sin el clasificador, una FK
+    # rota o un NOT NULL del propio fingerprint se leería como "fila ya importada" y
+    # la fila se SALTEARÍA en silencio. Ver services/_savepoint.py.
     try:
-        async with session.begin_nested():
+        async with guarded_savepoint(session, _ROW_FINGERPRINT_CONFLICT):
             session.add(
                 OperationFingerprint(
                     tenant_id=tenant_id,
@@ -449,7 +454,7 @@ async def _register_import_row_fingerprint(
                     action_type=_IMPORT_ROW_ACTION,
                 )
             )
-    except IntegrityError:
+    except SavepointConflictError:
         return True
     return False
 

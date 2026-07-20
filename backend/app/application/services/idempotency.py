@@ -20,13 +20,23 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+    unique_violation_classifier,
+)
 from app.persistence.models.memory import OperationFingerprint
 
 # Prefijo de namespace para no colisionar con los fingerprints SHA-256 del agente.
 _IDEMPOTENCY_PREFIX = "idem:"
+
+_FINGERPRINT_CONFLICT = unique_violation_classifier(
+    "fingerprint",
+    constraint="uq_operation_fingerprints_tenant_fp",
+    columns=("operation_fingerprints.tenant_id", "operation_fingerprints.fingerprint"),
+)
 
 
 def _idempotency_fingerprint(key: str) -> str:
@@ -48,13 +58,12 @@ async def claim_operation_fingerprint(
         True  si insertó el fingerprint (era nuevo).
         False si el fingerprint ya existía (duplicado).
     """
-    # El ``add`` ya va DENTRO del savepoint (correcto). Falta solo drenar antes:
-    # ``begin_nested()`` flushea incondicionalmente al crear el savepoint, así que un
-    # objeto pendiente ajeno se emitiría dentro del bloque y su ``IntegrityError`` se
-    # leería como "fingerprint duplicado". Ver services/_savepoint.py.
-    await session.flush()
+    # `guarded_savepoint` aporta el ordenamiento (drenar fuera del try, agregar dentro
+    # del savepoint) y, sobre todo, el clasificador: un `except IntegrityError` a secas
+    # reportaría una FK rota o un NOT NULL del propio fingerprint como "duplicado",
+    # devolviendo False y haciendo que el caller responda 409 por la razón equivocada.
     try:
-        async with session.begin_nested():
+        async with guarded_savepoint(session, _FINGERPRINT_CONFLICT):
             session.add(
                 OperationFingerprint(
                     tenant_id=tenant_id,
@@ -62,7 +71,7 @@ async def claim_operation_fingerprint(
                     action_type=action_type,
                 )
             )
-    except IntegrityError:
+    except SavepointConflictError:
         return False
     return True
 

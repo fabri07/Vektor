@@ -58,6 +58,36 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def unique_violation_classifier(
+    label: str, *, constraint: str, columns: tuple[str, ...] = ()
+) -> Callable[[IntegrityError], str | None]:
+    """Clasificador para UN índice único concreto; todo lo demás → ``None``.
+
+    Hace falta porque ``except IntegrityError`` a secas también traga una FK rota o
+    un NOT NULL del candidato y los reporta como "ya existía" — persistiendo una
+    conclusión falsa en silencio.
+
+    Dos formas de mensaje, porque los motores difieren: PostgreSQL/asyncpg nombran
+    el constraint (``uq_...``), pero **SQLite reporta las columnas**
+    (``UNIQUE constraint failed: tabla.col_a, tabla.col_b``). ``columns`` son los
+    nombres calificados a reconocer en esa segunda forma.
+    """
+
+    def _classify(exc: IntegrityError) -> str | None:
+        orig = getattr(exc, "orig", None)
+        name = getattr(orig, "constraint_name", None)
+        if name:
+            return label if str(name) == constraint else None
+        text = str(orig or exc)
+        if constraint in text:
+            return label
+        if "UNIQUE" not in text.upper():
+            return None
+        return label if columns and all(col in text for col in columns) else None
+
+    return _classify
+
+
 class SavepointConflictError(Exception):
     """Un constraint vigilado se violó dentro del savepoint.
 

@@ -20,14 +20,26 @@ import uuid
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+    unique_violation_classifier,
+)
 from app.persistence.models._sentinel import SENTINEL_FLAG_KEY
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import SaleEntry
 
 LOCAL_CUSTOMER_NAME = "Local"
+
+# El índice es PARCIAL (``WHERE custom_fields->>'_sentinel' = 'true'``) y por eso
+# PG-only: en SQLite no existe y esta rama no se ejercita. Sin ``columns``, entonces
+# —la forma por columnas de SQLite sería sólo ``customers.tenant_id`` y colisionaría
+# con cualquier otro unique de la tabla—.
+_SENTINEL_CONFLICT = unique_violation_classifier(
+    "sentinel", constraint="uq_customers_sentinel_per_tenant"
+)
 
 
 async def resolve_or_create_local_sentinel(
@@ -58,16 +70,12 @@ async def resolve_or_create_local_sentinel(
         return found
 
     new_id = uuid.uuid4()
-    # Drenar lo pendiente ANTES del try: ``begin_nested()`` flushea INCONDICIONALMENTE
-    # al crear el savepoint (``_take_snapshot``), así que sin esto un objeto ajeno
-    # pendiente se emitiría dentro del bloque y su fallo se atribuiría al sentinela.
-    await session.flush()
     try:
-        # El ``add`` va DENTRO del savepoint. Si se hiciera antes, el flush de
-        # ``_take_snapshot`` emitiría el INSERT en la transacción EXTERNA y el
-        # IntegrityError la abortaría entera → el ``_find()`` de abajo reventaría con
-        # InFailedSQLTransaction en PostgreSQL. Ver services/_savepoint.py.
-        async with session.begin_nested():
+        # `guarded_savepoint` aporta el ordenamiento (drenar fuera del try, agregar
+        # DENTRO del savepoint) y el clasificador: sin él, una FK rota o un NOT NULL
+        # caerían en el `except` y el re-query devolvería None → se re-propagaba, sí,
+        # pero recién después de ensuciar el diagnóstico. Ver services/_savepoint.py.
+        async with guarded_savepoint(session, _SENTINEL_CONFLICT):
             session.add(
                 Customer(
                     id=new_id,
@@ -76,11 +84,10 @@ async def resolve_or_create_local_sentinel(
                     custom_fields={SENTINEL_FLAG_KEY: "true"},
                 )
             )
-            await session.flush()
-    except IntegrityError:
+    except SavepointConflictError as conflict:
         existing = await _find()
-        if existing is None:  # una violación que NO era el unique del sentinela
-            raise
+        if existing is None:  # pragma: no cover — el índice garantiza que exista
+            raise conflict.original from conflict
         return existing
     return new_id
 
