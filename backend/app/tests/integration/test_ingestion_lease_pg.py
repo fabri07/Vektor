@@ -28,7 +28,7 @@ from typing import Any, cast
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Table, delete, func, select, update
 from sqlalchemy.engine import CursorResult  # noqa: F401 — usado por cast("CursorResult[Any]", ...)
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -75,7 +75,12 @@ async def pg_engine() -> AsyncGenerator[AsyncEngine, None]:
     """
     assert TEST_PG_DSN is not None
     engine = create_async_engine(TEST_PG_DSN, poolclass=NullPool)
-    tables = [Tenant.__table__, User.__table__, UploadedFile.__table__]
+    # `__table__` está declarado como FromClause; `create_all(tables=...)` espera Table.
+    tables: list[Table] = [
+        cast("Table", Tenant.__table__),
+        cast("Table", User.__table__),
+        cast("Table", UploadedFile.__table__),
+    ]
     async with engine.begin() as conn:
         from sqlalchemy import text  # noqa: PLC0415
 
