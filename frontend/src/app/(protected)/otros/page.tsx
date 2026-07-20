@@ -174,6 +174,17 @@ export default function OtrosPage() {
             "Vinculalo a uno de los sugeridos en vez de crear uno nuevo.",
           "error",
         );
+      } else if (code === "IDENTITY_CONFLICT") {
+        // F5-A: el backend dejó de colapsar el caso ambiguo en un solo id. El
+        // código de barras y el SKU pertenecen a productos DISTINTOS: no es un
+        // problema de los campos cargados, es una decisión que tiene que tomar el
+        // usuario. Sin esta rama caía en el else genérico ("Revisá los campos"),
+        // que apunta al lugar equivocado.
+        toast(
+          "El código de barras y el SKU apuntan a productos distintos. " +
+            "Vinculá el registro al que corresponda en vez de crear uno nuevo.",
+          "error",
+        );
       } else if (code === "INVALID_TARGET_PRODUCT") {
         // El candidato ya no está disponible (borrado/inactivo): cerrar y refrescar.
         toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");

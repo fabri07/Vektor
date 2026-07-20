@@ -24,6 +24,7 @@ from app.api.v1.expenses import _apply_category_label
 from app.api.v1.products import (
     _duplicate_identity_conflict,
     _find_active_product_by_identity,
+    _identity_conflict_from_db,
     _tenant_business_type,
 )
 from app.application.services import maintenance_lock_service, stock_service
@@ -383,8 +384,13 @@ async def reclassify_record(
                 ):
                     session.add(Product(tenant_id=tenant.tenant_id, **data))
             except ProductIdentityConflictError as conflict:
-                raise _duplicate_identity_conflict(
-                    conflict.existing, barcode=data.get("barcode"), sku=data.get("sku")
+                # ``_identity_conflict_from_db`` y no ``_duplicate_identity_conflict``:
+                # cuando barcode y sku pertenecen a productos DISTINTOS hay que
+                # devolver los dos ids. Colapsarlos en uno elegido por prioridad de
+                # índice es adivinar, justo en el caso donde el usuario tiene que
+                # decidir cuál corresponde.
+                raise _identity_conflict_from_db(
+                    conflict, barcode=data.get("barcode"), sku=data.get("sku")
                 ) from conflict
             label = "producto"
     except ValidationError as exc:
