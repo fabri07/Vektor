@@ -129,8 +129,10 @@ jobs:
 
       # ── 6c. pytest — tests de concurrencia contra Postgres real ───────────────
       # Corre SOLO los tests marcados `postgres` (advisory locks F3 + lease F4 +
-      # contención de savepoints F5-A) con TEST_PG_DSN apuntando al service, sobre
-      # el schema recién migrado.
+      # contención de savepoints F5-A + índices únicos y migración F5-B) con
+      # TEST_PG_DSN apuntando al service, sobre el schema recién migrado.
+      # El paso 6b de arriba ya ejerció el preflight y el CREATE CONCURRENTLY de
+      # F5-B al aplicar la cadena: si la migración no aplica, el CI corta ahí.
       # Sin cobertura (subconjunto acotado; la cobertura la mide el paso 6).
       - name: pytest — integración Postgres (concurrencia)
         env:
