@@ -1043,21 +1043,25 @@ async def _resolve_purchase_identity(
         return "otros", None, _candidates_from_conflict(conflict)
     if new_id is None:
         return "otros", None, []  # sin nombre utilizable: nada que crear ni linkear
-    if not created:
-        return "linked", new_id, []  # el índice único resolvió una carrera
-    # ``build_incomplete_product`` cachea el ORM recién creado por id en
-    # ``product_cache``; lo registramos en la caché de identidad para que filas
-    # POSTERIORES del mismo archivo reusen el producto (no dupliquen).
-    new_product = product_cache.get(new_id) if product_cache is not None else None
-    if new_product is not None:
+    # ``build_incomplete_product`` cachea por id en ``product_cache`` tanto el ORM
+    # recién creado como el ocupante reusado; lo registramos en la caché de identidad
+    # para que filas POSTERIORES del mismo archivo lo reusen (no dupliquen).
+    # También en el camino de REUSO: si no, cada fila siguiente con esa clave vuelve
+    # a construir el Product, abre un savepoint, se come el IntegrityError y
+    # re-consulta al ocupante — N savepoints y 2N roundtrips evitables en el camino
+    # caliente del import.
+    resuelto = product_cache.get(new_id) if product_cache is not None else None
+    if resuelto is not None:
         _register_product_identity_cache(
             cache,
-            new_product,
+            resuelto,
             normalize_sku(sku),
             normalize_product_name(name),
             normalize_brand(brand),
             normalize_barcode(barcode),
         )
+    if not created:
+        return "linked", new_id, []  # el índice único resolvió una carrera
     return "created", new_id, []
 
 
@@ -1332,6 +1336,13 @@ async def build_incomplete_product(
 
     Es ``async`` desde F5-A: el savepoint necesita un flush por producto NUEVO
     distinto (no por fila).
+
+    INVARIANTE PARA CALLERS SIN ``except ProductIdentityConflictError``
+    (``data_repair_service``, ``pending_action_service``): solo es seguro no
+    capturarla mientras se llame con **a lo sumo una** clave fuerte. La ambigüedad
+    requiere que barcode Y sku tengan dueños distintos, así que con ``barcode=None``
+    nunca se levanta. El día que alguien le agregue ``barcode=`` a esas llamadas,
+    aparece un 500 sin diagnóstico — hay que agregar el ``except`` primero.
     """
     from app.persistence.models.product import Product  # noqa: PLC0415
 

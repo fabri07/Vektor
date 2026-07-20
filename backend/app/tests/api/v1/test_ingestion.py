@@ -1011,6 +1011,96 @@ class TestConfirmLeaseF4:
         assert refreshed.import_started_at is None
         assert refreshed.import_phase is None
 
+    async def test_failure_after_f5_savepoints_still_compensates_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F5-A × F4: los savepoints anidados no rompen la compensación del lease.
+
+        El test anterior mockea ``insert_confirmed_data`` entero, así que falla
+        ANTES de abrir un solo savepoint interno. Acá el import corre de verdad:
+        crea el producto de la compra pasando por ``guarded_savepoint`` (savepoint
+        de 2º nivel bajo ``_import_sp``) y RECIÉN DESPUÉS falla. Es el caso que
+        importa — si el helper dejara la sesión en un estado raro, el
+        ``_import_sp.rollback()`` + el UPDATE de compensación no podrían correr y
+        el archivo quedaría clavado en IMPORTING para siempre.
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="compras.xlsx",
+            s3_key="uploads/test/uuid/compras.xlsx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            size_bytes=1024,
+            purpose="gastos",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "gastos",
+                "has_gasto": True,
+                "row_count": 1,
+                "gastos_detectados": [
+                    {
+                        "fecha": "2024-02-01",
+                        "categoria": "mercaderia",
+                        "producto": "Coca Cola 500ml",
+                        "sku": "COCA-500",
+                        "cantidad": "24",
+                        "monto": "19200",
+                        "costo_unitario": "800",
+                        "forma_pago": "efectivo",
+                    }
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        # Falla en el último paso ANTES de soltar el savepoint del import: para
+        # entonces el producto ya se creó dentro de un savepoint anidado.
+        with unittest.mock.patch(
+            "app.api.v1.ingestion.pipeline_event_service.emit_event",
+            new_callable=unittest.mock.AsyncMock,
+            side_effect=HTTPException(
+                status_code=503, detail="falla despues de los savepoints"
+            ),
+        ):
+            response = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/confirm",
+                headers=auth_headers,
+                json={"confirmed_fields": {"ventas": False, "gastos": True}},
+            )
+        assert response.status_code == 503
+
+        # ``refresh`` explícito: ``record`` sigue en el identity map y quedó
+        # expirado por el request, así que un ``select`` devolvería la MISMA
+        # instancia y el primer atributo que se lea dispararía un lazy load
+        # síncrono (MissingGreenlet) en vez de leer la fila.
+        await db_session.refresh(record)
+        assert record.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert record.import_attempt_id is None
+        assert record.import_started_at is None
+        assert record.import_phase is None
+
+        # El savepoint del import revirtió TODO lo parcial: ni producto ni gasto.
+        products = (
+            (
+                await db_session.execute(
+                    select(Product).where(Product.tenant_id == sample_tenant.tenant_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert products == [], "el rollback del savepoint no dejó datos a medias"
+
     async def test_delete_importing_returns_409(
         self,
         client: AsyncClient,
