@@ -425,18 +425,28 @@ async def update_product(
     # sku/barcode (el PATCH aplicaba setattr directo → dos productos activos con
     # el mismo SKU). Solo se chequea el identificador que efectivamente cambia,
     # excluyendo el propio producto. Mismo criterio de conflicto que POST.
-    _new_barcode = updates.get("barcode") if "barcode" in updates else None
-    _new_sku = updates.get("sku") if "sku" in updates else None
-    if _new_barcode is not None or _new_sku is not None:
+    # F5-A: la identidad EFECTIVA post-PATCH, no solo los campos presentes en el
+    # body. El índice de F5-B es parcial sobre ``is_active``, así que un PATCH que
+    # solo reactiva (``{"is_active": true}``) puede violarlo con el sku que el
+    # producto YA tenía: alguien ocupó esa clave mientras estaba dado de baja.
+    # Con las claves enviadas (ambas None) ni el pre-check corre ni el guard sabría
+    # a quién buscar, y el IntegrityError se re-propagaría crudo → 500
+    # determinístico, sin carrera de por medio.
+    effective_sku = updates.get("sku", product.sku)
+    effective_barcode = updates.get("barcode", product.barcode)
+    effective_active = updates.get("is_active", product.is_active)
+    reactivating = not product.is_active and bool(effective_active)
+    identity_changed = "sku" in updates or "barcode" in updates
+    if identity_changed or reactivating:
         barcode_match, sku_match = await _find_identity_matches(
             session,
             tenant.tenant_id,
-            barcode=_new_barcode,
-            sku=_new_sku,
+            barcode=effective_barcode,
+            sku=effective_sku,
             exclude_id=product.id,
         )
         conflict = _identity_conflict_response(
-            barcode_match, sku_match, barcode=_new_barcode, sku=_new_sku
+            barcode_match, sku_match, barcode=effective_barcode, sku=effective_sku
         )
         if conflict is not None:
             raise conflict
@@ -459,12 +469,18 @@ async def update_product(
         async with product_identity_guard(
             session,
             tenant_id=tenant.tenant_id,
-            barcode=_new_barcode,
-            sku=_new_sku,
+            barcode=effective_barcode,
+            sku=effective_sku,
             exclude_id=product.id,
         ):
             for field, value in updates.items():
                 setattr(product, field, value)
+            # Reactivar limpia la metadata de baja. Dejar ``is_active=True`` junto a
+            # ``deactivated_at``/``deactivation_reason`` viejos sería otra
+            # inconsistencia determinística: la baja ya no existe.
+            if reactivating:
+                product.deactivated_at = None
+                product.deactivation_reason = None
             # FASE 3 (B2): si el producto estaba marcado para completar y ya tiene
             # precio y costo, se considera completo (cierra el ciclo del auto-creado
             # por import).
@@ -476,7 +492,7 @@ async def update_product(
             saved = await repo.save(product)
     except ProductIdentityConflictError as conflict:
         raise _identity_conflict_from_db(
-            conflict, barcode=_new_barcode, sku=_new_sku
+            conflict, barcode=effective_barcode, sku=effective_sku
         ) from conflict
     _audit_data_change(
         session,

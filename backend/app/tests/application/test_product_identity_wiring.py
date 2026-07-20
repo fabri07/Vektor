@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import patch
@@ -32,12 +33,14 @@ from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.products import DEACTIVATION_REASON_MANUAL
 from app.application.services import stock_service
 from app.application.services.ingestion_import_service import (
     _resolve_purchase_identity,
     build_incomplete_product,
 )
 from app.application.services.product_identity import ProductIdentityConflictError
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryBalance
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -215,11 +218,19 @@ async def test_balance_duplicado_se_resuelve_al_existente(
 ) -> None:
     """El lock SHARED no serializa writers: dos requests crean dos balances.
 
-    La carrera se simula haciendo que el PRIMER ``scalar_one_or_none`` de la función
-    devuelva ``None`` aunque la fila ya exista — que es literalmente lo que ve la
+    La carrera se simula haciendo que el SELECT de balances devuelva ``None`` la
+    primera vez aunque la fila ya exista — que es literalmente lo que ve la
     transacción perdedora, cuyo SELECT corrió antes del commit de la ganadora—. Sin
     ese parche la función encuentra el balance en su primer SELECT, retorna temprano
     y el savepoint NUNCA se ejercita: el test pasaría vacío.
+
+    Se ciega por FORMA del statement, no por número de llamada. Cegar "la llamada
+    #1" sería correcto solo en SQLite: en Postgres,
+    ``maintenance_lock_service.acquire_write_lock_shared`` corre ANTES y emite su
+    propio ``SELECT pg_advisory_xact_lock_shared(...)``, así que la #1 sería el
+    lock, el SELECT real devolvería el balance, la función retornaría temprano —
+    y el test pasaría igual sin tocar el savepoint. Es el patrón exacto de
+    "SQLite verde ≠ Postgres verde", y con ``-m postgres`` en CI ya no es teórico.
     """
     tid = sample_tenant.tenant_id
     producto = _product(tid, name="Arroz", stock_units=7)
@@ -233,12 +244,18 @@ async def test_balance_duplicado_se_resuelve_al_existente(
     await db_session.flush()
 
     real_execute = db_session.execute
-    llamadas = {"n": 0}
+    cegados = {"n": 0}
 
-    async def _execute_ciego_la_primera(*args: Any, **kw: Any) -> Any:
+    def _es_select_de_balance(stmt: Any) -> bool:
+        return InventoryBalance.__table__ in getattr(stmt, "froms", []) or (
+            "inventory_balances" in str(stmt).lower() and str(stmt).lower().startswith("select")
+        )
+
+    async def _execute_ciego(*args: Any, **kw: Any) -> Any:
         result = await real_execute(*args, **kw)
-        llamadas["n"] += 1
-        if llamadas["n"] == 1:  # el SELECT de _get_or_create_balance
+        if args and _es_select_de_balance(args[0]) and cegados["n"] == 0:
+            cegados["n"] += 1
+
             class _Vacio:
                 @staticmethod
                 def scalar_one_or_none() -> None:
@@ -247,7 +264,7 @@ async def test_balance_duplicado_se_resuelve_al_existente(
             return _Vacio()
         return result
 
-    with patch.object(db_session, "execute", _execute_ciego_la_primera):
+    with patch.object(db_session, "execute", _execute_ciego):
         balance = await stock_service._get_or_create_balance(producto, tid, db_session)
 
     assert balance.id == ganador.id, "debió resolver al balance que ya existía"
@@ -370,3 +387,241 @@ async def test_post_products_ambiguo_devuelve_los_dos_candidatos(
     assert detail["code"] == "IDENTITY_CONFLICT"
     assert detail["barcode_product_id"] == a.json()["id"]
     assert detail["sku_product_id"] == b.json()["id"]
+
+
+# ── Reactivación: el índice parcial vive sobre ``is_active`` ─────────────────
+#
+# Un producto dado de baja queda FUERA del índice único, así que su sku/barcode
+# puede ser ocupado por otro. Reactivarlo lo vuelve a meter — con una clave que
+# ahora tiene dueño. El PATCH no manda ``sku`` en ese request, así que la
+# identidad hay que calcularla EFECTIVA (post-mutación), no leerla del body.
+
+
+async def _crear_y_dar_de_baja(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    auth_headers: dict[str, Any],
+    **identidad: Any,
+) -> Product:
+    resp = await client.post(
+        "/api/v1/products",
+        json={**_PAYLOAD, "name": "Dado de baja", **identidad},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    producto = (
+        await db_session.execute(
+            select(Product).where(Product.id == uuid.UUID(resp.json()["id"]))
+        )
+    ).scalar_one()
+    producto.is_active = False
+    producto.deactivated_at = datetime.now(UTC)
+    producto.deactivation_reason = DEACTIVATION_REASON_MANUAL
+    await db_session.flush()
+    return producto
+
+
+@pytest.mark.usefixtures("f5_indexes")
+async def test_reactivar_con_sku_ya_ocupado_devuelve_409_no_500(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    mock_score_trigger: Any,
+) -> None:
+    """Reactivar un producto cuyo SKU ocupó otro: 409, nunca 500."""
+    baja = await _crear_y_dar_de_baja(
+        client, db_session, auth_headers, sku="REACT-SKU"
+    )
+    ocupante = await client.post(
+        "/api/v1/products",
+        json={**_PAYLOAD, "name": "Ocupante", "sku": "REACT-SKU"},
+        headers=auth_headers,
+    )
+    assert ocupante.status_code == 201, "con el de baja fuera del índice, esto entra"
+
+    resp = await client.patch(
+        f"/api/v1/products/{baja.id}",
+        json={"is_active": True},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409, f"esperaba 409, salió {resp.status_code}"
+    assert resp.json()["detail"]["code"] == "DUPLICATE_PRODUCT_IDENTITY"
+
+
+@pytest.mark.usefixtures("f5_indexes")
+async def test_reactivar_con_barcode_ya_ocupado_devuelve_409_no_500(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    mock_score_trigger: Any,
+) -> None:
+    """Misma historia por barcode: la clave no viene en el body igual."""
+    baja = await _crear_y_dar_de_baja(
+        client, db_session, auth_headers, barcode="7790011119991"
+    )
+    ocupante = await client.post(
+        "/api/v1/products",
+        json={**_PAYLOAD, "name": "Ocupante", "barcode": "7790011119991"},
+        headers=auth_headers,
+    )
+    assert ocupante.status_code == 201
+
+    resp = await client.patch(
+        f"/api/v1/products/{baja.id}",
+        json={"is_active": True},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "DUPLICATE_PRODUCT_IDENTITY"
+
+
+@pytest.mark.usefixtures("f5_indexes")
+async def test_reactivacion_fallida_no_deja_rastro(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    mock_score_trigger: Any,
+) -> None:
+    """El 409 no puede dejar el producto medio-reactivado ni auditar un update.
+
+    Tres cosas juntas porque son el MISMO invariante (el rechazo es total):
+    sigue inactivo con su metadata de baja, no hay ``DATA_RECORD_UPDATED``, y la
+    sesión queda usable para el request siguiente.
+    """
+    baja = await _crear_y_dar_de_baja(
+        client, db_session, auth_headers, sku="REACT-RASTRO"
+    )
+    await client.post(
+        "/api/v1/products",
+        json={**_PAYLOAD, "name": "Ocupante", "sku": "REACT-RASTRO"},
+        headers=auth_headers,
+    )
+
+    resp = await client.patch(
+        f"/api/v1/products/{baja.id}",
+        json={"is_active": True},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409
+
+    await db_session.refresh(baja)
+    assert baja.is_active is False
+    assert baja.deactivated_at is not None, "la baja no se tocó"
+
+    audits = (
+        (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "DATA_RECORD_UPDATED"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [a for a in audits if a.decision_data.get("record_id") == str(baja.id)] == []
+
+    # La sesión sigue viva: un request posterior funciona con normalidad.
+    otro = await client.post(
+        "/api/v1/products",
+        json={**_PAYLOAD, "name": "Posterior", "sku": "REACT-POSTERIOR"},
+        headers=auth_headers,
+    )
+    assert otro.status_code == 201
+
+
+@pytest.mark.usefixtures("f5_indexes")
+async def test_reactivar_sin_colision_funciona_y_limpia_la_baja(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    mock_score_trigger: Any,
+) -> None:
+    """Sin ocupante la reactivación pasa — y borra la metadata de baja.
+
+    Sin este caso el test del 409 pasaría también con un pre-check que rechaza
+    TODA reactivación.
+    """
+    baja = await _crear_y_dar_de_baja(
+        client, db_session, auth_headers, sku="REACT-LIBRE"
+    )
+
+    resp = await client.patch(
+        f"/api/v1/products/{baja.id}",
+        json={"is_active": True},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+
+    await db_session.refresh(baja)
+    assert baja.is_active is True
+    assert baja.deactivated_at is None, "reactivar borra la baja, no la deja colgada"
+    assert baja.deactivation_reason is None
+
+
+@pytest.mark.usefixtures("f5_indexes")
+async def test_reactivar_cambiando_a_un_sku_libre_funciona(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    mock_score_trigger: Any,
+) -> None:
+    """Reactivar + mover el SKU al mismo tiempo: manda la clave NUEVA.
+
+    Si la identidad efectiva se calculara mal (leyendo el sku viejo del objeto en
+    vez del enviado), esto daría un 409 espurio contra el ocupante.
+    """
+    baja = await _crear_y_dar_de_baja(
+        client, db_session, auth_headers, sku="REACT-VIEJO"
+    )
+    await client.post(
+        "/api/v1/products",
+        json={**_PAYLOAD, "name": "Ocupante", "sku": "REACT-VIEJO"},
+        headers=auth_headers,
+    )
+
+    resp = await client.patch(
+        f"/api/v1/products/{baja.id}",
+        json={"is_active": True, "sku": "REACT-NUEVO"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    await db_session.refresh(baja)
+    assert baja.is_active is True
+    assert baja.sku == "REACT-NUEVO"
+
+
+@pytest.mark.usefixtures("f5_indexes")
+async def test_reactivar_perdiendo_la_carrera_llega_al_guard_y_da_409(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    mock_score_trigger: Any,
+) -> None:
+    """El pre-check tapa el caso normal; acá se prueba la red de atrás.
+
+    Con el pre-check cegado (lo que ve quien pierde la carrera TOCTOU), el UPDATE
+    llega al índice único. El guard tiene que traducirlo a 409 — y para eso
+    necesita la identidad EFECTIVA, porque el body no trae ``sku``.
+    """
+    baja = await _crear_y_dar_de_baja(
+        client, db_session, auth_headers, sku="REACT-CARRERA"
+    )
+    await client.post(
+        "/api/v1/products",
+        json={**_PAYLOAD, "name": "Ocupante", "sku": "REACT-CARRERA"},
+        headers=auth_headers,
+    )
+
+    with patch(
+        "app.api.v1.products._find_identity_matches",
+        return_value=(None, None),
+    ):
+        resp = await client.patch(
+            f"/api/v1/products/{baja.id}",
+            json={"is_active": True},
+            headers=auth_headers,
+        )
+
+    assert resp.status_code == 409, f"esperaba 409, salió {resp.status_code}"
+    assert resp.json()["detail"]["code"] == "DUPLICATE_PRODUCT_IDENTITY"
