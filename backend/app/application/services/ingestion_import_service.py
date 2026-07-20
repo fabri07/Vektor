@@ -255,18 +255,25 @@ async def _resolve_or_create_sentinel_supplier(
         return found
 
     new_id = uuid.uuid4()
-    sentinel = Supplier(
-        id=new_id,
-        tenant_id=tenant_id,
-        name=_SENTINEL_SUPPLIER_NAME,
-        custom_fields={"_sentinel": "true"},
-    )
-    session.add(sentinel)
+    # Drenar lo pendiente ANTES del try: ``begin_nested()`` flushea INCONDICIONALMENTE
+    # al crear el savepoint (``_take_snapshot``), y el import acumula decenas de
+    # objetos con ``autoflush=False`` — sin esto se emitirían dentro del bloque y su
+    # fallo se atribuiría al sentinela.
+    await session.flush()
     try:
-        # Flush para materializar el INSERT y disparar el índice único parcial
-        # ahora (no en el commit del caller): si otra corrida ya lo creó, lo
-        # detectamos acá y re-queryamos en vez de abortar todo el import.
+        # El ``add`` va DENTRO del savepoint. Si se hiciera antes, el flush de
+        # ``_take_snapshot`` emitiría el INSERT en la transacción EXTERNA y el
+        # IntegrityError la abortaría entera → el ``_find()`` de abajo reventaría con
+        # InFailedSQLTransaction en PostgreSQL. Ver services/_savepoint.py.
         async with session.begin_nested():
+            session.add(
+                Supplier(
+                    id=new_id,
+                    tenant_id=tenant_id,
+                    name=_SENTINEL_SUPPLIER_NAME,
+                    custom_fields={"_sentinel": "true"},
+                )
+            )
             await session.flush()
     except IntegrityError:
         existing = await _find()
@@ -428,6 +435,11 @@ async def _register_import_row_fingerprint(
         # Solo se trackea en memoria; se persiste en lote al final (idempotente).
         seen.add(fingerprint)
         return False
+    # El ``add`` ya va DENTRO del savepoint (correcto). Falta solo drenar antes:
+    # ``begin_nested()`` flushea incondicionalmente al crear el savepoint, y el import
+    # acumula objetos con ``autoflush=False`` — sin esto, el fallo de uno ajeno se
+    # leería como "fila ya importada". Ver services/_savepoint.py.
+    await session.flush()
     try:
         async with session.begin_nested():
             session.add(

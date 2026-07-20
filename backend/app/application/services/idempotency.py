@@ -48,6 +48,11 @@ async def claim_operation_fingerprint(
         True  si insertó el fingerprint (era nuevo).
         False si el fingerprint ya existía (duplicado).
     """
+    # El ``add`` ya va DENTRO del savepoint (correcto). Falta solo drenar antes:
+    # ``begin_nested()`` flushea incondicionalmente al crear el savepoint, así que un
+    # objeto pendiente ajeno se emitiría dentro del bloque y su ``IntegrityError`` se
+    # leería como "fingerprint duplicado". Ver services/_savepoint.py.
+    await session.flush()
     try:
         async with session.begin_nested():
             session.add(

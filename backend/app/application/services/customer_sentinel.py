@@ -58,22 +58,28 @@ async def resolve_or_create_local_sentinel(
         return found
 
     new_id = uuid.uuid4()
-    sentinel = Customer(
-        id=new_id,
-        tenant_id=tenant_id,
-        name=LOCAL_CUSTOMER_NAME,
-        custom_fields={SENTINEL_FLAG_KEY: "true"},
-    )
-    session.add(sentinel)
+    # Drenar lo pendiente ANTES del try: ``begin_nested()`` flushea INCONDICIONALMENTE
+    # al crear el savepoint (``_take_snapshot``), así que sin esto un objeto ajeno
+    # pendiente se emitiría dentro del bloque y su fallo se atribuiría al sentinela.
+    await session.flush()
     try:
-        # Flush dentro de un savepoint para disparar el índice único parcial ahora
-        # (no en el commit del caller): si otra corrida ya lo creó, lo detectamos y
-        # re-queryamos en vez de abortar la transacción entera.
+        # El ``add`` va DENTRO del savepoint. Si se hiciera antes, el flush de
+        # ``_take_snapshot`` emitiría el INSERT en la transacción EXTERNA y el
+        # IntegrityError la abortaría entera → el ``_find()`` de abajo reventaría con
+        # InFailedSQLTransaction en PostgreSQL. Ver services/_savepoint.py.
         async with session.begin_nested():
+            session.add(
+                Customer(
+                    id=new_id,
+                    tenant_id=tenant_id,
+                    name=LOCAL_CUSTOMER_NAME,
+                    custom_fields={SENTINEL_FLAG_KEY: "true"},
+                )
+            )
             await session.flush()
     except IntegrityError:
         existing = await _find()
-        if existing is None:  # pragma: no cover — el índice garantiza que exista
+        if existing is None:  # una violación que NO era el unique del sentinela
             raise
         return existing
     return new_id

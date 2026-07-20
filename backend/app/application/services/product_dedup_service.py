@@ -49,6 +49,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
+from app.application.services import product_identity
 from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
     SOURCE_TYPES,
@@ -1790,6 +1791,9 @@ _REVERT_REPOINT_DIVERGED = "repoint_rows_diverged"  # las filas re-apuntadas cam
 _REVERT_BALANCE_DIVERGED = "balance_diverged"      # balance recreado/inconsistente
 _REVERT_CANONICAL_MISSING = "canonical_missing"    # el canónico ya no existe
 _REVERT_DUP_MISSING = "duplicate_missing"          # un duplicado ya no existe
+# F5: reactivar el dup violaría uq_products_tenant_{barcode,sku}_norm contra el
+# canónico, que sigue ACTIVO y comparte la clave fuerte (por eso se fusionaron).
+_REVERT_IDENTITY_COLLISION = "revert_identity_collision"
 
 
 @dataclass
@@ -2018,6 +2022,16 @@ async def _revert_one_group(
             continue  # tolerancia: reactivación previa → no-op idempotente
         if dup.deactivation_reason != da["after"].get("deactivation_reason"):
             return ("skipped", _REVERT_STATE_DIVERGED)
+        # F5 — identidad: reactivar este dup lo pondría ACTIVO compartiendo
+        # barcode/sku con el canónico (que sigue activo), violando el índice único.
+        # Se chequea ACÁ, en la fase de guards, para que el revert sea ATÓMICO: si
+        # colisiona salimos sin haber reactivado nada ni restaurado balances.
+        # No-invention: NO se le borra sku/barcode al usuario para forzar la reversa.
+        collision, _matched = await product_identity.find_active_by_identity(
+            session, tenant_id, barcode=dup.barcode, sku=dup.sku, exclude_id=dup.id
+        )
+        if collision is not None:
+            return ("skipped", _REVERT_IDENTITY_COLLISION)
 
     # ── (c) MUTACIÓN (inversa exacta, orden INVERSO al apply) ────────────────────
     # 1) DEACTIVATE⁻¹ — reactivar el dup (no-op si ya está activo).
