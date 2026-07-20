@@ -17,6 +17,10 @@ from app.api.v1.deps import (
 )
 from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
+from app.application.services.product_identity import (
+    ProductIdentityConflictError,
+    product_identity_guard,
+)
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.product_categories import (
     normalize_product_category,
@@ -135,6 +139,34 @@ def _identity_conflict_response(
     if existing is not None:
         return _duplicate_identity_conflict(existing, barcode=barcode, sku=sku)
     return None
+
+
+def _identity_conflict_from_db(
+    conflict: ProductIdentityConflictError, *, barcode: str | None, sku: str | None
+) -> HTTPException:
+    """Traduce la violación del índice único al MISMO 409 que el pre-check.
+
+    F5-A: ``_find_identity_matches`` es un SELECT-antes-de-INSERT con ventana TOCTOU
+    —dos requests concurrentes pasan las dos—. Cuando el índice de la DB atrapa a la
+    perdedora, el cliente tiene que recibir el mismo error que si hubiera perdido el
+    pre-check: un 500 por carrera es indistinguible de un bug para quien lo consume.
+    """
+    if conflict.other is not None:
+        by_barcode = (
+            conflict.existing if conflict.matched_by == "barcode" else conflict.other
+        )
+        by_sku = conflict.other if conflict.matched_by == "barcode" else conflict.existing
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "IDENTITY_CONFLICT",
+                "barcode_product_id": str(by_barcode.id),
+                "sku_product_id": str(by_sku.id),
+                "message": "El código de barras y el SKU apuntan a productos "
+                "distintos. Revisá cuál corresponde.",
+            },
+        )
+    return _duplicate_identity_conflict(conflict.existing, barcode=barcode, sku=sku)
 
 
 async def _find_active_product_by_identity(
@@ -334,7 +366,21 @@ async def create_product(
                 "category_label": label,
             }
     product = Product(tenant_id=tenant.tenant_id, **data)
-    saved = await repo.save(product)
+    # F5-A: el pre-check de arriba tiene ventana TOCTOU. El guard abre el savepoint,
+    # emite el INSERT adentro y traduce la violación del índice único al mismo 409
+    # —sin él la request perdedora daría 500 y dejaría la transacción abortada—.
+    try:
+        async with product_identity_guard(
+            session,
+            tenant_id=tenant.tenant_id,
+            barcode=data.get("barcode"),
+            sku=data.get("sku"),
+        ):
+            saved = await repo.save(product)
+    except ProductIdentityConflictError as conflict:
+        raise _identity_conflict_from_db(
+            conflict, barcode=data.get("barcode"), sku=data.get("sku")
+        ) from conflict
     trigger_score_recalculation.delay(str(tenant.tenant_id), "product_created")
     return saved
 
@@ -406,15 +452,32 @@ async def update_product(
                 **(updates.get("custom_fields") or product.custom_fields or {}),
                 "category_label": label,
             }
-    for field, value in updates.items():
-        setattr(product, field, value)
-    # FASE 3 (B2): si el producto estaba marcado para completar y ya tiene precio
-    # y costo, se considera completo (cierra el ciclo del auto-creado por import).
-    recompute_requires_completion(product)
-    # Relectura de archivos: Product no tiene `source_upload_id`, así que cualquier
-    # edición manual lo marca como editado (la re-importación no debe pisarlo).
-    product.has_user_edits = True
-    saved = await repo.save(product)
+    # F5-A: los ``setattr`` van DENTRO del guard. Mutar antes deja el objeto ``dirty``
+    # y el flush incondicional de ``begin_nested()`` emitiría el UPDATE FUERA del
+    # savepoint — exactamente el defecto que el guard existe para evitar.
+    try:
+        async with product_identity_guard(
+            session,
+            tenant_id=tenant.tenant_id,
+            barcode=_new_barcode,
+            sku=_new_sku,
+            exclude_id=product.id,
+        ):
+            for field, value in updates.items():
+                setattr(product, field, value)
+            # FASE 3 (B2): si el producto estaba marcado para completar y ya tiene
+            # precio y costo, se considera completo (cierra el ciclo del auto-creado
+            # por import).
+            recompute_requires_completion(product)
+            # Relectura de archivos: Product no tiene `source_upload_id`, así que
+            # cualquier edición manual lo marca como editado (la re-importación no
+            # debe pisarlo).
+            product.has_user_edits = True
+            saved = await repo.save(product)
+    except ProductIdentityConflictError as conflict:
+        raise _identity_conflict_from_db(
+            conflict, barcode=_new_barcode, sku=_new_sku
+        ) from conflict
     _audit_data_change(
         session,
         tenant_id=tenant.tenant_id,

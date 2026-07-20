@@ -11,6 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
 from app.application.services import maintenance_lock_service
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+    unique_violation_classifier,
+)
 from app.application.services.inventory_movement_origin import ensure_utc
 from app.domain.product import effective_threshold
 from app.persistence.models.audit import DecisionAuditLog
@@ -22,6 +27,17 @@ from app.persistence.models.transaction import SaleEntry
 # UN movimiento 'sale' vivo (garantizado por el índice único parcial de la migración
 # 20260729_0001). Habilita reversa exacta por venta e idempotencia sync+evento.
 _SALE_SOURCE_PREFIX = "sale:"
+
+# F5-A: a diferencia de los sentinelas, este índice es TOTAL (sin ``WHERE``), así que
+# también existe en SQLite — donde el error viene por columnas y no por nombre. Se
+# declaran las dos formas para que el clasificador discrimine en ambos motores.
+# Público: lo comparte ``ingestion_import_service._apply_purchase_to_stock``, el otro
+# sitio que crea balances. Un segundo clasificador podría divergir del nombre real.
+BALANCE_CONFLICT = unique_violation_classifier(
+    "balance",
+    constraint="uq_inventory_balances_tenant_product",
+    columns=("inventory_balances.tenant_id", "inventory_balances.product_id"),
+)
 
 # Mensaje canónico de rechazo por stock insuficiente en una venta EN VIVO. Se muestra
 # TAL CUAL al usuario (chat vía user_message; endpoints REST vía handler global → 400).
@@ -119,15 +135,38 @@ async def _get_or_create_balance(
         )
     )
     balance = result.scalar_one_or_none()
-    if balance is None:
-        balance = InventoryBalance(
-            tenant_id=tenant_id,
-            product_id=product.id,
-            current_qty=product.stock_units,
-            reserved_qty=0,
-        )
-        db.add(balance)
-        await db.flush()
+    if balance is not None:
+        return balance
+
+    # F5-A: el SELECT de arriba corre bajo el lock SHARED, que no serializa writers
+    # entre sí — dos requests concurrentes del mismo producto pasan las dos y crean
+    # dos filas de balance. El savepoint deja que el índice único
+    # (``uq_inventory_balances_tenant_product``, F5-B) resuelva la carrera sin
+    # abortar la transacción de la perdedora.
+    #
+    # ``current_qty`` sale de ``product.stock_units``, NO de sumar el ledger: el
+    # stock no es Σ(inventory_movements) y recomputarlo desde ahí lo corrompería.
+    try:
+        async with guarded_savepoint(db, BALANCE_CONFLICT):
+            balance = InventoryBalance(
+                tenant_id=tenant_id,
+                product_id=product.id,
+                current_qty=product.stock_units,
+                reserved_qty=0,
+            )
+            db.add(balance)
+    except SavepointConflictError as conflict:
+        existing = (
+            await db.execute(
+                select(InventoryBalance).where(
+                    InventoryBalance.product_id == product.id,
+                    InventoryBalance.tenant_id == tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:  # pragma: no cover — el índice garantiza que exista
+            raise conflict.original from conflict
+        return existing
     return balance
 
 

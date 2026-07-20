@@ -27,6 +27,10 @@ from app.api.v1.products import (
     _tenant_business_type,
 )
 from app.application.services import maintenance_lock_service, stock_service
+from app.application.services.product_identity import (
+    ProductIdentityConflictError,
+    product_identity_guard,
+)
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
@@ -367,7 +371,21 @@ async def reclassify_record(
                         **(data.get("custom_fields") or {}),
                         "category_label": label_p,
                     }
-            session.add(Product(tenant_id=tenant.tenant_id, **data))
+            # F5-A: el `_find_active_product_by_identity` de arriba tiene ventana
+            # TOCTOU; el guard emite el INSERT dentro del savepoint y traduce la
+            # violación del índice único al MISMO 409 que ese pre-check.
+            try:
+                async with product_identity_guard(
+                    session,
+                    tenant_id=tenant.tenant_id,
+                    barcode=data.get("barcode"),
+                    sku=data.get("sku"),
+                ):
+                    session.add(Product(tenant_id=tenant.tenant_id, **data))
+            except ProductIdentityConflictError as conflict:
+                raise _duplicate_identity_conflict(
+                    conflict.existing, barcode=data.get("barcode"), sku=data.get("sku")
+                ) from conflict
             label = "producto"
     except ValidationError as exc:
         raise HTTPException(

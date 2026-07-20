@@ -330,7 +330,12 @@ async def _execute_reclassify_expense(
                 unit_cost = (
                     Decimal(str(unit_cost_raw)) if unit_cost_raw not in (None, "") else None
                 )
-                product_id = build_incomplete_product(
+                # F5-A: si el SKU ya está tomado por un producto activo, el helper
+                # devuelve ESE producto en vez de romper — reclasificar un gasto a
+                # reventa apuntando al producto que ya existe es exactamente lo que
+                # el usuario quiere. (``_created`` no se usa: acá no se reporta
+                # cuántos productos se crearon.)
+                product_id, _created = await build_incomplete_product(
                     session=db,
                     tenant_id=action.tenant_id,
                     name=payload.get("product_name") or expense.description,

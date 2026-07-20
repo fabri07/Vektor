@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
-from app.application.services import maintenance_lock_service
+from app.application.services import maintenance_lock_service, stock_service
 from app.application.services._savepoint import (
     SavepointConflictError,
     guarded_savepoint,
@@ -30,6 +30,11 @@ from app.application.services.inventory_movement_origin import (
     SOURCE_RECEIPT,
     compute_source_row_hash,
     ensure_utc,
+)
+from app.application.services.product_identity import (
+    MatchedBy,
+    ProductIdentityConflictError,
+    add_product_or_reuse,
 )
 from app.domain.business_time import now_ar_naive
 from app.domain.expense_categories import (
@@ -962,7 +967,34 @@ def _resolve_link(
     return _resolve_product_identity(name, sku, brand, indexes=indexes, barcode=barcode)
 
 
-def _resolve_purchase_identity(
+def _candidates_from_conflict(
+    conflict: ProductIdentityConflictError,
+) -> list[dict[str, Any]]:
+    """``match_candidates`` desde una ambigüedad detectada por la DB.
+
+    Misma forma que el ``_candidates`` de ``_resolve_product_identity``
+    (``{id, matched_by, name, sku, barcode}``) para que ``/otros`` renderice igual
+    una ambigüedad del motor y una detectada por el índice único. Acá ``matched_by``
+    sale de qué clave comparte cada candidato con la fila, no del índice violado.
+    """
+    # ``existing`` ocupa la clave que reportó la DB; ``other``, por definición, la otra.
+    otra: MatchedBy = "sku" if conflict.matched_by == "barcode" else "barcode"
+    porque: list[tuple[Product, str]] = [(conflict.existing, conflict.matched_by)]
+    if conflict.other is not None:
+        porque.append((conflict.other, otra))
+    return [
+        {
+            "id": str(product.id),
+            "matched_by": [matched],
+            "name": product.name,
+            "sku": product.sku,
+            "barcode": product.barcode,
+        }
+        for product, matched in porque
+    ]
+
+
+async def _resolve_purchase_identity(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     *,
@@ -983,25 +1015,44 @@ def _resolve_purchase_identity(
         (con barcode) y lo registra en la caché intra-corrida.
       - ``("otros", None, cands)`` → ``ambiguous``/``conflict``: NO crea (evita el
         3er duplicado del review F2 #1) — el caller rutea la fila a "Otros".
+
+    F5-A: los índices se pre-cargan al abrir la corrida, así que el motor puede
+    decidir ``create`` sobre una clave que otra transacción ocupó en el medio. Si el
+    índice único la rechaza, ``build_incomplete_product`` reusa al ocupante y esto
+    devuelve ``"linked"``, NO ``"created"`` — si no, ``counts``/``products_created``
+    reportarían un producto que nunca se creó.
     """
     res = _resolve_link(name, sku, brand, barcode, indexes=indexes, cache=cache)
     if res.status == "resolved":
         return "linked", res.product_id, []
     if res.status in ("ambiguous", "conflict"):
         return "otros", None, res.candidates
-    new_id = build_incomplete_product(
-        session, tenant_id, name, sku, unit_cost, product_cache, barcode=barcode
-    )
+    try:
+        new_id, created = await build_incomplete_product(
+            session, tenant_id, name, sku, unit_cost, product_cache, barcode=barcode
+        )
+    except ProductIdentityConflictError as conflict:
+        # Ambigüedad detectada por la DB (barcode y sku en productos distintos): mismo
+        # destino que la ambigüedad detectada por el motor — "Otros", nunca adivinar.
+        logger.warning(
+            "ingestion.product_identity_ambiguous_on_insert",
+            tenant_id=str(tenant_id),
+            matched_by=conflict.matched_by,
+            candidate_ids=[str(p.id) for p in conflict.candidates],
+        )
+        return "otros", None, _candidates_from_conflict(conflict)
     if new_id is None:
         return "otros", None, []  # sin nombre utilizable: nada que crear ni linkear
+    if not created:
+        return "linked", new_id, []  # el índice único resolvió una carrera
     # ``build_incomplete_product`` cachea el ORM recién creado por id en
     # ``product_cache``; lo registramos en la caché de identidad para que filas
     # POSTERIORES del mismo archivo reusen el producto (no dupliquen).
-    created = product_cache.get(new_id) if product_cache is not None else None
-    if created is not None:
+    new_product = product_cache.get(new_id) if product_cache is not None else None
+    if new_product is not None:
         _register_product_identity_cache(
             cache,
-            created,
+            new_product,
             normalize_sku(sku),
             normalize_product_name(name),
             normalize_brand(brand),
@@ -1201,13 +1252,34 @@ async def _record_stock_movement(
             )
         ).scalar_one_or_none()
     if balance is None:
-        new_balance = InventoryBalance(
-            tenant_id=tenant_id,
-            product_id=product_id,
-            current_qty=final_qty,
-            reserved_qty=0,
-        )
-        session.add(new_balance)
+        # F5-A: acotado a productos NUEVOS (los preexistentes ya tienen balance y caen
+        # en el `else`). Si otra transacción creó el balance en el medio, el índice
+        # único lo rechaza y se reusa el suyo, sumándole `qty` —el mismo efecto que la
+        # rama `else`, no `final_qty` absoluto, que pisaría lo que el otro escribió—.
+        try:
+            async with guarded_savepoint(session, stock_service.BALANCE_CONFLICT):
+                new_balance = InventoryBalance(
+                    tenant_id=tenant_id,
+                    product_id=product_id,
+                    current_qty=final_qty,
+                    reserved_qty=0,
+                )
+                session.add(new_balance)
+        except SavepointConflictError as conflict:
+            existing_balance = (
+                await session.execute(
+                    select(InventoryBalance).where(
+                        InventoryBalance.product_id == product_id,
+                        InventoryBalance.tenant_id == tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_balance is None:  # pragma: no cover — el índice lo garantiza
+                raise conflict.original from conflict
+            existing_balance.current_qty += qty
+            if balance_index is not None:
+                balance_index[product_id] = existing_balance
+            return
         if balance_index is not None:
             balance_index[product_id] = new_balance
     else:
@@ -1225,7 +1297,7 @@ def _parse_qty(qty_raw: Any) -> int:
     return qty if qty > 0 else 0
 
 
-def build_incomplete_product(
+async def build_incomplete_product(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     name: str | None,
@@ -1234,9 +1306,9 @@ def build_incomplete_product(
     product_cache: dict[uuid.UUID, Any] | None = None,
     *,
     barcode: str | None = None,
-) -> uuid.UUID | None:
+) -> tuple[uuid.UUID | None, bool]:
     """Construye y agrega a la sesión un ``Product`` vendible INCOMPLETO desde una
-    compra de mercadería, devolviendo su id (o ``None`` si no hay nombre utilizable).
+    compra de mercadería, devolviendo ``(id, creado)``.
 
     Un producto nacido de una compra no trae precio de venta ni categoría de
     catálogo: nace ``requires_completion=True``, ``sale_price_ars=0``,
@@ -1245,16 +1317,27 @@ def build_incomplete_product(
     "producto desde compra", reusado por el import (``_ensure_product_for_purchase``)
     y por la reclasificación de gastos a reventa (``RECLASSIFY_EXPENSE``).
 
-    Si se pasa ``product_cache``, el objeto recién creado se cachea por id. Crítico
+    Si se pasa ``product_cache``, el objeto resultante se cachea por id. Crítico
     con ``autoflush=False`` (prod): ``session.get`` no ve un producto pendiente sin
     flush, así que ``_apply_purchase_to_stock`` no podría incrementarle el stock —
     el cache se lo entrega sin tocar la DB.
+
+    F5-A: el INSERT va por ``add_product_or_reuse``. Si el SKU/barcode ya está tomado
+    por un producto activo del tenant —una carrera, o un índice pre-cargado que no lo
+    vio— devuelve ``(id_existente, False)`` en vez de romper: violar la unicidad de
+    una clave FUERTE no es ambigüedad, es el match exacto que ``_resolve_link``
+    hubiera devuelto como ``resolved``. La ambigüedad real (barcode y sku en
+    productos DISTINTOS) sí levanta ``ProductIdentityConflictError`` — no hay "el
+    existente" que reusar y el caller debe rutear la fila a "Otros".
+
+    Es ``async`` desde F5-A: el savepoint necesita un flush por producto NUEVO
+    distinto (no por fila).
     """
     from app.persistence.models.product import Product  # noqa: PLC0415
 
     clean_name = _clean_str(name, 299)
     if not clean_name:
-        return None
+        return None, False
     clean_sku = _clean_str(sku, 99)
     clean_barcode = _clean_str(barcode, 64)  # F2-T5
 
@@ -1274,13 +1357,15 @@ def build_incomplete_product(
         provenance="REAL",
         requires_completion=True,  # falta precio de venta → completar
     )
-    session.add(product)
+    # NO ``session.add()`` acá: ``add_product_or_reuse`` exige el objeto TRANSIENT
+    # para poder emitir el INSERT DENTRO del savepoint (ver services/_savepoint.py).
+    resolved, created = await add_product_or_reuse(session, product)
     if product_cache is not None:
-        product_cache[new_id] = product
-    return new_id
+        product_cache[resolved.id] = resolved
+    return resolved.id, created
 
 
-def _ensure_product_for_purchase(
+async def _ensure_product_for_purchase(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     name: str | None,
@@ -1305,7 +1390,7 @@ def _ensure_product_for_purchase(
     Cachea el id nuevo en ``by_sku``/``by_name`` para que filas posteriores del
     mismo SKU/nombre en el mismo archivo reusen el producto (sin duplicar).
     """
-    new_id = build_incomplete_product(
+    new_id, _created = await build_incomplete_product(
         session, tenant_id, name, sku, unit_cost, product_cache=product_cache
     )
     if new_id is None:
@@ -2373,7 +2458,7 @@ async def _insert_confirmed_data_impl(
                     if expense.product_id is None and (
                         _is_merch_purchase or (cat_code == "INVENTORY" and _has_qty)
                     ):
-                        _action, _pid, _cands = _resolve_purchase_identity(
+                        _action, _pid, _cands = await _resolve_purchase_identity(
                             session,
                             tenant_id,
                             name=_exp_name,
@@ -2568,52 +2653,35 @@ async def _insert_confirmed_data_impl(
                 _name_n = normalize_product_name(name)
                 _brand_n = normalize_brand(store_name)
                 _bc_n = normalize_barcode(barcode)
-                existing = _lookup_product_identity_cache(
-                    products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
-                )
-                if existing is None:
-                    _resolution = _resolve_product_identity(
-                        name, sku, store_name, indexes=_identity_indexes, barcode=barcode
-                    )
-                    if _resolution.status in ("ambiguous", "conflict"):
-                        counts["productos_ambiguos"] += 1
-                        logger.warning(
-                            "ingestion.product_name_ambiguous",
-                            tenant_id=str(tenant_id),
-                            normalized_name=_name_n,
-                            row_ref=_prod_row_ref,
-                            uploaded_file_id=(
-                                str(uploaded_file_id) if uploaded_file_id else None
-                            ),
-                            count=len(_resolution.candidates),
-                            candidate_ids=[c["id"] for c in _resolution.candidates],
-                            match_strategy=_resolution.status,
-                        )
-                        # La fila ambigua/en conflicto NO se descarta en
-                        # silencio — queda en "Otros" (bandeja /otros) para
-                        # revisión/unificación manual, con match_candidates.
-                        _context_label = (
-                            f"Producto ambiguo: coincide con {len(_resolution.candidates)} "
-                            "productos activos"
-                            if _resolution.status == "ambiguous"
-                            else "Conflicto de identidad: el SKU y el nombre "
-                            "apuntan a productos distintos"
-                        )
-                        counts["otros"] += _capture_unclassified(
-                            session,
-                            tenant_id,
-                            rows=[row],
-                            headers=headers,
-                            source=source,
-                            uploaded_file_id=uploaded_file_id,
-                            context_label=_context_label,
-                            suggested_entity="product",
-                            match_candidates=_resolution.candidates,
-                        )
-                        continue  # ambiguo/conflicto: no se importa, no se toca nada
-                    if _resolution.status == "resolved" and _resolution.product_id is not None:
-                        existing = await session.get(Product, _resolution.product_id)
-                if existing:
+                async def _merge_catalog_into_existing(
+                    existing: Product,
+                    *,
+                    name: str = name,
+                    sku: str | None = sku,
+                    barcode: str | None = barcode,
+                    price: Decimal | None = price,
+                    cost: Decimal | None = cost,
+                    stock_val: int = stock_val,
+                    prod_cat: str | None = prod_cat,
+                    store_name: str | None = store_name,
+                    _prod_row_ref: str | None = _prod_row_ref,
+                    _sku_n: str | None = _sku_n,
+                    _name_n: str = _name_n,
+                    _brand_n: str | None = _brand_n,
+                    _bc_n: str | None = _bc_n,
+                ) -> None:
+                    """Aplica la fila del catálogo a un producto que YA existe.
+
+                    Extraído en F5-A: ahora llegan acá dos caminos —el motor resolvió
+                    el producto, o el índice único rechazó la creación y
+                    ``add_product_or_reuse`` devolvió al ocupante—. Duplicar el cuerpo
+                    era el riesgo real: en creación ``_apply_catalog_stock`` recibe
+                    ``delta=stock_val`` (desde 0); aplicárselo a un producto que ya
+                    tiene stock se lo SUMARÍA de nuevo.
+
+                    Los defaults capturan los locales de ESTA iteración (un closure a
+                    secas los leería tarde, ya pisados por la fila siguiente).
+                    """
                     before_snap: dict[str, Any] | None = None
                     if return_details:
                         before_snap = {
@@ -2668,6 +2736,54 @@ async def _insert_confirmed_data_impl(
                                 },
                             }
                         )
+
+                existing = _lookup_product_identity_cache(
+                    products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
+                )
+                if existing is None:
+                    _resolution = _resolve_product_identity(
+                        name, sku, store_name, indexes=_identity_indexes, barcode=barcode
+                    )
+                    if _resolution.status in ("ambiguous", "conflict"):
+                        counts["productos_ambiguos"] += 1
+                        logger.warning(
+                            "ingestion.product_name_ambiguous",
+                            tenant_id=str(tenant_id),
+                            normalized_name=_name_n,
+                            row_ref=_prod_row_ref,
+                            uploaded_file_id=(
+                                str(uploaded_file_id) if uploaded_file_id else None
+                            ),
+                            count=len(_resolution.candidates),
+                            candidate_ids=[c["id"] for c in _resolution.candidates],
+                            match_strategy=_resolution.status,
+                        )
+                        # La fila ambigua/en conflicto NO se descarta en
+                        # silencio — queda en "Otros" (bandeja /otros) para
+                        # revisión/unificación manual, con match_candidates.
+                        _context_label = (
+                            f"Producto ambiguo: coincide con {len(_resolution.candidates)} "
+                            "productos activos"
+                            if _resolution.status == "ambiguous"
+                            else "Conflicto de identidad: el SKU y el nombre "
+                            "apuntan a productos distintos"
+                        )
+                        counts["otros"] += _capture_unclassified(
+                            session,
+                            tenant_id,
+                            rows=[row],
+                            headers=headers,
+                            source=source,
+                            uploaded_file_id=uploaded_file_id,
+                            context_label=_context_label,
+                            suggested_entity="product",
+                            match_candidates=_resolution.candidates,
+                        )
+                        continue  # ambiguo/conflicto: no se importa, no se toca nada
+                    if _resolution.status == "resolved" and _resolution.product_id is not None:
+                        existing = await session.get(Product, _resolution.product_id)
+                if existing:
+                    await _merge_catalog_into_existing(existing)
                 else:
                     new_product_id = uuid.uuid4()
                     cf_product: dict[str, str] = {
@@ -2698,7 +2814,41 @@ async def _insert_confirmed_data_impl(
                         custom_fields=cf_product if cf_product else None,
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
-                    session.add(new_product)
+                    # F5-A: sin ``session.add`` — el helper exige el objeto TRANSIENT
+                    # para emitir el INSERT dentro del savepoint.
+                    try:
+                        _resolved, _created = await add_product_or_reuse(
+                            session, new_product
+                        )
+                    except ProductIdentityConflictError as _conflict:
+                        counts["productos_ambiguos"] += 1
+                        logger.warning(
+                            "ingestion.product_identity_ambiguous_on_insert",
+                            tenant_id=str(tenant_id),
+                            normalized_name=_name_n,
+                            row_ref=_prod_row_ref,
+                            matched_by=_conflict.matched_by,
+                            candidate_ids=[str(p.id) for p in _conflict.candidates],
+                        )
+                        counts["otros"] += _capture_unclassified(
+                            session,
+                            tenant_id,
+                            rows=[row],
+                            headers=headers,
+                            source=source,
+                            uploaded_file_id=uploaded_file_id,
+                            context_label="Conflicto de identidad: el código de barras "
+                            "y el SKU apuntan a productos distintos",
+                            suggested_entity="product",
+                            match_candidates=_candidates_from_conflict(_conflict),
+                        )
+                        continue  # ambiguo: no se importa, no se toca nada
+                    if not _created:
+                        # El índice único resolvió una carrera: es exactamente el
+                        # camino de "producto existente", con su delta relativo.
+                        await _merge_catalog_into_existing(_resolved)
+                        counts["productos"] += 1
+                        continue
                     _register_product_identity_cache(
                         products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
                     )
@@ -3120,7 +3270,7 @@ async def _insert_multisheet_data(
         if expense.product_id is None and (
             _is_merch_purchase or (cat_code == "INVENTORY" and _has_qty)
         ):
-            _action, _pid, _cands = _resolve_purchase_identity(
+            _action, _pid, _cands = await _resolve_purchase_identity(
                 session,
                 tenant_id,
                 name=_exp_name,
@@ -3267,50 +3417,16 @@ async def _insert_multisheet_data(
         _name_n = normalize_product_name(name)
         _brand_n = normalize_brand(store_name)
         _bc_n = normalize_barcode(barcode)
-        existing = _lookup_product_identity_cache(
-            products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
-        )
-        if existing is None:
-            _resolution = _resolve_product_identity(
-                name, sku, store_name, indexes=_identity_indexes, barcode=barcode
-            )
-            if _resolution.status in ("ambiguous", "conflict"):
-                counts["productos_ambiguos"] += 1
-                logger.warning(
-                    "ingestion.product_name_ambiguous",
-                    tenant_id=str(tenant_id),
-                    normalized_name=_name_n,
-                    row_ref=row_ref,
-                    uploaded_file_id=str(uploaded_file_id) if uploaded_file_id else None,
-                    count=len(_resolution.candidates),
-                    candidate_ids=[c["id"] for c in _resolution.candidates],
-                    match_strategy=_resolution.status,
-                )
-                # La fila ambigua/en conflicto NO se descarta en silencio —
-                # queda en "Otros" (bandeja /otros) para revisión/unificación
-                # manual, con match_candidates.
-                _context_label = (
-                    f"Producto ambiguo: coincide con {len(_resolution.candidates)} "
-                    "productos activos"
-                    if _resolution.status == "ambiguous"
-                    else "Conflicto de identidad: el SKU y el nombre "
-                    "apuntan a productos distintos"
-                )
-                counts["otros"] += _capture_unclassified(
-                    session,
-                    tenant_id,
-                    rows=[row],
-                    headers=None,  # sin headers de hoja disponibles en este scope
-                    source=source,
-                    uploaded_file_id=uploaded_file_id,
-                    context_label=_context_label,
-                    suggested_entity="product",
-                    match_candidates=_resolution.candidates,
-                )
-                return  # ambiguo/conflicto: no se importa, no se toca nada
-            if _resolution.status == "resolved" and _resolution.product_id is not None:
-                existing = await session.get(Product, _resolution.product_id)
-        if existing:
+        async def _merge_into_existing(existing: Product) -> None:
+            """Aplica la fila del catálogo a un producto que YA existe.
+
+            Extraído en F5-A porque ahora hay dos caminos que llegan acá: el motor de
+            identidad resolvió el producto, o el índice único rechazó la creación y
+            ``add_product_or_reuse`` devolvió al ocupante. Duplicar este cuerpo era el
+            riesgo real: en el camino de creación ``_apply_catalog_stock`` recibe
+            ``delta=stock_val`` (desde 0), y aplicárselo a un producto preexistente le
+            SUMARÍA su stock actual otra vez.
+            """
             if price:
                 existing.sale_price_ars = price
             if cost:
@@ -3343,6 +3459,56 @@ async def _insert_multisheet_data(
             _register_product_identity_cache(
                 products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
             )
+
+        def _route_ambiguous_to_otros(
+            candidates: list[dict[str, Any]], context_label: str
+        ) -> None:
+            """La fila ambigua NO se descarta en silencio: queda en /otros con los
+            candidatos, para revisión/unificación manual."""
+            counts["productos_ambiguos"] += 1
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,  # sin headers de hoja disponibles en este scope
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=context_label,
+                suggested_entity="product",
+                match_candidates=candidates,
+            )
+
+        existing = _lookup_product_identity_cache(
+            products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
+        )
+        if existing is None:
+            _resolution = _resolve_product_identity(
+                name, sku, store_name, indexes=_identity_indexes, barcode=barcode
+            )
+            if _resolution.status in ("ambiguous", "conflict"):
+                logger.warning(
+                    "ingestion.product_name_ambiguous",
+                    tenant_id=str(tenant_id),
+                    normalized_name=_name_n,
+                    row_ref=row_ref,
+                    uploaded_file_id=str(uploaded_file_id) if uploaded_file_id else None,
+                    count=len(_resolution.candidates),
+                    candidate_ids=[c["id"] for c in _resolution.candidates],
+                    match_strategy=_resolution.status,
+                )
+                _route_ambiguous_to_otros(
+                    _resolution.candidates,
+                    f"Producto ambiguo: coincide con {len(_resolution.candidates)} "
+                    "productos activos"
+                    if _resolution.status == "ambiguous"
+                    else "Conflicto de identidad: el SKU y el nombre "
+                    "apuntan a productos distintos",
+                )
+                return  # ambiguo/conflicto: no se importa, no se toca nada
+            if _resolution.status == "resolved" and _resolution.product_id is not None:
+                existing = await session.get(Product, _resolution.product_id)
+        if existing:
+            await _merge_into_existing(existing)
         else:
             cf = _custom_fields(row, cf_cols)
             if cat_label:
@@ -3368,7 +3534,33 @@ async def _insert_multisheet_data(
                 custom_fields=cf or None,
                 source_row_ref=row_ref,  # Mejora D
             )
-            session.add(new_product)
+            # F5-A: sin ``session.add`` — ``add_product_or_reuse`` necesita el objeto
+            # TRANSIENT para emitir el INSERT dentro del savepoint.
+            try:
+                _resolved, _created = await add_product_or_reuse(session, new_product)
+            except ProductIdentityConflictError as _conflict:
+                # Ambigüedad que el motor no vio (barcode y sku de productos
+                # distintos): mismo destino que la ambigüedad detectada arriba.
+                logger.warning(
+                    "ingestion.product_identity_ambiguous_on_insert",
+                    tenant_id=str(tenant_id),
+                    normalized_name=_name_n,
+                    row_ref=row_ref,
+                    matched_by=_conflict.matched_by,
+                    candidate_ids=[str(p.id) for p in _conflict.candidates],
+                )
+                _route_ambiguous_to_otros(
+                    _candidates_from_conflict(_conflict),
+                    "Conflicto de identidad: el código de barras y el SKU "
+                    "apuntan a productos distintos",
+                )
+                return
+            if not _created:
+                # El índice único resolvió una carrera: es exactamente el camino de
+                # "producto existente" —incluido el delta de stock relativo—.
+                await _merge_into_existing(_resolved)
+                counts["productos"] += 1
+                return
             _register_product_identity_cache(
                 products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
             )
@@ -3769,7 +3961,7 @@ async def import_receipt(
         # Resolver producto del catálogo; si no existe, crearlo incompleto.
         product_id = _resolve_product(by_sku, by_name, line.product_name, line.sku, by_token)
         if product_id is None:
-            product_id = _ensure_product_for_purchase(
+            product_id = await _ensure_product_for_purchase(
                 session,
                 tenant_id,
                 line.product_name,

@@ -1365,6 +1365,7 @@ async def _process_misclassified_expense(
     }
 
     new_product_id: uuid.UUID | None = None
+    product_was_created = False
     if not dry_run:
         expense.category = candidate.new_category
         expense.expense_type = infer_expense_type(
@@ -1380,16 +1381,18 @@ async def _process_misclassified_expense(
             qty = _parse_qty((expense.custom_fields or {}).get("quantity"))
             name = candidate.new_label or candidate.matched_text
             if qty > 0 and name:
-                new_product_id = build_incomplete_product(
+                new_product_id, product_was_created = await build_incomplete_product(
                     db, candidate.tenant_id, name, None, None
                 )
                 if new_product_id is not None:
                     expense.product_id = new_product_id
                     expense.expense_type = "COGS"
         # Reclasificación de gasto OPEX→COGS: contar como reclasificación, y solo
-        # como producto creado si efectivamente se creó/vinculó uno.
+        # como producto creado si efectivamente se CREÓ uno. F5-A: el helper puede
+        # devolver un producto preexistente (el índice único resolvió una carrera);
+        # contarlo como creado inflaría el informe de la reparación.
         result.expenses_reclassified += 1
-        if new_product_id is not None:
+        if new_product_id is not None and product_was_created:
             result.products_created += 1
 
     after = {
