@@ -33,6 +33,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
+from app.domain.text_norm import normalize_product_name
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
@@ -144,45 +145,99 @@ async def test_import_de_compras_con_sku_ocupado_vincula_sin_duplicar(
     assert expense.product_id == existing.id, "el gasto queda vinculado al ocupante"
 
 
-@pytest.mark.usefixtures("stale_identity_index")
 async def test_dos_filas_con_el_mismo_sku_nuevo_reusan_por_cache(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Dos filas con el mismo SKU nuevo crean UN producto — sin índice único.
+    """La 2ª fila con la misma clave sale por la CACHÉ, sin volver al savepoint.
 
-    Corre a propósito **sin** ``f5_indexes``: con el índice puesto la 2ª fila
-    colisionaría contra el unique y volvería ``"linked"``, así que las aserciones
-    pasarían aunque el reuso intra-corrida estuviera muerto. Sin índice, el único
-    que puede evitar el 2º producto es el reuso intra-corrida.
+    Este test reemplaza a uno e2e que, con los uniques de F5-B puestos, pasaba
+    VACÍO: el índice hacía que la 2ª fila volviera ``"linked"`` igual, así que las
+    aserciones (1 producto, ``sin_producto == 1``) se cumplían aunque el reuso
+    intra-corrida estuviera muerto. Y el e2e tampoco distinguía la caché del índice
+    transaccional legacy, que cubre el mismo comportamiento por otra vía.
 
-    Alcance real, medido por mutación: el reuso lo dan DOS mecanismos redundantes
-    —la caché de identidad (``_register_product_identity_cache``) y el índice
-    transaccional legacy (``_register_product_transaction_indexes``)—. Desactivar
-    cualquiera de los dos por separado NO regresa (el otro cubre); recién con los
-    dos muertos aparecen 2 productos y ``sin_producto`` salta a 2. O sea: este test
-    protege el COMPORTAMIENTO, no cada mecanismo por separado. Una regresión que
-    rompa uno solo pasaría desapercibida acá, y hoy no hay nada más que la cubra.
+    Por eso se llama al motor DIRECTO y se afirman las dos cosas por separado:
+    que el producto queda registrado en la caché bajo sus claves, y que la 2ª
+    llamada resuelve ahí — sin tocar ``build_incomplete_product``, que es quien
+    abre el savepoint. Un spy de conteo sobre el import completo no alcanzaría:
+    el índice legacy también evita la 2ª llamada.
     """
-    counts = await importer.insert_confirmed_data(
+    indexes = importer.ProductIdentityIndexes({}, {}, {}, {}, {})
+    cache: dict[str, Product] = {}
+    product_cache: dict[uuid.UUID, Any] = {}
+
+    async def _resolver() -> tuple[str, uuid.UUID | None, list[dict[str, Any]]]:
+        return await importer._resolve_purchase_identity(
+            db_session,
+            sample_tenant.tenant_id,
+            name="Coca Cola 500ml",
+            sku="COCA-500",
+            brand=None,
+            barcode=None,
+            unit_cost=Decimal("800"),
+            indexes=indexes,
+            cache=cache,
+            product_cache=product_cache,
+        )
+
+    accion, product_id, _ = await _resolver()
+    assert accion == "created"
+    assert product_id is not None
+
+    # 1) El producto quedó en la caché bajo TODAS sus claves de identidad.
+    creado = product_cache[product_id]
+    assert cache["sku:coca-500"] is creado
+    assert cache[f"name:{normalize_product_name('Coca Cola 500ml')}"] is creado
+
+    # 2) La 2ª fila resuelve por caché: no vuelve a construir el Product ni a abrir
+    #    el savepoint. Si el registro en caché se rompe, este mock no se llama y el
+    #    assert de abajo falla — es lo que el test viejo no discriminaba.
+    with patch.object(
+        importer, "build_incomplete_product", new=AsyncMock()
+    ) as no_deberia_llamarse:
+        accion_2, product_id_2, _ = await _resolver()
+
+    assert accion_2 == "linked"
+    assert product_id_2 == product_id
+    no_deberia_llamarse.assert_not_called()
+
+
+async def test_el_producto_reusado_tambien_queda_en_la_cache(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El reuso por índice único también puebla la caché (perf de F5-A).
+
+    Cuando el unique rechaza el INSERT y ``build_incomplete_product`` devuelve al
+    ocupante, la fila resuelve igual — pero si ese ocupante no se registra en la
+    caché, CADA fila siguiente con la misma clave vuelve a construir el Product,
+    abre un savepoint y se come el ``IntegrityError``: N savepoints y 2N roundtrips
+    en el camino caliente del import. El comportamiento observable es idéntico en
+    los dos casos, así que sin este test la optimización puede morir en silencio.
+    """
+    ocupante = await _seed_product(db_session, sample_tenant.tenant_id, sku="COCA-500")
+
+    # Índice vacío = el motor no ve al ocupante y decide ``create``; el unique lo
+    # rechaza y ``build_incomplete_product`` lo reusa. Es la carrera de F5-A.
+    indexes = importer.ProductIdentityIndexes({}, {}, {}, {}, {})
+    cache: dict[str, Product] = {}
+    product_cache: dict[uuid.UUID, Any] = {}
+
+    accion, product_id, _ = await importer._resolve_purchase_identity(
         db_session,
         sample_tenant.tenant_id,
-        _compras_summary([_compra_row(), _compra_row(monto="9600", cantidad="12")]),
-        {"gastos": True},
+        name="Coca Cola 500ml",
+        sku="COCA-500",
+        brand=None,
+        barcode=None,
+        unit_cost=Decimal("800"),
+        indexes=indexes,
+        cache=cache,
+        product_cache=product_cache,
     )
 
-    assert counts["gastos"] == 2
-    products = (
-        (
-            await db_session.execute(
-                select(Product).where(Product.tenant_id == sample_tenant.tenant_id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert len(products) == 1
-    # Un solo producto creado, aunque haya dos filas de compra.
-    assert counts["sin_producto"] == 1
+    assert accion == "linked", "reusar al ocupante no es crear"
+    assert product_id == ocupante.id
+    assert cache["sku:coca-500"].id == ocupante.id
 
 
 # ── created vs linked: los counts no pueden mentir ───────────────────────────
