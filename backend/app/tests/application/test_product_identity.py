@@ -239,8 +239,22 @@ async def test_add_deja_la_sesion_usable_y_no_pierde_pendientes(
 async def test_add_no_traga_violaciones_ajenas(
     db_session: AsyncSession, sample_tenant: Tenant, f5_indexes: None
 ) -> None:
-    """Un NOT NULL roto no puede convertirse en 'ya existía, lo reuso'."""
-    invalido = _product(sample_tenant.tenant_id, sku="X")
+    """Un NOT NULL roto no puede convertirse en 'ya existía, lo reuso'.
+
+    El SKU del inválido tiene que estar OCUPADO por un producto activo. Si fuera
+    una clave libre, el test pasaría igual con el clasificador totalmente roto
+    (``return "sku"`` para toda ``IntegrityError``): al no haber dueño,
+    ``_resolve_conflict_owner`` levantaría ``LookupError`` y el caller
+    re-propagaría el ``IntegrityError`` de todos modos — verde por el fallback,
+    no por discriminar. Con la clave ocupada, un clasificador laxo devolvería
+    ``(existente, False)`` y el ``pytest.raises`` lo caza.
+    """
+    tid = sample_tenant.tenant_id
+    ocupante = _product(tid, name="Ocupante", sku="X")
+    db_session.add(ocupante)
+    await db_session.flush()
+
+    invalido = _product(tid, sku="X")
     invalido.name = None  # type: ignore[assignment]  # NOT NULL a propósito
 
     with pytest.raises(IntegrityError):
