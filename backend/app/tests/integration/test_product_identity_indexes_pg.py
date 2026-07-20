@@ -200,17 +200,61 @@ async def test_dos_inactivos_con_la_misma_clave_son_legales(
         await s.commit()
 
 
-async def test_null_y_vacio_quedan_fuera_del_parcial(
+async def test_null_queda_fuera_del_parcial(
     sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
 ) -> None:
-    """Sin clave fuerte no hay identidad que colisionar: N activos sin SKU."""
+    """Sin clave fuerte no hay identidad que colisionar: N activos sin SKU.
+
+    Ojo: acá NO se puede probar el ``''`` pasando ``sku=""``. El listener
+    ``before_insert`` del ORM recomputa ``sku_normalized`` con ``normalize_sku``,
+    que devuelve ``None`` para ``""`` y para espacios — las filas terminarían en
+    NULL y el test diría "vacío" probando NULL otra vez. El ``''`` va aparte, por
+    SQL crudo.
+    """
     await _seed_tenant(sm, tenant_id)
     async with sm() as s:
-        s.add(_producto(tenant_id, sku=None, sku_normalized=None))
-        s.add(_producto(tenant_id, sku=None, sku_normalized=None))
-        s.add(_producto(tenant_id, sku="", sku_normalized=""))
-        s.add(_producto(tenant_id, sku="", sku_normalized=""))
+        s.add(_producto(tenant_id, sku=None))
+        s.add(_producto(tenant_id, sku=None))
         await s.commit()
+
+
+async def test_string_vacio_queda_fuera_del_parcial(
+    sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
+    """Dos activos con ``sku_normalized = ''`` conviven: el ``<> ''`` los excluye.
+
+    Se inserta por SQL CRUDO a propósito: el ``''`` es INALCANZABLE por el ORM
+    (``normalize_sku`` lo convierte en ``None``), así que la única forma de tener
+    esas filas es la que las produjo en la vida real — datos legacy anteriores a
+    los normalizadores, o un INSERT directo. Justamente por eso el predicado lleva
+    ``AND sku_normalized <> ''``: sin esa cláusula, dos filas legacy vacías
+    colisionarían entre sí y romperían el deploy de una base histórica.
+
+    Medido por mutación contra Postgres real: quitándole el ``<> ''`` al predicado,
+    los otros 15 tests de este archivo pasan igual. Este es el único que lo cubre.
+    """
+    await _seed_tenant(sm, tenant_id)
+    inserta = text(
+        "INSERT INTO products (id, tenant_id, name, sale_price_ars, stock_units, "
+        "is_active, sku, sku_normalized, created_at, updated_at) "
+        "VALUES (:id, :t, 'Legacy', 100, 0, true, '', '', now(), now())"
+    )
+    async with sm() as s:
+        for _ in range(2):
+            await s.execute(inserta, {"id": uuid.uuid4(), "t": tenant_id})
+        await s.commit()
+
+    async with sm() as s:
+        total = (
+            await s.execute(
+                text(
+                    "SELECT count(*) FROM products "
+                    "WHERE tenant_id = :t AND sku_normalized = ''"
+                ),
+                {"t": tenant_id},
+            )
+        ).scalar_one()
+    assert total == 2, "el parcial no debe alcanzar a los normalizados vacíos"
 
 
 async def test_dos_activos_con_el_mismo_barcode_son_rechazados(

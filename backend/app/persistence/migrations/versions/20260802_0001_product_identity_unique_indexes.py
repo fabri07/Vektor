@@ -182,6 +182,15 @@ def _canonical(predicate: str | None) -> str:
     "incompatible" para un predicado idéntico. Se comparan sin paréntesis, sin
     casts ``::text`` y en minúscula; cualquier diferencia REAL (otra columna, otro
     operador, un AND de más) sobrevive a esta normalización.
+
+    CUIDADO AL AGREGAR PREDICADOS NUEVOS: borrar los paréntesis también borra el
+    AGRUPAMIENTO, así que ``(a AND b) OR c`` y ``a AND (b OR c)`` canonizan igual.
+    Hoy no es un agujero porque los tres predicados son conjunciones PURAS, y
+    reagrupar un AND no cambia el significado —lo único que esta función acepta de
+    más es una reescritura equivalente—. Un predicado con ``OR`` rompe esa
+    propiedad: ahí un índice ajeno con los mismos tokens y otro agrupamiento
+    pasaría como "compatible" y la migración lo daría por bueno sin crear el suyo.
+    Si aparece un ``OR``, comparar de otra forma (o parentizar explícitamente).
     """
     if predicate is None:
         return ""
