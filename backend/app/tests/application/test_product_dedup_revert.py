@@ -180,10 +180,56 @@ async def _add_expense(
     return e
 
 
-async def _plan_and_apply(session: AsyncSession, tenant_id: uuid.UUID) -> svc.ApplyResult:
+async def _plan_apply(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[svc.ApplyResult, list[uuid.UUID]]:
+    """Plan + apply, devolviendo además los canónicos REALES que eligió el plan.
+
+    Los ids salen de ``DedupGroup.canonical_id`` (``choose_canonical``), no de una
+    variable del test: cuál producto queda canónico lo decide el planner, y hay que
+    capturarlo ANTES del apply (después los grupos ya están fusionados y
+    ``plan_dedup`` no los vuelve a detectar).
+    """
     plan = await svc.plan_dedup(session, tenant_id)
+    canonicals = [g.canonical_id for g in plan.groups if g.is_mergeable and g.canonical_id]
     source_run_id = await svc.persist_dedup_plan(session, tenant_id, plan)
-    return await svc.apply_dedup_plan(session, tenant_id, source_run_id, lease_id=None)
+    applied = await svc.apply_dedup_plan(session, tenant_id, source_run_id, lease_id=None)
+    return applied, canonicals
+
+
+async def _plan_and_apply(session: AsyncSession, tenant_id: uuid.UUID) -> svc.ApplyResult:
+    applied, _ = await _plan_apply(session, tenant_id)
+    return applied
+
+
+async def _free_identities(session: AsyncSession, product_ids: list[uuid.UUID]) -> None:
+    """Libera la clave fuerte de los productos indicados (los canónicos del plan).
+
+    Desde F5 el revert está bloqueado por ``_REVERT_IDENTITY_COLLISION`` siempre que
+    el dup comparta ``barcode``/``sku`` con el canónico activo — que es *por qué* el
+    dedup los fusionó, así que aplica a TODO merge. La reversa automática dejó de
+    existir: lo que sigue siendo posible, y lo que estos round-trips ejercitan, es la
+    reversa **después de que un humano resolvió la colisión** liberando esa clave
+    (renombrando el producto, reasignando el SKU). Es un escenario excepcional y
+    asistido, NO reversibilidad automática. El bloqueo tiene su propio test.
+
+    Muta por ORM a propósito: dispara ``before_update``, que es la fuente única de
+    recálculo de las columnas ``*_normalized`` —las que consulta el guard—. Con
+    ``update()`` Core los listeners NO corren y habría que nulear las cuatro columnas
+    a mano, duplicando la lógica de normalización en el test.
+    """
+    for pid in product_ids:
+        product = await session.get(Product, pid)
+        if product is None:  # pragma: no cover — defensivo
+            continue
+        product.sku = None
+        product.barcode = None
+    # COMMIT, no flush: ``revert_dedup_run`` hace ``session.rollback()`` cuando saltea
+    # un grupo (``product_dedup_service.py:2196``), y ese rollback descartaría un
+    # cambio sin commitear —restaurando la clave justo antes de procesar los grupos
+    # siguientes—. Commitear también espeja la realidad: la resolución humana de la
+    # colisión es una transacción confirmada, no trabajo en vuelo.
+    await session.commit()
 
 
 # ── Round-trip SUM simple ────────────────────────────────────────────────────────
@@ -209,10 +255,11 @@ async def test_revert_simple_sum_roundtrip(
     canonical_id, dup_id = canonical.id, dup.id
     sale_id, expense_id, dup_mov_id = sale.id, expense.id, dup_mov.id
 
-    applied = await _plan_and_apply(db_session, tid)
+    applied, canonicals = await _plan_apply(db_session, tid)
     assert applied.status == "APPLIED"
     apply_run_id = applied.run_id
 
+    await _free_identities(db_session, canonicals)
     reverted = await svc.revert_dedup_run(db_session, tid, apply_run_id, lease_id=None)
     assert reverted.status == "REVERTED"
     assert reverted.groups_reverted == 1
@@ -296,10 +343,11 @@ async def test_revert_catalog_most_recent_roundtrip(
     await db_session.flush()
     canonical_id, d1_id, d2_id = canonical.id, d1.id, d2.id
 
-    applied = await _plan_and_apply(db_session, tid)
+    applied, canonicals = await _plan_apply(db_session, tid)
     assert applied.status == "APPLIED"
 
     # Post-apply: canónico quedó en 8 (ancla más reciente).
+    await _free_identities(db_session, canonicals)
     reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
     assert reverted.status == "REVERTED"
     assert reverted.groups_reverted == 1
@@ -490,7 +538,7 @@ async def test_revert_partial_one_group_blocked_rest_reverts(
     await db_session.flush()
     canon_a_id, dup_a_id, dup_b_id = canon_a.id, dup_a.id, dup_b.id
 
-    applied = await _plan_and_apply(db_session, tid)
+    applied, canonicals = await _plan_apply(db_session, tid)
     assert applied.status == "APPLIED"
     assert applied.groups_applied == 2
 
@@ -502,6 +550,9 @@ async def test_revert_partial_one_group_blocked_rest_reverts(
     )
     await db_session.commit()
 
+    # Ambos canónicos liberados (ver F5): B queda revertible; A sigue bloqueado por
+    # el campo editado, que se chequea ANTES que la identidad.
+    await _free_identities(db_session, canonicals)
     reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
     assert reverted.status == "PARTIALLY_REVERTED"
     assert reverted.groups_reverted == 1  # B
@@ -537,6 +588,72 @@ async def test_revert_dry_run_source_raises(
         await svc.revert_dedup_run(db_session, tid, source_run_id, lease_id=None)
 
 
+async def test_revert_bloqueado_por_identidad_es_atomico(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F5: si reactivar el dup colisionaría con el canónico, NO se toca nada.
+
+    Este es el caso NORMAL desde F5, y el contraste con los round-trips de arriba es
+    lo que importa documentar:
+
+    - **Acá** (sin intervención humana): el dup comparte la clave fuerte con el
+      canónico —por eso el dedup los fusionó—, así que el revert SIEMPRE rebota. La
+      reversa automática del dedup dejó de existir con el índice único.
+    - **Round-trips de arriba**: revierten sólo porque ``_free_identities`` simula que
+      un humano resolvió antes la colisión liberando la clave. Es un escenario
+      excepcional y asistido, no reversibilidad automática.
+
+    El bloqueo se chequea en la fase de guards, antes de cualquier mutación, para que
+    el revert sea atómico: si rebota, no quedó nada a medio revertir.
+    """
+    tid = sample_tenant.tenant_id
+    canonical = await _add_product(
+        db_session, tid, name="Yerba", sku="YERBA", barcode="7790033330003", stock_units=5
+    )
+    dup = await _add_product(
+        db_session, tid, name="Yerba x", sku="YERBA", stock_units=8, unit_cost=Decimal("40")
+    )
+    await _add_movement(db_session, tid, canonical.id, 5, SOURCE_PURCHASE_IMPORT, "y1")
+    await _add_movement(db_session, tid, dup.id, 8, SOURCE_RECEIPT, "y2")
+    await _add_balance(db_session, tid, canonical.id, 5)
+    await _add_balance(db_session, tid, dup.id, 8)
+    sale = await _add_sale(db_session, tid, dup.id)
+    await db_session.flush()
+    canonical_id, dup_id, sale_id = canonical.id, dup.id, sale.id
+
+    applied = await _plan_and_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+    canon_stock_post_apply = (await db_session.get(Product, canonical_id)).stock_units  # type: ignore[union-attr]
+    await db_session.commit()
+
+    # Sin liberar la identidad del canónico: el revert tiene que rebotar.
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.status == "PARTIALLY_REVERTED"
+    assert reverted.groups_reverted == 0
+    assert reverted.groups_skipped == 1
+    assert reverted.group_results[0]["reason"] == svc._REVERT_IDENTITY_COLLISION
+
+    db_session.expunge_all()
+    # Atomicidad: nada reactivado, ningún balance restaurado, canónico intacto.
+    rd = await db_session.get(Product, dup_id)
+    assert rd is not None and rd.is_active is False
+    assert rd.deactivation_reason == "DUPLICATE"
+    rc = await db_session.get(Product, canonical_id)
+    assert rc is not None and rc.stock_units == canon_stock_post_apply
+    dup_balance = (
+        await db_session.execute(
+            select(InventoryBalance).where(
+                InventoryBalance.tenant_id == tid, InventoryBalance.product_id == dup_id
+            )
+        )
+    ).scalar_one_or_none()
+    assert dup_balance is None  # el apply lo borró y el revert NO lo recreó
+    rs = await db_session.get(SaleEntry, sale_id)
+    assert rs is not None and rs.product_id == canonical_id  # venta sigue en el canónico
+    run = await db_session.get(DataRepairRun, applied.run_id)
+    assert run is not None and run.status != "REVERTED"
+
+
 async def test_revert_already_reverted_raises(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -547,7 +664,8 @@ async def test_revert_already_reverted_raises(
     await _add_product(db_session, tid, name="Té x", sku="TE1", stock_units=0)
     await db_session.flush()
 
-    applied = await _plan_and_apply(db_session, tid)
+    applied, canonicals = await _plan_apply(db_session, tid)
+    await _free_identities(db_session, canonicals)
     first = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
     assert first.status == "REVERTED"
 
