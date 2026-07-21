@@ -23,6 +23,7 @@ from app.application.services.ingestion_import_service import (
 )
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 
 
 def test_parse_date_handles_datetime_and_date_formats() -> None:
@@ -342,10 +343,118 @@ def _text_summary() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_text_contexts_imported_by_group(
+async def test_multisheet_venta_sin_fecha_va_a_otros_no_duplica_al_reimportar(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Documento de texto: cada grupo incluido se importa con su entity_type."""
+    """F6-A2/A3: una venta con monto válido pero sin fecha reconocible va a /otros
+    (no se inventa "hoy"); la captura es output persistido, así re-subir el MISMO
+    archivo no re-crea el UnclassifiedRecord (idempotencia por fingerprint)."""
+    import uuid as _uuid
+
+    from app.persistence.models.file import UploadedFile
+
+    uploaded = UploadedFile(
+        id=_uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        original_filename="ventas_sin_fecha.xlsx",
+        s3_key="test/ventas_sin_fecha.xlsx",
+        content_type="application/vnd.ms-excel",
+        size_bytes=1024,
+        purpose="ingestion",
+    )
+    db_session.add(uploaded)
+    await db_session.flush()
+
+    summary: dict[str, Any] = {
+        "file_type": "spreadsheet",
+        "inferred_type": "ventas",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Ventas",
+                "entity_type": "sale",
+                "source_kind": "sheet",
+                "headers": ["detalle", "valor"],
+                "row_count": 1,
+            }
+        ],
+        "ventas_detectadas": [
+            {"detalle": "Venta mostrador", "valor": "5000", "__context__": "sheet:Ventas"}
+        ],
+        "gastos_detectados": [],
+        "stock_detectado": [],
+    }
+    kwargs: dict[str, Any] = {
+        "context_confirmed": {"sheet:Ventas": True},
+        "context_mappings": {"sheet:Ventas": {"valor": "amount"}},
+        "uploaded_file_id": uploaded.id,
+    }
+
+    first = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"ventas": True}, **kwargs
+    )
+    assert first["ventas"] == 0
+    assert first["otros"] == 1
+    assert (await db_session.execute(select(SaleEntry))).scalars().all() == []
+    record = (await db_session.execute(select(UnclassifiedRecord))).scalar_one()
+    assert record.suggested_entity == "sale"
+
+    # Re-import del mismo archivo → no duplica el /otros.
+    second = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"ventas": True}, **kwargs
+    )
+    assert second["otros"] == 0
+    assert len((await db_session.execute(select(UnclassifiedRecord))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_multisheet_venta_con_fecha_valida_conserva_la_fecha(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-A (mutation guard): una fecha válida NUNCA se reemplaza por hoy ni se
+    rutea a /otros — se registra la venta con la fecha del archivo."""
+    from datetime import date as _date
+
+    summary: dict[str, Any] = {
+        "file_type": "spreadsheet",
+        "inferred_type": "ventas",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Ventas",
+                "entity_type": "sale",
+                "source_kind": "sheet",
+                "headers": ["fecha", "valor"],
+                "row_count": 1,
+            }
+        ],
+        "ventas_detectadas": [
+            {"fecha": "2024-03-05", "valor": "5000", "__context__": "sheet:Ventas"}
+        ],
+        "gastos_detectados": [],
+        "stock_detectado": [],
+    }
+    counts = await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"ventas": True},
+        context_confirmed={"sheet:Ventas": True},
+        context_mappings={"sheet:Ventas": {"valor": "amount", "fecha": "transaction_date"}},
+    )
+    assert counts["ventas"] == 1
+    assert counts["otros"] == 0
+    sale = (await db_session.execute(select(SaleEntry))).scalar_one()
+    assert sale.transaction_date.date() == _date(2024, 3, 5)
+
+
+@pytest.mark.asyncio
+async def test_text_contexts_van_a_otros_sin_inventar_fecha(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-A4: los documentos de texto/imagen no extraen fecha. En vez de estampillar
+    "hoy" (invariante 2d), cada línea con monto va a /otros para revisión manual.
+    No se crea ninguna venta ni gasto; la lectura real con fecha es F7."""
     counts = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
@@ -353,17 +462,21 @@ async def test_text_contexts_imported_by_group(
         {},
         context_confirmed={"text:sale": True, "text:expense": True},
     )
-    assert counts["ventas"] == 1
-    assert counts["gastos"] == 1
-    sale = (await db_session.execute(select(SaleEntry))).scalar_one()
-    assert sale.amount == Decimal("5000")
+    assert counts["ventas"] == 0
+    assert counts["gastos"] == 0
+    assert counts["otros"] == 2
+    assert (await db_session.execute(select(SaleEntry))).scalars().all() == []
+    assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert {r.suggested_entity for r in records} == {"sale", "expense"}
 
 
 @pytest.mark.asyncio
-async def test_text_context_entity_override(
+async def test_text_context_entity_override_va_a_otros_con_sugerencia(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """context_entity reasigna el grupo 'ventas' detectado a gasto."""
+    """context_entity reasigna el grupo 'ventas' a gasto: la línea va a /otros
+    sugerida como gasto (no se inventa la fecha — F6-A4)."""
     counts = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
@@ -372,8 +485,8 @@ async def test_text_context_entity_override(
         context_confirmed={"text:sale": True, "text:expense": False},
         context_entity={"text:sale": "expense"},
     )
-    # El grupo de ventas, reasignado a gasto, entra como ExpenseEntry.
     assert counts["ventas"] == 0
-    assert counts["gastos"] == 1
-    expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
-    assert expense.amount == Decimal("5000")
+    assert counts["gastos"] == 0
+    assert counts["otros"] == 1
+    record = (await db_session.execute(select(UnclassifiedRecord))).scalar_one()
+    assert record.suggested_entity == "expense"

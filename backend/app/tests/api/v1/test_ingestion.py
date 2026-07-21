@@ -788,12 +788,17 @@ def test_parse_amount_logs_non_positive_discard(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-async def test_parse_date_fallback_logs_debug(
+async def test_fila_con_fecha_ilegible_va_a_otros_no_inventa_hoy(
     db_session: AsyncSession,
     sample_tenant: Tenant,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """F6-A2: una fila con valor de fecha ilegible NO se registra con "hoy" — va a
+    /otros para revisión manual. Antes se estampillaba la fecha de carga (invariante
+    2d violada); ahora no se crea ninguna venta y la fila queda como pendiente.
+    """
     import app.application.services.ingestion_import_service as importer
+    from app.persistence.models.unclassified_record import UnclassifiedRecord
 
     capture = _CaptureLogger()
     monkeypatch.setattr(importer, "logger", capture)
@@ -810,13 +815,17 @@ async def test_parse_date_fallback_logs_debug(
         {"ventas": True},
     )
 
-    result = await db_session.execute(select(SaleEntry))
-    sale = result.scalar_one()
-    assert sale.amount == Decimal("100")
-    assert sale.transaction_date.date() == date.today()
+    # No se creó ninguna venta con fecha inventada.
+    sales = (await db_session.execute(select(SaleEntry))).scalars().all()
+    assert sales == []
+    # La fila quedó en /otros, sugerida como venta.
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(records) == 1
+    assert records[0].suggested_entity == "sale"
+    assert records[0].row_data.get("monto") == "100"
     assert capture.debug_events == [
         (
-            "ingestion.parse.date_fallback_today",
+            "ingestion.parse.date_row_routed_to_otros",
             {"raw": "fecha rara", "row_index": 0},
         )
     ]
