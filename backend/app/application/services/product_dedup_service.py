@@ -54,6 +54,9 @@ from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
     SOURCE_TYPES,
 )
+from app.observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -1791,9 +1794,40 @@ _REVERT_REPOINT_DIVERGED = "repoint_rows_diverged"  # las filas re-apuntadas cam
 _REVERT_BALANCE_DIVERGED = "balance_diverged"      # balance recreado/inconsistente
 _REVERT_CANONICAL_MISSING = "canonical_missing"    # el canónico ya no existe
 _REVERT_DUP_MISSING = "duplicate_missing"          # un duplicado ya no existe
-# F5: reactivar el dup violaría uq_products_tenant_{barcode,sku}_norm contra el
-# canónico, que sigue ACTIVO y comparte la clave fuerte (por eso se fusionaron).
+# F5: reactivar el dup violaría uq_products_tenant_{barcode,sku}_norm — contra el
+# canónico (si ya tenía la clave ANTES del merge), contra un tercer producto activo,
+# o contra otro dup del mismo grupo que la reversa reactiva en la misma pasada.
 _REVERT_IDENTITY_COLLISION = "revert_identity_collision"
+
+# Las dos claves fuertes que indexa F5-B, en el orden en que se evalúan. Anotado como
+# la tupla de Literals que espera ``find_active_owner_of_key``: un ``tuple[str, ...]``
+# suelto lo pierde y mypy rechaza el argumento.
+_IDENTITY_KEY_KINDS: tuple[product_identity.MatchedBy, ...] = ("barcode", "sku")
+
+
+def _log_revert_collision(
+    *,
+    kind: str,
+    scope: str,
+    group_id: str | None,
+    run_id: uuid.UUID | None,
+    canonical_id: uuid.UUID,
+    duplicate_id: uuid.UUID,
+    owner_id: uuid.UUID | None,
+) -> None:
+    """Traza por qué rebotó un grupo. IDs y tipo de clave, nunca el SKU/barcode crudo:
+    para diagnosticar alcanza con saber *cuál* clave y *quién* la ocupa, y el valor es
+    dato comercial del tenant que no tiene por qué quedar en los logs."""
+    logger.info(
+        "product_dedup.revert_identity_collision",
+        kind=kind,
+        collision_scope=scope,
+        group_id=group_id,
+        run_id=str(run_id) if run_id else None,
+        canonical_id=str(canonical_id),
+        duplicate_id=str(duplicate_id),
+        owner_id=str(owner_id) if owner_id else None,
+    )
 
 
 @dataclass
@@ -1891,6 +1925,7 @@ async def _revert_one_group(
     gdata: dict[str, Any],
     *,
     lease_id: uuid.UUID | None,
+    run_id: uuid.UUID | None = None,
 ) -> tuple[str, str]:
     """Revierte UN grupo (NO commitea — el caller maneja la txn). Valida el estado
     ACTUAL contra ``after_json`` (read-only); si diverge → ``("skipped", motivo)`` sin
@@ -1909,6 +1944,7 @@ async def _revert_one_group(
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
     canonical_id: uuid.UUID = gdata["canonical_id"]
+    group_id: str | None = gdata.get("group_id")
     merge = gdata["merge"]
     if merge is None:  # pragma: no cover — todo grupo aplicado registró un MERGE
         return ("skipped", "no_merge_item")
@@ -2012,6 +2048,33 @@ async def _revert_one_group(
     # DEACTIVATE: por dup — tolerancia si ya está activo; si no, debe seguir como lo
     # dejó el apply (is_active=False, reason=DUPLICATE).
     dup_objs: dict[uuid.UUID, Any] = {}
+    # F5 — identidad. Reactivar un dup lo pone ACTIVO, así que su barcode/sku vuelve a
+    # entrar en los índices únicos parciales. Hay que anticipar la colisión ACÁ, en la
+    # fase de guards, para que el revert sea ATÓMICO: si rebota, no quedó nada a medio
+    # revertir. No-invention: NUNCA se le borra sku/barcode al usuario para forzarlo.
+    #
+    # El estado a evaluar es el PROYECTADO post-MERGE⁻¹, no el actual: si el merge
+    # completó la clave EN el canónico copiándola del dup (``fields_completed``), el
+    # paso 5 la devuelve a NULL y la colisión es TRANSITORIA. La validación de arriba ya
+    # garantizó ``canon.<campo> == fields_completed[<campo>]``, y ``fields_completed``
+    # solo contiene campos que estaban VACÍOS en el canónico pre-merge: campo presente
+    # ⟺ MERGE⁻¹ lo nulea. Sin ambigüedad.
+    #
+    # Alcance, para no sobrevender esto: la reversa AUTOMÁTICA de un merge sigue
+    # bloqueada SIEMPRE. Todo grupo mergeable nace de una arista fuerte (barcode) o
+    # media (sku), y en las dos los DOS extremos poseen la clave — o sea que el canónico
+    # ya la tenía pre-merge y siempre hay un dup que colisiona con él de forma
+    # persistente. Lo que la tolerancia transitoria destraba es el camino ASISTIDO: una
+    # vez que un humano liberó la clave COMPARTIDA, la reversa no le exige ADEMÁS borrar
+    # la que el merge le copió del duplicado — que es justo el dato que MERGE⁻¹ restaura.
+    #
+    # Y como varios dups se reactivan en la MISMA reversa, no alcanza con mirar quién
+    # ocupa la clave hoy: dos dups del grupo que comparten sku entre sí colisionarían
+    # entre ellos al reactivarse (con el canónico ya liberado), rompiendo el revert con
+    # un IntegrityError en vez de un skip limpio. Por eso se acumulan las claves que
+    # los dups ya procesados van a reclamar.
+    fields_completed = m_after.get("fields_completed") or {}
+    claimed_keys: dict[tuple[str, str], uuid.UUID] = {}
     for da in deactivates:
         dup_id = da["product_id"]
         dup = await session.get(Product, dup_id)
@@ -2022,15 +2085,42 @@ async def _revert_one_group(
             continue  # tolerancia: reactivación previa → no-op idempotente
         if dup.deactivation_reason != da["after"].get("deactivation_reason"):
             return ("skipped", _REVERT_STATE_DIVERGED)
-        # F5 — identidad: reactivar este dup lo pondría ACTIVO compartiendo
-        # barcode/sku con el canónico (que sigue activo), violando el índice único.
-        # Se chequea ACÁ, en la fase de guards, para que el revert sea ATÓMICO: si
-        # colisiona salimos sin haber reactivado nada ni restaurado balances.
-        # No-invention: NO se le borra sku/barcode al usuario para forzar la reversa.
-        collision, _matched = await product_identity.find_active_by_identity(
-            session, tenant_id, barcode=dup.barcode, sku=dup.sku, exclude_id=dup.id
-        )
-        if collision is not None:
+        for kind in _IDENTITY_KEY_KINDS:
+            owner, normalized = await product_identity.find_active_owner_of_key(
+                session, tenant_id, kind, getattr(dup, kind), exclude_id=dup_id
+            )
+            if normalized is None:
+                continue  # el dup no trae esta clave → no entra al índice parcial
+            # (i) contra los otros dups del MISMO grupo, que esta reversa reactiva.
+            prior = claimed_keys.get((kind, normalized))
+            if prior is not None:
+                _log_revert_collision(
+                    kind=kind,
+                    scope="intra_group",
+                    group_id=group_id,
+                    run_id=run_id,
+                    canonical_id=canonical_id,
+                    duplicate_id=dup_id,
+                    owner_id=prior,
+                )
+                return ("skipped", _REVERT_IDENTITY_COLLISION)
+            claimed_keys[(kind, normalized)] = dup_id
+            # (ii) contra lo que ya está ACTIVO en la base.
+            if owner is None:
+                continue
+            if owner.id == canonical_id and kind in fields_completed:
+                continue  # transitoria: MERGE⁻¹ la libera
+            _log_revert_collision(
+                kind=kind,
+                scope=(
+                    "canonical_persistent" if owner.id == canonical_id else "third_product"
+                ),
+                group_id=group_id,
+                run_id=run_id,
+                canonical_id=canonical_id,
+                duplicate_id=dup_id,
+                owner_id=owner.id,
+            )
             return ("skipped", _REVERT_IDENTITY_COLLISION)
 
     # ── (c) MUTACIÓN (inversa exacta, orden INVERSO al apply) ────────────────────
@@ -2176,7 +2266,7 @@ async def revert_dedup_run(
                 break
         try:
             status, reason = await _revert_one_group(
-                session, tenant_id, gdata, lease_id=lease_id
+                session, tenant_id, gdata, lease_id=lease_id, run_id=run_id
             )
         except LeaseLostError:
             await session.rollback()

@@ -150,6 +150,32 @@ async def find_active_by_identity(
     return None, None
 
 
+async def find_active_owner_of_key(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    kind: MatchedBy,
+    raw_value: str | None,
+    *,
+    exclude_id: uuid.UUID | None = None,
+) -> tuple[Product | None, str | None]:
+    """Dueño ACTIVO de UNA clave concreta, sin la prioridad barcode-sobre-sku.
+
+    :func:`find_active_by_identity` responde "¿esta identidad está ocupada?" y para
+    eso ordena las claves. Quien necesita razonar clave POR clave —el revert del
+    dedup, que decide por separado si el barcode y el sku van a colisionar— no puede
+    usar esa prioridad: le esconde la colisión de sku cuando el barcode ya matcheó.
+
+    Devuelve además el valor NORMALIZADO (``None`` si la clave viene vacía), para que
+    el caller compare claves entre sí con la misma normalización que evalúa el índice
+    en vez de re-implementarla.
+    """
+    normalized = normalize_barcode(raw_value) if kind == "barcode" else normalize_sku(raw_value)
+    if not normalized:
+        return None, None
+    found = await _find_by_key(session, tenant_id, kind, normalized, exclude_id=exclude_id)
+    return found, normalized
+
+
 async def _find_by_key(
     session: AsyncSession,
     tenant_id: uuid.UUID,

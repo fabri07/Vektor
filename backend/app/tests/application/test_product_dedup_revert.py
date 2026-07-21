@@ -39,7 +39,7 @@ from app.application.services.inventory_movement_origin import (
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
-from app.persistence.models.repair import DataRepairRun
+from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
@@ -205,13 +205,18 @@ async def _plan_and_apply(session: AsyncSession, tenant_id: uuid.UUID) -> svc.Ap
 async def _free_identities(session: AsyncSession, product_ids: list[uuid.UUID]) -> None:
     """Libera la clave fuerte de los productos indicados (los canónicos del plan).
 
-    Desde F5 el revert está bloqueado por ``_REVERT_IDENTITY_COLLISION`` siempre que
-    el dup comparta ``barcode``/``sku`` con el canónico activo — que es *por qué* el
-    dedup los fusionó, así que aplica a TODO merge. La reversa automática dejó de
-    existir: lo que sigue siendo posible, y lo que estos round-trips ejercitan, es la
-    reversa **después de que un humano resolvió la colisión** liberando esa clave
-    (renombrando el producto, reasignando el SKU). Es un escenario excepcional y
-    asistido, NO reversibilidad automática. El bloqueo tiene su propio test.
+    Desde F5 el revert rebota con ``_REVERT_IDENTITY_COLLISION`` cuando el dup
+    comparta ``barcode``/``sku`` con un producto que va a seguir ACTIVO después de la
+    reversa: el canónico que YA tenía esa clave antes del merge, un tercer producto, u
+    otro dup del mismo grupo. NO rebota por la clave que el canónico recibió DEL dup
+    durante el merge (``fields_completed``): esa colisión es transitoria, porque
+    MERGE⁻¹ la nulea.
+
+    Eso NO vuelve automática la reversa. Todo grupo mergeable comparte una clave que el
+    canónico ya tenía pre-merge (es la arista que lo formó), así que siempre hace falta
+    que un humano la libere primero — que es lo que este helper simula. Lo único que la
+    tolerancia transitoria evita es exigirle al humano que borre ADEMÁS la clave del
+    duplicado. Ambas variantes tienen sus propios tests más abajo.
 
     Muta por ORM a propósito: dispara ``before_update``, que es la fuente única de
     recálculo de las columnas ``*_normalized`` —las que consulta el guard—. Con
@@ -328,7 +333,16 @@ async def test_revert_catalog_most_recent_roundtrip(
     canonical = await _add_product(
         db_session, tid, name="Yerba", sku="YERBA", barcode="7790033330003", stock_units=5
     )
-    d1 = await _add_product(db_session, tid, name="Yerba 1", sku="YERBA", stock_units=8)
+    # d1 entra al grupo por el BARCODE y d2 por el SKU, para que los dos duplicados no
+    # compartan clave ENTRE SÍ. Con ambos en sku="YERBA" (como estaba antes de F5-B),
+    # revertirlos dejaría dos productos ACTIVOS con el mismo SKU: el guard intra-grupo
+    # lo bloquea, y con razón — en Postgres eso es una violación de
+    # ``uq_products_tenant_sku_norm``, no un round-trip válido. Este test cubre la
+    # aritmética de stock del ancla MOST_RECENT, no la colisión; la colisión tiene su
+    # propio test más abajo.
+    d1 = await _add_product(
+        db_session, tid, name="Yerba 1", barcode="7790033330003", stock_units=8
+    )
     d2 = await _add_product(db_session, tid, name="Yerba 2", sku="YERBA", stock_units=6)
     await _add_movement(
         db_session, tid, canonical.id, 5, SOURCE_CATALOG_INITIAL_STOCK, "c", occurred_offset_days=1
@@ -712,3 +726,228 @@ def test_cli_revert_run_excludes_apply() -> None:
     )
     assert proc.returncode == 2
     assert "revert-run" in proc.stdout.lower()
+
+
+# ── F5-B: colisión de identidad — persistente vs TRANSITORIA ─────────────────────
+#
+# Alcance real de estos tests, que conviene no exagerar: la reversa AUTOMÁTICA de un
+# merge sigue bloqueada SIEMPRE. Todo grupo mergeable se forma por arista fuerte
+# (barcode compartido) o media (sku compartido), y en las dos los DOS extremos poseen
+# la clave — o sea que el canónico siempre la tenía ANTES del merge y siempre hay un
+# dup que colisiona persistentemente con él. Eso es estructural y no lo cambia nada
+# de acá.
+#
+# Lo que estos tests cubren es el camino ASISTIDO: después de que un humano liberó la
+# clave COMPARTIDA del canónico, la reversa no debe además exigirle que borre la clave
+# que el merge le COPIÓ desde el duplicado. Esa segunda clave la devuelve MERGE⁻¹ a
+# NULL sola, así que su colisión es transitoria; pedirle al humano que la borre a mano
+# es pedirle que destruya el dato que la reversa iba a restaurar.
+
+
+async def _seed_transient_group(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    canonical_barcode: str | None = None,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Canónico SIN barcode + dup CON barcode, unidos por el sku que comparten.
+
+    ``has_user_edits=True`` en el canónico porque es el primer criterio de
+    ``choose_canonical``: sin eso gana el dup (tiene barcode) y el merge no completa
+    nada, que es justo el escenario que estos tests NO quieren.
+
+    ``canonical_barcode`` siembra el caso de control: si el canónico YA trae barcode
+    propio, el merge no se lo completa y la colisión pasa a ser persistente.
+    """
+    canonical = await _add_product(
+        session, tenant_id, name="Yerba", sku="YERBA", barcode=canonical_barcode, stock_units=5
+    )
+    canonical.has_user_edits = True
+    dup = await _add_product(
+        session, tenant_id, name="Yerba x", sku="YERBA", barcode="7790033330003", stock_units=8
+    )
+    await _add_movement(session, tenant_id, canonical.id, 5, SOURCE_PURCHASE_IMPORT, "y1")
+    await _add_movement(session, tenant_id, dup.id, 8, SOURCE_RECEIPT, "y2")
+    await _add_balance(session, tenant_id, canonical.id, 5)
+    await _add_balance(session, tenant_id, dup.id, 8)
+    await session.flush()
+    return canonical.id, dup.id
+
+
+async def _release_key(session: AsyncSession, product_id: uuid.UUID, field: str) -> None:
+    """El humano libera UNA clave del canónico (por ORM, para que corra before_update)."""
+    product = await session.get(Product, product_id)
+    assert product is not None
+    setattr(product, field, None)
+    await session.commit()
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_revert_permite_colision_transitoria_de_barcode(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El barcode que el merge COPIÓ al canónico no bloquea: MERGE⁻¹ lo nulea."""
+    tid = sample_tenant.tenant_id
+    canonical_id, dup_id = await _seed_transient_group(db_session, tid)
+
+    applied, canonicals = await _plan_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+    assert canonicals == [canonical_id], "el canónico debe ser el que NO tiene barcode"
+    await db_session.commit()
+
+    # El merge le copió el barcode del dup al canónico → es un campo completable.
+    merge_item = (
+        await db_session.execute(
+            select(DataRepairItem).where(
+                DataRepairItem.run_id == applied.run_id,
+                DataRepairItem.action == "MERGE_PRODUCT",
+            )
+        )
+    ).scalars().one()
+    assert (merge_item.after_json or {})["fields_completed"] == {"barcode": "7790033330003"}
+
+    # Sin intervención: el sku COMPARTIDO (que el canónico ya tenía) bloquea.
+    blocked = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert blocked.group_results[0]["reason"] == svc._REVERT_IDENTITY_COLLISION
+
+    # El humano libera SOLO el sku compartido. El barcode NO lo toca: es del dup.
+    await _release_key(db_session, canonical_id, "sku")
+
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.status == "REVERTED", reverted.group_results
+    db_session.expunge_all()
+    canon = await db_session.get(Product, canonical_id)
+    dup = await db_session.get(Product, dup_id)
+    assert canon is not None and canon.barcode is None, "MERGE⁻¹ devolvió el barcode a NULL"
+    assert dup is not None and dup.is_active is True
+    assert dup.barcode == "7790033330003", "el dup recuperó su barcode"
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_revert_bloquea_colision_persistente_de_barcode(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Control del test anterior: si el barcode YA era del canónico, sigue bloqueando.
+
+    Única diferencia con el caso transitorio: el canónico trae barcode propio, así que
+    ``fields_completed`` no lo incluye y MERGE⁻¹ no lo va a liberar.
+    """
+    tid = sample_tenant.tenant_id
+    canonical_id, dup_id = await _seed_transient_group(
+        db_session, tid, canonical_barcode="7790033330003"
+    )
+
+    applied, _ = await _plan_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+    await db_session.commit()
+
+    merge_item = (
+        await db_session.execute(
+            select(DataRepairItem).where(
+                DataRepairItem.run_id == applied.run_id,
+                DataRepairItem.action == "MERGE_PRODUCT",
+            )
+        )
+    ).scalars().one()
+    assert "barcode" not in (merge_item.after_json or {})["fields_completed"]
+
+    await _release_key(db_session, canonical_id, "sku")
+
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.status == "PARTIALLY_REVERTED"
+    assert reverted.group_results[0]["reason"] == svc._REVERT_IDENTITY_COLLISION
+    db_session.expunge_all()
+    dup = await db_session.get(Product, dup_id)
+    assert dup is not None and dup.is_active is False
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_revert_permite_colision_transitoria_de_sku(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Variante espejo: la clave completada es el SKU y la compartida el barcode."""
+    tid = sample_tenant.tenant_id
+    canonical = await _add_product(
+        db_session, tid, name="Yerba", barcode="7790033330003", stock_units=5
+    )
+    canonical.has_user_edits = True
+    dup = await _add_product(
+        db_session, tid, name="Yerba x", barcode="7790033330003", sku="YERBA-X", stock_units=8
+    )
+    await _add_movement(db_session, tid, canonical.id, 5, SOURCE_PURCHASE_IMPORT, "y1")
+    await _add_movement(db_session, tid, dup.id, 8, SOURCE_RECEIPT, "y2")
+    await _add_balance(db_session, tid, canonical.id, 5)
+    await _add_balance(db_session, tid, dup.id, 8)
+    await db_session.flush()
+    canonical_id, dup_id = canonical.id, dup.id
+
+    applied, canonicals = await _plan_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+    assert canonicals == [canonical_id]
+    await db_session.commit()
+
+    merge_item = (
+        await db_session.execute(
+            select(DataRepairItem).where(
+                DataRepairItem.run_id == applied.run_id,
+                DataRepairItem.action == "MERGE_PRODUCT",
+            )
+        )
+    ).scalars().one()
+    assert (merge_item.after_json or {})["fields_completed"] == {"sku": "YERBA-X"}
+
+    await _release_key(db_session, canonical_id, "barcode")
+
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.status == "REVERTED", reverted.group_results
+    db_session.expunge_all()
+    canon = await db_session.get(Product, canonical_id)
+    dup_row = await db_session.get(Product, dup_id)
+    assert canon is not None and canon.sku is None
+    assert dup_row is not None and dup_row.is_active is True and dup_row.sku == "YERBA-X"
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_revert_bloquea_colision_entre_dos_dups_del_mismo_grupo(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Dos dups que recuperan el MISMO barcode colisionan entre sí, no con el canónico.
+
+    Es el caso que la tolerancia transitoria destapa: liberada la clave del canónico,
+    los dos dups pasan el chequeo contra la base (el barcode que ven es el que MERGE⁻¹
+    va a nulear) y se reactivarían los dos con el mismo código → violación del índice
+    DURANTE la mutación, que es justo lo que la fase de guards existe para evitar.
+    """
+    tid = sample_tenant.tenant_id
+    canonical = await _add_product(db_session, tid, name="Yerba", sku="YERBA", stock_units=5)
+    canonical.has_user_edits = True
+    dup_a = await _add_product(
+        db_session, tid, name="Yerba a", sku="YERBA", barcode="7790033330003", stock_units=8
+    )
+    dup_b = await _add_product(
+        db_session, tid, name="Yerba b", sku="YERBA", barcode="7790033330003", stock_units=3
+    )
+    for pid, qty, src, h in (
+        (canonical.id, 5, SOURCE_PURCHASE_IMPORT, "y1"),
+        (dup_a.id, 8, SOURCE_RECEIPT, "y2"),
+        (dup_b.id, 3, SOURCE_RECEIPT, "y3"),
+    ):
+        await _add_movement(db_session, tid, pid, qty, src, h)
+        await _add_balance(db_session, tid, pid, qty)
+    await db_session.flush()
+    canonical_id, dup_a_id, dup_b_id = canonical.id, dup_a.id, dup_b.id
+
+    applied, canonicals = await _plan_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+    assert canonicals == [canonical_id]
+    await db_session.commit()
+
+    await _release_key(db_session, canonical_id, "sku")
+
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.status == "PARTIALLY_REVERTED", reverted.group_results
+    assert reverted.group_results[0]["reason"] == svc._REVERT_IDENTITY_COLLISION
+    db_session.expunge_all()
+    for pid in (dup_a_id, dup_b_id):
+        row = await db_session.get(Product, pid)
+        assert row is not None and row.is_active is False, "ningún dup se reactivó"
