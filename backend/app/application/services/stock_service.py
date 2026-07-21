@@ -5,7 +5,6 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
@@ -37,6 +36,19 @@ BALANCE_CONFLICT = unique_violation_classifier(
     "balance",
     constraint="uq_inventory_balances_tenant_product",
     columns=("inventory_balances.tenant_id", "inventory_balances.product_id"),
+)
+
+# Idempotencia del descuento de venta EN VIVO: el índice parcial de la migración
+# 20260729_0001 sobre (tenant_id, source_event_id) para los movimientos 'sale' vivos.
+# Discriminar importa más desde F5-B: acá abajo había un ``except IntegrityError`` a
+# secas que, además de esta carrera, se tragaba la violación del unique NUEVO de
+# ``inventory_balances`` (y cualquier FK/NOT NULL) devolviendo ``None`` — o sea una
+# venta persistida que NUNCA descuenta stock, sin log ni error, y que recién aparece
+# semanas después como divergencia sin causa en el chequeo de integridad.
+LIVE_SALE_EVENT_CONFLICT = unique_violation_classifier(
+    "live_sale_event",
+    constraint="uq_inventory_movements_live_sale_event",
+    columns=("inventory_movements.tenant_id", "inventory_movements.source_event_id"),
 )
 
 # Mensaje canónico de rechazo por stock insuficiente en una venta EN VIVO. Se muestra
@@ -499,7 +511,7 @@ async def decrement_for_sale(
     if isinstance(occurred, date) and not isinstance(occurred, datetime):
         occurred = datetime(occurred.year, occurred.month, occurred.day)
     try:
-        async with db.begin_nested():
+        async with guarded_savepoint(db, LIVE_SALE_EVENT_CONFLICT):
             return await decrement_stock(
                 product_id=sale.product_id,
                 tenant_id=sale.tenant_id,
@@ -508,7 +520,9 @@ async def decrement_for_sale(
                 db=db,
                 occurred_at=occurred,
             )
-    except IntegrityError:
+    except SavepointConflictError:
+        # El movimiento ya lo creó la otra rama (request vs evento) → no-op, que es la
+        # semántica idempotente documentada arriba.
         return None
 
 

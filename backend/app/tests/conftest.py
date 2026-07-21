@@ -165,15 +165,30 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
                 await trans.rollback()
 
 
-# Los tres uniques que declara F5-B en el ORM (products ×2 + inventory_balances).
-# Los NOMBRES se leen de los propios objetos Index para no versionar una 4ª copia
-# del DDL: antes de F5-B había tres copias sueltas en tres archivos de test y ya
-# habían divergido (una creaba 2 índices, las otras 3).
-_F5_UNIQUE_INDEXES = (
-    "uq_products_tenant_barcode_norm",
-    "uq_products_tenant_sku_norm",
-    "uq_inventory_balances_tenant_product",
-)
+def _f5_unique_index_names() -> tuple[str, ...]:
+    """Los uniques que declara F5-B, LEÍDOS del ORM (products ×2 + inventory_balances).
+
+    Derivados y no hardcodeados a propósito: con la lista escrita a mano, renombrar un
+    índice en el modelo y en la migración deja este ``DROP INDEX IF EXISTS`` sin
+    encontrar nada, la fixture se vuelve un no-op SILENCIOSO y los tests que la piden
+    pasan a correr CON los uniques puestos — verdes por la razón equivocada, que es el
+    modo de falla que F5-B ya se comió dos veces. Derivándolos, un rename se propaga
+    solo; si un día no quedara ninguno, el ``assert`` lo grita.
+    """
+    from app.persistence.models.inventory import InventoryBalance  # noqa: PLC0415
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    names = tuple(
+        index.name
+        for model in (Product, InventoryBalance)
+        for index in sorted(model.__table__.indexes, key=lambda i: i.name or "")
+        if index.unique and index.name
+    )
+    assert names, "F5-B declara uniques en el ORM; si esto queda vacío, algo se borró"
+    return names
+
+
+_F5_UNIQUE_INDEXES = _f5_unique_index_names()
 
 
 @pytest_asyncio.fixture

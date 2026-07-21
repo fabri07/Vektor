@@ -35,7 +35,11 @@ class InventoryBalance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # F5-B — un solo balance por (tenant, producto). No es parcial: acá NO hay
         # concepto de baja, un segundo balance para el mismo producto es siempre un
         # bug (el dedup de F3 los fusiona antes de que este índice pueda crearse).
-        # Sostiene el ON CONFLICT del sync de balances.
+        # Sostiene el get-or-create de balances: los dos sitios que los crean
+        # (``stock_service._get_or_create_balance`` e
+        # ``ingestion_import_service._apply_purchase_to_stock``) resuelven la carrera
+        # con ``guarded_savepoint`` + ``BALANCE_CONFLICT`` y re-consultan al perder.
+        # NO hay ningún ON CONFLICT sobre esta tabla.
         Index("uq_inventory_balances_tenant_product", "tenant_id", "product_id", unique=True),
     )
 
