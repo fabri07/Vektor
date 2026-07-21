@@ -175,13 +175,24 @@ def _f5_unique_index_names() -> tuple[str, ...]:
     modo de falla que F5-B ya se comió dos veces. Derivándolos, un rename se propaga
     solo; si un día no quedara ninguno, el ``assert`` lo grita.
     """
+    from typing import cast  # noqa: PLC0415
+
+    from sqlalchemy import Table  # noqa: PLC0415
+
     from app.persistence.models.inventory import InventoryBalance  # noqa: PLC0415
     from app.persistence.models.product import Product  # noqa: PLC0415
 
+    # El ``cast`` es por el tipo ESTÁTICO, no por runtime. SQLAlchemy declara
+    # ``__table__`` como ``FromClause`` porque un mapper puede apuntar a cualquier
+    # selectable —un ``join()``, un ``select()`` aliasado (mapeo imperativo a una
+    # subconsulta)—, y ``FromClause`` no expone ``.indexes``: los índices son de
+    # ``Table``. Un modelo declarativo normal como estos dos SIEMPRE recibe un
+    # ``Table``, así que el cast es seguro; sin él, ``mypy app`` corta el CI.
+    tables = (cast("Table", Product.__table__), cast("Table", InventoryBalance.__table__))
     names = tuple(
         index.name
-        for model in (Product, InventoryBalance)
-        for index in sorted(model.__table__.indexes, key=lambda i: i.name or "")
+        for table in tables
+        for index in sorted(table.indexes, key=lambda i: i.name or "")
         if index.unique and index.name
     )
     assert names, "F5-B declara uniques en el ORM; si esto queda vacío, algo se borró"
