@@ -37,6 +37,7 @@ from app.application.services.product_identity import (
     add_product_or_reuse,
 )
 from app.domain.business_time import now_ar_naive
+from app.domain.date_parsing import parse_business_datetime
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -1734,34 +1735,9 @@ def _parse_amount(raw: Any) -> Decimal | None:
         return None
 
 
-def _parse_date(raw: Any) -> datetime | None:
-    # transaction_date es timestamp: se intenta primero con hora (ISO o dd/mm con
-    # hora) y, si no, solo fecha (queda a medianoche).
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    # ISO 8601: "2026-06-05T14:30:00", "2026-06-05 14:30:00", "2026-06-05".
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        pass
-    formats = (
-        # con hora (probar antes que las de solo fecha)
-        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
-        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
-        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
-        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M",
-        # solo fecha
-        "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d", "%m/%d/%Y",
-    )
-    for fmt in formats:
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
+# F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
+# gate de calidad, así que ya no pueden discrepar sobre el mismo archivo.
+_parse_date = parse_business_datetime
 
 
 def _find_col(headers: list[str], keywords: set[str] | tuple[str, ...]) -> str | None:

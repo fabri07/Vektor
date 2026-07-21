@@ -10,13 +10,18 @@ from __future__ import annotations
 import contextlib
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.domain.date_parsing import parse_business_date
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Un valor solo se considera "candidato a fecha" si trae separador. Sin esto, un
+# monto o documento de 8 dígitos entra como ISO compacto (ver _extract_dates).
+_DATE_SEPARATOR_RE = re.compile(r"[/-]")
 
 _AMOUNT_CEILING = Decimal("50_000_000")  # 50M ARS — por encima es sospechoso de error de escala
 
@@ -85,14 +90,20 @@ def _extract_dates(summary: dict[str, Any]) -> tuple[list[date], int]:
         for v in row.values():
             if v is None or not isinstance(v, str) or not v.strip():
                 continue
+            text = v.strip()
+            # Esta función escanea TODOS los valores de la fila, no solo la columna
+            # de fecha, así que necesita un pre-filtro: el parser compartido acepta
+            # ISO compacto y un monto de 8 dígitos ("20260605" = $20.260.605) se
+            # leería como fecha, tapando el rechazo por all_dates_invalid.
+            if not _DATE_SEPARATOR_RE.search(text):
+                continue
             total_date_values += 1
-            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y"):
-                try:
-                    valid_dates.append(datetime.strptime(v.strip(), fmt).date())
-                    total_date_values -= 1  # no cuenta como "fallido" si parsea
-                    break
-                except ValueError:
-                    continue
+            # F6-C1: mismo parser que el importador. Antes esta lista tenía 4 de
+            # los 14 formatos y el gate rechazaba fechas que el import levantaba.
+            parsed = parse_business_date(text)
+            if parsed is not None:
+                valid_dates.append(parsed)
+                total_date_values -= 1  # no cuenta como "fallido" si parsea
 
     return valid_dates, total_date_values
 

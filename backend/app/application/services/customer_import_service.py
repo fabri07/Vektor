@@ -17,6 +17,7 @@ from uuid import UUID
 
 from pydantic_core import PydanticCustomError
 
+from app.domain.date_parsing import BIRTHDAY_CENTURY_PIVOT, parse_business_date
 from app.persistence.models.customer import Customer
 from app.persistence.repositories.customer_repository import CustomerRepository
 from app.schemas._ar_fiscal import validate_cuit, validate_dni
@@ -185,12 +186,9 @@ def build_import_preview(
 
 
 def _coerce_birthday(value: Any) -> date | None:
-    if value is None or isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(str(value)[:10])
-    except ValueError:
-        return None
+    # F6-C1: antes solo aceptaba ISO, así que un "12/03/1985" de una planilla se
+    # perdía en silencio. Mismo parser y mismo pivote que la extracción por IA.
+    return parse_business_date(value, century_pivot=BIRTHDAY_CENTURY_PIVOT)
 
 
 async def apply_import(

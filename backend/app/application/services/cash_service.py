@@ -2,13 +2,14 @@
 
 import re
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import now_ar_naive
+from app.domain.date_parsing import parse_business_datetime
 from app.domain.expense_categories import (
     infer_expense_type,
     normalize_expense_category,
@@ -72,21 +73,19 @@ _normalize_payment_method = normalize_payment_method
 
 
 def _coerce_transaction_date(value: object) -> datetime:
-    # transaction_date es timestamp: si viene solo fecha, queda a medianoche; si no
-    # viene nada, se usa el momento actual (captura la hora del registro en vivo).
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, date):
-        return datetime.combine(value, datetime.min.time())
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            try:
-                return datetime.combine(date.fromisoformat(value), datetime.min.time())
-            except ValueError:
-                return now_ar_naive()
-    return now_ar_naive()
+    """Fecha de una carga MANUAL: si el usuario no informó ninguna, "ahora" es la
+    respuesta correcta (está registrando algo que pasa en este momento).
+
+    Lo que NO es correcto es caer a "ahora" porque el valor no se pudo leer: eso
+    inventa una fecha de negocio (F6). Con el parser compartido, "12/03/2024" ahora
+    se entiende en vez de convertirse silenciosamente en hoy.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return now_ar_naive()
+    parsed = parse_business_datetime(value)
+    if parsed is None:
+        raise ValueError(f"Fecha no reconocida: {value!r}")
+    return parsed
 
 
 async def save_sale(
