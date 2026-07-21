@@ -137,7 +137,8 @@ class BulkImportRequest(BaseModel):
 class BulkImportResponse(BaseModel):
     imported_sales: int
     imported_expenses: int
-    skipped: int
+    skipped: int  # ya importados (idempotencia)
+    needs_manual: int = 0  # no parsearon (fecha/monto ilegible) → completar a mano
 
 
 @router.get(

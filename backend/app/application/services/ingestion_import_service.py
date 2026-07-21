@@ -3794,7 +3794,10 @@ async def bulk_import_unclassified(
     parsea queda PENDING (el modal por registro permite completarlo a mano);
     los sugeridos como producto no entran acá (necesitan campos que la fila
     suelta no garantiza). Devuelve ``{imported_sales, imported_expenses,
-    skipped}``.
+    skipped, needs_manual}`` — ``skipped`` = ya importados (idempotencia);
+    ``needs_manual`` = no parsearon (fecha/monto ilegible) y requieren que el
+    usuario los complete en el modal por registro. Antes se mezclaban en un solo
+    contador y la UI no podía decir cuántos exigían atención (F6-A5).
     """
     from datetime import UTC  # noqa: PLC0415
 
@@ -3825,7 +3828,7 @@ async def bulk_import_unclassified(
         .scalars()
         .all()
     )
-    counts = {"imported_sales": 0, "imported_expenses": 0, "skipped": 0}
+    counts = {"imported_sales": 0, "imported_expenses": 0, "skipped": 0, "needs_manual": 0}
     if not records:
         return counts
 
@@ -3854,7 +3857,10 @@ async def bulk_import_unclassified(
             or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
         )
         if fecha is None or amount is None:
-            counts["skipped"] += 1
+            # F6-A5: no parseó (fecha o monto ilegible) → requiere completarlo a
+            # mano en el modal. Distinto de "ya importado" (skipped): la UI debe
+            # poder decir cuántos exigen atención del usuario.
+            counts["needs_manual"] += 1
             continue
         desc = _clean_str(_row_val(row, _NOMBRE_COLS), 499)
         pay_raw = _clean_str(_row_val(row, _PAGO_COLS), 30)

@@ -62,7 +62,8 @@ export interface ResolvePurchasePayload {
 export interface BulkImportResult {
   imported_sales: number;
   imported_expenses: number;
-  skipped: number;
+  skipped: number; // ya importados (idempotencia)
+  needs_manual: number; // no parsearon (fecha/monto ilegible) → completar a mano
 }
 
 export const othersService = {
