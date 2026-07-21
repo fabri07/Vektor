@@ -887,10 +887,19 @@ async def confirm_file(
             for _m in _ctx_mappings:
                 if _m.target_field != "ignore" and _m.context_id:
                     _ctx_map_by_cid[_m.context_id][_m.source_column] = _m.target_field
+            _override = body.context_entity or {}
             for _ctx in _mapping_ctxs:
                 _cid = _ctx.get("context_id")
-                _ent = _ctx.get("entity_type")
-                if not _cid or _ent not in ("sale", "expense"):
+                if not _cid:
+                    continue
+                # Entidad EFECTIVA: el usuario puede reasignar una hoja general/
+                # producto a venta/gasto (context_entity) y el importador la procesa
+                # como tal (misma resolución que _insert_multisheet_data:3634). Sin
+                # mirar la entidad efectiva, esa hoja sin fecha escaparía el gate,
+                # tomaría el lease y volcaría todo a /otros — se rompería el contrato
+                # "422 antes del lease".
+                _ent = _override.get(_cid) or _ctx.get("entity_type")
+                if _ent not in ("sale", "expense"):
                     continue
                 if _context_included(_cid, _ent):
                     _label = str(_ctx.get("label") or _cid)

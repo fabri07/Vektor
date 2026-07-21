@@ -179,7 +179,11 @@ def resolve_transaction_date_column(
     """
     if mappings:
         for src, target in mappings.items():
-            if target in _DATE_TARGET_FIELDS:
+            # El mapeo explícito solo vale si la columna EXISTE en la hoja. Un
+            # payload viejo/inconsistente como {"col_inexistente": "transaction_date"}
+            # pasaría el gate, pero el importador obtendría None por fila (la columna
+            # no está) y mandaría todo a /otros — el 422-antes-del-lease se saltearía.
+            if target in _DATE_TARGET_FIELDS and (headers is None or src in headers):
                 return src
     if headers:
         # Import local: file_parsing es un módulo pesado; column_mapping_service se

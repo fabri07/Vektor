@@ -2934,6 +2934,13 @@ async def _insert_confirmed_data_impl(
             # Se rutea la línea UNA vez (no N veces por cada monto detectado). Solo si
             # trae al menos un monto válido — una línea sin monto no materializa un
             # pendiente vacío. `uploaded_file_id` liga el /otros al archivo origen.
+            #
+            # No se registra fingerprint por línea (a diferencia del path spreadsheet,
+            # que ancla en (archivo, contexto, índice)): el path texto nunca tuvo
+            # anclas de fila estables. La no-duplicación la garantiza F4 aguas arriba
+            # — un confirm exitoso deja el archivo DONE y no puede re-confirmarse
+            # (CAS del lease), y un fallo revierte el savepoint entero. La relectura
+            # es un flujo distinto (reread_service) que reprocesa desde cero.
             if not any(_parse_amount(m) for m in entry.get("montos", [])):
                 return
             counts["otros"] += _capture_unclassified(

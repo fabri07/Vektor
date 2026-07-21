@@ -58,6 +58,24 @@ def test_resolve_date_column_mapeo_explicito_gana() -> None:
     )
 
 
+def test_resolve_date_column_mapeo_a_columna_inexistente_no_cuenta() -> None:
+    # Un mapeo a una columna que NO está en los headers no satisface el gate: el
+    # importador obtendría None por fila. Sin heurística que salve, devuelve None.
+    assert (
+        resolve_transaction_date_column(
+            ["detalle", "monto"], {"col_inexistente": "transaction_date"}
+        )
+        is None
+    )
+    # Pero si además hay una columna de fecha real, la heurística la encuentra.
+    assert (
+        resolve_transaction_date_column(
+            ["fecha", "monto"], {"col_inexistente": "transaction_date"}
+        )
+        == "fecha"
+    )
+
+
 def test_validate_required_date_mapping_reporta_solo_los_sin_fecha() -> None:
     included: list[tuple[str, list[str] | None, dict[str, str]]] = [
         ("Ventas", ["fecha", "monto"], {}),

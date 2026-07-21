@@ -763,6 +763,67 @@ class TestConfirmEndpoint:
         assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
         assert refreshed.import_attempt_id is None
 
+    async def test_confirm_contexto_reasignado_a_venta_sin_fecha_devuelve_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F6-A1: si el usuario reasigna una hoja de producto (sin fecha) a venta
+        vía context_entity, el gate debe usar la entidad EFECTIVA — el importador
+        la procesaría como venta y volcaría todo a /otros. 422 antes del lease."""
+        summary = {
+            "confidence": "HIGH",
+            "file_type": "spreadsheet",
+            "inferred_type": "stock",
+            "mapping_contexts": [
+                {
+                    "context_id": "table",
+                    "entity_type": "product",
+                    "label": "Catálogo",
+                    "headers": ["producto", "precio"],  # sin fecha
+                }
+            ],
+            "stock_detectado": [
+                {"__context__": "table", "producto": "Vela", "precio": "500"}
+            ],
+        }
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="catalogo.xlsx",
+            s3_key="uploads/test/uuid/catalogo.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="productos",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json=summary,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"table": True},
+                "context_entity": {"table": "sale"},  # reasignado a venta
+            },
+        )
+        assert response.status_code == 422
+        assert "fecha" in response.json()["detail"].lower()
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
 
 class _CaptureLogger:
     def __init__(self) -> None:

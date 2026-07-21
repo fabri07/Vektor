@@ -5,6 +5,12 @@ function _buildIso(y: string, mo: string, d: string): string {
   const month = Number(mo);
   const day = Number(d);
   if (!year || month < 1 || month > 12 || day < 1 || day > 31) return "";
+  // Rechazar fechas calendáricamente imposibles (ej. 2024-02-31): construir la
+  // fecha y verificar que no haya "rodado" a otro mes.
+  const dt = new Date(year, month - 1, day);
+  if (dt.getFullYear() !== year || dt.getMonth() !== month - 1 || dt.getDate() !== day) {
+    return "";
+  }
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${year}-${pad(month)}-${pad(day)}`;
 }
@@ -31,7 +37,13 @@ export function toIsoDate(raw: string): string {
   const first = m[1] ?? "";
   const second = m[2] ?? "";
   const rawYear = m[3] ?? "";
-  const year = rawYear.length === 2 ? `20${rawYear}` : rawYear;
+  // Año de 2 dígitos: mismo pivote que strptime %y del backend para transacciones
+  // (date_parsing.parse_business_datetime sin century_pivot): 00–68 → 20xx,
+  // 69–99 → 19xx. Antes el frontend forzaba 20xx y "05/06/99" divergía (2099 vs 1999).
+  const year =
+    rawYear.length === 2
+      ? String((Number(rawYear) <= 68 ? 2000 : 1900) + Number(rawYear))
+      : rawYear;
   // AR: dd/mm primero; solo si el 2º campo no puede ser mes (>12) y el 1º sí,
   // se interpreta como mm/dd.
   let day = first;
