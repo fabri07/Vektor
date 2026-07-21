@@ -59,13 +59,14 @@ def test_resolve_date_column_mapeo_explicito_gana() -> None:
 
 
 def test_validate_required_date_mapping_reporta_solo_los_sin_fecha() -> None:
-    included = [
+    included: list[tuple[str, list[str] | None, dict[str, str]]] = [
         ("Ventas", ["fecha", "monto"], {}),
         ("Gastos", ["detalle", "monto"], {}),  # sin fecha
     ]
     assert validate_required_date_mapping(included) == ["Gastos"]
     # Todos con fecha → lista vacía.
-    assert validate_required_date_mapping([("Ventas", ["fecha", "monto"], {})]) == []
+    ok: list[tuple[str, list[str] | None, dict[str, str]]] = [("Ventas", ["fecha", "monto"], {})]
+    assert validate_required_date_mapping(ok) == []
 
 
 def test_heuristic_match_sale() -> None:
