@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { UnclassifiedRecordResponse } from "@/services/others.service";
-import { ReclassifyModal } from "../page";
+import { ReclassifyModal } from "../ReclassifyModal";
 
 const record: UnclassifiedRecordResponse = {
   id: "record-1",
