@@ -15,6 +15,8 @@ from app.application.services.column_mapping_service import (
     ColumnMappingService,
     _heuristic_match,
     _normalize_col,
+    resolve_transaction_date_column,
+    validate_required_date_mapping,
 )
 
 
@@ -23,6 +25,47 @@ def test_normalize_col() -> None:
     assert _normalize_col("  fecha  ") == "fecha"
     assert _normalize_col("P. Venta") == "p._venta"
     assert _normalize_col("MONTO") == "monto"
+
+
+# ── F6-A1: resolver de columna de fecha (fuente única API + importador) ─────────
+
+
+def test_resolve_date_column_por_header_heuristico() -> None:
+    assert resolve_transaction_date_column(["Fecha", "Monto"], None) == "Fecha"
+    assert resolve_transaction_date_column(["dia", "importe"], None) == "dia"
+    # Sin ninguna columna de fecha → None (dispara el 422 del gate).
+    assert resolve_transaction_date_column(["detalle", "monto"], None) is None
+    assert resolve_transaction_date_column(None, None) is None
+
+
+def test_resolve_date_column_mapeo_explicito_gana() -> None:
+    # El mapeo explícito precede a la heurística: "columna_x" mapeada a
+    # transaction_date resuelve aunque no matchee ningún keyword.
+    assert (
+        resolve_transaction_date_column(
+            ["columna_x", "monto"], {"columna_x": "transaction_date"}
+        )
+        == "columna_x"
+    )
+    assert (
+        resolve_transaction_date_column(["col", "monto"], {"col": "expense_date"})
+        == "col"
+    )
+    # Mapeo que NO es de fecha → cae a la heurística (acá tampoco hay) → None.
+    assert (
+        resolve_transaction_date_column(["detalle", "monto"], {"detalle": "notes"})
+        is None
+    )
+
+
+def test_validate_required_date_mapping_reporta_solo_los_sin_fecha() -> None:
+    included = [
+        ("Ventas", ["fecha", "monto"], {}),
+        ("Gastos", ["detalle", "monto"], {}),  # sin fecha
+    ]
+    assert validate_required_date_mapping(included) == ["Gastos"]
+    # Todos con fecha → lista vacía.
+    assert validate_required_date_mapping([("Ventas", ["fecha", "monto"], {})]) == []
 
 
 def test_heuristic_match_sale() -> None:

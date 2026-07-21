@@ -27,7 +27,11 @@ from app.api.v1.deps import (
     require_role,
 )
 from app.application.services import pipeline_event_service
-from app.application.services.column_mapping_service import REQUIRED_FIELDS, ColumnMappingService
+from app.application.services.column_mapping_service import (
+    REQUIRED_FIELDS,
+    ColumnMappingService,
+    validate_required_date_mapping,
+)
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
 )
@@ -866,6 +870,67 @@ async def confirm_file(
                             f"{', '.join(sorted(missing))}"
                         ),
                     )
+
+    # ── F6-A1: bloqueo por fecha faltante, ANTES del lease ──────────────────────
+    # Una venta/gasto sin columna de fecha resoluble caía al fallback "hoy" (dato
+    # inventado — invariante 2d). Se rechaza upfront, no por fila: sin este gate un
+    # archivo de miles de filas sin columna de fecha genera miles de registros en
+    # /otros que el bulk import no puede resolver. Solo aplica a SPREADSHEETS: los
+    # documentos de texto/imagen no tienen columnas y se rutean a /otros durante el
+    # import (A4). Fuente única de "hay fecha o no": resolve_transaction_date_column
+    # (la misma del importador), nunca `_FECHA_COLS` privado.
+    if _summary_for_ctx.get("file_type", "spreadsheet") == "spreadsheet":
+        _date_check: list[tuple[str, list[str] | None, dict[str, str]]] = []
+        _mapping_ctxs = _summary_for_ctx.get("mapping_contexts") or []
+        if _mapping_ctxs:
+            _ctx_map_by_cid: dict[str, dict[str, str]] = defaultdict(dict)
+            for _m in _ctx_mappings:
+                if _m.target_field != "ignore" and _m.context_id:
+                    _ctx_map_by_cid[_m.context_id][_m.source_column] = _m.target_field
+            for _ctx in _mapping_ctxs:
+                _cid = _ctx.get("context_id")
+                _ent = _ctx.get("entity_type")
+                if not _cid or _ent not in ("sale", "expense"):
+                    continue
+                if _context_included(_cid, _ent):
+                    _label = str(_ctx.get("label") or _cid)
+                    _date_check.append(
+                        (_label, _ctx.get("headers"), _ctx_map_by_cid.get(_cid, {}))
+                    )
+        else:
+            # Legacy: summary sin mapping_contexts (single-context por keyword). El
+            # importador deriva los headers de `rows[0].keys()` (no de un `headers`
+            # top-level, que este path ni siquiera setea), así que el gate hace lo
+            # mismo para no divergir del importador (el objetivo de C1).
+            _flat_confirmed = bool(
+                (body.confirmed_fields.get("ventas") and _entity_type == "sale")
+                or (body.confirmed_fields.get("gastos") and _entity_type == "expense")
+            )
+            if _flat_confirmed:
+                _flat_map = {
+                    m.source_column: m.target_field
+                    for m in _flat_mappings
+                    if m.target_field != "ignore"
+                }
+                _legacy_rows = (
+                    _summary_for_ctx.get("ventas_detectadas")
+                    or _summary_for_ctx.get("gastos_detectados")
+                    or _summary_for_ctx.get("otros_detectados")
+                    or []
+                )
+                _legacy_headers = list(_legacy_rows[0].keys()) if _legacy_rows else None
+                _date_check.append(("", _legacy_headers, _flat_map))
+        _missing_dates = validate_required_date_mapping(_date_check)
+        if _missing_dates:
+            _labels = ", ".join(lbl or "hoja principal" for lbl in _missing_dates)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"No se detectó columna de fecha en: {_labels}. Mapeá la columna "
+                    "de fecha o completá los datos antes de importar (sin fecha no se "
+                    "puede registrar la operación)."
+                ),
+            )
 
     # ── F4: tomar el lease per-file ANTES de cualquier escritura ────────────────
     # CAS atómico NEEDS_CONFIRMATION→IMPORTING (o takeover si quedó stale),

@@ -641,6 +641,128 @@ class TestConfirmEndpoint:
         )
         assert response.status_code == 404
 
+    async def test_confirm_sin_columna_fecha_devuelve_422_antes_del_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F6-A1: una venta confirmada sin columna de fecha se rechaza con 422 y
+        NUNCA toma el lease (el archivo sigue re-confirmable en NEEDS_CONFIRMATION).
+        Sin este gate, la fila caería al fallback silencioso "hoy" (invariante 2d).
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas_sin_fecha.xlsx",
+            s3_key="uploads/test/uuid/ventas_sin_fecha.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "row_count": 1,
+                # Sin ninguna columna de fecha en las filas.
+                "ventas_detectadas": [{"monto": "50000", "descripcion": "Venta"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True}},
+        )
+        assert response.status_code == 422
+        assert "fecha" in response.json()["detail"].lower()
+
+        # El lease nunca se tomó: sigue re-confirmable.
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+        assert refreshed.import_started_at is None
+
+    async def test_confirm_multicontexto_bloquea_solo_el_contexto_sin_fecha(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F6-A1: en multi-hoja, confirmar un contexto sin fecha lo bloquea (422
+        nombrándolo); si ese contexto NO se incluye, los demás importan."""
+        summary = {
+            "confidence": "HIGH",
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "has_venta": True,
+            "has_gasto": True,
+            "mapping_contexts": [
+                {
+                    "context_id": "sheet:A:ventas",
+                    "entity_type": "sale",
+                    "label": "Hoja A — Ventas",
+                    "headers": ["fecha", "monto"],
+                },
+                {
+                    "context_id": "sheet:B:gastos",
+                    "entity_type": "expense",
+                    "label": "Hoja B — Gastos",
+                    "headers": ["detalle", "monto"],  # sin fecha
+                },
+            ],
+            "ventas_detectadas": [
+                {"__context__": "sheet:A:ventas", "fecha": "2024-01-15", "monto": "50000"}
+            ],
+            "gastos_detectados": [
+                {"__context__": "sheet:B:gastos", "detalle": "Varios", "monto": "12000"}
+            ],
+        }
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="mixto.xlsx",
+            s3_key="uploads/test/uuid/mixto.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=1024,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json=summary,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        # Ambos contextos incluidos → el de gastos (sin fecha) dispara 422.
+        blocked = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True, "gastos": True}},
+        )
+        assert blocked.status_code == 422
+        assert "Gastos" in blocked.json()["detail"]
+
+        # El lease no se tomó pese al 422.
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
 
 class _CaptureLogger:
     def __init__(self) -> None:
