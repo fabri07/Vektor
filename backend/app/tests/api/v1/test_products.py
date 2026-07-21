@@ -203,6 +203,148 @@ class TestProductsTenantIsolation:
         resp = await client.get(f"/api/v1/products/{product_id}", headers=second_auth_headers)
         assert resp.status_code == 404
 
+
+@pytest.mark.asyncio
+class TestProductIdentityBarcodeExpiry:
+    """F2-T2b: `barcode`/`expiry_date` en schemas + 409 por identidad duplicada."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_create_product_with_barcode_and_expiry(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        payload = {
+            **_PRODUCT_PAYLOAD,
+            "barcode": "7791234567890",
+            "expiry_date": "2027-03-15",
+        }
+        resp = await client.post("/api/v1/products", json=payload, headers=auth_headers)
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["barcode"] == "7791234567890"
+        assert data["expiry_date"] == "2027-03-15"
+
+    async def test_create_product_duplicate_sku_409(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        first = {**_PRODUCT_PAYLOAD, "sku": "SKU-001"}
+        resp1 = await client.post("/api/v1/products", json=first, headers=auth_headers)
+        assert resp1.status_code == 201
+
+        second = {**_PRODUCT_PAYLOAD, "name": "Otro nombre", "sku": "sku-001"}
+        resp2 = await client.post("/api/v1/products", json=second, headers=auth_headers)
+        assert resp2.status_code == 409
+        detail = resp2.json()["detail"]
+        assert detail["code"] == "DUPLICATE_PRODUCT_IDENTITY"
+        assert detail["field"] == "sku"
+        assert detail["existing_id"] == resp1.json()["id"]
+
+    async def test_create_product_duplicate_barcode_409(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        first = {**_PRODUCT_PAYLOAD, "barcode": "7791111111111"}
+        resp1 = await client.post("/api/v1/products", json=first, headers=auth_headers)
+        assert resp1.status_code == 201
+
+        second = {**_PRODUCT_PAYLOAD, "name": "Otro nombre", "barcode": "779-1111111111"}
+        resp2 = await client.post("/api/v1/products", json=second, headers=auth_headers)
+        assert resp2.status_code == 409
+        detail = resp2.json()["detail"]
+        assert detail["code"] == "DUPLICATE_PRODUCT_IDENTITY"
+        assert detail["field"] == "barcode"
+
+    async def test_create_product_barcode_vs_sku_conflict_409(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Review F2 #6: si el barcode matchea un producto y el sku matchea OTRO,
+        es un CONFLICTO de identidad (no un duplicado simple) → 409 IDENTITY_CONFLICT
+        con AMBOS ids (nunca un .first() arbitrario)."""
+        a = {**_PRODUCT_PAYLOAD, "name": "Producto A", "barcode": "7790000000017"}
+        resp_a = await client.post("/api/v1/products", json=a, headers=auth_headers)
+        assert resp_a.status_code == 201
+        b = {**_PRODUCT_PAYLOAD, "name": "Producto B", "sku": "SKU-B"}
+        resp_b = await client.post("/api/v1/products", json=b, headers=auth_headers)
+        assert resp_b.status_code == 201
+
+        # barcode → A, sku → B: conflicto.
+        clash = {
+            **_PRODUCT_PAYLOAD,
+            "name": "Producto C",
+            "barcode": "7790000000017",
+            "sku": "SKU-B",
+        }
+        resp = await client.post("/api/v1/products", json=clash, headers=auth_headers)
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["code"] == "IDENTITY_CONFLICT"
+        assert detail["barcode_product_id"] == resp_a.json()["id"]
+        assert detail["sku_product_id"] == resp_b.json()["id"]
+
+    async def test_patch_product_duplicate_sku_409(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Review F2 #2: el PATCH valida identidad duplicada antes de aplicar un
+        cambio de sku/barcode (antes hacía setattr directo → 2 activos con mismo SKU)."""
+        a = {**_PRODUCT_PAYLOAD, "name": "Producto A", "sku": "SKU-AAA"}
+        resp_a = await client.post("/api/v1/products", json=a, headers=auth_headers)
+        assert resp_a.status_code == 201
+        b = {**_PRODUCT_PAYLOAD, "name": "Producto B", "sku": "SKU-BBB"}
+        resp_b = await client.post("/api/v1/products", json=b, headers=auth_headers)
+        assert resp_b.status_code == 201
+
+        # Intentar pisar B con el SKU de A → 409.
+        resp = await client.patch(
+            f"/api/v1/products/{resp_b.json()['id']}",
+            json={"sku": "sku-aaa"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "DUPLICATE_PRODUCT_IDENTITY"
+
+    async def test_patch_product_same_sku_and_fresh_sku_ok(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """El PATCH NO se rechaza a sí mismo (exclude_id) y acepta un sku libre."""
+        a = {**_PRODUCT_PAYLOAD, "name": "Producto A", "sku": "SKU-SELF"}
+        resp_a = await client.post("/api/v1/products", json=a, headers=auth_headers)
+        pid = resp_a.json()["id"]
+        # Re-mandar el MISMO sku (no es duplicado de sí mismo).
+        resp_same = await client.patch(
+            f"/api/v1/products/{pid}", json={"sku": "SKU-SELF"}, headers=auth_headers
+        )
+        assert resp_same.status_code == 200
+        # Un sku nuevo y libre.
+        resp_new = await client.patch(
+            f"/api/v1/products/{pid}", json={"sku": "SKU-NEW"}, headers=auth_headers
+        )
+        assert resp_new.status_code == 200
+        assert resp_new.json()["sku"] == "SKU-NEW"
+
+    async def test_create_product_duplicate_sku_other_tenant_ok(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+    ) -> None:
+        first = {**_PRODUCT_PAYLOAD, "sku": "SKU-ISO"}
+        resp1 = await client.post("/api/v1/products", json=first, headers=auth_headers)
+        assert resp1.status_code == 201
+
+        second = {**_PRODUCT_PAYLOAD, "sku": "SKU-ISO"}
+        resp2 = await client.post("/api/v1/products", json=second, headers=second_auth_headers)
+        assert resp2.status_code == 201
+
+    async def test_create_product_duplicate_name_only_allowed(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        resp1 = await client.post("/api/v1/products", json=_PRODUCT_PAYLOAD, headers=auth_headers)
+        assert resp1.status_code == 201
+
+        resp2 = await client.post("/api/v1/products", json=_PRODUCT_PAYLOAD, headers=auth_headers)
+        assert resp2.status_code == 201
+
     async def test_list_only_own_products(
         self,
         client: AsyncClient,

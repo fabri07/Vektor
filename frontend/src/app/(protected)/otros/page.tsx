@@ -2,14 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { AxiosError } from "axios";
 import { Trash2, Pencil, Zap } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
+import { ReclassifyModal } from "./ReclassifyModal";
+import { prefill, rowPreview } from "./helpers";
 import { Table } from "@/components/ui/Table";
 import {
   othersService,
+  type ProductMatchCandidate,
   type ReclassifyEntityType,
   type UnclassifiedRecordResponse,
 } from "@/services/others.service";
@@ -31,32 +35,13 @@ const ENTITY_LABELS: Record<ReclassifyEntityType, string> = {
   supplier: "Proveedor",
 };
 
-/** Heurística simple de prellenado desde la fila cruda (solo sugerencia visual). */
-function prefill(record: UnclassifiedRecordResponse): {
-  amount: string;
-  date: string;
-  text: string;
-} {
-  let amount = "";
-  let date = "";
-  let text = "";
-  for (const [key, value] of Object.entries(record.row_data)) {
-    const k = key.toLowerCase();
-    if (!amount && /(monto|importe|total|precio|valor)/.test(k)) amount = value;
-    if (!date && /(fecha|date|dia)/.test(k)) date = value;
-    if (!text && /(detalle|concepto|descripcion|nombre|producto|item)/.test(k)) text = value;
-  }
-  return { amount, date, text };
+/** Extrae el `detail.code` de un error de axios (contrato del backend: `{detail:{code}}`). */
+function errorCode(error: unknown): string | null {
+  const detail = (error as AxiosError<{ detail?: { code?: string } }>)?.response?.data?.detail;
+  return detail?.code ?? null;
 }
 
-function rowPreview(record: UnclassifiedRecordResponse): string {
-  return Object.entries(record.row_data)
-    .filter(([, v]) => v !== "")
-    .slice(0, 5)
-    .map(([k, v]) => `${k}: ${v}`)
-    .join(" · ");
-}
-
+/** Etiqueta corta de un candidato de producto (nombre + sku/barcode si existen). */
 const PAGE_SIZE = 50;
 
 export default function OtrosPage() {
@@ -122,17 +107,106 @@ export default function OtrosPage() {
       id,
       entityType,
       fields,
+      targetProductId,
     }: {
       id: string;
       entityType: ReclassifyEntityType;
       fields: Record<string, unknown>;
-    }) => othersService.reclassify(id, { entity_type: entityType, fields }),
+      targetProductId?: string;
+    }) =>
+      othersService.reclassify(id, {
+        entity_type: entityType,
+        fields,
+        ...(targetProductId ? { target_product_id: targetProductId } : {}),
+      }),
     onSuccess: async (_, vars) => {
       setReclassifying(null);
-      toast(`Registro importado como ${ENTITY_LABELS[vars.entityType].toLowerCase()}.`, "success");
+      toast(
+        vars.targetProductId
+          ? "Registro vinculado al producto existente."
+          : `Registro importado como ${ENTITY_LABELS[vars.entityType].toLowerCase()}.`,
+        "success",
+      );
       await invalidate();
     },
-    onError: () => toast("No se pudo importar el registro. Revisá los campos.", "error"),
+    onError: async (error) => {
+      const code = errorCode(error);
+      if (code === "DUPLICATE_PRODUCT_IDENTITY") {
+        toast(
+          "Ya existe un producto activo con ese SKU o código de barras. " +
+            "Vinculalo a uno de los sugeridos en vez de crear uno nuevo.",
+          "error",
+        );
+      } else if (code === "IDENTITY_CONFLICT") {
+        // F5-A: el backend dejó de colapsar el caso ambiguo en un solo id. El
+        // código de barras y el SKU pertenecen a productos DISTINTOS: no es un
+        // problema de los campos cargados, es una decisión que tiene que tomar el
+        // usuario. Sin esta rama caía en el else genérico ("Revisá los campos"),
+        // que apunta al lugar equivocado.
+        toast(
+          "El código de barras y el SKU apuntan a productos distintos. " +
+            "Vinculá el registro al que corresponda en vez de crear uno nuevo.",
+          "error",
+        );
+      } else if (code === "INVALID_TARGET_PRODUCT") {
+        // El candidato ya no está disponible (borrado/inactivo): cerrar y refrescar.
+        toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
+        setReclassifying(null);
+        await invalidate();
+      } else {
+        toast("No se pudo importar el registro. Revisá los campos.", "error");
+      }
+    },
+  });
+
+  const resolvePurchaseMutation = useMutation({
+    mutationFn: ({
+      id,
+      targetProductId,
+      fields,
+    }: {
+      id: string;
+      targetProductId: string;
+      fields: {
+        amount: number;
+        quantity: number;
+        unitCost?: number;
+        transactionDate: string;
+        paymentMethod: string;
+        category: string;
+        description: string;
+      };
+    }) =>
+      othersService.resolvePurchase(id, {
+        target_product_id: targetProductId,
+        amount: fields.amount,
+        quantity: fields.quantity,
+        ...(fields.unitCost !== undefined ? { unit_cost: fields.unitCost } : {}),
+        transaction_date: fields.transactionDate,
+        payment_method: fields.paymentMethod,
+        category: fields.category,
+        description: fields.description || undefined,
+      }),
+    onSuccess: async () => {
+      setReclassifying(null);
+      toast("Compra registrada.", "success");
+      await invalidate();
+    },
+    onError: async (error) => {
+      const code = errorCode(error);
+      const httpStatus = (error as AxiosError)?.response?.status;
+      if (code === "INVALID_TARGET_PRODUCT" || code === "TARGET_NOT_A_CANDIDATE") {
+        toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
+        setReclassifying(null);
+        await invalidate();
+      } else if (httpStatus === 409) {
+        toast("Esta compra ya había sido registrada. Actualizamos la lista.", "info");
+        setReclassifying(null);
+        await invalidate();
+      } else {
+        toast("No se pudo registrar la compra. Revisá los campos.", "error");
+      }
+    },
   });
 
   const columns = [
@@ -293,248 +367,26 @@ export default function OtrosPage() {
       <ReclassifyModal
         record={reclassifying}
         productCategories={productCategories}
-        saving={reclassifyMutation.isPending}
+        saving={reclassifyMutation.isPending || resolvePurchaseMutation.isPending}
         onClose={() => setReclassifying(null)}
         onSave={(entityType, fields) =>
           reclassifying &&
           reclassifyMutation.mutate({ id: reclassifying.id, entityType, fields })
         }
+        onLink={(targetProductId) =>
+          reclassifying &&
+          reclassifyMutation.mutate({
+            id: reclassifying.id,
+            entityType: "product",
+            fields: {},
+            targetProductId,
+          })
+        }
+        onResolvePurchase={(targetProductId, fields) =>
+          reclassifying &&
+          resolvePurchaseMutation.mutate({ id: reclassifying.id, targetProductId, fields })
+        }
       />
     </PageWrapper>
-  );
-}
-
-function ReclassifyModal({
-  record,
-  productCategories,
-  saving,
-  onClose,
-  onSave,
-}: {
-  record: UnclassifiedRecordResponse | null;
-  productCategories: ProductCategoryOption[];
-  saving: boolean;
-  onClose: () => void;
-  onSave: (entityType: ReclassifyEntityType, fields: Record<string, unknown>) => void;
-}) {
-  const [entityType, setEntityType] = useState<ReclassifyEntityType>("expense");
-  const [amount, setAmount] = useState("");
-  const [date, setDate] = useState("");
-  const [text, setText] = useState("");
-  const [category, setCategory] = useState("OTHER");
-  const [productCategory, setProductCategory] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("cash");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-
-  useEffect(() => {
-    if (!record) return;
-    const pre = prefill(record);
-    const entity = record.suggested_entity ?? "expense";
-    setEntityType(entity);
-    setAmount(pre.amount.replace(/[^\d.,]/g, ""));
-    setDate(pre.date.slice(0, 10));
-    setText(pre.text);
-    // Prellenar con la categoría recomendada por el backend según el destino.
-    setCategory(
-      entity === "expense" && record.suggested_category ? record.suggested_category : "OTHER",
-    );
-    setProductCategory(
-      entity === "product" && record.suggested_category ? record.suggested_category : "",
-    );
-    setPaymentMethod("cash");
-    setEmail("");
-    setPhone("");
-  }, [record]);
-
-  if (!record) return null;
-
-  // Cliente y Proveedor son entidades de contacto: solo nombre + email/teléfono.
-  const isContact = entityType === "customer" || entityType === "supplier";
-  const inputCls = "rounded border border-vk-border-w px-3 py-2";
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    const num = Number(amount.replace(",", "."));
-    const isoDate = date ? `${date}T00:00:00` : new Date().toISOString().slice(0, 19);
-    if (entityType === "sale") {
-      onSave("sale", {
-        amount: num,
-        transaction_date: isoDate,
-        payment_method: paymentMethod,
-        notes: text || null,
-      });
-    } else if (entityType === "expense") {
-      onSave("expense", {
-        amount: num,
-        expense_date: isoDate,
-        category,
-        description: text,
-        payment_method: paymentMethod,
-      });
-    } else if (entityType === "product") {
-      onSave("product", {
-        name: text || "Producto importado",
-        sale_price_ars: num,
-        category: productCategory || null,
-      });
-    } else {
-      // customer | supplier
-      onSave(entityType, {
-        name: text,
-        ...(email ? { email } : {}),
-        ...(phone ? { phone } : {}),
-      });
-    }
-  };
-
-  return (
-    <Modal isOpen={!!record} onClose={onClose} title="Editar e importar registro" size="lg">
-      <form className="grid gap-4" onSubmit={submit}>
-        <div className="rounded border border-vk-border-w bg-vk-bg-light p-3 text-xs text-vk-text-muted">
-          {rowPreview(record)}
-        </div>
-        <label className="grid gap-1 text-sm text-vektor-body">
-          Importar como
-          <select
-            className={inputCls}
-            value={entityType}
-            onChange={(e) => setEntityType(e.target.value as ReclassifyEntityType)}
-          >
-            <option value="sale">Venta</option>
-            <option value="expense">Gasto</option>
-            <option value="product">Producto</option>
-            <option value="customer">Cliente</option>
-            <option value="supplier">Proveedor</option>
-          </select>
-        </label>
-        {!isContact ? (
-          <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-sm text-vektor-body">
-              {entityType === "product" ? "Precio de venta" : "Monto"}
-              <input
-                className={inputCls}
-                type="number"
-                min={0}
-                step="0.01"
-                required
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-            </label>
-            {entityType !== "product" ? (
-              <label className="grid gap-1 text-sm text-vektor-body">
-                Fecha
-                <input
-                  className={inputCls}
-                  type="date"
-                  required
-                  value={date}
-                  onChange={(e) => setDate(e.target.value)}
-                />
-              </label>
-            ) : null}
-          </div>
-        ) : null}
-        <label className="grid gap-1 text-sm text-vektor-body">
-          {entityType === "product"
-            ? "Nombre del producto"
-            : entityType === "customer"
-              ? "Nombre del cliente"
-              : entityType === "supplier"
-                ? "Nombre del proveedor"
-                : "Descripción"}
-          <input
-            className={inputCls}
-            required={entityType === "product" || isContact}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
-        </label>
-        {isContact ? (
-          <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-sm text-vektor-body">
-              Email (opcional)
-              <input
-                className={inputCls}
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </label>
-            <label className="grid gap-1 text-sm text-vektor-body">
-              Teléfono (opcional)
-              <input
-                className={inputCls}
-                type="tel"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-              />
-            </label>
-          </div>
-        ) : null}
-        {entityType === "expense" ? (
-          <label className="grid gap-1 text-sm text-vektor-body">
-            Categoría
-            <select
-              className={inputCls}
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-            >
-              {ALL_CATEGORIES.map((cat) => (
-                <option key={cat} value={cat}>
-                  {CATEGORY_LABELS[cat]}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {entityType === "product" && productCategories.length > 0 ? (
-          <label className="grid gap-1 text-sm text-vektor-body">
-            Categoría
-            <select
-              className={inputCls}
-              value={productCategory}
-              onChange={(e) => setProductCategory(e.target.value)}
-            >
-              <option value="">Sin categoría</option>
-              {productCategories.map((cat) => (
-                <option key={cat.code} value={cat.code}>
-                  {cat.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {entityType !== "product" && !isContact ? (
-          <label className="grid gap-1 text-sm text-vektor-body">
-            Forma de pago
-            <select
-              className={inputCls}
-              value={paymentMethod}
-              onChange={(e) => setPaymentMethod(e.target.value)}
-            >
-              <option value="cash">Efectivo</option>
-              <option value="transfer">Transferencia</option>
-              <option value="debit_card">Débito</option>
-              <option value="credit_card">Crédito</option>
-              <option value="qr">QR</option>
-              <option value="account">Cuenta corriente</option>
-            </select>
-          </label>
-        ) : null}
-        <div className="flex justify-end gap-2 pt-2">
-          <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">
-            Cancelar
-          </button>
-          <button
-            type="submit"
-            disabled={saving}
-            className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {saving ? "Importando..." : "Importar"}
-          </button>
-        </div>
-      </form>
-    </Modal>
   );
 }

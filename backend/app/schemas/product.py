@@ -1,6 +1,6 @@
 """Pydantic schemas for product endpoints."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -17,6 +17,8 @@ class ProductResponse(BaseModel):
     tenant_id: UUID
     name: str
     sku: str | None
+    barcode: str | None = None
+    expiry_date: date | None = None
     description: str | None
     category: str | None
     sale_price_ars: Decimal
@@ -67,6 +69,8 @@ class CreateProductRequest(BaseModel):
     # None = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS; 0 = explícito, solo sin-stock aplica
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
+    barcode: str | None = Field(default=None, max_length=64)
+    expiry_date: date | None = Field(default=None, description="Vencimiento (informativo)")
     description: str | None = Field(default=None, max_length=1000)
     acquired_at: datetime | None = Field(default=None, description="Fecha/hora de alta")
     custom_fields: dict[str, Any] = Field(default_factory=dict)
@@ -80,6 +84,8 @@ class UpdateProductRequest(BaseModel):
     stock_units: int | None = Field(default=None, ge=0)
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
+    barcode: str | None = Field(default=None, max_length=64)
+    expiry_date: date | None = None
     is_active: bool | None = None
     acquired_at: datetime | None = None
     custom_fields: dict[str, Any] | None = None

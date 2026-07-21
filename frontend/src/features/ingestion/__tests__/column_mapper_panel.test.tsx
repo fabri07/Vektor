@@ -1,10 +1,16 @@
 import "@testing-library/jest-dom";
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ColumnMapperPanel } from "../ColumnMapperPanel";
 import { ingestionService } from "@/services/ingestion.service";
+
+const mockAddToast = jest.fn();
+jest.mock("@/stores/toastStore", () => ({
+  useToastStore: (selector: (s: { add: jest.Mock }) => unknown) =>
+    selector({ add: mockAddToast }),
+}));
 
 jest.mock("@/services/ingestion.service", () => ({
   ingestionService: {
@@ -17,6 +23,7 @@ jest.mock("@/services/ingestion.service", () => ({
 
 const mockGetPreview = ingestionService.getPreview as jest.Mock;
 const mockGetColumnMappings = ingestionService.getColumnMappings as jest.Mock;
+const mockConfirmFile = ingestionService.confirmFile as jest.Mock;
 
 function renderPanel() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -98,6 +105,85 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
       expect(screen.getByText(/IA/)).toBeInTheDocument();
     });
     expect(screen.getByText(/80%/)).toBeInTheDocument();
+  });
+
+  test("confirm con 409 → toast amable (ya se está importando / ya se importó)", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "ColX",
+        normalized_column: "colx",
+        sample_values: ["1500"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    // El confirm concurrente / archivo ya importado devuelve 409 (forma AxiosError).
+    mockConfirmFile.mockRejectedValue({ response: { status: 409 } });
+
+    renderPanel();
+
+    const confirmBtn = await screen.findByRole("button", {
+      name: /Confirmar importación/i,
+    });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith(
+        "Ya se está importando este archivo o ya se importó — actualizá la lista",
+        "warning",
+      );
+    });
+    // El 409 NO debe pintar el banner rojo de "error de mapeo".
+    expect(
+      screen.queryByText(/Error al confirmar/i),
+    ).not.toBeInTheDocument();
+  });
+
+  test("confirm con timeout (ECONNABORTED) → toast informativo, sin error rojo", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "ColX",
+        normalized_column: "colx",
+        sample_values: ["1500"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    // Timeout del cliente axios: el import sigue en curso en el backend.
+    mockConfirmFile.mockRejectedValue({ code: "ECONNABORTED" });
+
+    renderPanel();
+
+    const confirmBtn = await screen.findByRole("button", {
+      name: /Confirmar importación/i,
+    });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith(
+        "El import sigue en curso — revisá la lista en unos segundos",
+        "info",
+      );
+    });
+    expect(
+      screen.queryByText(/Error al confirmar/i),
+    ).not.toBeInTheDocument();
   });
 
   test("multi-contexto: muestra columns_at_risk y source llm por hoja", async () => {

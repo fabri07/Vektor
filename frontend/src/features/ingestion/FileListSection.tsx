@@ -16,10 +16,12 @@ import { matchesRow } from "@/lib/search";
 import { ColumnMapperPanel } from "./ColumnMapperPanel";
 import { RereadDiff } from "./RereadDiff";
 import { RereadProgress } from "./RereadProgress";
+import { IndeterminateBar } from "./IndeterminateBar";
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "Pendiente",
   PROCESSING: "Procesando",
+  IMPORTING: "Importando…",
   NEEDS_CONFIRMATION: "Confirmar",
   NEEDS_COMPLETION: "Completar datos",
   DONE: "Importado",
@@ -29,6 +31,7 @@ const STATUS_LABELS: Record<string, string> = {
 const STATUS_COLORS: Record<string, string> = {
   PENDING:            "text-vk-text-muted bg-vk-border-w",
   PROCESSING:         "text-vk-info bg-vk-info-bg",
+  IMPORTING:          "text-vk-info bg-vk-info-bg",
   NEEDS_CONFIRMATION: "text-vk-warning bg-vk-warning-bg",
   NEEDS_COMPLETION:   "text-vk-text-muted bg-vk-border-w",
   DONE:               "text-vk-success bg-vk-success-bg",
@@ -50,7 +53,11 @@ function formatType(filename: string): string {
 
 function hasActiveFiles(files: UploadedFileItem[]): boolean {
   return files.some((f) =>
-    f.processing_status === "PENDING" || f.processing_status === "PROCESSING",
+    f.processing_status === "PENDING" ||
+    f.processing_status === "PROCESSING" ||
+    // IMPORTING: el confirm está corriendo → seguir el poll rápido (3s) hasta que
+    // el archivo pase a DONE/NEEDS_COMPLETION.
+    f.processing_status === "IMPORTING",
   );
 }
 
@@ -438,19 +445,22 @@ export function FileListSection() {
                             Volver a leer
                           </button>
                         )}
-                        {/* Eliminar */}
-                        <button
-                          onClick={() => {
-                            if (confirm(`¿Eliminar "${file.original_filename}"?`)) {
-                              deleteMutation.mutate(file.id);
-                            }
-                          }}
-                          disabled={deleteMutation.isPending}
-                          className="rounded p-1 text-vk-text-muted hover:text-vk-danger hover:bg-vk-danger/10 transition-colors disabled:opacity-50"
-                          title="Eliminar archivo"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {/* Eliminar: oculto mientras el import corre (IMPORTING);
+                            el backend además rechaza el DELETE con 409. */}
+                        {file.processing_status !== "IMPORTING" && (
+                          <button
+                            onClick={() => {
+                              if (confirm(`¿Eliminar "${file.original_filename}"?`)) {
+                                deleteMutation.mutate(file.id);
+                              }
+                            }}
+                            disabled={deleteMutation.isPending}
+                            className="rounded p-1 text-vk-text-muted hover:text-vk-danger hover:bg-vk-danger/10 transition-colors disabled:opacity-50"
+                            title="Eliminar archivo"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -466,6 +476,21 @@ export function FileListSection() {
                         </td>
                       </tr>
                     )}
+
+                  {/* IMPORTING: el confirm está corriendo. Barra indeterminada
+                      honesta (sin %) + aviso de no cerrar. */}
+                  {file.processing_status === "IMPORTING" && (
+                    <tr>
+                      <td colSpan={5} className="pb-3 pt-0">
+                        <div className="flex flex-col gap-2 rounded-lg border border-vk-info/30 bg-vk-info-bg/40 px-3 py-2.5">
+                          <IndeterminateBar />
+                          <p className="text-xs text-vk-info">
+                            Importando… no cierres esta ventana mientras termina.
+                          </p>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
                 </Fragment>
               ))}
             </tbody>

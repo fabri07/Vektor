@@ -20,14 +20,26 @@ import uuid
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+    unique_violation_classifier,
+)
 from app.persistence.models._sentinel import SENTINEL_FLAG_KEY
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import SaleEntry
 
 LOCAL_CUSTOMER_NAME = "Local"
+
+# El índice es PARCIAL (``WHERE custom_fields->>'_sentinel' = 'true'``) y por eso
+# PG-only: en SQLite no existe y esta rama no se ejercita. Sin ``columns``, entonces
+# —la forma por columnas de SQLite sería sólo ``customers.tenant_id`` y colisionaría
+# con cualquier otro unique de la tabla—.
+_SENTINEL_CONFLICT = unique_violation_classifier(
+    "sentinel", constraint="uq_customers_sentinel_per_tenant"
+)
 
 
 async def resolve_or_create_local_sentinel(
@@ -58,23 +70,24 @@ async def resolve_or_create_local_sentinel(
         return found
 
     new_id = uuid.uuid4()
-    sentinel = Customer(
-        id=new_id,
-        tenant_id=tenant_id,
-        name=LOCAL_CUSTOMER_NAME,
-        custom_fields={SENTINEL_FLAG_KEY: "true"},
-    )
-    session.add(sentinel)
     try:
-        # Flush dentro de un savepoint para disparar el índice único parcial ahora
-        # (no en el commit del caller): si otra corrida ya lo creó, lo detectamos y
-        # re-queryamos en vez de abortar la transacción entera.
-        async with session.begin_nested():
-            await session.flush()
-    except IntegrityError:
+        # `guarded_savepoint` aporta el ordenamiento (drenar fuera del try, agregar
+        # DENTRO del savepoint) y el clasificador: sin él, una FK rota o un NOT NULL
+        # caerían en el `except` y el re-query devolvería None → se re-propagaba, sí,
+        # pero recién después de ensuciar el diagnóstico. Ver services/_savepoint.py.
+        async with guarded_savepoint(session, _SENTINEL_CONFLICT):
+            session.add(
+                Customer(
+                    id=new_id,
+                    tenant_id=tenant_id,
+                    name=LOCAL_CUSTOMER_NAME,
+                    custom_fields={SENTINEL_FLAG_KEY: "true"},
+                )
+            )
+    except SavepointConflictError as conflict:
         existing = await _find()
         if existing is None:  # pragma: no cover — el índice garantiza que exista
-            raise
+            raise conflict.original from conflict
         return existing
     return new_id
 

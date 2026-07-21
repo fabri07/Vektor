@@ -739,19 +739,24 @@ async def test_ambiguous_log_includes_row_ref_candidate_ids_and_strategy(
     assert len(ambiguous_events) == 1
     event = ambiguous_events[0]
     assert event["count"] == 2
-    assert event["match_strategy"] == "lower_trim"
+    # F2-T2: el lookup name-only de F1 (``_find_product_by_name_tolerant`` +
+    # ``_load_product_name_lookup_indexes``) fue reemplazado por el motor de
+    # identidad de ``test_ingestion_product_identity.py`` — ``match_strategy``
+    # ahora es el ``status`` de ``ProductResolution`` ("ambiguous"/"conflict"),
+    # no la estrategia interna de match de nombre ("lower_trim"/etc.).
+    assert event["match_strategy"] == "ambiguous"
     assert set(event["candidate_ids"]) == expected_ids
     assert "row_ref" in event
     assert "uploaded_file_id" in event
 
 
 @pytest.mark.asyncio
-async def test_find_product_by_name_tolerant_helper_unit(
+async def test_load_product_identity_indexes_and_resolve_helper_unit(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Unit test directo del helper redisañado (FIX 2/4): índices pre-cargados
-    UNA vez, ``candidate_ids``/``strategy`` correctos para los 3 casos
-    (exacto único, fallback normalizado único, ambiguo)."""
+    """Unit test directo del motor de identidad (F2-T2, reemplaza al helper
+    name-only de F1 eliminado): índices pre-cargados UNA vez,
+    ``_resolve_product_identity`` resuelve/crea/ambigua correctamente."""
     unique = (
         await _create_products(db_session, sample_tenant.tenant_id, ["Agua 500ml"])
     )[0]
@@ -762,44 +767,38 @@ async def test_find_product_by_name_tolerant_helper_unit(
         db_session, sample_tenant.tenant_id, ["Fanta-Naranja", "Fanta_Naranja"]
     )
 
-    exact_index, norm_index = await importer._load_product_name_lookup_indexes(
+    indexes = await importer._load_product_identity_indexes(
         db_session, sample_tenant.tenant_id
     )
 
-    # (1) match exacto único → strategy="lower_trim".
-    chosen, count, candidate_ids, strategy = await importer._find_product_by_name_tolerant(
-        db_session, "Agua 500ml", exact_index=exact_index, norm_index=norm_index
+    # (1) match exacto único → resolved.
+    resolution = importer._resolve_product_identity(
+        "Agua 500ml", None, None, indexes=indexes
     )
-    assert chosen is not None
-    assert chosen.id == unique.id
-    assert count == 1
-    assert candidate_ids == [unique.id]
-    assert strategy == "lower_trim"
+    assert resolution.status == "resolved"
+    assert resolution.product_id == unique.id
 
-    # (2) sin match exacto, fallback normalizado único → strategy="normalized_python".
-    chosen, count, candidate_ids, strategy = await importer._find_product_by_name_tolerant(
-        db_session, "Sprite 500ml", exact_index=exact_index, norm_index=norm_index
+    # (2) fallback normalizado único (guion → espacio) → resolved.
+    resolution = importer._resolve_product_identity(
+        "Sprite 500ml", None, None, indexes=indexes
     )
-    assert chosen is not None
-    assert chosen.id == hyphen_variant.id
-    assert count == 1
-    assert candidate_ids == [hyphen_variant.id]
-    assert strategy == "normalized_python"
+    assert resolution.status == "resolved"
+    assert resolution.product_id == hyphen_variant.id
 
-    # (3) ambiguo por fallback normalizado → chosen=None, count real, candidatos completos.
-    chosen, count, candidate_ids, strategy = await importer._find_product_by_name_tolerant(
-        db_session, "Fanta Naranja", exact_index=exact_index, norm_index=norm_index
+    # (3) ambiguo por fallback normalizado → sin desambiguador, candidatos completos.
+    resolution = importer._resolve_product_identity(
+        "Fanta Naranja", None, None, indexes=indexes
     )
-    assert chosen is None
-    assert count == 2
-    assert set(candidate_ids) == {p.id for p in ambiguous_pair}
-    assert strategy == "normalized_python"
+    assert resolution.status == "ambiguous"
+    assert resolution.product_id is None
+    assert {c["id"] for c in resolution.candidates} == {
+        str(p.id) for p in ambiguous_pair
+    }
 
-    # (4) sin ningún match → strategy="none".
-    chosen, count, candidate_ids, strategy = await importer._find_product_by_name_tolerant(
-        db_session, "Producto Inexistente", exact_index=exact_index, norm_index=norm_index
+    # (4) sin ningún match → create.
+    resolution = importer._resolve_product_identity(
+        "Producto Inexistente", None, None, indexes=indexes
     )
-    assert chosen is None
-    assert count == 0
-    assert candidate_ids == []
-    assert strategy == "none"
+    assert resolution.status == "create"
+    assert resolution.product_id is None
+    assert resolution.candidates == []

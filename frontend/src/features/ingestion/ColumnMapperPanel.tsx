@@ -33,6 +33,7 @@ const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> 
   ],
   product: [
     { value: "sku", label: "Código (SKU)" },
+    { value: "barcode", label: "Código de barras (EAN/UPC)" },
     { value: "name", label: "Nombre" },
     { value: "sale_price_ars", label: "Precio de venta" },
     { value: "unit_cost_ars", label: "Costo unitario" },
@@ -55,6 +56,42 @@ const SOURCE_LABELS: Record<string, string> = {
   llm: "IA",
   none: "—",
 };
+
+// F4: un error de confirm que NO es de mapeo — 409 (confirm concurrente / archivo
+// ya importado o importándose) o timeout del cliente (el import sigue en curso en
+// el backend). No debe pintar el banner rojo de "revisá los campos".
+function isTransientConfirmError(error: unknown): boolean {
+  const e = error as { response?: { status?: number }; code?: string } | null;
+  return e?.response?.status === 409 || e?.code === "ECONNABORTED";
+}
+
+// Maneja el error transitorio del confirm: avisa amable y refresca la lista.
+// Devuelve true si lo manejó (para no caer en el banner de error de mapeo).
+function handleTransientConfirmError(
+  error: unknown,
+  toast: (msg: string, variant: "warning" | "info") => void,
+  invalidate: () => void,
+): boolean {
+  const e = error as { response?: { status?: number }; code?: string } | null;
+  if (e?.response?.status === 409) {
+    toast(
+      "Ya se está importando este archivo o ya se importó — actualizá la lista",
+      "warning",
+    );
+    invalidate();
+    return true;
+  }
+  if (e?.code === "ECONNABORTED") {
+    // Timeout del cliente: el import sigue corriendo en el backend. No es un error.
+    toast(
+      "El import sigue en curso — revisá la lista en unos segundos",
+      "info",
+    );
+    invalidate();
+    return true;
+  }
+  return false;
+}
 
 // FASE 2 (A2)/A3: color de la confianza del mapeo (verde alto / ámbar medio / rojo bajo).
 function confidenceColor(confidence: number): string {
@@ -546,6 +583,13 @@ function MultiContextMapper({
       for (const w of result.warnings ?? []) toast(w, "warning");
       onDone();
     },
+    onError: (error) => {
+      // 409 (concurrente/ya importado) o timeout (import en curso): no es un error
+      // de mapeo — se avisa amable y se refresca la lista, sin banner rojo.
+      handleTransientConfirmError(error, toast, () =>
+        queryClient.invalidateQueries({ queryKey: ["ingestion-files"] }),
+      );
+    },
   });
 
   const cancelMutation = useMutation({
@@ -605,11 +649,12 @@ function MultiContextMapper({
         />
       )}
 
-      {confirmMutation.isError && (
-        <p className="mt-3 text-xs text-vk-danger">
-          {errDetail ?? "Error al confirmar. Revisá los campos requeridos de cada hoja."}
-        </p>
-      )}
+      {confirmMutation.isError &&
+        !isTransientConfirmError(confirmMutation.error) && (
+          <p className="mt-3 text-xs text-vk-danger">
+            {errDetail ?? "Error al confirmar. Revisá los campos requeridos de cada hoja."}
+          </p>
+        )}
 
       <div className="mt-4 flex items-center gap-2">
         <button
@@ -624,7 +669,7 @@ function MultiContextMapper({
         <button
           type="button"
           onClick={() => cancelMutation.mutate()}
-          disabled={cancelMutation.isPending}
+          disabled={cancelMutation.isPending || confirmMutation.isPending}
           className="rounded-lg border border-vk-border-w px-3 py-1.5 text-xs text-vk-text-secondary hover:bg-vk-bg-light disabled:opacity-50 transition-colors"
         >
           Cancelar
@@ -742,6 +787,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       // toasts (compras sin proveedor/producto, filas a "Otros").
       for (const w of result.warnings ?? []) toast(w, "warning");
       onDone();
+    },
+    onError: (error) => {
+      // 409 (concurrente/ya importado) o timeout (import en curso): no es un error
+      // de mapeo — se avisa amable y se refresca la lista, sin banner rojo.
+      handleTransientConfirmError(error, toast, () =>
+        queryClient.invalidateQueries({ queryKey: ["ingestion-files"] }),
+      );
     },
   });
 
@@ -1122,12 +1174,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         />
       )}
 
-      {/* Error de API */}
-      {confirmMutation.isError && (
-        <p className="mb-2 text-xs text-vk-danger">
-          Error al confirmar. Verificá que los campos requeridos estén mapeados.
-        </p>
-      )}
+      {/* Error de API (excluye 409/timeout: los maneja el toast, no el banner) */}
+      {confirmMutation.isError &&
+        !isTransientConfirmError(confirmMutation.error) && (
+          <p className="mb-2 text-xs text-vk-danger">
+            Error al confirmar. Verificá que los campos requeridos estén mapeados.
+          </p>
+        )}
 
       {/* Acciones */}
       <div className="flex items-center gap-2">
@@ -1152,7 +1205,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         <button
           type="button"
           onClick={() => cancelMutation.mutate()}
-          disabled={cancelMutation.isPending}
+          disabled={cancelMutation.isPending || confirmMutation.isPending}
           className="rounded-lg border border-vk-border-w px-3 py-1.5 text-xs text-vk-text-secondary hover:bg-vk-bg-light disabled:opacity-50 transition-colors"
         >
           Cancelar

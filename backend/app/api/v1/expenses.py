@@ -7,7 +7,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
+from app.api.v1.deps import (
+    ensure_tenant_not_under_maintenance,
+    get_current_tenant,
+    require_modify_access,
+    require_role,
+)
 from app.application.services import tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
@@ -169,7 +174,10 @@ async def list_expenses(
 async def create_expense(
     body: CreateExpenseRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
+    # products/others/suppliers (ver create_product).
     _: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ExpenseEntry:

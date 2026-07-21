@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
+    ensure_tenant_not_under_maintenance,
     get_current_tenant,
     require_modify_access,
     require_owner_stepup,
@@ -237,7 +238,10 @@ async def create_receipt(
     supplier_id: UUID,
     body: CreateReceiptRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
+    # lockeado recibiría 423 en vez de 403.
     user: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ReceiptResponse:

@@ -62,6 +62,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import ingestion_import_service as _iis
+from app.application.services import maintenance_lock_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
@@ -1005,6 +1006,10 @@ async def apply_reread(
 
     Si se pasa ``run`` (creado por ``start_background_apply`` y ejecutado por el
     worker), se reusa; si no, se crea uno (camino síncrono / tests)."""
+    # F3-T3: la relectura crea/void productos+stock. Shared lock ANTES de mutar.
+    # No-op en SQLite.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)

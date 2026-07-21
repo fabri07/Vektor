@@ -39,7 +39,14 @@ async def emit_event(
     confidence: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:
-    """Inserta un PipelineEvent. Fail-silent: loguea y sigue ante cualquier error."""
+    """Inserta un PipelineEvent. Fail-silent: loguea y sigue ante cualquier error.
+
+    El flush corre dentro de un SAVEPOINT propio (`begin_nested`): si el INSERT
+    falla, se revierte SOLO ese savepoint (async-safe) y la transacción del caller
+    queda limpia. Sin esto, un flush fallido dejaría el subtx de Postgres en
+    estado abortado y envenenaría al caller (p.ej. abortaría un import ya exitoso
+    cuando `emit_event` corre dentro del savepoint del confirm — F4).
+    """
     try:
         event = PipelineEvent(
             trace_id=_as_uuid(trace_id),
@@ -53,8 +60,9 @@ async def emit_event(
             confidence=confidence,
             detail=detail,
         )
-        session.add(event)
-        await session.flush()
+        async with session.begin_nested():
+            session.add(event)
+            await session.flush()
     except Exception as exc:  # noqa: BLE001 — la observabilidad nunca debe romper el pipeline
         logger.warning(
             "pipeline_event.emit_failed",

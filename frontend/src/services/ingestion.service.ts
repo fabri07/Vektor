@@ -6,6 +6,14 @@ import type { AxiosError } from "axios";
 // corre en background (Celery) y el frontend hace polling del estado.
 const REREAD_TIMEOUT_MS = 120_000;
 
+// F4: el confirm corre el import SÍNCRONO (inline) y puede tardar minutos en
+// archivos grandes sobre Neon. El timeout global de 15s cortaría al usuario con
+// un error aunque el backend siga importando (y un reintento daría 409). Se le da
+// margen POR ENCIMA del TTL del lease del backend (15 min) para que un import
+// legítimamente largo termine; si aun así vence, el caller lo trata como
+// "sigue en curso" (no como error) y refresca el estado desde la lista.
+const CONFIRM_TIMEOUT_MS = 16 * 60_000; // 16 min > TTL del lease (15 min)
+
 export interface UploadedFileItem {
   id: string;
   original_filename: string;
@@ -252,6 +260,7 @@ export const ingestionService = {
         context_entity: contextEntity ?? {},
         stock_treatment: stockTreatment ?? null,
       },
+      { timeout: CONFIRM_TIMEOUT_MS },
     );
     return res.data;
   },

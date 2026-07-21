@@ -16,18 +16,20 @@ import hashlib
 import io
 import unittest.mock
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
+    PROCESSING_STATUS_IMPORTING,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     UploadedFile,
 )
@@ -863,3 +865,280 @@ class TestIngestionWorkers:
         headers = ["nombre", "precio", "columna_desconocida"]
         result = _analyze_headers(headers)
         assert result["confidence"] == "MEDIUM"
+
+
+# ── F4: lease del confirm (concurrencia) ────────────────────────────────────────
+
+
+def _importing_file_kwargs(tenant_id: uuid.UUID, *, started_at: datetime) -> dict[str, Any]:
+    """Kwargs de un UploadedFile en estado IMPORTING con lease tomado."""
+    return {
+        "tenant_id": tenant_id,
+        "uploaded_by": None,
+        "original_filename": "importing.xlsx",
+        "s3_key": "uploads/test/uuid/importing.xlsx",
+        "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "size_bytes": 1024,
+        "purpose": "ventas",
+        "status": "uploaded",
+        "processing_status": PROCESSING_STATUS_IMPORTING,
+        "import_attempt_id": uuid.uuid4(),
+        "import_started_at": started_at,
+        "import_phase": "inserting",
+        "parsed_summary_json": {
+            "confidence": "HIGH",
+            "file_type": "spreadsheet",
+            "inferred_type": "ventas",
+            "has_venta": True,
+            "has_fecha": True,
+            "row_count": 1,
+            "ventas_detectadas": [
+                {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
+            ],
+        },
+    }
+
+
+@pytest.mark.asyncio
+class TestConfirmLeaseF4:
+    async def test_confirm_success_clears_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Un confirm exitoso deja DONE y limpia el lease por completo."""
+        response = await client.post(
+            f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True, "gastos": False}},
+        )
+        assert response.status_code == 200
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == confirmed_file.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_DONE
+        assert refreshed.import_attempt_id is None
+        assert refreshed.import_started_at is None
+        assert refreshed.import_phase is None
+
+    async def test_confirm_while_importing_returns_409(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Un IMPORTING vivo (lease no vencido) rechaza un segundo confirm con 409."""
+        record = UploadedFile(
+            **_importing_file_kwargs(
+                sample_tenant.tenant_id, started_at=datetime.now(UTC)
+            )
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True, "gastos": False}},
+        )
+        assert response.status_code == 409
+        assert "importando" in response.json()["detail"].lower()
+
+    async def test_confirm_stale_importing_takeover_succeeds(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Un IMPORTING con import_started_at viejo (proceso muerto) es retomable."""
+        stale = datetime.now(UTC) - timedelta(hours=1)  # TTL default = 15 min
+        record = UploadedFile(**_importing_file_kwargs(sample_tenant.tenant_id, started_at=stale))
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True, "gastos": False}},
+        )
+        assert response.status_code == 200
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_DONE
+        assert refreshed.import_attempt_id is None
+
+    async def test_confirm_failure_restores_needs_confirmation_and_clears_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """Si el import falla tras tomar el lease, el compensador revierte el
+        savepoint, restaura NEEDS_CONFIRMATION y limpia el lease (re-confirmable)."""
+        with unittest.mock.patch(
+            "app.api.v1.ingestion.insert_confirmed_data",
+            new_callable=unittest.mock.AsyncMock,
+            side_effect=HTTPException(status_code=400, detail="boom"),
+        ):
+            response = await client.post(
+                f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+                headers=auth_headers,
+                json={"confirmed_fields": {"ventas": True, "gastos": False}},
+            )
+        assert response.status_code == 400
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == confirmed_file.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+        assert refreshed.import_started_at is None
+        assert refreshed.import_phase is None
+
+    async def test_failure_after_f5_savepoints_still_compensates_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F5-A × F4: los savepoints anidados no rompen la compensación del lease.
+
+        El test anterior mockea ``insert_confirmed_data`` entero, así que falla
+        ANTES de abrir un solo savepoint interno. Acá el import corre de verdad:
+        crea el producto de la compra pasando por ``guarded_savepoint`` (savepoint
+        de 2º nivel bajo ``_import_sp``) y RECIÉN DESPUÉS falla. Es el caso que
+        importa — si el helper dejara la sesión en un estado raro, el
+        ``_import_sp.rollback()`` + el UPDATE de compensación no podrían correr y
+        el archivo quedaría clavado en IMPORTING para siempre.
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="compras.xlsx",
+            s3_key="uploads/test/uuid/compras.xlsx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            size_bytes=1024,
+            purpose="gastos",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "gastos",
+                "has_gasto": True,
+                "row_count": 1,
+                "gastos_detectados": [
+                    {
+                        "fecha": "2024-02-01",
+                        "categoria": "mercaderia",
+                        "producto": "Coca Cola 500ml",
+                        "sku": "COCA-500",
+                        "cantidad": "24",
+                        "monto": "19200",
+                        "costo_unitario": "800",
+                        "forma_pago": "efectivo",
+                    }
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        # Falla en el último paso ANTES de soltar el savepoint del import: para
+        # entonces el producto ya se creó dentro de un savepoint anidado.
+        with unittest.mock.patch(
+            "app.api.v1.ingestion.pipeline_event_service.emit_event",
+            new_callable=unittest.mock.AsyncMock,
+            side_effect=HTTPException(
+                status_code=503, detail="falla despues de los savepoints"
+            ),
+        ):
+            response = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/confirm",
+                headers=auth_headers,
+                json={"confirmed_fields": {"ventas": False, "gastos": True}},
+            )
+        assert response.status_code == 503
+
+        # ``refresh`` explícito: ``record`` sigue en el identity map y quedó
+        # expirado por el request, así que un ``select`` devolvería la MISMA
+        # instancia y el primer atributo que se lea dispararía un lazy load
+        # síncrono (MissingGreenlet) en vez de leer la fila.
+        await db_session.refresh(record)
+        assert record.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert record.import_attempt_id is None
+        assert record.import_started_at is None
+        assert record.import_phase is None
+
+        # El savepoint del import revirtió TODO lo parcial: ni producto ni gasto.
+        products = (
+            (
+                await db_session.execute(
+                    select(Product).where(Product.tenant_id == sample_tenant.tenant_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert products == [], "el rollback del savepoint no dejó datos a medias"
+
+    async def test_delete_importing_returns_409(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """No se puede borrar un archivo con un import en curso (409)."""
+        record = UploadedFile(
+            **_importing_file_kwargs(sample_tenant.tenant_id, started_at=datetime.now(UTC))
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.delete(
+            f"/api/v1/ingestion/files/{record.id}",
+            headers=auth_headers,
+        )
+        assert response.status_code == 409
+        assert "importa" in response.json()["detail"].lower()
+
+    async def test_delete_non_importing_soft_deletes(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """El CAS de borrado sigue soft-deleteando un archivo normal (204)."""
+        response = await client.delete(
+            f"/api/v1/ingestion/files/{confirmed_file.id}",
+            headers=auth_headers,
+        )
+        assert response.status_code == 204
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == confirmed_file.id)
+            )
+        ).scalar_one()
+        assert refreshed.deleted_at is not None

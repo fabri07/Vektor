@@ -16,6 +16,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.stock_service import (
@@ -287,3 +288,40 @@ async def test_chat_register_sale_insufficient_stock_raises_and_creates_nothing(
     ).scalar_one()
     assert remaining == 0
     assert product.stock_units == 2  # intacto
+
+
+@pytest.mark.asyncio
+async def test_decrement_for_sale_no_se_traga_violaciones_ajenas(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Una IntegrityError que NO es la carrera de idempotencia se re-propaga.
+
+    Antes de F5-B acá había un ``except IntegrityError`` a secas: cualquier violación
+    —la del unique nuevo de ``inventory_balances``, una FK, un NOT NULL— salía como
+    ``None``, o sea "no había nada que descontar". El resultado era una venta
+    persistida que nunca descuenta stock, sin log ni error, detectable recién semanas
+    después como divergencia sin causa en el chequeo semanal de integridad.
+
+    Se simula con una violación arbitraria dentro del savepoint (no la del índice
+    vigilado) y se exige que SALGA, en vez de convertirse en un no-op silencioso.
+    """
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=10)
+    sale = await _make_sale(db_session, tid, product.id, quantity=3)
+
+    async def _boom(**kwargs: object) -> InventoryMovement:
+        raise IntegrityError(
+            "INSERT INTO inventory_balances ...",
+            {},
+            Exception('null value in column "tenant_id" violates not-null constraint'),
+        )
+
+    with (
+        unittest.mock.patch(
+            "app.application.services.stock_service.decrement_stock", side_effect=_boom
+        ),
+        pytest.raises(IntegrityError),
+    ):
+        await decrement_for_sale(sale, db_session)
+
+    await db_session.rollback()

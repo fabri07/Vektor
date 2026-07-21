@@ -5,11 +5,16 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.services import maintenance_lock_service
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+    unique_violation_classifier,
+)
 from app.application.services.inventory_movement_origin import ensure_utc
 from app.domain.product import effective_threshold
 from app.persistence.models.audit import DecisionAuditLog
@@ -21,6 +26,30 @@ from app.persistence.models.transaction import SaleEntry
 # UN movimiento 'sale' vivo (garantizado por el índice único parcial de la migración
 # 20260729_0001). Habilita reversa exacta por venta e idempotencia sync+evento.
 _SALE_SOURCE_PREFIX = "sale:"
+
+# F5-A: a diferencia de los sentinelas, este índice es TOTAL (sin ``WHERE``), así que
+# también existe en SQLite — donde el error viene por columnas y no por nombre. Se
+# declaran las dos formas para que el clasificador discrimine en ambos motores.
+# Público: lo comparte ``ingestion_import_service._apply_purchase_to_stock``, el otro
+# sitio que crea balances. Un segundo clasificador podría divergir del nombre real.
+BALANCE_CONFLICT = unique_violation_classifier(
+    "balance",
+    constraint="uq_inventory_balances_tenant_product",
+    columns=("inventory_balances.tenant_id", "inventory_balances.product_id"),
+)
+
+# Idempotencia del descuento de venta EN VIVO: el índice parcial de la migración
+# 20260729_0001 sobre (tenant_id, source_event_id) para los movimientos 'sale' vivos.
+# Discriminar importa más desde F5-B: acá abajo había un ``except IntegrityError`` a
+# secas que, además de esta carrera, se tragaba la violación del unique NUEVO de
+# ``inventory_balances`` (y cualquier FK/NOT NULL) devolviendo ``None`` — o sea una
+# venta persistida que NUNCA descuenta stock, sin log ni error, y que recién aparece
+# semanas después como divergencia sin causa en el chequeo de integridad.
+LIVE_SALE_EVENT_CONFLICT = unique_violation_classifier(
+    "live_sale_event",
+    constraint="uq_inventory_movements_live_sale_event",
+    columns=("inventory_movements.tenant_id", "inventory_movements.source_event_id"),
+)
 
 # Mensaje canónico de rechazo por stock insuficiente en una venta EN VIVO. Se muestra
 # TAL CUAL al usuario (chat vía user_message; endpoints REST vía handler global → 400).
@@ -82,6 +111,10 @@ async def check_stock_available(
     Devuelve el ``Product`` bloqueado (queda en el identity map: ``decrement_stock`` lo
     reusa sin reconsultar). Reusable por todos los caminos de venta en vivo.
     """
+    # F3-T3 review: el advisory shared SIEMPRE antes que cualquier FOR UPDATE — si un
+    # writer tomara la fila primero y pidiera el advisory después, podría deadlockear
+    # contra el dedup (que toma el exclusive y luego intentaría lockear la misma fila).
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     product = (
         await db.execute(
             select(Product)
@@ -101,6 +134,12 @@ async def _get_or_create_balance(
     tenant_id: uuid.UUID,
     db: AsyncSession,
 ) -> InventoryBalance:
+    # F3-T3: chokepoint COMÚN de toda mutación de balance/stock (decrement_stock,
+    # increment_stock, register_stock_loss, void_movement, unvoid_movement — y
+    # transitivamente decrement_for_sale/revert_sale_stock, que pasan por acá).
+    # Shared lock ANTES de mutar: barrera de exclusión mutua real contra el dedup
+    # (que toma el exclusive). No-op en SQLite.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     result = await db.execute(
         select(InventoryBalance).where(
             InventoryBalance.product_id == product.id,
@@ -108,15 +147,38 @@ async def _get_or_create_balance(
         )
     )
     balance = result.scalar_one_or_none()
-    if balance is None:
-        balance = InventoryBalance(
-            tenant_id=tenant_id,
-            product_id=product.id,
-            current_qty=product.stock_units,
-            reserved_qty=0,
-        )
-        db.add(balance)
-        await db.flush()
+    if balance is not None:
+        return balance
+
+    # F5-A: el SELECT de arriba corre bajo el lock SHARED, que no serializa writers
+    # entre sí — dos requests concurrentes del mismo producto pasan las dos y crean
+    # dos filas de balance. El savepoint deja que el índice único
+    # (``uq_inventory_balances_tenant_product``, F5-B) resuelva la carrera sin
+    # abortar la transacción de la perdedora.
+    #
+    # ``current_qty`` sale de ``product.stock_units``, NO de sumar el ledger: el
+    # stock no es Σ(inventory_movements) y recomputarlo desde ahí lo corrompería.
+    try:
+        async with guarded_savepoint(db, BALANCE_CONFLICT):
+            balance = InventoryBalance(
+                tenant_id=tenant_id,
+                product_id=product.id,
+                current_qty=product.stock_units,
+                reserved_qty=0,
+            )
+            db.add(balance)
+    except SavepointConflictError as conflict:
+        existing = (
+            await db.execute(
+                select(InventoryBalance).where(
+                    InventoryBalance.product_id == product.id,
+                    InventoryBalance.tenant_id == tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:  # pragma: no cover — el índice garantiza que exista
+            raise conflict.original from conflict
+        return existing
     return balance
 
 
@@ -129,6 +191,8 @@ async def decrement_stock(
     *,
     occurred_at: datetime | None = None,
 ) -> InventoryMovement:
+    # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     product = await db.get(Product, product_id)
     if product is None or product.tenant_id != tenant_id:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
@@ -193,9 +257,21 @@ async def increment_stock(
     supplier_id: uuid.UUID | None = None,
     update_product_cost: bool = True,
     occurred_at: datetime | None = None,
+    defer_event: bool = False,
 ) -> InventoryMovement:
-    product = await db.get(Product, product_id)
-    if product is None or product.tenant_id != tenant_id:
+    # F3-T3 review: advisory shared ANTES del FOR UPDATE de fila (orden fijo, evita
+    # deadlock AB-BA contra el exclusive del dedup).
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+    # Serializa compras concurrentes del mismo producto para no perder incrementos
+    # en ``stock_units``/``InventoryBalance.current_qty``.
+    product = (
+        await db.execute(
+            select(Product)
+            .where(Product.id == product_id, Product.tenant_id == tenant_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if product is None:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
 
     balance = await _get_or_create_balance(product, tenant_id, db)
@@ -225,14 +301,15 @@ async def increment_stock(
     db.add(movement)
     await db.flush()
 
-    EventBus.emit(
-        "STOCK_INCREASED",
-        {
-            "tenant_id": str(tenant_id),
-            "product_id": str(product_id),
-            "qty": qty,
-        },
-    )
+    event_payload = {
+        "tenant_id": str(tenant_id),
+        "product_id": str(product_id),
+        "qty": qty,
+    }
+    if defer_event:
+        EventBus.emit_after_commit(db, "STOCK_INCREASED", event_payload)
+    else:
+        EventBus.emit("STOCK_INCREASED", event_payload)
 
     return movement
 
@@ -246,6 +323,8 @@ async def register_stock_loss(
     db: AsyncSession,
 ) -> InventoryMovement:
     """HIGH risk: decrements stock and creates a reinforced audit entry."""
+    # F3-T3 review: acquire al tope del entry point.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     product = await db.get(Product, product_id)
     if product is None or product.tenant_id != tenant_id:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
@@ -310,6 +389,8 @@ async def void_movement(
     """
     if movement.voided_at is not None:
         return
+    # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
+    await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
     product = await db.get(Product, movement.product_id)
     if product is not None and product.tenant_id == movement.tenant_id:
         # Sembrar el balance ANTES de mutar stock_units: _get_or_create_balance inicializa
@@ -333,6 +414,8 @@ async def unvoid_movement(
     """
     if movement.voided_at is None:
         return
+    # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
+    await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
     product = await db.get(Product, movement.product_id)
     if product is not None and product.tenant_id == movement.tenant_id:
         balance = await _get_or_create_balance(product, movement.tenant_id, db)
@@ -413,6 +496,10 @@ async def decrement_for_sale(
         return None
     if await _live_sale_movement(sale.id, sale.tenant_id, db) is not None:
         return None
+    # F3-T3 review: acquire explícito acá también (aunque check_stock_available ya lo
+    # toma) para que el orden quede garantizado en este entry point sin depender de
+    # que el próximo cambio en check_stock_available lo preserve.
+    await maintenance_lock_service.acquire_write_lock_shared(db, sale.tenant_id)
     # NO se permite stock negativo: validar (con lock) antes de descontar. Si no alcanza,
     # levanta InsufficientStockError y la venta NO se descuenta (ni se persiste: el request
     # revierte). El producto bloqueado queda en el identity map → decrement_stock lo reusa.
@@ -424,7 +511,7 @@ async def decrement_for_sale(
     if isinstance(occurred, date) and not isinstance(occurred, datetime):
         occurred = datetime(occurred.year, occurred.month, occurred.day)
     try:
-        async with db.begin_nested():
+        async with guarded_savepoint(db, LIVE_SALE_EVENT_CONFLICT):
             return await decrement_stock(
                 product_id=sale.product_id,
                 tenant_id=sale.tenant_id,
@@ -433,7 +520,9 @@ async def decrement_for_sale(
                 db=db,
                 occurred_at=occurred,
             )
-    except IntegrityError:
+    except SavepointConflictError:
+        # El movimiento ya lo creó la otra rama (request vs evento) → no-op, que es la
+        # semántica idempotente documentada arriba.
         return None
 
 
@@ -452,6 +541,9 @@ async def revert_sale_stock(
     movement = await _live_sale_movement(sale_id, tenant_id, db)
     if movement is None:
         return False
+    # F3-T3 review: acquire explícito acá también (void_movement ya lo toma) para
+    # fijar el orden en este entry point independientemente de void_movement.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     await void_movement(movement, db)
     return True
 

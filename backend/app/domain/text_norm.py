@@ -13,6 +13,7 @@ migración de hashes ya persistidos.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 
@@ -21,3 +22,52 @@ def normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     return " ".join(s.casefold().split())
+
+
+# Rango de longitudes plausibles para un código de barras retail: EAN-8 (8),
+# UPC-A (12), EAN-13 (13), ITF-14/GTIN-14 (14). Se admite todo el rango 8–14
+# para no rechazar códigos internos cortos legítimos.
+_BARCODE_MIN_DIGITS = 8
+_BARCODE_MAX_DIGITS = 14
+
+
+def normalize_barcode(s: str | None) -> str | None:
+    """Código de barras normalizado: SOLO dígitos, y solo si el resultado tiene
+    una longitud PLAUSIBLE de barcode (8–14 dígitos). None/vacío → None.
+
+    El gate de longitud evita colisiones falsas: un SKU o nombre con dígitos
+    embebidos (``"producto-123"`` → ``"123"``, ``"ABC123"`` → ``"123"``) NO es
+    un código de barras y debe caer a None, no fusionarse con otros productos
+    por esos 3 dígitos. El campo raw se preserva aparte (columna ``barcode``);
+    esto normaliza solo la clave de matching.
+    """
+    if not s:
+        return None
+    digits = re.sub(r"\D", "", s)
+    if not (_BARCODE_MIN_DIGITS <= len(digits) <= _BARCODE_MAX_DIGITS):
+        return None
+    return digits
+
+
+def normalize_sku(s: str | None) -> str | None:
+    """SKU normalizado (``normalize_text``). None/vacío → None."""
+    if not s:
+        return None
+    return normalize_text(s) or None
+
+
+def normalize_product_name(s: str | None) -> str:
+    """Nombre de producto normalizado: colapsa ``[-_]`` → espacio y luego
+    ``normalize_text`` (superset para matching: 'Coca-Cola' == 'Coca Cola' ==
+    'coca_cola'). '' si vacío.
+    """
+    if not s:
+        return ""
+    return normalize_text(re.sub(r"[-_]+", " ", s))
+
+
+def normalize_brand(s: str | None) -> str | None:
+    """Marca normalizada (``normalize_text``). None/vacío → None."""
+    if not s:
+        return None
+    return normalize_text(s) or None

@@ -20,6 +20,25 @@ jobs:
       run:
         working-directory: backend
 
+    # Postgres real para los tests de concurrencia (advisory locks F3 + lease F4):
+    # los primitivos que hacen la exclusión mutua sólo existen en Postgres, en
+    # SQLite son no-op. Sin esto la garantía de concurrencia no queda cubierta
+    # contra regresiones (ver test_maintenance_lock_pg.py / test_ingestion_lease_pg.py).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vektor
+          POSTGRES_PASSWORD: vektor
+          POSTGRES_DB: vektor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout code
@@ -83,6 +102,60 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under=60 \
             -v
+
+      # ── 6b. Alembic — validar la MIGRACIÓN sobre Postgres real ────────────────
+      # `create_all` prueba el modelo ORM, NO la migración. Correr `upgrade head`
+      # contra el Postgres del service valida toda la cadena Alembic desde cero
+      # (falla el CI si una migración no aplica en Postgres, que SQLite no detecta).
+      - name: Alembic — upgrade head (Postgres)
+        env:
+          # DATABASE_URL (postgresql://) → env.py lo convierte a psycopg2 (sync).
+          # El resto es por si algún módulo importado carga Settings (CI sin .env).
+          DATABASE_URL: "postgresql://vektor:vektor@localhost:5432/vektor"
+          SECRET_KEY: "ci-test-secret-key-not-for-production"
+          ENVIRONMENT: "test"
+          ALLOWED_ORIGINS: "http://localhost:3000"
+          S3_ENDPOINT_URL: ""
+          S3_ACCESS_KEY_ID: ""
+          S3_SECRET_ACCESS_KEY: ""
+          S3_BUCKET_NAME: "vektor-test"
+          SMTP_HOST: "localhost"
+          SMTP_PORT: "1025"
+          SMTP_USER: ""
+          SMTP_PASSWORD: ""
+          SMTP_FROM_EMAIL: "test@vektor.app"
+          ENABLE_EMAIL_VERIFICATION: "false"
+        run: alembic upgrade head
+
+      # ── 6c. pytest — tests de concurrencia contra Postgres real ───────────────
+      # Corre SOLO los tests marcados `postgres` (advisory locks F3 + lease F4 +
+      # contención de savepoints F5-A + índices únicos y migración F5-B) con
+      # TEST_PG_DSN apuntando al service, sobre el schema recién migrado.
+      # El paso 6b de arriba ya ejerció el preflight y el CREATE CONCURRENTLY de
+      # F5-B al aplicar la cadena: si la migración no aplica, el CI corta ahí.
+      # Sin cobertura (subconjunto acotado; la cobertura la mide el paso 6).
+      - name: pytest — integración Postgres (concurrencia)
+        env:
+          # TEST_PG_DSN activa los tests marcados `postgres` (apunta al service).
+          # El resto del env es el MISMO que el paso SQLite: el app (conftest →
+          # Settings) sigue usando SQLite; los tests PG abren su propio engine.
+          TEST_PG_DSN: "postgresql+asyncpg://vektor:vektor@localhost:5432/vektor"
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          REDIS_URL: "redis://localhost:6379/0"
+          SECRET_KEY: "ci-test-secret-key-not-for-production"
+          ENVIRONMENT: "test"
+          ALLOWED_ORIGINS: "http://localhost:3000"
+          S3_ENDPOINT_URL: ""
+          S3_ACCESS_KEY_ID: ""
+          S3_SECRET_ACCESS_KEY: ""
+          S3_BUCKET_NAME: "vektor-test"
+          SMTP_HOST: "localhost"
+          SMTP_PORT: "1025"
+          SMTP_USER: ""
+          SMTP_PASSWORD: ""
+          SMTP_FROM_EMAIL: "test@vektor.app"
+          ENABLE_EMAIL_VERIFICATION: "false"
+        run: pytest -m postgres --no-cov -v
 
       # ── 7. Docker build (verify only, no push) ───────────────────────────────
       - name: Docker — verify build

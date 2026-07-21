@@ -18,7 +18,15 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services import stock_service, tenant_categories_service
+from app.application.services import (
+    maintenance_lock_service,
+    stock_service,
+    tenant_categories_service,
+)
+from app.application.services.product_identity import (
+    ProductIdentityConflictError,
+    add_product_or_reuse,
+)
 from app.domain.product_categories import normalize_product_category
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -93,6 +101,12 @@ async def register_manual_purchase(
     ).scalar_one_or_none()
     if supplier is None:
         raise PurchaseError("Proveedor no encontrado para este negocio.")
+
+    # F3 review final: el advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila
+    # (acá abajo) — si no, deadlockea AB-BA contra el exclusive del script de dedup. Antes
+    # el shared recién se tomaba en increment_stock, después del FOR UPDATE de este método.
+    # Idempotente dentro de la txn: no molesta que stock_service lo pida de nuevo.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
 
     # Rechazar productos existentes repetidos en el comprobante.
     existing_ids = [line.product_id for line in body.lines if line.product_id is not None]
@@ -254,6 +268,20 @@ async def _resolve_product(
         stock_units=0,  # el ingreso lo aplica increment_stock
         custom_fields=custom_fields,
     )
-    session.add(product)
+    # F5-A: alta INTERACTIVA (el usuario está cargando una compra a mano), así que
+    # NO se reusa en silencio: si el SKU ya está tomado por otro producto activo,
+    # elegirle uno sería adivinar sobre una decisión suya. Se le dice cuál es y
+    # decide él —vincular la línea a ese producto, o corregir el SKU—.
+    try:
+        _resolved, _created = await add_product_or_reuse(
+            session, product, on_conflict="raise"
+        )
+    except ProductIdentityConflictError as conflict:
+        clave = "código de barras" if conflict.matched_by == "barcode" else "SKU"
+        raise PurchaseError(
+            f"El {clave} del producto «{name}» ya pertenece a "
+            f"«{conflict.existing.name}». Vinculá la línea a ese producto o "
+            f"corregí el {clave}."
+        ) from conflict
     await session.flush()  # asigna product.id
     return product, True

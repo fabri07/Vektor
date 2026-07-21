@@ -15,6 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import maintenance_lock_service
 from app.application.services.pin_service import PinService
 from app.observability.logger import bind_request_context
 from app.persistence.db.redis_client import get_redis
@@ -151,3 +152,29 @@ async def require_owner_stepup(
         )
     await _require_pin_window(current_user, redis)
     return current_user
+
+
+# ── Mantenimiento (F3-T3 — dedup de productos) ──────────────────────────────────
+
+
+async def ensure_tenant_not_under_maintenance(
+    tenant_id: UUID = Depends(get_current_tenant_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Guard HTTP 423 (fast-fail de UX) mientras corre la deduplicación del tenant.
+
+    NO es la garantía de exclusión mutua real — esa la da el advisory lock
+    transaccional (``maintenance_lock_service.acquire_write_lock_shared``) que
+    cada write boundary toma antes de mutar. Este guard solo evita que el
+    cliente mande un request que sabemos de entrada que va a esperar/fallar;
+    sin el advisory lock quedaría una carrera TOCTOU (un request que ya pasó
+    este chequeo pero escribe mientras el dedup fusiona).
+    """
+    if await maintenance_lock_service.is_locked(session, tenant_id):
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=(
+                "La cuenta está en mantenimiento (deduplicación en curso). "
+                "Reintentá en unos minutos."
+            ),
+        )
