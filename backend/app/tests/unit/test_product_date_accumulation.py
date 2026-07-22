@@ -61,8 +61,19 @@ def _r(alta: str, venc: str = "10/07/2026", stock: str = "5") -> dict[str, Any]:
     return {"producto": "Leche", "vencimiento": venc, "fecha_alta": alta, "stock": stock}
 
 
-def _catalog_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+_MAPPING = {
+    "producto": "name",
+    "vencimiento": "expiry_date",
+    "fecha_alta": "acquired_at",
+    "stock": "stock_units",
+}
+
+
+async def _import_multi(
+    db_session: AsyncSession, tid: uuid.UUID, rows: list[dict[str, Any]]
+) -> None:
+    """Path multi-hoja (_insert_multisheet_data): inferred_type mixed/multi_sheet."""
+    summary = {
         "file_type": "spreadsheet",
         "inferred_type": "stock",
         "multi_sheet": True,
@@ -78,38 +89,46 @@ def _catalog_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ],
         "stock_detectado": [{**r, "__context__": "sheet:Catalogo"} for r in rows],
     }
-
-
-async def _import(
-    db_session: AsyncSession, tid: uuid.UUID, rows: list[dict[str, Any]]
-) -> None:
     await insert_confirmed_data(
         db_session,
         tid,
-        _catalog_summary(rows),
+        summary,
         {"productos": True},
         context_confirmed={"sheet:Catalogo": True},
-        context_mappings={
-            "sheet:Catalogo": {
-                "producto": "name",
-                "vencimiento": "expiry_date",
-                "fecha_alta": "acquired_at",
-                "stock": "stock_units",
-            }
-        },
+        context_mappings={"sheet:Catalogo": _MAPPING},
     )
+
+
+async def _import_single(
+    db_session: AsyncSession, tid: uuid.UUID, rows: list[dict[str, Any]]
+) -> None:
+    """Path single-context (catálogo CSV/XLSX simple): inferred_type=stock SIN
+    multi_sheet → el camino común, el que el review encontró sin cablear."""
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "has_producto": True,
+        "stock_detectado": list(rows),
+    }
+    await insert_confirmed_data(
+        db_session, tid, summary, {"productos": True}, column_mappings=_MAPPING
+    )
+
+
+# Ambos caminos deben cumplir el mismo contrato B1/B2 (paridad CSV/XLSX).
+_IMPORTERS = [
+    pytest.param(_import_single, id="single-context"),
+    pytest.param(_import_multi, id="multi-sheet"),
+]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_importar_catalogo_puebla_fechas_de_producto(
-    db_session: AsyncSession, sample_tenant: Tenant
+    db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
 ) -> None:
     tid = sample_tenant.tenant_id
-    await _import(
-        db_session,
-        tid,
-        [_r("01/03/2026")],
-    )
+    await do_import(db_session, tid, [_r("01/03/2026")])
     await db_session.commit()
     prod = (await db_session.execute(select(Product))).scalar_one()
     assert prod.expiry_date == date(2026, 7, 10)
@@ -118,20 +137,14 @@ async def test_importar_catalogo_puebla_fechas_de_producto(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_reimportar_acumula_acquired_mas_antigua(
-    db_session: AsyncSession, sample_tenant: Tenant
+    db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
 ) -> None:
     tid = sample_tenant.tenant_id
-    # 1er import: alta 01/03. 2do: alta 01/01 (más antigua) → debe quedar la de enero.
-    await _import(
-        db_session, tid,
-        [_r("01/03/2026")],
-    )
+    await do_import(db_session, tid, [_r("01/03/2026")])
     await db_session.commit()
-    await _import(
-        db_session, tid,
-        [_r("01/01/2026")],
-    )
+    await do_import(db_session, tid, [_r("01/01/2026")])
     await db_session.commit()
     prod = (await db_session.execute(select(Product))).scalar_one()
     assert prod.acquired_at is not None
@@ -139,27 +152,38 @@ async def test_reimportar_acumula_acquired_mas_antigua(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_has_user_edits_protege_las_fechas(
-    db_session: AsyncSession, sample_tenant: Tenant
+    db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
 ) -> None:
     tid = sample_tenant.tenant_id
-    await _import(
-        db_session, tid,
-        [_r("01/03/2026")],
-    )
-    # El usuario editó a mano y fijó fechas propias.
+    await do_import(db_session, tid, [_r("01/03/2026")])
     prod = (await db_session.execute(select(Product))).scalar_one()
     prod.has_user_edits = True
     prod.acquired_at = datetime(2025, 1, 1)
     prod.expiry_date = date(2027, 1, 1)
     await db_session.commit()
 
-    # Reimportar con otras fechas NO debe pisarlas.
-    await _import(
-        db_session, tid,
-        [_r("01/01/2026", stock="8")],
-    )
+    await do_import(db_session, tid, [_r("01/01/2026", stock="8")])
     await db_session.commit()
     prod2 = (await db_session.execute(select(Product))).scalar_one()
     assert prod2.acquired_at == datetime(2025, 1, 1)
     assert prod2.expiry_date == date(2027, 1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("do_import", _IMPORTERS)
+async def test_fecha_mapeada_a_mano_ilegible_va_a_otros_sin_crear_producto(
+    db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
+) -> None:
+    """F6-B2 (política de inválida): un vencimiento MAPEADO a mano con valor no
+    vacío ilegible → la fila va a /otros y NO se crea el producto (ni stock)."""
+    from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+    tid = sample_tenant.tenant_id
+    await do_import(db_session, tid, [_r("01/03/2026", venc="no es fecha")])
+    await db_session.commit()
+
+    assert (await db_session.execute(select(Product))).scalars().all() == []
+    rec = (await db_session.execute(select(UnclassifiedRecord))).scalar_one()
+    assert rec.suggested_entity == "product"

@@ -203,9 +203,11 @@ class InventoryRepository:
             .subquery()
         )
 
-        # Costo unitario del movimiento más reciente por producto: se busca el
-        # unit_cost del movimiento cuyo created_at == MAX(created_at) del producto.
-        # (Si hay empate de timestamp, gana cualquiera — caso borde improbable.)
+        # Costo unitario del movimiento más reciente por producto: el unit_cost del
+        # movimiento con la mayor fecha de NEGOCIO (COALESCE(occurred_at, created_at),
+        # F6-B3) — mismo criterio que el MAX de last_purchase_at, así fecha y costo
+        # salen del MISMO movimiento. Desempate por id.desc() para que dos
+        # movimientos con exactamente el mismo instante elijan un costo DETERMINÍSTICO.
         latest_cost = (
             select(
                 InventoryMovement.product_id.label("product_id"),
@@ -213,10 +215,10 @@ class InventoryRepository:
                 func.row_number()
                 .over(
                     partition_by=InventoryMovement.product_id,
-                    # F6-B3: mismo criterio que el MAX de arriba — la fecha y el costo
-                    # de "última compra" deben salir del mismo movimiento (por fecha
-                    # de negocio), no divergir por created_at.
-                    order_by=movement_business_time(InventoryMovement).desc(),
+                    order_by=[
+                        movement_business_time(InventoryMovement).desc(),
+                        InventoryMovement.id.desc(),
+                    ],
                 )
                 .label("rn"),
             )

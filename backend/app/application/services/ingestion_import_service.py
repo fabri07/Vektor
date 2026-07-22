@@ -1722,6 +1722,21 @@ _EXPIRY_COLS: set[str] = {
 }
 
 
+def _product_date_invalid_explicit(
+    raw: Any, parsed: object, explicitly_mapped: bool
+) -> bool:
+    """F6-B2 (política de fecha inválida): True si el usuario MAPEÓ explícitamente el
+    campo de fecha de producto y la celda trae un valor NO vacío que no parseó → la
+    fila va a /otros (sin aplicarse parcialmente). Columna heurística o celda vacía
+    NO cuentan (un producto es válido sin fecha)."""
+    return (
+        explicitly_mapped
+        and raw is not None
+        and str(raw).strip() != ""
+        and parsed is None
+    )
+
+
 def _accumulate_acquired_at(
     existing: datetime | None, new: datetime | None
 ) -> datetime | None:
@@ -2133,6 +2148,12 @@ async def _insert_confirmed_data_impl(
         if sku_col is not None and sku_col == barcode_col:
             sku_col = None
         supplier_col = _find_col(headers, _PROVEEDOR_COLS)
+        # F6-B1/B2: fechas de producto por heurística (la genérica "fecha" no cuenta).
+        # El override explícito y los flags "mapeado a mano" se resuelven abajo.
+        acquired_col = _find_col(headers, _ACQUIRED_COLS)
+        expiry_col = _find_col(headers, _EXPIRY_COLS)
+        _acquired_explicit = False
+        _expiry_explicit = False
 
         # Columnas extra (solo disponibles con column_mappings explícitos)
         qty_col: str | None = None
@@ -2184,6 +2205,14 @@ async def _insert_confirmed_data_impl(
             payment_col = target_to_col.get("payment_method")
             category_col = target_to_col.get("category")
             recurring_col = target_to_col.get("is_recurring")
+            # F6-B2: override explícito de fechas de producto + marca "mapeado a mano"
+            # (necesaria para la política de fecha inválida → /otros).
+            if "acquired_at" in target_to_col:
+                acquired_col = target_to_col["acquired_at"]
+                _acquired_explicit = True
+            if "expiry_date" in target_to_col:
+                expiry_col = target_to_col["expiry_date"]
+                _expiry_explicit = True
 
         # FASE 3: en archivos ambiguos ("general") se honra la confirmación EXPLÍCITA del
         # usuario (no se requiere la señal auto-detectada). Para tipos ya inferidos se
@@ -2628,6 +2657,20 @@ async def _insert_confirmed_data_impl(
             # MISMA: un producto creado por una compra en el bloque de gastos ya
             # quedó registrado y una fila de catálogo posterior lo reusa.
             for _prod_index, row in enumerate(rows):
+                # F6-B2: idempotencia SOLO de las filas capturadas a /otros por fecha
+                # ilegible (ancla propia "producto"). Los productos normales no
+                # fingerprintean (dedupean por identidad/upsert); esta huella solo la
+                # registran las capturas, así una relectura del archivo no re-crea el
+                # UnclassifiedRecord. READ-ONLY acá; se registra recién al capturar.
+                _prod_capture_anchor = (
+                    _import_row_anchor(tenant_id, uploaded_file_id, "producto", _prod_index)
+                    if uploaded_file_id is not None
+                    else None
+                )
+                if _prod_capture_anchor is not None and await _import_row_seen(
+                    session, tenant_id, _prod_capture_anchor, seen_fp
+                ):
+                    continue
                 # A4 (RC2): fila ya importada como compra de mercadería en el bloque
                 # de gastos (creó producto + stock + COGS) → reprocesarla duplicaría
                 # producto/stock. Review F2 #1: o ya fue capturada a "Otros" por
@@ -2640,6 +2683,37 @@ async def _insert_confirmed_data_impl(
                     continue
                 name = str(row.get(nombre_col, "")).strip()[:299]
                 if not name or name.lower() in {"none", "nan", ""}:
+                    continue
+                # F6-B2: fechas de producto (columna mapeada o heurística; la genérica
+                # "fecha" no cuenta). Política de inválida: si un campo MAPEADO A MANO
+                # trae valor no vacío ilegible → la fila va a /otros SIN aplicarse (no
+                # se toca stock, precio ni identidad). acquired_at naive; expiry date.
+                _acq_raw = row.get(acquired_col) if acquired_col else None
+                _acquired = parse_business_datetime(_acq_raw) if _acq_raw is not None else None
+                if _acquired is not None and _acquired.tzinfo is not None:
+                    _acquired = _acquired.replace(tzinfo=None)
+                _exp_raw = row.get(expiry_col) if expiry_col else None
+                _expiry = parse_business_date(_exp_raw) if _exp_raw is not None else None
+                if _product_date_invalid_explicit(
+                    _acq_raw, _acquired, _acquired_explicit
+                ) or _product_date_invalid_explicit(_exp_raw, _expiry, _expiry_explicit):
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        rows=[row],
+                        headers=headers,
+                        source=source,
+                        uploaded_file_id=uploaded_file_id,
+                        context_label=(
+                            "Fecha de producto ilegible en una columna que mapeaste a "
+                            "mano: revisá y completá antes de importar"
+                        ),
+                        suggested_entity="product",
+                    )
+                    if _prod_capture_anchor is not None:
+                        await _register_import_row_fingerprint(
+                            session, tenant_id, _prod_capture_anchor, seen_fp
+                        )
                     continue
                 # La columna "Tienda"/"proveedor" de un CATÁLOGO es marca/origen del
                 # artículo, NO un proveedor: se guarda como atributo del producto en
@@ -2717,6 +2791,8 @@ async def _insert_confirmed_data_impl(
                     _name_n: str = _name_n,
                     _brand_n: str | None = _brand_n,
                     _bc_n: str | None = _bc_n,
+                    _acquired: datetime | None = _acquired,
+                    _expiry: date | None = _expiry,
                 ) -> None:
                     """Aplica la fila del catálogo a un producto que YA existe.
 
@@ -2768,6 +2844,18 @@ async def _insert_confirmed_data_impl(
                         existing.barcode = barcode
                     if prod_cat and not existing.category:
                         existing.category = prod_cat
+                    # F6-B2: acumular fechas de producto salvo edición manual del
+                    # usuario. acquired_at = la más antigua; expiry_date por la regla
+                    # futuro-más-próximo / vencido-más-reciente.
+                    if not existing.has_user_edits:
+                        _acc_acq = _accumulate_acquired_at(existing.acquired_at, _acquired)
+                        if _acc_acq is not None:
+                            existing.acquired_at = _acc_acq
+                        _acc_exp = _accumulate_expiry_date(
+                            existing.expiry_date, _expiry, today.date()
+                        )
+                        if _acc_exp is not None:
+                            existing.expiry_date = _acc_exp
                     _register_product_identity_cache(
                         products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
                     )
@@ -2859,6 +2947,9 @@ async def _insert_confirmed_data_impl(
                         provenance="REAL",
                         # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
                         requires_completion=not price or not cost,
+                        # F6-B2: fechas del archivo (None si no se mapearon/detectaron).
+                        acquired_at=_acquired,
+                        expiry_date=_expiry,
                         custom_fields=cf_product if cf_product else None,
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
@@ -3419,11 +3510,15 @@ async def _insert_multisheet_data(
         cols: dict[str, str],
         cf_cols: dict[str, str],
         row_ref: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Devuelve ``True`` si la fila se CAPTURÓ a /otros (identidad ambigua o fecha
+        de producto ilegible en columna mapeada a mano) — el caller registra la huella
+        de esa captura. ``False`` si creó/actualizó el producto o si no había nombre
+        (la creación normal dedupea por identidad, no por huella)."""
         _name_col = cols.get("name") or cols.get("product_name")
         name = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 299)
         if not name:
-            return
+            return False
         # La columna "Tienda"/"proveedor" de un CATÁLOGO es marca/origen del
         # artículo, NO un proveedor: se guarda como atributo del producto en
         # ``custom_fields["marca"]``. NO se crea Supplier desde un catálogo.
@@ -3485,15 +3580,35 @@ async def _insert_multisheet_data(
         if cat_raw:
             cat, cat_label = normalize_product_category(cat_raw, _business_type)
         # F6-B2: fechas de producto (columna mapeada o keyword; la genérica "fecha"
-        # NO cuenta). Inválida/ausente → None: un producto es válido sin fecha, no se
-        # inventa ni se rutea a /otros. acquired_at es datetime (columna naive);
-        # expiry_date es date.
+        # NO cuenta). Sin columna/celda vacía/heurística ilegible → None (un producto
+        # es válido sin fecha, no se inventa). PERO si un campo MAPEADO A MANO trae un
+        # valor no vacío ilegible → la fila va a /otros SIN aplicarse (no se toca
+        # stock, precio ni identidad). acquired_at naive; expiry_date date.
         _acq_raw = _val(row, cols.get("acquired_at"), _ACQUIRED_COLS)
         _acquired = parse_business_datetime(_acq_raw) if _acq_raw is not None else None
         if _acquired is not None and _acquired.tzinfo is not None:
             _acquired = _acquired.replace(tzinfo=None)
         _exp_raw = _val(row, cols.get("expiry_date"), _EXPIRY_COLS)
         _expiry = parse_business_date(_exp_raw) if _exp_raw is not None else None
+        if _product_date_invalid_explicit(
+            _acq_raw, _acquired, cols.get("acquired_at") is not None
+        ) or _product_date_invalid_explicit(
+            _exp_raw, _expiry, cols.get("expiry_date") is not None
+        ):
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=(
+                    "Fecha de producto ilegible en una columna que mapeaste a mano: "
+                    "revisá y completá antes de importar"
+                ),
+                suggested_entity="product",
+            )
+            return True
         # F2-T2: resolución de identidad por claves independientes
         # (barcode→sku→nombre+marca). Caché intra-corrida ANTES del motor —
         # evita duplicar con autoflush=False cuando 2 filas del archivo
@@ -3601,7 +3716,7 @@ async def _insert_multisheet_data(
                     else "Conflicto de identidad: el SKU y el nombre "
                     "apuntan a productos distintos",
                 )
-                return  # ambiguo/conflicto: no se importa, no se toca nada
+                return True  # capturado a /otros: no se importa, no se toca nada
             if _resolution.status == "resolved" and _resolution.product_id is not None:
                 existing = await session.get(Product, _resolution.product_id)
         if existing:
@@ -3654,13 +3769,13 @@ async def _insert_multisheet_data(
                     "Conflicto de identidad: el código de barras y el SKU "
                     "apuntan a productos distintos",
                 )
-                return
+                return True  # capturado a /otros
             if not _created:
                 # El índice único resolvió una carrera: es exactamente el camino de
                 # "producto existente" —incluido el delta de stock relativo—.
                 await _merge_into_existing(_resolved)
                 counts["productos"] += 1
-                return
+                return False
             _register_product_identity_cache(
                 products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
             )
@@ -3682,6 +3797,7 @@ async def _insert_multisheet_data(
                 is_purchase=stock_is_purchase,
             )
         counts["productos"] += 1
+        return False  # creó/actualizó producto: no es captura
 
     entity_bucket = {
         "sale": "ventas_detectadas",
@@ -3761,8 +3877,27 @@ async def _insert_multisheet_data(
                 elif entity == "expense":
                     _did_insert = await _add_expense(row, cols, cf_cols, _row_ref)
                 else:
-                    await _add_product(row, cols, cf_cols, _row_ref)
-                    _did_insert = False  # productos no se fingerprintean
+                    # F6-B2: la CREACIÓN de producto no fingerprintea (dedup por
+                    # identidad/upsert), pero SÍ su CAPTURA a /otros (identidad
+                    # ambigua o fecha ilegible mapeada a mano) — ancla propia
+                    # "producto:{ctx}" para no re-capturar en una relectura.
+                    _prod_cap_anchor = (
+                        _import_row_anchor(
+                            tenant_id, uploaded_file_id, f"producto:{ctx_id}", _i
+                        )
+                        if uploaded_file_id is not None
+                        else None
+                    )
+                    if _prod_cap_anchor is not None and await _import_row_seen(
+                        session, tenant_id, _prod_cap_anchor, seen_fp
+                    ):
+                        continue
+                    _prod_captured = await _add_product(row, cols, cf_cols, _row_ref)
+                    if _prod_captured and _prod_cap_anchor is not None:
+                        await _register_import_row_fingerprint(
+                            session, tenant_id, _prod_cap_anchor, seen_fp
+                        )
+                    _did_insert = False  # su huella (si hubo captura) ya se registró
                 if _ctx_anchor is not None and _did_insert:
                     await _register_import_row_fingerprint(
                         session, tenant_id, _ctx_anchor, seen_fp

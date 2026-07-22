@@ -45,6 +45,7 @@ async def _purchase(
     voided: bool = False,
     occurred_at: datetime | None = None,
     created_at: datetime | None = None,
+    movement_id: uuid.UUID | None = None,
 ) -> None:
     kwargs: dict[str, object] = {}
     if occurred_at is not None:
@@ -55,7 +56,7 @@ async def _purchase(
         kwargs["created_at"] = created_at
     session.add(
         InventoryMovement(
-            id=uuid.uuid4(),
+            id=movement_id or uuid.uuid4(),
             tenant_id=tenant_id,
             product_id=product_id,
             supplier_id=supplier_id,

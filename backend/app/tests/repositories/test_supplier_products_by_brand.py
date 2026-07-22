@@ -347,6 +347,39 @@ async def test_ultima_compra_por_fecha_de_negocio_no_por_carga(
 
 
 @pytest.mark.asyncio
+async def test_ultima_compra_desempate_por_id_es_deterministico(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-B3: dos compras con el MISMO instante de negocio → el costo elegido es
+    determinístico (desempate por id.desc()), no arbitrario."""
+    from datetime import UTC, datetime
+
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Mayorista")
+    db_session.add(supplier)
+    await db_session.flush()
+    p = await _product(db_session, tid, "Fideos", marca="Marca")
+    same_instant = datetime(2026, 5, 1, tzinfo=UTC)
+    id_low = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    id_high = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 1, Decimal("100"),
+        occurred_at=same_instant, movement_id=id_low,
+    )
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 1, Decimal("200"),
+        occurred_at=same_instant, movement_id=id_high,
+    )
+    await db_session.commit()
+
+    rows = await InventoryRepository(db_session).products_purchased_from_supplier(
+        tid, supplier.id
+    )
+    # Empate de instante → gana el id mayor (200), de forma estable.
+    assert rows[0].unit_price == Decimal("200")
+
+
+@pytest.mark.asyncio
 async def test_voided_movements_excluded(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
