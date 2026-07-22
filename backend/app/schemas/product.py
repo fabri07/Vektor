@@ -1,13 +1,17 @@
 """Pydantic schemas for product endpoints."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field
 
+from app.domain.business_time import now_ar_naive
 from app.domain.product import effective_threshold
+
+# F6-B4: umbral "próximo a vencer" (días). Documentado y único.
+EXPIRY_WARNING_DAYS = 30
 
 
 class ProductResponse(BaseModel):
@@ -58,6 +62,26 @@ class ProductResponse(BaseModel):
         if self.is_low_stock:
             return "low_stock"
         return "in_stock"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def expiry_status(self) -> str | None:
+        """F6-B4: estado de vencimiento a NIVEL PRODUCTO (no por lote — FEFO real
+        necesita inventory_lots, fuera de alcance). Informativo: NO infiere la
+        cantidad afectada. Valores:
+        - ``None``: sin vencimiento conocido (indistinguible de "no perecedero").
+        - ``"expired"``: ya venció.
+        - ``"expiring_soon"``: vence dentro de EXPIRY_WARNING_DAYS (30) días.
+        - ``"ok"``: falta más que el umbral.
+        Compara contra "hoy" en hora AR (no UTC)."""
+        if self.expiry_date is None:
+            return None
+        today = now_ar_naive().date()
+        if self.expiry_date < today:
+            return "expired"
+        if self.expiry_date <= today + timedelta(days=EXPIRY_WARNING_DAYS):
+            return "expiring_soon"
+        return "ok"
 
 
 class CreateProductRequest(BaseModel):

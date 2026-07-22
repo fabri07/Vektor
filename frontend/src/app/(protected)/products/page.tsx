@@ -52,6 +52,21 @@ function getStockCsvLabel(product: ProductResponse): string {
   return "En stock";
 }
 
+// F6-B4: badge de vencimiento a nivel producto (informativo). Solo se muestra si
+// venció o está por vencer; "ok"/sin fecha no renderiza nada.
+function getExpiryBadge(product: ProductResponse) {
+  if (product.expiry_status === "expired") return <Badge variant="danger">Vencido</Badge>;
+  if (product.expiry_status === "expiring_soon")
+    return <Badge variant="warning">Por vencer</Badge>;
+  return null;
+}
+
+function getExpiryCsvSuffix(product: ProductResponse): string {
+  if (product.expiry_status === "expired") return " · Vencido";
+  if (product.expiry_status === "expiring_soon") return " · Por vencer";
+  return "";
+}
+
 function stockSort(a: ProductResponse, b: ProductResponse): number {
   // out_of_stock → low_stock → in_stock
   const rank = (p: ProductResponse) => {
@@ -134,10 +149,19 @@ const COLUMNS = [
     key: "_status",
     header: "Estado",
     hideable: true,
-    render: (_: unknown, row: Record<string, unknown>) =>
-      getStockBadge(row as unknown as ProductResponse),
-    csvValue: (_: unknown, row: Record<string, unknown>) =>
-      getStockCsvLabel(row as unknown as ProductResponse),
+    render: (_: unknown, row: Record<string, unknown>) => {
+      const p = row as unknown as ProductResponse;
+      return (
+        <span className="flex flex-wrap items-center gap-1">
+          {getStockBadge(p)}
+          {getExpiryBadge(p)}
+        </span>
+      );
+    },
+    csvValue: (_: unknown, row: Record<string, unknown>) => {
+      const p = row as unknown as ProductResponse;
+      return getStockCsvLabel(p) + getExpiryCsvSuffix(p);
+    },
   },
   {
     key: "_acquired",
