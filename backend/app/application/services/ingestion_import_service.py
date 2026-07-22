@@ -3982,7 +3982,29 @@ async def _insert_multisheet_data(
                     if uploaded_file_id is not None
                     else None
                 )
-                await _add_product(row, {}, {}, _p_ref)
+                # F6-B (review): idempotencia de la captura a /otros (identidad
+                # ambigua) también en el path legacy — ancla propia para no re-capturar
+                # en una relectura, igual que en single/multi-context. Namespace
+                # "producto:productos" disjunto del ancla de row_ref (contexto
+                # "productos"). Los productos normales (return False) no fingerprintean.
+                _prod_cap_anchor = (
+                    _import_row_anchor(
+                        tenant_id, uploaded_file_id, "producto:productos", _k
+                    )
+                    if uploaded_file_id is not None
+                    else None
+                )
+                if _prod_cap_anchor is not None and await _import_row_seen(
+                    session, tenant_id, _prod_cap_anchor, seen_fp
+                ):
+                    continue
+                if (
+                    await _add_product(row, {}, {}, _p_ref)
+                    and _prod_cap_anchor is not None
+                ):
+                    await _register_import_row_fingerprint(
+                        session, tenant_id, _prod_cap_anchor, seen_fp
+                    )
 
     # Traza agregada (Fase 1) de las decisiones de proveedor del multi-hoja.
     if _real_suppliers:
