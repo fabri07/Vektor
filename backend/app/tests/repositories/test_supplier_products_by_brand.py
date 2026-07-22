@@ -362,13 +362,16 @@ async def test_ultima_compra_desempate_por_id_es_deterministico(
     same_instant = datetime(2026, 5, 1, tzinfo=UTC)
     id_low = uuid.UUID("00000000-0000-0000-0000-000000000001")
     id_high = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    # occurred_at Y created_at iguales: así el ÚNICO desempate posible es id.desc()
+    # (sin él, la vieja `created_at.desc()` no distinguía y el resultado quedaba
+    # indefinido — el test no aislaba el tiebreak).
     await _purchase(
         db_session, tid, p.id, supplier.id, 1, Decimal("100"),
-        occurred_at=same_instant, movement_id=id_low,
+        occurred_at=same_instant, created_at=same_instant, movement_id=id_low,
     )
     await _purchase(
         db_session, tid, p.id, supplier.id, 1, Decimal("200"),
-        occurred_at=same_instant, movement_id=id_high,
+        occurred_at=same_instant, created_at=same_instant, movement_id=id_high,
     )
     await db_session.commit()
 

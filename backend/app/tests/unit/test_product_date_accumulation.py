@@ -160,15 +160,20 @@ async def test_has_user_edits_protege_las_fechas(
     await do_import(db_session, tid, [_r("01/03/2026")])
     prod = (await db_session.execute(select(Product))).scalar_one()
     prod.has_user_edits = True
-    prod.acquired_at = datetime(2025, 1, 1)
-    prod.expiry_date = date(2027, 1, 1)
+    # Valores que la regla de acumulación SOBRESCRIBIRÍA si el guard no existiera:
+    # acquired_at manual MÁS NUEVA que la entrante (min la bajaría); expiry manual
+    # futuro MÁS LEJANO que el entrante (futuro-más-próximo la adelantaría). Así el
+    # test discrimina de verdad el guard (mutación: quitarlo → falla).
+    prod.acquired_at = datetime(2026, 6, 1)
+    prod.expiry_date = date(2027, 12, 1)
     await db_session.commit()
 
-    await do_import(db_session, tid, [_r("01/01/2026", stock="8")])
+    # Reimporta con alta más antigua (01/01/2026) y venc futuro más próximo (01/09/2026).
+    await do_import(db_session, tid, [_r("01/01/2026", venc="01/09/2026", stock="8")])
     await db_session.commit()
     prod2 = (await db_session.execute(select(Product))).scalar_one()
-    assert prod2.acquired_at == datetime(2025, 1, 1)
-    assert prod2.expiry_date == date(2027, 1, 1)
+    assert prod2.acquired_at == datetime(2026, 6, 1)
+    assert prod2.expiry_date == date(2027, 12, 1)
 
 
 @pytest.mark.asyncio

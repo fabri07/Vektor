@@ -1589,12 +1589,19 @@ async def _apply_catalog_stock(
     # F6-C3: NO incluir la fecha en el hash de identidad de la fila de catálogo.
     # ``tx_date`` acá es SIEMPRE ``today`` sintético (el ancla catalog_initial_stock
     # no tiene fecha de negocio real — por eso inventory_temporal_service la ignora,
-    # ver invariante 2d). Meterla hacía que el MISMO catálogo, releído otro día,
-    # produjera un ``source_row_hash`` distinto, y F3 (product_dedup_service, único
-    # consumidor del hash al fusionar duplicados) no reconocía la fila como la misma
-    # → doble conteo de stock. La identidad lógica es producto+qty+costo+proveedor+
-    # upload; el ``upload_id`` ya separa archivos distintos. NO se usa el ancla de
-    # fila: incluye el índice y rompería la estabilidad ante reordenamiento del Excel.
+    # ver invariante 2d). Meter un valor sintético en un hash de IDENTIDAD LÓGICA es
+    # incorrecto de principio: hacía que el MISMO catálogo, releído otro día, produjera
+    # un ``source_row_hash`` distinto.
+    # Alcance real del hash de catálogo (verificado en el review): su ÚNICO consumidor
+    # es F3 (product_dedup_service), y ahí SOLO lo lee ``compute_group_fingerprint``
+    # (detección de cambio dry-run↔apply de un grupo de duplicados). La decisión de
+    # stock de un grupo catálogo-puro es ``STOCK_MOST_RECENT`` (max qty), que NO usa el
+    # hash — así que esto NO previene ningún "doble conteo" (el dedup por hash con SUM
+    # es exclusivo de COMPRAS, cuyo hash lo genera _apply_purchase_to_stock con la fecha
+    # REAL del gasto, intacto). El beneficio concreto es acotado: estabilizar ese
+    # fingerprint de grupo entre días. La identidad lógica queda producto+qty+costo+
+    # proveedor+upload; el ``upload_id`` ya separa archivos distintos. NO se usa el ancla
+    # de fila: incluye el índice y rompería la estabilidad ante reordenamiento del Excel.
     _row_hash = compute_source_row_hash(
         product_key=product_name,
         qty=delta,
@@ -2666,11 +2673,12 @@ async def _insert_confirmed_data_impl(
             # MISMA: un producto creado por una compra en el bloque de gastos ya
             # quedó registrado y una fila de catálogo posterior lo reusa.
             for _prod_index, row in enumerate(rows):
-                # F6-B2: idempotencia SOLO de las filas capturadas a /otros por fecha
-                # ilegible (ancla propia "producto"). Los productos normales no
-                # fingerprintean (dedupean por identidad/upsert); esta huella solo la
-                # registran las capturas, así una relectura del archivo no re-crea el
-                # UnclassifiedRecord. READ-ONLY acá; se registra recién al capturar.
+                # F6-B2: idempotencia de las filas capturadas a /otros (fecha ilegible
+                # mapeada a mano o identidad ambigua/en conflicto), con ancla propia
+                # "producto". Los productos normales no fingerprintean (dedupean por
+                # identidad/upsert); esta huella solo la registran las capturas, así una
+                # relectura del archivo no re-crea el UnclassifiedRecord. READ-ONLY acá;
+                # se registra recién al capturar.
                 _prod_capture_anchor = (
                     _import_row_anchor(tenant_id, uploaded_file_id, "producto", _prod_index)
                     if uploaded_file_id is not None
@@ -2924,6 +2932,15 @@ async def _insert_confirmed_data_impl(
                             suggested_entity="product",
                             match_candidates=_resolution.candidates,
                         )
+                        # F6-B (review): la captura ambigua también es output
+                        # PERSISTIDO → registrar la huella para que una relectura no
+                        # re-cree el UnclassifiedRecord (paridad con multi-context, que
+                        # ya lo hace vía el bool de _add_product). Antes solo la
+                        # captura por fecha registraba; la ambigua re-capturaba (F2).
+                        if _prod_capture_anchor is not None:
+                            await _register_import_row_fingerprint(
+                                session, tenant_id, _prod_capture_anchor, seen_fp
+                            )
                         continue  # ambiguo/conflicto: no se importa, no se toca nada
                     if _resolution.status == "resolved" and _resolution.product_id is not None:
                         existing = await session.get(Product, _resolution.product_id)
@@ -2990,6 +3007,11 @@ async def _insert_confirmed_data_impl(
                             suggested_entity="product",
                             match_candidates=_candidates_from_conflict(_conflict),
                         )
+                        # F6-B (review): idempotencia de la captura (ver arriba).
+                        if _prod_capture_anchor is not None:
+                            await _register_import_row_fingerprint(
+                                session, tenant_id, _prod_capture_anchor, seen_fp
+                            )
                         continue  # ambiguo: no se importa, no se toca nada
                     if not _created:
                         # El índice único resolvió una carrera: es exactamente el
