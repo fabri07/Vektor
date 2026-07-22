@@ -641,6 +641,189 @@ class TestConfirmEndpoint:
         )
         assert response.status_code == 404
 
+    async def test_confirm_sin_columna_fecha_devuelve_422_antes_del_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F6-A1: una venta confirmada sin columna de fecha se rechaza con 422 y
+        NUNCA toma el lease (el archivo sigue re-confirmable en NEEDS_CONFIRMATION).
+        Sin este gate, la fila caería al fallback silencioso "hoy" (invariante 2d).
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas_sin_fecha.xlsx",
+            s3_key="uploads/test/uuid/ventas_sin_fecha.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "row_count": 1,
+                # Sin ninguna columna de fecha en las filas.
+                "ventas_detectadas": [{"monto": "50000", "descripcion": "Venta"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True}},
+        )
+        assert response.status_code == 422
+        assert "fecha" in response.json()["detail"].lower()
+
+        # El lease nunca se tomó: sigue re-confirmable.
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+        assert refreshed.import_started_at is None
+
+    async def test_confirm_multicontexto_bloquea_solo_el_contexto_sin_fecha(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F6-A1: en multi-hoja, confirmar un contexto sin fecha lo bloquea (422
+        nombrándolo); si ese contexto NO se incluye, los demás importan."""
+        summary = {
+            "confidence": "HIGH",
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "has_venta": True,
+            "has_gasto": True,
+            "mapping_contexts": [
+                {
+                    "context_id": "sheet:A:ventas",
+                    "entity_type": "sale",
+                    "label": "Hoja A — Ventas",
+                    "headers": ["fecha", "monto"],
+                },
+                {
+                    "context_id": "sheet:B:gastos",
+                    "entity_type": "expense",
+                    "label": "Hoja B — Gastos",
+                    "headers": ["detalle", "monto"],  # sin fecha
+                },
+            ],
+            "ventas_detectadas": [
+                {"__context__": "sheet:A:ventas", "fecha": "2024-01-15", "monto": "50000"}
+            ],
+            "gastos_detectados": [
+                {"__context__": "sheet:B:gastos", "detalle": "Varios", "monto": "12000"}
+            ],
+        }
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="mixto.xlsx",
+            s3_key="uploads/test/uuid/mixto.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=1024,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json=summary,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        # Ambos contextos incluidos → el de gastos (sin fecha) dispara 422.
+        blocked = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True, "gastos": True}},
+        )
+        assert blocked.status_code == 422
+        assert "Gastos" in blocked.json()["detail"]
+
+        # El lease no se tomó pese al 422.
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
+    async def test_confirm_contexto_reasignado_a_venta_sin_fecha_devuelve_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F6-A1: si el usuario reasigna una hoja de producto (sin fecha) a venta
+        vía context_entity, el gate debe usar la entidad EFECTIVA — el importador
+        la procesaría como venta y volcaría todo a /otros. 422 antes del lease."""
+        summary = {
+            "confidence": "HIGH",
+            "file_type": "spreadsheet",
+            "inferred_type": "stock",
+            "mapping_contexts": [
+                {
+                    "context_id": "table",
+                    "entity_type": "product",
+                    "label": "Catálogo",
+                    "headers": ["producto", "precio"],  # sin fecha
+                }
+            ],
+            "stock_detectado": [
+                {"__context__": "table", "producto": "Vela", "precio": "500"}
+            ],
+        }
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="catalogo.xlsx",
+            s3_key="uploads/test/uuid/catalogo.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="productos",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json=summary,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"table": True},
+                "context_entity": {"table": "sale"},  # reasignado a venta
+            },
+        )
+        assert response.status_code == 422
+        assert "fecha" in response.json()["detail"].lower()
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
 
 class _CaptureLogger:
     def __init__(self) -> None:
@@ -666,12 +849,17 @@ def test_parse_amount_logs_non_positive_discard(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-async def test_parse_date_fallback_logs_debug(
+async def test_fila_con_fecha_ilegible_va_a_otros_no_inventa_hoy(
     db_session: AsyncSession,
     sample_tenant: Tenant,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """F6-A2: una fila con valor de fecha ilegible NO se registra con "hoy" — va a
+    /otros para revisión manual. Antes se estampillaba la fecha de carga (invariante
+    2d violada); ahora no se crea ninguna venta y la fila queda como pendiente.
+    """
     import app.application.services.ingestion_import_service as importer
+    from app.persistence.models.unclassified_record import UnclassifiedRecord
 
     capture = _CaptureLogger()
     monkeypatch.setattr(importer, "logger", capture)
@@ -688,13 +876,17 @@ async def test_parse_date_fallback_logs_debug(
         {"ventas": True},
     )
 
-    result = await db_session.execute(select(SaleEntry))
-    sale = result.scalar_one()
-    assert sale.amount == Decimal("100")
-    assert sale.transaction_date.date() == date.today()
+    # No se creó ninguna venta con fecha inventada.
+    sales = (await db_session.execute(select(SaleEntry))).scalars().all()
+    assert sales == []
+    # La fila quedó en /otros, sugerida como venta.
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(records) == 1
+    assert records[0].suggested_entity == "sale"
+    assert records[0].row_data.get("monto") == "100"
     assert capture.debug_events == [
         (
-            "ingestion.parse.date_fallback_today",
+            "ingestion.parse.date_row_routed_to_otros",
             {"raw": "fecha rara", "row_index": 0},
         )
     ]

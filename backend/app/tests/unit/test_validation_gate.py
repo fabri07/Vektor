@@ -192,6 +192,31 @@ class TestRegla4Fechas:
         assert not result.passed
         assert result.rejection_reason == "all_dates_invalid"
 
+    def test_un_monto_de_8_digitos_no_cuenta_como_fecha(self, gate: ValidationGate) -> None:
+        """F6-C1: el gate escanea TODOS los valores de la fila, no solo la columna
+        de fecha. El parser compartido acepta ISO compacto ("20260605"), así que un
+        monto de $20.260.605 se leería como fecha y taparía el rechazo legítimo.
+        Solo cuentan los valores con separador de fecha.
+        """
+        summary = _spreadsheet_ventas()
+        summary["has_fecha"] = True
+        summary["ventas_detectadas"] = [
+            {"fecha": "99/99/9999", "monto": "20260605"},
+        ]
+        result = gate.validate(summary)
+        assert not result.passed
+        assert result.rejection_reason == "all_dates_invalid"
+
+    def test_monto_de_8_digitos_no_genera_warning_de_fecha(self, gate: ValidationGate) -> None:
+        summary = _spreadsheet_ventas()
+        summary["ventas_detectadas"] = [
+            {"fecha": date.today().strftime("%d/%m/%Y"), "monto": "20260605"},
+        ]
+        result = gate.validate(summary)
+        assert result.passed
+        warnings = (result.corrected_summary or {}).get("warnings", [])
+        assert not any("date_warning" in str(w) for w in warnings)
+
     def test_passes_no_fecha_column(self, gate: ValidationGate) -> None:
         """Sin columna de fecha (has_fecha=False), no se rechaza por fechas."""
         summary = _spreadsheet_ventas()

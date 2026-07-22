@@ -89,14 +89,13 @@ export default function OtrosPage() {
     mutationFn: () => othersService.bulkImport(),
     onSuccess: async (result) => {
       const total = result.imported_sales + result.imported_expenses;
-      toast(
+      const msg =
         `${total} registro(s) importados (${result.imported_sales} ventas, ` +
-          `${result.imported_expenses} gastos)` +
-          (result.skipped > 0
-            ? `; ${result.skipped} quedaron pendientes (sin fecha o monto legibles).`
-            : "."),
-        "success",
-      );
+        `${result.imported_expenses} gastos)` +
+        (result.needs_manual > 0
+          ? `; ${result.needs_manual} requieren completar la fecha o el monto a mano.`
+          : ".");
+      toast(msg, "success");
       await invalidate();
     },
     onError: () => toast("No se pudo importar en lote. Probá de nuevo.", "error"),

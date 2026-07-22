@@ -101,10 +101,15 @@ export function ReclassifyModal({
   // Cliente y Proveedor son entidades de contacto: solo nombre + email/teléfono.
   const isContact = entityType === "customer" || entityType === "supplier";
   const inputCls = "rounded border border-vk-border-w px-3 py-2";
+  // F6: la fila llegó a /otros porque no tiene fecha confiable. Al resolverla NO
+  // se inventa "hoy": la fecha es obligatoria para venta/gasto. El <input> es
+  // required, pero lo validamos explícito (defensa) y nunca construimos un fallback.
+  const needsDate = entityType === "sale" || entityType === "expense";
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
+    if (needsDate && !date) return;
     const num = Number(amount.replace(",", "."));
-    const isoDate = date ? `${date}T00:00:00` : new Date().toISOString().slice(0, 19);
+    const isoDate = `${date}T00:00:00`;
     if (entityType === "sale") {
       onSave("sale", {
         amount: num,
@@ -171,9 +176,13 @@ export function ReclassifyModal({
                     </div>
                     <button
                       type="button"
-                      disabled={saving}
+                      // El botón NO es submit, así que el `required` del <input date>
+                      // no lo bloquea: sin este guard, resolver una compra sin fecha
+                      // caía al fallback "hoy" (F6). Fecha obligatoria y sin fallback.
+                      disabled={saving || (isPurchaseResolution && !date)}
                       onClick={() => {
                         if (isPurchaseResolution) {
+                          if (!date) return;
                           const parsedUnitCost = unitCost
                             ? Number(unitCost.replace(",", "."))
                             : undefined;
@@ -183,9 +192,7 @@ export function ReclassifyModal({
                             ...(parsedUnitCost !== undefined
                               ? { unitCost: parsedUnitCost }
                               : {}),
-                            transactionDate: date
-                              ? `${date}T00:00:00`
-                              : new Date().toISOString().slice(0, 19),
+                            transactionDate: `${date}T00:00:00`,
                             paymentMethod,
                             category: category || "INVENTORY",
                             description: text,
@@ -374,7 +381,9 @@ export function ReclassifyModal({
           </button>
           <button
             type="submit"
-            disabled={saving}
+            // Fecha obligatoria para venta/gasto: sin ella no se puede importar
+            // (no se inventa "hoy" — F6). Refuerza el `required` del <input>.
+            disabled={saving || (needsDate && !date)}
             className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {saving ? "Importando..." : "Importar"}

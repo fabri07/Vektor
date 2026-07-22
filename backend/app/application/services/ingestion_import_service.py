@@ -37,6 +37,7 @@ from app.application.services.product_identity import (
     add_product_or_reuse,
 )
 from app.domain.business_time import now_ar_naive
+from app.domain.date_parsing import parse_business_datetime
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -1734,34 +1735,9 @@ def _parse_amount(raw: Any) -> Decimal | None:
         return None
 
 
-def _parse_date(raw: Any) -> datetime | None:
-    # transaction_date es timestamp: se intenta primero con hora (ISO o dd/mm con
-    # hora) y, si no, solo fecha (queda a medianoche).
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    # ISO 8601: "2026-06-05T14:30:00", "2026-06-05 14:30:00", "2026-06-05".
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        pass
-    formats = (
-        # con hora (probar antes que las de solo fecha)
-        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
-        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
-        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
-        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M",
-        # solo fecha
-        "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d", "%m/%d/%Y",
-    )
-    for fmt in formats:
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
+# F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
+# gate de calidad, así que ya no pueden discrepar sobre el mismo archivo.
+_parse_date = parse_business_datetime
 
 
 def _find_col(headers: list[str], keywords: set[str] | tuple[str, ...]) -> str | None:
@@ -2278,17 +2254,43 @@ async def _insert_confirmed_data_impl(
             _captured_to_otros = False
 
             raw_date = row.get(fecha_col) if fecha_col else None
-            tx_date = _parse_date(raw_date) if fecha_col else None
+            tx_date = _parse_date(raw_date) if raw_date is not None else None
+            # F6-A2: sin fecha reconocible NO se inventa "hoy" (invariante 2d). Si la
+            # fila iba a registrar una operación fechada (venta/gasto con monto), va
+            # a /otros para revisión manual — no se crea NADA desde ella (ni venta,
+            # ni gasto, ni producto, ni proveedor). Filas sin monto (o de producto
+            # puro, que no necesita fecha) NO se rutean: tx_date=None nunca llega a
+            # un registro porque el `if amount:` interno de cada bloque lo protege.
             if tx_date is None:
-                if fecha_col:
+                _venta_amount = (
+                    _parse_amount(row.get(venta_col)) if (wants_ventas and venta_col) else None
+                )
+                _gasto_amount = (
+                    _parse_amount(row.get(gasto_col)) if (wants_gastos and gasto_col) else None
+                )
+                if _venta_amount is not None or _gasto_amount is not None:
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        rows=[row],
+                        headers=headers,
+                        source=source,
+                        uploaded_file_id=uploaded_file_id,
+                        context_label=(
+                            "Fila sin fecha reconocible: no se puede registrar la "
+                            "operación sin inventar la fecha"
+                        ),
+                        suggested_entity="sale" if _venta_amount is not None else "expense",
+                    )
+                    _captured_to_otros_rows.add(row_index)
+                    _captured_to_otros = True
                     logger.debug(
-                        "ingestion.parse.date_fallback_today",
+                        "ingestion.parse.date_row_routed_to_otros",
                         raw=str(raw_date),
                         row_index=row_index,
                     )
-                tx_date = today
 
-            if wants_ventas:
+            if wants_ventas and not _captured_to_otros:
                 assert venta_col is not None  # wants_ventas implica venta_col presente
                 amount = _parse_amount(row.get(venta_col))
                 if amount:
@@ -2353,7 +2355,7 @@ async def _insert_confirmed_data_impl(
                     session.add(entry)
                     counts["ventas"] += 1
 
-            if wants_gastos:
+            if wants_gastos and not _captured_to_otros:
                 assert gasto_col is not None  # wants_gastos implica gasto_col presente
                 amount = _parse_amount(row.get(gasto_col))
                 if amount:
@@ -2923,41 +2925,43 @@ async def _insert_confirmed_data_impl(
 
     else:
         # ── Documentos de texto/imagen: inserción por línea (montos detectados) ──
+        # F6-A4: los documentos de texto/imagen NO extraen fecha (ni nada
+        # estructurado más allá de montos por línea vía AMOUNT_RE). Antes se
+        # estampillaba "hoy" — fecha de negocio inventada (invariante 2d). Ahora la
+        # línea va a /otros para que el usuario complete la fecha antes de importar.
+        # Es degradado pero honesto: la lectura real de foto/PDF con fecha es F7.
+        def _route_text_line_to_otros(entry: dict[str, Any], suggested: str) -> None:
+            # Se rutea la línea UNA vez (no N veces por cada monto detectado). Solo si
+            # trae al menos un monto válido — una línea sin monto no materializa un
+            # pendiente vacío. `uploaded_file_id` liga el /otros al archivo origen.
+            #
+            # No se registra fingerprint por línea (a diferencia del path spreadsheet,
+            # que ancla en (archivo, contexto, índice)): el path texto nunca tuvo
+            # anclas de fila estables. La no-duplicación la garantiza F4 aguas arriba
+            # — un confirm exitoso deja el archivo DONE y no puede re-confirmarse
+            # (CAS del lease), y un fallo revierte el savepoint entero. La relectura
+            # es un flujo distinto (reread_service) que reprocesa desde cero.
+            if not any(_parse_amount(m) for m in entry.get("montos", [])):
+                return
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[entry],
+                headers=None,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=(
+                    "Documento sin fecha reconocible: revisá el monto y completá la "
+                    "fecha antes de importar"
+                ),
+                suggested_entity=suggested,
+            )
+
         def _add_text_sale(entry: dict[str, Any]) -> None:
-            for m in entry.get("montos", []):
-                amount = _parse_amount(m)
-                if not amount:
-                    continue
-                session.add(
-                    SaleEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        quantity=1,
-                        transaction_date=today,
-                        payment_method="cash",
-                        notes=str(entry.get("linea", ""))[:499] or "Importado desde archivo",
-                        provenance="REAL",
-                    )
-                )
-                counts["ventas"] += 1
+            _route_text_line_to_otros(entry, "sale")
 
         def _add_text_expense(entry: dict[str, Any]) -> None:
-            for m in entry.get("montos", []):
-                amount = _parse_amount(m)
-                if not amount:
-                    continue
-                session.add(
-                    ExpenseEntry(
-                        tenant_id=tenant_id,
-                        amount=amount,
-                        category="OTHER",
-                        transaction_date=today,
-                        description=str(entry.get("linea", ""))[:499] or "Gasto importado",
-                        payment_method="transfer",
-                        provenance="REAL",
-                    )
-                )
-                counts["gastos"] += 1
+            _route_text_line_to_otros(entry, "expense")
 
         text_contexts = summary.get("mapping_contexts")
         if text_contexts:
@@ -3138,9 +3142,22 @@ async def _insert_multisheet_data(
         if not amount:
             return False
         raw_date = _val(row, cols.get("transaction_date") or cols.get("expense_date"), _FECHA_COLS)
-        tx_date = _parse_date(raw_date) if raw_date is not None else today
+        tx_date = _parse_date(raw_date) if raw_date is not None else None
         if tx_date is None:
-            tx_date = today
+            # F6-A2: sin fecha reconocible la venta va a /otros — no se inventa "hoy"
+            # (invariante 2d). Devuelve True: la captura es output PERSISTIDO, así el
+            # caller registra el fingerprint (re-subir no re-crea el UnclassifiedRecord).
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,  # sin headers de hoja en este scope
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label="Fila sin fecha reconocible: no se puede registrar la venta",
+                suggested_entity="sale",
+            )
+            return True
         qty: int = 1
         qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         if qty_raw not in (None, "", "None", "nan"):
@@ -3200,9 +3217,21 @@ async def _insert_multisheet_data(
         if not amount:
             return False
         raw_date = _val(row, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS)
-        tx_date = _parse_date(raw_date) if raw_date is not None else today
+        tx_date = _parse_date(raw_date) if raw_date is not None else None
         if tx_date is None:
-            tx_date = today
+            # F6-A2: sin fecha reconocible el gasto va a /otros — no se inventa "hoy"
+            # (invariante 2d). Devuelve True para que el caller registre el fingerprint.
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label="Fila sin fecha reconocible: no se puede registrar el gasto",
+                suggested_entity="expense",
+            )
+            return True
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         desc = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
         pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
@@ -3772,7 +3801,10 @@ async def bulk_import_unclassified(
     parsea queda PENDING (el modal por registro permite completarlo a mano);
     los sugeridos como producto no entran acá (necesitan campos que la fila
     suelta no garantiza). Devuelve ``{imported_sales, imported_expenses,
-    skipped}``.
+    skipped, needs_manual}`` — ``skipped`` = ya importados (idempotencia);
+    ``needs_manual`` = no parsearon (fecha/monto ilegible) y requieren que el
+    usuario los complete en el modal por registro. Antes se mezclaban en un solo
+    contador y la UI no podía decir cuántos exigían atención (F6-A5).
     """
     from datetime import UTC  # noqa: PLC0415
 
@@ -3803,7 +3835,7 @@ async def bulk_import_unclassified(
         .scalars()
         .all()
     )
-    counts = {"imported_sales": 0, "imported_expenses": 0, "skipped": 0}
+    counts = {"imported_sales": 0, "imported_expenses": 0, "skipped": 0, "needs_manual": 0}
     if not records:
         return counts
 
@@ -3832,7 +3864,10 @@ async def bulk_import_unclassified(
             or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
         )
         if fecha is None or amount is None:
-            counts["skipped"] += 1
+            # F6-A5: no parseó (fecha o monto ilegible) → requiere completarlo a
+            # mano en el modal. Distinto de "ya importado" (skipped): la UI debe
+            # poder decir cuántos exigen atención del usuario.
+            counts["needs_manual"] += 1
             continue
         desc = _clean_str(_row_val(row, _NOMBRE_COLS), 499)
         pay_raw = _clean_str(_row_val(row, _PAGO_COLS), 30)

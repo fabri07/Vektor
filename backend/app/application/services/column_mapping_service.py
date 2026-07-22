@@ -159,6 +159,64 @@ def _normalize_col(col: str) -> str:
     return col.lower().strip().replace(" ", "_").replace("-", "_")
 
 
+# Targets canónicos que representan la fecha de negocio de una fila.
+_DATE_TARGET_FIELDS: frozenset[str] = frozenset({"transaction_date", "expense_date"})
+
+
+def resolve_transaction_date_column(
+    headers: list[str] | None,
+    mappings: dict[str, str] | None,
+) -> str | None:
+    """Fuente ÚNICA de verdad: ¿esta hoja/entidad tiene una columna de fecha
+    resoluble? Devuelve el nombre de columna, o ``None`` si no hay ninguna.
+
+    Precedencia idéntica a la del importador (F6-A1): primero el mapeo explícito
+    (``source_col`` cuyo ``target`` sea ``transaction_date``/``expense_date``),
+    luego la heurística por substring del header contra ``FECHA_COLS`` — el mismo
+    criterio que ``file_parsing.has_fecha`` y que ``_find_col(headers, FECHA_COLS)``.
+    Sin esta función, la API y el importador terminaban divergiendo sobre "esta
+    hoja tiene fecha o no" (ver C1).
+    """
+    if mappings:
+        for src, target in mappings.items():
+            # El mapeo explícito solo vale si la columna EXISTE en la hoja. Un
+            # payload viejo/inconsistente como {"col_inexistente": "transaction_date"}
+            # pasaría el gate, pero el importador obtendría None por fila (la columna
+            # no está) y mandaría todo a /otros — el 422-antes-del-lease se saltearía.
+            if target in _DATE_TARGET_FIELDS and (headers is None or src in headers):
+                return src
+    if headers:
+        # Import local: file_parsing es un módulo pesado; column_mapping_service se
+        # importa desde routers livianos. FECHA_COLS es el set canónico de keywords.
+        from app.application.services.file_parsing import FECHA_COLS  # noqa: PLC0415
+
+        for h in headers:
+            norm = _normalize_col(h)
+            if any(k in norm for k in FECHA_COLS):
+                return h
+    return None
+
+
+def validate_required_date_mapping(
+    included: list[tuple[str, list[str] | None, dict[str, str]]],
+) -> list[str]:
+    """F6-A1: dado un conjunto de contextos venta/gasto INCLUIDOS en el import,
+    devuelve las etiquetas de los que NO tienen columna de fecha resoluble.
+
+    Cada elemento de ``included`` es ``(label, headers, mappings)``. La API arma
+    la lista desde su estado de confirmación (flat vs por-contexto) y esta función
+    aplica el mismo resolver que el importador — sin que el router toque
+    ``FECHA_COLS`` ni ``_find_col`` (ambos privados del pipeline de import).
+
+    Lista vacía = todos los contextos incluidos tienen fecha.
+    """
+    missing: list[str] = []
+    for label, headers, mappings in included:
+        if resolve_transaction_date_column(headers, mappings) is None:
+            missing.append(label)
+    return missing
+
+
 def _heuristic_match(normalized: str, entity_type: str) -> str | None:
     """Busca el target_field para un header normalizado.
 

@@ -42,6 +42,7 @@ from app.application.services.file_parsing import (
     detect_supported_mime,
     rows_to_dicts,
 )
+from app.domain.date_parsing import BIRTHDAY_CENTURY_PIVOT, parse_business_date
 from app.integrations.anthropic_client import (
     AnthropicConfigurationError,
     get_anthropic_async_client,
@@ -174,32 +175,10 @@ def _map_customer_columns(headers: list[str]) -> dict[str, str]:
 
 
 def _parse_date_loose(raw: Any) -> date | None:
-    """Parsea una fecha de cumpleaños tolerante: ISO o ``dd/mm/yyyy``."""
-    if raw is None:
-        return None
-    if isinstance(raw, date):
-        return raw
-    text = str(raw).strip()
-    if not text:
-        return None
-    text = text[:10]
-    # ISO YYYY-MM-DD
-    try:
-        return date.fromisoformat(text)
-    except ValueError:
-        pass
-    # dd/mm/yyyy o dd-mm-yyyy
-    for sep in ("/", "-"):
-        parts = text.split(sep)
-        if len(parts) == 3:
-            try:
-                d, m, y = (int(p) for p in parts)
-                if y < 100:
-                    y += 1900 if y > 30 else 2000
-                return date(y, m, d)
-            except (ValueError, TypeError):
-                continue
-    return None
+    """Fecha de cumpleaños. F6-C1: mismo parser que el resto del sistema, con el
+    pivote de siglo de personas (nacido en "50" es 1950, no 2050).
+    """
+    return parse_business_date(raw, century_pivot=BIRTHDAY_CENTURY_PIVOT)
 
 
 def _clean_str(raw: Any, *, maxlen: int) -> str | None:
