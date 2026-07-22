@@ -3,8 +3,19 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy import (
+    ColumnElement,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -121,3 +132,22 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             f"<InventoryMovement product={self.product_id}"
             f" type={self.movement_type!r} qty={self.qty:+d}>"
         )
+
+
+def movement_business_time(movement: Any = InventoryMovement) -> ColumnElement[datetime]:
+    """Expresión SQL de la fecha de NEGOCIO del movimiento (invariante 2d):
+    ``COALESCE(occurred_at, created_at)``. NUNCA usar ``created_at`` solo — filas
+    legacy sin ``occurred_at`` deben caer a la fecha de carga, y agregaciones/orden
+    por "cuándo pasó" deben usar la de negocio (incidente don pedro 2026-07).
+
+    Acepta la clase o un ``aliased(InventoryMovement)`` para usarla dentro de window
+    functions o subqueries sobre el mismo modelo. Devuelve una expresión ligada a
+    la instancia/alias que se pasa (no una constante a nivel módulo), justamente
+    para que sirva con ``aliased()``.
+
+    Nota: hay un gemelo Python en ``product_dedup_service._movement_time`` que aplica
+    la MISMA regla sobre ``MovementRow`` (objetos en memoria del replay de dedup);
+    son capas distintas (expresión SQL vs valor Python) y no se pueden unificar en
+    una sola función, pero codifican la misma invariante.
+    """
+    return func.coalesce(movement.occurred_at, movement.created_at)

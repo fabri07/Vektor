@@ -10,7 +10,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.text_norm import normalize_text
-from app.persistence.models.inventory import InventoryMovement
+from app.persistence.models.inventory import InventoryMovement, movement_business_time
 from app.persistence.models.product import Product
 from app.persistence.models.supplier import SENTINEL_FLAG_KEY, Supplier, is_sentinel_value
 
@@ -177,8 +177,11 @@ class InventoryRepository:
         Fuente: ``inventory_movements`` con ``movement_type='purchase'`` y
         ``supplier_id`` del proveedor. Por producto:
           - ``total_qty`` = ``SUM(qty)`` (suma de unidades compradas);
-          - ``last_purchase_at`` = ``MAX(created_at)`` (última compra);
-          - ``unit_price`` = ``unit_cost`` del movimiento MÁS RECIENTE del producto.
+          - ``last_purchase_at`` = ``MAX(COALESCE(occurred_at, created_at))`` (última
+            compra por fecha de NEGOCIO, invariante 2d — F6-B3);
+          - ``unit_price`` = ``unit_cost`` del movimiento MÁS RECIENTE del producto,
+            también por fecha de negocio (así la fecha mostrada y el costo salen del
+            MISMO movimiento; con ``created_at`` puro podían divergir).
 
         SIEMPRE filtra por ``tenant_id`` (aislamiento multi-tenant). Orden por
         última compra descendente.
@@ -188,7 +191,7 @@ class InventoryRepository:
             select(
                 InventoryMovement.product_id.label("product_id"),
                 func.coalesce(func.sum(InventoryMovement.qty), 0).label("total_qty"),
-                func.max(InventoryMovement.created_at).label("last_purchase_at"),
+                func.max(movement_business_time(InventoryMovement)).label("last_purchase_at"),
             )
             .where(
                 InventoryMovement.tenant_id == tenant_id,
@@ -210,7 +213,10 @@ class InventoryRepository:
                 func.row_number()
                 .over(
                     partition_by=InventoryMovement.product_id,
-                    order_by=InventoryMovement.created_at.desc(),
+                    # F6-B3: mismo criterio que el MAX de arriba — la fecha y el costo
+                    # de "última compra" deben salir del mismo movimiento (por fecha
+                    # de negocio), no divergir por created_at.
+                    order_by=movement_business_time(InventoryMovement).desc(),
                 )
                 .label("rn"),
             )

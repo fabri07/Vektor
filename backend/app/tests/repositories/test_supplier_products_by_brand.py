@@ -8,6 +8,7 @@ pura ``group_products_by_brand`` (agrupado, orden, match oficial). El label
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -298,6 +299,51 @@ async def test_sentinel_supplier_groups_normally(
     groups = group_products_by_brand(rows, sentinel.name)
     assert [g.brand for g in groups] == ["Playadito", None]
     assert all(g.is_official is False for g in groups)
+
+
+@pytest.mark.asyncio
+async def test_ultima_compra_por_fecha_de_negocio_no_por_carga(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-B3: la fecha y el costo de "última compra" salen del movimiento con el
+    occurred_at (fecha de negocio) más reciente, NO del created_at (fecha de carga).
+
+    Escenario del bug: la compra cargada DESPUÉS (created_at posterior) ocurrió
+    ANTES (occurred_at anterior). Con created_at puro, la UI mostraba la fecha de
+    una compra y el costo de otra. Con COALESCE(occurred_at, created_at), fecha y
+    costo salen del MISMO movimiento (el de negocio más reciente).
+    """
+    from datetime import UTC, datetime
+
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Mayorista")
+    db_session.add(supplier)
+    await db_session.flush()
+    p = await _product(db_session, tid, "Aceite", marca="Natura")
+
+    # Compra vieja (negocio) pero cargada última: occurred_at enero, created_at marzo.
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 5, Decimal("100"),
+        occurred_at=datetime(2026, 1, 10, tzinfo=UTC),
+        created_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    # Compra reciente (negocio) pero cargada primero: occurred_at febrero, created_at feb.
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 3, Decimal("200"),
+        occurred_at=datetime(2026, 2, 20, tzinfo=UTC),
+        created_at=datetime(2026, 2, 20, tzinfo=UTC),
+    )
+    await db_session.commit()
+
+    rows = await InventoryRepository(db_session).products_purchased_from_supplier(
+        tid, supplier.id
+    )
+    assert len(rows) == 1
+    # Última compra = la de negocio más reciente (20/02), no la cargada última (01/03).
+    assert rows[0].last_purchase_at is not None
+    assert rows[0].last_purchase_at.date() == date(2026, 2, 20)
+    # El costo sale del MISMO movimiento (200), no del cargado último (100).
+    assert rows[0].unit_price == Decimal("200")
 
 
 @pytest.mark.asyncio
