@@ -41,6 +41,8 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "stock_units": "Stock (unidades)",
         "category": "Categoría",
         "description": "Descripción",
+        "acquired_at": "Fecha de alta/adquisición",
+        "expiry_date": "Fecha de vencimiento",
     },
 }
 
@@ -150,6 +152,16 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
         },
         "category": {"categoria", "tipo", "rubro"},
         "description": {"descripcion", "descripción", "detalle", "comentarios"},
+        # F6-B1: fechas de producto. La palabra genérica "fecha" NO auto-mapea
+        # ninguna (evita robarle la columna de fecha de venta/gasto en hojas mixtas).
+        "acquired_at": {
+            "alta", "adquisicion", "adquisición",
+            "fecha_alta", "fecha_ingreso", "fecha_compra",
+        },
+        "expiry_date": {
+            "vencimiento", "caducidad", "vence", "vto",
+            "expira", "expiracion", "expiración",
+        },
     },
 }
 

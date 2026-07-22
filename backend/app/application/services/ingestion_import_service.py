@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -37,7 +37,7 @@ from app.application.services.product_identity import (
     add_product_or_reuse,
 )
 from app.domain.business_time import now_ar_naive
-from app.domain.date_parsing import parse_business_datetime
+from app.domain.date_parsing import parse_business_date, parse_business_datetime
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -1710,6 +1710,41 @@ _PROVEEDOR_COLS: set[str] = {
 _VENTA_AMOUNT_COLS: set[str] = _VENTA_COLS | {"total", "importe_total", "precio_unitario"}
 # Columnas de monto de gasto ampliadas
 _GASTO_AMOUNT_COLS: set[str] = _GASTO_COLS | {"monto", "total", "importe"}
+
+# F6-B1/B2: fechas de producto. La genérica "fecha" queda AFUERA a propósito (no
+# le roba la columna a la fecha de venta/gasto en hojas mixtas). Espejan las
+# heurísticas de column_mapping_service._HEURISTICS["product"].
+_ACQUIRED_COLS: set[str] = {
+    "alta", "adquisicion", "adquisición", "fecha_alta", "fecha_ingreso", "fecha_compra",
+}
+_EXPIRY_COLS: set[str] = {
+    "vencimiento", "caducidad", "vence", "vto", "expira", "expiracion", "expiración",
+}
+
+
+def _accumulate_acquired_at(
+    existing: datetime | None, new: datetime | None
+) -> datetime | None:
+    """F6-B2: fecha de alta = la MÁS ANTIGUA conocida (un producto se dio de alta
+    una vez; reimportes con otra fecha no la hacen "más nueva")."""
+    candidates = [d for d in (existing, new) if d is not None]
+    return min(candidates) if candidates else None
+
+
+def _accumulate_expiry_date(
+    existing: date | None, new: date | None, today: date
+) -> date | None:
+    """F6-B2: vencimiento a nivel producto (no por lote — FEFO real necesita
+    inventory_lots, fuera de alcance). Si hay al menos un vencimiento FUTURO → el
+    más próximo (lo que primero hay que vender/descartar). Si TODOS están vencidos
+    → el más reciente. Nunca se descarta una fecha por ser pasada: B4 necesita poder
+    mostrar "vencido", y un producto sin expiry es indistinguible de uno sin
+    vencimiento conocido."""
+    candidates = [d for d in (existing, new) if d is not None]
+    if not candidates:
+        return None
+    future = [d for d in candidates if d >= today]
+    return min(future) if future else max(candidates)
 
 
 def _parse_amount(raw: Any) -> Decimal | None:
@@ -3449,6 +3484,16 @@ async def _insert_multisheet_data(
         cat_label: str | None = None
         if cat_raw:
             cat, cat_label = normalize_product_category(cat_raw, _business_type)
+        # F6-B2: fechas de producto (columna mapeada o keyword; la genérica "fecha"
+        # NO cuenta). Inválida/ausente → None: un producto es válido sin fecha, no se
+        # inventa ni se rutea a /otros. acquired_at es datetime (columna naive);
+        # expiry_date es date.
+        _acq_raw = _val(row, cols.get("acquired_at"), _ACQUIRED_COLS)
+        _acquired = parse_business_datetime(_acq_raw) if _acq_raw is not None else None
+        if _acquired is not None and _acquired.tzinfo is not None:
+            _acquired = _acquired.replace(tzinfo=None)
+        _exp_raw = _val(row, cols.get("expiry_date"), _EXPIRY_COLS)
+        _expiry = parse_business_date(_exp_raw) if _exp_raw is not None else None
         # F2-T2: resolución de identidad por claves independientes
         # (barcode→sku→nombre+marca). Caché intra-corrida ANTES del motor —
         # evita duplicar con autoflush=False cuando 2 filas del archivo
@@ -3496,6 +3541,18 @@ async def _insert_multisheet_data(
                 existing.barcode = barcode
             if cat and not existing.category:
                 existing.category = cat
+            # F6-B2: acumular fechas de producto salvo edición manual del usuario
+            # (has_user_edits protege ambas). acquired_at = la más antigua conocida;
+            # expiry_date por la regla futuro-más-próximo / vencido-más-reciente.
+            if not existing.has_user_edits:
+                _acc_acq = _accumulate_acquired_at(existing.acquired_at, _acquired)
+                if _acc_acq is not None:
+                    existing.acquired_at = _acc_acq
+                _acc_exp = _accumulate_expiry_date(
+                    existing.expiry_date, _expiry, today.date()
+                )
+                if _acc_exp is not None:
+                    existing.expiry_date = _acc_exp
             _register_product_identity_cache(
                 products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
             )
@@ -3571,6 +3628,9 @@ async def _insert_multisheet_data(
                 provenance="REAL",
                 # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.
                 requires_completion=not price or not cost,
+                # F6-B2: fechas de producto del archivo (None si no se mapearon).
+                acquired_at=_acquired,
+                expiry_date=_expiry,
                 custom_fields=cf or None,
                 source_row_ref=row_ref,  # Mejora D
             )
