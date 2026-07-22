@@ -43,10 +43,20 @@ async def _purchase(
     qty: int,
     unit_cost: Decimal | None,
     voided: bool = False,
+    occurred_at: datetime | None = None,
+    created_at: datetime | None = None,
+    movement_id: uuid.UUID | None = None,
 ) -> None:
+    kwargs: dict[str, object] = {}
+    if occurred_at is not None:
+        kwargs["occurred_at"] = occurred_at
+    if created_at is not None:
+        # Sobrescribe el server_default: sirve para probar que la fecha de negocio
+        # (occurred_at) manda sobre la de carga (created_at) — F6-B3.
+        kwargs["created_at"] = created_at
     session.add(
         InventoryMovement(
-            id=uuid.uuid4(),
+            id=movement_id or uuid.uuid4(),
             tenant_id=tenant_id,
             product_id=product_id,
             supplier_id=supplier_id,
@@ -54,5 +64,6 @@ async def _purchase(
             qty=qty,
             unit_cost=unit_cost,
             voided_at=datetime.now(UTC) if voided else None,
+            **kwargs,
         )
     )

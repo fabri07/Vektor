@@ -40,6 +40,9 @@ const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> 
     { value: "stock_units", label: "Stock (unidades)" },
     { value: "category", label: "Categoría" },
     { value: "description", label: "Descripción" },
+    // F6-B1: espeja CANONICAL_FIELDS["product"] del backend (mantener en sync).
+    { value: "acquired_at", label: "Fecha de alta/adquisición" },
+    { value: "expiry_date", label: "Fecha de vencimiento" },
   ],
 };
 

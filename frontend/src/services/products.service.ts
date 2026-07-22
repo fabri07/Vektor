@@ -37,6 +37,9 @@ export interface ProductResponse {
   margin_pct: number | null;
   is_low_stock: boolean;
   stock_status: "in_stock" | "low_stock" | "out_of_stock";
+  // F6-B4: estado de vencimiento a nivel producto (null = sin vencimiento conocido).
+  expiry_status?: "expired" | "expiring_soon" | "ok" | null;
+  expiry_date?: string | null;
   custom_fields?: Record<string, unknown>;
   acquired_at?: string | null;
   created_at?: string;

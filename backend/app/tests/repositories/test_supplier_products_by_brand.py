@@ -8,6 +8,7 @@ pura ``group_products_by_brand`` (agrupado, orden, match oficial). El label
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -298,6 +299,87 @@ async def test_sentinel_supplier_groups_normally(
     groups = group_products_by_brand(rows, sentinel.name)
     assert [g.brand for g in groups] == ["Playadito", None]
     assert all(g.is_official is False for g in groups)
+
+
+@pytest.mark.asyncio
+async def test_ultima_compra_por_fecha_de_negocio_no_por_carga(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-B3: la fecha y el costo de "última compra" salen del movimiento con el
+    occurred_at (fecha de negocio) más reciente, NO del created_at (fecha de carga).
+
+    Escenario del bug: la compra cargada DESPUÉS (created_at posterior) ocurrió
+    ANTES (occurred_at anterior). Con created_at puro, la UI mostraba la fecha de
+    una compra y el costo de otra. Con COALESCE(occurred_at, created_at), fecha y
+    costo salen del MISMO movimiento (el de negocio más reciente).
+    """
+    from datetime import UTC, datetime
+
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Mayorista")
+    db_session.add(supplier)
+    await db_session.flush()
+    p = await _product(db_session, tid, "Aceite", marca="Natura")
+
+    # Compra vieja (negocio) pero cargada última: occurred_at enero, created_at marzo.
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 5, Decimal("100"),
+        occurred_at=datetime(2026, 1, 10, tzinfo=UTC),
+        created_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    # Compra reciente (negocio) pero cargada primero: occurred_at febrero, created_at feb.
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 3, Decimal("200"),
+        occurred_at=datetime(2026, 2, 20, tzinfo=UTC),
+        created_at=datetime(2026, 2, 20, tzinfo=UTC),
+    )
+    await db_session.commit()
+
+    rows = await InventoryRepository(db_session).products_purchased_from_supplier(
+        tid, supplier.id
+    )
+    assert len(rows) == 1
+    # Última compra = la de negocio más reciente (20/02), no la cargada última (01/03).
+    assert rows[0].last_purchase_at is not None
+    assert rows[0].last_purchase_at.date() == date(2026, 2, 20)
+    # El costo sale del MISMO movimiento (200), no del cargado último (100).
+    assert rows[0].unit_price == Decimal("200")
+
+
+@pytest.mark.asyncio
+async def test_ultima_compra_desempate_por_id_es_deterministico(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-B3: dos compras con el MISMO instante de negocio → el costo elegido es
+    determinístico (desempate por id.desc()), no arbitrario."""
+    from datetime import UTC, datetime
+
+    tid = sample_tenant.tenant_id
+    supplier = Supplier(id=uuid.uuid4(), tenant_id=tid, name="Mayorista")
+    db_session.add(supplier)
+    await db_session.flush()
+    p = await _product(db_session, tid, "Fideos", marca="Marca")
+    same_instant = datetime(2026, 5, 1, tzinfo=UTC)
+    id_low = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    id_high = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    # occurred_at Y created_at iguales: así el ÚNICO desempate posible es id.desc()
+    # (sin él, la vieja `created_at.desc()` no distinguía y el resultado quedaba
+    # indefinido — el test no aislaba el tiebreak).
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 1, Decimal("100"),
+        occurred_at=same_instant, created_at=same_instant, movement_id=id_low,
+    )
+    await _purchase(
+        db_session, tid, p.id, supplier.id, 1, Decimal("200"),
+        occurred_at=same_instant, created_at=same_instant, movement_id=id_high,
+    )
+    await db_session.commit()
+
+    rows = await InventoryRepository(db_session).products_purchased_from_supplier(
+        tid, supplier.id
+    )
+    # Empate de instante → gana el id mayor (200), de forma estable.
+    assert rows[0].unit_price == Decimal("200")
 
 
 @pytest.mark.asyncio

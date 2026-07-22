@@ -184,6 +184,89 @@ async def test_single_sheet_duplicate_product_name_no_500(
 
 
 @pytest.mark.asyncio
+async def test_single_sheet_captura_ambigua_es_idempotente_en_relectura(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-B (review): en single-context, la captura a /otros por identidad ambigua
+    registra fingerprint, así una RELECTURA del mismo archivo no re-crea el
+    UnclassifiedRecord (paridad con multi-context). Antes re-capturaba (duplicaba)."""
+    tid = sample_tenant.tenant_id
+    await _create_two_active_products_same_name(db_session, tid)
+    up = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tid,
+        original_filename="cat.csv",
+        s3_key="k",
+        content_type="text/csv",
+        size_bytes=10,
+        purpose="ingestion",
+    )
+    db_session.add(up)
+    await db_session.flush()
+
+    summary = _stock_summary(
+        [{"producto": "Coca Cola", "precio": "1500", "costo": "900", "stock": "50"}]
+    )
+    kwargs: dict[str, Any] = {"uploaded_file_id": up.id}
+
+    first = await importer.insert_confirmed_data(
+        db_session, tid, summary, {"productos": True}, **kwargs
+    )
+    assert first["otros"] == 1
+
+    # Relectura del MISMO archivo → no re-captura (idempotente por fingerprint).
+    second = await importer.insert_confirmed_data(
+        db_session, tid, summary, {"productos": True}, **kwargs
+    )
+    assert second["otros"] == 0
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(records) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_multisheet_captura_ambigua_es_idempotente_en_relectura(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """F6-B (review): la rama legacy de _insert_multisheet_data (summary mixed/
+    multi_sheet SIN mapping_contexts) también fingerprintea la captura ambigua →
+    relectura no duplica el UnclassifiedRecord."""
+    tid = sample_tenant.tenant_id
+    await _create_two_active_products_same_name(db_session, tid)
+    up = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tid,
+        original_filename="legacy.csv",
+        s3_key="k",
+        content_type="text/csv",
+        size_bytes=10,
+        purpose="ingestion",
+    )
+    db_session.add(up)
+    await db_session.flush()
+
+    # mixed + multi_sheet pero SIN mapping_contexts → cae a la rama legacy.
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_producto": True,
+        "stock_detectado": [{"producto": "Coca Cola", "stock": "50"}],
+    }
+    kwargs: dict[str, Any] = {"uploaded_file_id": up.id}
+
+    first = await importer.insert_confirmed_data(
+        db_session, tid, summary, {"productos": True}, **kwargs
+    )
+    assert first["otros"] == 1
+    second = await importer.insert_confirmed_data(
+        db_session, tid, summary, {"productos": True}, **kwargs
+    )
+    assert second["otros"] == 0
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(records) == 1
+
+
+@pytest.mark.asyncio
 async def test_multisheet_duplicate_product_name_no_500(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
