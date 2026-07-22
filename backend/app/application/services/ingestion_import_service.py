@@ -1586,11 +1586,20 @@ async def _apply_catalog_stock(
     """
     if delta == 0:
         return
+    # F6-C3: NO incluir la fecha en el hash de identidad de la fila de catálogo.
+    # ``tx_date`` acá es SIEMPRE ``today`` sintético (el ancla catalog_initial_stock
+    # no tiene fecha de negocio real — por eso inventory_temporal_service la ignora,
+    # ver invariante 2d). Meterla hacía que el MISMO catálogo, releído otro día,
+    # produjera un ``source_row_hash`` distinto, y F3 (product_dedup_service, único
+    # consumidor del hash al fusionar duplicados) no reconocía la fila como la misma
+    # → doble conteo de stock. La identidad lógica es producto+qty+costo+proveedor+
+    # upload; el ``upload_id`` ya separa archivos distintos. NO se usa el ancla de
+    # fila: incluye el índice y rompería la estabilidad ante reordenamiento del Excel.
     _row_hash = compute_source_row_hash(
         product_key=product_name,
         qty=delta,
         unit_cost=unit_cost,
-        movement_date=tx_date,
+        movement_date=None,
         supplier_key=store_name,
         upload_id=uploaded_file_id,
     )
