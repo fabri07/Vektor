@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.application.services.file_parsing import (
+    analyze_headers,
     detect_supported_mime,
     infer_spreadsheet_type,
     parse_uploaded_content,
@@ -490,6 +491,31 @@ def test_maestro_signal_with_transaccion_does_not_intercept() -> None:
         gasto_score=1,
     )
     assert result == "gastos"
+
+
+def test_maestro_signal_with_catalogo_fuerte_does_not_intercept() -> None:
+    """Review fix: catálogo fuerte (sku/codigo/articulo/item) + columna proveedor/
+    cliente, SIN cantidad/monto/fecha → sigue siendo 'stock' (regla 1), no se
+    reclasifica como maestro. Un catálogo con una columna 'proveedor' (quién lo
+    distribuye) no es un maestro de proveedores."""
+    result = infer_spreadsheet_type(
+        has_fecha=False,
+        has_venta=False,
+        has_gasto=False,
+        has_producto=True,
+        has_nombre=True,
+        has_catalogo_fuerte=True,
+        proveedor_master_score=1,
+    )
+    assert result == "stock"
+
+
+def test_analyze_headers_catalogo_con_columna_proveedor_sigue_stock() -> None:
+    """No-regresión (review): los 3 casos reportados — catálogo real con una columna
+    de proveedor/cliente pero sin señales transaccionales sigue siendo 'stock'."""
+    assert analyze_headers(["sku", "producto", "proveedor", "precio"])["inferred_type"] == "stock"
+    assert analyze_headers(["codigo", "articulo", "contacto"])["inferred_type"] == "stock"
+    assert analyze_headers(["articulo", "sku", "cliente"])["inferred_type"] == "stock"
 
 
 def test_csv_clientes_master_end_to_end_infers_clientes() -> None:

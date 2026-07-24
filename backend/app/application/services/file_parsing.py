@@ -476,10 +476,14 @@ def infer_spreadsheet_type(
         dispara cuando, sin esta regla, el archivo caería en "stock" por error.
     -0.5 (F7a). MAESTRO DE CLIENTES/PROVEEDORES: señal de identidad fiscal/contacto
         (dni/cliente para clientes; cuil/proveedor para proveedores) SIN ninguna señal
-        transaccional (monto de operación, cantidad, fecha) → clientes/proveedores.
+        transaccional (monto de operación, cantidad, fecha) NI de catálogo fuerte
+        (sku/codigo/inventario/articulo/item — regla 1) → clientes/proveedores.
         Disjunta con la regla -1 (esa exige monto+fecha; esta los excluye), así el
-        orden entre ambas no importa. Corre ANTES que las reglas de catálogo (2-4) para
-        que un maestro con columna "nombre" no se confunda con una lista de precios.
+        orden entre ambas no importa. El guard de catálogo evita que un CATÁLOGO de
+        productos con una columna "proveedor"/"cliente" (ej. quién lo distribuye) se
+        confunda con un maestro — sigue siendo "stock" vía la regla 1. Corre ANTES
+        que las reglas de catálogo débiles (2-4, basadas en "nombre") para que un
+        maestro con columna "nombre" no se confunda con una lista de precios.
     0. Compra de mercadería/insumos + cantidad → inventario (FASE 3, conservador).
     1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
     2. Señal de nombre/producto sin venta explícita → stock.
@@ -513,10 +517,16 @@ def infer_spreadsheet_type(
     # Regla -0.5 (F7a, CONSERVADORA): un maestro de CLIENTES o PROVEEDORES trae
     # identidad fiscal/contacto (dni/cliente, cuil/proveedor, +opcionalmente
     # nombre+email/telefono/localidad/etc.) pero NINGUNA señal transaccional
-    # (monto de operación, cantidad, fecha). Sin esta regla, un maestro con columna
-    # "nombre" caería en "stock" (regla 2-4) o, si trae "proveedor", en "gastos"
-    # (GASTO_SIGNAL_COLS) — perdiendo el maestro. Empate o ausencia de discriminador
-    # → no se adivina (cae a las reglas siguientes, comportamiento previo).
+    # (monto de operación, cantidad, fecha) NI de catálogo (sku/codigo/inventario/
+    # articulo/item — regla 1, `has_catalogo_fuerte`). Sin esta regla, un maestro
+    # con columna "nombre" caería en "stock" (regla 2-4) o, si trae "proveedor", en
+    # "gastos" (GASTO_SIGNAL_COLS) — perdiendo el maestro. El guard de catálogo
+    # evita el caso inverso: un CATÁLOGO de productos que además trae una columna
+    # "proveedor"/"cliente" (p.ej. quién lo distribuye) NO es un maestro de
+    # clientes/proveedores — sigue siendo "stock" (regla 1, más abajo). Un maestro
+    # real no trae sku/codigo/inventario/articulo/item. Empate o ausencia de
+    # discriminador → no se adivina (cae a las reglas siguientes, comportamiento
+    # previo).
     has_maestro_signal = (
         cliente_score > 0
         or proveedor_master_score > 0
@@ -527,6 +537,7 @@ def infer_spreadsheet_type(
         and not has_monto_transaccion
         and not has_cantidad
         and not has_fecha
+        and not has_catalogo_fuerte
     ):
         if proveedor_master_score > cliente_score:
             return "proveedores"
