@@ -2930,6 +2930,11 @@ async def _insert_confirmed_data_impl(
                     # no matchea, la decisión (sentinela o no) se difiere al bloque de
                     # abajo, que ya sabe si la fila es una compra de mercadería.
                     _pending_supplier_ref: RowReferenceResolution | None = None
+                    # Review 7d (Important): el contador de "matched" se difiere al
+                    # bloque `if not _captured_to_otros` (más abajo) — bumpearlo acá
+                    # contaba una fila que después podía ir a "Otros" por producto
+                    # ambiguo (el gasto nunca se persiste en ese caso).
+                    _supplier_matched = False
                     if _supplier_ref_mode == "link_only":
                         _has_supplier_ref_col = bool(
                             supplier_col
@@ -2949,7 +2954,7 @@ async def _insert_confirmed_data_impl(
                                 expense.supplier_id = _sup_ref.entity.id
                                 expense.supplier_name = _sup_ref.entity.name
                                 cf["_supplier_resolution"] = "matched"
-                                _bump_reference_counts(counts, "compras_proveedor", "matched")
+                                _supplier_matched = True
                             else:
                                 _pending_supplier_ref = _sup_ref
                     elif supplier_col:
@@ -3093,6 +3098,11 @@ async def _insert_confirmed_data_impl(
                                     if _raw:
                                         cf["_supplier_reference_raw"] = _raw
                                 _bump_reference_counts(counts, "compras_proveedor", _outcome)
+                        elif _supplier_matched:
+                            # Review 7d (Important): recién acá se sabe que la fila
+                            # no fue descartada a "Otros" — bumpear antes hubiera
+                            # contado una compra que nunca se persistió.
+                            _bump_reference_counts(counts, "compras_proveedor", "matched")
                         if cf:
                             expense.custom_fields = cf
                         await _apply_purchase_to_stock(
@@ -3950,6 +3960,9 @@ async def _insert_multisheet_data(
         # matchea por identidad y NUNCA crea; el anonymous/unresolved sin match se
         # difiere al bloque de abajo, que ya sabe si es compra de mercadería.
         _pending_supplier_ref: RowReferenceResolution | None = None
+        # Review 7d (Important): diferido igual que en el path single-context —
+        # ver el comentario en _insert_confirmed_data_impl.
+        _supplier_matched = False
         _supplier_name_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
         if _supplier_ref_mode == "link_only":
             _has_supplier_ref_col = bool(
@@ -3969,7 +3982,7 @@ async def _insert_multisheet_data(
                     expense.supplier_id = _sup_ref.entity.id
                     expense.supplier_name = _sup_ref.entity.name
                     cf["_supplier_resolution"] = "matched"
-                    _bump_reference_counts(counts, "compras_proveedor", "matched")
+                    _supplier_matched = True
                 else:
                     _pending_supplier_ref = _sup_ref
         elif _supplier_name_raw is not None:
@@ -4088,6 +4101,11 @@ async def _insert_multisheet_data(
                 if _outcome == "unresolved" and _raw_pending:
                     cf["_supplier_reference_raw"] = _raw_pending
                 _bump_reference_counts(counts, "compras_proveedor", _outcome)
+        elif _supplier_matched:
+            # Review 7d (Important): recién acá se sabe que la fila no fue
+            # descartada a "Otros" (ese branch ya retornó antes) — bumpear en
+            # el momento del match contaba una compra que podía no persistirse.
+            _bump_reference_counts(counts, "compras_proveedor", "matched")
         if cf:
             expense.custom_fields = cf
         await _apply_purchase_to_stock(

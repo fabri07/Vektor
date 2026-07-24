@@ -1215,6 +1215,15 @@ async def confirm_file(
                 "otros_detectados",
                 "preview_rows",
                 "mapping_contexts",
+                # F7d review (Important): clientes_detectados/proveedores_detectados
+                # traen filas crudas con nombre/DNI/CUIT/email/teléfono — sin esto,
+                # esa PII quedaba at-rest en el JSONB y se re-servía cruda por
+                # GET /files/{id}/preview. El preview de maestros se computa aparte
+                # (_build_master_previews, contra mapping_contexts) y NO depende de
+                # estos buckets sobrevivir al confirm — mismo criterio que los
+                # demás buckets de filas crudas de la lista.
+                "clientes_detectados",
+                "proveedores_detectados",
             )
         }
         compact_summary["imported_counts"] = counts

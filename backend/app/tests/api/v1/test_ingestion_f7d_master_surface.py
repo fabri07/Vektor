@@ -182,6 +182,63 @@ class TestConfirmMasterWarningsAndCounts:
         }
         assert customer_names == {"Juan Perez", "Local"}
 
+    async def test_confirm_no_persiste_pii_cruda_de_maestros_en_parsed_summary(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Review 7d (Important): `compact_summary` limpiaba ventas_detectadas/
+        gastos_detectados/stock_detectado/otros_detectados/preview_rows/
+        mapping_contexts pero NO clientes_detectados/proveedores_detectados —
+        esos buckets traen nombre/DNI/CUIT/email/teléfono crudos y quedaban
+        at-rest en el JSONB, re-servidos por GET /files/{id}/preview."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="mixto_pii.xlsx",
+            s3_key="uploads/test/uuid/mixto_pii.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=2048,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json=_mixed_summary(),
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True, "clientes": True},
+                "column_mappings": _mixed_column_mappings(),
+                "context_confirmed": {"sheet:Clientes": True, "sheet:Ventas": True},
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        await db_session.refresh(record)
+        stored = record.parsed_summary_json or {}
+        assert "clientes_detectados" not in stored
+        assert "proveedores_detectados" not in stored
+        # Ningún DNI crudo de la hoja de Clientes sobrevive al confirm.
+        assert _VALID_DNI not in json.dumps(stored)
+        assert _OTHER_DNI not in json.dumps(stored)
+
+        # El GET /preview re-sirve exactamente ese summary guardado — verificar
+        # ahí también cubre el otro consumidor del mismo dato at-rest.
+        preview_response = await client.get(
+            f"/api/v1/ingestion/files/{record.id}/preview",
+            headers=auth_headers,
+        )
+        assert preview_response.status_code == 200, preview_response.text
+        assert _VALID_DNI not in preview_response.text
+        assert _OTHER_DNI not in preview_response.text
+
     async def test_confirm_venta_anonima_sola_no_genera_ningun_warning_de_cliente(
         self,
         client: AsyncClient,

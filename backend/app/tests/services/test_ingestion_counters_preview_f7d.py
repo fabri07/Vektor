@@ -18,6 +18,7 @@ módulo cubre:
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -26,11 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
 from app.application.services import reread_service
+from app.config.settings import get_settings
 from app.integrations.s3 import S3Client
 from app.persistence.models.customer import Customer
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
+from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
+from app.persistence.models.transaction import ExpenseEntry
 
 _VALID_DNI = "30111222"
 _OTHER_DNI = "40987654"
@@ -403,3 +407,108 @@ async def test_reread_sin_mapeo_guardado_no_reaplica_maestros(
     await db_session.commit()
 
     assert (await db_session.execute(select(Customer))).first() is None
+
+
+# ── 4. apply_import (F7d review) no pisa un campo existente con celda vacía ───
+
+
+@pytest.mark.asyncio
+async def test_customer_apply_import_no_pisa_email_existente_con_celda_vacia(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Review 7d (Important): una columna MAPEADA pero con la celda vacía en esta
+    fila arma {campo: ""} (clave presente, valor vacío) — el guard de update
+    anterior (``if fname not in record``) chequeaba presencia de clave, no
+    vacuidad, así que ese valor vacío se ``setattr``-eaba igual y borraba el
+    email existente. El re-import matchea por DNI con la columna email MAPEADA
+    pero vacía → el email debe preservarse."""
+    from app.application.services.customer_import_service import apply_import
+    from app.persistence.repositories.customer_repository import CustomerRepository
+
+    repo = CustomerRepository(db_session)
+    tid = sample_tenant.tenant_id
+    existing = Customer(
+        tenant_id=tid, name="Juan Perez", dni=_VALID_DNI, email="juan@viejo.com"
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    # La columna "email" está MAPEADA (la clave está presente) pero la celda de
+    # esta fila vino vacía.
+    records = [{"name": "Juan Perez", "dni": _VALID_DNI, "email": ""}]
+    result = await apply_import(repo, tid, records)
+    assert result.updated_ids == [existing.id]
+
+    await db_session.refresh(existing)
+    assert existing.email == "juan@viejo.com"  # preservado, no pisado con ""
+
+
+# ── 5. compras_proveedor_identificado no cuenta compras que van a "Otros" ──────
+
+
+@pytest.mark.asyncio
+async def test_compra_matched_pero_producto_ambiguo_no_genera_conteo_fantasma(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 7d (Minor): el bump de "matched" ocurría ANTES del check de
+    producto ambiguo — una compra con proveedor matcheado pero producto
+    ambiguo (≥2 activos con el mismo nombre) va a "Otros" y el gasto NUNCA se
+    persiste, pero el contador igual sumaba +1 (conteo fantasma). Ahora el
+    bump se difiere a después de saber que la fila no fue descartada."""
+    monkeypatch.setattr(get_settings(), "SUPPLIER_REFERENCE_CREATION_MODE", "link_only")
+
+    valid_cuil = "20-12345678-6"
+    supplier = Supplier(
+        tenant_id=sample_tenant.tenant_id, name="Distribuidora Real", cuil=valid_cuil
+    )
+    # Dos productos activos con el MISMO nombre → lookup ambiguo.
+    products = [
+        Product(
+            tenant_id=sample_tenant.tenant_id,
+            name="Coca Cola",
+            sale_price_ars=Decimal("1000"),
+            unit_cost_ars=Decimal("600"),
+            stock_units=5,
+            is_active=True,
+        ),
+        Product(
+            tenant_id=sample_tenant.tenant_id,
+            name="Coca Cola",
+            sale_price_ars=Decimal("1200"),
+            unit_cost_ars=Decimal("700"),
+            stock_units=8,
+            is_active=True,
+        ),
+    ]
+    db_session.add(supplier)
+    db_session.add_all(products)
+    await db_session.flush()
+
+    summary: dict[str, Any] = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "has_gasto": True,
+        "gastos_detectados": [
+            {
+                "fecha": "2024-01-15",
+                "gasto": "5000",
+                "producto": "Coca Cola",
+                "cantidad": "10",
+                "cuil_prov": valid_cuil,
+            }
+        ],
+    }
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"gastos": True},
+        column_mappings={"cuil_prov": "supplier_cuil"},
+    )
+
+    assert counts["otros"] == 1
+    assert counts["gastos"] == 0  # el gasto NUNCA se persistió (fue a "Otros")
+    assert counts["compras_proveedor_identificado"] == 0  # sin conteo fantasma
+
+    expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
+    assert expenses == []

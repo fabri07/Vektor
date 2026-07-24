@@ -762,6 +762,11 @@ async def execute_pending_action(
                         "otros_detectados",
                         "preview_rows",
                         "mapping_contexts",
+                        # F7d review (Important): mismo criterio que el confirm de
+                        # la API — estos buckets traen PII cruda (nombre/DNI/CUIT/
+                        # email/teléfono) y no hace falta que sobrevivan al import.
+                        "clientes_detectados",
+                        "proveedores_detectados",
                     )
                 },
                 "confirmed_fields": confirmed_fields,

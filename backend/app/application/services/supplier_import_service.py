@@ -20,6 +20,7 @@ from pydantic_core import PydanticCustomError
 from app.application.services.identity_resolution import (
     IdentityKey,
     build_existing_index,
+    is_blank,
     record_keys,
     resolve_identity,
 )
@@ -230,9 +231,12 @@ async def apply_import(
         if resolution.outcome == "matched":
             match = resolution.entity
             assert match is not None  # invariante de "matched": siempre trae entity
-            # Actualizar solo los campos provistos (no pisar con vacío).
+            # Actualizar solo los campos provistos (no pisar con vacío): una
+            # columna MAPEADA pero con la celda vacía en esta fila arma
+            # {campo: None} (clave presente, valor vacío) — is_blank() evita que
+            # eso borre un valor existente (edición manual u otra carga).
             for fname in _IMPORTABLE_FIELDS:
-                if fname not in record:
+                if fname not in record or is_blank(record[fname]):
                     continue
                 setattr(match, fname, record[fname])
             await repo.save(match)

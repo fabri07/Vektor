@@ -221,3 +221,31 @@ class TestSupplierApplyImport:
         # No matchea la marca colapsada (excluida del índice) → crea un proveedor nuevo.
         assert len(result.created_ids) == 1
         assert result.created_ids[0] != collapsed.id
+
+    async def test_update_no_pisa_email_existente_con_celda_vacia(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        """Review 7d (Important): una columna MAPEADA pero con la celda vacía en
+        esta fila arma {campo: ""} (clave presente, valor vacío) — antes del fix,
+        el guard de update era ``if fname not in record`` (presencia de clave, no
+        vacuidad), así que ese valor vacío se ``setattr``-eaba igual y borraba el
+        email existente. El re-import matchea por CUIL con la columna email
+        MAPEADA pero vacía → el email debe preservarse."""
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+        existing = Supplier(
+            tenant_id=tid, name="Distribuidora Norte", cuil=_VALID_CUIL, email="norte@viejo.com"
+        )
+        db_session.add(existing)
+        await db_session.commit()
+
+        # La columna "email" está MAPEADA (la clave está presente) pero la celda
+        # de esta fila vino vacía.
+        records = [_row(name="Distribuidora Norte", cuil=_VALID_CUIL, email="")]
+        result = await apply_import(repo, tid, records)
+        assert result.updated_ids == [existing.id]
+
+        await db_session.refresh(existing)
+        assert existing.email == "norte@viejo.com"  # preservado, no pisado con ""

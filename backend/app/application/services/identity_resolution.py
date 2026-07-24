@@ -18,6 +18,7 @@ no lo necesita saber.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -53,6 +54,28 @@ def normalize_name(value: Any) -> str:
     if value is None:
         return ""
     return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+_BLANK_STRINGS = {"", "nan", "none", "null", "n/a", "na"}
+
+
+def is_blank(value: Any) -> bool:
+    """True si ``value`` representa "sin dato": ``None``, NaN (float), o un string
+    vacío/whitespace/placeholder de nulo (``"nan"``, ``"none"``, ``"null"``, etc.
+    — mismo criterio laxo que ``file_parsing._NULL_STRINGS``, sin acoplar los dos
+    módulos).
+
+    Usado por ``apply_import`` (F7d review) para que un update NUNCA pise un
+    campo existente con un valor vacío: una columna MAPEADA pero con la celda
+    en blanco en esta fila puntual arma ``{campo: None}`` (clave presente, valor
+    vacío) — sin este chequeo, ese `None` se `setattr`-ea igual y borra una
+    edición manual o un dato cargado por otra vía.
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return isinstance(value, str) and value.strip().lower() in _BLANK_STRINGS
 
 
 @dataclass(frozen=True)
