@@ -71,6 +71,39 @@ class TestProductsCRUD:
         assert resp.status_code == 200
         assert len(resp.json()) >= 1
 
+    async def test_list_tolerates_legacy_json_null_custom_fields(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: Any,
+        sample_tenant: Any,
+    ) -> None:
+        """Regresión: una fila con ``custom_fields = JSON null`` (``None`` en Python,
+        lo que persistía el import de catálogo sin marca) NO debe romper el listado
+        con 503 (``ResponseValidationError``). La respuesta la normaliza a ``{}``
+        (mutación: quitar el ``field_validator`` de ``ProductResponse`` → 503)."""
+        import uuid
+        from decimal import Decimal
+
+        from app.persistence.models.product import Product
+
+        product = Product(
+            id=uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            name="Legacy sin custom_fields",
+            sale_price_ars=Decimal("1000"),
+            stock_units=5,
+            provenance="REAL",
+            custom_fields=None,  # como el import viejo → 'null'::jsonb
+        )
+        db_session.add(product)
+        await db_session.commit()
+
+        resp = await client.get("/api/v1/products", headers=auth_headers)
+        assert resp.status_code == 200
+        row = next(p for p in resp.json() if p["id"] == str(product.id))
+        assert row["custom_fields"] == {}
+
     async def test_list_products_filter_active(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 from app.domain.business_time import now_ar_naive
 from app.domain.product import effective_threshold
@@ -39,6 +39,14 @@ class ProductResponse(BaseModel):
     created_at: datetime
     deactivated_at: datetime | None = None
     deactivation_reason: str | None = None
+
+    @field_validator("custom_fields", mode="before")
+    @classmethod
+    def _coerce_null_custom_fields(cls, v: Any) -> Any:
+        """Un import de catálogo pudo persistir ``custom_fields`` como JSON ``null``
+        (``'null'::jsonb`` → ``None`` en Python). El listado NO debe romperse con 503
+        por eso: normalizamos ``None`` → ``{}`` al serializar la respuesta."""
+        return {} if v is None else v
 
     @computed_field  # type: ignore[prop-decorator]
     @property
