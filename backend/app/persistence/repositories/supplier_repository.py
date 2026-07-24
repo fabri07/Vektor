@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
 
 from app.persistence.models.inventory import InventoryMovement
-from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY, Supplier
+from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY, SENTINEL_FLAG_KEY, Supplier
 from app.persistence.models.transaction import ExpenseEntry
 from app.persistence.repositories._jsonb_flags import flag_not_true_sql
 
@@ -114,6 +114,23 @@ class SupplierRepository:
             )
         )
         return int(expenses.scalar_one() or 0) + int(movements.scalar_one() or 0)
+
+    async def list_for_dedup(self, tenant_id: UUID) -> list[Supplier]:
+        """Proveedores activos, no-sentinela y no-marca-colapsada — base de la
+        deduplicación del import masivo (F7b). Espejo de
+        ``CustomerRepository.list_for_dedup``: devuelve los registros completos para
+        que el import arme el índice de identidad en memoria. El sentinela "No
+        identificado" y las marcas colapsadas (``_brand_collapsed``) nunca se crean ni
+        se actualizan por import.
+        """
+        q = select(Supplier).where(
+            Supplier.tenant_id == tenant_id,
+            Supplier.deactivated_at.is_(None),
+            flag_not_true_sql(Supplier.custom_fields, SENTINEL_FLAG_KEY),
+            flag_not_true_sql(Supplier.custom_fields, BRAND_COLLAPSED_FLAG_KEY),
+        )
+        result = await self._session.execute(q)
+        return list(result.scalars().all())
 
     async def save(self, supplier: Supplier) -> Supplier:
         self._session.add(supplier)
