@@ -104,7 +104,8 @@ async def test_venta_matchea_cliente_creado_por_otra_hoja_del_mismo_archivo(
     )
     assert counts["clientes"] == 1
     assert counts["ventas"] == 1
-    assert counts["clientes_sin_identificar"] == 0
+    assert counts["ventas_cliente_identificado"] == 1
+    assert counts["ventas_cliente_no_resuelto"] == 0
 
     customer = (await db_session.execute(select(Customer))).scalar_one()
     assert customer.name == "Juan Perez"
@@ -135,7 +136,9 @@ async def test_venta_sin_columna_de_cliente_es_anonymous_sin_marcar_para_revisio
         db_session, sample_tenant.tenant_id, summary, {"ventas": True}
     )
     assert counts["ventas"] == 1
-    assert counts["clientes_sin_identificar"] == 0
+    assert counts["ventas_cliente_no_resuelto"] == 0
+    assert counts["ventas_cliente_anonimo"] == 1
+    assert counts["ventas_cliente_identificado"] == 0
 
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
     assert sale.custom_fields is not None
@@ -170,7 +173,8 @@ async def test_venta_con_documento_de_cliente_inexistente_es_unresolved(
         column_mappings={"doc_cliente": "customer_dni"},
     )
     assert counts["ventas"] == 1
-    assert counts["clientes_sin_identificar"] == 1
+    assert counts["ventas_cliente_no_resuelto"] == 1
+    assert counts["ventas_cliente_anonimo"] == 0
 
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
     assert sale.custom_fields is not None
@@ -217,7 +221,9 @@ async def test_compra_modo_legacy_sigue_creando_proveedor_por_nombre(
         _merch_purchase_summary("Distribuidora Norte"),
         {"gastos": True},
     )
-    assert counts["proveedores_sin_identificar"] == 0
+    assert counts["compras_proveedor_no_resuelto"] == 0
+    assert counts["compras_proveedor_anonimo"] == 0
+    assert counts["compras_proveedor_identificado"] == 0
 
     supplier = (await db_session.execute(select(Supplier))).scalar_one()
     assert supplier.name == "Distribuidora Norte"
@@ -238,7 +244,8 @@ async def test_compra_modo_link_only_nunca_crea_proveedor_cae_a_sentinela(
         _merch_purchase_summary("Distribuidora Fantasma"),
         {"gastos": True},
     )
-    assert counts["proveedores_sin_identificar"] == 1
+    assert counts["compras_proveedor_no_resuelto"] == 1
+    assert counts["compras_proveedor_identificado"] == 0
 
     # NUNCA crea un proveedor real desde la fila: solo el sentinela.
     suppliers = (await db_session.execute(select(Supplier))).scalars().all()
@@ -289,7 +296,8 @@ async def test_compra_modo_link_only_matchea_proveedor_existente_por_cuil(
         {"gastos": True},
         column_mappings={"cuil_prov": "supplier_cuil"},
     )
-    assert counts["proveedores_sin_identificar"] == 0
+    assert counts["compras_proveedor_no_resuelto"] == 0
+    assert counts["compras_proveedor_identificado"] == 1
 
     suppliers = (await db_session.execute(select(Supplier))).scalars().all()
     assert len(suppliers) == 1  # matcheó el existente, no creó uno nuevo

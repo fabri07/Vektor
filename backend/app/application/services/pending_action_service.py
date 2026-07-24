@@ -794,6 +794,21 @@ async def execute_pending_action(
         else:
             raise ValueError("IMPORT_TABULAR_FILE sin file_id ni parsed_records")
 
+        # F7d: `counts` ganó desgloses de la resolución de referencia por fila
+        # (ventas_cliente_*/compras_proveedor_*) y del import de maestro
+        # (clientes/proveedores_creados|actualizados|needs_review|invalidos) —
+        # son sub-clasificaciones de "ventas"/"gastos"/"clientes"/"proveedores",
+        # no registros adicionales. Sumar TODO el dict inflaba el conteo (cada
+        # venta se cuenta una vez en "ventas" y otra vez en su bucket de
+        # resolución). Acá contamos registros efectivamente cargados.
+        entity_count = (
+            counts.get("ventas", 0)
+            + counts.get("gastos", 0)
+            + counts.get("productos", 0)
+            + counts.get("clientes", 0)
+            + counts.get("proveedores", 0)
+            + counts.get("otros", 0)
+        )
         await mem.record(
             db=db,
             redis=redis,
@@ -802,7 +817,7 @@ async def execute_pending_action(
             entry_type="DATA_LOADED",
             description=description,
             entity_type=entity_type,
-            entity_count=sum(counts.values()),
+            entity_count=entity_count,
             uploaded_file_id=uploaded_file_id,
             pending_action_id=action.id,
         )

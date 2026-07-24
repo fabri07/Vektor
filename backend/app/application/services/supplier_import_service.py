@@ -77,6 +77,10 @@ class ImportResult:
     created_ids: list[UUID] = field(default_factory=list)
     updated_ids: list[UUID] = field(default_factory=list)
     skipped: int = 0
+    # F7d: desglose de `skipped` (siempre skipped == needs_review + invalid) — ver
+    # el mismo campo en customer_import_service.ImportResult.
+    needs_review: int = 0
+    invalid: int = 0
 
 
 def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
@@ -208,11 +212,19 @@ async def apply_import(
     for record in records:
         if _validate_record(record):
             result.skipped += 1
+            result.invalid += 1
             continue
         keys = _record_keys(record)
         resolution = resolve_identity(keys, index)
-        if resolution.outcome in ("needs_review", "conflict"):
+        # F7d: mismo mapeo que build_import_preview — needs_review (sin clave
+        # fuerte) es distinto de conflict (ambiguo, tratado como invalid).
+        if resolution.outcome == "needs_review":
             result.skipped += 1
+            result.needs_review += 1
+            continue
+        if resolution.outcome == "conflict":
+            result.skipped += 1
+            result.invalid += 1
             continue
 
         if resolution.outcome == "matched":

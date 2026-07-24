@@ -435,6 +435,28 @@ def _classify_row_reference(
     )
 
 
+# F7d: taxonomía reconciliada de contadores de resolución por fila. Única fuente
+# de las 3 claves por dominio — evita que counts termine con dos formas de contar
+# lo mismo (el gap que 7d vino a cerrar: 7c dejó "clientes_sin_identificar", acá
+# se reemplaza por "ventas_cliente_no_resuelto", mismo criterio para compras).
+_REFERENCE_OUTCOME_SUFFIX = {
+    "matched": "identificado",
+    "anonymous": "anonimo",
+    "unresolved": "no_resuelto",
+}
+
+
+def _bump_reference_counts(counts: dict[str, Any], prefix: str, outcome: str) -> None:
+    """Suma 1 a ``{prefix}_{identificado|anonimo|no_resuelto}`` según ``outcome``.
+
+    ``anonimo`` (sin referencia — venta de mostrador, compra sin proveedor
+    informado) NUNCA amerita revisión humana — ver la regla de warnings en
+    ``api/v1/ingestion.py`` (solo ``no_resuelto`` avisa).
+    """
+    key = f"{prefix}_{_REFERENCE_OUTCOME_SUFFIX[outcome]}"
+    counts[key] = counts.get(key, 0) + 1
+
+
 def _rows_for_context(bucket: list[dict[str, Any]], ctx_id: str) -> list[dict[str, Any]]:
     """Filtra un bucket de filas por ``__context__`` (multi-hoja). Si las filas no
     llevan el marcador (archivo de un solo contexto, ej. un CSV de clientes
@@ -597,6 +619,18 @@ async def _import_master_entities(
                 + len(cust_result.created_ids)
                 + len(cust_result.updated_ids)
             )
+            counts["clientes_creados"] = (
+                counts.get("clientes_creados", 0) + len(cust_result.created_ids)
+            )
+            counts["clientes_actualizados"] = (
+                counts.get("clientes_actualizados", 0) + len(cust_result.updated_ids)
+            )
+            counts["clientes_needs_review"] = (
+                counts.get("clientes_needs_review", 0) + cust_result.needs_review
+            )
+            counts["clientes_invalidos"] = (
+                counts.get("clientes_invalidos", 0) + cust_result.invalid
+            )
         else:
             supplier_records = [
                 {
@@ -613,6 +647,18 @@ async def _import_master_entities(
                 counts.get("proveedores", 0)
                 + len(sup_result.created_ids)
                 + len(sup_result.updated_ids)
+            )
+            counts["proveedores_creados"] = (
+                counts.get("proveedores_creados", 0) + len(sup_result.created_ids)
+            )
+            counts["proveedores_actualizados"] = (
+                counts.get("proveedores_actualizados", 0) + len(sup_result.updated_ids)
+            )
+            counts["proveedores_needs_review"] = (
+                counts.get("proveedores_needs_review", 0) + sup_result.needs_review
+            )
+            counts["proveedores_invalidos"] = (
+                counts.get("proveedores_invalidos", 0) + sup_result.invalid
             )
 
 
@@ -2370,14 +2416,31 @@ async def _insert_confirmed_data_impl(
         # nombre normalizado) — NO se importa, NO se toca ningún existente.
         "productos_ambiguos": 0,
         # F7c: maestros importados dentro del confirm (orden maestro→transacción).
+        # "clientes"/"proveedores" = creados + actualizados (alias plano, F7c,
+        # mantenido por compatibilidad — ver el desglose F7d abajo).
         "clientes": 0,
         "proveedores": 0,
-        # F7c: filas transaccionales con referencia de cliente/proveedor presente
-        # que NO matcheó contra ningún registro existente (asignadas al
-        # sentinela con traza para revisión). NO incluye "anonymous" (sin
-        # referencia — el caso normal de venta de mostrador/compra sin dato).
-        "clientes_sin_identificar": 0,
-        "proveedores_sin_identificar": 0,
+        # F7d: desglose de maestros por bucket del import service (F7b). Solo
+        # needs_review/invalidos ameritan aviso — nunca se persisten.
+        "clientes_creados": 0,
+        "clientes_actualizados": 0,
+        "clientes_needs_review": 0,
+        "clientes_invalidos": 0,
+        "proveedores_creados": 0,
+        "proveedores_actualizados": 0,
+        "proveedores_needs_review": 0,
+        "proveedores_invalidos": 0,
+        # F7d: taxonomía reconciliada de resolución de referencia por fila
+        # transaccional (ventas→cliente, compras→proveedor) — única fuente,
+        # reemplaza los "clientes_sin_identificar"/"proveedores_sin_identificar"
+        # de F7c. "anonimo" (sin referencia — mostrador/sin dato) NUNCA amerita
+        # revisión; solo "no_resuelto" (trae referencia pero no matcheó) avisa.
+        "ventas_cliente_identificado": 0,
+        "ventas_cliente_anonimo": 0,
+        "ventas_cliente_no_resuelto": 0,
+        "compras_proveedor_identificado": 0,
+        "compras_proveedor_anonimo": 0,
+        "compras_proveedor_no_resuelto": 0,
     }
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
@@ -2793,10 +2856,9 @@ async def _insert_confirmed_data_impl(
                     else:
                         entry.customer_id = await _get_local_sentinel()
                         cf["_customer_resolution"] = _cust_ref.outcome
-                        if _cust_ref.outcome == "unresolved":
-                            if _cust_ref.raw_value:
-                                cf["_customer_reference_raw"] = _cust_ref.raw_value
-                            counts["clientes_sin_identificar"] += 1
+                        if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
+                            cf["_customer_reference_raw"] = _cust_ref.raw_value
+                    _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
                     if cf:
                         entry.custom_fields = cf
                     # Mejora D: trazabilidad import → fila origen.
@@ -2887,6 +2949,7 @@ async def _insert_confirmed_data_impl(
                                 expense.supplier_id = _sup_ref.entity.id
                                 expense.supplier_name = _sup_ref.entity.name
                                 cf["_supplier_resolution"] = "matched"
+                                _bump_reference_counts(counts, "compras_proveedor", "matched")
                             else:
                                 _pending_supplier_ref = _sup_ref
                     elif supplier_col:
@@ -3029,7 +3092,7 @@ async def _insert_confirmed_data_impl(
                                     )
                                     if _raw:
                                         cf["_supplier_reference_raw"] = _raw
-                                    counts["proveedores_sin_identificar"] += 1
+                                _bump_reference_counts(counts, "compras_proveedor", _outcome)
                         if cf:
                             expense.custom_fields = cf
                         await _apply_purchase_to_stock(
@@ -3810,10 +3873,9 @@ async def _insert_multisheet_data(
         else:
             entry.customer_id = await _get_local_sentinel()
             cf["_customer_resolution"] = _cust_ref.outcome
-            if _cust_ref.outcome == "unresolved":
-                if _cust_ref.raw_value:
-                    cf["_customer_reference_raw"] = _cust_ref.raw_value
-                counts["clientes_sin_identificar"] += 1
+            if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
+                cf["_customer_reference_raw"] = _cust_ref.raw_value
+        _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
         if cf:
             entry.custom_fields = cf
         if row_ref is not None:
@@ -3907,6 +3969,7 @@ async def _insert_multisheet_data(
                     expense.supplier_id = _sup_ref.entity.id
                     expense.supplier_name = _sup_ref.entity.name
                     cf["_supplier_resolution"] = "matched"
+                    _bump_reference_counts(counts, "compras_proveedor", "matched")
                 else:
                     _pending_supplier_ref = _sup_ref
         elif _supplier_name_raw is not None:
@@ -4021,10 +4084,10 @@ async def _insert_multisheet_data(
                     else "anonymous"
                 )
                 cf["_supplier_resolution"] = _outcome
-                if _outcome == "unresolved":
-                    if _pending_supplier_ref and _pending_supplier_ref.raw_value:
-                        cf["_supplier_reference_raw"] = _pending_supplier_ref.raw_value
-                    counts["proveedores_sin_identificar"] += 1
+                _raw_pending = _pending_supplier_ref.raw_value if _pending_supplier_ref else None
+                if _outcome == "unresolved" and _raw_pending:
+                    cf["_supplier_reference_raw"] = _raw_pending
+                _bump_reference_counts(counts, "compras_proveedor", _outcome)
         if cf:
             expense.custom_fields = cf
         await _apply_purchase_to_stock(
