@@ -377,12 +377,21 @@ class ColumnMappingService:
         *,
         trace_id: uuid.UUID | str | None = None,
         file_id: uuid.UUID | str | None = None,
+        allow_llm: bool = True,
     ) -> list[dict[str, Any]]:
         """Genera sugerencias de mapeo para los headers del archivo.
 
         FASE 2 (A2): si `trace_id` y `file_id` están presentes, la decisión de la
         4ª capa LLM se traza en pipeline_events (stage="mapping"). Los parámetros
         son keyword-only y opcionales para no romper los callers existentes.
+
+        ``allow_llm=False`` (F7d review) saltea por completo la 4ª capa LLM —
+        para callers de solo-lectura/idempotentes (ej. el preview de maestros de
+        ``GET /files/{id}/preview``, que puede correr en cada poll/reload) que NO
+        deben disparar una llamada real al LLM aunque ``ENABLE_LLM_COLUMN_MAPPING``
+        esté prendido. El flujo real de mapeo (``GET /column-mappings``, que el
+        usuario dispara explícitamente al armar el mapeo) sigue con el default
+        ``True``.
         """
         from app.persistence.models.column_mapping import TenantColumnMapping  # noqa: PLC0415
 
@@ -457,13 +466,15 @@ class ColumnMappingService:
 
         # FASE 2: 4ª capa LLM (fallback). Solo para columnas con baja confianza
         # determinística. Una sola llamada batch; fail-silent (flag/key/errores).
-        await self._apply_llm_fallback(
-            entity_type,
-            suggestions,
-            tenant_id=tenant_id,
-            trace_id=trace_id,
-            file_id=file_id,
-        )
+        # `allow_llm=False` la saltea por completo (ver docstring de este método).
+        if allow_llm:
+            await self._apply_llm_fallback(
+                entity_type,
+                suggestions,
+                tenant_id=tenant_id,
+                trace_id=trace_id,
+                file_id=file_id,
+            )
 
         # Segunda pasada: detectar required_missing
         mapped_targets = {

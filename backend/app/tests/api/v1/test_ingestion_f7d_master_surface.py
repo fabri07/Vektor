@@ -341,6 +341,65 @@ class TestMasterPreviewEndpoint:
                 "issue",
             }
 
+    async def test_preview_de_maestro_nunca_dispara_el_fallback_llm(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Review 7d (Important): GET /files/{id}/preview puede correr en cada
+        poll/reload de la página — nunca debe disparar la 4ª capa LLM de
+        mapeo, ni siquiera con ENABLE_LLM_COLUMN_MAPPING=True. El fallback
+        LLM sigue disponible en GET /column-mappings (el flujo real de
+        mapeo que el usuario dispara explícitamente)."""
+        from app.config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "ENABLE_LLM_COLUMN_MAPPING", True)
+        llm_mock = unittest.mock.AsyncMock(return_value={})
+        monkeypatch.setattr(
+            "app.application.services.llm_column_mapper.suggest_with_llm", llm_mock
+        )
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="clientes_llm.xlsx",
+            s3_key="uploads/test/uuid/clientes_llm.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=1024,
+            purpose="clientes",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "clientes",
+                "mapping_contexts": [
+                    {
+                        "context_id": "table",
+                        "entity_type": "customer",
+                        # "zzz_ambiguo" no matchea ninguna heurística/fuzzy con
+                        # confianza — entraría al fallback LLM si no estuviera
+                        # gateado (confidence < LLM_MAPPING_THRESHOLD).
+                        "headers": ["nombre", "zzz_ambiguo"],
+                        "preview_rows": [{"nombre": "Juan Perez", "zzz_ambiguo": "x"}],
+                    }
+                ],
+                "clientes_detectados": [{"nombre": "Juan Perez", "zzz_ambiguo": "x"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.get(
+            f"/api/v1/ingestion/files/{record.id}/preview",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        llm_mock.assert_not_called()
+
     async def test_preview_summary_legacy_sin_mapping_contexts_master_previews_vacio(
         self,
         client: AsyncClient,

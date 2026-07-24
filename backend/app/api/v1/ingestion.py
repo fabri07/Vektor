@@ -469,7 +469,14 @@ async def _build_master_previews(
             continue
         headers = ctx.get("headers") or list(rows[0].keys())
         sample_rows = ctx.get("preview_rows") or rows[:10]
-        suggestions = await mapping_svc.suggest_mappings(tenant_id, entity, headers, sample_rows)
+        # Review 7d (Important): este GET puede correr en cada poll/reload de la
+        # página — NUNCA debe disparar la 4ª capa LLM (costo + latencia sin cache
+        # ni cap), aunque ENABLE_LLM_COLUMN_MAPPING esté prendido. Solo
+        # determinístico acá; el LLM sigue disponible en GET /column-mappings,
+        # que el usuario dispara explícitamente al armar el mapeo real.
+        suggestions = await mapping_svc.suggest_mappings(
+            tenant_id, entity, headers, sample_rows, allow_llm=False
+        )
         target_to_col = {
             s["target_field"]: s["source_column"] for s in suggestions if s["status"] == "mapped"
         }
