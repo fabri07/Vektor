@@ -22,6 +22,13 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "payment_method": "Método de pago",
         "product_name": "Nombre del producto",
         "notes": "Notas",
+        # F7a: campos de referencia al cliente (aditivo — el mapeo/vinculación real
+        # a un Customer existente queda para 7c; acá solo se abre el contrato).
+        "customer_dni": "DNI del cliente",
+        "customer_cuit": "CUIT del cliente",
+        "customer_email": "Email del cliente",
+        "customer_phone": "Teléfono del cliente",
+        "customer_name": "Nombre del cliente",
     },
     "expense": {
         "amount": "Monto del gasto",
@@ -30,6 +37,40 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "payment_method": "Método de pago",
         "is_recurring": "Recurrente",
         "supplier_name": "Proveedor",
+        "notes": "Notas",
+        # F7a: campos de referencia al proveedor (aditivo, ver nota de sale arriba).
+        "supplier_cuil": "CUIL del proveedor",
+        "supplier_email": "Email del proveedor",
+        "supplier_phone": "Teléfono del proveedor",
+    },
+    # F7a: maestro de CLIENTES — campos que persiste el modelo Customer.
+    "customer": {
+        "customer_type": "Tipo (persona/empresa)",
+        "name": "Nombre",
+        "last_name": "Apellido",
+        "doc_type": "Tipo de documento",
+        "dni": "DNI",
+        "cuit": "CUIT",
+        "iva_condition": "Condición de IVA",
+        "email": "Email",
+        "phone": "Teléfono",
+        "address": "Dirección",
+        "locality": "Localidad",
+        "province": "Provincia",
+        "postal_code": "Código postal",
+        "birthday": "Cumpleaños",
+        "notes": "Notas",
+    },
+    # F7a: maestro de PROVEEDORES — ACOTADO a lo que persiste el modelo Supplier
+    # HOY (models/supplier.py). No se agregan doc_type/address/locality/province/
+    # postal_code/iva_condition: el modelo no los tiene, quedan fuera de esta PR.
+    "supplier": {
+        "name": "Nombre",
+        "last_name": "Apellido",
+        "cuil": "CUIL",
+        "payment_method": "Método de pago",
+        "email": "Email",
+        "phone": "Teléfono",
         "notes": "Notas",
     },
     "product": {
@@ -51,6 +92,8 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
     "sale": ["amount", "transaction_date"],
     "expense": ["amount", "expense_date"],
     "product": ["name"],
+    "customer": ["name"],
+    "supplier": ["name"],
 }
 
 # ── Heurísticas: entity_type → target_field → keywords (substring match) ─────
@@ -83,6 +126,16 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "detalle",
         },
         "notes": {"notas", "observaciones", "obs", "comentarios", "nota", "memo"},
+        # F7a: referencia al cliente (aditivo). Bare "cliente" es seguro acá — no
+        # colisiona con ningún keyword existente de sale (ver product_name arriba,
+        # que usa "nombre" pero no "cliente").
+        "customer_dni": {"dni_cliente", "cliente_dni", "dni"},
+        "customer_cuit": {"cuit_cliente", "cliente_cuit", "cuit"},
+        "customer_email": {"email_cliente", "cliente_email", "email", "correo", "mail"},
+        "customer_phone": {
+            "telefono_cliente", "cliente_telefono", "telefono", "teléfono", "whatsapp_cliente",
+        },
+        "customer_name": {"cliente", "nombre_cliente", "cliente_nombre"},
     },
     "expense": {
         "amount": {
@@ -118,6 +171,44 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "supplier",
         },
         "notes": {"notas", "observaciones", "descripcion", "detalle", "obs"},
+        # F7a: referencia al proveedor (aditivo). "supplier_name" ya existía arriba
+        # (no se duplica); acá solo se suman los campos que faltaban.
+        "supplier_cuil": {"cuil_proveedor", "proveedor_cuil", "cuil"},
+        "supplier_email": {"email_proveedor", "proveedor_email", "email", "correo", "mail"},
+        "supplier_phone": {
+            "telefono_proveedor", "proveedor_telefono", "telefono", "teléfono",
+        },
+    },
+    # F7a: maestro de CLIENTES (identidad fiscal/contacto — sin datos transaccionales).
+    "customer": {
+        "customer_type": {"tipo_cliente", "persona_empresa", "tipo"},
+        "name": {"nombre", "cliente", "razon_social", "razón_social"},
+        "last_name": {"apellido"},
+        "doc_type": {"tipo_documento", "tipo_doc"},
+        "dni": {"dni"},
+        "cuit": {"cuit"},
+        "iva_condition": {"condicion_iva", "condición_iva", "situacion_iva", "iva"},
+        "email": {"email", "correo", "mail"},
+        "phone": {"telefono", "teléfono", "celular", "whatsapp"},
+        "address": {"direccion", "dirección", "domicilio"},
+        "locality": {"localidad", "ciudad"},
+        "province": {"provincia"},
+        "postal_code": {"codigo_postal", "código_postal", "cp"},
+        "birthday": {"cumpleanos", "cumpleaños", "fecha_nacimiento", "nacimiento"},
+        "notes": {"notas", "observaciones", "obs", "comentarios"},
+    },
+    # F7a: maestro de PROVEEDORES — acotado a los campos que persiste el modelo
+    # Supplier hoy (ver CANONICAL_FIELDS["supplier"] arriba).
+    "supplier": {
+        "name": {"nombre", "proveedor", "razon_social", "razón_social"},
+        "last_name": {"apellido"},
+        "cuil": {"cuil"},
+        "payment_method": {
+            "forma_pago", "forma_de_pago", "medio_pago", "condicion_pago", "payment",
+        },
+        "email": {"email", "correo", "mail"},
+        "phone": {"telefono", "teléfono", "celular", "whatsapp", "contacto"},
+        "notes": {"notas", "observaciones", "obs", "comentarios"},
     },
     "product": {
         "sku": {"sku", "codigo", "código", "code", "ref", "id_producto"},

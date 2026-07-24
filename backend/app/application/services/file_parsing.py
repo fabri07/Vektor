@@ -134,6 +134,27 @@ FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago", "método_pago", "f
 # Columna de proveedor (contraparte de una compra).
 PROVEEDOR_COLS = {"proveedor", "proveedores"}
 
+# F7a: señales de identidad fiscal/contacto para maestros de CLIENTES/PROVEEDORES
+# (aditivo — no implementa import todavía, solo detección/mapeo). Discriminadores
+# específicos de cada entidad, alineados a los campos que persisten los modelos
+# Customer (dni/cuit) y Supplier (cuil, sin dni/cuit): un maestro de clientes trae
+# "dni"/"cliente"; uno de proveedores trae "cuil"/"proveedor". "cuit" queda fuera
+# de ambos sets discriminadores porque lo usan tanto empresas-cliente como
+# proveedores — no desempata por sí solo.
+CLIENTE_SIGNAL_COLS = {
+    "cliente", "clientes", "consumidor", "dni", "cumpleanos", "cumpleaños",
+    "fecha_nacimiento",
+}
+PROVEEDOR_MASTER_COLS = {"proveedor", "proveedores", "cuil", "contacto"}
+# Contacto/fiscal genérico: no discrimina cliente vs proveedor por sí solo, pero
+# junto con "nombre" y la ausencia de señales transaccionales indica que la hoja
+# es un maestro de identidad (no una lista de precios ni un libro de compras).
+IDENTIDAD_CONTACTO_COLS = {
+    "cuit", "razon_social", "razón_social", "email", "telefono", "teléfono",
+    "direccion", "dirección", "localidad", "provincia", "codigo_postal", "cp",
+    "apellido",
+}
+
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
 GASTO_CTX = {"gasto", "compra", "pago", "factura", "proveedor", "egreso", "gaste"}
 STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia", "mercadería"}
@@ -383,6 +404,15 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     has_forma_pago = any(col in FORMA_PAGO_COLS for col in normalized)
     has_proveedor = any(col in PROVEEDOR_COLS for col in normalized)
 
+    # F7a: señales de maestro de clientes/proveedores (identidad fiscal/contacto).
+    cliente_score = sum(any(k in col for k in CLIENTE_SIGNAL_COLS) for col in normalized)
+    proveedor_master_score = sum(
+        any(k in col for k in PROVEEDOR_MASTER_COLS) for col in normalized
+    )
+    has_identidad_contacto = any(
+        any(k in col for k in IDENTIDAD_CONTACTO_COLS) for col in normalized
+    )
+
     inferred_type = infer_spreadsheet_type(
         has_fecha=has_fecha,
         has_venta=has_venta,
@@ -398,6 +428,9 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_monto_transaccion=has_monto_transaccion,
         has_forma_pago=has_forma_pago,
         has_proveedor=has_proveedor,
+        cliente_score=cliente_score,
+        proveedor_master_score=proveedor_master_score,
+        has_identidad_contacto=has_identidad_contacto,
     )
 
     has_catalogo_signal = has_catalogo_fuerte or has_nombre
@@ -429,6 +462,9 @@ def infer_spreadsheet_type(
     has_monto_transaccion: bool = False,
     has_forma_pago: bool = False,
     has_proveedor: bool = False,
+    cliente_score: int = 0,
+    proveedor_master_score: int = 0,
+    has_identidad_contacto: bool = False,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
@@ -438,6 +474,12 @@ def infer_spreadsheet_type(
         aunque traiga sku/cantidad/costo_unitario. Una compra de mercadería es a la vez
         gasto (COGS) y salida de caja; el catálogo no la captura. CONSERVADOR: solo se
         dispara cuando, sin esta regla, el archivo caería en "stock" por error.
+    -0.5 (F7a). MAESTRO DE CLIENTES/PROVEEDORES: señal de identidad fiscal/contacto
+        (dni/cliente para clientes; cuil/proveedor para proveedores) SIN ninguna señal
+        transaccional (monto de operación, cantidad, fecha) → clientes/proveedores.
+        Disjunta con la regla -1 (esa exige monto+fecha; esta los excluye), así el
+        orden entre ambas no importa. Corre ANTES que las reglas de catálogo (2-4) para
+        que un maestro con columna "nombre" no se confunda con una lista de precios.
     0. Compra de mercadería/insumos + cantidad → inventario (FASE 3, conservador).
     1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
     2. Señal de nombre/producto sin venta explícita → stock.
@@ -467,6 +509,29 @@ def infer_spreadsheet_type(
         and gasto_score > venta_score
     ):
         return "gastos"
+
+    # Regla -0.5 (F7a, CONSERVADORA): un maestro de CLIENTES o PROVEEDORES trae
+    # identidad fiscal/contacto (dni/cliente, cuil/proveedor, +opcionalmente
+    # nombre+email/telefono/localidad/etc.) pero NINGUNA señal transaccional
+    # (monto de operación, cantidad, fecha). Sin esta regla, un maestro con columna
+    # "nombre" caería en "stock" (regla 2-4) o, si trae "proveedor", en "gastos"
+    # (GASTO_SIGNAL_COLS) — perdiendo el maestro. Empate o ausencia de discriminador
+    # → no se adivina (cae a las reglas siguientes, comportamiento previo).
+    has_maestro_signal = (
+        cliente_score > 0
+        or proveedor_master_score > 0
+        or (has_nombre and has_identidad_contacto)
+    )
+    if (
+        has_maestro_signal
+        and not has_monto_transaccion
+        and not has_cantidad
+        and not has_fecha
+    ):
+        if proveedor_master_score > cliente_score:
+            return "proveedores"
+        if cliente_score > proveedor_master_score:
+            return "clientes"
 
     # FASE 3: compra de mercadería/insumos para reventa CON columna de cantidad →
     # inventario, NO gasto corriente. Conservador: requiere AMBAS señales para no
@@ -926,6 +991,17 @@ def _store_rows_by_type(
         summary["ventas_detectadas"] = rows
         summary["gastos_detectados"] = []
         summary["stock_detectado"] = []
+    elif inferred_type == "clientes":
+        # F7a: aditivo — el import/vinculación de clientes queda para 7b/7c.
+        summary["clientes_detectados"] = rows
+        summary["ventas_detectadas"] = []
+        summary["gastos_detectados"] = []
+        summary["stock_detectado"] = []
+    elif inferred_type == "proveedores":
+        summary["proveedores_detectados"] = rows
+        summary["ventas_detectadas"] = []
+        summary["gastos_detectados"] = []
+        summary["stock_detectado"] = []
     else:
         summary["otros_detectados"] = rows
         summary["ventas_detectadas"] = []
@@ -938,6 +1014,8 @@ _TYPE_TO_ENTITY: dict[str, str] = {
     "ventas": "sale",
     "gastos": "expense",
     "stock": "product",
+    "clientes": "customer",
+    "proveedores": "supplier",
 }
 
 
@@ -1083,7 +1161,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
     _max_rows_per_type = None  # None = sin límite
 
     def _classify_sheet(name: str) -> str:
-        """Clasifica una pestaña de xlsx por nombre → 'ventas'|'gastos'|'stock'|'unknown'."""
+        """Clasifica una pestaña de xlsx por nombre →
+        'ventas'|'gastos'|'stock'|'clientes'|'proveedores'|'unknown'."""
         norm = unicodedata.normalize("NFD", name.lower().strip())
         norm = "".join(c for c in norm if unicodedata.category(c) != "Mn")
         if any(k in norm for k in ["venta", "ingreso", "cobro", "sale"]):
@@ -1093,8 +1172,17 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
         # proveedores" se rutee a stock por el match de "compra".)
         if any(k in norm for k in ["compra", "mercaderia", "purchase"]):
             return "stock"
-        if any(k in norm for k in ["gasto", "egreso", "operativo", "expense", "proveedor"]):
+        if any(k in norm for k in ["gasto", "egreso", "operativo", "expense"]):
             return "gastos"
+        # F7a: maestros de clientes/proveedores. Van DESPUÉS de compra/gasto para
+        # no pisar "Compras a Proveedores" (→ stock) ni "Gastos y Proveedores"
+        # (→ gastos) — solo captura un nombre de hoja que es puramente el maestro
+        # (ej. "Proveedores"). El contenido (infer_spreadsheet_type) manda siempre;
+        # esto es solo el desempate por nombre cuando el contenido es ambiguo.
+        if any(k in norm for k in ["cliente", "clientes", "consumidor"]):
+            return "clientes"
+        if any(k in norm for k in ["proveedor", "proveedores"]):
+            return "proveedores"
         if any(k in norm for k in ["producto", "inventario", "catalogo", "stock", "item"]):
             return "stock"
         return "unknown"
@@ -1109,6 +1197,9 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             all_ventas: list[dict[str, Any]] = []
             all_gastos: list[dict[str, Any]] = []
             all_stock: list[dict[str, Any]] = []
+            # F7a: aditivo — el import/vinculación de clientes/proveedores queda para 7b/7c.
+            all_clientes: list[dict[str, Any]] = []
+            all_proveedores: list[dict[str, Any]] = []
             primary_headers: list[str] = []
             contexts: list[dict[str, Any]] = []
             total_rows = 0
@@ -1257,10 +1348,16 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     all_gastos.extend(marked)
                 elif sheet_type == "stock":
                     all_stock.extend(marked)
+                elif sheet_type == "clientes":
+                    all_clientes.extend(marked)
+                elif sheet_type == "proveedores":
+                    all_proveedores.extend(marked)
 
             has_ventas = bool(all_ventas)
             has_gastos = bool(all_gastos)
             has_stock = bool(all_stock)
+            has_clientes = bool(all_clientes)
+            has_proveedores = bool(all_proveedores)
 
             if has_ventas and has_gastos and has_stock or has_ventas and has_gastos:
                 inferred_type = "mixed"
@@ -1270,6 +1367,12 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                 inferred_type = "gastos"
             elif has_stock:
                 inferred_type = "stock"
+            elif has_clientes and has_proveedores:
+                inferred_type = "mixed"
+            elif has_clientes:
+                inferred_type = "clientes"
+            elif has_proveedores:
+                inferred_type = "proveedores"
             else:
                 inferred_type = "general"
 
@@ -1295,6 +1398,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     "ventas_detectadas": all_ventas,
                     "gastos_detectados": all_gastos,
                     "stock_detectado": all_stock,
+                    "clientes_detectados": all_clientes,
+                    "proveedores_detectados": all_proveedores,
                     "preview_rows": preview,
                     "mapping_contexts": contexts,
                 }

@@ -143,20 +143,72 @@ def test_heuristic_match_none_for_unknown() -> None:
     assert _heuristic_match("color", "product") is None
 
 
+# ── F7a: entidades customer/supplier (maestros) + campos de referencia ─────────
+
+
+def test_heuristic_match_customer() -> None:
+    assert _heuristic_match("nombre", "customer") == "name"
+    assert _heuristic_match("apellido", "customer") == "last_name"
+    assert _heuristic_match("dni", "customer") == "dni"
+    assert _heuristic_match("cuit", "customer") == "cuit"
+    assert _heuristic_match("email", "customer") == "email"
+    assert _heuristic_match("telefono", "customer") == "phone"
+    assert _heuristic_match("localidad", "customer") == "locality"
+
+
+def test_heuristic_match_supplier() -> None:
+    assert _heuristic_match("nombre", "supplier") == "name"
+    assert _heuristic_match("cuil", "supplier") == "cuil"
+    assert _heuristic_match("forma_pago", "supplier") == "payment_method"
+    assert _heuristic_match("email", "supplier") == "email"
+    assert _heuristic_match("telefono", "supplier") == "phone"
+
+
+def test_heuristic_match_sale_customer_reference_fields() -> None:
+    """Columnas de referencia al cliente en una hoja de VENTAS (para que 7c pueda
+    mapearlas más adelante — esta PR solo abre el contrato)."""
+    assert _heuristic_match("dni", "sale") == "customer_dni"
+    assert _heuristic_match("cuit", "sale") == "customer_cuit"
+    assert _heuristic_match("cliente", "sale") == "customer_name"
+    # "nombre" a secas sigue siendo product_name — no lo pisa customer_name.
+    assert _heuristic_match("nombre", "sale") == "product_name"
+
+
+def test_heuristic_match_expense_supplier_reference_fields() -> None:
+    """Columnas de referencia al proveedor en una hoja de GASTOS."""
+    assert _heuristic_match("cuil", "expense") == "supplier_cuil"
+    assert _heuristic_match("email", "expense") == "supplier_email"
+    # supplier_name ya existía (Sprint 21) — sigue intacto.
+    assert _heuristic_match("proveedor", "expense") == "supplier_name"
+
+
 def test_required_fields_structure() -> None:
     assert "amount" in REQUIRED_FIELDS["sale"]
     assert "transaction_date" in REQUIRED_FIELDS["sale"]
     assert "amount" in REQUIRED_FIELDS["expense"]
     assert "expense_date" in REQUIRED_FIELDS["expense"]
     assert "name" in REQUIRED_FIELDS["product"]
+    assert REQUIRED_FIELDS["customer"] == ["name"]
+    assert REQUIRED_FIELDS["supplier"] == ["name"]
 
 
 def test_canonical_fields_all_entities() -> None:
     assert "sale" in CANONICAL_FIELDS
     assert "expense" in CANONICAL_FIELDS
     assert "product" in CANONICAL_FIELDS
+    assert "customer" in CANONICAL_FIELDS
+    assert "supplier" in CANONICAL_FIELDS
     assert "amount" in CANONICAL_FIELDS["sale"]
     assert "name" in CANONICAL_FIELDS["product"]
+    assert "dni" in CANONICAL_FIELDS["customer"]
+    assert "cuit" in CANONICAL_FIELDS["customer"]
+    assert "cuil" in CANONICAL_FIELDS["supplier"]
+    # Supplier acotado a lo que persiste el modelo hoy: sin domicilio/condición IVA.
+    assert "address" not in CANONICAL_FIELDS["supplier"]
+    assert "iva_condition" not in CANONICAL_FIELDS["supplier"]
+    # Campos de referencia en las entidades transaccionales.
+    assert "customer_dni" in CANONICAL_FIELDS["sale"]
+    assert "supplier_cuil" in CANONICAL_FIELDS["expense"]
 
 
 @pytest.mark.asyncio
@@ -185,6 +237,49 @@ async def test_suggest_mappings_heuristic() -> None:
 
     prod_sugg = next(s for s in suggestions if s["source_column"] == "Producto")
     assert prod_sugg["target_field"] == "product_name"
+
+
+@pytest.mark.asyncio
+async def test_suggest_mappings_customer_master() -> None:
+    """suggest_mappings resuelve columnas fiscales de un maestro de clientes."""
+    db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=mock_result)
+
+    svc = ColumnMappingService(db)
+    headers = ["Nombre", "DNI", "CUIT", "Email"]
+    sample_rows = [
+        {"Nombre": "Juan Perez", "DNI": "30111222", "CUIT": "20301112223", "Email": "juan@mail.com"}
+    ]
+
+    suggestions = await svc.suggest_mappings(uuid.uuid4(), "customer", headers, sample_rows)
+
+    by_col = {s["source_column"]: s for s in suggestions}
+    assert by_col["Nombre"]["target_field"] == "name"
+    assert by_col["DNI"]["target_field"] == "dni"
+    assert by_col["CUIT"]["target_field"] == "cuit"
+    assert by_col["Email"]["target_field"] == "email"
+
+
+@pytest.mark.asyncio
+async def test_suggest_mappings_sale_with_customer_reference_column() -> None:
+    """Una hoja de VENTAS con columna 'DNI' (referencia al cliente) la mapea a
+    customer_dni — el contrato que habilita 7c, sin implementar la vinculación."""
+    db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=mock_result)
+
+    svc = ColumnMappingService(db)
+    headers = ["Fecha", "Monto", "DNI"]
+    sample_rows = [{"Fecha": "2024-01-15", "Monto": "1500", "DNI": "30111222"}]
+
+    suggestions = await svc.suggest_mappings(uuid.uuid4(), "sale", headers, sample_rows)
+
+    dni_sugg = next(s for s in suggestions if s["source_column"] == "DNI")
+    assert dni_sugg["target_field"] == "customer_dni"
+    assert dni_sugg["status"] == "mapped"
 
 
 @pytest.mark.asyncio

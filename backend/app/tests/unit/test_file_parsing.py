@@ -442,6 +442,111 @@ def test_multisheet_content_first_libro_compras_still_expense() -> None:
     assert not summary.get("stock_detectado")
 
 
+# --- F7a: maestros de clientes/proveedores ---
+
+
+def test_cliente_maestro_headers_classified_as_clientes() -> None:
+    """dni (CLIENTE_SIGNAL_COLS) sin señales transaccionales → clientes."""
+    result = infer_spreadsheet_type(
+        has_fecha=False,
+        has_venta=False,
+        has_gasto=False,
+        has_producto=False,
+        has_nombre=True,
+        cliente_score=1,
+        proveedor_master_score=0,
+        has_identidad_contacto=True,
+    )
+    assert result == "clientes"
+
+
+def test_proveedor_maestro_headers_classified_as_proveedores() -> None:
+    """cuil (PROVEEDOR_MASTER_COLS) sin señales transaccionales → proveedores."""
+    result = infer_spreadsheet_type(
+        has_fecha=False,
+        has_venta=False,
+        has_gasto=False,
+        has_producto=False,
+        has_nombre=True,
+        cliente_score=0,
+        proveedor_master_score=1,
+        has_identidad_contacto=True,
+    )
+    assert result == "proveedores"
+
+
+def test_maestro_signal_with_transaccion_does_not_intercept() -> None:
+    """Señal de maestro + monto/fecha (operación real) → NO se intercepta acá;
+    sigue el flujo normal de venta/gasto (disjunto con la regla -1/-0.5)."""
+    result = infer_spreadsheet_type(
+        has_fecha=True,
+        has_venta=False,
+        has_gasto=True,
+        has_producto=False,
+        has_nombre=False,
+        cliente_score=1,
+        proveedor_master_score=0,
+        has_monto_transaccion=True,
+        gasto_score=1,
+    )
+    assert result == "gastos"
+
+
+def test_csv_clientes_master_end_to_end_infers_clientes() -> None:
+    """End-to-end: un maestro de clientes (nombre/dni/cuit/email, sin montos) → clientes."""
+    csv = (
+        b"nombre,dni,cuit,email\n"
+        b"Juan Perez,30111222,20301112223,juan@mail.com\n"
+        b"Maria Lopez,28555666,27285556669,maria@mail.com\n"
+    )
+    summary = parse_uploaded_content(csv, "text/csv", "clientes.csv")
+    assert summary["inferred_type"] == "clientes"
+    assert len(summary["clientes_detectados"]) == 2
+    assert not summary["ventas_detectadas"]
+
+
+def test_csv_proveedores_master_end_to_end_infers_proveedores() -> None:
+    """End-to-end: un maestro de proveedores (nombre/cuil/email/telefono, sin montos)
+    → proveedores, no gastos (aunque 'proveedor' históricamente disparaba GASTO_SIGNAL_COLS)."""
+    csv = (
+        b"nombre,cuil,email,telefono\n"
+        b"Distribuidora SA,20304050607,ventas@distribuidora.com,1145678900\n"
+    )
+    summary = parse_uploaded_content(csv, "text/csv", "proveedores.csv")
+    assert summary["inferred_type"] == "proveedores"
+    assert len(summary["proveedores_detectados"]) == 1
+    assert not summary["gastos_detectados"]
+
+
+def test_csv_libro_compras_still_gastos_not_proveedores() -> None:
+    """No-regresión: un libro de compras (monto+forma_pago+fecha+proveedor) sigue
+    clasificando 'gastos', no 'proveedores' (la regla -0.5 exige AUSENCIA de monto/fecha)."""
+    csv = (
+        b"fecha,sku,producto,cantidad,costo_unitario,total,proveedor,forma_pago,categoria\n"
+        b"2024-01-15,SKU001,Coca-Cola 600ml,24,800,19200,Distribuidora SA,transferencia,Bebidas\n"
+    )
+    summary = parse_uploaded_content(csv, "text/csv", "libro_compras.csv")
+    assert summary["inferred_type"] == "gastos"
+
+
+def test_multisheet_classify_sheet_maps_clientes_and_proveedores_by_name() -> None:
+    """_classify_sheet (desempate por NOMBRE, solo cuando el contenido es ambiguo):
+    hojas 'Clientes'/'Proveedores' con columnas de contacto genéricas (sin señal
+    fuerte, contenido 'general') se mapean por su nombre."""
+    content = _build_multisheet_xlsx(
+        {
+            "Clientes": [["Email", "Teléfono"], ["juan@mail.com", "1145678900"]],
+            "Proveedores": [["Email", "Teléfono"], ["ventas@dist.com", "1145670000"]],
+            "Ventas": [["fecha", "total", "cliente"], ["2024-01-15", "5400", "Juan"]],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "contactos.xlsx")
+
+    by_id = {c["context_id"]: c for c in summary["mapping_contexts"]}
+    assert by_id["sheet:Clientes"]["entity_type"] == "customer"
+    assert by_id["sheet:Proveedores"]["entity_type"] == "supplier"
+
+
 def test_csv_exposes_single_table_context() -> None:
     """CSV expone un único mapping_context 'table' con su entity_type inferido."""
     sales_csv = b"fecha,venta,cliente\n2024-01-15,50000,Juan\n"

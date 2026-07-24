@@ -32,7 +32,9 @@ logger = get_logger(__name__)
 # Tipo ambiguo que dispara la detección por contenido.
 _AMBIGUOUS_TYPE = "general"
 # Tipos que el LLM puede asignar (deben coincidir con los de infer_spreadsheet_type).
-_VALID_TYPES = frozenset({"ventas", "gastos", "stock"})
+# F7a: clientes/proveedores (maestros de identidad, sin datos transaccionales)
+# se suman como tipos reconocidos — aditivo, sin import todavía (7b/7c).
+_VALID_TYPES = frozenset({"ventas", "gastos", "stock", "clientes", "proveedores"})
 # Cuántas filas de muestra se le pasan al LLM como evidencia.
 _MAX_SAMPLE_ROWS = 8
 
@@ -40,11 +42,16 @@ _SYSTEM_PROMPT = (
     "Sos un asistente que clasifica el propósito de una planilla de un negocio "
     "argentino. Te paso los nombres de columna y algunas filas de ejemplo. "
     "Decidí si la planilla registra VENTAS (ingresos/cobros a clientes), GASTOS "
-    "(egresos/pagos a proveedores, servicios, alquiler) o STOCK (catálogo de "
-    "productos / inventario / lista de precios).\n\n"
+    "(egresos/pagos a proveedores, servicios, alquiler), STOCK (catálogo de "
+    "productos / inventario / lista de precios), CLIENTES (maestro/ficha de "
+    "clientes: nombre, dni/cuit, email, teléfono, dirección — SIN montos ni "
+    "fechas de operación) o PROVEEDORES (maestro/ficha de proveedores: razón "
+    "social, cuil, email, teléfono, condición de pago — SIN montos ni fechas de "
+    "operación; distinto de un libro de compras, que SÍ trae monto + fecha).\n\n"
     "Reglas:\n"
     "- Respondé SOLO un objeto JSON, sin texto adicional ni markdown.\n"
-    '- Formato: {"file_type": "ventas|gastos|stock|general", "confidence": <0..1>}.\n'
+    '- Formato: {"file_type": "ventas|gastos|stock|clientes|proveedores|general", '
+    '"confidence": <0..1>}.\n'
     '- Usá "general" si genuinamente no podés decidir con la evidencia.\n'
     "- No inventes datos. No calcules montos: solo clasificás el propósito.\n"
     "- confidence refleja qué tan seguro estás (1 = certeza, 0 = nada)."
@@ -191,6 +198,8 @@ _TYPE_TO_ENTITY: dict[str, str] = {
     "ventas": "sale",
     "gastos": "expense",
     "stock": "product",
+    "clientes": "customer",
+    "proveedores": "supplier",
 }
 
 

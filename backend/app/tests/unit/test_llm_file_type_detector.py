@@ -29,6 +29,21 @@ def test_parse_tolerates_fences() -> None:
     assert _parse_llm_response(raw) == ("gastos", 0.7)
 
 
+def test_parse_valid_clientes() -> None:
+    # F7a: clientes/proveedores son tipos válidos ahora (maestros de identidad).
+    assert _parse_llm_response('{"file_type": "clientes", "confidence": 0.85}') == (
+        "clientes",
+        0.85,
+    )
+
+
+def test_parse_valid_proveedores() -> None:
+    assert _parse_llm_response('{"file_type": "proveedores", "confidence": 0.8}') == (
+        "proveedores",
+        0.8,
+    )
+
+
 def test_parse_invalid_type_returns_none() -> None:
     # "mixto" no es un tipo válido → None (pero conserva confidence parseada).
     assert _parse_llm_response('{"file_type": "mixto", "confidence": 0.8}') == (None, 0.8)
@@ -148,6 +163,35 @@ async def test_maybe_detect_updates_and_emits() -> None:
     assert kwargs["detail"]["type"] == "file_type_detection"
     assert kwargs["detail"]["previous_type"] == "general"
     assert kwargs["detail"]["detected_type"] == "ventas"
+
+
+@pytest.mark.asyncio
+async def test_maybe_detect_updates_entity_type_for_proveedores() -> None:
+    """F7a: detected='proveedores' → entity_type del contexto único pasa a 'supplier'."""
+    summary: dict[str, Any] = {
+        "inferred_type": "general",
+        "headers": ["nombre", "cuil", "email"],
+        "preview_rows": [{"nombre": "Dist SA", "cuil": "20304050607"}],
+        "mapping_contexts": [{"context_id": "table", "entity_type": None}],
+    }
+    db = AsyncMock()
+    with (
+        unittest.mock.patch.object(
+            llm_file_type_detector,
+            "detect_file_type",
+            new=AsyncMock(return_value=("proveedores", 0.8, "model-x")),
+        ),
+        unittest.mock.patch(
+            "app.application.services.pipeline_event_service.emit_event",
+            new=AsyncMock(),
+        ),
+    ):
+        await maybe_detect_file_type(
+            db, summary, trace_id=uuid.uuid4(), tenant_id=uuid.uuid4(), file_id=uuid.uuid4()
+        )
+
+    assert summary["inferred_type"] == "proveedores"
+    assert summary["mapping_contexts"][0]["entity_type"] == "supplier"
 
 
 @pytest.mark.asyncio

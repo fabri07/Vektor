@@ -66,7 +66,8 @@ class ColumnMapping(BaseModel):
     target_field: str  # campo canónico, "ignore", o "custom_field:{key}"
     # Mapeo cualificado por contexto (multi-hoja / multi-grupo). None = mapeo plano legacy.
     context_id: str | None = None
-    entity_type: str | None = None  # entity_type del contexto (sale|expense|product)
+    # entity_type del contexto (sale|expense|product|customer|supplier)
+    entity_type: str | None = None
 
 
 class TenantColumnMappingResponse(BaseModel):
@@ -85,7 +86,9 @@ class ConfirmIngestionRequest(BaseModel):
     confirmed_fields: dict[str, Any] = Field(
         description=(
             "Which data categories to import from the parsed file. "
-            "Keys: 'ventas', 'gastos', 'productos'. Values: bool."
+            "Keys: 'ventas', 'gastos', 'productos' (y, F7a, 'clientes'/'proveedores' — "
+            "reconocidas en la detección/mapeo; el import de estas dos queda para 7b/7c). "
+            "Values: bool."
         )
     )
     column_mappings: list[ColumnMapping] = Field(
@@ -107,7 +110,8 @@ class ConfirmIngestionRequest(BaseModel):
         default_factory=dict,
         description=(
             "Override de entity_type por contexto en documentos de texto/imagen: "
-            "{context_id: sale|expense}. Permite reasignar un grupo detectado."
+            "{context_id: sale|expense|customer|supplier}. Permite reasignar un grupo "
+            "detectado."
         ),
     )
     stock_treatment: Literal["opening_balance", "purchase"] | None = Field(
