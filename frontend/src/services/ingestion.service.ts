@@ -87,7 +87,7 @@ export interface MappingContext {
   context_id: string;
   label: string;
   source_kind: "sheet" | "table" | "text_group" | "ocr_group";
-  entity_type: "sale" | "expense" | "product" | null;
+  entity_type: "sale" | "expense" | "product" | "customer" | "supplier" | null;
   headers: string[] | null;
   fields: string[] | null;
   preview_rows: Record<string, unknown>[];

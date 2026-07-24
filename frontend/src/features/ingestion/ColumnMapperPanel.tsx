@@ -44,12 +44,44 @@ const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> 
     { value: "acquired_at", label: "Fecha de alta/adquisición" },
     { value: "expiry_date", label: "Fecha de vencimiento" },
   ],
+  // F7a: espeja CANONICAL_FIELDS["customer"] del backend (mantener en sync).
+  // Aditivo — el import/vinculación real queda para 7b/7c.
+  customer: [
+    { value: "customer_type", label: "Tipo (persona/empresa)" },
+    { value: "name", label: "Nombre" },
+    { value: "last_name", label: "Apellido" },
+    { value: "doc_type", label: "Tipo de documento" },
+    { value: "dni", label: "DNI" },
+    { value: "cuit", label: "CUIT" },
+    { value: "iva_condition", label: "Condición de IVA" },
+    { value: "email", label: "Email" },
+    { value: "phone", label: "Teléfono" },
+    { value: "address", label: "Dirección" },
+    { value: "locality", label: "Localidad" },
+    { value: "province", label: "Provincia" },
+    { value: "postal_code", label: "Código postal" },
+    { value: "birthday", label: "Cumpleaños" },
+    { value: "notes", label: "Notas" },
+  ],
+  // F7a: espeja CANONICAL_FIELDS["supplier"] del backend — ACOTADO a lo que
+  // persiste el modelo Supplier hoy (sin domicilio/condición IVA).
+  supplier: [
+    { value: "name", label: "Nombre" },
+    { value: "last_name", label: "Apellido" },
+    { value: "cuil", label: "CUIL" },
+    { value: "payment_method", label: "Método de pago" },
+    { value: "email", label: "Email" },
+    { value: "phone", label: "Teléfono" },
+    { value: "notes", label: "Notas" },
+  ],
 };
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
   sale: "Ventas",
   expense: "Gastos",
   product: "Productos",
+  customer: "Clientes",
+  supplier: "Proveedores",
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -386,6 +418,8 @@ function SheetMapperSection({
           >
             <option value="sale">Ventas</option>
             <option value="expense">Gastos</option>
+            <option value="customer">Clientes</option>
+            <option value="supplier">Proveedores</option>
           </select>
         ) : (
           <span className="rounded-full bg-vk-info-bg px-2 py-0.5 text-[10px] font-medium text-vk-blue">
