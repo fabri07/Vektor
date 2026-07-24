@@ -30,11 +30,38 @@ export interface ColumnAtRisk {
   recommendation: string;
 }
 
+// F7d: fila de muestra del preview de un maestro (cliente/proveedor). El
+// backend minimiza PII a propósito — nunca trae DNI/CUIT/email/teléfono
+// crudos, solo nombre + estado + un diagnóstico corto.
+export interface MasterPreviewSample {
+  row_index: number;
+  status: "create" | "update" | "invalid" | "duplicate_in_file" | "needs_review";
+  display_name: string | null;
+  existing_name: string | null;
+  issue: string | null;
+}
+
+// F7d: preview de una hoja de maestro — cuántas filas son create/update/
+// needs_review/invalid/duplicate ANTES de confirmar. Solo diagnóstico, no
+// persiste nada; el confirm real solo importa create/update.
+export interface MasterPreviewSummary {
+  context_id: string | null;
+  entity_type: "customer" | "supplier";
+  to_create: number;
+  to_update: number;
+  needs_review: number;
+  invalid: number;
+  duplicates: number;
+  samples: MasterPreviewSample[];
+}
+
 export interface FilePreview {
   file_id: string;
   processing_status: string;
   parsed_summary_json: Record<string, unknown> | null;
   columns_at_risk: ColumnAtRisk[];
+  // F7e: vacío si el archivo no tiene hojas de maestro o no se pudo estimar el mapeo.
+  master_previews: MasterPreviewSummary[];
 }
 
 export interface ConfirmIngestionResult {
@@ -87,7 +114,7 @@ export interface MappingContext {
   context_id: string;
   label: string;
   source_kind: "sheet" | "table" | "text_group" | "ocr_group";
-  entity_type: "sale" | "expense" | "product" | null;
+  entity_type: "sale" | "expense" | "product" | "customer" | "supplier" | null;
   headers: string[] | null;
   fields: string[] | null;
   preview_rows: Record<string, unknown>[];

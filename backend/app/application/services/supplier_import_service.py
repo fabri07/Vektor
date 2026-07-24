@@ -1,18 +1,17 @@
-"""customer_import_service — import masivo de clientes en dos pasos (preview/confirm).
+"""supplier_import_service — import masivo de proveedores en dos pasos (preview/confirm).
 
-Reutiliza el parser determinístico de ``customer_extraction_service.parse_customer_records``
-para leer la planilla, y el motor común ``identity_resolution`` para matchear cada fila
-contra los clientes existentes (documento → email → teléfono; el nombre es señal débil).
-Arma un preview (a crear / a actualizar / inválido / duplicado en el archivo / needs_review
-— sin clave fuerte, no matchea ni crea). El confirm aplica el upsert idempotente: re-resuelve
-contra la DB y crea o actualiza, sin duplicar; needs_review y conflictos de identidad se
-saltean siempre. El sentinela "Local" nunca se crea por import.
+Espejo de ``customer_import_service``: mismo motor de identidad
+(``identity_resolution``), misma estructura de dos pasos (preview puro / confirm con
+upsert idempotente). Matchea por CUIL → email → teléfono; el nombre es señal débil.
+Campos acotados a lo que persiste el modelo ``Supplier`` hoy (ver ``models/supplier.py``):
+no hay doc_type/address/etc. El sentinela "No identificado" y las marcas colapsadas
+(``_brand_collapsed``) nunca se crean ni se actualizan por import — quedan afuera del
+índice de dedup (``SupplierRepository.list_for_dedup``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -25,31 +24,15 @@ from app.application.services.identity_resolution import (
     record_keys,
     resolve_identity,
 )
-from app.domain.date_parsing import BIRTHDAY_CENTURY_PIVOT, parse_business_date
-from app.persistence.models.customer import Customer
-from app.persistence.repositories.customer_repository import CustomerRepository
-from app.schemas._ar_fiscal import validate_cuit, validate_dni
+from app.persistence.models.supplier import Supplier
+from app.persistence.repositories.supplier_repository import SupplierRepository
+from app.schemas._ar_fiscal import validate_cuit
 
-# Documento: CUIT antes que DNI (prioridad de match del motor de identidad).
-_DOC_FIELDS = ("cuit", "dni")
+# Campos del proveedor que el import puede setear/actualizar (subconjunto del modelo).
+_IMPORTABLE_FIELDS = ("name", "last_name", "cuil", "payment_method", "email", "phone", "notes")
 
-# Campos del cliente que el import puede setear/actualizar (subconjunto del modelo).
-_IMPORTABLE_FIELDS = (
-    "customer_type",
-    "name",
-    "last_name",
-    "doc_type",
-    "dni",
-    "cuit",
-    "iva_condition",
-    "email",
-    "phone",
-    "address",
-    "locality",
-    "province",
-    "postal_code",
-    "birthday",
-)
+# Proveedor solo tiene CUIL como documento (sin DNI, a diferencia de cliente).
+_DOC_FIELDS = ("cuil",)
 
 
 @dataclass
@@ -95,64 +78,53 @@ class ImportResult:
     created_ids: list[UUID] = field(default_factory=list)
     updated_ids: list[UUID] = field(default_factory=list)
     skipped: int = 0
-    # F7d: desglose de `skipped` (siempre skipped == needs_review + invalid) — la
-    # taxonomía reconciliada de contadores de maestro necesita distinguir "sin
-    # clave fuerte para identificar sin ambigüedad" de "dato inválido/conflicto",
-    # sin romper `skipped` (usado hoy en la respuesta pública del import manual).
+    # F7d: desglose de `skipped` (siempre skipped == needs_review + invalid) — ver
+    # el mismo campo en customer_import_service.ImportResult.
     needs_review: int = 0
     invalid: int = 0
 
 
 def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
-    """Claves de identidad del record — CUIT → DNI → email → teléfono."""
+    """Claves de identidad del record — CUIL → email → teléfono."""
     return record_keys(record, doc_fields=_DOC_FIELDS)
 
 
 def _validate_record(record: dict[str, Any]) -> list[str]:
-    """Diagnóstico de una fila de import. Lista vacía = válida (puede seguir siendo
-    ``needs_review`` más adelante si no trae ninguna clave fuerte — eso lo resuelve
-    el motor de identidad, no esta función).
+    """Diagnóstico de una fila de import. Lista vacía = válida.
 
-    Reglas: nombre/razón social obligatorio; si trae DNI o CUIT, tiene que ser válido.
-    NO exige documento — una fila sin documento pero con email/teléfono es candidata a
-    matchear por esas claves, y una fila sin ninguna clave fuerte cae en needs_review
-    (no en invalid).
+    Reglas: nombre/razón social obligatorio; si trae CUIL, tiene que ser válido. NO
+    exige CUIL — una fila sin CUIL pero con email/teléfono es candidata a matchear por
+    esas claves, y una fila sin ninguna clave fuerte cae en needs_review (no invalid).
     """
     issues: list[str] = []
     if not (record.get("name") or "").strip():
         issues.append("Falta nombre o razón social.")
-    has_cuit = bool((record.get("cuit") or "").strip())
-    has_dni = bool((record.get("dni") or "").strip())
-    if has_cuit:
+    cuil = (record.get("cuil") or "").strip()
+    if cuil:
         try:
-            validate_cuit(record.get("cuit"))
-        except PydanticCustomError as exc:
-            issues.append(str(exc))
-    if has_dni:
-        try:
-            validate_dni(record.get("dni"))
+            validate_cuit(record.get("cuil"))
         except PydanticCustomError as exc:
             issues.append(str(exc))
     return issues
 
 
-def _existing_doc_map(existing: list[Customer]) -> dict[IdentityKey, Customer]:
-    """Índice ``IdentityKey → Customer`` de los clientes existentes (documento/email/tel)."""
-    return build_existing_index(existing, to_record=_customer_record, doc_fields=_DOC_FIELDS)
+def _supplier_record(sup: Supplier) -> dict[str, Any]:
+    return {"cuil": sup.cuil, "email": sup.email, "phone": sup.phone}
 
 
-def _customer_record(cust: Customer) -> dict[str, Any]:
-    return {"cuit": cust.cuit, "dni": cust.dni, "email": cust.email, "phone": cust.phone}
+def _existing_index(existing: list[Supplier]) -> dict[IdentityKey, Supplier]:
+    """Índice ``IdentityKey → Supplier`` de los proveedores existentes (CUIL/email/tel)."""
+    return build_existing_index(existing, to_record=_supplier_record, doc_fields=_DOC_FIELDS)
 
 
 def build_import_preview(
     records: list[dict[str, Any]],
-    existing: list[Customer],
+    existing: list[Supplier],
     *,
     parse_warnings: list[str] | None = None,
 ) -> ImportPreview:
     """Clasifica cada fila contra los existentes. Puro, sin tocar la DB."""
-    existing_index = _existing_doc_map(existing)
+    existing_index = _existing_index(existing)
     seen_in_file: dict[IdentityKey, int] = {}
     items: list[PreviewItem] = []
 
@@ -188,8 +160,8 @@ def build_import_preview(
                     status="needs_review",
                     fields=record,
                     issues=[
-                        "Falta un dato fuerte (DNI, CUIT, email o teléfono) para "
-                        "identificar al cliente sin ambigüedad."
+                        "Falta un dato fuerte (CUIL, email o teléfono) para "
+                        "identificar al proveedor sin ambigüedad."
                     ],
                 )
             )
@@ -199,7 +171,7 @@ def build_import_preview(
                     row_index=idx,
                     status="invalid",
                     fields=record,
-                    issues=["El registro matchea contra más de un cliente existente."],
+                    issues=["El registro matchea contra más de un proveedor existente."],
                 )
             )
         elif resolution.outcome == "matched":
@@ -220,27 +192,22 @@ def build_import_preview(
     return ImportPreview(items=items, warnings=list(parse_warnings or []))
 
 
-def _coerce_birthday(value: Any) -> date | None:
-    # F6-C1: antes solo aceptaba ISO, así que un "12/03/1985" de una planilla se
-    # perdía en silencio. Mismo parser y mismo pivote que la extracción por IA.
-    return parse_business_date(value, century_pivot=BIRTHDAY_CENTURY_PIVOT)
-
-
 async def apply_import(
-    repo: CustomerRepository,
+    repo: SupplierRepository,
     tenant_id: UUID,
     records: list[dict[str, Any]],
 ) -> ImportResult:
-    """Aplica el import: upsert idempotente por documento. Crea o actualiza, no duplica.
+    """Aplica el import: upsert idempotente por CUIL/email/teléfono. Crea o actualiza,
+    no duplica.
 
-    Re-valida cada fila y re-resuelve el match contra la DB actual (no confía en la
-    clasificación del cliente). Las filas inválidas se saltean, igual que las
-    ``needs_review`` (sin clave fuerte) y los conflictos de identidad — nunca crean ni
-    actualizan. El sentinela nunca se crea (los records no llevan ``_sentinel`` y no lo
-    seteamos). Devuelve los ids creados/actualizados y la cantidad salteada.
+    Re-valida cada fila y re-resuelve el match contra la DB actual. Las filas
+    inválidas se saltean, igual que las ``needs_review`` (sin clave fuerte) y los
+    conflictos de identidad — nunca crean ni actualizan. El sentinela "No identificado"
+    y las marcas colapsadas nunca se crean/pisan (quedan fuera de ``list_for_dedup``).
+    Devuelve los ids creados/actualizados y la cantidad salteada.
     """
     existing = await repo.list_for_dedup(tenant_id)
-    index = _existing_doc_map(existing)
+    index = _existing_index(existing)
     result = ImportResult()
 
     for record in records:
@@ -271,28 +238,17 @@ async def apply_import(
             for fname in _IMPORTABLE_FIELDS:
                 if fname not in record or is_blank(record[fname]):
                     continue
-                value = (
-                    _coerce_birthday(record[fname])
-                    if fname == "birthday"
-                    else record[fname]
-                )
-                setattr(match, fname, value)
+                setattr(match, fname, record[fname])
             await repo.save(match)
             result.updated_ids.append(match.id)
         else:
-            payload: dict[str, Any] = {}
-            for fname in _IMPORTABLE_FIELDS:
-                if fname not in record:
-                    continue
-                payload[fname] = (
-                    _coerce_birthday(record[fname])
-                    if fname == "birthday"
-                    else record[fname]
-                )
-            customer = Customer(tenant_id=tenant_id, **payload)
-            saved = await repo.save(customer)
+            payload: dict[str, Any] = {
+                fname: record[fname] for fname in _IMPORTABLE_FIELDS if fname in record
+            }
+            supplier = Supplier(tenant_id=tenant_id, **payload)
+            saved = await repo.save(supplier)
             result.created_ids.append(saved.id)
-            # Registrar el nuevo doc para no duplicar dentro del mismo batch.
+            # Registrar las nuevas claves para no duplicar dentro del mismo batch.
             for k in keys:
                 index[k] = saved
 

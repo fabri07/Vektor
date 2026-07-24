@@ -186,6 +186,125 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     ).not.toBeInTheDocument();
   });
 
+  test("F7e: campos de referencia al cliente disponibles al mapear una hoja de ventas", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["documento"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "documento",
+        normalized_column: "documento",
+        sample_values: ["30111222"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+    ]);
+
+    renderPanel();
+
+    await screen.findAllByText("documento");
+    // Debe poder mapearse a los campos de referencia al cliente (mismos
+    // target_field que column_mapping_service.CANONICAL_FIELDS["sale"] en el backend).
+    // La columna sin mapear aparece tanto en el bloque "revisá antes de
+    // confirmar" como en la tabla principal — de ahí *AllBy*.
+    expect(screen.getAllByRole("option", { name: "Cliente — DNI" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("option", { name: "Cliente — CUIT" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("option", { name: "Cliente — Email" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("option", { name: "Cliente — Teléfono" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("option", { name: "Cliente — Nombre" }).length).toBeGreaterThan(0);
+  });
+
+  test("F7e: campos de referencia al proveedor disponibles al mapear una hoja de gastos", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "gastos", headers: ["contacto"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "contacto",
+        normalized_column: "contacto",
+        sample_values: ["20333444"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+    ]);
+
+    renderPanel();
+
+    await screen.findAllByText("contacto");
+    expect(screen.getAllByRole("option", { name: "Proveedor — CUIL" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("option", { name: "Proveedor — Email" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("option", { name: "Proveedor — Teléfono" }).length).toBeGreaterThan(0);
+    // "Proveedor" (supplier_name) ya existía antes de F7e — sigue disponible.
+    expect(screen.getAllByRole("option", { name: "Proveedor" }).length).toBeGreaterThan(0);
+  });
+
+  test("F7e: los buckets Clientes/Proveedores aparecen como checkbox de importación", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["a"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText("clientes")).toBeInTheDocument();
+    });
+    expect(screen.getByText("proveedores")).toBeInTheDocument();
+  });
+
+  test("F7e: preview de maestros — conteos por bucket y muestra needs_review/invalid", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["a"] },
+      columns_at_risk: [],
+      master_previews: [
+        {
+          context_id: null,
+          entity_type: "customer",
+          to_create: 3,
+          to_update: 1,
+          needs_review: 2,
+          invalid: 1,
+          duplicates: 0,
+          samples: [
+            {
+              row_index: 0,
+              status: "needs_review",
+              display_name: "Juan Pérez",
+              existing_name: null,
+              issue: "Sin documento ni email para identificar",
+            },
+          ],
+        },
+      ],
+    });
+    mockGetColumnMappings.mockResolvedValue([]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText("Clientes")).toBeInTheDocument();
+    });
+    expect(screen.getByText("En revisión")).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/Ver por qué/i));
+    expect(screen.getByText(/Juan Pérez/)).toBeInTheDocument();
+    expect(screen.getByText(/Sin documento ni email para identificar/)).toBeInTheDocument();
+  });
+
   test("multi-contexto: muestra columns_at_risk y source llm por hoja", async () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",

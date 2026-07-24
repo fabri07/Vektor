@@ -26,8 +26,14 @@ from app.api.v1.deps import (
     require_modify_access,
     require_role,
 )
-from app.application.services import pipeline_event_service
+from app.application.services import (
+    customer_import_service,
+    pipeline_event_service,
+    supplier_import_service,
+)
+from app.application.services import ingestion_import_service as _iis
 from app.application.services.column_mapping_service import (
+    CANONICAL_FIELDS,
     REQUIRED_FIELDS,
     ColumnMappingService,
     validate_required_date_mapping,
@@ -86,7 +92,9 @@ from app.persistence.models.pipeline_event import (
 )
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
+from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.file_repository import FileRepository
+from app.persistence.repositories.supplier_repository import SupplierRepository
 from app.schemas.ingestion import (
     ColumnAtRisk,
     ColumnMapping,
@@ -96,6 +104,8 @@ from app.schemas.ingestion import (
     DropColumnsRequest,
     FilePreviewResponse,
     FileStatusItem,
+    MasterPreviewSample,
+    MasterPreviewSummary,
     RereadApplyStartResponse,
     RereadCounts,
     RereadItem,
@@ -412,6 +422,112 @@ async def list_files(
     )
 
 
+async def _build_master_previews(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+) -> list[MasterPreviewSummary]:
+    """F7d: preview universal de maestros — para cada hoja de clientes/proveedores
+    detectada, estima create/update/needs_review/invalid/duplicate contra el
+    motor de identidad de F7b (``build_import_preview``) usando un mapeo
+    heurístico (las mismas sugerencias que ``GET /column-mappings`` — el usuario
+    todavía no eligió el mapeo final, eso pasa recién en el confirm). Solo
+    diagnóstico, no persiste nada.
+
+    PII minimizada: el registro completo (con documento/email/teléfono) vive
+    solo en memoria durante el request para poder matchear contra los
+    existentes — la respuesta serializada solo lleva nombre + estado + un
+    diagnóstico corto por fila de muestra (ver ``MasterPreviewSample``).
+    """
+    mapping_ctxs = list(summary.get("mapping_contexts") or [])
+    master_ctxs = [c for c in mapping_ctxs if c.get("entity_type") in ("customer", "supplier")]
+    if not master_ctxs:
+        # Legacy: archivo de un solo contexto (sin mapping_contexts) ya inferido
+        # como "clientes"/"proveedores" por file_parsing.
+        inferred = summary.get("inferred_type")
+        _headers = summary.get("headers", [])
+        if inferred == "clientes":
+            master_ctxs = [{"context_id": None, "entity_type": "customer", "headers": _headers}]
+        elif inferred == "proveedores":
+            master_ctxs = [{"context_id": None, "entity_type": "supplier", "headers": _headers}]
+    if not master_ctxs:
+        return []
+
+    mapping_svc = ColumnMappingService(session)
+    customer_repo = CustomerRepository(session)
+    supplier_repo = SupplierRepository(session)
+    existing_customers: list[Any] | None = None
+    existing_suppliers: list[Any] | None = None
+    previews: list[MasterPreviewSummary] = []
+
+    for ctx in master_ctxs:
+        entity = ctx["entity_type"]
+        ctx_id = ctx.get("context_id")
+        bucket_key = "clientes_detectados" if entity == "customer" else "proveedores_detectados"
+        rows = _iis._rows_for_context(summary.get(bucket_key) or [], ctx_id or "")
+        if not rows:
+            continue
+        headers = ctx.get("headers") or list(rows[0].keys())
+        sample_rows = ctx.get("preview_rows") or rows[:10]
+        # Review 7d (Important): este GET puede correr en cada poll/reload de la
+        # página — NUNCA debe disparar la 4ª capa LLM (costo + latencia sin cache
+        # ni cap), aunque ENABLE_LLM_COLUMN_MAPPING esté prendido. Solo
+        # determinístico acá; el LLM sigue disponible en GET /column-mappings,
+        # que el usuario dispara explícitamente al armar el mapeo real.
+        suggestions = await mapping_svc.suggest_mappings(
+            tenant_id, entity, headers, sample_rows, allow_llm=False
+        )
+        target_to_col = {
+            s["target_field"]: s["source_column"] for s in suggestions if s["status"] == "mapped"
+        }
+        if not target_to_col:
+            continue  # sin mapeo estimable: no se adivina el shape (mismo criterio que el confirm)
+
+        preview: customer_import_service.ImportPreview | supplier_import_service.ImportPreview
+        if entity == "customer":
+            _fields = CANONICAL_FIELDS["customer"]
+            records = [
+                {f: row.get(target_to_col[f]) for f in _fields if f in target_to_col}
+                for row in rows
+            ]
+            if existing_customers is None:
+                existing_customers = await customer_repo.list_for_dedup(tenant_id)
+            preview = customer_import_service.build_import_preview(records, existing_customers)
+        else:
+            _fields = CANONICAL_FIELDS["supplier"]
+            records = [
+                {f: row.get(target_to_col[f]) for f in _fields if f in target_to_col}
+                for row in rows
+            ]
+            if existing_suppliers is None:
+                existing_suppliers = await supplier_repo.list_for_dedup(tenant_id)
+            preview = supplier_import_service.build_import_preview(records, existing_suppliers)
+
+        samples = [
+            MasterPreviewSample(
+                row_index=item.row_index,
+                status=item.status,
+                display_name=str(item.fields.get("name"))[:80] if item.fields.get("name") else None,
+                existing_name=item.existing_name,
+                issue=item.issues[0] if item.issues else None,
+            )
+            for item in preview.items[:5]
+        ]
+        previews.append(
+            MasterPreviewSummary(
+                context_id=ctx_id,
+                entity_type=entity,
+                to_create=preview.to_create,
+                to_update=preview.to_update,
+                needs_review=preview.needs_review,
+                invalid=preview.invalid,
+                duplicates=preview.duplicates,
+                samples=samples,
+            )
+        )
+    return previews
+
+
 @router.get(
     "/files/{file_id}/preview",
     response_model=FilePreviewResponse,
@@ -436,11 +552,22 @@ async def get_file_preview(
     raw_at_risk = (record.parsed_summary_json or {}).get("columns_at_risk", [])
     columns_at_risk = [ColumnAtRisk(**col) for col in raw_at_risk if isinstance(col, dict)]
 
+    # F7d: preview de maestros — best-effort, nunca debe romper el preview del
+    # archivo (es un diagnóstico adicional, no el dato principal de la respuesta).
+    master_previews: list[MasterPreviewSummary] = []
+    try:
+        master_previews = await _build_master_previews(
+            session, tenant.tenant_id, record.parsed_summary_json or {}
+        )
+    except Exception:
+        logger.warning("ingestion.preview.master_preview_failed", file_id=str(file_id))
+
     return FilePreviewResponse(
         file_id=record.id,
         processing_status=record.processing_status,
         parsed_summary_json=record.parsed_summary_json,
         columns_at_risk=columns_at_risk,
+        master_previews=master_previews,
     )
 
 
@@ -646,7 +773,7 @@ async def get_column_mappings(
     file_id: uuid.UUID,
     entity_type: str = Query(
         default="sale",
-        description="Tipo de entidad: sale | expense | product",
+        description="Tipo de entidad: sale | expense | product | customer | supplier",
     ),
     context_id: str | None = Query(
         default=None,
@@ -656,10 +783,17 @@ async def get_column_mappings(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ColumnMappingSuggestion]:
-    if entity_type not in ("sale", "expense", "product", "inventory"):
+    # F7d: "customer"/"supplier" sumados — sin esto, un archivo flat (legacy, sin
+    # mapping_contexts) de clientes/proveedores no podía pedir sugerencias de
+    # mapeo (context_id resuelve el entity_type real igual, pero el query param
+    # por default "sale" ya rebotaba acá antes de llegar a esa resolución).
+    if entity_type not in ("sale", "expense", "product", "inventory", "customer", "supplier"):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="entity_type debe ser: sale, expense, product o inventory.",
+            detail=(
+                "entity_type debe ser: sale, expense, product, inventory, customer o "
+                "supplier."
+            ),
         )
 
     repo = FileRepository(session)
@@ -794,7 +928,16 @@ async def confirm_file(
 
     # Derivar entity_type desde el summary para validación y aprendizaje
     _inferred_type = (record.parsed_summary_json or {}).get("inferred_type", "general")
-    _entity_map = {"ventas": "sale", "gastos": "expense", "stock": "product"}
+    # F7d: "clientes"/"proveedores" sumados — sin esto, un archivo flat (legacy,
+    # sin mapping_contexts) de SOLO maestros validaba contra REQUIRED_FIELDS["sale"]
+    # (el default de abajo) en vez de REQUIRED_FIELDS["customer"/"supplier"].
+    _entity_map = {
+        "ventas": "sale",
+        "gastos": "expense",
+        "stock": "product",
+        "clientes": "customer",
+        "proveedores": "supplier",
+    }
     _entity_type = _entity_map.get(_inferred_type, "sale")
 
     # ── Separar mapeos planos (legacy single-context) de los cualificados por contexto ──
@@ -828,6 +971,9 @@ async def confirm_file(
             (entity_type == "sale" and body.confirmed_fields.get("ventas"))
             or (entity_type == "expense" and body.confirmed_fields.get("gastos"))
             or (entity_type == "product" and body.confirmed_fields.get("productos"))
+            # F7d: clientes/proveedores se incluyen/excluyen como los demás buckets.
+            or (entity_type == "customer" and body.confirmed_fields.get("clientes"))
+            or (entity_type == "supplier" and body.confirmed_fields.get("proveedores"))
         )
 
     def _missing_required(entity_type: str, mappings: list[ColumnMapping]) -> set[str]:
@@ -844,6 +990,8 @@ async def confirm_file(
             (body.confirmed_fields.get("ventas") and _entity_type == "sale")
             or (body.confirmed_fields.get("gastos") and _entity_type == "expense")
             or (body.confirmed_fields.get("productos") and _entity_type == "product")
+            or (body.confirmed_fields.get("clientes") and _entity_type == "customer")
+            or (body.confirmed_fields.get("proveedores") and _entity_type == "supplier")
         )
         if confirmed_entity:
             missing = _missing_required(_entity_type, _flat_mappings)
@@ -998,6 +1146,26 @@ async def confirm_file(
                 _cm[m.context_id or ""][m.source_column] = m.target_field
             context_mappings = dict(_cm)
 
+        # F7d: subconjunto de mapeos de columnas de hojas de maestro (clientes/
+        # proveedores) — solo nombres de columna → campo canónico, sin PII de
+        # ninguna fila. Se persiste para que una relectura posterior
+        # (reread_service._reread_master_entities) pueda reaplicar el mismo
+        # upsert idempotente sin volver a preguntar el mapeo (sin esto, F7c/F7d
+        # no adivinan el shape de una hoja de maestro y la saltean siempre).
+        _master_context_mappings = {
+            cid: mapping
+            for cid, mapping in (context_mappings or {}).items()
+            if _context_entity.get(cid) in ("customer", "supplier")
+        }
+        _master_flat_mapping = (
+            explicit_mappings if _entity_type in ("customer", "supplier") else None
+        )
+        if _master_context_mappings or _master_flat_mapping:
+            updated_summary["master_column_mappings"] = {
+                "context": _master_context_mappings,
+                "flat": _master_flat_mapping,
+            }
+
         _trace_id = record.trace_id or record.id
         bind_request_context(trace_id=_trace_id)
         _t0 = time.monotonic()
@@ -1047,6 +1215,15 @@ async def confirm_file(
                 "otros_detectados",
                 "preview_rows",
                 "mapping_contexts",
+                # F7d review (Important): clientes_detectados/proveedores_detectados
+                # traen filas crudas con nombre/DNI/CUIT/email/teléfono — sin esto,
+                # esa PII quedaba at-rest en el JSONB y se re-servía cruda por
+                # GET /files/{id}/preview. El preview de maestros se computa aparte
+                # (_build_master_previews, contra mapping_contexts) y NO depende de
+                # estos buckets sobrevivir al confirm — mismo criterio que los
+                # demás buckets de filas crudas de la lista.
+                "clientes_detectados",
+                "proveedores_detectados",
             )
         }
         compact_summary["imported_counts"] = counts
@@ -1075,7 +1252,13 @@ async def confirm_file(
             tenant_id=tenant.tenant_id,
             stage=STAGE_CONFIRM,
             file_id=file_id,
-            rows_out=counts["ventas"] + counts["gastos"] + counts["productos"],
+            rows_out=(
+                counts["ventas"]
+                + counts["gastos"]
+                + counts["productos"]
+                + counts["clientes"]
+                + counts["proveedores"]
+            ),
             latency_ms=_confirm_latency_ms,
             detail={"imported_counts": counts, "confirmed_fields": body.confirmed_fields},
         )
@@ -1124,6 +1307,10 @@ async def confirm_file(
         parts.append(f"{counts['gastos']} gasto(s)")
     if counts["productos"]:
         parts.append(f"{counts['productos']} producto(s)")
+    if counts["clientes"]:
+        parts.append(f"{counts['clientes']} cliente(s)")
+    if counts["proveedores"]:
+        parts.append(f"{counts['proveedores']} proveedor(es)")
 
     message = (
         f"Importados: {', '.join(parts)}. La puntuación será recalculada."
@@ -1143,6 +1330,47 @@ async def confirm_file(
         warnings.append(
             f"{counts['sin_producto']} compra(s) sin producto detallado crearon un producto "
             "incompleto. Completá precio de venta y datos en Productos."
+        )
+    # F7d: taxonomía reconciliada de resolución de referencia. "anonimo" (venta de
+    # mostrador / compra sin proveedor informado) NUNCA avisa — es el caso normal.
+    # Solo "no_resuelto" (trajo una referencia que no matcheó contra ningún
+    # cliente/proveedor existente) amerita revisión.
+    if counts.get("ventas_cliente_no_resuelto"):
+        warnings.append(
+            f"{counts['ventas_cliente_no_resuelto']} venta(s) con referencia de cliente "
+            "que no se pudo identificar quedaron asignadas a «Local». Revisá el dato "
+            "(documento/email/teléfono) cuando puedas."
+        )
+    if counts.get("compras_proveedor_no_resuelto"):
+        warnings.append(
+            f"{counts['compras_proveedor_no_resuelto']} compra(s) con referencia de "
+            "proveedor que no se pudo identificar quedaron agrupadas en «No "
+            "identificado». Revisá el dato (CUIL/email/teléfono) cuando puedas."
+        )
+    # F7d: maestros con filas que necesitan revisión o son inválidas — NUNCA se
+    # persisten (needs_review/invalid/conflicto se saltean siempre en el import
+    # service), así que el aviso es la única señal de que quedaron afuera.
+    if counts.get("clientes_needs_review"):
+        warnings.append(
+            f"{counts['clientes_needs_review']} fila(s) de clientes no tenían un dato "
+            "fuerte (DNI, CUIT, email o teléfono) para identificar sin ambigüedad y no "
+            "se importaron."
+        )
+    if counts.get("clientes_invalidos"):
+        warnings.append(
+            f"{counts['clientes_invalidos']} fila(s) de clientes tenían datos inválidos "
+            "o ambiguos y no se importaron."
+        )
+    if counts.get("proveedores_needs_review"):
+        warnings.append(
+            f"{counts['proveedores_needs_review']} fila(s) de proveedores no tenían un "
+            "dato fuerte (CUIL, email o teléfono) para identificar sin ambigüedad y no "
+            "se importaron."
+        )
+    if counts.get("proveedores_invalidos"):
+        warnings.append(
+            f"{counts['proveedores_invalidos']} fila(s) de proveedores tenían datos "
+            "inválidos o ambiguos y no se importaron."
         )
     if counts.get("otros"):
         # F1-fix: cubre también los productos con nombre ambiguo (F1) — ya no
@@ -1333,6 +1561,8 @@ async def reread_run_status(
         legacy_fallback=bool(d.get("legacy_fallback", False)),
         items=items,
         error=d.get("error"),
+        clientes=int(d.get("clientes", 0) or 0),
+        proveedores=int(d.get("proveedores", 0) or 0),
     )
 
 

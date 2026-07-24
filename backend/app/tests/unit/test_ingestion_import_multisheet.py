@@ -159,7 +159,9 @@ async def test_context_custom_field_persisted(
     )
     assert counts["ventas"] == 1
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
-    assert sale.custom_fields == {"vendedor": "Juan"}
+    # F7c: toda venta lleva la traza de resolución de cliente por fila — acá
+    # "anonymous" porque la hoja no mapea ninguna columna customer_*.
+    assert sale.custom_fields == {"vendedor": "Juan", "_customer_resolution": "anonymous"}
     # El marcador interno nunca se filtra a custom_fields.
     assert "__context__" not in sale.custom_fields
 

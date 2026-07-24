@@ -9,10 +9,12 @@ import {
   type ColumnMapping,
   type ColumnMappingSuggestion,
   type MappingContext,
+  type MasterPreviewSummary,
   type StockTreatment,
 } from "@/services/ingestion.service";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { useToastStore } from "@/stores/toastStore";
+import { MasterPreviewPanel } from "./MasterPreviewPanel";
 
 // Campos canónicos por entity_type (para los selects del panel derecho)
 const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> = {
@@ -23,6 +25,14 @@ const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> 
     { value: "payment_method", label: "Método de pago" },
     { value: "product_name", label: "Nombre del producto" },
     { value: "notes", label: "Notas" },
+    // F7e: espeja CANONICAL_FIELDS["sale"] del backend (mantener en sync).
+    // Referencia al cliente — vincula la venta con un Customer existente
+    // (matching por documento/email/teléfono en el motor de identidad de 7b).
+    { value: "customer_dni", label: "Cliente — DNI" },
+    { value: "customer_cuit", label: "Cliente — CUIT" },
+    { value: "customer_email", label: "Cliente — Email" },
+    { value: "customer_phone", label: "Cliente — Teléfono" },
+    { value: "customer_name", label: "Cliente — Nombre" },
   ],
   expense: [
     { value: "amount", label: "Monto del gasto" },
@@ -30,6 +40,11 @@ const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> 
     { value: "category", label: "Categoría" },
     { value: "supplier_name", label: "Proveedor" },
     { value: "notes", label: "Notas" },
+    // F7e: espeja CANONICAL_FIELDS["expense"] del backend (mantener en sync).
+    // Referencia al proveedor — vincula el gasto con un Supplier existente.
+    { value: "supplier_cuil", label: "Proveedor — CUIL" },
+    { value: "supplier_email", label: "Proveedor — Email" },
+    { value: "supplier_phone", label: "Proveedor — Teléfono" },
   ],
   product: [
     { value: "sku", label: "Código (SKU)" },
@@ -44,12 +59,44 @@ const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> 
     { value: "acquired_at", label: "Fecha de alta/adquisición" },
     { value: "expiry_date", label: "Fecha de vencimiento" },
   ],
+  // F7a: espeja CANONICAL_FIELDS["customer"] del backend (mantener en sync).
+  // Aditivo — el import/vinculación real queda para 7b/7c.
+  customer: [
+    { value: "customer_type", label: "Tipo (persona/empresa)" },
+    { value: "name", label: "Nombre" },
+    { value: "last_name", label: "Apellido" },
+    { value: "doc_type", label: "Tipo de documento" },
+    { value: "dni", label: "DNI" },
+    { value: "cuit", label: "CUIT" },
+    { value: "iva_condition", label: "Condición de IVA" },
+    { value: "email", label: "Email" },
+    { value: "phone", label: "Teléfono" },
+    { value: "address", label: "Dirección" },
+    { value: "locality", label: "Localidad" },
+    { value: "province", label: "Provincia" },
+    { value: "postal_code", label: "Código postal" },
+    { value: "birthday", label: "Cumpleaños" },
+    { value: "notes", label: "Notas" },
+  ],
+  // F7a: espeja CANONICAL_FIELDS["supplier"] del backend — ACOTADO a lo que
+  // persiste el modelo Supplier hoy (sin domicilio/condición IVA).
+  supplier: [
+    { value: "name", label: "Nombre" },
+    { value: "last_name", label: "Apellido" },
+    { value: "cuil", label: "CUIL" },
+    { value: "payment_method", label: "Método de pago" },
+    { value: "email", label: "Email" },
+    { value: "phone", label: "Teléfono" },
+    { value: "notes", label: "Notas" },
+  ],
 };
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
   sale: "Ventas",
   expense: "Gastos",
   product: "Productos",
+  customer: "Clientes",
+  supplier: "Proveedores",
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -386,6 +433,8 @@ function SheetMapperSection({
           >
             <option value="sale">Ventas</option>
             <option value="expense">Gastos</option>
+            <option value="customer">Clientes</option>
+            <option value="supplier">Proveedores</option>
           </select>
         ) : (
           <span className="rounded-full bg-vk-info-bg px-2 py-0.5 text-[10px] font-medium text-vk-blue">
@@ -506,11 +555,13 @@ function MultiContextMapper({
   fileId,
   contexts,
   columnsAtRisk,
+  masterPreviews,
   onDone,
 }: {
   fileId: string;
   contexts: MappingContext[];
   columnsAtRisk: ColumnAtRisk[];
+  masterPreviews: MasterPreviewSummary[];
   onDone: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -617,6 +668,9 @@ function MultiContextMapper({
         </p>
       </div>
 
+      {/* F7e: preview de maestros (clientes/proveedores) detectados en el archivo. */}
+      <MasterPreviewPanel previews={masterPreviews} />
+
       {/* A3: bloque "Revisá antes de confirmar" — columns_at_risk también en multi-hoja. */}
       {columnsAtRisk.length > 0 && (
         <div className="mb-3 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 p-3">
@@ -694,6 +748,10 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     ventas: true,
     gastos: false,
     productos: false,
+    // F7e: buckets de maestros — mismo criterio que gastos/productos (el
+    // usuario los tilda a propósito, no vienen prendidos por default).
+    clientes: false,
+    proveedores: false,
   });
   const [mappings, setMappings] = useState<Record<string, string>>({});
   const [unmappedQueue, setUnmappedQueue] = useState<string[]>([]);
@@ -719,6 +777,10 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     ventas: "sale",
     gastos: "expense",
     stock: "product",
+    // F7e: archivo legacy de un solo contexto ya inferido como maestro
+    // (ver _build_master_previews en el backend).
+    clientes: "customer",
+    proveedores: "supplier",
   };
   // A3: archivo ambiguo ("general") → el tipo efectivo es el propósito elegido.
   const isAmbiguous = _inferredType === "general";
@@ -738,7 +800,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     setPurpose(value);
     const opt = PURPOSE_OPTIONS.find((o) => o.value === value);
     if (opt) {
-      setConfirmedFields({ ventas: false, gastos: false, productos: false, [opt.field]: true });
+      setConfirmedFields({
+        ventas: false,
+        gastos: false,
+        productos: false,
+        clientes: false,
+        proveedores: false,
+        [opt.field]: true,
+      });
     }
     // Re-inicializar el mapeo con el nuevo schema de entidad.
     setInitialized(false);
@@ -903,6 +972,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         fileId={fileId}
         contexts={contexts}
         columnsAtRisk={columnsAtRisk}
+        masterPreviews={preview?.master_previews ?? []}
         onDone={onDone}
       />
     );
@@ -924,10 +994,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             )}
           </p>
         </div>
-        {/* Selector de tipo (ventas/gastos/productos). En archivos ambiguos lo
-            reemplaza el selector de propósito del bloque "Revisá antes de confirmar". */}
-        <div className={`flex gap-2 ${isAmbiguous ? "hidden" : ""}`}>
-          {(["ventas", "gastos", "productos"] as const).map((key) => (
+        {/* Selector de tipo (ventas/gastos/productos/clientes/proveedores). En
+            archivos ambiguos lo reemplaza el selector de propósito del bloque
+            "Revisá antes de confirmar". */}
+        <div className={`flex flex-wrap gap-2 ${isAmbiguous ? "hidden" : ""}`}>
+          {(["ventas", "gastos", "productos", "clientes", "proveedores"] as const).map((key) => (
             <label key={key} className="flex cursor-pointer items-center gap-1.5">
               <input
                 type="checkbox"
@@ -944,6 +1015,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           ))}
         </div>
       </div>
+
+      {/* F7e: preview de maestros (clientes/proveedores) detectados en el archivo. */}
+      <MasterPreviewPanel previews={preview?.master_previews ?? []} />
 
       {/* A3: bloque consolidado "Revisá antes de confirmar" */}
       {(isAmbiguous || columnsAtRisk.length > 0 || needsAttention.length > 0) && (
