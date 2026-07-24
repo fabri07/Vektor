@@ -138,6 +138,23 @@ async def test_importar_catalogo_puebla_fechas_de_producto(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("do_import", _IMPORTERS)
+async def test_catalogo_sin_marca_persiste_custom_fields_vacio_no_null(
+    db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
+) -> None:
+    """Regresión: un catálogo SIN columna de marca NO debe persistir
+    ``custom_fields`` como JSON null (``'null'::jsonb`` → ``None`` en Python). Ese
+    ``None`` rompía ``GET /products`` con 503 (``ProductResponse`` exige dict). El
+    import debe dejar ``{}`` (mutación: volver a ``cf or None`` → este test falla)."""
+    tid = sample_tenant.tenant_id
+    await do_import(db_session, tid, [_r("01/03/2026")])
+    await db_session.commit()
+    prod = (await db_session.execute(select(Product))).scalar_one()
+    assert prod.custom_fields == {}
+    assert prod.custom_fields is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_reimportar_acumula_acquired_mas_antigua(
     db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
 ) -> None:

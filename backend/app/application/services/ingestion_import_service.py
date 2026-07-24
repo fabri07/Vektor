@@ -3468,7 +3468,10 @@ async def _insert_confirmed_data_impl(
                         # F6-B2: fechas del archivo (None si no se mapearon/detectaron).
                         acquired_at=_acquired,
                         expiry_date=_expiry,
-                        custom_fields=cf_product if cf_product else None,
+                        # `{}` y no `None`: la columna es JSONB nullable=False, pero
+                        # un `None` explícito persiste como JSON `null` ('null'::jsonb)
+                        # y rompe `GET /products` (ProductResponse exige dict → 503).
+                        custom_fields=cf_product if cf_product else {},
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
                     # F5-A: sin ``session.add`` — el helper exige el objeto TRANSIENT
@@ -4365,7 +4368,9 @@ async def _insert_multisheet_data(
                 # F6-B2: fechas de producto del archivo (None si no se mapearon).
                 acquired_at=_acquired,
                 expiry_date=_expiry,
-                custom_fields=cf or None,
+                # `{}` y no `None`: un `None` explícito persiste como JSON `null`
+                # ('null'::jsonb) y rompe `GET /products` con 503 (ver arriba).
+                custom_fields=cf or {},
                 source_row_ref=row_ref,  # Mejora D
             )
             # F5-A: sin ``session.add`` — ``add_product_or_reuse`` necesita el objeto
