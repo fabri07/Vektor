@@ -199,9 +199,10 @@ export function CustomerFileModal({
         {/* Preview del import masivo */}
         {mode === "bulk" && preview ? (
           <div className="space-y-3">
-            <div className="grid grid-cols-4 gap-2 text-center">
+            <div className="grid grid-cols-5 gap-2 text-center">
               <SummaryCard label="A crear" value={preview.to_create} tone="success" />
               <SummaryCard label="A actualizar" value={preview.to_update} tone="info" />
+              <SummaryCard label="A revisar" value={preview.needs_review} tone="warn" />
               <SummaryCard label="Duplicados" value={preview.duplicates} tone="warn" />
               <SummaryCard label="Inválidos" value={preview.invalid} tone="danger" />
             </div>
@@ -322,6 +323,12 @@ function StatusLabel({
     );
   if (status === "duplicate_in_file")
     return <span className="text-vk-warning">Duplicado en el archivo</span>;
+  if (status === "needs_review")
+    return (
+      <span className="text-vk-warning" title={issues.join(" ")}>
+        Revisar{issues.length ? `: ${issues[0]}` : ""}
+      </span>
+    );
   return (
     <span className="text-vk-danger" title={issues.join(" ")}>
       Inválido{issues.length ? `: ${issues[0]}` : ""}

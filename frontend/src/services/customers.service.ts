@@ -111,7 +111,12 @@ export interface CustomerImportRow {
   birthday?: string | null;
 }
 
-export type ImportItemStatus = "create" | "update" | "invalid" | "duplicate_in_file";
+export type ImportItemStatus =
+  | "create"
+  | "update"
+  | "invalid"
+  | "duplicate_in_file"
+  | "needs_review";
 
 export interface CustomerImportPreviewItem {
   row_index: number;
@@ -126,6 +131,7 @@ export interface CustomerImportPreviewResponse {
   items: CustomerImportPreviewItem[];
   to_create: number;
   to_update: number;
+  needs_review: number;
   invalid: number;
   duplicates: number;
   warnings: string[];
