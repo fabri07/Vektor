@@ -6,7 +6,7 @@ All fields are documented with their purpose and defaults.
 import json
 import re
 from functools import lru_cache
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic.fields import FieldInfo
@@ -241,6 +241,13 @@ class Settings(BaseSettings):
     # por encima del máximo operativo esperado (un import grande sobre Neon puede
     # tardar minutos): un TTL corto arriesga interrumpir un import legítimo.
     INGESTION_IMPORT_LEASE_TTL_SECONDS: int = 900  # 15 min
+    # F7c: gobierna si la resolución de proveedor por fila en compras importadas
+    # puede CREAR un proveedor nuevo por nombre ("legacy", comportamiento
+    # histórico) o SOLO vincular contra proveedores existentes por identidad
+    # ("link_only" — nunca crea, cae al sentinela "No identificado" si no
+    # matchea). Default "legacy": F7c es aditivo/seguro, el comportamiento de
+    # compras no cambia hasta que el usuario active "link_only".
+    SUPPLIER_REFERENCE_CREATION_MODE: Literal["legacy", "link_only"] = "legacy"
 
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -24,6 +25,12 @@ from app.application.services.cash_service import normalize_payment_method
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
+from app.application.services.identity_resolution import (
+    IdentityKey,
+    build_existing_index,
+    record_keys,
+    resolve_identity,
+)
 from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
     SOURCE_PURCHASE_IMPORT,
@@ -36,6 +43,7 @@ from app.application.services.product_identity import (
     ProductIdentityConflictError,
     add_product_or_reuse,
 )
+from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
 from app.domain.date_parsing import parse_business_date, parse_business_datetime
 from app.domain.expense_categories import (
@@ -48,6 +56,7 @@ from app.domain.text_norm import (
     normalize_brand,
     normalize_product_name,
     normalize_sku,
+    normalize_text,
 )
 from app.observability.logger import get_logger
 
@@ -83,8 +92,15 @@ def check_nonempty_import(
     # descarta también lo capturado a "Otros") para que pueda reintentar con
     # mapeo manual — si "otros" sumara, una hoja no clasificable taparía la
     # pérdida silenciosa de los datos confirmados.
+    # F7c: clientes/proveedores (maestro) también cuentan como inserción — sin
+    # esto, un archivo de SOLO clientes/proveedores que sí importó registros
+    # disparaba este error igual (total_inserted quedaba en 0).
     total_inserted = (
-        counts.get("ventas", 0) + counts.get("gastos", 0) + counts.get("productos", 0)
+        counts.get("ventas", 0)
+        + counts.get("gastos", 0)
+        + counts.get("productos", 0)
+        + counts.get("clientes", 0)
+        + counts.get("proveedores", 0)
     )
     had_rows = bool(summary.get("row_count")) or any(
         summary.get(k)
@@ -93,6 +109,8 @@ def check_nonempty_import(
             "gastos_detectados",
             "stock_detectado",
             "otros_detectados",
+            "clientes_detectados",
+            "proveedores_detectados",
         )
     )
     confirmed_any = any((confirmed_fields or {}).values()) or any(
@@ -320,6 +338,282 @@ def _audit_supplier_decision(
             created_at=datetime.now(UTC),
         )
     )
+
+
+# ── F7c: orden maestro→transacción + resolución de cliente/proveedor por fila ─
+# 7a abrió los campos de referencia (``customer_dni``/``customer_cuit``/...,
+# ``supplier_cuil``/...) en ``column_mapping_service``; 7b construyó el motor de
+# identidad común (``identity_resolution``) + los import services de maestro
+# (``customer_import_service``/``supplier_import_service``). Acá se cablean:
+# los maestros se importan ANTES que cualquier venta/gasto (misma transacción
+# del confirm), y cada fila transaccional resuelve su referencia contra el
+# índice de identidad — nunca crea una entidad desde una fila.
+
+_CUSTOMER_DOC_FIELDS: tuple[str, ...] = ("cuit", "dni")
+_SUPPLIER_DOC_FIELDS: tuple[str, ...] = ("cuil",)
+
+# Tokens de cliente "genérico" (venta de mostrador sin identificar). Comparados
+# ya normalizados (``normalize_text``: sin acentos, sin mayúsculas, sin
+# voseo/espacios de más) — "Público", "PUBLICO", "público " matchean igual.
+_ANONYMOUS_CUSTOMER_TOKENS: frozenset[str] = frozenset(
+    normalize_text(t)
+    for t in (
+        "consumidor final",
+        "consumidor",
+        "mostrador",
+        "local",
+        "publico",
+        "publico general",
+        "varios",
+        "sin nombre",
+        "sin datos",
+        "cliente ocasional",
+        "n/a",
+        "na",
+    )
+)
+
+
+@dataclass
+class RowReferenceResolution:
+    """Resultado de clasificar la referencia de UNA fila transaccional (venta→
+    cliente, compra→proveedor) contra el índice de identidad ya armado. Nunca
+    crea — solo matchea o deriva a revisión (ver ``_classify_row_reference``).
+    """
+
+    outcome: str  # "matched" | "anonymous" | "unresolved"
+    entity: Any | None = None
+    raw_value: str | None = None
+
+
+def _classify_row_reference(
+    record: dict[str, Any],
+    *,
+    doc_fields: tuple[str, ...],
+    existing_index: dict[IdentityKey, Any],
+    anonymous_name_tokens: frozenset[str] | None = None,
+) -> RowReferenceResolution:
+    """Clasifica la referencia de una fila transaccional en la semántica de 3
+    vías de F7c, sobre el motor F7b (``identity_resolution.resolve_identity``):
+
+    - ``matched``: una clave fuerte (documento > email > teléfono) matchea una
+      única entidad existente del índice.
+    - ``anonymous``: sin ninguna referencia (fila de mostrador — el caso normal,
+      SIN warning) o el único dato es un nombre "genérico"
+      (``anonymous_name_tokens``, ej. "Consumidor final").
+    - ``unresolved``: hay una referencia (documento/email/teléfono, o un nombre
+      real sin clave fuerte) pero no matchea, o matchea a más de una entidad —
+      se marca para revisión. NUNCA crea.
+    """
+    name_raw = record.get("name")
+    name_norm = normalize_text(str(name_raw)) if name_raw else ""
+    if anonymous_name_tokens is not None and name_norm and name_norm in anonymous_name_tokens:
+        return RowReferenceResolution(outcome="anonymous")
+
+    keys = record_keys(record, doc_fields=doc_fields)
+    if not keys and not name_norm:
+        return RowReferenceResolution(outcome="anonymous")
+
+    resolution = resolve_identity(keys, existing_index)
+    if resolution.outcome == "matched":
+        assert resolution.entity is not None  # invariante de "matched"
+        return RowReferenceResolution(outcome="matched", entity=resolution.entity)
+
+    # unresolved: needs_review (solo nombre débil), none (clave sin match) o
+    # conflict (clave ambigua) — todas se tratan igual acá: no identifican sin
+    # ambigüedad, van al sentinela con traza para revisión humana.
+    raw: Any = name_raw
+    if raw is None:
+        for f in doc_fields:
+            if record.get(f):
+                raw = record[f]
+                break
+        else:
+            raw = record.get("email") or record.get("phone")
+    return RowReferenceResolution(
+        outcome="unresolved", raw_value=str(raw) if raw is not None else None
+    )
+
+
+def _rows_for_context(bucket: list[dict[str, Any]], ctx_id: str) -> list[dict[str, Any]]:
+    """Filtra un bucket de filas por ``__context__`` (multi-hoja). Si las filas no
+    llevan el marcador (archivo de un solo contexto, ej. un CSV de clientes
+    suelto), el bucket entero pertenece a ese único contexto."""
+    if not bucket:
+        return []
+    if "__context__" not in bucket[0]:
+        return bucket
+    return [r for r in bucket if r.get("__context__") == ctx_id]
+
+
+def _customer_reference_record(row: dict[str, Any], cols: dict[str, str]) -> dict[str, Any]:
+    """Arma el record de referencia de cliente de una fila de venta desde las
+    columnas ``customer_*`` mapeadas (F7a). Sin mapeo explícito para un campo,
+    queda ``None`` — la referencia es opt-in, no se adivina por keyword (a
+    diferencia de monto/fecha, que sí tienen fallback): sin columna de cliente
+    mapeada, la fila es ``anonymous`` (venta de mostrador), no ``unresolved``.
+    """
+    return {
+        "cuit": row.get(cols["customer_cuit"]) if cols.get("customer_cuit") else None,
+        "dni": row.get(cols["customer_dni"]) if cols.get("customer_dni") else None,
+        "email": row.get(cols["customer_email"]) if cols.get("customer_email") else None,
+        "phone": row.get(cols["customer_phone"]) if cols.get("customer_phone") else None,
+        "name": row.get(cols["customer_name"]) if cols.get("customer_name") else None,
+    }
+
+
+def _supplier_reference_record(
+    row: dict[str, Any], cols: dict[str, str], name_raw: Any
+) -> dict[str, Any]:
+    """Arma el record de referencia de proveedor de una fila de compra desde las
+    columnas ``supplier_*`` mapeadas (F7a). ``name_raw`` es el valor de nombre ya
+    resuelto por el caller (mapeo explícito o keyword ``_PROVEEDOR_COLS`` — mismo
+    dato que usa hoy ``_resolve_or_create_supplier``, no se duplica esa detección).
+    """
+    return {
+        "cuil": row.get(cols["supplier_cuil"]) if cols.get("supplier_cuil") else None,
+        "email": row.get(cols["supplier_email"]) if cols.get("supplier_email") else None,
+        "phone": row.get(cols["supplier_phone"]) if cols.get("supplier_phone") else None,
+        "name": name_raw,
+    }
+
+
+async def _load_customer_identity_index(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> dict[IdentityKey, Any]:
+    """Índice de identidad de clientes (documento→email→teléfono) para resolver
+    referencias de fila en ventas. Reusa el motor F7b; excluye el sentinela
+    "Local" y los desactivados (``CustomerRepository.list_for_dedup``)."""
+    from app.persistence.repositories.customer_repository import (  # noqa: PLC0415
+        CustomerRepository,
+    )
+
+    existing = await CustomerRepository(session).list_for_dedup(tenant_id)
+    return build_existing_index(
+        existing,
+        to_record=lambda c: {"cuit": c.cuit, "dni": c.dni, "email": c.email, "phone": c.phone},
+        doc_fields=_CUSTOMER_DOC_FIELDS,
+    )
+
+
+async def _load_supplier_identity_index(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> dict[IdentityKey, Any]:
+    """Índice de identidad de proveedores (CUIL→email→teléfono). Solo se carga en
+    modo ``link_only`` (ver ``SUPPLIER_REFERENCE_CREATION_MODE``) — en "legacy" no
+    hace falta, el comportamiento de compras no cambia."""
+    from app.persistence.repositories.supplier_repository import (  # noqa: PLC0415
+        SupplierRepository,
+    )
+
+    existing = await SupplierRepository(session).list_for_dedup(tenant_id)
+    return build_existing_index(
+        existing,
+        to_record=lambda s: {"cuil": s.cuil, "email": s.email, "phone": s.phone},
+        doc_fields=_SUPPLIER_DOC_FIELDS,
+    )
+
+
+async def _import_master_entities(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+    context_mappings: dict[str, dict[str, str]] | None,
+    context_confirmed: dict[str, bool] | None,
+    column_mappings: dict[str, str] | None,
+    counts: dict[str, Any],
+) -> None:
+    """Paso 1/2 del orden maestro→transacción: importa clientes y proveedores
+    ANTES de cualquier venta/gasto, reusando los import services de F7b
+    (``customer_import_service.apply_import`` / ``supplier_import_service.
+    apply_import``). Corre dentro de la MISMA transacción del confirm — sin
+    commit intermedio, así que si algo posterior falla, el rollback integral
+    también deshace estas altas/actualizaciones.
+
+    Recorre los contextos ``entity_type in ("customer", "supplier")`` de
+    ``mapping_contexts`` (siempre presente — ``file_parsing`` arma al menos el
+    contexto "table" para un archivo de una sola hoja). Sin mapeo explícito
+    (``context_mappings``/``column_mappings``) para esa hoja, no se importa esta
+    corrida: no hay forma de saber qué columna es el DNI/CUIT/email de cada
+    fila sin adivinar el shape de los datos.
+    """
+    from app.application.services import (  # noqa: PLC0415
+        customer_import_service,
+        supplier_import_service,
+    )
+    from app.application.services.column_mapping_service import CANONICAL_FIELDS  # noqa: PLC0415
+    from app.persistence.repositories.customer_repository import (  # noqa: PLC0415
+        CustomerRepository,
+    )
+    from app.persistence.repositories.supplier_repository import (  # noqa: PLC0415
+        SupplierRepository,
+    )
+
+    for ctx in summary.get("mapping_contexts") or []:
+        entity = ctx.get("entity_type")
+        ctx_id = str(ctx.get("context_id") or "")
+        if entity == "customer":
+            confirm_key = "clientes"
+            bucket_key = "clientes_detectados"
+        elif entity == "supplier":
+            confirm_key = "proveedores"
+            bucket_key = "proveedores_detectados"
+        else:
+            continue
+
+        # Inclusión: por contexto si vino context_confirmed; si no, por tipo
+        # (legacy) — mismo criterio que el dispatch de ventas/gastos/productos.
+        if context_confirmed:
+            if not context_confirmed.get(ctx_id):
+                continue
+        elif not confirmed_fields.get(confirm_key):
+            continue
+
+        rows = _rows_for_context(summary.get(bucket_key) or [], ctx_id)
+        if not rows:
+            continue
+        mapping = (context_mappings or {}).get(ctx_id) or (
+            column_mappings if ctx_id == "table" else None
+        ) or {}
+        target_to_col, _ = _resolve_target_cols(mapping)
+        if not target_to_col:
+            continue  # sin mapeo explícito: no se adivina el shape de la fila
+
+        if entity == "customer":
+            customer_records = [
+                {
+                    f: row.get(target_to_col[f])
+                    for f in CANONICAL_FIELDS["customer"]
+                    if f in target_to_col
+                }
+                for row in rows
+            ]
+            cust_result = await customer_import_service.apply_import(
+                CustomerRepository(session), tenant_id, customer_records
+            )
+            counts["clientes"] = (
+                counts.get("clientes", 0)
+                + len(cust_result.created_ids)
+                + len(cust_result.updated_ids)
+            )
+        else:
+            supplier_records = [
+                {
+                    f: row.get(target_to_col[f])
+                    for f in CANONICAL_FIELDS["supplier"]
+                    if f in target_to_col
+                }
+                for row in rows
+            ]
+            sup_result = await supplier_import_service.apply_import(
+                SupplierRepository(session), tenant_id, supplier_records
+            )
+            counts["proveedores"] = (
+                counts.get("proveedores", 0)
+                + len(sup_result.created_ids)
+                + len(sup_result.updated_ids)
+            )
 
 
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
@@ -2075,9 +2369,32 @@ async def _insert_confirmed_data_impl(
         # F1 (hotfix puente): fila de producto ambigua (≥2 activos con el mismo
         # nombre normalizado) — NO se importa, NO se toca ningún existente.
         "productos_ambiguos": 0,
+        # F7c: maestros importados dentro del confirm (orden maestro→transacción).
+        "clientes": 0,
+        "proveedores": 0,
+        # F7c: filas transaccionales con referencia de cliente/proveedor presente
+        # que NO matcheó contra ningún registro existente (asignadas al
+        # sentinela con traza para revisión). NO incluye "anonymous" (sin
+        # referencia — el caso normal de venta de mostrador/compra sin dato).
+        "clientes_sin_identificar": 0,
+        "proveedores_sin_identificar": 0,
     }
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
+
+    # F7c — paso 1/2 del orden maestro→transacción: clientes y proveedores ANTES
+    # que cualquier venta/gasto, misma transacción. Así una venta de una hoja
+    # posterior del MISMO archivo puede vincular a un cliente recién creado acá.
+    await _import_master_entities(
+        session,
+        tenant_id,
+        summary,
+        confirmed_fields,
+        context_mappings,
+        context_confirmed,
+        column_mappings,
+        counts,
+    )
 
     # Batch anti-N+1: precargar las huellas de import del tenant una sola vez
     # (solo si hay dedup activa, i.e. uploaded_file_id real). Evita un SELECT y un
@@ -2125,6 +2442,34 @@ async def _insert_confirmed_data_impl(
                     session, tenant_id, seen_fp - _preloaded_fp
                 )
             return counts
+
+        # Índice de identidad de clientes para resolver la referencia por fila en
+        # ventas (F7c). Incluye los clientes recién creados por el paso maestro de
+        # arriba (los import services flushean por fila, visibles en la sesión).
+        _customer_identity_index: dict[IdentityKey, Any] = await _load_customer_identity_index(
+            session, tenant_id
+        )
+        _local_sentinel_id: uuid.UUID | None = None
+
+        async def _get_local_sentinel() -> uuid.UUID:
+            nonlocal _local_sentinel_id
+            if _local_sentinel_id is None:
+                from app.application.services.customer_sentinel import (  # noqa: PLC0415
+                    resolve_or_create_local_sentinel,
+                )
+
+                _local_sentinel_id = await resolve_or_create_local_sentinel(session, tenant_id)
+            return _local_sentinel_id
+
+        # F7c: modo de resolución de proveedor por fila en compras. "legacy"
+        # (default) no cambia nada — el índice de identidad ni se carga.
+        # "link_only" nunca crea proveedor desde una fila.
+        _supplier_ref_mode = get_settings().SUPPLIER_REFERENCE_CREATION_MODE
+        _supplier_identity_index: dict[IdentityKey, Any] = (
+            await _load_supplier_identity_index(session, tenant_id)
+            if _supplier_ref_mode == "link_only"
+            else {}
+        )
 
         rows: list[dict[str, Any]]
         rows_from_otros = False
@@ -2178,10 +2523,14 @@ async def _insert_confirmed_data_impl(
         category_col: str | None = None
         recurring_col: str | None = None
         custom_field_cols: dict[str, str] = {}
+        # F7c: declarado siempre (no solo dentro de `if column_mappings:`) para
+        # que la resolución de referencia cliente/proveedor por fila pueda usar
+        # `target_to_col.get(...)` sin guardas — vacío si no hay mapeo explícito
+        # (la referencia es opt-in, ver `_customer_reference_record`).
+        target_to_col: dict[str, str] = {}
 
         if column_mappings:
             # Construir lookup: target_field → primer source_col que lo mapee
-            target_to_col: dict[str, str] = {}
             for src_col, target in column_mappings.items():
                 if target == "ignore":
                     continue
@@ -2417,8 +2766,6 @@ async def _insert_confirmed_data_impl(
                         provenance="REAL",
                         source_upload_id=uploaded_file_id,
                     )
-                    if cf:
-                        entry.custom_fields = cf
                     # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
                     entry.product_id = _resolve_product(
                         _by_sku,
@@ -2429,6 +2776,29 @@ async def _insert_confirmed_data_impl(
                         by_barcode=_identity_indexes.by_barcode,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
+                    # F7c: resolución de cliente por fila — matched/anonymous/
+                    # unresolved. Nunca crea: solo vincula contra un cliente
+                    # existente (maestro importado arriba o ya en la DB) o cae al
+                    # sentinela "Local" con traza si la referencia no matchea.
+                    _cust_ref = _classify_row_reference(
+                        _customer_reference_record(row, target_to_col),
+                        doc_fields=_CUSTOMER_DOC_FIELDS,
+                        existing_index=_customer_identity_index,
+                        anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
+                    )
+                    if _cust_ref.outcome == "matched":
+                        assert _cust_ref.entity is not None
+                        entry.customer_id = _cust_ref.entity.id
+                        cf["_customer_resolution"] = "matched"
+                    else:
+                        entry.customer_id = await _get_local_sentinel()
+                        cf["_customer_resolution"] = _cust_ref.outcome
+                        if _cust_ref.outcome == "unresolved":
+                            if _cust_ref.raw_value:
+                                cf["_customer_reference_raw"] = _cust_ref.raw_value
+                            counts["clientes_sin_identificar"] += 1
+                    if cf:
+                        entry.custom_fields = cf
                     # Mejora D: trazabilidad import → fila origen.
                     if _row_anchor is not None:
                         entry.source_row_ref = _source_row_ref(_row_anchor)
@@ -2491,10 +2861,35 @@ async def _insert_confirmed_data_impl(
                         provenance="REAL",
                         source_upload_id=uploaded_file_id,
                     )
-                    if cf:
-                        expense.custom_fields = cf
-                    # Capturar proveedor real (find-or-create) si la fila lo trae.
-                    if supplier_col:
+                    # Capturar proveedor real si la fila lo trae. F7c: gobernado por
+                    # SUPPLIER_REFERENCE_CREATION_MODE. "legacy" (default) — sin
+                    # cambios, find-or-create por nombre como siempre. "link_only" —
+                    # matchea por identidad (CUIL/email/tel/nombre) y NUNCA crea; si
+                    # no matchea, la decisión (sentinela o no) se difiere al bloque de
+                    # abajo, que ya sabe si la fila es una compra de mercadería.
+                    _pending_supplier_ref: RowReferenceResolution | None = None
+                    if _supplier_ref_mode == "link_only":
+                        _has_supplier_ref_col = bool(
+                            supplier_col
+                            or target_to_col.get("supplier_cuil")
+                            or target_to_col.get("supplier_email")
+                            or target_to_col.get("supplier_phone")
+                        )
+                        if _has_supplier_ref_col:
+                            _sup_name_raw = row.get(supplier_col) if supplier_col else None
+                            _sup_ref = _classify_row_reference(
+                                _supplier_reference_record(row, target_to_col, _sup_name_raw),
+                                doc_fields=_SUPPLIER_DOC_FIELDS,
+                                existing_index=_supplier_identity_index,
+                            )
+                            if _sup_ref.outcome == "matched":
+                                assert _sup_ref.entity is not None
+                                expense.supplier_id = _sup_ref.entity.id
+                                expense.supplier_name = _sup_ref.entity.name
+                                cf["_supplier_resolution"] = "matched"
+                            else:
+                                _pending_supplier_ref = _sup_ref
+                    elif supplier_col:
                         (
                             expense.supplier_id,
                             expense.supplier_name,
@@ -2613,6 +3008,30 @@ async def _insert_confirmed_data_impl(
                             )
                             _sentinel_used = True
                             counts["sin_proveedor"] += 1
+                            # F7c (link_only): recién acá se sabe que es compra de
+                            # mercadería — se aplica la clasificación diferida
+                            # (anonymous/unresolved) que quedó pendiente arriba. En
+                            # OPEX (product_id None) el sentinela nunca se toca, así
+                            # que una referencia sin matchear en un gasto operativo
+                            # queda sin proveedor y sin traza — igual que hoy.
+                            if _supplier_ref_mode == "link_only":
+                                _outcome = (
+                                    _pending_supplier_ref.outcome
+                                    if _pending_supplier_ref is not None
+                                    else "anonymous"
+                                )
+                                cf["_supplier_resolution"] = _outcome
+                                if _outcome == "unresolved":
+                                    _raw = (
+                                        _pending_supplier_ref.raw_value
+                                        if _pending_supplier_ref
+                                        else None
+                                    )
+                                    if _raw:
+                                        cf["_supplier_reference_raw"] = _raw
+                                    counts["proveedores_sin_identificar"] += 1
+                        if cf:
+                            expense.custom_fields = cf
                         await _apply_purchase_to_stock(
                             session,
                             tenant_id,
@@ -3252,6 +3671,32 @@ async def _insert_multisheet_data(
     _business_type = await _load_business_type(session, tenant_id)
     # Batch: balances en una query (evita un SELECT por fila en movimientos).
     _balance_index = await _load_balance_index(session, tenant_id)
+    # F7c: índice de identidad de clientes para resolver la referencia por fila
+    # en ventas — incluye los clientes recién creados por el paso maestro (arriba,
+    # en _insert_confirmed_data_impl, antes de llegar acá).
+    _customer_identity_index: dict[IdentityKey, Any] = await _load_customer_identity_index(
+        session, tenant_id
+    )
+    _local_sentinel_id: uuid.UUID | None = None
+
+    async def _get_local_sentinel() -> uuid.UUID:
+        nonlocal _local_sentinel_id
+        if _local_sentinel_id is None:
+            from app.application.services.customer_sentinel import (  # noqa: PLC0415
+                resolve_or_create_local_sentinel,
+            )
+
+            _local_sentinel_id = await resolve_or_create_local_sentinel(session, tenant_id)
+        return _local_sentinel_id
+
+    # F7c: modo de resolución de proveedor por fila en compras (ver docstring del
+    # mismo bloque en _insert_confirmed_data_impl). "legacy" no carga el índice.
+    _supplier_ref_mode = get_settings().SUPPLIER_REFERENCE_CREATION_MODE
+    _supplier_identity_index: dict[IdentityKey, Any] = (
+        await _load_supplier_identity_index(session, tenant_id)
+        if _supplier_ref_mode == "link_only"
+        else {}
+    )
     # Traza agregada de decisiones de proveedor (Fase 1): reales desde compras,
     # marcas omitidas de catálogos, y uso del sentinela "No identificado".
     _real_suppliers: set[str] = set()
@@ -3282,7 +3727,7 @@ async def _insert_multisheet_data(
                 out[cf_key] = str(v)
         return out
 
-    def _add_sale(
+    async def _add_sale(
         row: dict[str, Any],
         cols: dict[str, str],
         cf_cols: dict[str, str],
@@ -3339,8 +3784,6 @@ async def _insert_multisheet_data(
             source_upload_id=uploaded_file_id,
         )
         cf = _custom_fields(row, cf_cols)
-        if cf:
-            entry.custom_fields = cf
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         entry.product_id = _resolve_product(
             _by_sku,
@@ -3351,6 +3794,28 @@ async def _insert_multisheet_data(
             by_barcode=_identity_indexes.by_barcode,
             barcode=_val(row, cols.get("barcode"), _BARCODE_COLS),
         )
+        # F7c: resolución de cliente por fila — matched/anonymous/unresolved.
+        # Nunca crea: solo vincula (maestro importado arriba o ya en la DB) o cae
+        # al sentinela "Local" con traza si la referencia no matchea.
+        _cust_ref = _classify_row_reference(
+            _customer_reference_record(row, cols),
+            doc_fields=_CUSTOMER_DOC_FIELDS,
+            existing_index=_customer_identity_index,
+            anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
+        )
+        if _cust_ref.outcome == "matched":
+            assert _cust_ref.entity is not None
+            entry.customer_id = _cust_ref.entity.id
+            cf["_customer_resolution"] = "matched"
+        else:
+            entry.customer_id = await _get_local_sentinel()
+            cf["_customer_resolution"] = _cust_ref.outcome
+            if _cust_ref.outcome == "unresolved":
+                if _cust_ref.raw_value:
+                    cf["_customer_reference_raw"] = _cust_ref.raw_value
+                counts["clientes_sin_identificar"] += 1
+        if cf:
+            entry.custom_fields = cf
         if row_ref is not None:
             entry.source_row_ref = row_ref  # Mejora D
         session.add(entry)
@@ -3416,16 +3881,40 @@ async def _insert_multisheet_data(
         cf = _custom_fields(row, cf_cols)
         if cat_label:
             cf = {**cf, "category_label": cat_label}
-        if cf:
-            expense.custom_fields = cf
-        # Capturar proveedor real (find-or-create) si la fila/mapeo lo trae.
-        _supplier_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
-        if _supplier_raw is not None:
+        # Capturar proveedor real si la fila/mapeo lo trae. F7c: gobernado por
+        # SUPPLIER_REFERENCE_CREATION_MODE — ver el mismo bloque en
+        # _insert_confirmed_data_impl (single-context) para el detalle completo.
+        # "legacy" (default): sin cambios, find-or-create por nombre. "link_only":
+        # matchea por identidad y NUNCA crea; el anonymous/unresolved sin match se
+        # difiere al bloque de abajo, que ya sabe si es compra de mercadería.
+        _pending_supplier_ref: RowReferenceResolution | None = None
+        _supplier_name_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
+        if _supplier_ref_mode == "link_only":
+            _has_supplier_ref_col = bool(
+                _supplier_name_raw is not None
+                or cols.get("supplier_cuil")
+                or cols.get("supplier_email")
+                or cols.get("supplier_phone")
+            )
+            if _has_supplier_ref_col:
+                _sup_ref = _classify_row_reference(
+                    _supplier_reference_record(row, cols, _supplier_name_raw),
+                    doc_fields=_SUPPLIER_DOC_FIELDS,
+                    existing_index=_supplier_identity_index,
+                )
+                if _sup_ref.outcome == "matched":
+                    assert _sup_ref.entity is not None
+                    expense.supplier_id = _sup_ref.entity.id
+                    expense.supplier_name = _sup_ref.entity.name
+                    cf["_supplier_resolution"] = "matched"
+                else:
+                    _pending_supplier_ref = _sup_ref
+        elif _supplier_name_raw is not None:
             (
                 expense.supplier_id,
                 expense.supplier_name,
             ) = await _resolve_or_create_supplier(
-                session, tenant_id, _supplier_raw, _supplier_index
+                session, tenant_id, _supplier_name_raw, _supplier_index
             )
             if expense.supplier_name:
                 _real_suppliers.add(expense.supplier_name)
@@ -3520,6 +4009,24 @@ async def _insert_multisheet_data(
             )
             _sentinel_used = True
             counts["sin_proveedor"] += 1
+            # F7c (link_only): recién acá se sabe que es compra de mercadería —
+            # aplicar la clasificación diferida (anonymous/unresolved). En OPEX
+            # (product_id None) el sentinela nunca se toca, así que una
+            # referencia sin matchear en un gasto operativo queda sin proveedor
+            # y sin traza, igual que hoy.
+            if _supplier_ref_mode == "link_only":
+                _outcome = (
+                    _pending_supplier_ref.outcome
+                    if _pending_supplier_ref is not None
+                    else "anonymous"
+                )
+                cf["_supplier_resolution"] = _outcome
+                if _outcome == "unresolved":
+                    if _pending_supplier_ref and _pending_supplier_ref.raw_value:
+                        cf["_supplier_reference_raw"] = _pending_supplier_ref.raw_value
+                    counts["proveedores_sin_identificar"] += 1
+        if cf:
+            expense.custom_fields = cf
         await _apply_purchase_to_stock(
             session,
             tenant_id,
@@ -3846,6 +4353,10 @@ async def _insert_multisheet_data(
             # FASE F: el usuario puede reasignar una hoja no clasificada a un
             # tipo importable (context_entity), igual que en documentos de texto.
             entity = (context_entity or {}).get(ctx_id or "") or base_entity
+            if entity in ("customer", "supplier"):
+                # F7c: maestros ya importados en _import_master_entities, ANTES de
+                # este dispatch (orden maestro→transacción) — nada más que hacer.
+                continue
             if entity not in entity_bucket:
                 # Hoja no clasificada y no reasignada → bandeja "Otros".
                 otros_rows = [
@@ -3904,7 +4415,7 @@ async def _insert_multisheet_data(
                     else None
                 )
                 if entity == "sale":
-                    _did_insert = _add_sale(row, cols, cf_cols, _row_ref)
+                    _did_insert = await _add_sale(row, cols, cf_cols, _row_ref)
                 elif entity == "expense":
                     _did_insert = await _add_expense(row, cols, cf_cols, _row_ref)
                 else:
@@ -3949,7 +4460,10 @@ async def _insert_multisheet_data(
                     session, tenant_id, _v_anchor, seen_fp
                 ):
                     continue
-                if _add_sale(row, {}, {}, _source_row_ref(_v_anchor)) and _v_anchor is not None:
+                if (
+                    await _add_sale(row, {}, {}, _source_row_ref(_v_anchor))
+                    and _v_anchor is not None
+                ):
                     await _register_import_row_fingerprint(
                         session, tenant_id, _v_anchor, seen_fp
                     )
@@ -4194,6 +4708,9 @@ def default_confirmed_fields(summary: dict[str, Any]) -> dict[str, bool]:
         "ventas": bool(summary.get("ventas_detectadas")) or inferred == "ventas",
         "gastos": bool(summary.get("gastos_detectados")) or inferred == "gastos",
         "productos": bool(summary.get("stock_detectado")) or inferred == "stock",
+        # F7c: maestros de clientes/proveedores.
+        "clientes": bool(summary.get("clientes_detectados")) or inferred == "clientes",
+        "proveedores": bool(summary.get("proveedores_detectados")) or inferred == "proveedores",
     }
 
 
