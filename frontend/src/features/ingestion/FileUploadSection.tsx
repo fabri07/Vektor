@@ -12,6 +12,7 @@ import {
 import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
+import { MasterPreviewPanel } from "./MasterPreviewPanel";
 
 const ACCEPTED_EXTENSIONS = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
 const MAX_POLLS = 30;
@@ -61,6 +62,10 @@ export function FileUploadSection() {
     ventas: true,
     gastos: true,
     productos: true,
+    // F7e: buckets de maestros — arrancan tildados como los demás en este
+    // flujo rápido (a diferencia del mapeo detallado, acá no hay per-tipo).
+    clientes: true,
+    proveedores: true,
   });
   const [isConfirming, setIsConfirming] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -226,7 +231,13 @@ export function FileUploadSection() {
     setStockTreatment("opening_balance");
     setUploadProgress(0);
     pollCount.current = 0;
-    setConfirmedFields({ ventas: true, gastos: true, productos: true });
+    setConfirmedFields({
+      ventas: true,
+      gastos: true,
+      productos: true,
+      clientes: true,
+      proveedores: true,
+    });
   }
 
   function handleFileSelect(file: File) {
@@ -398,8 +409,11 @@ export function FileUploadSection() {
             Datos detectados — seleccioná qué querés importar
           </p>
 
+          {/* F7e: preview de maestros (clientes/proveedores) detectados en el archivo. */}
+          <MasterPreviewPanel previews={preview.master_previews ?? []} />
+
           <div className="mb-4 space-y-2">
-            {(["ventas", "gastos", "productos"] as const).map((key) => (
+            {(["ventas", "gastos", "productos", "clientes", "proveedores"] as const).map((key) => (
               <label
                 key={key}
                 className="flex cursor-pointer items-center gap-2.5"
