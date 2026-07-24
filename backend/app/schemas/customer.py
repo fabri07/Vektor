@@ -210,7 +210,7 @@ class CustomerImportRow(BaseModel):
 
 class CustomerImportPreviewItem(BaseModel):
     row_index: int
-    status: str  # "create" | "update" | "invalid" | "duplicate_in_file"
+    status: str  # "create" | "update" | "invalid" | "duplicate_in_file" | "needs_review"
     customer: CustomerImportRow
     existing_id: UUID | None = None
     existing_name: str | None = None
@@ -223,6 +223,9 @@ class CustomerImportPreviewResponse(BaseModel):
     to_update: int
     invalid: int
     duplicates: int
+    # F7b: filas con nombre pero sin ninguna clave fuerte (documento/email/teléfono) —
+    # no matchean ni crean, requieren revisión manual. Default 0 = backward-compat.
+    needs_review: int = 0
     warnings: list[str] = Field(default_factory=list)
     source_upload_id: UUID | None = None
 

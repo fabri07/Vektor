@@ -224,7 +224,7 @@ def _row(**kw: Any) -> dict[str, Any]:
 
 
 class TestImportPreview:
-    def test_classifies_create_update_invalid_duplicate(self) -> None:
+    def test_classifies_create_update_needs_review_duplicate(self) -> None:
         existing = [
             Customer(
                 tenant_id=uuid.uuid4(),
@@ -236,13 +236,14 @@ class TestImportPreview:
         records = [
             _row(name="Nuevo", dni="30111222"),  # create
             _row(name="Actualizar SA", cuit=_VALID_CUIT),  # update (match por cuit)
-            _row(name="Sin Doc"),  # invalid (sin documento)
+            _row(name="Sin Doc"),  # needs_review (sin ninguna clave fuerte)
             _row(name="Repe", dni="30111222"),  # duplicate_in_file
         ]
         preview = build_import_preview(records, existing)
         assert preview.to_create == 1
         assert preview.to_update == 1
-        assert preview.invalid == 1
+        assert preview.needs_review == 1
+        assert preview.invalid == 0
         assert preview.duplicates == 1
 
     def test_invalid_cuit_check_digit_flagged(self) -> None:
@@ -250,6 +251,34 @@ class TestImportPreview:
         preview = build_import_preview(records, [])
         assert preview.invalid == 1
         assert preview.items[0].issues
+
+    def test_missing_name_is_invalid_not_needs_review(self) -> None:
+        # Sin nombre no hay ni siquiera señal débil — sigue siendo "invalid".
+        records = [_row(dni="30111222")]
+        preview = build_import_preview(records, [])
+        assert preview.invalid == 1
+        assert preview.needs_review == 0
+
+    def test_email_only_matches_existing_customer(self) -> None:
+        existing = [
+            Customer(tenant_id=uuid.uuid4(), name="Con Email SA", email="ventas@norte.com")
+        ]
+        records = [_row(name="Con Email SA", email="Ventas@Norte.com")]
+        preview = build_import_preview(records, existing)
+        assert preview.to_update == 1
+        assert preview.items[0].existing_id == existing[0].id
+
+    def test_conflict_between_doc_and_email_is_invalid(self) -> None:
+        existing = [
+            Customer(tenant_id=uuid.uuid4(), name="A", cuit=_VALID_CUIT),
+            Customer(tenant_id=uuid.uuid4(), name="B", email="b@b.com"),
+        ]
+        records = [_row(name="Ambiguo", cuit=_VALID_CUIT, email="b@b.com")]
+        preview = build_import_preview(records, existing)
+        assert preview.invalid == 1
+        assert preview.needs_review == 0
+        assert preview.to_create == 0
+        assert preview.to_update == 0
 
 
 @pytest.mark.asyncio
@@ -296,6 +325,41 @@ class TestApplyImport:
         assert len(result.created_ids) == 1
         assert len(result.updated_ids) == 1
         assert await repo.count_active(tid) == 1
+
+    async def test_needs_review_never_created(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        records = [_row(name="Solo Nombre")]  # sin ninguna clave fuerte
+        result = await apply_import(repo, tid, records)
+        assert result.created_ids == []
+        assert result.updated_ids == []
+        assert result.skipped == 1
+        assert await repo.count_active(tid) == 0
+
+    async def test_conflict_never_created_or_updated(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        a = Customer(tenant_id=tid, name="A", cuit=_VALID_CUIT)
+        b = Customer(tenant_id=tid, name="B", email="b@b.com")
+        db_session.add_all([a, b])
+        await db_session.commit()
+
+        records = [_row(name="Ambiguo", cuit=_VALID_CUIT, email="b@b.com")]
+        result = await apply_import(repo, tid, records)
+        assert result.created_ids == []
+        assert result.updated_ids == []
+        assert result.skipped == 1
+        # A y B siguen sin tocarse.
+        assert (await repo.get_by_id(a.id, tid)).name == "A"  # type: ignore[union-attr]
+        assert (await repo.get_by_id(b.id, tid)).name == "B"  # type: ignore[union-attr]
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -372,6 +436,39 @@ class TestCustomerFileEndpoints:
         listed = await client.get("/api/v1/customers", headers=auth_headers)
         names = {c["name"] for c in listed.json()}
         assert {"Norte SA", "Sur SA"} <= names
+
+    async def test_import_preview_reports_needs_review_and_confirm_skips_it(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        mock_s3_upload: unittest.mock.AsyncMock,
+    ) -> None:
+        # Una fila sin documento/email/teléfono (solo nombre) → needs_review en el
+        # preview; si igual se manda al confirm, apply_import la saltea (no crea).
+        content = _xlsx_clientes([["Solo Nombre SA", "", "", ""]])
+        prev = await client.post(
+            "/api/v1/customers/import/preview",
+            files={"file": ("clientes.xlsx", content, "application/octet-stream")},
+            headers=auth_headers,
+        )
+        assert prev.status_code == 200, prev.text
+        pbody = prev.json()
+        assert pbody["needs_review"] == 1
+        assert pbody["items"][0]["status"] == "needs_review"
+
+        rows = [item["customer"] for item in pbody["items"]]
+        conf = await client.post(
+            "/api/v1/customers/import/confirm",
+            json={"rows": rows},
+            headers=auth_headers,
+        )
+        assert conf.status_code == 200, conf.text
+        cbody = conf.json()
+        assert cbody["created"] == 0
+        assert cbody["skipped"] == 1
+
+        listed = await client.get("/api/v1/customers", headers=auth_headers)
+        assert "Solo Nombre SA" not in {c["name"] for c in listed.json()}
 
     async def test_import_preview_rejects_photo_with_warning(
         self,

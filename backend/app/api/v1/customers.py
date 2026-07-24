@@ -391,6 +391,7 @@ async def import_customers_preview(
         to_update=preview.to_update,
         invalid=preview.invalid,
         duplicates=preview.duplicates,
+        needs_review=preview.needs_review,
         warnings=preview.warnings,
         source_upload_id=source_upload_id,
     )

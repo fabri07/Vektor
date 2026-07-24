@@ -1,15 +1,16 @@
 """customer_import_service — import masivo de clientes en dos pasos (preview/confirm).
 
 Reutiliza el parser determinístico de ``customer_extraction_service.parse_customer_records``
-para leer la planilla, matchea cada fila contra los clientes existentes por documento
-(DNI/CUIT) y arma un preview (a crear / a actualizar / inválidos / duplicados en el
-archivo). El confirm aplica el upsert idempotente: matchea de nuevo por documento contra
-la DB y crea o actualiza, sin duplicar. El sentinela "Local" nunca se crea por import.
+para leer la planilla, y el motor común ``identity_resolution`` para matchear cada fila
+contra los clientes existentes (documento → email → teléfono; el nombre es señal débil).
+Arma un preview (a crear / a actualizar / inválido / duplicado en el archivo / needs_review
+— sin clave fuerte, no matchea ni crea). El confirm aplica el upsert idempotente: re-resuelve
+contra la DB y crea o actualiza, sin duplicar; needs_review y conflictos de identidad se
+saltean siempre. El sentinela "Local" nunca se crea por import.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -17,10 +18,19 @@ from uuid import UUID
 
 from pydantic_core import PydanticCustomError
 
+from app.application.services.identity_resolution import (
+    IdentityKey,
+    build_existing_index,
+    record_keys,
+    resolve_identity,
+)
 from app.domain.date_parsing import BIRTHDAY_CENTURY_PIVOT, parse_business_date
 from app.persistence.models.customer import Customer
 from app.persistence.repositories.customer_repository import CustomerRepository
 from app.schemas._ar_fiscal import validate_cuit, validate_dni
+
+# Documento: CUIT antes que DNI (prioridad de match del motor de identidad).
+_DOC_FIELDS = ("cuit", "dni")
 
 # Campos del cliente que el import puede setear/actualizar (subconjunto del modelo).
 _IMPORTABLE_FIELDS = (
@@ -46,7 +56,7 @@ class PreviewItem:
     """Una fila del preview: clasificación + payload normalizado + diagnóstico."""
 
     row_index: int
-    status: str  # "create" | "update" | "invalid" | "duplicate_in_file"
+    status: str  # "create" | "update" | "invalid" | "duplicate_in_file" | "needs_review"
     fields: dict[str, Any]
     existing_id: UUID | None = None
     existing_name: str | None = None
@@ -74,6 +84,10 @@ class ImportPreview:
     def duplicates(self) -> int:
         return sum(1 for i in self.items if i.status == "duplicate_in_file")
 
+    @property
+    def needs_review(self) -> int:
+        return sum(1 for i in self.items if i.status == "needs_review")
+
 
 @dataclass
 class ImportResult:
@@ -82,35 +96,26 @@ class ImportResult:
     skipped: int = 0
 
 
-def _digits(value: Any) -> str:
-    return re.sub(r"\D", "", str(value)) if value is not None else ""
-
-
-def _doc_keys(record: dict[str, Any]) -> list[tuple[str, str]]:
-    """Claves de documento (tipo, dígitos) para matchear — CUIT primero."""
-    keys: list[tuple[str, str]] = []
-    cuit = _digits(record.get("cuit"))
-    if cuit:
-        keys.append(("cuit", cuit))
-    dni = _digits(record.get("dni"))
-    if dni:
-        keys.append(("dni", dni))
-    return keys
+def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
+    """Claves de identidad del record — CUIT → DNI → email → teléfono."""
+    return record_keys(record, doc_fields=_DOC_FIELDS)
 
 
 def _validate_record(record: dict[str, Any]) -> list[str]:
-    """Diagnóstico de una fila de import. Lista vacía = válida.
+    """Diagnóstico de una fila de import. Lista vacía = válida (puede seguir siendo
+    ``needs_review`` más adelante si no trae ninguna clave fuerte — eso lo resuelve
+    el motor de identidad, no esta función).
 
-    Reglas del import (más livianas que el alta manual, pero exigen identidad + un
-    documento para poder deduplicar): nombre/razón social + (DNI o CUIT válido).
+    Reglas: nombre/razón social obligatorio; si trae DNI o CUIT, tiene que ser válido.
+    NO exige documento — una fila sin documento pero con email/teléfono es candidata a
+    matchear por esas claves, y una fila sin ninguna clave fuerte cae en needs_review
+    (no en invalid).
     """
     issues: list[str] = []
     if not (record.get("name") or "").strip():
         issues.append("Falta nombre o razón social.")
-    has_dni = bool((record.get("dni") or "").strip())
     has_cuit = bool((record.get("cuit") or "").strip())
-    if not has_dni and not has_cuit:
-        issues.append("Falta un documento (DNI o CUIT).")
+    has_dni = bool((record.get("dni") or "").strip())
     if has_cuit:
         try:
             validate_cuit(record.get("cuit"))
@@ -124,13 +129,13 @@ def _validate_record(record: dict[str, Any]) -> list[str]:
     return issues
 
 
-def _existing_doc_map(existing: list[Customer]) -> dict[tuple[str, str], Customer]:
-    """Índice ``(tipo_doc, dígitos) → Customer`` de los clientes existentes."""
-    index: dict[tuple[str, str], Customer] = {}
-    for cust in existing:
-        for key in _doc_keys({"cuit": cust.cuit, "dni": cust.dni}):
-            index.setdefault(key, cust)
-    return index
+def _existing_doc_map(existing: list[Customer]) -> dict[IdentityKey, Customer]:
+    """Índice ``IdentityKey → Customer`` de los clientes existentes (documento/email/tel)."""
+    return build_existing_index(existing, to_record=_customer_record, doc_fields=_DOC_FIELDS)
+
+
+def _customer_record(cust: Customer) -> dict[str, Any]:
+    return {"cuit": cust.cuit, "dni": cust.dni, "email": cust.email, "phone": cust.phone}
 
 
 def build_import_preview(
@@ -141,7 +146,7 @@ def build_import_preview(
 ) -> ImportPreview:
     """Clasifica cada fila contra los existentes. Puro, sin tocar la DB."""
     existing_index = _existing_doc_map(existing)
-    seen_in_file: dict[tuple[str, str], int] = {}
+    seen_in_file: dict[IdentityKey, int] = {}
     items: list[PreviewItem] = []
 
     for idx, record in enumerate(records):
@@ -152,8 +157,8 @@ def build_import_preview(
             )
             continue
 
-        keys = _doc_keys(record)
-        # Duplicado dentro del MISMO archivo (otra fila ya trajo este documento).
+        keys = _record_keys(record)
+        # Duplicado dentro del MISMO archivo (otra fila ya trajo esta clave).
         dup_of = next((seen_in_file[k] for k in keys if k in seen_in_file), None)
         if dup_of is not None:
             items.append(
@@ -161,15 +166,38 @@ def build_import_preview(
                     row_index=idx,
                     status="duplicate_in_file",
                     fields=record,
-                    issues=[f"Documento repetido en el archivo (fila {dup_of + 1})."],
+                    issues=[f"Documento/contacto repetido en el archivo (fila {dup_of + 1})."],
                 )
             )
             continue
         for k in keys:
             seen_in_file[k] = idx
 
-        match = next((existing_index[k] for k in keys if k in existing_index), None)
-        if match is not None:
+        resolution = resolve_identity(keys, existing_index)
+        if resolution.outcome == "needs_review":
+            items.append(
+                PreviewItem(
+                    row_index=idx,
+                    status="needs_review",
+                    fields=record,
+                    issues=[
+                        "Falta un dato fuerte (DNI, CUIT, email o teléfono) para "
+                        "identificar al cliente sin ambigüedad."
+                    ],
+                )
+            )
+        elif resolution.outcome == "conflict":
+            items.append(
+                PreviewItem(
+                    row_index=idx,
+                    status="invalid",
+                    fields=record,
+                    issues=["El registro matchea contra más de un cliente existente."],
+                )
+            )
+        elif resolution.outcome == "matched":
+            match = resolution.entity
+            assert match is not None  # invariante de "matched": siempre trae entity
             items.append(
                 PreviewItem(
                     row_index=idx,
@@ -199,9 +227,10 @@ async def apply_import(
     """Aplica el import: upsert idempotente por documento. Crea o actualiza, no duplica.
 
     Re-valida cada fila y re-resuelve el match contra la DB actual (no confía en la
-    clasificación del cliente). Las filas inválidas se saltean. El sentinela nunca se
-    crea (los records no llevan ``_sentinel`` y no lo seteamos). Devuelve los ids
-    creados/actualizados y la cantidad salteada.
+    clasificación del cliente). Las filas inválidas se saltean, igual que las
+    ``needs_review`` (sin clave fuerte) y los conflictos de identidad — nunca crean ni
+    actualizan. El sentinela nunca se crea (los records no llevan ``_sentinel`` y no lo
+    seteamos). Devuelve los ids creados/actualizados y la cantidad salteada.
     """
     existing = await repo.list_for_dedup(tenant_id)
     index = _existing_doc_map(existing)
@@ -211,10 +240,15 @@ async def apply_import(
         if _validate_record(record):
             result.skipped += 1
             continue
-        keys = _doc_keys(record)
-        match = next((index[k] for k in keys if k in index), None)
+        keys = _record_keys(record)
+        resolution = resolve_identity(keys, index)
+        if resolution.outcome in ("needs_review", "conflict"):
+            result.skipped += 1
+            continue
 
-        if match is not None:
+        if resolution.outcome == "matched":
+            match = resolution.entity
+            assert match is not None  # invariante de "matched": siempre trae entity
             # Actualizar solo los campos provistos (no pisar con vacío).
             for fname in _IMPORTABLE_FIELDS:
                 if fname not in record:
