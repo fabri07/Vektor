@@ -30,7 +30,7 @@ class TenantColumnMapping(Base):
             name="uq_tcm_tenant_entity_col",
         ),
         CheckConstraint(
-            "entity_type IN ('sale', 'expense', 'product', 'inventory')",
+            "entity_type IN ('sale', 'expense', 'product', 'inventory', 'customer', 'supplier')",
             name="ck_tcm_entity_type",
         ),
         Index("ix_tcm_tenant_entity", "tenant_id", "entity_type"),
