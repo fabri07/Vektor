@@ -127,6 +127,8 @@ class TestConfirmMasterWarningsAndCounts:
         sample_tenant: Tenant,
         mock_score_trigger: unittest.mock.MagicMock,
     ) -> None:
+        """También verifica que needs_review/invalido NUNCA se persisten vía
+        /confirm — el aviso es la única señal de que esas filas quedaron afuera."""
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -167,6 +169,18 @@ class TestConfirmMasterWarningsAndCounts:
         # anonimo (1 venta sin ninguna columna de cliente) NUNCA avisa.
         assert "anonimo" not in warnings_text.lower()
         assert "anónima" not in warnings_text.lower()
+
+        # El confirm SALTEA needs_review/invalido — nunca se persisten. De las 3
+        # filas de la hoja de Clientes (Juan Perez válido, Sin Documento
+        # needs_review, Doc Invalido inválido) solo existe la válida — más el
+        # sentinela "Local" (la venta unresolved/anonymous se asigna ahí).
+        from app.persistence.models.customer import Customer  # noqa: PLC0415
+
+        customer_names = {
+            c.name
+            for c in (await db_session.execute(select(Customer))).scalars().all()
+        }
+        assert customer_names == {"Juan Perez", "Local"}
 
     async def test_confirm_venta_anonima_sola_no_genera_ningun_warning_de_cliente(
         self,

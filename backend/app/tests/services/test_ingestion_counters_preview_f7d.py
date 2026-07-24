@@ -317,6 +317,66 @@ async def test_reread_maestro_needs_review_no_mergea(
 
 
 @pytest.mark.asyncio
+async def test_reread_maestro_conflicto_de_clave_no_mergea(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una fila cuyas claves matchean a DOS clientes existentes distintos
+    (conflict) NUNCA mergea — el reread la saltea igual que needs_review, no
+    hay merge silencioso de dos identidades distintas."""
+    valid_cuit = "20-12345678-6"
+    existing_a = Customer(
+        tenant_id=sample_tenant.tenant_id, name="Cliente Uno", cuit=valid_cuit
+    )
+    existing_b = Customer(
+        tenant_id=sample_tenant.tenant_id, name="Cliente Dos", email="ambiguo@mail.com"
+    )
+    db_session.add_all([existing_a, existing_b])
+    await db_session.flush()
+
+    file = await _make_reread_file(
+        db_session,
+        sample_tenant,
+        {"flat": {"nombre": "name", "cuit_col": "cuit", "correo": "email"}, "context": {}},
+    )
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "clientes",
+        "mapping_contexts": [
+            {
+                "context_id": "table",
+                "entity_type": "customer",
+                "headers": ["nombre", "cuit_col", "correo"],
+            }
+        ],
+        "clientes_detectados": [
+            {
+                "nombre": "Cliente Confuso",
+                "cuit_col": valid_cuit,  # matchea a existing_a por documento
+                "correo": "ambiguo@mail.com",  # matchea a existing_b por email
+            }
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, sample_tenant.tenant_id)
+    assert result.clientes == 0
+    await db_session.commit()
+
+    # Ningún merge silencioso: los dos clientes existentes siguen intactos y
+    # separados, y no se creó un tercero.
+    customers = (await db_session.execute(select(Customer))).scalars().all()
+    assert len(customers) == 2
+    refreshed_a = (
+        await db_session.execute(select(Customer).where(Customer.id == existing_a.id))
+    ).scalar_one()
+    refreshed_b = (
+        await db_session.execute(select(Customer).where(Customer.id == existing_b.id))
+    ).scalar_one()
+    assert refreshed_a.name == "Cliente Uno"
+    assert refreshed_b.name == "Cliente Dos"
+
+
+@pytest.mark.asyncio
 async def test_reread_sin_mapeo_guardado_no_reaplica_maestros(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
