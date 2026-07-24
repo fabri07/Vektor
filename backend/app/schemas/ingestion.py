@@ -33,6 +33,33 @@ class ColumnAtRisk(BaseModel):
     recommendation: str = "drop"
 
 
+class MasterPreviewSample(BaseModel):
+    """Fila de muestra del preview de un maestro (cliente/proveedor). PII
+    minimizada a propósito: solo nombre + estado + primer diagnóstico — nunca
+    DNI/CUIT/email/teléfono crudos (esos solo viven en memoria durante el
+    request, no se serializan)."""
+
+    row_index: int
+    status: str  # "create" | "update" | "invalid" | "duplicate_in_file" | "needs_review"
+    display_name: str | None = None
+    existing_name: str | None = None
+    issue: str | None = None
+
+
+class MasterPreviewSummary(BaseModel):
+    """Preview de una hoja de maestro (F7d) — cuántas filas son create/update/
+    needs_review/invalid/duplicate ANTES de confirmar. No persiste nada."""
+
+    context_id: str | None = None
+    entity_type: str  # "customer" | "supplier"
+    to_create: int
+    to_update: int
+    needs_review: int
+    invalid: int
+    duplicates: int
+    samples: list[MasterPreviewSample] = Field(default_factory=list)
+
+
 class FilePreviewResponse(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -40,6 +67,9 @@ class FilePreviewResponse(BaseModel):
     processing_status: str
     parsed_summary_json: dict[str, Any] | None
     columns_at_risk: list[ColumnAtRisk] = []
+    # F7d: preview universal de maestros (clientes/proveedores) — vacío si el
+    # archivo no tiene hojas de maestro o si no se pudo estimar el mapeo.
+    master_previews: list[MasterPreviewSummary] = Field(default_factory=list)
 
 
 class DropColumnsRequest(BaseModel):
@@ -174,6 +204,9 @@ class RereadApplyResponse(BaseModel):
     inserted: int
     legacy_fallback: bool = False
     items: list[RereadItem] = Field(default_factory=list)
+    # F7d: maestros (clientes/proveedores) reaplicados — creados + actualizados.
+    clientes: int = 0
+    proveedores: int = 0
 
 
 class RereadApplyStartResponse(BaseModel):
@@ -198,6 +231,9 @@ class RereadRunStatusResponse(BaseModel):
     legacy_fallback: bool = False
     items: list[RereadItem] = Field(default_factory=list)
     error: str | None = None
+    # F7d: maestros (clientes/proveedores) reaplicados — creados + actualizados.
+    clientes: int = 0
+    proveedores: int = 0
 
 
 class RereadUndoResponse(BaseModel):

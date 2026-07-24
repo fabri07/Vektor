@@ -169,6 +169,12 @@ class RereadApplyResult:
     inserted: int = 0
     legacy_fallback: bool = False
     items: list[dict[str, Any]] = field(default_factory=list)
+    # F7d: maestros (clientes/proveedores) reaplicados por esta relectura —
+    # creados + actualizados combinados. Ver ``_reread_master_entities``: solo se
+    # reaplica si el confirm original guardó ``master_column_mappings`` en el
+    # summary (sin mapeo, no se adivina el shape — mismo criterio que el confirm).
+    clientes: int = 0
+    proveedores: int = 0
 
 
 # ── snapshots para auditoría ───────────────────────────────────────────────────
@@ -279,6 +285,54 @@ def _confirmed_fields_for(file: UploadedFile, fresh: dict[str, Any]) -> dict[str
         keys = set(stored) | set(fresh_defaults)
         return {k: bool(stored.get(k)) or bool(fresh_defaults.get(k)) for k in keys}
     return fresh_defaults
+
+
+async def _reread_master_entities(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file: UploadedFile,
+    fresh: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+) -> tuple[int, int]:
+    """F7d — reread de hojas de maestro (clientes/proveedores).
+
+    Reusa el MISMO motor que el confirm (``_import_master_entities``, F7c/F7d):
+    upsert idempotente (crea o actualiza, solo setea los campos que el archivo
+    provee — no pisa con vacío una edición manual posterior) y needs_review/
+    conflicto de identidad se saltean siempre (nunca merge silencioso).
+
+    A diferencia de ventas/gastos, clientes/proveedores NO tienen
+    ``source_upload_id`` ni ciclo void+reimport — igual que los productos (ver
+    el comentario ``products_limitation`` más abajo), se re-derivan
+    idempotentemente por identidad (documento/email/teléfono), así que no hace
+    falta reconciliar altas/bajas acá.
+
+    Requiere que el confirm original haya guardado ``master_column_mappings``
+    en el summary (ver ``api/v1/ingestion.py::confirm_file``) — sin mapeo
+    explícito no se adivina el shape de la hoja (mismo criterio que el
+    confirm), así que un archivo confirmado ANTES de F7d simplemente no
+    reaplica sus maestros en la relectura (cobertura documentada, no un bug).
+
+    Devuelve ``(clientes_creados_o_actualizados, proveedores_creados_o_actualizados)``.
+    """
+    stored = (file.parsed_summary_json or {}).get("master_column_mappings") or {}
+    context_mappings = stored.get("context") or None
+    flat_mapping = stored.get("flat") or None
+    if not context_mappings and not flat_mapping:
+        return 0, 0
+
+    counts: dict[str, Any] = {"clientes": 0, "proveedores": 0}
+    await _iis._import_master_entities(
+        session,
+        tenant_id,
+        fresh,
+        confirmed_fields,
+        context_mappings,
+        None,
+        flat_mapping,
+        counts,
+    )
+    return counts.get("clientes", 0), counts.get("proveedores", 0)
 
 
 # ── reconciliación común ───────────────────────────────────────────────────────
@@ -1028,7 +1082,17 @@ async def apply_reread(
         session.add(run)
         await session.flush()
 
+    # F7d: maestros (clientes/proveedores) ANTES que la reconciliación
+    # transaccional — mismo orden que el confirm (F7c), y por la misma razón: una
+    # venta/gasto de este archivo puede referenciar un cliente/proveedor recién
+    # actualizado. No-op si el confirm original no guardó mapeo de columnas.
+    clientes_count, proveedores_count = await _reread_master_entities(
+        session, tenant_id, file, fresh, confirmed_fields
+    )
+
     result = await _reconcile(session, file, tenant_id, fresh, confirmed_fields, run)
+    result.clientes = clientes_count
+    result.proveedores = proveedores_count
 
     run.status = "APPLIED"
     run.completed_at = datetime.now(UTC)
@@ -1042,6 +1106,8 @@ async def apply_reread(
         "voided": result.voided,
         "inserted": result.inserted,
         "legacy_fallback": result.legacy_fallback,
+        "clientes": result.clientes,
+        "proveedores": result.proveedores,
         # Sample para el diff antes/después en el frontend (limitado para no inflar).
         "sample_changes": list(result.items)[:24],
         "products_limitation": (
