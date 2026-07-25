@@ -356,8 +356,12 @@ def validate_column_risk_decisions(
     decisiones violan el contrato:
 
     - ``drop_column`` de un target REQUERIDO (``REQUIRED_FIELDS`` de la entidad
-      efectiva) sin OTRA columna mapeada al mismo ``target_field`` en ese
-      contexto: dejaría el requerido sin mapear.
+      efectiva) que deja el target SIN columnas sobrevivientes en ese contexto:
+      dejaría el requerido sin mapear. El batch se trata ATÓMICAMENTE — dos
+      ``drop_column`` del MISMO request sobre las dos únicas columnas de un
+      requerido se evalúan juntas (ninguna decisión individual "ve" a la otra
+      columna dropeada como si siguiera disponible; ver bug reportado por
+      review, F8b Task 2).
     - ``route_affected_rows_to_others`` de un target NO accionable (opcional
       que el usuario no seleccionó explícitamente): invariante 1 — un opcional
       vacío nunca manda filas a Otros.
@@ -369,6 +373,16 @@ def validate_column_risk_decisions(
     """
     apply_inclusion = confirmed_fields is not None or context_confirmed is not None
     violations: list[ColumnRiskViolation] = []
+
+    # Batch atómico: columnas que el request dropea por (context_id, target_field).
+    # Sin esto, dos `drop_column` sobre las dos únicas columnas de un mismo
+    # requerido se validarían una contra la otra en el snapshot ESTÁTICO de
+    # `context_mappings` (cada una "ve" a la otra como reemplazo todavía mapeado)
+    # y ambas pasarían, dejando el requerido sin ninguna columna sobreviviente.
+    dropped_by_target: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for d in decisions:
+        if d.action == "drop_column":
+            dropped_by_target[(d.context_id, d.target_field)].add(d.source_column)
 
     for decision in decisions:
         entity = context_entities.get(decision.context_id)
@@ -400,8 +414,12 @@ def validate_column_risk_decisions(
             field_requirement = "optional"
 
         if decision.action == "drop_column":
-            has_replacement = len(target_to_cols.get(decision.target_field, [])) > 1
-            if field_requirement == "required" and not has_replacement:
+            mapped_cols = set(target_to_cols.get(decision.target_field, []))
+            dropped_cols = dropped_by_target.get(
+                (decision.context_id, decision.target_field), set()
+            )
+            surviving_cols = mapped_cols - dropped_cols
+            if field_requirement == "required" and not surviving_cols:
                 violations.append(
                     ColumnRiskViolation(
                         context_id=decision.context_id,
@@ -410,9 +428,9 @@ def validate_column_risk_decisions(
                         action=decision.action,
                         reason=(
                             f"No se puede eliminar la columna '{decision.source_column}': "
-                            f"es la única mapeada al campo requerido "
-                            f"'{decision.target_field}' en el contexto "
-                            f"'{decision.context_id}'."
+                            f"el campo requerido '{decision.target_field}' del contexto "
+                            f"'{decision.context_id}' quedaría sin ninguna columna mapeada "
+                            "(todas sus columnas se están eliminando en este mismo pedido)."
                         ),
                     )
                 )

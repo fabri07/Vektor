@@ -76,6 +76,48 @@ def test_drop_requerido_con_reemplazo_ok() -> None:
     assert violations == []
 
 
+def test_drop_ambas_columnas_del_mismo_requerido_en_un_batch_es_violacion() -> None:
+    """Bug crítico (review de Task 2): dos columnas mapean a un requerido
+    (transaction_date). Si el MISMO request dropea las DOS, cada decisión
+    tomada aisladamente contra el snapshot estático "ve" a la otra como
+    reemplazo todavía mapeado — y ambas pasarían, dejando el requerido sin
+    NINGUNA columna. El batch debe evaluarse atómicamente: el conjunto de
+    columnas sobrevivientes (mapeadas MENOS todas las dropeadas en este mismo
+    request) debe seguir cubriendo el requerido."""
+    context_mappings = {
+        "table": [
+            MappingEntry("fecha", "transaction_date", user_selected=False),
+            MappingEntry("fecha_alt", "transaction_date", user_selected=True),
+            MappingEntry("monto", "amount", user_selected=False),
+        ]
+    }
+    context_entities = {"table": "sale"}
+    decisions = [
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="fecha",
+            target_field="transaction_date",
+            action="drop_column",
+        ),
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="fecha_alt",
+            target_field="transaction_date",
+            action="drop_column",
+        ),
+    ]
+
+    violations = validate_column_risk_decisions(decisions, context_mappings, context_entities)
+
+    # Ambas decisiones quedan sin columna sobreviviente → ambas se flaggean.
+    assert len(violations) == 2
+    flagged_columns = {v.source_column for v in violations}
+    assert flagged_columns == {"fecha", "fecha_alt"}
+    for v in violations:
+        assert v.target_field == "transaction_date"
+        assert v.action == "drop_column"
+
+
 def test_route_opcional_no_seleccionado_es_violacion() -> None:
     """`notes` en `product` es opcional. Sin `user_selected=True`, rutear filas
     a Otros por su vaciedad violaría el invariante 1 (opcional vacío nunca
