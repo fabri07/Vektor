@@ -49,6 +49,7 @@ from app.application.services.file_parsing import (
 from app.application.services.ingestion_import_service import _parse_amount
 from app.domain.date_parsing import parse_business_datetime
 from app.schemas._ar_fiscal import validate_cuit, validate_dni
+from app.schemas.ingestion import ColumnRiskDecision
 
 # Buckets del summary que contienen las filas COMPLETAS del archivo (no solo el
 # preview de 10). En multi-hoja/texto las filas llevan un marcador ``__context__``;
@@ -323,5 +324,112 @@ def build_contextual_column_risk(
                     ),
                 }
             )
-
     return result
+
+
+@dataclass(frozen=True)
+class ColumnRiskViolation:
+    """F8b: una `ColumnRiskDecision` que el mapeo efectivo NO permite.
+
+    ``reason`` es el detalle accionable que el confirm expone en el 422 (qué
+    columna, qué target, por qué)."""
+
+    context_id: str
+    source_column: str
+    target_field: str
+    action: str
+    reason: str
+
+
+def validate_column_risk_decisions(
+    decisions: list[ColumnRiskDecision],
+    context_mappings: dict[str, list[MappingEntry]],
+    context_entities: dict[str, str],
+    *,
+    confirmed_fields: dict[str, bool] | None = None,
+    context_confirmed: dict[str, bool] | None = None,
+) -> list[ColumnRiskViolation]:
+    """F8b (Task 2): valida las decisiones del usuario ANTES del lease.
+
+    PURA (sin DB, sin LLM) — mismo espíritu que ``build_contextual_column_risk``:
+    recibe el mapeo efectivo + la entidad efectiva por contexto y determina qué
+    decisiones violan el contrato:
+
+    - ``drop_column`` de un target REQUERIDO (``REQUIRED_FIELDS`` de la entidad
+      efectiva) sin OTRA columna mapeada al mismo ``target_field`` en ese
+      contexto: dejaría el requerido sin mapear.
+    - ``route_affected_rows_to_others`` de un target NO accionable (opcional
+      que el usuario no seleccionó explícitamente): invariante 1 — un opcional
+      vacío nunca manda filas a Otros.
+
+    Decisiones sobre un contexto EXCLUIDO del import (misma inclusión que el
+    confirm, vía ``context_is_included``) no generan violación — esas filas ni
+    se procesan. Si ambos filtros de inclusión son ``None`` (no se pasaron), no
+    se aplica exclusión (se asume que el caller ya filtró).
+    """
+    apply_inclusion = confirmed_fields is not None or context_confirmed is not None
+    violations: list[ColumnRiskViolation] = []
+
+    for decision in decisions:
+        entity = context_entities.get(decision.context_id)
+        if not entity:
+            continue
+        if apply_inclusion and not context_is_included(
+            decision.context_id, entity, confirmed_fields or {}, context_confirmed or {}
+        ):
+            continue
+
+        entries = context_mappings.get(decision.context_id, [])
+        target_to_cols: dict[str, list[str]] = defaultdict(list)
+        matched_entry: MappingEntry | None = None
+        for entry in entries:
+            if _is_real_target(entry.target_field):
+                target_to_cols[entry.target_field].append(entry.source_column)
+            if (
+                entry.source_column == decision.source_column
+                and entry.target_field == decision.target_field
+            ):
+                matched_entry = entry
+
+        required = set(REQUIRED_FIELDS.get(entity, []))
+        if decision.target_field in required:
+            field_requirement = "required"
+        elif matched_entry is not None and matched_entry.user_selected:
+            field_requirement = "explicitly_selected"
+        else:
+            field_requirement = "optional"
+
+        if decision.action == "drop_column":
+            has_replacement = len(target_to_cols.get(decision.target_field, [])) > 1
+            if field_requirement == "required" and not has_replacement:
+                violations.append(
+                    ColumnRiskViolation(
+                        context_id=decision.context_id,
+                        source_column=decision.source_column,
+                        target_field=decision.target_field,
+                        action=decision.action,
+                        reason=(
+                            f"No se puede eliminar la columna '{decision.source_column}': "
+                            f"es la única mapeada al campo requerido "
+                            f"'{decision.target_field}' en el contexto "
+                            f"'{decision.context_id}'."
+                        ),
+                    )
+                )
+        elif decision.action == "route_affected_rows_to_others":
+            if field_requirement not in _ACTIONABLE_REQUIREMENTS:
+                violations.append(
+                    ColumnRiskViolation(
+                        context_id=decision.context_id,
+                        source_column=decision.source_column,
+                        target_field=decision.target_field,
+                        action=decision.action,
+                        reason=(
+                            f"'{decision.target_field}' es un campo opcional que el usuario "
+                            "no seleccionó explícitamente: un opcional vacío no puede "
+                            "rutear filas a Otros."
+                        ),
+                    )
+                )
+
+    return violations

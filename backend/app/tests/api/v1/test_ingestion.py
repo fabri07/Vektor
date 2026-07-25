@@ -824,6 +824,249 @@ class TestConfirmEndpoint:
         assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
         assert refreshed.import_attempt_id is None
 
+    async def test_confirm_drop_requerido_sin_reemplazo_devuelve_422_antes_del_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F8b (Task 2): dropear la ÚNICA columna mapeada a un target requerido
+        (transaction_date) dejaría el requerido sin mapear. Se rechaza con 422
+        ANTES del lease — igual contrato que el gate de fecha F6-A1."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [{"fecha": "2024-01-15", "monto": "50000"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "fecha",
+                        "target_field": "transaction_date",
+                        "action": "drop_column",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 422
+        assert "transaction_date" in response.json()["detail"]
+
+        # El lease nunca se tomó: sigue re-confirmable.
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+        assert refreshed.import_started_at is None
+
+    async def test_confirm_drop_requerido_con_reemplazo_no_bloquea(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """F8b (Task 2): dropear una columna requerida CON otra columna mapeada
+        al mismo target (fecha_alt) no bloquea — el requerido sigue cubierto."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [{"fecha": "2024-01-15", "monto": "50000"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {
+                        "source_column": "fecha_alt",
+                        "target_field": "transaction_date",
+                        "user_selected": True,
+                    },
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "fecha",
+                        "target_field": "transaction_date",
+                        "action": "drop_column",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+    async def test_confirm_route_opcional_no_seleccionado_devuelve_422_antes_del_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F8b (Task 2): rutear filas a Otros por un campo OPCIONAL que el
+        usuario no seleccionó explícitamente viola el invariante 1. 422 antes
+        del lease."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [
+                    {"fecha": "2024-01-15", "monto": "50000", "notas": None}
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                    {"source_column": "notas", "target_field": "notes"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "notas",
+                        "target_field": "notes",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 422
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
+    async def test_confirm_route_requerido_no_bloquea(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """F8b (Task 2): rutear filas afectadas por un campo REQUERIDO (amount)
+        es una decisión válida — no bloquea el confirm."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [{"fecha": "2024-01-15", "monto": "50000"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
 
 class _CaptureLogger:
     def __init__(self) -> None:

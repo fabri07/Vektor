@@ -43,6 +43,7 @@ from app.application.services.column_risk import (
     build_contextual_column_risk,
     context_is_included,
     resolve_contexts,
+    validate_column_risk_decisions,
 )
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
@@ -1220,6 +1221,40 @@ async def confirm_file(
                     "de fecha o completá los datos antes de importar (sin fecha no se "
                     "puede registrar la operación)."
                 ),
+            )
+
+    # ── F8b: validar decisiones de riesgo de columnas, ANTES del lease ─────────
+    # Mismo espíritu que el gate de fecha (F6-A1): una decisión inválida (dropear
+    # el único mapeo de un requerido, o rutear un opcional no seleccionado) se
+    # rechaza upfront — nunca a mitad del import con el lease ya tomado.
+    if body.column_risk_decisions:
+        _risk_context_mappings: dict[str, list[MappingEntry]] = defaultdict(list)
+        _risk_context_entities: dict[str, str] = {}
+        for _m in body.column_mappings:
+            if _m.target_field == "ignore":
+                continue
+            _cid = _m.context_id or "table"
+            _risk_context_entities[_cid] = _entity_for(_m)
+            _risk_context_mappings[_cid].append(
+                MappingEntry(
+                    source_column=_m.source_column,
+                    target_field=_m.target_field,
+                    mapping_source="none",
+                    user_selected=_m.user_selected,
+                )
+            )
+        _risk_violations = validate_column_risk_decisions(
+            body.column_risk_decisions,
+            _risk_context_mappings,
+            _risk_context_entities,
+            confirmed_fields=body.confirmed_fields,
+            context_confirmed=body.context_confirmed,
+        )
+        if _risk_violations:
+            _risk_detail = " ".join(v.reason for v in _risk_violations)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Decisión de columna riesgosa inválida: {_risk_detail}",
             )
 
     # ── F4: tomar el lease per-file ANTES de cualquier escritura ────────────────
