@@ -159,6 +159,21 @@ class TenantColumnMappingResponse(BaseModel):
 # ── Ingestion confirm ─────────────────────────────────────────────────────────
 
 
+class ColumnRiskDecision(BaseModel):
+    """F8b: decisión del usuario sobre UNA columna riesgosa (F8a) al confirmar.
+
+    ``action`` es un set cerrado de solo dos valores: ``drop_column`` (eliminar
+    la columna del mapeo antes de importar) o ``route_affected_rows_to_others``
+    (las filas afectadas — vacías/inválidas en esa columna — van a "Otros" en
+    vez de importarse con el dato faltante). ``cancel_and_complete`` NO es una
+    decisión por columna: es una acción global manejada por ``POST /cancel``."""
+
+    context_id: str
+    source_column: str
+    target_field: str
+    action: Literal["drop_column", "route_affected_rows_to_others"]
+
+
 class ConfirmIngestionRequest(BaseModel):
     confirmed_fields: dict[str, Any] = Field(
         description=(
@@ -198,6 +213,14 @@ class ConfirmIngestionRequest(BaseModel):
             "(saldo de apertura — mercadería que ya tenías, entra al inventario sin "
             "gasto ni salida de caja) o 'purchase' (compra — genera gasto de mercadería "
             "COGS + baja de caja). Si se omite, se asume saldo de apertura."
+        ),
+    )
+    column_risk_decisions: list[ColumnRiskDecision] = Field(
+        default_factory=list,
+        description=(
+            "F8b: decisiones del usuario sobre columnas riesgosas (F8a) detectadas "
+            "en el preview/column-risk. Opcional — vacío por default para mantener "
+            "compatibilidad con confirms previos (F7) que no conocen este campo."
         ),
     )
 
