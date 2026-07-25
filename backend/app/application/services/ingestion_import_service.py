@@ -852,6 +852,25 @@ def _import_row_anchor(
     )
 
 
+def _risk_row_anchor(
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    context_id: str,
+    row_index: int,
+) -> str:
+    """Ancla de la huella de captura de riesgo (F8b, invariante 6) — namespace
+    PROPIO ``risk``, NUNCA el texto de ``_import_row_anchor`` (``IMPORT_ROW``,
+    el ancla de venta/gasto). Así una fila puede tener SIMULTÁNEAMENTE su
+    ancla de import normal (si se importó con éxito) y su ancla de riesgo (si
+    además quedó con columnas riesgosas ruteadas a "Otros") sin que una huella
+    bloquee a la otra. Incluye ``tenant_id``/``uploaded_file_id`` (a diferencia
+    del `risk:{context_id}:{row_index}` literal del brief) para que dos
+    archivos distintos del mismo tenant que reusan el mismo ``context_id``
+    sintético (p.ej. ``"table"`` en single-sheet) no colisionen entre sí.
+    """
+    return f"{tenant_id}:risk:{uploaded_file_id or ''}:{context_id}:{row_index}"
+
+
 def _source_row_ref(anchor: str | None) -> str | None:
     """Mejora D: ref estable de 64 chars para ``source_row_ref`` desde el ancla.
 
@@ -908,6 +927,70 @@ def _capture_unclassified(
         )
         count += 1
     return count
+
+
+async def _capture_column_risk_rows(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    context_id: str,
+    entity_type: str,
+    affected_rows: dict[int, dict[str, Any]],
+    source: str = "ingestion",
+) -> int:
+    """F8b (Task 3): captura en "Otros" las filas de un contexto afectadas por
+    una decisión ``route_affected_rows_to_others`` — UNA ``UnclassifiedRecord``
+    por fila, combinando TODOS los campos problemáticos de esa fila.
+
+    ``affected_rows`` es ``{row_index: {campo_problemático: valor_crudo}}`` YA
+    agrupado por fila: si dos columnas riesgosas distintas del mismo contexto
+    afectan la misma fila, el CALLER (Task 4) combina ambas en un solo dict
+    antes de invocar esta primitiva — acá no se vuelve a agrupar entre
+    columnas, solo se persiste 1:1 por ``row_index``.
+
+    Idempotencia — namespace de huella PROPIO (invariante 6, ``_risk_row_anchor``):
+    nunca el ancla ``IMPORT_ROW`` de venta/gasto. La huella se registra
+    DESPUÉS de persistir la captura (``_capture_unclassified`` primero,
+    ``_register_import_row_fingerprint`` después) — si la fila combinada
+    queda vacía (nada que capturar), NO se registra huella, para que un
+    reintento con datos corregidos no quede bloqueado por una huella
+    "fantasma" que nunca capturó nada (mismo principio que
+    ``_import_row_seen``/``_register_import_row_fingerprint`` para el ancla de
+    import normal). Un reintento con la MISMA fila (mismo contexto + índice)
+    hace skip sin duplicar.
+
+    ``context_label`` incluye SOLO nombres de columna (nunca valores) —
+    invariante 7, sin PII.
+
+    Devuelve la cantidad de ``UnclassifiedRecord`` NUEVAS creadas (para sumar
+    a ``counts["otros"]`` en el caller).
+    """
+    created = 0
+    for row_index, row_data in affected_rows.items():
+        anchor = _risk_row_anchor(tenant_id, uploaded_file_id, context_id, row_index)
+        if await _import_row_seen(session, tenant_id, anchor):
+            continue
+        context_label = (
+            f"Columna riesgosa ({entity_type}, contexto '{context_id}'): "
+            + ", ".join(sorted(row_data))
+        )[:200]
+        captured = _capture_unclassified(
+            session,
+            tenant_id,
+            rows=[row_data],
+            headers=(sorted(row_data) or None),
+            source=source,
+            uploaded_file_id=uploaded_file_id,
+            context_label=context_label,
+            suggested_entity=entity_type,
+        )
+        if captured == 0:
+            # Fila combinada vacía (nada que capturar): no hay nada persistido,
+            # así que NO se registra la huella — ver docstring.
+            continue
+        await _register_import_row_fingerprint(session, tenant_id, anchor)
+        created += captured
+    return created
 
 
 async def _load_business_type(session: AsyncSession, tenant_id: uuid.UUID) -> str | None:
