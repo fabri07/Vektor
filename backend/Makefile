@@ -57,6 +57,17 @@ seed-demo: ## Seed 3 demo tenants (kiosco/limpieza/deco) with calibrated data
 reset-demo: ## Drop and re-seed all 3 demo tenants (useful between investor demos)
 	$(PYTHON) scripts/reset_demo_data.py
 
+# URL asyncpg del Postgres LOCAL de Docker (servicio `postgres`). El seed script
+# no normaliza el esquema, por eso se pasa +asyncpg inline. Requiere el stack
+# levantado (make dev-bg) + docker-compose.override.yml (DATABASE_URL → local).
+LOCAL_DB_URL = postgresql+asyncpg://vektor:vektor@postgres:5432/vektor
+
+seed-demo-local: ## Seed demo tenants against the LOCAL Docker Postgres (safe, never touches prod)
+	$(DOCKER_COMPOSE) exec -e DATABASE_URL=$(LOCAL_DB_URL) backend python scripts/seed_demo_data.py
+
+reset-demo-local: ## Drop and re-seed demo tenants against the LOCAL Docker Postgres (safe)
+	$(DOCKER_COMPOSE) exec -e DATABASE_URL=$(LOCAL_DB_URL) backend python scripts/reset_demo_data.py
+
 seed-vertical-fields: ## Upsert vertical field definitions from JSON files (idempotent)
 	$(PYTHON) scripts/seed_vertical_fields.py
 
