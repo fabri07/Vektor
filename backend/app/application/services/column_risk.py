@@ -35,6 +35,7 @@ rechaza) tienen ``invalid_rows == 0`` (solo su vaciedad importa):
 
 from __future__ import annotations
 
+import copy
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -131,6 +132,21 @@ _TARGET_VALIDATORS: dict[str, Callable[[object], bool]] = {
     "cuil": _valid_fiscal(validate_cuit),
     "supplier_cuil": _valid_fiscal(validate_cuit),
 }
+
+
+def _classify_cell(value: object, validator: Callable[[object], bool] | None) -> str | None:
+    """Clasifica una celda respecto del importador canónico: ``None`` = aceptada,
+    ``"null"`` = vacía, ``"invalid"`` = no vacía pero RECHAZADA/RUTEADA.
+
+    Fuente ÚNICA del criterio de "fila afectada" — la comparten el diagnóstico
+    (``build_contextual_column_risk``) y la aplicación en el confirm
+    (``affected_rows_for_context``) para no divergir del parser canónico
+    (invariante 3: el backend recalcula, nunca confía en un conteo del cliente)."""
+    if _is_null(value):
+        return "null"
+    if validator is not None and not validator(value):
+        return "invalid"
+    return None
 
 
 def _is_real_target(target_field: str | None) -> bool:
@@ -270,10 +286,10 @@ def build_contextual_column_risk(
             null_rows = 0
             invalid_rows = 0
             for row in rows:
-                value = row.get(entry.source_column)
-                if _is_null(value):
+                kind = _classify_cell(row.get(entry.source_column), validator)
+                if kind == "null":
                     null_rows += 1
-                elif validator is not None and not validator(value):
+                elif kind == "invalid":
                     invalid_rows += 1
 
             null_ratio = null_rows / row_count
@@ -451,3 +467,183 @@ def validate_column_risk_decisions(
                 )
 
     return violations
+
+
+# ── F8b (Task 4): aplicación de las decisiones sobre una COPIA del summary ────
+
+
+def affected_rows_for_context(
+    rows: list[dict[str, Any]],
+    col_targets: list[tuple[str, str]],
+) -> dict[int, dict[str, Any]]:
+    """Filas AFECTADAS de un contexto por una o más columnas ruteadas.
+
+    ``rows`` es la lista ORDENADA de filas del contexto (mismo orden que
+    ``_rows_for_context`` / ``_iter_context_rows``). ``col_targets`` = lista de
+    ``(columna, target)`` de las columnas con decisión
+    ``route_affected_rows_to_others``.
+
+    Devuelve ``{indice_de_fila_en_contexto: {columna_mala: valor_crudo}}`` — una
+    entrada por fila con AL MENOS una columna vacía/inválida, combinando todas
+    sus columnas malas en un solo dict (invariante 6: máx una captura por fila).
+
+    Recalculado con el MISMO criterio que ``build_contextual_column_risk``
+    (``_classify_cell`` + ``_TARGET_VALIDATORS``): el backend NUNCA confía en un
+    ``affected_rows`` provisto por el cliente — lo recomputa (invariante 3)."""
+    affected: dict[int, dict[str, Any]] = {}
+    for idx, row in enumerate(rows):
+        bad: dict[str, Any] = {}
+        for source_column, target in col_targets:
+            validator = _TARGET_VALIDATORS.get(target)
+            if _classify_cell(row.get(source_column), validator) is not None:
+                bad[source_column] = row.get(source_column)
+        if bad:
+            affected[idx] = bad
+    return affected
+
+
+def _iter_context_rows(
+    summary: dict[str, Any], context_id: str
+) -> list[tuple[str, int, dict[str, Any]]]:
+    """``(bucket, posición_en_bucket, fila)`` de un contexto, en el orden de
+    ``_ROW_BUCKETS`` (mismo que ``_rows_for_context``). La posición permite
+    borrar la fila de la lista real del summary copiado. Single-sheet: las filas
+    sin ``__context__`` pertenecen al contexto sintético ``"table"``."""
+    out: list[tuple[str, int, dict[str, Any]]] = []
+    for bucket in _ROW_BUCKETS:
+        blist = summary.get(bucket)
+        if not isinstance(blist, list):
+            continue
+        for pos, row in enumerate(blist):
+            if isinstance(row, dict) and row.get("__context__", "table") == context_id:
+                out.append((bucket, pos, row))
+    return out
+
+
+@dataclass(frozen=True)
+class AppliedColumnRisk:
+    """Resultado de aplicar las decisiones de riesgo sobre una COPIA del summary.
+
+    - ``summary``: copia PROFUNDA ya mutada (el original nunca se toca).
+    - ``dropped_columns``: ``{context_id: [columnas eliminadas]}``.
+    - ``routed_rows``: ``{context_id: {row_index: {columna_mala: valor}}}`` — lo
+      que el caller (Task 4) captura en "Otros" DENTRO del savepoint.
+    - ``routed_entity``: entidad efectiva por contexto ruteado (para
+      ``suggested_entity`` de la captura).
+    - ``routed_totals``: total de filas del contexto ruteado (para el contador
+      ``filas_riesgo_importadas`` = total − afectadas)."""
+
+    summary: dict[str, Any]
+    dropped_columns: dict[str, list[str]]
+    routed_rows: dict[str, dict[int, dict[str, Any]]]
+    routed_entity: dict[str, str]
+    routed_totals: dict[str, int]
+
+
+def apply_column_risk_decisions(
+    summary: dict[str, Any],
+    decisions: list[ColumnRiskDecision],
+    context_entities: dict[str, str],
+) -> AppliedColumnRisk:
+    """Aplica las decisiones (ya validadas en Task 2) sobre una COPIA PROFUNDA del
+    summary — el original (ORM-tracked) NUNCA se muta (invariante 4).
+
+    - ``drop_column``: saca la columna de las filas de ESE contexto + de sus
+      ``headers``/``preview_rows`` (por contexto y, en single-sheet, top-level) +
+      de ``columns_at_risk``. Solo ese contexto, nunca otro.
+    - ``route_affected_rows_to_others``: RECALCULA las filas afectadas (vacías/
+      inválidas por el parser canónico, invariante 3), las SACA del bucket (no se
+      importan) y las devuelve para capturarlas en "Otros". Las filas NO
+      afectadas quedan y se importan normal.
+
+    PURA (sin DB, sin LLM): la captura en "Otros" y la auditoría las hace el
+    caller DENTRO del savepoint del confirm."""
+    new_summary = copy.deepcopy(summary)
+
+    drops: dict[str, set[str]] = defaultdict(set)
+    routes: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for d in decisions:
+        if d.action == "drop_column":
+            drops[d.context_id].add(d.source_column)
+        elif d.action == "route_affected_rows_to_others":
+            routes[d.context_id].append((d.source_column, d.target_field))
+
+    contexts = {
+        c.get("context_id"): c
+        for c in resolve_contexts(new_summary)
+        if c.get("context_id")
+    }
+
+    routed_rows: dict[str, dict[int, dict[str, Any]]] = {}
+    routed_entity: dict[str, str] = {}
+    routed_totals: dict[str, int] = {}
+
+    # ── ROUTE primero: captura los valores ANTES de un posible drop de otra columna
+    for cid, col_targets in routes.items():
+        ordered = _iter_context_rows(new_summary, cid)
+        rows = [row for (_b, _p, row) in ordered]
+        affected = affected_rows_for_context(rows, col_targets)
+        routed_rows[cid] = affected
+        routed_totals[cid] = len(ordered)
+        routed_entity[cid] = (
+            context_entities.get(cid)
+            or str((contexts.get(cid) or {}).get("entity_type") or "")
+        )
+        # Borrar las filas afectadas de sus buckets (posiciones desc por bucket
+        # para no correr los índices al eliminar).
+        to_remove: dict[str, list[int]] = defaultdict(list)
+        for idx in affected:
+            bucket, pos, _row = ordered[idx]
+            to_remove[bucket].append(pos)
+        for bucket, positions in to_remove.items():
+            blist = new_summary.get(bucket)
+            if isinstance(blist, list):
+                for pos in sorted(positions, reverse=True):
+                    del blist[pos]
+
+    # ── DROP después ──
+    dropped_columns: dict[str, list[str]] = {}
+    all_dropped_names: set[str] = set()
+    for cid, cols in drops.items():
+        dropped_columns[cid] = sorted(cols)
+        all_dropped_names |= cols
+        # Filas del contexto (sobre lo que quedó tras el route).
+        for _b, _p, row in _iter_context_rows(new_summary, cid):
+            for c in cols:
+                row.pop(c, None)
+        # headers/preview por contexto (multi-hoja).
+        for ctx in new_summary.get("mapping_contexts") or []:
+            if isinstance(ctx, dict) and ctx.get("context_id") == cid:
+                if isinstance(ctx.get("headers"), list):
+                    ctx["headers"] = [h for h in ctx["headers"] if h not in cols]
+                for pr in ctx.get("preview_rows") or []:
+                    if isinstance(pr, dict):
+                        for c in cols:
+                            pr.pop(c, None)
+        # Single-sheet: headers/preview top-level (contexto sintético "table").
+        if cid == "table":
+            if isinstance(new_summary.get("headers"), list):
+                new_summary["headers"] = [
+                    h for h in new_summary["headers"] if h not in cols
+                ]
+            for pr in new_summary.get("preview_rows") or []:
+                if isinstance(pr, dict):
+                    for c in cols:
+                        pr.pop(c, None)
+
+    # columns_at_risk (diagnóstico global legacy): sacar las columnas dropeadas
+    # para que la copia compacta persistida no siga marcándolas como riesgosas.
+    if all_dropped_names and isinstance(new_summary.get("columns_at_risk"), list):
+        new_summary["columns_at_risk"] = [
+            e
+            for e in new_summary["columns_at_risk"]
+            if not (isinstance(e, dict) and e.get("column") in all_dropped_names)
+        ]
+
+    return AppliedColumnRisk(
+        summary=new_summary,
+        dropped_columns=dropped_columns,
+        routed_rows=routed_rows,
+        routed_entity=routed_entity,
+        routed_totals=routed_totals,
+    )

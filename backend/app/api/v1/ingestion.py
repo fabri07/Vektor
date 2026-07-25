@@ -40,6 +40,7 @@ from app.application.services.column_mapping_service import (
 )
 from app.application.services.column_risk import (
     MappingEntry,
+    apply_column_risk_decisions,
     build_contextual_column_risk,
     context_is_included,
     resolve_contexts,
@@ -62,6 +63,9 @@ from app.application.services.ingestion_import_service import (
     EmptyImportError,
     check_nonempty_import,
     insert_confirmed_data,
+)
+from app.application.services.ingestion_import_service import (
+    _capture_column_risk_rows as capture_column_risk_rows,
 )
 from app.application.services.ingestion_lease_service import (
     ImportLeaseLostError,
@@ -106,6 +110,7 @@ from app.schemas.ingestion import (
     ColumnAtRisk,
     ColumnMapping,
     ColumnMappingSuggestion,
+    ColumnRiskDecision,
     ColumnRiskRequest,
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
@@ -1227,9 +1232,18 @@ async def confirm_file(
     # Mismo espíritu que el gate de fecha (F6-A1): una decisión inválida (dropear
     # el único mapeo de un requerido, o rutear un opcional no seleccionado) se
     # rechaza upfront — nunca a mitad del import con el lease ya tomado.
+    # Vista del mapeo efectivo por contexto (columna→campo, entidad efectiva) que
+    # comparten la validación pre-lease (Task 2) y la aplicación dentro del
+    # savepoint (Task 4). Se inicializa siempre (aunque no haya decisiones) para
+    # que su referencia posterior sea segura.
+    _risk_context_mappings: dict[str, list[MappingEntry]] = defaultdict(list)
+    _risk_context_entities: dict[str, str] = {}
+    # Decisiones que efectivamente se aplican: solo las de contextos INCLUIDOS en
+    # el import (misma inclusión que el importador). Una decisión sobre un contexto
+    # EXCLUIDO es no-op — sus filas ni se procesan, así que jamás debe rutear filas
+    # a "Otros" ni dropear nada.
+    _effective_risk_decisions: list[ColumnRiskDecision] = []
     if body.column_risk_decisions:
-        _risk_context_mappings: dict[str, list[MappingEntry]] = defaultdict(list)
-        _risk_context_entities: dict[str, str] = {}
         for _m in body.column_mappings:
             if _m.target_field == "ignore":
                 continue
@@ -1256,6 +1270,22 @@ async def confirm_file(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Decisión de columna riesgosa inválida: {_risk_detail}",
             )
+        _effective_risk_decisions = [
+            d
+            for d in body.column_risk_decisions
+            if _context_included(
+                d.context_id, _risk_context_entities.get(d.context_id, "")
+            )
+        ]
+    # Pares (context_id, source_column) DROPEADOS (solo contextos incluidos). El
+    # context_id sintético "table" cubre los mapeos planos (single-sheet). Se usa
+    # para saltear la columna en los mapeos que se pasan al importador y para no
+    # crearle un custom field.
+    _dropped_pairs: set[tuple[str, str]] = {
+        (d.context_id, d.source_column)
+        for d in _effective_risk_decisions
+        if d.action == "drop_column"
+    }
 
     # ── F4: tomar el lease per-file ANTES de cualquier escritura ────────────────
     # CAS atómico NEEDS_CONFIRMATION→IMPORTING (o takeover si quedó stale),
@@ -1285,6 +1315,12 @@ async def confirm_file(
             )
 
             for _mapping in body.column_mappings:
+                # Una columna dropeada no crea custom field (no se va a importar).
+                if (
+                    _mapping.context_id or "table",
+                    _mapping.source_column,
+                ) in _dropped_pairs:
+                    continue
                 if _mapping.target_field.startswith("custom_field:"):
                     _field_key = _mapping.target_field[len("custom_field:"):]
                     await ensure_custom_field_exists(
@@ -1295,8 +1331,25 @@ async def confirm_file(
                         _mapping.source_column,  # nombre de la columna como label inicial
                     )
 
+        # ── F8b (Task 4): aplicar las decisiones de riesgo sobre una COPIA del
+        # summary, DENTRO del savepoint. drop_column filtra columnas del summary
+        # (y, más abajo, de los mapeos); route recalcula las filas afectadas y las
+        # aparta para capturarlas en "Otros". Nada se persiste hasta el commit del
+        # savepoint → si el confirm falla, rollback integral (invariante 4).
+        _applied = (
+            apply_column_risk_decisions(
+                record.parsed_summary_json or {},
+                _effective_risk_decisions,
+                _risk_context_entities,
+            )
+            if _effective_risk_decisions
+            else None
+        )
+
         # Insert parsed rows into business tables, then mark done
-        updated_summary = dict(record.parsed_summary_json or {})
+        updated_summary = (
+            _applied.summary if _applied is not None else dict(record.parsed_summary_json or {})
+        )
         updated_summary["confirmed_fields"] = body.confirmed_fields
         # Persistir la elección de tratamiento del stock (apertura vs compra) en el summary
         # para que una relectura posterior conserve la decisión sin volver a preguntar.
@@ -1305,12 +1358,20 @@ async def confirm_file(
 
         explicit_mappings: dict[str, str] | None = None
         if _flat_mappings:
-            explicit_mappings = {m.source_column: m.target_field for m in _flat_mappings}
+            # F8b: una columna dropeada ("table") no se pasa al importador.
+            explicit_mappings = {
+                m.source_column: m.target_field
+                for m in _flat_mappings
+                if ("table", m.source_column) not in _dropped_pairs
+            }
 
         context_mappings: dict[str, dict[str, str]] | None = None
         if _ctx_mappings:
             _cm: dict[str, dict[str, str]] = defaultdict(dict)
             for m in _ctx_mappings:
+                # F8b: saltear las columnas dropeadas de su contexto.
+                if (m.context_id or "table", m.source_column) in _dropped_pairs:
+                    continue
                 _cm[m.context_id or ""][m.source_column] = m.target_field
             context_mappings = dict(_cm)
 
@@ -1368,6 +1429,62 @@ async def confirm_file(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=exc.user_message,
             ) from exc
+
+        # ── F8b (Task 4): capturar en "Otros" las filas ruteadas por columna
+        # riesgosa + counters + auditoría AGREGADA, todo DENTRO del savepoint (si
+        # el confirm falla, se revierte junto con el import — invariante 4). La
+        # captura usa la primitiva idempotente de Task 3 (huella `risk:` propia).
+        if _applied is not None:
+            _risk_a_otros = 0
+            _risk_importadas = 0
+            for _cid, _rows_by_idx in _applied.routed_rows.items():
+                if _rows_by_idx:
+                    _risk_a_otros += await capture_column_risk_rows(
+                        session,
+                        tenant.tenant_id,
+                        file_id,
+                        _cid,
+                        # Entidad efectiva del contexto (sale/expense/product/...);
+                        # cae a "otros" si no se pudo resolver (nunca > 10 chars).
+                        _applied.routed_entity.get(_cid) or "otros",
+                        _rows_by_idx,
+                        source="ingestion",
+                    )
+                _risk_importadas += _applied.routed_totals.get(_cid, 0) - len(_rows_by_idx)
+            _columnas_eliminadas = sum(len(v) for v in _applied.dropped_columns.values())
+            counts["filas_riesgo_a_otros"] = _risk_a_otros
+            counts["filas_riesgo_importadas"] = _risk_importadas
+            counts["columnas_eliminadas"] = _columnas_eliminadas
+
+            # Auditoría AGREGADA (insert-only), sin PII (solo nombres de columna y
+            # conteos — nunca valores/documentos/emails/teléfonos; invariantes 7, 9).
+            if _applied.dropped_columns or _risk_a_otros or _columnas_eliminadas:
+                from app.persistence.models.audit import (  # noqa: PLC0415
+                    DecisionAuditLog,
+                )
+
+                session.add(
+                    DecisionAuditLog(
+                        tenant_id=tenant.tenant_id,
+                        decision_type="INGESTION_COLUMN_RISK_DECISIONS",
+                        decision_data={
+                            "file_id": str(file_id),
+                            "dropped_columns": _applied.dropped_columns,
+                            "routed_to_others": {
+                                _cid: len(_rows)
+                                for _cid, _rows in _applied.routed_rows.items()
+                                if _rows
+                            },
+                            "filas_riesgo_a_otros": _risk_a_otros,
+                            "filas_riesgo_importadas": _risk_importadas,
+                            "columnas_eliminadas": _columnas_eliminadas,
+                        },
+                        triggered_by="ingestion:confirm",
+                        actor_user_id=None,
+                        context={"source": "ingestion.confirm_file"},
+                        created_at=datetime.now(UTC),
+                    )
+                )
 
         # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
         # Para archivos grandes (multi-hoja o muchas filas) el JSONB puede pesar 10+ MB;
@@ -1546,6 +1663,17 @@ async def confirm_file(
         # se persiste ahí (evita doble conteo/mensaje solapado).
         warnings.append(
             f"{counts['otros']} fila(s) quedaron en «Otros» para que las revises y clasifiques."
+        )
+    # F8b: decisiones de columnas riesgosas aplicadas en este confirm.
+    if counts.get("columnas_eliminadas"):
+        warnings.append(
+            f"{counts['columnas_eliminadas']} columna(s) con alto porcentaje de datos "
+            "faltantes se eliminaron de la importación por tu decisión."
+        )
+    if counts.get("filas_riesgo_a_otros"):
+        warnings.append(
+            f"{counts['filas_riesgo_a_otros']} fila(s) con datos faltantes o inválidos en "
+            "columnas riesgosas se enviaron a «Otros» para que las completes."
         )
 
     # Aviso temporal (human-in-the-loop): si las ventas recién importadas dejan el stock
