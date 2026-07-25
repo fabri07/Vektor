@@ -33,6 +33,30 @@ class ColumnAtRisk(BaseModel):
     recommendation: str = "drop"
 
 
+class ContextualColumnRisk(BaseModel):
+    """F8a: riesgo de una columna mapeada, POR CONTEXTO y según el mapeo efectivo.
+
+    Reemplaza al diagnóstico global ``ColumnAtRisk`` (basado solo en el nombre de
+    columna). Solo son accionables los targets requeridos y los opcionales que el
+    usuario seleccionó explícitamente (``user_selected=True``). ``affected_rows`` es
+    exacto (vacíos + inválidos según el parser canónico del target).
+    """
+
+    context_id: str
+    entity_type: str
+    source_column: str
+    target_field: str
+    null_ratio: float  # 0.0–1.0; la UI lo muestra ×100
+    affected_rows: int  # vacíos + inválidos, exacto
+    null_rows: int
+    invalid_rows: int
+    field_requirement: Literal["required", "explicitly_selected", "optional"]
+    mapping_source: Literal["tenant_history", "heuristic", "fuzzy", "llm", "none"]
+    user_selected: bool
+    allowed_actions: list[str] = Field(default_factory=list)
+    recommendation: str
+
+
 class MasterPreviewSample(BaseModel):
     """Fila de muestra del preview de un maestro (cliente/proveedor). PII
     minimizada a propósito: solo nombre + estado + primer diagnóstico — nunca
@@ -66,7 +90,11 @@ class FilePreviewResponse(BaseModel):
     file_id: UUID
     processing_status: str
     parsed_summary_json: dict[str, Any] | None
+    # Deprecado (diagnóstico global por nombre de columna); ver contextual_column_risk.
     columns_at_risk: list[ColumnAtRisk] = []
+    # F8a: riesgo contextual por columna mapeada (informativo en el preview, desde
+    # las sugerencias de mapeo). Vacío si el archivo no tiene contextos transaccionales.
+    contextual_column_risk: list[ContextualColumnRisk] = Field(default_factory=list)
     # F7d: preview universal de maestros (clientes/proveedores) — vacío si el
     # archivo no tiene hojas de maestro o si no se pudo estimar el mapeo.
     master_previews: list[MasterPreviewSummary] = Field(default_factory=list)
@@ -85,7 +113,7 @@ class ColumnMappingSuggestion(BaseModel):
     sample_values: list[str]
     target_field: str | None
     confidence: float
-    source: Literal["tenant_history", "heuristic", "fuzzy", "none"]
+    source: Literal["tenant_history", "heuristic", "fuzzy", "llm", "none"]
     status: Literal["mapped", "unmapped", "required_missing"]
     # Contexto al que pertenece la sugerencia (hoja/tabla). None = archivo de un solo contexto.
     context_id: str | None = None
@@ -98,6 +126,25 @@ class ColumnMapping(BaseModel):
     context_id: str | None = None
     # entity_type del contexto (sale|expense|product|customer|supplier)
     entity_type: str | None = None
+    # F8a: el usuario tocó/confirmó/creó este mapping (vs. aceptar pasivamente una
+    # sugerencia). Solo True vuelve accionable un target OPCIONAL en el protocolo de
+    # riesgo. El backend nunca lo infiere de la mera presencia del mapping.
+    user_selected: bool = False
+
+
+class ColumnRiskRequest(BaseModel):
+    """Body del endpoint read-only ``POST /files/{id}/column-risk``: el mapeo
+    provisional (draft) que el usuario armó, para recalcular el riesgo con el mapeo
+    efectivo (incluye ``user_selected`` por columna). No persiste nada.
+
+    ``confirmed_fields``/``context_confirmed`` espejan el body del confirm: los
+    contextos que el usuario decidió NO importar no generan riesgo accionable
+    (misma decisión de inclusión que ``POST /confirm``)."""
+
+    column_mappings: list[ColumnMapping] = Field(default_factory=list)
+    context_entity: dict[str, str] = Field(default_factory=dict)
+    confirmed_fields: dict[str, bool] = Field(default_factory=dict)
+    context_confirmed: dict[str, bool] = Field(default_factory=dict)
 
 
 class TenantColumnMappingResponse(BaseModel):
