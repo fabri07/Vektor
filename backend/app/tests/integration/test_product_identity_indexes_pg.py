@@ -235,9 +235,12 @@ async def test_string_vacio_queda_fuera_del_parcial(
     """
     await _seed_tenant(sm, tenant_id)
     inserta = text(
-        "INSERT INTO products (id, tenant_id, name, sale_price_ars, stock_units, "
-        "is_active, sku, sku_normalized, created_at, updated_at) "
-        "VALUES (:id, :t, 'Legacy', 100, 0, true, '', '', now(), now())"
+        # name_normalized es NOT NULL desde F8d (mig 20260804_0001): este INSERT crudo
+        # (que saltea el listener del ORM) tiene que proveerlo con un valor válido. El
+        # test es sobre sku_normalized='' — name_normalized solo necesita ser no vacío.
+        "INSERT INTO products (id, tenant_id, name, name_normalized, sale_price_ars, "
+        "stock_units, is_active, sku, sku_normalized, created_at, updated_at) "
+        "VALUES (:id, :t, 'Legacy', 'legacy', 100, 0, true, '', '', now(), now())"
     )
     async with sm() as s:
         for _ in range(2):
