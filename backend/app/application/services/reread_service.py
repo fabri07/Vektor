@@ -53,6 +53,7 @@ idempotente (upsert por SKU/nombre). Se reporta en ``details_json``.
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -63,6 +64,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import ingestion_import_service as _iis
 from app.application.services import maintenance_lock_service
+from app.application.services.column_risk import (
+    AppliedColumnRisk,
+    apply_column_risk_decisions,
+)
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
@@ -79,6 +84,12 @@ from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_STATUS_DISMISSED,
+    UNCLASSIFIED_STATUS_PENDING,
+    UnclassifiedRecord,
+)
+from app.schemas.ingestion import ColumnRiskDecision
 
 # Helpers/constantes de parseo compartidos con el import — reusados en el estimado
 # del preview para clasificar/anclar las filas IGUAL que ``insert_confirmed_data``.
@@ -96,6 +107,11 @@ _row_val = _iis._row_val
 _resolve_product = _iis._resolve_product
 _load_import_fingerprints = _iis._load_import_fingerprints
 _load_product_index = _iis._load_product_index
+# F8b (Task 5): primitivas de captura/correlación de riesgo compartidas con el
+# confirm (reuso deliberado, no se reimplementa la captura).
+_capture_column_risk_rows = _iis._capture_column_risk_rows
+_risk_row_anchor = _iis._risk_row_anchor
+_RISK_REF_KEY = _iis.RISK_REF_KEY
 
 logger = get_logger(__name__)
 
@@ -1018,6 +1034,123 @@ def _estimate_reread(
     )
 
 
+# ── F8b (Task 5): decisiones de riesgo de columnas en la relectura ──────────────
+
+
+def _load_risk_decisions(file: UploadedFile) -> list[ColumnRiskDecision]:
+    """Decisiones de riesgo de columnas que el confirm (Task 4/5) persistió en
+    ``parsed_summary_json`` — mismo patrón que ``master_column_mappings``.
+
+    Vacío si el archivo se confirmó antes de F8b o sin decisiones: la relectura
+    simplemente no reaplica nada (cobertura documentada, no un bug). Una decisión
+    corrupta se ignora sin romper la relectura."""
+    raw = (file.parsed_summary_json or {}).get("column_risk_decisions") or []
+    decisions: list[ColumnRiskDecision] = []
+    if not isinstance(raw, list):
+        return decisions
+    for d in raw:
+        if isinstance(d, dict):
+            try:
+                decisions.append(ColumnRiskDecision(**d))
+            except Exception:  # noqa: BLE001 — decisión ilegible: se saltea
+                continue
+    return decisions
+
+
+def _apply_risk_decisions(
+    file: UploadedFile, fresh: dict[str, Any]
+) -> AppliedColumnRisk | None:
+    """Reaplica las decisiones persistidas sobre el summary fresco (copia; el
+    original no se muta). ``None`` si no hay decisiones. RECOMPUTA las filas
+    afectadas con el criterio canónico (``_classify_cell`` vía
+    ``apply_column_risk_decisions``) — NUNCA confía en un ``affected_rows``
+    guardado (invariante 3)."""
+    decisions = _load_risk_decisions(file)
+    if not decisions:
+        return None
+    # ``context_entities={}``: la entidad efectiva se toma del summary por contexto
+    # (fallback dentro de ``apply_column_risk_decisions``); el confirm ya validó las
+    # decisiones, acá solo se reaplican.
+    return apply_column_risk_decisions(fresh, decisions, {})
+
+
+def _parse_risk_ref(row_data: dict[str, Any] | None) -> tuple[str, int] | None:
+    """``(context_id, row_index)`` desde la clave de correlación ``__risk_ref__``
+    que la captura (Task 5) guardó en el ``UnclassifiedRecord``. ``None`` si el
+    registro no proviene de una captura de riesgo o la clave es ilegible."""
+    if not row_data:
+        return None
+    raw = row_data.get(_RISK_REF_KEY)
+    if not raw:
+        return None
+    try:
+        obj = json.loads(raw)
+        return str(obj["context_id"]), int(obj["row_index"])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _reconcile_column_risk(
+    session: AsyncSession,
+    file: UploadedFile,
+    tenant_id: uuid.UUID,
+    applied: AppliedColumnRisk,
+) -> None:
+    """Honra las decisiones de riesgo en la relectura (dentro de la transacción del
+    apply):
+
+    1. Re-captura en "Otros" las filas TODAVÍA afectadas (recomputadas sobre el
+       summary fresco). Idempotente por la huella ``risk:*`` de Task 3 — una fila
+       ya capturada no se duplica.
+    2. Resuelve el "Otros" de las filas CORREGIDAS: las que tenían captura previa
+       (``__risk_ref__``) pero ya NO están afectadas se marcan DISMISSED (resueltas,
+       alineado a ``VOID_REASON_REREAD``) y se borra su huella de riesgo. Así se
+       importan normal en este mismo reimport (ya estaban en ``applied.summary``,
+       que solo removió las que siguen mal) y una relectura futura vuelve a
+       capturarlas si el problema reaparece.
+    """
+    file_id = file.id
+
+    # (1) Re-capturar afectadas (dedup por huella risk:*). ``routed_rows`` ya viene
+    # recomputado por ``apply_column_risk_decisions``.
+    still_affected: set[tuple[str, int]] = set()
+    for cid, rows_by_idx in applied.routed_rows.items():
+        for idx in rows_by_idx:
+            still_affected.add((cid, idx))
+        if rows_by_idx:
+            await _capture_column_risk_rows(
+                session,
+                tenant_id,
+                file_id,
+                cid,
+                applied.routed_entity.get(cid) or "otros",
+                rows_by_idx,
+                source="reanalysis",
+            )
+
+    # (2) Resolver Otros de filas corregidas.
+    pending_res = await session.execute(
+        select(UnclassifiedRecord).where(
+            UnclassifiedRecord.tenant_id == tenant_id,
+            UnclassifiedRecord.uploaded_file_id == file_id,
+            UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+        )
+    )
+    now = datetime.now(UTC)
+    corrected_fps: set[str] = set()
+    for rec in pending_res.scalars().all():
+        ref = _parse_risk_ref(rec.row_data)
+        if ref is None:
+            continue  # no es una captura de riesgo correlacionada
+        if ref in still_affected:
+            continue  # sigue afectada → preservar sin duplicar
+        rec.status = UNCLASSIFIED_STATUS_DISMISSED
+        rec.resolved_at = now
+        cid, idx = ref
+        corrected_fps.add(_hash_anchor(_risk_row_anchor(tenant_id, file_id, cid, idx)))
+    await _delete_fingerprints(session, tenant_id, corrected_fps)
+
+
 # ── API pública ────────────────────────────────────────────────────────────────
 
 
@@ -1038,6 +1171,11 @@ async def preview_reread(
     s3 = s3 or S3Client()
     fresh = await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
+    # F8b (Task 5): reaplicar decisiones de riesgo para que el estimado refleje los
+    # drop/route (filas ruteadas salen de los buckets → no se cuentan como nuevas).
+    _applied = _apply_risk_decisions(file, fresh)
+    if _applied is not None:
+        fresh = _applied.summary
     sales, expenses = await _load_existing_records(session, file_id, tenant_id)
     # Huellas de import (lo que el apply usa para deduplicar) + catálogo de productos
     # (para estimar altas/reposiciones). Dos queries, en memoria.
@@ -1071,6 +1209,14 @@ async def apply_reread(
     fresh = await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
 
+    # F8b (Task 5): reaplicar las decisiones de riesgo persistidas por el confirm
+    # sobre el summary fresco (copia; recomputando afectadas — invariante 3). El
+    # summary resultante honra drop/route: la reconciliación importa desde ÉL, así
+    # una fila corregida vuelve al bucket y se importa, y una que sigue mal queda
+    # fuera. ``None`` si el archivo se confirmó sin decisiones (relectura clásica).
+    _applied = _apply_risk_decisions(file, fresh)
+    summary_for_import = _applied.summary if _applied is not None else fresh
+
     if run is None:
         run = DataRepairRun(
             tenant_id=tenant_id,
@@ -1087,12 +1233,20 @@ async def apply_reread(
     # venta/gasto de este archivo puede referenciar un cliente/proveedor recién
     # actualizado. No-op si el confirm original no guardó mapeo de columnas.
     clientes_count, proveedores_count = await _reread_master_entities(
-        session, tenant_id, file, fresh, confirmed_fields
+        session, tenant_id, file, summary_for_import, confirmed_fields
     )
 
-    result = await _reconcile(session, file, tenant_id, fresh, confirmed_fields, run)
+    result = await _reconcile(
+        session, file, tenant_id, summary_for_import, confirmed_fields, run
+    )
     result.clientes = clientes_count
     result.proveedores = proveedores_count
+
+    # F8b (Task 5): tras el reimport, honrar las decisiones de riesgo — re-capturar
+    # afectadas (dedup) y resolver el "Otros" de las filas corregidas. Dentro de la
+    # transacción del apply (atómico con el resto de la relectura).
+    if _applied is not None:
+        await _reconcile_column_risk(session, file, tenant_id, _applied)
 
     run.status = "APPLIED"
     run.completed_at = datetime.now(UTC)
