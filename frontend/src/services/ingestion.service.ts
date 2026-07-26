@@ -30,6 +30,32 @@ export interface ColumnAtRisk {
   recommendation: string;
 }
 
+// F8c: diagnóstico de riesgo por columna dentro de un contexto (reemplaza el
+// legacy ColumnAtRisk global). null_ratio es 0.0–1.0 → la UI lo muestra ×100.
+export interface ContextualColumnRisk {
+  context_id: string;
+  entity_type: string;
+  source_column: string;
+  target_field: string;
+  null_ratio: number; // 0.0–1.0
+  affected_rows: number;
+  null_rows: number;
+  invalid_rows: number;
+  field_requirement: "required" | "explicitly_selected" | "optional";
+  mapping_source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none";
+  user_selected: boolean;
+  allowed_actions: string[]; // "drop_column" | "route_affected_rows_to_others"
+  recommendation: string;
+}
+
+// F8c: decisión del usuario sobre una columna riesgosa dentro de un contexto.
+export interface ColumnRiskDecision {
+  context_id: string;
+  source_column: string;
+  target_field: string;
+  action: "drop_column" | "route_affected_rows_to_others";
+}
+
 // F7d: fila de muestra del preview de un maestro (cliente/proveedor). El
 // backend minimiza PII a propósito — nunca trae DNI/CUIT/email/teléfono
 // crudos, solo nombre + estado + un diagnóstico corto.
@@ -60,6 +86,9 @@ export interface FilePreview {
   processing_status: string;
   parsed_summary_json: Record<string, unknown> | null;
   columns_at_risk: ColumnAtRisk[];
+  // F8c: diagnóstico contextual por columna; opcional para archivos viejos que
+  // no lo hayan traído en su parsed_summary_json.
+  contextual_column_risk?: ContextualColumnRisk[];
   // F7e: vacío si el archivo no tiene hojas de maestro o no se pudo estimar el mapeo.
   master_previews: MasterPreviewSummary[];
 }
@@ -107,6 +136,10 @@ export interface ColumnMapping {
   target_field: string; // campo canónico, "ignore", o "custom_field:{key}"
   context_id?: string | null;
   entity_type?: string | null;
+  // F8c: el frontend lo marca en true solo cuando el usuario cambió el target
+  // manualmente. El backend nunca lo infiere — es distinto de `source`/
+  // `mapping_source` (que indican de dónde salió la sugerencia).
+  user_selected?: boolean;
 }
 
 /** Contexto de mapeo: una hoja/tabla/grupo detectado dentro de un archivo. */
@@ -277,6 +310,8 @@ export const ingestionService = {
     contextEntity?: Record<string, string>,
     // Solo relevante cuando el archivo trae stock/productos: cómo tratar ese stock.
     stockTreatment?: StockTreatment,
+    // F8c: decisiones del usuario sobre columnas riesgosas (drop / enrutar a Otros).
+    columnRiskDecisions?: ColumnRiskDecision[],
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
@@ -286,8 +321,34 @@ export const ingestionService = {
         context_confirmed: contextConfirmed ?? {},
         context_entity: contextEntity ?? {},
         stock_treatment: stockTreatment ?? null,
+        column_risk_decisions: columnRiskDecisions ?? [],
       },
       { timeout: CONFIRM_TIMEOUT_MS },
+    );
+    return res.data;
+  },
+
+  // F8c: recalcula el riesgo contextual de columnas en vivo (p. ej. tras
+  // cambiar un mapeo o confirmar un contexto), sin persistir nada.
+  async recomputeColumnRisk(
+    fileId: string,
+    body: {
+      columnMappings: ColumnMapping[];
+      contextEntity: Record<string, string>;
+      confirmedFields: Record<string, boolean>;
+      contextConfirmed: Record<string, boolean>;
+    },
+    signal?: AbortSignal,
+  ): Promise<ContextualColumnRisk[]> {
+    const res = await api.post<ContextualColumnRisk[]>(
+      `/ingestion/files/${fileId}/column-risk`,
+      {
+        column_mappings: body.columnMappings,
+        context_entity: body.contextEntity,
+        confirmed_fields: body.confirmedFields,
+        context_confirmed: body.contextConfirmed,
+      },
+      { signal },
     );
     return res.data;
   },
