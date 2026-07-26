@@ -32,9 +32,18 @@ Orden (mismo patrón que ``20260731_0002_backfill_product_identity.py`` +
    corta y la versión vieja sigue sirviendo. El operador corre
    ``scripts/preflight_product_name_normalized.py`` para ubicar y reparar el
    ``name`` de esas filas antes de reintentar.
-3. ``op.alter_column(..., nullable=False)`` — SIN ``server_default`` (un
-   default no protege contra ``''``, que es exactamente lo que ``_verify_clean``
-   ya descartó que exista).
+3. ``SET NOT NULL`` — SIN ``server_default`` (un default no protege contra
+   ``''``, que es exactamente lo que ``_verify_clean`` ya descartó que exista).
+   En Postgres, en vez de un ``ALTER COLUMN ... SET NOT NULL`` directo (ACCESS
+   EXCLUSIVE + full table scan bajo tráfico vivo del preDeploy — el mismo
+   problema que documenta ``20260802_0001``), se usa el patrón zero-lock:
+   ``ADD CONSTRAINT ... CHECK (...) NOT VALID`` (instantáneo) → ``VALIDATE
+   CONSTRAINT`` (solo SHARE UPDATE EXCLUSIVE, no bloquea lecturas/escrituras) →
+   ``SET NOT NULL`` (PG 12+ lo resuelve instantáneo porque la CHECK ya
+   validada prueba el NOT NULL, sin escanear de nuevo) → ``DROP CONSTRAINT``
+   (la CHECK queda redundante una vez que el NOT NULL está puesto; catalog-only,
+   instantáneo). En otros dialectos (SQLite, tests) se usa el
+   ``alter_column(nullable=False)`` simple.
 
 ``downgrade`` revierte la columna a nullable (reversible; no re-vacía datos).
 
@@ -57,6 +66,8 @@ branch_labels = None
 depends_on = None
 
 _BATCH = 500
+
+_CHECK_NAME = "ck_products_name_normalized_not_null"
 
 
 def _run_backfill(bind: sa.Connection) -> None:
@@ -109,18 +120,57 @@ def upgrade() -> None:
     bind = op.get_bind()
     _run_backfill(bind)
     _verify_clean(bind)
-    op.alter_column(
-        "products",
-        "name_normalized",
-        existing_type=sa.String(400),
-        nullable=False,
+
+    if bind.dialect.name != "postgresql":
+        # SQLite (tests): sin locking real que evitar, alcanza con el ALTER
+        # directo. `batch_alter_table` recrea la tabla, que es como SQLite
+        # soporta modificar NOT NULL de una columna existente.
+        with op.batch_alter_table("products") as batch_op:
+            batch_op.alter_column(
+                "name_normalized",
+                existing_type=sa.String(400),
+                nullable=False,
+            )
+        return
+
+    # Postgres: patrón zero-lock (mismo motivo que 20260802_0001). Un
+    # `ALTER COLUMN ... SET NOT NULL` directo toma ACCESS EXCLUSIVE + escanea
+    # toda la tabla bajo el tráfico vivo del preDeploy. En vez de eso:
+    #   1) CHECK NOT VALID — instantáneo, no escanea.
+    #   2) VALIDATE CONSTRAINT — solo SHARE UPDATE EXCLUSIVE, no bloquea
+    #      lecturas/escrituras concurrentes.
+    #   3) SET NOT NULL — PG 12+ lo resuelve instantáneo porque la CHECK ya
+    #      validada prueba el NOT NULL, sin volver a escanear.
+    #   4) DROP CONSTRAINT — la CHECK queda redundante con el NOT NULL puesto;
+    #      catalog-only, instantáneo.
+    bind.execute(
+        sa.text(
+            f"ALTER TABLE products ADD CONSTRAINT {_CHECK_NAME} "
+            "CHECK (name_normalized IS NOT NULL) NOT VALID"
+        )
     )
+    bind.execute(sa.text(f"ALTER TABLE products VALIDATE CONSTRAINT {_CHECK_NAME}"))
+    bind.execute(sa.text("ALTER TABLE products ALTER COLUMN name_normalized SET NOT NULL"))
+    bind.execute(sa.text(f"ALTER TABLE products DROP CONSTRAINT {_CHECK_NAME}"))
 
 
 def downgrade() -> None:
-    op.alter_column(
-        "products",
-        "name_normalized",
-        existing_type=sa.String(400),
-        nullable=True,
-    )
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        # Defensivo: si un upgrade quedó a mitad de camino (falló entre el ADD
+        # y el DROP), no dejar la CHECK huérfana al revertir.
+        bind.execute(sa.text(f"ALTER TABLE products DROP CONSTRAINT IF EXISTS {_CHECK_NAME}"))
+        op.alter_column(
+            "products",
+            "name_normalized",
+            existing_type=sa.String(400),
+            nullable=True,
+        )
+        return
+
+    with op.batch_alter_table("products") as batch_op:
+        batch_op.alter_column(
+            "name_normalized",
+            existing_type=sa.String(400),
+            nullable=True,
+        )
