@@ -824,6 +824,254 @@ class TestConfirmEndpoint:
         assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
         assert refreshed.import_attempt_id is None
 
+    async def test_confirm_drop_requerido_sin_reemplazo_devuelve_422_antes_del_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F8b (Task 2): dropear la ÚNICA columna mapeada a un target requerido
+        (transaction_date) dejaría el requerido sin mapear. Se rechaza con 422
+        ANTES del lease — igual contrato que el gate de fecha F6-A1."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [{"fecha": "2024-01-15", "monto": "50000"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "fecha",
+                        "target_field": "transaction_date",
+                        "action": "drop_column",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 422
+        assert "transaction_date" in response.json()["detail"]
+
+        # El lease nunca se tomó: sigue re-confirmable.
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+        assert refreshed.import_started_at is None
+
+    async def test_confirm_drop_requerido_con_reemplazo_no_bloquea(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """F8b (Task 2): dropear una columna requerida CON otra columna mapeada
+        al mismo target (fecha_alt) no bloquea — el requerido sigue cubierto.
+
+        F8b (Task 4): además, el drop AHORA se aplica de verdad, así que la fila
+        debe importar por la columna de reemplazo (fecha_alt)."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [
+                    {"fecha": "2024-01-15", "fecha_alt": "2024-01-20", "monto": "50000"}
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {
+                        "source_column": "fecha_alt",
+                        "target_field": "transaction_date",
+                        "user_selected": True,
+                    },
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "fecha",
+                        "target_field": "transaction_date",
+                        "action": "drop_column",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+    async def test_confirm_route_opcional_no_seleccionado_devuelve_422_antes_del_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F8b (Task 2): rutear filas a Otros por un campo OPCIONAL que el
+        usuario no seleccionó explícitamente viola el invariante 1. 422 antes
+        del lease."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [
+                    {"fecha": "2024-01-15", "monto": "50000", "notas": None}
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                    {"source_column": "notas", "target_field": "notes"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "notas",
+                        "target_field": "notes",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 422
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
+    async def test_confirm_route_requerido_no_bloquea(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """F8b (Task 2): rutear filas afectadas por un campo REQUERIDO (amount)
+        es una decisión válida — no bloquea el confirm."""
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": 1,
+                "ventas_detectadas": [{"fecha": "2024-01-15", "monto": "50000"}],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
 
 class _CaptureLogger:
     def __init__(self) -> None:
@@ -1334,3 +1582,586 @@ class TestConfirmLeaseF4:
             )
         ).scalar_one()
         assert refreshed.deleted_at is not None
+
+
+@pytest.mark.asyncio
+class TestConfirmColumnRiskF8b:
+    """F8b (Task 4): aplicación de las decisiones de riesgo DENTRO del confirm.
+
+    Cablea drop_column / route_affected_rows_to_others sobre una COPIA del
+    summary, dentro del savepoint del import: atomicidad, counters, auditoría
+    agregada sin PII, y recálculo exacto de filas afectadas (no confía en el
+    cliente).
+    """
+
+    @staticmethod
+    def _ventas_record(tenant_id: uuid.UUID, rows: list[dict[str, Any]]) -> UploadedFile:
+        return UploadedFile(
+            tenant_id=tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": len(rows),
+                "ventas_detectadas": rows,
+            },
+        )
+
+    async def test_route_importa_validas_y_captura_solo_afectadas(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """route sobre `amount` (requerido): la fila válida importa; las vacías/
+        inválidas van a Otros. El recálculo es EXACTO (no rutea la válida — el
+        backend NUNCA confía en un `affected_rows` del cliente)."""
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": "50000"},  # válida → importa
+                {"fecha": "2024-01-16", "monto": ""},  # vacía → Otros
+                {"fecha": "2024-01-17", "monto": "no-numerico"},  # inválida → Otros
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        # Solo 1 venta importada (la válida).
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all()
+        assert len(sales) == 1
+
+        # Exactamente 2 filas capturadas en Otros (las afectadas).
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others) == 2
+        assert all(r.suggested_entity == "sale" for r in others)
+
+    async def test_recompute_no_rutea_todo_el_contexto(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Guard de mutación (invariante 3): con 4 filas de las que 3 son válidas,
+        solo la afectada va a Otros. Si el backend ruteara el contexto entero
+        (mutación: confiar en el cliente), este test fallaría."""
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": "100"},
+                {"fecha": "2024-01-16", "monto": "200"},
+                {"fecha": "2024-01-17", "monto": "300"},
+                {"fecha": "2024-01-18", "monto": ""},  # única afectada
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all()
+        assert len(sales) == 3  # las 3 válidas, NO 0
+
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others) == 1  # solo la afectada, NO 4
+
+    async def test_rollback_integral_si_confirm_falla(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Si el confirm falla DESPUÉS de aplicar decisiones (dentro del
+        savepoint), NADA persiste: ni ventas, ni capturas en Otros, ni auditoría.
+        El archivo vuelve a NEEDS_CONFIRMATION (re-confirmable).
+
+        Mutación clave: si la captura se hiciera FUERA del savepoint, el commit
+        del compensador del lease dejaría las filas en Otros → este test fallaría.
+        """
+        from app.persistence.models.audit import DecisionAuditLog
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": "50000"},
+                {"fecha": "2024-01-16", "monto": ""},
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        # finalize_import_lease corre DESPUÉS de la captura/audit, antes del commit
+        # del savepoint → forzamos el fallo ahí para ejercitar el rollback integral.
+        with unittest.mock.patch(
+            "app.api.v1.ingestion.finalize_import_lease",
+            new_callable=unittest.mock.AsyncMock,
+            side_effect=HTTPException(status_code=500, detail="boom"),
+        ):
+            response = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/confirm",
+                headers=auth_headers,
+                json={
+                    "confirmed_fields": {"ventas": True},
+                    "column_mappings": [
+                        {"source_column": "fecha", "target_field": "transaction_date"},
+                        {"source_column": "monto", "target_field": "amount"},
+                    ],
+                    "column_risk_decisions": [
+                        {
+                            "context_id": "table",
+                            "source_column": "monto",
+                            "target_field": "amount",
+                            "action": "route_affected_rows_to_others",
+                        }
+                    ],
+                },
+            )
+        assert response.status_code >= 400
+
+        # Nada persistido.
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all()
+        assert sales == []
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert others == []
+        audits = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                    DecisionAuditLog.decision_type == "INGESTION_COLUMN_RISK_DECISIONS",
+                )
+            )
+        ).scalars().all()
+        assert audits == []
+
+        # El archivo quedó re-confirmable.
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
+    async def test_audit_agregada_sin_pii(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """La auditoría agregada registra columnas + conteos, NUNCA el valor crudo
+        (email/teléfono/documento) de la fila ruteada (invariantes 7, 9)."""
+        from app.persistence.models.audit import DecisionAuditLog
+
+        pii_email = "secreto@ejemplo.com"
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": "50000", "contacto": "ok@x.com"},
+                # amount inválido → afectada; su columna contacto trae PII.
+                {"fecha": "2024-01-16", "monto": "", "contacto": pii_email},
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        audit = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                    DecisionAuditLog.decision_type == "INGESTION_COLUMN_RISK_DECISIONS",
+                )
+            )
+        ).scalar_one()
+        # Conteos correctos.
+        assert audit.decision_data["filas_riesgo_a_otros"] == 1
+        assert audit.decision_data["filas_riesgo_importadas"] == 1
+        assert audit.decision_data["routed_to_others"] == {"table": 1}
+        # Sin PII: el email crudo no aparece en ninguna parte del registro.
+        serialized = f"{audit.decision_data}{audit.context}"
+        assert pii_email not in serialized
+
+    async def test_drop_solo_su_contexto_y_counters(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Multi-hoja: drop de `notas` SOLO en s1 (venta) — s2 (gasto) intacto.
+        Ambas hojas importan; la auditoría agregada registra solo s1."""
+        from app.persistence.models.audit import DecisionAuditLog
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="mixto.xlsx",
+            s3_key="uploads/test/uuid/mixto.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="mixto",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "multi_sheet": True,
+                "row_count": 2,
+                "mapping_contexts": [
+                    {
+                        "context_id": "s1",
+                        "label": "Ventas",
+                        "entity_type": "sale",
+                        "headers": ["fecha", "monto", "notas"],
+                        "preview_rows": [],
+                    },
+                    {
+                        "context_id": "s2",
+                        "label": "Gastos",
+                        "entity_type": "expense",
+                        "headers": ["fecha", "monto", "notas"],
+                        "preview_rows": [],
+                    },
+                ],
+                "ventas_detectadas": [
+                    {
+                        "fecha": "2024-01-15",
+                        "monto": "50000",
+                        "notas": "hola",
+                        "__context__": "s1",
+                    }
+                ],
+                "gastos_detectados": [
+                    {
+                        "fecha": "2024-01-16",
+                        "monto": "12000",
+                        "notas": "chau",
+                        "__context__": "s2",
+                    }
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"s1": True, "s2": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date",
+                     "context_id": "s1", "entity_type": "sale"},
+                    {"source_column": "monto", "target_field": "amount",
+                     "context_id": "s1", "entity_type": "sale"},
+                    {"source_column": "notas", "target_field": "notes",
+                     "context_id": "s1", "entity_type": "sale", "user_selected": True},
+                    {"source_column": "fecha", "target_field": "expense_date",
+                     "context_id": "s2", "entity_type": "expense"},
+                    {"source_column": "monto", "target_field": "amount",
+                     "context_id": "s2", "entity_type": "expense"},
+                    {"source_column": "notas", "target_field": "notes",
+                     "context_id": "s2", "entity_type": "expense", "user_selected": True},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "s1",
+                        "source_column": "notas",
+                        "target_field": "notes",
+                        "action": "drop_column",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        # Ambas hojas importaron.
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all()
+        expenses = (
+            await db_session.execute(
+                select(ExpenseEntry).where(
+                    ExpenseEntry.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(sales) == 1
+        assert len(expenses) == 1
+
+        audit = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                    DecisionAuditLog.decision_type == "INGESTION_COLUMN_RISK_DECISIONS",
+                )
+            )
+        ).scalar_one()
+        assert audit.decision_data["dropped_columns"] == {"s1": ["notas"]}
+        assert audit.decision_data["columnas_eliminadas"] == 1
+
+    async def test_decision_de_contexto_excluido_es_noop(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Una decisión route sobre un contexto EXCLUIDO del import no captura
+        nada en Otros (sus filas ni se procesan) y no crea auditoría."""
+        from app.persistence.models.audit import DecisionAuditLog
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="mixto.xlsx",
+            s3_key="uploads/test/uuid/mixto.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="mixto",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "multi_sheet": True,
+                "row_count": 2,
+                "mapping_contexts": [
+                    {"context_id": "s1", "label": "Ventas", "entity_type": "sale",
+                     "headers": ["fecha", "monto"], "preview_rows": []},
+                    {"context_id": "s2", "label": "Gastos", "entity_type": "expense",
+                     "headers": ["fecha", "monto"], "preview_rows": []},
+                ],
+                "ventas_detectadas": [
+                    {"fecha": "2024-01-15", "monto": "50000", "__context__": "s1"}
+                ],
+                "gastos_detectados": [
+                    {"fecha": "2024-01-16", "monto": "", "__context__": "s2"}
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                # s2 EXCLUIDO — solo s1 se importa.
+                "context_confirmed": {"s1": True, "s2": False},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date",
+                     "context_id": "s1", "entity_type": "sale"},
+                    {"source_column": "monto", "target_field": "amount",
+                     "context_id": "s1", "entity_type": "sale"},
+                    {"source_column": "fecha", "target_field": "expense_date",
+                     "context_id": "s2", "entity_type": "expense"},
+                    {"source_column": "monto", "target_field": "amount",
+                     "context_id": "s2", "entity_type": "expense"},
+                ],
+                # route sobre s2 (excluido) — debe ser no-op.
+                "column_risk_decisions": [
+                    {"context_id": "s2", "source_column": "monto",
+                     "target_field": "amount",
+                     "action": "route_affected_rows_to_others"},
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        # s2 no se procesó → nada en Otros, ni auditoría F8b.
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert others == []
+        audits = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                    DecisionAuditLog.decision_type == "INGESTION_COLUMN_RISK_DECISIONS",
+                )
+            )
+        ).scalars().all()
+        assert audits == []
+
+    async def test_confirm_persiste_decisiones_en_summary_para_reread(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Task 5: las decisiones EFECTIVAS quedan en ``parsed_summary_json``
+        (``column_risk_decisions``) para que la relectura las re-aplique. Mutación:
+        si el confirm no las persistiera, la key no existiría y este test falla."""
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": "50000"},
+                {"fecha": "2024-01-16", "monto": ""},
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        persisted = (refreshed.parsed_summary_json or {}).get("column_risk_decisions")
+        assert persisted == [
+            {
+                "context_id": "table",
+                "source_column": "monto",
+                "target_field": "amount",
+                "action": "route_affected_rows_to_others",
+            }
+        ]

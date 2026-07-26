@@ -176,6 +176,11 @@ async def list_unclassified(
     responses: list[UnclassifiedRecordResponse] = []
     for rec in records:
         resp = UnclassifiedRecordResponse.model_validate(rec)
+        # Ocultar claves internas reservadas (prefijo ``__``, p.ej. la correlación
+        # ``__risk_ref__`` de F8b): son metadata, no columnas del archivo.
+        resp.row_data = {
+            k: v for k, v in (rec.row_data or {}).items() if not k.startswith("__")
+        }
         raw = _row_val_categoria(rec.row_data or {})
         raw_s = str(raw).strip() if raw not in (None, "") else None
         if raw_s and rec.suggested_entity == "expense":

@@ -37,6 +37,11 @@ from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
+from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_STATUS_DISMISSED,
+    UNCLASSIFIED_STATUS_PENDING,
+    UnclassifiedRecord,
+)
 
 # CSV original (2 filas). El reread vuelve a leer ESTE contenido salvo cuando el
 # test pide una variante (fila extra).
@@ -650,3 +655,151 @@ async def test_undo_reread_restores_inventory(
     active, stock = await _active_movement_state(db_session, tenant, file, product_id)
     assert active == 1
     assert stock == _STOCK_QTY
+
+
+# ── F8b (Task 5): decisiones de riesgo de columnas en la relectura ──────────────
+
+# CSV donde la 2ª fila tiene ``monto`` vacío → ruteada a "Otros" por la decisión
+# de riesgo. La variante FIXED la corrige (el reread la re-importa como gasto).
+_CSV_RISK_BAD = (
+    b"fecha,producto,monto,proveedor\n"
+    b"2026-01-05,Coca Cola,1500,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,,Panaderia Norte\n"
+)
+_CSV_RISK_FIXED = (
+    b"fecha,producto,monto,proveedor\n"
+    b"2026-01-05,Coca Cola,1500,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,800,Panaderia Norte\n"
+)
+_RISK_DECISION = {
+    "context_id": "table",
+    "source_column": "monto",
+    "target_field": "amount",
+    "action": "route_affected_rows_to_others",
+}
+
+
+async def _risk_records(
+    session: AsyncSession, tenant: Tenant, file: UploadedFile, status: str
+) -> list[UnclassifiedRecord]:
+    res = await session.execute(
+        select(UnclassifiedRecord).where(
+            UnclassifiedRecord.tenant_id == tenant.tenant_id,
+            UnclassifiedRecord.uploaded_file_id == file.id,
+            UnclassifiedRecord.status == status,
+        )
+    )
+    return list(res.scalars().all())
+
+
+async def _first_confirm_with_risk(
+    session: AsyncSession, tenant: Tenant, content: bytes
+) -> UploadedFile:
+    """Simula el confirm original con una decisión ``route_affected_rows_to_others``
+    sobre ``monto``: persiste la decisión en el summary (como hace el confirm),
+    importa solo las filas válidas y captura la afectada en "Otros" (Task 3/4)."""
+    from app.application.services.column_risk import apply_column_risk_decisions
+    from app.application.services.ingestion_import_service import (
+        _capture_column_risk_rows,
+    )
+    from app.schemas.ingestion import ColumnRiskDecision
+
+    summary = parse_uploaded_content(content, "text/csv", "gastos.csv")
+    confirmed = default_confirmed_fields(summary)
+    file = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="gastos.csv",
+        s3_key=f"tenants/{tenant.tenant_id}/gastos.csv",
+        content_type="text/csv",
+        size_bytes=len(content),
+        purpose="gastos",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={
+            "inferred_type": summary.get("inferred_type"),
+            "confirmed_fields": confirmed,
+            # El confirm persiste las decisiones efectivas (Task 5) para el reread.
+            "column_risk_decisions": [_RISK_DECISION],
+        },
+    )
+    session.add(file)
+    await session.commit()
+
+    applied = apply_column_risk_decisions(
+        summary, [ColumnRiskDecision(**_RISK_DECISION)], {}
+    )
+    # Importar solo las válidas (el bucket ya sin las afectadas).
+    await insert_confirmed_data(
+        session,
+        tenant.tenant_id,
+        applied.summary,
+        confirmed,
+        source="ingestion",
+        uploaded_file_id=file.id,
+    )
+    # Capturar las afectadas en "Otros" (con __risk_ref__ de correlación).
+    for cid, rows_by_idx in applied.routed_rows.items():
+        if rows_by_idx:
+            await _capture_column_risk_rows(
+                session,
+                tenant.tenant_id,
+                file.id,
+                cid,
+                applied.routed_entity.get(cid) or "otros",
+                rows_by_idx,
+                source="ingestion",
+            )
+    await session.commit()
+    return file
+
+
+@pytest.mark.asyncio
+async def test_reread_fila_corregida_importa_y_resuelve_otros(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fila antes ruteada a Otros por riesgo, ahora CORREGIDA en el reread: se
+    importa como gasto normal Y su UnclassifiedRecord previo queda resuelto
+    (DISMISSED), sin duplicar."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+
+    # Estado inicial: 1 gasto (la válida) + 1 Otros de riesgo pendiente (la mala).
+    assert len(await _active_expenses(db_session, tenant, file)) == 1
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 1
+
+    # Reread con la fila corregida.
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    # Ahora 2 gastos activos (la válida reimportada + la corregida).
+    assert len(await _active_expenses(db_session, tenant, file)) == 2
+    # El Otros previo quedó resuelto: 0 pendientes, exactamente 1 DISMISSED
+    # (no se duplicó ni quedó vivo).
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 0
+    dismissed = await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_DISMISSED)
+    assert len(dismissed) == 1
+    assert dismissed[0].resolved_at is not None
+
+
+@pytest.mark.asyncio
+async def test_reread_conserva_decision_y_no_duplica_otros(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fila que SIGUE mal en el reread: la decisión se conserva (no se importa) y
+    su Otros previo no se duplica (huella risk:* idempotente)."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+    assert len(await _active_expenses(db_session, tenant, file)) == 1
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 1
+
+    # Reread con el MISMO contenido (la fila sigue con monto vacío).
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    # La decisión se honra: la fila mala NO se importó (sigue 1 gasto) y su Otros
+    # no se duplicó (sigue 1 pendiente).
+    assert len(await _active_expenses(db_session, tenant, file)) == 1
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 1
