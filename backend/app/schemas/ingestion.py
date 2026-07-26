@@ -100,10 +100,6 @@ class FilePreviewResponse(BaseModel):
     master_previews: list[MasterPreviewSummary] = Field(default_factory=list)
 
 
-class DropColumnsRequest(BaseModel):
-    columns: list[str] = Field(description="Columnas a eliminar antes de confirmar la importación.")
-
-
 # ── Column mapping schemas ────────────────────────────────────────────────────
 
 
@@ -178,8 +174,8 @@ class ConfirmIngestionRequest(BaseModel):
     confirmed_fields: dict[str, Any] = Field(
         description=(
             "Which data categories to import from the parsed file. "
-            "Keys: 'ventas', 'gastos', 'productos' (y, F7a, 'clientes'/'proveedores' — "
-            "reconocidas en la detección/mapeo; el import de estas dos queda para 7b/7c). "
+            "Keys: 'ventas', 'gastos', 'productos', 'clientes', 'proveedores' (F7 — "
+            "clientes/proveedores como entidad de primera clase, ya integrado). "
             "Values: bool."
         )
     )

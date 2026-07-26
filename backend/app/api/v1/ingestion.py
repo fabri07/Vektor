@@ -115,7 +115,6 @@ from app.schemas.ingestion import (
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     ContextualColumnRisk,
-    DropColumnsRequest,
     FilePreviewResponse,
     FileStatusItem,
     MasterPreviewSample,
@@ -718,67 +717,6 @@ async def compute_column_risk(
 
 
 @router.post(
-    "/files/{file_id}/drop-columns",
-    summary="Drop risky columns and keep file in NEEDS_CONFIRMATION",
-)
-async def drop_columns(
-    file_id: uuid.UUID,
-    body: DropColumnsRequest,
-    tenant: Tenant = Depends(get_current_tenant),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
-    repo = FileRepository(session)
-    record = await repo.get_by_id(file_id, tenant.tenant_id)
-    if not record:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
-
-    if record.processing_status != PROCESSING_STATUS_NEEDS_CONFIRMATION:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Solo se pueden eliminar columnas en archivos pendientes de confirmación.",
-        )
-
-    summary = dict(record.parsed_summary_json or {})
-    columns_to_drop = set(body.columns)
-
-    # Eliminar columnas del summary (headers, preview_rows, columns_at_risk)
-    summary["headers"] = [h for h in summary.get("headers", []) if h not in columns_to_drop]
-    summary["columns"] = summary["headers"]
-    summary["columns_at_risk"] = [
-        c for c in summary.get("columns_at_risk", []) if c.get("column") not in columns_to_drop
-    ]
-    summary["preview_rows"] = [
-        {k: v for k, v in row.items() if k not in columns_to_drop}
-        for row in summary.get("preview_rows", [])
-    ]
-    for data_key in (
-        "ventas_detectadas",
-        "gastos_detectados",
-        "productos_detectados",
-        "stock_detectado",
-    ):
-        if isinstance(summary.get(data_key), list):
-            summary[data_key] = [
-                {k: v for k, v in row.items() if k not in columns_to_drop}
-                for row in summary[data_key]
-            ]
-    summary.setdefault("warnings", []).append(
-        f"Columnas eliminadas por el usuario: {', '.join(sorted(columns_to_drop))}."
-    )
-
-    record.parsed_summary_json = summary
-    await repo.save(record)
-    await session.commit()
-
-    logger.info(
-        "ingestion.drop_columns",
-        file_id=str(file_id),
-        dropped=list(columns_to_drop),
-    )
-    return {"file_id": str(file_id), "dropped_columns": list(columns_to_drop)}
-
-
-@router.post(
     "/files/{file_id}/cancel",
     summary=(
         "Cancel confirmation; mark file as NEEDS_COMPLETION so user can re-upload with complete "
@@ -1096,14 +1034,23 @@ async def confirm_file(
     _flat_mappings = [m for m in body.column_mappings if m.context_id is None]
     _ctx_mappings = [m for m in body.column_mappings if m.context_id is not None]
 
+    # Override del usuario para reasignar la entidad de un contexto completo
+    # (ej. una hoja "general"/producto pasada a venta/gasto). Fuente única con
+    # el gate F6-A1 (más abajo) y con `_insert_multisheet_data`, que también lo
+    # consulta — sin esto, `_entity_for` quedaba desalineada: validaba
+    # requeridos/decisiones de riesgo/aprendizaje bajo la entidad ORIGINAL del
+    # summary mientras el import real ya usaba la reasignada (bug de review).
+    _override = body.context_entity or {}
+
     def _entity_for(mapping: ColumnMapping) -> str:
-        # Con context_id, el entity_type se deriva del contexto del summary
-        # (autoritativo, igual que la inserción en _insert_multisheet_data). El del
-        # payload es solo fallback para que validación/aprendizaje/custom fields
-        # queden bajo la misma entidad que realmente se importa.
+        # Con context_id, el entity_type se deriva del contexto (autoritativo,
+        # igual que la inserción en _insert_multisheet_data): override del
+        # usuario primero, después el original del summary, después el del
+        # payload como último fallback.
         if mapping.context_id:
             return (
-                _context_entity.get(mapping.context_id)
+                _override.get(mapping.context_id)
+                or _context_entity.get(mapping.context_id)
                 or mapping.entity_type
                 or _entity_type
             )
@@ -1174,7 +1121,6 @@ async def confirm_file(
             for _m in _ctx_mappings:
                 if _m.target_field != "ignore" and _m.context_id:
                     _ctx_map_by_cid[_m.context_id][_m.source_column] = _m.target_field
-            _override = body.context_entity or {}
             for _ctx in _mapping_ctxs:
                 _cid = _ctx.get("context_id")
                 if not _cid:

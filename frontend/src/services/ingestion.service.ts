@@ -353,17 +353,6 @@ export const ingestionService = {
     return res.data;
   },
 
-  async dropColumns(
-    fileId: string,
-    columns: string[],
-  ): Promise<{ file_id: string; dropped_columns: string[] }> {
-    const res = await api.post<{ file_id: string; dropped_columns: string[] }>(
-      `/ingestion/files/${fileId}/drop-columns`,
-      { columns },
-    );
-    return res.data;
-  },
-
   async cancelFile(fileId: string): Promise<{ file_id: string; status: string }> {
     const res = await api.post<{ file_id: string; status: string }>(
       `/ingestion/files/${fileId}/cancel`,
