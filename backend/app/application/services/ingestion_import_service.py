@@ -79,6 +79,7 @@ def check_nonempty_import(
     summary: dict[str, Any],
     confirmed_fields: dict[str, bool] | None,
     context_confirmed: dict[str, bool] | None = None,
+    routed_to_others: int = 0,
 ) -> None:
     """Falla explícita ante inserción vacía con datos presentes.
 
@@ -87,6 +88,16 @@ def check_nonempty_import(
     ``EmptyImportError`` en vez de dejar pasar un import silenciosamente vacío.
     Compartida por el endpoint de ingestión (→ 422) y el camino de chat
     (IMPORT_TABULAR_FILE → la pending action queda FAILED con mensaje visible).
+
+    ``routed_to_others`` (F8c, default 0): cantidad de filas REALMENTE
+    capturadas en "Otros" por una decisión ``route_affected_rows_to_others``
+    de columna riesgosa (F8b) — conteo ya persistido (retorno de
+    ``capture_column_risk_rows``), nunca planificado (invariante de
+    no-invención). Si es > 0, el archivo no está "vacío": el usuario decidió
+    explícitamente mandar esas filas a revisión manual, y esa decisión cuenta
+    como manejo válido — no como pérdida silenciosa de datos (Minor 1 de F8b).
+    El caller de chat (``pending_action_service``) no pasa este parámetro y
+    conserva el comportamiento previo vía el default 0.
     """
     # NOTA: counts["otros"] NO cuenta como insertado. Si el usuario confirmó un
     # tipo y ese tipo importó 0 filas, hay que cortar con error (y el rollback
@@ -117,7 +128,7 @@ def check_nonempty_import(
     confirmed_any = any((confirmed_fields or {}).values()) or any(
         (context_confirmed or {}).values()
     )
-    if total_inserted == 0 and had_rows and confirmed_any:
+    if total_inserted == 0 and routed_to_others == 0 and had_rows and confirmed_any:
         logger.warning(
             "ingestion.import.zero_inserted",
             row_count=summary.get("row_count"),

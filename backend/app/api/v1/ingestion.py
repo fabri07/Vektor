@@ -1426,29 +1426,20 @@ async def confirm_file(
         )
         _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
 
-        # Import vacío → 422; el compensador (except) restaura NEEDS_CONFIRMATION
-        # y limpia el lease para reintentar con mapeo manual.
-        try:
-            check_nonempty_import(
-                counts, updated_summary, body.confirmed_fields, body.context_confirmed
-            )
-        except EmptyImportError as exc:
-            logger.warning(
-                "ingestion.confirm.zero_inserted",
-                file_id=str(file_id),
-                row_count=updated_summary.get("row_count"),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=exc.user_message,
-            ) from exc
-
-        # ── F8b (Task 4): capturar en "Otros" las filas ruteadas por columna
-        # riesgosa + counters + auditoría AGREGADA, todo DENTRO del savepoint (si
-        # el confirm falla, se revierte junto con el import — invariante 4). La
-        # captura usa la primitiva idempotente de Task 3 (huella `risk:` propia).
+        # ── F8b (Task 4) + F8c (Minor 1): capturar en "Otros" las filas
+        # ruteadas por columna riesgosa + counters + auditoría AGREGADA, todo
+        # DENTRO del savepoint (si el confirm falla, se revierte junto con el
+        # import — invariante 4). La captura usa la primitiva idempotente de
+        # Task 3 (huella `risk:` propia). F8c: este bloque corre ANTES del
+        # chequeo de import vacío (``check_nonempty_import`` más abajo) — la
+        # captura NO depende de ``insert_confirmed_data`` (solo usa
+        # ``_applied.routed_rows``/``routed_entity``/``routed_totals``/
+        # ``dropped_columns``), y un archivo que rutea TODAS sus filas a
+        # "Otros" (``total_inserted == 0``) necesita que ``_risk_a_otros`` ya
+        # esté calculado para que el chequeo de vacío no lo confunda con un
+        # import realmente vacío (Minor 1 de F8b).
+        _risk_a_otros = 0
         if _applied is not None:
-            _risk_a_otros = 0
             _risk_importadas = 0
             for _cid, _rows_by_idx in _applied.routed_rows.items():
                 if _rows_by_idx:
@@ -1499,6 +1490,29 @@ async def confirm_file(
                     )
                 )
 
+        # Import vacío → 422; el compensador (except) restaura NEEDS_CONFIRMATION
+        # y limpia el lease para reintentar con mapeo manual. F8c: las filas
+        # capturadas en "Otros" (``routed_to_others``) cuentan como manejadas —
+        # un archivo que ruteó TODO a "Otros" no es un import vacío.
+        try:
+            check_nonempty_import(
+                counts,
+                updated_summary,
+                body.confirmed_fields,
+                body.context_confirmed,
+                routed_to_others=_risk_a_otros,
+            )
+        except EmptyImportError as exc:
+            logger.warning(
+                "ingestion.confirm.zero_inserted",
+                file_id=str(file_id),
+                row_count=updated_summary.get("row_count"),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=exc.user_message,
+            ) from exc
+
         # Limpiar arrays de datos del summary antes de escribir de vuelta a la BD.
         # Para archivos grandes (multi-hoja o muchas filas) el JSONB puede pesar 10+ MB;
         # guardar solo metadata compacta evita un UPDATE lento en Neon.
@@ -1544,6 +1558,19 @@ async def confirm_file(
             session, tenant.tenant_id, file_id, _import_token, compact_summary
         )
 
+        # F8c: cuántos contextos (hojas/grupos) tuvieron una decisión de riesgo
+        # EFECTIVA — ruteo con filas reales o drop de columna. Sin PII (solo
+        # cuenta context_ids, nunca valores de fila); 0 si no hubo decisiones
+        # (``_applied is None``).
+        _column_risk_contexts: set[str] = set()
+        if _applied is not None:
+            _column_risk_contexts.update(
+                cid for cid, rows in _applied.routed_rows.items() if rows
+            )
+            _column_risk_contexts.update(
+                cid for cid, cols in _applied.dropped_columns.items() if cols
+            )
+
         await pipeline_event_service.emit_event(
             session,
             trace_id=_trace_id,
@@ -1558,7 +1585,16 @@ async def confirm_file(
                 + counts["proveedores"]
             ),
             latency_ms=_confirm_latency_ms,
-            detail={"imported_counts": counts, "confirmed_fields": body.confirmed_fields},
+            detail={
+                "imported_counts": counts,
+                "confirmed_fields": body.confirmed_fields,
+                "column_risk": {
+                    "contextos_afectados": len(_column_risk_contexts),
+                    "filas_riesgo_a_otros": counts.get("filas_riesgo_a_otros", 0),
+                    "filas_riesgo_importadas": counts.get("filas_riesgo_importadas", 0),
+                    "columnas_eliminadas": counts.get("columnas_eliminadas", 0),
+                },
+            },
         )
         # Import OK: liberar el savepoint (los cambios quedan en la transacción del
         # request, que los commitea al final).

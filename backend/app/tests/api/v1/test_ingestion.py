@@ -2165,3 +2165,487 @@ class TestConfirmColumnRiskF8b:
                 "action": "route_affected_rows_to_others",
             }
         ]
+
+
+@pytest.mark.asyncio
+class TestConfirmColumnRiskAllRoutedF8c:
+    """F8c — Minor 1 de F8b: un archivo cuyo confirm rutea TODAS sus filas a
+    "Otros" (``total_inserted == 0``) hoy daba 422 y no rescataba nada, porque
+    ``check_nonempty_import`` corría ANTES de la captura. El fix reordena la
+    captura para que corra primero DENTRO del mismo savepoint y le pasa el
+    conteo REALMENTE persistido (``routed_to_others``) al chequeo de vacío.
+    """
+
+    @staticmethod
+    def _ventas_record(tenant_id: uuid.UUID, rows: list[dict[str, Any]]) -> UploadedFile:
+        return UploadedFile(
+            tenant_id=tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "has_venta": True,
+                "has_fecha": True,
+                "row_count": len(rows),
+                "ventas_detectadas": rows,
+            },
+        )
+
+    async def test_all_routed_un_contexto_no_da_422_y_captura_todo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """3 filas, TODAS con `monto` vacío/inválido → antes del fix, `amount`
+        importaba 0 filas y el chequeo de vacío disparaba 422 (rollback total,
+        la captura en Otros nunca corría). Con el fix: 200, las 3 quedan en
+        Otros con `__risk_ref__`, y el warning menciona "Otros"."""
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": ""},
+                {"fecha": "2024-01-16", "monto": ""},
+                {"fecha": "2024-01-17", "monto": "no-numerico"},
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["warnings"]
+        assert any("Otros" in w for w in body["warnings"])
+
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all()
+        assert sales == []
+
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others) == 3
+        assert all("__risk_ref__" in (r.row_data or {}) for r in others)
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        counts = (refreshed.parsed_summary_json or {}).get("imported_counts") or {}
+        assert counts.get("ventas", 0) == 0
+        assert counts.get("filas_riesgo_a_otros") == 3
+
+    async def test_all_routed_mixto_importa_validas_y_rutea_el_resto(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Mezcla: 1 fila válida + 2 afectadas. Debe importar la válida y rutear
+        el resto — sin 422 (ni antes ni después del fix, pero lo dejamos como
+        red de regresión del reorden: `total_inserted > 0` no debe romper la
+        captura ni los counters)."""
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": "50000"},
+                {"fecha": "2024-01-16", "monto": ""},
+                {"fecha": "2024-01-17", "monto": "no-numerico"},
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        sales = (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all()
+        assert len(sales) == 1
+
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others) == 2
+
+    async def test_all_routed_multicontexto_cuenta_contextos_afectados(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Multi-hoja: s1 (venta) y s2 (gasto) rutean TODAS sus filas → ambas
+        capturan en Otros, ninguna inserta, y el pipeline event registra
+        `column_risk.contextos_afectados == 2` (uno por hoja con filas
+        ruteadas)."""
+        from app.persistence.models.pipeline_event import STAGE_CONFIRM, PipelineEvent
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="mixto.xlsx",
+            s3_key="uploads/test/uuid/mixto.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="mixto",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "multi_sheet": True,
+                "row_count": 2,
+                "mapping_contexts": [
+                    {
+                        "context_id": "s1",
+                        "label": "Ventas",
+                        "entity_type": "sale",
+                        "headers": ["fecha", "monto"],
+                        "preview_rows": [],
+                    },
+                    {
+                        "context_id": "s2",
+                        "label": "Gastos",
+                        "entity_type": "expense",
+                        "headers": ["fecha", "monto"],
+                        "preview_rows": [],
+                    },
+                ],
+                "ventas_detectadas": [
+                    {"fecha": "2024-01-15", "monto": "", "__context__": "s1"}
+                ],
+                "gastos_detectados": [
+                    {"fecha": "2024-01-16", "monto": "", "__context__": "s2"}
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"s1": True, "s2": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date",
+                     "context_id": "s1", "entity_type": "sale"},
+                    {"source_column": "monto", "target_field": "amount",
+                     "context_id": "s1", "entity_type": "sale"},
+                    {"source_column": "fecha", "target_field": "expense_date",
+                     "context_id": "s2", "entity_type": "expense"},
+                    {"source_column": "monto", "target_field": "amount",
+                     "context_id": "s2", "entity_type": "expense"},
+                ],
+                "column_risk_decisions": [
+                    {"context_id": "s1", "source_column": "monto",
+                     "target_field": "amount",
+                     "action": "route_affected_rows_to_others"},
+                    {"context_id": "s2", "source_column": "monto",
+                     "target_field": "amount",
+                     "action": "route_affected_rows_to_others"},
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others) == 2
+
+        event = (
+            await db_session.execute(
+                select(PipelineEvent).where(
+                    PipelineEvent.tenant_id == sample_tenant.tenant_id,
+                    PipelineEvent.file_id == record.id,
+                    PipelineEvent.stage == STAGE_CONFIRM,
+                )
+            )
+        ).scalar_one()
+        detail = event.detail or {}
+        assert detail["column_risk"]["contextos_afectados"] == 2
+        assert detail["column_risk"]["filas_riesgo_a_otros"] == 2
+
+    async def test_all_routed_customer_rutea_a_otros(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Hoja de MAESTRO (customer) con `nombre` (requerido) vacío en TODAS
+        las filas: no es solo sale/expense — el rescate cubre también
+        customer/supplier."""
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        rows = [
+            {"nombre": None, "tel": "1155551234", "__context__": "table"}
+            for _ in range(2)
+        ]
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="clientes.xlsx",
+            s3_key="uploads/test/uuid/clientes.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="clientes",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "clientes",
+                "row_count": 2,
+                "clientes_detectados": rows,
+                "mapping_contexts": [
+                    {
+                        "context_id": "table",
+                        "label": "Tabla",
+                        "entity_type": "customer",
+                        "headers": ["nombre", "tel"],
+                        "preview_rows": rows,
+                    }
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"clientes": True},
+                "column_mappings": [
+                    {"source_column": "nombre", "target_field": "name",
+                     "context_id": "table", "entity_type": "customer"},
+                    {"source_column": "tel", "target_field": "phone",
+                     "context_id": "table", "entity_type": "customer"},
+                ],
+                "column_risk_decisions": [
+                    {"context_id": "table", "source_column": "nombre",
+                     "target_field": "name",
+                     "action": "route_affected_rows_to_others"},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        assert any("Otros" in w for w in response.json()["warnings"])
+
+        others = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others) == 2
+        assert all(r.suggested_entity == "customer" for r in others)
+
+    async def test_recaptura_de_la_misma_fila_no_duplica(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Doble captura imposible: tras un confirm all-routed real, un reintento
+        de la primitiva de captura (misma huella `risk:{context}:{row_index}`,
+        p.ej. lo que haría una relectura) NO crea un segundo `UnclassifiedRecord`
+        — la primitiva de Task 3 (F8b) es idempotente por su propia huella
+        (distinta de `_import_row_anchor`)."""
+        from app.application.services.ingestion_import_service import (
+            _capture_column_risk_rows as capture_column_risk_rows,
+        )
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [{"fecha": "2024-01-15", "monto": ""}],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        others_before = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others_before) == 1
+
+        # Simula un reintento (p.ej. una relectura) con la MISMA fila del MISMO
+        # contexto/índice — la huella `risk:` ya registrada debe frenarlo.
+        recreated = await capture_column_risk_rows(
+            db_session,
+            sample_tenant.tenant_id,
+            record.id,
+            "table",
+            "sale",
+            {0: {"monto": ""}},
+            source="ingestion",
+        )
+        await db_session.flush()
+
+        assert recreated == 0
+        others_after = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(others_after) == 1
+
+
+@pytest.mark.asyncio
+class TestOthersHidesRiskRef:
+    """F8c — Minor 3 de F8b: la clave interna `__risk_ref__` (correlación
+    PII-free de F8b Task 5) NUNCA debe llegar en el payload servido por
+    ``GET /others`` — es metadata interna, no una columna del archivo."""
+
+    async def test_get_others_no_expone_risk_ref(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        import json
+
+        from app.application.services.ingestion_import_service import RISK_REF_KEY
+        from app.persistence.models.unclassified_record import (
+            UNCLASSIFIED_STATUS_PENDING,
+            UnclassifiedRecord,
+        )
+
+        db_session.add(
+            UnclassifiedRecord(
+                tenant_id=sample_tenant.tenant_id,
+                uploaded_file_id=None,
+                source="ingestion",
+                context_label="Columna riesgosa (sale, contexto 'table'): monto",
+                headers=["monto"],
+                row_data={
+                    "monto": "",
+                    RISK_REF_KEY: json.dumps({"context_id": "table", "row_index": 0}),
+                },
+                suggested_entity="sale",
+                status=UNCLASSIFIED_STATUS_PENDING,
+            )
+        )
+        await db_session.commit()
+
+        response = await client.get("/api/v1/others", headers=auth_headers)
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        assert RISK_REF_KEY not in payload[0]["row_data"]
+        # Sanity: el resto de la fila (columnas reales) sigue expuesto.
+        assert payload[0]["row_data"]["monto"] == ""
+        # Ni siquiera aparece en el JSON crudo de la respuesta (headers/labels).
+        raw = response.text
+        assert RISK_REF_KEY not in raw
