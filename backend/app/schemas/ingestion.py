@@ -138,7 +138,9 @@ class ColumnRiskRequest(BaseModel):
     (misma decisión de inclusión que ``POST /confirm``)."""
 
     column_mappings: list[ColumnMapping] = Field(default_factory=list)
-    context_entity: dict[str, str] = Field(default_factory=dict)
+    context_entity: dict[str, Literal["sale", "expense", "product", "customer", "supplier"]] = (
+        Field(default_factory=dict)
+    )
     confirmed_fields: dict[str, bool] = Field(default_factory=dict)
     context_confirmed: dict[str, bool] = Field(default_factory=dict)
 
@@ -194,13 +196,16 @@ class ConfirmIngestionRequest(BaseModel):
             "{context_id: incluir}. Vacío = se usa confirmed_fields por tipo (legacy)."
         ),
     )
-    context_entity: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Override de entity_type por contexto en documentos de texto/imagen: "
-            "{context_id: sale|expense|customer|supplier}. Permite reasignar un grupo "
-            "detectado."
-        ),
+    context_entity: dict[str, Literal["sale", "expense", "product", "customer", "supplier"]] = (
+        Field(
+            default_factory=dict,
+            description=(
+                "Override de entity_type por contexto en documentos de texto/imagen: "
+                "{context_id: sale|expense|product|customer|supplier}. Permite reasignar un "
+                "grupo detectado. Un valor inválido/vacío se rechaza acá (422) — nunca cae "
+                "silenciosamente a la entidad original vía `or`."
+            ),
+        )
     )
     stock_treatment: Literal["opening_balance", "purchase"] | None = Field(
         default=None,

@@ -125,6 +125,23 @@ class TestContextualColumnRisk:
         assert cat["field_requirement"] == "explicitly_selected"
         assert "drop_column" in cat["allowed_actions"]
 
+    async def test_column_risk_context_entity_invalido_devuelve_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        sale_file_with_risk: UploadedFile,
+    ) -> None:
+        """`context_entity` es `Literal[sale|expense|product|customer|supplier]`
+        (review de armonía F8): un valor fuera de ese set (incluido `""`, que
+        antes caía silenciosamente vía `or` a la entidad original) se rechaza
+        en el borde de la API, no más adentro del pipeline."""
+        response = await client.post(
+            f"/api/v1/ingestion/files/{sale_file_with_risk.id}/column-risk",
+            headers=auth_headers,
+            json={"context_entity": {"table": ""}},
+        )
+        assert response.status_code == 422
+
     async def test_column_risk_contexto_excluido_no_devuelve_riesgo(
         self,
         client: AsyncClient,

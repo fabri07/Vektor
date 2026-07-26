@@ -700,7 +700,9 @@ async def compute_column_risk(
         tenant.tenant_id,
         summary,
         user_mappings=body.column_mappings,
-        context_entity=body.context_entity,
+        # Literal[...] a nivel schema (rechaza valores inválidos en el borde de
+        # la API); el resto del pipeline maneja entity_type como str genérico.
+        context_entity=cast("dict[str, str]", body.context_entity),
     )
     # Con el mapeo efectivo del usuario se aplica la MISMA inclusión que el confirm:
     # los contextos que el usuario decidió NO importar no generan riesgo accionable.
@@ -1330,7 +1332,12 @@ async def confirm_file(
         _master_context_mappings = {
             cid: mapping
             for cid, mapping in (context_mappings or {}).items()
-            if _context_entity.get(cid) in ("customer", "supplier")
+            # Entidad EFECTIVA (override primero, ver _entity_for): un contexto
+            # reasignado a customer/supplier tiene que persistir su mapeo para
+            # el reread aunque su entidad ORIGINAL en el summary fuera otra —
+            # y, a la inversa, uno reasignado FUERA de customer/supplier no
+            # debe seguir tratándose como maestro.
+            if (_override.get(cid) or _context_entity.get(cid)) in ("customer", "supplier")
         }
         _master_flat_mapping = (
             explicit_mappings if _entity_type in ("customer", "supplier") else None
@@ -1365,7 +1372,7 @@ async def confirm_file(
             column_mappings=explicit_mappings,
             context_mappings=context_mappings,
             context_confirmed=body.context_confirmed or None,
-            context_entity=body.context_entity or None,
+            context_entity=cast("dict[str, str]", body.context_entity) or None,
             source="ingestion",
             uploaded_file_id=file_id,
             stock_treatment=body.stock_treatment,
