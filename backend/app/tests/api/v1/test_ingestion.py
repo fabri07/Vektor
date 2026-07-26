@@ -2108,3 +2108,60 @@ class TestConfirmColumnRiskF8b:
             )
         ).scalars().all()
         assert audits == []
+
+    async def test_confirm_persiste_decisiones_en_summary_para_reread(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Task 5: las decisiones EFECTIVAS quedan en ``parsed_summary_json``
+        (``column_risk_decisions``) para que la relectura las re-aplique. Mutación:
+        si el confirm no las persistiera, la key no existiría y este test falla."""
+        record = self._ventas_record(
+            sample_tenant.tenant_id,
+            [
+                {"fecha": "2024-01-15", "monto": "50000"},
+                {"fecha": "2024-01-16", "monto": ""},
+            ],
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "action": "route_affected_rows_to_others",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        persisted = (refreshed.parsed_summary_json or {}).get("column_risk_decisions")
+        assert persisted == [
+            {
+                "context_id": "table",
+                "source_column": "monto",
+                "target_field": "amount",
+                "action": "route_affected_rows_to_others",
+            }
+        ]

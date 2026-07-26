@@ -63,7 +63,13 @@ async def test_one_record_per_row_combines_all_bad_fields(
     assert len(records) == 1
     record = records[0]
     assert record.suggested_entity == "customer"
-    assert set(record.row_data) == {"email", "telefono", "vencimiento"}
+    # Las columnas problemáticas de negocio (excluyendo la key reservada de
+    # correlación __risk_ref__ que agrega Task 5).
+    assert {k for k in record.row_data if not k.startswith("__")} == {
+        "email",
+        "telefono",
+        "vencimiento",
+    }
     assert record.row_data["email"] == "no-es-un-mail"
     assert record.row_data["telefono"] == "abc123"
     assert record.row_data["vencimiento"] == "31/13/2026"
@@ -126,6 +132,39 @@ async def test_fingerprint_registered_after_persist_retry_does_not_duplicate(
         select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
     )
     assert len(result.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_captura_guarda_clave_de_correlacion_pii_free(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Task 5: la captura guarda ``__risk_ref__`` = ``{context_id, row_index}`` en
+    ``row_data`` para que la relectura pueda mapear la fila a su registro previo.
+    La clave es PII-free (solo id de contexto + índice) y va bajo prefijo ``__``.
+    """
+    import json
+
+    from app.application.services.ingestion_import_service import RISK_REF_KEY
+
+    tid = sample_tenant.tenant_id
+    await _capture_column_risk_rows(
+        db_session,
+        tenant_id=tid,
+        uploaded_file_id=uuid.uuid4(),
+        context_id="sheet:Clientes",
+        entity_type="customer",
+        affected_rows={9: {"email": "malo"}},
+    )
+    await db_session.flush()
+
+    record = (
+        await db_session.execute(
+            select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
+        )
+    ).scalars().one()
+    assert RISK_REF_KEY in record.row_data
+    ref = json.loads(record.row_data[RISK_REF_KEY])
+    assert ref == {"context_id": "sheet:Clientes", "row_index": 9}
 
 
 @pytest.mark.asyncio

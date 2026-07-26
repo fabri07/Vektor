@@ -1395,6 +1395,19 @@ async def confirm_file(
                 "flat": _master_flat_mapping,
             }
 
+        # F8b (Task 5): persistir las decisiones de riesgo EFECTIVAS (crudas, ya
+        # validadas) en el summary — mismo patrón que ``master_column_mappings``
+        # (F7d): sin esto, una relectura re-parsea el crudo y perdería los
+        # drop/route que el usuario decidió en este confirm. ``reread_service`` las
+        # lee de ``parsed_summary_json`` y las RE-APLICA recomputando afectadas
+        # (nunca confía en un conteo guardado — invariante 3). Solo las de
+        # contextos INCLUIDOS (``_effective_risk_decisions``). Sin PII (contexto +
+        # columna + acción; nunca valores de fila).
+        if _effective_risk_decisions:
+            updated_summary["column_risk_decisions"] = [
+                d.model_dump() for d in _effective_risk_decisions
+            ]
+
         _trace_id = record.trace_id or record.id
         bind_request_context(trace_id=_trace_id)
         _t0 = time.monotonic()

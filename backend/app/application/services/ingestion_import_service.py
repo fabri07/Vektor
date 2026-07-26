@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -665,6 +666,15 @@ async def _import_master_entities(
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
 
 _IMPORT_ROW_ACTION = "IMPORT_ROW"
+
+# F8b (Task 5): clave reservada en ``UnclassifiedRecord.row_data`` que correlaciona
+# la captura de riesgo con su fila de origen ``(context_id, row_index)``. La usa la
+# relectura (``reread_service``) para resolver el "Otros" previo cuando la fila
+# aparece corregida. Es PII-free (solo id de contexto + índice), va bajo prefijo
+# ``__`` como ``__context__`` (interno, no dato de negocio) y ``/otros`` la oculta
+# del render. Valor = JSON string (``json.dumps({context_id, row_index})``).
+RISK_REF_KEY = "__risk_ref__"
+
 _ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
     "fingerprint",
     constraint="uq_operation_fingerprints_tenant_fp",
@@ -967,6 +977,11 @@ async def _capture_column_risk_rows(
     """
     created = 0
     for row_index, row_data in affected_rows.items():
+        # Fila combinada vacía (nada que capturar): se saltea SIN registrar huella,
+        # para que un reintento con datos corregidos no quede bloqueado por una
+        # huella "fantasma" (mismo principio que ``_import_row_seen``).
+        if not row_data:
+            continue
         anchor = _risk_row_anchor(tenant_id, uploaded_file_id, context_id, row_index)
         if await _import_row_seen(session, tenant_id, anchor):
             continue
@@ -974,10 +989,20 @@ async def _capture_column_risk_rows(
             f"Columna riesgosa ({entity_type}, contexto '{context_id}'): "
             + ", ".join(sorted(row_data))
         )[:200]
+        # Correlación PII-free (Task 5): (context_id, row_index) → este registro,
+        # para que la relectura pueda resolver el "Otros" al aparecer corregida la
+        # fila. Va aparte de las columnas problemáticas (headers/label la excluyen;
+        # ``/otros`` oculta las keys ``__``).
+        _payload = {
+            **row_data,
+            RISK_REF_KEY: json.dumps(
+                {"context_id": context_id, "row_index": row_index}
+            ),
+        }
         captured = _capture_unclassified(
             session,
             tenant_id,
-            rows=[row_data],
+            rows=[_payload],
             headers=(sorted(row_data) or None),
             source=source,
             uploaded_file_id=uploaded_file_id,
