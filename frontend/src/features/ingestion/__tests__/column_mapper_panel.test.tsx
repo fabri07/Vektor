@@ -506,6 +506,59 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     ]);
   });
 
+  test("touched-set: resetear el mapeo (checkbox de confirmedFields) limpia el touched-set", async () => {
+    // Regresión: choosePurpose() y el onChange de los checkboxes de
+    // confirmedFields re-inicializan `mappings` desde las sugerencias pero
+    // antes NO limpiaban touchedRef — una columna tocada a mano quedaba
+    // marcada user_selected=true aunque terminara re-derivada de la sugerencia.
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "ColX",
+        normalized_column: "colx",
+        sample_values: ["1500"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+
+    renderPanel();
+
+    await screen.findAllByText("ColX");
+
+    // El usuario cambia el mapeo a mano → queda "tocado".
+    fireEvent.change(screen.getAllByRole("combobox")[0]!, {
+      target: { value: "quantity" },
+    });
+
+    // Togglear un checkbox de confirmedFields resetea `mappings`/`initialized`
+    // (re-deriva desde la sugerencia original) — debe limpiar el touched-set.
+    fireEvent.click(screen.getByRole("checkbox", { name: "gastos" }));
+
+    // El mapeo vuelve a "amount" (la sugerencia original), no "quantity".
+    await waitFor(() => {
+      const select = screen.getAllByRole("combobox")[0] as HTMLSelectElement;
+      expect(select.value).toBe("amount");
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Confirmar importación/i }),
+    );
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const calls = mockConfirmFile.mock.calls[0][2] as ColumnMapping[];
+    const colx = calls.find((m) => m.source_column === "ColX");
+    // Re-derivada de la sugerencia tras el reset: NO es una selección manual.
+    expect(colx?.user_selected).toBeFalsy();
+  });
+
   test("el panel de decisiones aparece solo con contextual_column_risk", async () => {
     const risk = makeContextualRisk();
     mockGetPreview.mockResolvedValue({

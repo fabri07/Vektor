@@ -908,6 +908,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     // Re-inicializar el mapeo con el nuevo schema de entidad.
     setInitialized(false);
     setMappings({});
+    // F8c: el mapeo se re-deriva de las sugerencias del nuevo schema — ninguna
+    // columna quedó tocada a mano en el schema nuevo (evita fuga de user_selected).
+    touchedRef.current.clear();
   }
 
   // Multi-contexto: se usa el mapeo por contexto cuando hay >1 contexto (multi-hoja)
@@ -1114,6 +1117,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                   setConfirmedFields((prev) => ({ ...prev, [key]: e.target.checked }));
                   setInitialized(false);
                   setMappings({});
+                  // F8c: mismo motivo que choosePurpose — el mapeo se re-deriva de
+                  // las sugerencias del nuevo bucket, sin arrastrar touches viejos.
+                  touchedRef.current.clear();
                 }}
                 className="h-3.5 w-3.5 rounded border-vk-border-w accent-vk-blue"
               />
@@ -1126,8 +1132,24 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       {/* F7e: preview de maestros (clientes/proveedores) detectados en el archivo. */}
       <MasterPreviewPanel previews={preview?.master_previews ?? []} />
 
+      {/* F8c: panel de decisiones de columnas riesgosas — en su propio contenedor
+          (como en multi-hoja), NO dentro del wrapper "Revisá antes de confirmar":
+          el panel ya trae su propio encabezado/caja, anidarlo duplicaba ambos. El
+          riesgo se recalcula en vivo (recompute) al cambiar el mapeo/tipo del archivo. */}
+      {contextualRisk.length > 0 && (
+        <div className="mb-4">
+          <ColumnRiskDecisionsPanel
+            initialRisks={contextualRisk}
+            recomputeKey={riskRecomputeKey}
+            recompute={recomputeRisk}
+            onDecisionsChange={setRiskDecisions}
+            onCancelAndComplete={() => cancelMutation.mutate()}
+          />
+        </div>
+      )}
+
       {/* A3: bloque consolidado "Revisá antes de confirmar" */}
-      {(isAmbiguous || contextualRisk.length > 0 || needsAttention.length > 0) && (
+      {(isAmbiguous || needsAttention.length > 0) && (
         <div className="mb-4 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 p-3">
           <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-vk-text-primary">
             <AlertCircle className="h-3.5 w-3.5 shrink-0 text-vk-warning" />
@@ -1157,20 +1179,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                   </button>
                 ))}
               </div>
-            </div>
-          )}
-
-          {/* F8c: panel de decisiones de columnas riesgosas. El riesgo se
-              recalcula en vivo (recompute) al cambiar el mapeo/tipo del archivo. */}
-          {contextualRisk.length > 0 && (
-            <div className="mb-3">
-              <ColumnRiskDecisionsPanel
-                initialRisks={contextualRisk}
-                recomputeKey={riskRecomputeKey}
-                recompute={recomputeRisk}
-                onDecisionsChange={setRiskDecisions}
-                onCancelAndComplete={() => cancelMutation.mutate()}
-              />
             </div>
           )}
 
