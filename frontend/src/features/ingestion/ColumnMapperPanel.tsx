@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle, AlertCircle, XCircle, ArrowRight } from "lucide-react";
 import {
   ingestionService,
-  type ColumnAtRisk,
   type ColumnMapping,
   type ColumnMappingSuggestion,
+  type ColumnRiskDecision,
+  type ContextualColumnRisk,
   type MappingContext,
   type MasterPreviewSummary,
   type StockTreatment,
@@ -15,6 +16,14 @@ import {
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
+import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
+
+// F8c: identidad estable de una columna riesgosa dentro del archivo: (contexto,
+// columna). Se serializa la tupla con JSON.stringify (sin separador propenso a
+// colisión) — misma convención que el panel de decisiones. Se usa como clave del
+// touched-set que marca `user_selected` SOLO en cambios manuales de mapeo.
+const riskKey = (contextId: string, sourceColumn: string): string =>
+  JSON.stringify([contextId, sourceColumn]);
 
 // Campos canónicos por entity_type (para los selects del panel derecho)
 const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> = {
@@ -148,27 +157,6 @@ function confidenceColor(confidence: number): string {
   if (confidence >= 0.75) return "text-vk-success";
   if (confidence >= 0.5) return "text-vk-warning";
   return "text-vk-danger";
-}
-
-// A3: lista reutilizable de columnas con muchos datos vacíos (columns_at_risk).
-function ColumnsAtRiskList({ items }: { items: ColumnAtRisk[] }) {
-  if (items.length === 0) return null;
-  return (
-    <div>
-      <p className="mb-1 text-[11px] text-vk-text-secondary">
-        Columnas con muchos datos vacíos:
-      </p>
-      <ul className="space-y-0.5">
-        {items.map((c) => (
-          <li key={c.column} className="flex items-center gap-1.5 text-[11px] text-vk-text-muted">
-            <XCircle className="h-3 w-3 shrink-0 text-vk-warning" />
-            <span className="font-mono text-vk-text-secondary">{c.column}</span>
-            <span>· {Math.round(c.null_pct)}% vacío — {c.recommendation}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
 }
 
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
@@ -341,6 +329,7 @@ function SheetMapperSection({
   onIncludeChange,
   onMappingsChange,
   onEntityChange,
+  onColumnTouched,
 }: {
   fileId: string;
   context: MappingContext;
@@ -349,6 +338,8 @@ function SheetMapperSection({
   onIncludeChange: (ctxId: string, included: boolean) => void;
   onMappingsChange: (ctxId: string, mappings: Record<string, string>) => void;
   onEntityChange: (ctxId: string, entity: string) => void;
+  // F8c: se llama SOLO en cambios manuales de mapeo (marca user_selected).
+  onColumnTouched?: (ctxId: string, col: string) => void;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -366,11 +357,16 @@ function SheetMapperSection({
     }
     setCustomFor((c) => (c === col ? null : c));
     setMappings((p) => ({ ...p, [col]: value }));
+    // Cambio MANUAL del mapeo → marcar la columna como tocada por el usuario.
+    onColumnTouched?.(context.context_id, col);
   }
 
   function commitCustom(col: string) {
     const key = customKey.trim().toLowerCase().replace(/\s+/g, "_");
-    if (key) setMappings((p) => ({ ...p, [col]: `custom_field:${key}` }));
+    if (key) {
+      setMappings((p) => ({ ...p, [col]: `custom_field:${key}` }));
+      onColumnTouched?.(context.context_id, col);
+    }
     setCustomFor(null);
     setCustomKey("");
   }
@@ -554,13 +550,13 @@ function SheetMapperSection({
 function MultiContextMapper({
   fileId,
   contexts,
-  columnsAtRisk,
+  contextualRisk,
   masterPreviews,
   onDone,
 }: {
   fileId: string;
   contexts: MappingContext[];
-  columnsAtRisk: ColumnAtRisk[];
+  contextualRisk: ContextualColumnRisk[];
   masterPreviews: MasterPreviewSummary[];
   onDone: () => void;
 }) {
@@ -577,6 +573,12 @@ function MultiContextMapper({
   const [stockTreatment, setStockTreatment] =
     useState<StockTreatment>("opening_balance");
   const mappingsRef = useRef<Record<string, Record<string, string>>>({});
+  // F8c: decisiones de columnas riesgosas + touched-set (user_selected).
+  const [riskDecisions, setRiskDecisions] = useState<ColumnRiskDecision[]>([]);
+  const touchedRef = useRef<Set<string>>(new Set());
+  // Los mapeos viven en mappingsRef (no en estado) para evitar re-renders de las
+  // hojas; este contador los hace observables para recalcular el riesgo en vivo.
+  const [mappingsVersion, setMappingsVersion] = useState(0);
 
   const handleIncludeChange = useCallback((ctxId: string, inc: boolean) => {
     setIncluded((prev) => ({ ...prev, [ctxId]: inc }));
@@ -589,15 +591,68 @@ function MultiContextMapper({
   const handleMappingsChange = useCallback(
     (ctxId: string, mappings: Record<string, string>) => {
       mappingsRef.current[ctxId] = mappings;
+      setMappingsVersion((v) => v + 1);
     },
     [],
   );
+
+  // F8c: cambio MANUAL de un mapeo en cualquier hoja → marca la columna como
+  // tocada por el usuario y dispara el recompute (via mappingsVersion).
+  const handleColumnTouched = useCallback((ctxId: string, col: string) => {
+    touchedRef.current.add(riskKey(ctxId, col));
+    setMappingsVersion((v) => v + 1);
+  }, []);
 
   // A: alguna hoja incluida es de productos → preguntar cómo tratar el stock.
   const hasStock = contexts.some(
     (c) =>
       included[c.context_id] &&
       (entityByCtx[c.context_id] ?? c.entity_type) === "product",
+  );
+
+  // F8c: input del recompute de riesgo — recorre las hojas incluidas leyendo el
+  // mapeo vivo de mappingsRef (observable via mappingsVersion) y el touched-set.
+  // touchedRef/mappingsRef son refs → se leen en el momento; mappingsVersion en
+  // deps garantiza que el memo se rearme cuando cambia un mapeo de cualquier hoja.
+  const riskRecomputeInput = useMemo(() => {
+    const columnMappings: ColumnMapping[] = [];
+    const contextEntity: Record<string, string> = {};
+    for (const ctx of contexts) {
+      if (!included[ctx.context_id]) continue;
+      const ent = entityByCtx[ctx.context_id] ?? ctx.entity_type ?? "sale";
+      if (ctx.headers == null) contextEntity[ctx.context_id] = ent;
+      const m = mappingsRef.current[ctx.context_id] ?? {};
+      for (const [src, target] of Object.entries(m)) {
+        if (!target) continue;
+        columnMappings.push({
+          source_column: src,
+          target_field: target,
+          context_id: ctx.context_id,
+          entity_type: ent,
+          user_selected: touchedRef.current.has(riskKey(ctx.context_id, src)),
+        });
+      }
+    }
+    return {
+      columnMappings,
+      contextEntity,
+      confirmedFields: {} as Record<string, boolean>,
+      contextConfirmed: included,
+    };
+    // mappingsVersion es un trigger deliberado: el memo lee mappingsRef.current
+    // (no rastreable por React), así que dependemos del contador para rearmarlo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contexts, included, entityByCtx, mappingsVersion]);
+
+  const riskRecomputeKey = useMemo(
+    () => JSON.stringify(riskRecomputeInput),
+    [riskRecomputeInput],
+  );
+
+  const recomputeRisk = useCallback(
+    (signal: AbortSignal) =>
+      ingestionService.recomputeColumnRisk(fileId, riskRecomputeInput, signal),
+    [fileId, riskRecomputeInput],
   );
 
   const confirmMutation = useMutation({
@@ -617,6 +672,7 @@ function MultiContextMapper({
             target_field: target,
             context_id: ctx.context_id,
             entity_type: ent,
+            user_selected: touchedRef.current.has(riskKey(ctx.context_id, src)),
           });
         }
       }
@@ -627,6 +683,7 @@ function MultiContextMapper({
         included,
         contextEntity,
         hasStock ? stockTreatment : undefined,
+        riskDecisions,
       );
     },
     onSuccess: (result) => {
@@ -671,14 +728,17 @@ function MultiContextMapper({
       {/* F7e: preview de maestros (clientes/proveedores) detectados en el archivo. */}
       <MasterPreviewPanel previews={masterPreviews} />
 
-      {/* A3: bloque "Revisá antes de confirmar" — columns_at_risk también en multi-hoja. */}
-      {columnsAtRisk.length > 0 && (
-        <div className="mb-3 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 p-3">
-          <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-vk-text-primary">
-            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-vk-warning" />
-            Revisá antes de confirmar
-          </p>
-          <ColumnsAtRiskList items={columnsAtRisk} />
+      {/* F8c: panel de decisiones de columnas riesgosas — también en multi-hoja.
+          El riesgo se recalcula en vivo (recompute) al cambiar mapeos/inclusión. */}
+      {contextualRisk.length > 0 && (
+        <div className="mb-3">
+          <ColumnRiskDecisionsPanel
+            initialRisks={contextualRisk}
+            recomputeKey={riskRecomputeKey}
+            recompute={recomputeRisk}
+            onDecisionsChange={setRiskDecisions}
+            onCancelAndComplete={() => cancelMutation.mutate()}
+          />
         </div>
       )}
 
@@ -693,6 +753,7 @@ function MultiContextMapper({
             onIncludeChange={handleIncludeChange}
             onMappingsChange={handleMappingsChange}
             onEntityChange={handleEntityChange}
+            onColumnTouched={handleColumnTouched}
           />
         ))}
       </div>
@@ -757,6 +818,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const [unmappedQueue, setUnmappedQueue] = useState<string[]>([]);
   const [showUnmappedModal, setShowUnmappedModal] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  // F8c: decisiones de columnas riesgosas + touched-set (user_selected). El
+  // touched-set solo se marca en cambios MANUALES de mapeo (no en la
+  // inicialización desde sugerencias, que es señal débil de F7).
+  const [riskDecisions, setRiskDecisions] = useState<ColumnRiskDecision[]>([]);
+  const touchedRef = useRef<Set<string>>(new Set());
   // A3: cuando el tipo quedó ambiguo ("general"), el usuario elige el propósito aquí.
   const [purpose, setPurpose] = useState<string>("");
   // A: tratamiento del stock cuando el archivo trae productos (default: saldo de apertura).
@@ -787,14 +853,44 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const effectiveInferred = isAmbiguous ? purpose : _inferredType;
   const needsPurpose = isAmbiguous && !purpose;
   const entityType = INFERRED_TO_ENTITY[effectiveInferred] ?? "sale";
-  // columns_at_risk (Sprint 14): hasta ahora no se renderizaban en el panel.
-  const columnsAtRisk = preview?.columns_at_risk ?? [];
+  // F8c: riesgo contextual por columna (reemplaza el legacy columns_at_risk).
+  const contextualRisk = preview?.contextual_column_risk ?? [];
   // A: el archivo trae stock si el schema efectivo es de productos, si se tildó
   // "productos", o si el summary detectó stock/productos.
   const hasStock =
     entityType === "product" ||
     confirmedFields.productos ||
     summaryHasStock(summary);
+
+  // F8c: input/clave/closure del recompute de riesgo en vivo. touchedRef es un
+  // ref (no está en deps): se lee en el momento del recompute — cuando el usuario
+  // toca un mapeo, `mappings` cambia, dispara el recompute y re-lee el touched-set.
+  const riskRecomputeInput = useMemo(
+    () => ({
+      columnMappings: Object.entries(mappings)
+        .filter(([, t]) => Boolean(t))
+        .map(([src, target]) => ({
+          source_column: src,
+          target_field: target,
+          context_id: "table",
+          entity_type: entityType,
+          user_selected: touchedRef.current.has(riskKey("table", src)),
+        })) as ColumnMapping[],
+      contextEntity: {} as Record<string, string>,
+      confirmedFields,
+      contextConfirmed: {} as Record<string, boolean>,
+    }),
+    [mappings, confirmedFields, entityType],
+  );
+  const riskRecomputeKey = useMemo(
+    () => JSON.stringify(riskRecomputeInput),
+    [riskRecomputeInput],
+  );
+  const recomputeRisk = useCallback(
+    (signal: AbortSignal) =>
+      ingestionService.recomputeColumnRisk(fileId, riskRecomputeInput, signal),
+    [fileId, riskRecomputeInput],
+  );
 
   function choosePurpose(value: string) {
     setPurpose(value);
@@ -851,6 +947,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         undefined,
         undefined,
         hasStock ? stockTreatment : undefined,
+        riskDecisions,
       ),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
@@ -882,6 +979,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   }
 
   function setMappingForColumn(col: string, target: string) {
+    // Cambio MANUAL del mapeo → marcar la columna como tocada (user_selected).
+    touchedRef.current.add(riskKey("table", col));
     setMappings((prev) => ({ ...prev, [col]: target }));
   }
 
@@ -931,6 +1030,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     const current = unmappedQueue[0];
     const updatedMappings = current ? { ...mappings, [current]: target } : { ...mappings };
     if (current) {
+      // El usuario asignó un target a esta columna → cambio manual.
+      touchedRef.current.add(riskKey("table", current));
       setMappings(updatedMappings);
     }
     const remaining = unmappedQueue.slice(1);
@@ -946,7 +1047,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   function doConfirm(currentMappings: Record<string, string>) {
     const columnMappings: ColumnMapping[] = Object.entries(currentMappings)
       .filter(([, target]) => Boolean(target))
-      .map(([src, target]) => ({ source_column: src, target_field: target }));
+      .map(([src, target]) => ({
+        source_column: src,
+        target_field: target,
+        // F8c: mismo touched-set que el recompute — user_selected solo si el
+        // usuario cambió el mapeo a mano (no si vino de una sugerencia).
+        user_selected: touchedRef.current.has(riskKey("table", src)),
+      }));
     confirmMutation.mutate(columnMappings);
   }
 
@@ -971,7 +1078,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       <MultiContextMapper
         fileId={fileId}
         contexts={contexts}
-        columnsAtRisk={columnsAtRisk}
+        contextualRisk={contextualRisk}
         masterPreviews={preview?.master_previews ?? []}
         onDone={onDone}
       />
@@ -1020,7 +1127,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       <MasterPreviewPanel previews={preview?.master_previews ?? []} />
 
       {/* A3: bloque consolidado "Revisá antes de confirmar" */}
-      {(isAmbiguous || columnsAtRisk.length > 0 || needsAttention.length > 0) && (
+      {(isAmbiguous || contextualRisk.length > 0 || needsAttention.length > 0) && (
         <div className="mb-4 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 p-3">
           <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-vk-text-primary">
             <AlertCircle className="h-3.5 w-3.5 shrink-0 text-vk-warning" />
@@ -1053,10 +1160,17 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             </div>
           )}
 
-          {/* Columnas con muchos datos vacíos (columns_at_risk, Sprint 14) */}
-          {columnsAtRisk.length > 0 && (
+          {/* F8c: panel de decisiones de columnas riesgosas. El riesgo se
+              recalcula en vivo (recompute) al cambiar el mapeo/tipo del archivo. */}
+          {contextualRisk.length > 0 && (
             <div className="mb-3">
-              <ColumnsAtRiskList items={columnsAtRisk} />
+              <ColumnRiskDecisionsPanel
+                initialRisks={contextualRisk}
+                recomputeKey={riskRecomputeKey}
+                recompute={recomputeRisk}
+                onDecisionsChange={setRiskDecisions}
+                onCancelAndComplete={() => cancelMutation.mutate()}
+              />
             </div>
           )}
 

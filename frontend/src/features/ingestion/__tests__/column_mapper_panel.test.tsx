@@ -4,7 +4,12 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ColumnMapperPanel } from "../ColumnMapperPanel";
-import { ingestionService } from "@/services/ingestion.service";
+import {
+  ingestionService,
+  type ColumnMapping,
+  type ColumnRiskDecision,
+  type ContextualColumnRisk,
+} from "@/services/ingestion.service";
 
 const mockAddToast = jest.fn();
 jest.mock("@/stores/toastStore", () => ({
@@ -18,12 +23,36 @@ jest.mock("@/services/ingestion.service", () => ({
     getColumnMappings: jest.fn(),
     confirmFile: jest.fn(),
     cancelFile: jest.fn(),
+    recomputeColumnRisk: jest.fn(),
   },
 }));
 
 const mockGetPreview = ingestionService.getPreview as jest.Mock;
 const mockGetColumnMappings = ingestionService.getColumnMappings as jest.Mock;
 const mockConfirmFile = ingestionService.confirmFile as jest.Mock;
+const mockRecomputeColumnRisk = ingestionService.recomputeColumnRisk as jest.Mock;
+
+// Helper: arma un ContextualColumnRisk completo (los tests solo pisan lo que importa).
+function makeContextualRisk(
+  overrides: Partial<ContextualColumnRisk> = {},
+): ContextualColumnRisk {
+  return {
+    context_id: "table",
+    entity_type: "sale",
+    source_column: "obs",
+    target_field: "notes",
+    null_ratio: 0.9,
+    affected_rows: 45,
+    null_rows: 45,
+    invalid_rows: 0,
+    field_requirement: "optional",
+    mapping_source: "heuristic",
+    user_selected: false,
+    allowed_actions: ["route_affected_rows_to_others", "drop_column"],
+    recommendation: "Revisá o eliminá la columna",
+    ...overrides,
+  };
+}
 
 function renderPanel() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -38,6 +67,9 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
+    // Default: el recompute no cambia el set (evita vaciar el panel si el
+    // debounce llega a dispararse durante un test).
+    mockRecomputeColumnRisk.mockResolvedValue([]);
   });
 
   test("archivo ambiguo (general) muestra el selector de propósito", async () => {
@@ -61,15 +93,17 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     expect(mockGetColumnMappings).not.toHaveBeenCalled();
   });
 
-  test("renderiza columns_at_risk del preview", async () => {
+  test("renderiza contextual_column_risk del preview (null_ratio → %)", async () => {
+    // null_ratio 0.9 debe mostrarse como 90% (NO 1%, el bug legacy de Math.round).
+    const risk = makeContextualRisk({ source_column: "obs", null_ratio: 0.9 });
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
       parsed_summary_json: { inferred_type: "ventas", headers: ["fecha", "obs"] },
-      columns_at_risk: [
-        { column: "obs", null_pct: 72, recommendation: "Revisá o eliminá la columna" },
-      ],
+      columns_at_risk: [],
+      contextual_column_risk: [risk],
     });
+    mockRecomputeColumnRisk.mockResolvedValue([risk]);
 
     renderPanel();
 
@@ -77,7 +111,8 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
       expect(screen.getByText(/Columnas con muchos datos vacíos/i)).toBeInTheDocument();
     });
     expect(screen.getByText("obs")).toBeInTheDocument();
-    expect(screen.getByText(/72% vacío/i)).toBeInTheDocument();
+    expect(screen.getByText(/90% vacío/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^1% vacío/)).not.toBeInTheDocument();
   });
 
   test("muestra el source 'llm' como IA con su confianza", async () => {
@@ -305,7 +340,12 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     expect(screen.getByText(/Sin documento ni email para identificar/)).toBeInTheDocument();
   });
 
-  test("multi-contexto: muestra columns_at_risk y source llm por hoja", async () => {
+  test("multi-contexto: muestra contextual_column_risk y source llm por hoja", async () => {
+    const risk = makeContextualRisk({
+      context_id: "hoja1",
+      source_column: "obs",
+      null_ratio: 0.8,
+    });
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -334,10 +374,10 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
           },
         ],
       },
-      columns_at_risk: [
-        { column: "obs", null_pct: 80, recommendation: "Revisá o eliminá la columna" },
-      ],
+      columns_at_risk: [],
+      contextual_column_risk: [risk],
     });
+    mockRecomputeColumnRisk.mockResolvedValue([risk]);
     mockGetColumnMappings.mockResolvedValue([
       {
         source_column: "ColX",
@@ -352,15 +392,153 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
 
     renderPanel();
 
-    // columns_at_risk visible también en multi-hoja.
+    // El panel de riesgo aparece también en multi-hoja.
     await waitFor(() => {
       expect(screen.getByText(/Columnas con muchos datos vacíos/i)).toBeInTheDocument();
     });
     expect(screen.getByText("obs")).toBeInTheDocument();
+    expect(screen.getByText(/80% vacío/i)).toBeInTheDocument();
     // source llm visible en al menos una sección de hoja.
     await waitFor(() => {
       expect(screen.getAllByText(/IA/).length).toBeGreaterThan(0);
     });
     expect(screen.getAllByText(/77%/).length).toBeGreaterThan(0);
+  });
+
+  test("user_selected: sugerencia inicial NO cuenta como manual; cambiar el mapeo sí", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "ColX",
+        normalized_column: "colx",
+        sample_values: ["1500"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+
+    renderPanel();
+
+    // Esperar a que carguen las sugerencias (la columna y su select).
+    await screen.findAllByText("ColX");
+
+    // Confirmar SIN tocar el mapeo auto-sugerido.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Confirmar importación/i }),
+    );
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const first = mockConfirmFile.mock.calls[0][2] as ColumnMapping[];
+    const colxInitial = first.find((m) => m.source_column === "ColX");
+    // La sugerencia inicial NO es una selección manual.
+    expect(colxInitial?.user_selected).toBeFalsy();
+
+    // Ahora el usuario cambia el mapeo manualmente y reconfirma.
+    mockConfirmFile.mockClear();
+    fireEvent.change(screen.getAllByRole("combobox")[0]!, {
+      target: { value: "quantity" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Confirmar importación/i }),
+    );
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const second = mockConfirmFile.mock.calls[0][2] as ColumnMapping[];
+    const colxManual = second.find((m) => m.source_column === "ColX");
+    expect(colxManual?.user_selected).toBe(true);
+  });
+
+  test("las decisiones de riesgo viajan al confirm", async () => {
+    const risk = makeContextualRisk({
+      context_id: "table",
+      source_column: "obs",
+      target_field: "notes",
+      allowed_actions: ["route_affected_rows_to_others"],
+    });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["obs"] },
+      columns_at_risk: [],
+      contextual_column_risk: [risk],
+    });
+    mockRecomputeColumnRisk.mockResolvedValue([risk]);
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "obs",
+        normalized_column: "obs",
+        sample_values: ["x"],
+        target_field: "notes",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+
+    renderPanel();
+
+    // Elegir "enviar filas afectadas a Otros" en el panel de decisiones.
+    const routeBtn = await screen.findByRole("button", {
+      name: /Enviar filas afectadas a Otros/i,
+    });
+    fireEvent.click(routeBtn);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Confirmar importación/i }),
+    );
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // column_risk_decisions es el 7º arg posicional de confirmFile (índice 6).
+    const decisions = mockConfirmFile.mock.calls[0][6] as ColumnRiskDecision[];
+    expect(decisions).toEqual([
+      {
+        context_id: "table",
+        source_column: "obs",
+        target_field: "notes",
+        action: "route_affected_rows_to_others",
+      },
+    ]);
+  });
+
+  test("el panel de decisiones aparece solo con contextual_column_risk", async () => {
+    const risk = makeContextualRisk();
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["obs"] },
+      columns_at_risk: [],
+      contextual_column_risk: [risk],
+    });
+    mockRecomputeColumnRisk.mockResolvedValue([risk]);
+
+    const { unmount } = renderPanel();
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("column-risk-decisions-panel"),
+      ).toBeInTheDocument();
+    });
+    unmount();
+
+    // Sin contextual_column_risk el panel no se monta.
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["obs"] },
+      columns_at_risk: [],
+      contextual_column_risk: [],
+    });
+    renderPanel();
+    await waitFor(() => {
+      expect(mockGetColumnMappings).toHaveBeenCalled();
+    });
+    expect(
+      screen.queryByTestId("column-risk-decisions-panel"),
+    ).not.toBeInTheDocument();
   });
 });
