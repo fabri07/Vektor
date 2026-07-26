@@ -251,6 +251,25 @@ async def test_constraint_not_null_rechaza_insert_crudo_con_name_normalized_nulo
             await conn.execute(inserta, {"id": uuid.uuid4(), "t": tenant_id})
 
 
+async def test_constraint_not_blank_rechaza_insert_crudo_con_name_normalized_whitespace(
+    pg_engine: AsyncEngine, tenant_id: uuid.UUID
+) -> None:
+    """La CHECK ``ck_products_name_normalized_not_blank`` (defensa en profundidad,
+    no redundante con NOT NULL) tiene que rechazar un INSERT crudo con
+    ``name_normalized`` de solo espacios — el caso que ``CreateProductRequest``
+    ya bloquea a nivel schema, pero un camino que inserte por fuera de ese
+    schema (import, script) también tiene que chocar con la DB."""
+    inserta = text(
+        "INSERT INTO products "
+        "(id, tenant_id, name, name_normalized, sale_price_ars, stock_units, "
+        " is_active, created_at, updated_at) "
+        "VALUES (:id, :t, '   ', '   ', 100, 0, true, now(), now())"
+    )
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(inserta, {"id": uuid.uuid4(), "t": tenant_id})
+
+
 async def test_constraint_not_null_acepta_insert_crudo_con_valor(
     pg_engine: AsyncEngine, tenant_id: uuid.UUID
 ) -> None:

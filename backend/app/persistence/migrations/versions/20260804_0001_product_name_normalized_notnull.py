@@ -44,8 +44,21 @@ Orden (mismo patrón que ``20260731_0002_backfill_product_identity.py`` +
    (la CHECK queda redundante una vez que el NOT NULL está puesto; catalog-only,
    instantáneo). En otros dialectos (SQLite, tests) se usa el
    ``alter_column(nullable=False)`` simple.
+4. ``CHECK (btrim(name_normalized) <> '')`` — PERMANENTE (no se dropea como la
+   de NOT NULL, porque NO es redundante: ``NOT NULL`` nunca prohibió ``''``.
+   Sin esto, un ``name`` de solo espacios pasa ``CreateProductRequest`` (Pydantic
+   ``min_length=1`` cuenta longitud CRUDA, no post-strip) y el listener lo
+   normaliza a ``""``, que el ``NOT NULL`` solo no rechaza — la garantía de
+   "no-invention" que ``_verify_clean`` exige en el backfill quedaría sin
+   vigencia para filas nuevas. Mismo patrón zero-lock (``NOT VALID`` →
+   ``VALIDATE``), pero esta CHECK se mantiene. La validación de origen real
+   (rechazar el ``name`` en blanco antes de llegar acá) vive en
+   ``CreateProductRequest``/``UpdateProductRequest`` (``app/schemas/product.py``) —
+   la CHECK es la red de defensa en profundidad para cualquier camino que
+   inserte por fuera de esos schemas (import, scripts).
 
-``downgrade`` revierte la columna a nullable (reversible; no re-vacía datos).
+``downgrade`` revierte la columna a nullable y dropea ambas CHECK (reversible;
+no re-vacía datos).
 
 Funciones a nivel de módulo (no anidadas en ``upgrade``) para que la suite de
 integración Postgres (T2, ``app/tests/integration/``) las importe por ruta de
@@ -68,6 +81,7 @@ depends_on = None
 _BATCH = 500
 
 _CHECK_NAME = "ck_products_name_normalized_not_null"
+_CHECK_NAME_NONBLANK = "ck_products_name_normalized_not_blank"
 
 
 def _run_backfill(bind: sa.Connection) -> None:
@@ -131,6 +145,9 @@ def upgrade() -> None:
                 existing_type=sa.String(400),
                 nullable=False,
             )
+            batch_op.create_check_constraint(
+                _CHECK_NAME_NONBLANK, "trim(name_normalized) != ''"
+            )
         return
 
     # Postgres: patrón zero-lock (mismo motivo que 20260802_0001). Un
@@ -153,13 +170,25 @@ def upgrade() -> None:
     bind.execute(sa.text("ALTER TABLE products ALTER COLUMN name_normalized SET NOT NULL"))
     bind.execute(sa.text(f"ALTER TABLE products DROP CONSTRAINT {_CHECK_NAME}"))
 
+    # CHECK de no-blank: PERMANENTE (no redundante con NOT NULL, ver docstring).
+    bind.execute(
+        sa.text(
+            f"ALTER TABLE products ADD CONSTRAINT {_CHECK_NAME_NONBLANK} "
+            "CHECK (btrim(name_normalized) <> '') NOT VALID"
+        )
+    )
+    bind.execute(sa.text(f"ALTER TABLE products VALIDATE CONSTRAINT {_CHECK_NAME_NONBLANK}"))
+
 
 def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
         # Defensivo: si un upgrade quedó a mitad de camino (falló entre el ADD
-        # y el DROP), no dejar la CHECK huérfana al revertir.
+        # y el DROP), no dejar ninguna CHECK huérfana al revertir.
         bind.execute(sa.text(f"ALTER TABLE products DROP CONSTRAINT IF EXISTS {_CHECK_NAME}"))
+        bind.execute(
+            sa.text(f"ALTER TABLE products DROP CONSTRAINT IF EXISTS {_CHECK_NAME_NONBLANK}")
+        )
         op.alter_column(
             "products",
             "name_normalized",
@@ -169,6 +198,7 @@ def downgrade() -> None:
         return
 
     with op.batch_alter_table("products") as batch_op:
+        batch_op.drop_constraint(_CHECK_NAME_NONBLANK, type_="check")
         batch_op.alter_column(
             "name_normalized",
             existing_type=sa.String(400),

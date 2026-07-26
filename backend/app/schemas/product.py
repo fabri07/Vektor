@@ -107,6 +107,15 @@ class CreateProductRequest(BaseModel):
     acquired_at: datetime | None = Field(default=None, description="Fecha/hora de alta")
     custom_fields: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip_name(cls, v: Any) -> Any:
+        """``min_length=1`` cuenta longitud CRUDA: un nombre de solo espacios
+        pasaría la validación y el listener de identidad lo normalizaría a
+        ``""`` (F8d). Se hace strip ANTES del chequeo de longitud para que
+        ``min_length`` rechace lo que en la práctica es un nombre vacío."""
+        return v.strip() if isinstance(v, str) else v
+
 
 class UpdateProductRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=300)
@@ -121,3 +130,8 @@ class UpdateProductRequest(BaseModel):
     is_active: bool | None = None
     acquired_at: datetime | None = None
     custom_fields: dict[str, Any] | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip_name(cls, v: Any) -> Any:
+        return v.strip() if isinstance(v, str) else v
