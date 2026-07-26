@@ -663,12 +663,28 @@ async def test_missing_identity_precondition_count(
 ) -> None:
     tid = sample_tenant.tenant_id
     assert await svc.count_active_products_missing_identity(db_session, tid) == 0
-    # Forzar name_normalized NULL (el listener lo setea; lo pisamos con UPDATE).
-    p = await _add_product(db_session, tid, name="Sin norm", stock_units=0)
-    from sqlalchemy import update
 
-    await db_session.execute(
-        update(Product).where(Product.id == p.id).values(name_normalized=None)
+
+async def test_name_normalized_cannot_be_forced_null(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Desde F8d (``20260804_0001``) ``name_normalized`` es NOT NULL a nivel DB.
+
+    El escenario que este test forzaba antes de F8d (UPDATE directo pisando el
+    listener para simular un producto legacy) ya no puede ocurrir — la
+    precondición que protegía ``count_active_products_missing_identity`` quedó
+    estructuralmente inalcanzable. Se prueba la garantía inversa: forzarlo debe
+    fallar fuerte (IntegrityError), no silenciarse — si algún día alguien afloja
+    la columna sin querer, este test lo grita.
+    """
+    from sqlalchemy import update
+    from sqlalchemy.exc import IntegrityError
+
+    p = await _add_product(
+        db_session, sample_tenant.tenant_id, name="Sin norm", stock_units=0
     )
-    await db_session.flush()
-    assert await svc.count_active_products_missing_identity(db_session, tid) == 1
+
+    with pytest.raises(IntegrityError):
+        await db_session.execute(
+            update(Product).where(Product.id == p.id).values(name_normalized=None)
+        )
