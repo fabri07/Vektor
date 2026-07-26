@@ -281,6 +281,96 @@ describe("ColumnRiskDecisionsPanel — F8c decisiones de columnas riesgosas", ()
       expect(screen.queryByText(/Se eliminará al confirmar/i)).not.toBeInTheDocument();
     });
 
+    test("poda al recalcular: recompute con target_field distinto elimina la decisión", async () => {
+      const onDecisionsChange = jest.fn();
+      const d = deferred<ContextualColumnRisk[]>();
+      const recompute = jest.fn().mockReturnValue(d.promise);
+
+      const { rerender } = render(
+        <ColumnRiskDecisionsPanel
+          initialRisks={[makeRisk()]}
+          recomputeKey="k0"
+          recompute={recompute}
+          onDecisionsChange={onDecisionsChange}
+          onCancelAndComplete={jest.fn()}
+        />,
+      );
+
+      // Elegimos drop sobre la columna.
+      fireEvent.click(screen.getByRole("button", { name: /Eliminar columna/i }));
+      expect(onDecisionsChange).toHaveBeenLastCalledWith([
+        expect.objectContaining({ action: "drop_column" }),
+      ]);
+
+      // Cambia el recomputeKey → dispara recompute (debounced).
+      rerender(
+        <ColumnRiskDecisionsPanel
+          initialRisks={[makeRisk()]}
+          recomputeKey="k1"
+          recompute={recompute}
+          onDecisionsChange={onDecisionsChange}
+          onCancelAndComplete={jest.fn()}
+        />,
+      );
+      act(() => {
+        jest.advanceTimersByTime(400);
+      });
+      expect(recompute).toHaveBeenCalledTimes(1);
+
+      // La misma columna sigue riesgosa, pero ahora mapea a otro target_field
+      // (el usuario cambió el mapeo mientras tanto): la decisión vieja ya no aplica.
+      d.resolve([makeRisk({ target_field: "otro_campo" })]);
+      await flush();
+
+      expect(onDecisionsChange).toHaveBeenLastCalledWith([]);
+    });
+
+    test("poda al recalcular: recompute sin la acción elegida en allowed_actions elimina la decisión", async () => {
+      const onDecisionsChange = jest.fn();
+      const d = deferred<ContextualColumnRisk[]>();
+      const recompute = jest.fn().mockReturnValue(d.promise);
+
+      const { rerender } = render(
+        <ColumnRiskDecisionsPanel
+          initialRisks={[makeRisk()]}
+          recomputeKey="k0"
+          recompute={recompute}
+          onDecisionsChange={onDecisionsChange}
+          onCancelAndComplete={jest.fn()}
+        />,
+      );
+
+      // Elegimos drop sobre la columna.
+      fireEvent.click(screen.getByRole("button", { name: /Eliminar columna/i }));
+      expect(onDecisionsChange).toHaveBeenLastCalledWith([
+        expect.objectContaining({ action: "drop_column" }),
+      ]);
+
+      // Cambia el recomputeKey → dispara recompute (debounced).
+      rerender(
+        <ColumnRiskDecisionsPanel
+          initialRisks={[makeRisk()]}
+          recomputeKey="k1"
+          recompute={recompute}
+          onDecisionsChange={onDecisionsChange}
+          onCancelAndComplete={jest.fn()}
+        />,
+      );
+      act(() => {
+        jest.advanceTimersByTime(400);
+      });
+      expect(recompute).toHaveBeenCalledTimes(1);
+
+      // La misma columna sigue riesgosa con el mismo target_field, pero
+      // "drop_column" ya no está entre las acciones permitidas.
+      d.resolve([
+        makeRisk({ allowed_actions: ["route_affected_rows_to_others"] }),
+      ]);
+      await flush();
+
+      expect(onDecisionsChange).toHaveBeenLastCalledWith([]);
+    });
+
     test("stale ignorado: la respuesta vieja que resuelve tarde no pisa a la nueva", async () => {
       const first = deferred<ContextualColumnRisk[]>();
       const second = deferred<ContextualColumnRisk[]>();
