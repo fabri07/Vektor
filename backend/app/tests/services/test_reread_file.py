@@ -35,6 +35,7 @@ from app.integrations.s3 import S3Client
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
     REREAD_STATUS_APPLIED,
+    REREAD_STATUS_AUTO_APPLIED,
     REREAD_STATUS_NEEDS_REVIEW,
     UploadedFile,
 )
@@ -832,6 +833,42 @@ async def test_reread_reapplied_outcome_bumps_version_and_status(
     assert file.reread_summary["algorithm_version"] == INGESTION_VERSION
 
 
+@pytest.mark.asyncio
+async def test_undo_reread_reverts_ingestion_version_and_status(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round post-review (hallazgo Important #2): ``undo_reread`` debe
+    revertir el stamping de versionado que ``apply_reread`` hizo sobre el
+    archivo. Antes de este fix, deshacer una relectura REAPPLIED dejaba el
+    archivo con ``ingestion_version`` bumpeado y ``reread_status=APPLIED``
+    para siempre, aunque sus datos hubieran vuelto al estado pre-reread —
+    excluyéndolo PARA SIEMPRE de ``select_candidate_files`` (filtra por
+    ``ingestion_version < to_version``)."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+    original_version = file.ingestion_version
+    assert original_version < INGESTION_VERSION  # precondición: hay algo que bumpear
+
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.column_risk_outcome == "REAPPLIED"
+    assert file.ingestion_version == INGESTION_VERSION
+    assert file.reread_status == REREAD_STATUS_APPLIED
+
+    undo = await reread_service.undo_reread(db_session, result.run_id, tenant.tenant_id)
+    await db_session.commit()
+    assert undo["status"] == "REVERTED"
+
+    # El archivo vuelve a su ingestion_version previa y deja de "decir" APPLIED
+    # — necesita revisión de nuevo, y select_candidate_files debe poder
+    # encontrarlo otra vez (ingestion_version < to_version).
+    assert file.ingestion_version == original_version
+    assert file.reread_status not in (REREAD_STATUS_APPLIED, REREAD_STATUS_AUTO_APPLIED)
+    assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
+
+
 # ── F9a (Task 3): outcomes explícitos para archivos pre-F8 (mapeo re-derivado) ──
 #
 # Invariante de seguridad: para un archivo confirmado ANTES de F8 (sin
@@ -915,8 +952,10 @@ async def test_reread_forced_unverified_does_not_auto_apply(
     assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
     assert file.reread_summary is not None
     assert file.reread_summary["outcome"] == "FORCED_UNVERIFIED"
-    assert len(file.reread_summary["forced_unverified_columns"]) == 1
-    assert file.reread_summary["ambiguous_columns"] == []
+    # Shape único de ``reread_summary`` (fix round post-review, hallazgo
+    # Important #3): ``risk_columns`` anidado, no keys top-level sueltas.
+    assert len(file.reread_summary["risk_columns"]["forced_unverified"]) == 1
+    assert file.reread_summary["risk_columns"]["ambiguous"] == []
 
 
 @pytest.mark.asyncio

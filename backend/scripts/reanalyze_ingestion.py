@@ -44,7 +44,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _db import async_engine_config, insert_decision_audit  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import inspect, or_, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
 from app.application.services import reread_service  # noqa: E402
@@ -118,18 +118,31 @@ _EXCLUSION_REASONS: dict[str, str] = {
 
 @dataclass
 class ScanEntry:
-    """Resultado de evaluar UN archivo candidato — unidad del reporte."""
+    """Resultado de evaluar UN archivo candidato — unidad del reporte.
+
+    ``ambiguous_rows``/``forced_rows`` se guardan SEPARADOS (fix round
+    post-review, hallazgo Important #3) para poder alimentar el shape único de
+    ``reread_summary`` (``reread_service.build_reread_summary``, que espera
+    las dos listas por separado bajo ``risk_columns``) — antes se combinaban en
+    un único ``risk_rows`` plano y esa distinción se perdía."""
 
     file_id: uuid.UUID
     tenant_id: uuid.UUID
     filename: str
     bucket: str
     outcome: str
-    risk_rows: list[dict[str, Any]] = field(default_factory=list)
+    ambiguous_rows: list[dict[str, Any]] = field(default_factory=list)
+    forced_rows: list[dict[str, Any]] = field(default_factory=list)
     exclusion_reason: str | None = None
     applied: bool = False
     from_version: int = 1
     to_version: int = INGESTION_VERSION
+
+    @property
+    def risk_rows(self) -> list[dict[str, Any]]:
+        """Vista combinada (forzadas + ambiguas) para el reporte tabular —
+        mismo orden que antes del fix round (forzadas primero)."""
+        return [*self.forced_rows, *self.ambiguous_rows]
 
 
 # ── selección de candidatos ────────────────────────────────────────────────────
@@ -147,9 +160,22 @@ async def select_candidate_files(
     from_version: int,
     to_version: int,
     limit: int | None = None,
+    skip_scanned: bool = False,
 ) -> list[UploadedFile]:
     """Archivos candidatos a reanálisis: procesados, no borrados, con crudo en S3
-    y ``ingestion_version`` dentro de ``[from_version, to_version)``."""
+    y ``ingestion_version`` dentro de ``[from_version, to_version)``.
+
+    ``skip_scanned`` (Important #5, fix round post-review): los outcomes
+    ``NO_RISK_FOUND``/``FORCED_UNVERIFIED``/``AMBIGUOUS`` correctamente NO
+    bumpean ``ingestion_version`` (por diseño — ver ``ResolvedRisk`` en
+    ``reread_service.py``), lo que significaba que CADA corrida de
+    ``--all-active`` volvía a re-descargar y re-parsear esos mismos archivos de
+    S3 para siempre, sin forma de saltarlos. Con ``skip_scanned=True``, se
+    excluyen los archivos donde ``latest_preview_version IS NOT NULL AND
+    latest_preview_version >= to_version`` — ya fueron escaneados con la
+    versión objetivo actual (o una mayor), así que no hace falta re-escanearlos
+    hasta que ``to_version`` suba. Default ``False`` — comportamiento actual
+    preservado si no se pasa el flag."""
     stmt = (
         select(UploadedFile)
         .where(
@@ -162,6 +188,13 @@ async def select_candidate_files(
         )
         .order_by(UploadedFile.created_at)
     )
+    if skip_scanned:
+        stmt = stmt.where(
+            or_(
+                UploadedFile.latest_preview_version.is_(None),
+                UploadedFile.latest_preview_version < to_version,
+            )
+        )
     if limit is not None:
         stmt = stmt.limit(limit)
     result = await session.execute(stmt)
@@ -177,6 +210,7 @@ async def evaluate_file(
     file: UploadedFile,
     *,
     do_apply: bool,
+    to_version: int = INGESTION_VERSION,
 ) -> ScanEntry:
     """Pasos 1–3 del flujo: preview + clasificación + auto-apply condicional.
 
@@ -186,11 +220,17 @@ async def evaluate_file(
 
     Invariante de seguridad: SOLO ``outcome == "REAPPLIED"`` sin ediciones
     humanas puede llegar a ``apply_reread`` — y solo si ``do_apply=True``.
+
+    ``to_version`` es el valor que el usuario pidió vía ``--to-version``
+    (default ``INGESTION_VERSION`` actual) — se usa SOLO para el reporte/
+    auditoría de "qué rango pidió el usuario" (fix round post-review, hallazgo
+    Minor #7). El algoritmo que ``apply_reread`` REALMENTE corre y stampea
+    sobre el archivo sigue siendo siempre ``INGESTION_VERSION`` (la versión
+    real del código corriendo), independientemente de este argumento.
     """
     previous_version = file.ingestion_version
     preview = await reread_service.preview_reread(session, file.id, file.tenant_id, s3=s3)
     outcome = preview.column_risk_outcome
-    risk_rows = [*preview.column_risk_forced_unverified, *preview.column_risk_ambiguous]
 
     def _entry(bucket: str, *, applied: bool = False) -> ScanEntry:
         return ScanEntry(
@@ -199,11 +239,12 @@ async def evaluate_file(
             filename=file.original_filename,
             bucket=bucket,
             outcome=outcome,
-            risk_rows=risk_rows,
+            ambiguous_rows=preview.column_risk_ambiguous,
+            forced_rows=preview.column_risk_forced_unverified,
             exclusion_reason=None if applied else _EXCLUSION_REASONS.get(bucket),
             applied=applied,
             from_version=previous_version,
-            to_version=INGESTION_VERSION,
+            to_version=to_version,
         )
 
     if outcome != "REAPPLIED":
@@ -235,7 +276,7 @@ async def evaluate_file(
         decision_data={
             "file_id": str(file.id),
             "from_version": previous_version,
-            "to_version": INGESTION_VERSION,
+            "to_version": to_version,
         },
         triggered_by=TRIGGERED_BY,
     )
@@ -250,20 +291,28 @@ def record_bookkeeping(file: UploadedFile, entry: ScanEntry) -> None:
     ``entry.applied`` es ``True``, ``apply_reread`` YA seteó
     ``reread_status``/``reread_summary`` con más detalle (incluyendo
     ``run_id``) — acá no se pisa, solo se completa ``latest_preview_version``
-    (que ``apply_reread`` no toca)."""
+    (que ``apply_reread`` no toca).
+
+    ``reread_summary`` se arma vía ``reread_service.build_reread_summary`` —
+    fix round post-review (hallazgo Important #3): antes este módulo escribía
+    un shape propio (``bucket``/``risk_columns`` plano) incompatible con el que
+    escribe ``apply_reread`` (``ambiguous_columns``/``forced_unverified_columns``
+    sueltos); ahora ambos convergen al mismo shape único."""
     file.latest_preview_version = INGESTION_VERSION
     if entry.applied:
         return
     file.reread_status = REREAD_STATUS_NEEDS_REVIEW
-    file.reread_summary = {
-        "outcome": entry.outcome,
-        "algorithm_version": INGESTION_VERSION,
-        "bucket": entry.bucket,
-        "has_user_edits": entry.bucket == BUCKET_HAS_USER_EDITS,
-        "risk_columns": entry.risk_rows,
-        "scanned_at": datetime.now(UTC).isoformat(),
-        "scanned_by": TRIGGERED_BY,
-    }
+    file.reread_summary = reread_service.build_reread_summary(
+        entry.outcome,
+        ambiguous=entry.ambiguous_rows,
+        forced_unverified=entry.forced_rows,
+        extra={
+            "bucket": entry.bucket,
+            "has_user_edits": entry.bucket == BUCKET_HAS_USER_EDITS,
+            "scanned_at": datetime.now(UTC).isoformat(),
+            "scanned_by": TRIGGERED_BY,
+        },
+    )
 
 
 async def run_scan(
@@ -273,6 +322,7 @@ async def run_scan(
     *,
     do_apply: bool,
     record_scan: bool,
+    to_version: int = INGESTION_VERSION,
 ) -> list[ScanEntry]:
     """Orquesta ``evaluate_file`` + bookkeeping condicional sobre una lista de
     candidatos ya seleccionada (``select_candidate_files``). Reusado por
@@ -292,24 +342,67 @@ async def run_scan(
     rollback" tras un fallo dentro de un `flush`/`commit`; sin esto, TODOS los
     archivos siguientes fallarían en cascada) y el archivo se reporta en
     ``BUCKET_ERROR`` con el mensaje sanitizado — nunca bookkeeping para un
-    archivo cuya evaluación no se completó."""
+    archivo cuya evaluación no se completó.
+
+    Re-fetch defensivo por iteración (fix round post-review, hallazgo
+    Critical): un ``session.rollback()`` del bloque ``except`` de una
+    iteración ANTERIOR expira INCONDICIONALMENTE todos los objetos cargados en
+    el identity map de la sesión — sin importar ``expire_on_commit`` (eso solo
+    protege los ``commit()``, ver ``main()``). Confirmado empíricamente:
+    incluso leer el atributo de primary key de un objeto expirado FUERA de un
+    ``await`` explícito revienta con ``MissingGreenlet`` — exactamente lo que
+    enmascaraba el manejo de errores anterior (funcionaba solo cuando el fake
+    de test lanzaba la excepción ANTES de cualquier query real; con una query
+    real de por medio, como ``preview_reread``/``_load_file`` hace siempre, el
+    rollback subsiguiente dejaba el SIGUIENTE archivo de la lista expirado y
+    el propio ``except`` reventaba un segundo ``MissingGreenlet`` al leer sus
+    atributos para el reporte, enmascarando el error original).
+
+    Por eso acá NUNCA se lee un atributo de un ``UploadedFile`` de la lista
+    ``files`` directamente: ``inspect(stale_file).identity`` lee la identity
+    key cacheada en el ``InstanceState`` (nunca dispara una carga a la DB, es
+    seguro incluso sobre un objeto expirado) para obtener el id, y
+    ``session.get(UploadedFile, file_id)`` — async-seguro, corre dentro del
+    greenlet de SQLAlchemy — garantiza un objeto fresco antes de tocar
+    cualquier otro atributo o de pasarlo a ``evaluate_file`` (que lee
+    ``file.ingestion_version`` sincrónicamente ni bien entra). Si el objeto NO
+    estaba expirado, ``session.get`` es un hit de identity map sin ida a la
+    DB — sin costo extra en el camino feliz."""
     entries: list[ScanEntry] = []
-    for file in files:
+    for stale_file in files:
+        identity = inspect(stale_file).identity
+        # ``identity`` solo es ``None`` para instancias transient/pending
+        # (nunca flusheadas) — ``files`` siempre viene de una query ya
+        # ejecutada (``select_candidate_files`` o un fixture de test
+        # commiteado), así que esto nunca dispara en la práctica; el guard es
+        # para mypy y para no propagar un ``TypeError`` críptico si algún
+        # caller futuro rompe esa invariante.
+        if identity is None:
+            continue
+        file_id = identity[0]
+        file = await session.get(UploadedFile, file_id)
+        if file is None:
+            continue  # borrado concurrentemente entre la selección y el scan
+        tenant_id = file.tenant_id
+        filename = file.original_filename
+        previous_version = file.ingestion_version
         try:
-            entry = await evaluate_file(session, s3, file, do_apply=do_apply)
+            entry = await evaluate_file(
+                session, s3, file, do_apply=do_apply, to_version=to_version
+            )
         except Exception as exc:  # noqa: BLE001 — aislamiento por archivo, ver docstring.
             await session.rollback()
             entries.append(
                 ScanEntry(
-                    file_id=file.id,
-                    tenant_id=file.tenant_id,
-                    filename=file.original_filename,
+                    file_id=file_id,
+                    tenant_id=tenant_id,
+                    filename=filename,
                     bucket=BUCKET_ERROR,
                     outcome="error",
                     exclusion_reason=_sanitize_error(exc),
                     applied=False,
-                    from_version=file.ingestion_version,
-                    to_version=INGESTION_VERSION,
+                    from_version=previous_version,
+                    to_version=to_version,
                 )
             )
             continue
@@ -409,6 +502,16 @@ async def main() -> None:
         action="store_true",
         help="Además de --record-scan, auto-aplica donde el outcome sea REAPPLIED",
     )
+    parser.add_argument(
+        "--skip-scanned",
+        action="store_true",
+        help=(
+            "Excluye archivos con latest_preview_version >= to_version (ya "
+            "escaneados con la versión objetivo actual) — evita re-descargar/"
+            "re-parsear de S3 en cada corrida de --all-active. Default: no "
+            "excluye nada (comportamiento actual preservado)."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Imprime además un resumen JSON")
     args = parser.parse_args()
 
@@ -421,7 +524,16 @@ async def main() -> None:
     s3 = S3Client()
     record_scan = args.record_scan or args.apply
 
-    async with AsyncSession(engine) as session:
+    # F9a fix (Critical, fix round post-review): `expire_on_commit=False` evita
+    # que los commits intermedios (dos DENTRO de `evaluate_file` en el camino
+    # REAPPLIED+apply, uno en `record_bookkeeping`) expiren TODOS los objetos
+    # cargados del identity map — incluidos los archivos candidatos que
+    # `run_scan` todavía no procesó en esta misma corrida. `run_scan` además
+    # se protege por sí solo (re-fetch defensivo vía `session.get` en cada
+    # iteración, ver su docstring) contra la expiración INCONDICIONAL que un
+    # `rollback()` (tras un error aislado por archivo) sigue disparando pese a
+    # este flag — las dos partes del fix son necesarias.
+    async with AsyncSession(engine, expire_on_commit=False) as session:
         tenant_ids = (
             [uuid.UUID(args.tenant)] if args.tenant else await select_active_tenant_ids(session)
         )
@@ -431,6 +543,7 @@ async def main() -> None:
             from_version=args.from_version,
             to_version=args.to_version,
             limit=args.limit,
+            skip_scanned=args.skip_scanned,
         )
 
         mode = "APPLY" if args.apply else ("RECORD-SCAN" if args.record_scan else "DRY-RUN")
@@ -440,7 +553,12 @@ async def main() -> None:
         )
 
         entries = await run_scan(
-            session, s3, files, do_apply=args.apply, record_scan=record_scan
+            session,
+            s3,
+            files,
+            do_apply=args.apply,
+            record_scan=record_scan,
+            to_version=args.to_version,
         )
 
         print()

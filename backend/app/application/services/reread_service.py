@@ -1175,6 +1175,42 @@ def _sanitize_column_name(name: str) -> str:
     return cleaned[:_SANITIZE_MAX_LEN]
 
 
+def build_reread_summary(
+    outcome: str,
+    *,
+    algorithm_version: int = INGESTION_VERSION,
+    ambiguous: list[dict[str, Any]] | None = None,
+    forced_unverified: list[dict[str, Any]] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Shape ÚNICO de ``UploadedFile.reread_summary`` — fix round post-review
+    (hallazgo Important #3): antes de esto, ``apply_reread`` (acá) y
+    ``record_bookkeeping`` (``scripts/reanalyze_ingestion.py``) escribían dos
+    shapes incompatibles (``ambiguous_columns``/``forced_unverified_columns``
+    sueltos vs. ``bucket``/``risk_columns`` plano), y ningún consumidor podía
+    confiar en nada más allá de ``outcome``/``algorithm_version`` porque cambiaba
+    según quién hubiera escrito por última vez.
+
+    Ambos escritores llaman a ESTE helper — no pueden volver a divergir. Claves
+    base (siempre presentes): ``outcome``, ``algorithm_version``, ``risk_columns``
+    (``{"ambiguous": [...], "forced_unverified": [...]}``, anidado para preservar
+    la distinción sin perder una key top-level común). ``extra`` agrega claves
+    adicionales propias de cada escritor (ej. ``run_id`` acá, ``bucket``/
+    ``has_user_edits``/``scanned_at``/``scanned_by`` en el script) sin pisar las
+    base."""
+    summary: dict[str, Any] = {
+        "outcome": outcome,
+        "algorithm_version": algorithm_version,
+        "risk_columns": {
+            "ambiguous": ambiguous or [],
+            "forced_unverified": forced_unverified or [],
+        },
+    }
+    if extra:
+        summary.update(extra)
+    return summary
+
+
 def _sanitize_risk_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sanitiza ``source_column``/``target_field`` en una lista de filas de riesgo
     (ambiguas o forzadas) antes de exponerlas al caller o persistirlas. El resto
@@ -1472,6 +1508,14 @@ async def apply_reread(
     # F9a: stamping de versionado/estado de la relectura sobre el archivo.
     # REAPPLIED es el ÚNICO outcome que bumpea ``ingestion_version`` — es el único
     # caso donde el mapeo reaplicado es el REAL (F8b+), no un guess re-derivado.
+    #
+    # Fix round post-review (hallazgo Important #2): guardamos el valor PREVIO
+    # de ``ingestion_version`` en ``run.details_json`` ANTES de pisarlo — sin
+    # esto, ``undo_reread`` no tenía forma de restaurarlo y un archivo
+    # revertido quedaba con la versión bumpeada para siempre, excluido de
+    # ``select_candidate_files`` (filtra por ``ingestion_version < to_version``)
+    # aunque sus datos hubieran vuelto al estado pre-reread.
+    previous_ingestion_version = file.ingestion_version
     if resolved.outcome == "REAPPLIED":
         file.ingestion_version = INGESTION_VERSION
         file.reread_status = (
@@ -1480,13 +1524,15 @@ async def apply_reread(
     else:
         file.reread_status = REREAD_STATUS_NEEDS_REVIEW
     file.reread_at = datetime.now(UTC)
-    file.reread_summary = {
-        "outcome": resolved.outcome,
-        "algorithm_version": INGESTION_VERSION,
-        "ambiguous_columns": resolved.ambiguous_rows,
-        "forced_unverified_columns": resolved.forced_rows,
-        "run_id": str(run.id),
-    }
+    # Fix round post-review (hallazgo Important #3): shape único vía
+    # ``build_reread_summary`` — ver su docstring (antes divergía de lo que
+    # escribe ``scripts/reanalyze_ingestion.py::record_bookkeeping``).
+    file.reread_summary = build_reread_summary(
+        resolved.outcome,
+        ambiguous=resolved.ambiguous_rows,
+        forced_unverified=resolved.forced_rows,
+        extra={"run_id": str(run.id)},
+    )
 
     run.status = "APPLIED"
     run.completed_at = datetime.now(UTC)
@@ -1494,6 +1540,7 @@ async def apply_reread(
     run.sales_voided = result.voided
     run.details_json = {
         "file_id": str(file_id),
+        "previous_ingestion_version": previous_ingestion_version,
         "to_update": result.to_update,
         "preserved": result.preserved,
         "new": result.new,
@@ -1698,6 +1745,27 @@ async def undo_reread(
         else:
             await void_movement(mov, session)
 
+    # Fix round post-review (hallazgo Important #2): revertir el stamping de
+    # versionado que ``apply_reread`` hizo sobre el archivo. Sin esto, deshacer
+    # una relectura REAPPLIED dejaba el archivo "diciendo" ``ingestion_version``
+    # bumpeado + ``reread_status`` APPLIED/AUTO_APPLIED aunque sus datos
+    # volvieron al estado previo — quedaba excluido PARA SIEMPRE de
+    # ``select_candidate_files`` (filtra por ``ingestion_version < to_version``)
+    # pese a seguir necesitando revisión. ``previous_ingestion_version`` fue
+    # guardado en ``run.details_json`` por ``apply_reread`` antes de bumpear.
+    # ``reread_status`` SIEMPRE vuelve a NEEDS_REVIEW tras un undo (nunca debe
+    # quedar APPLIED/AUTO_APPLIED, sin importar el outcome original).
+    details = run.details_json or {}
+    undo_file_id = details.get("file_id")
+    if undo_file_id:
+        undone_file = await session.get(UploadedFile, uuid.UUID(undo_file_id))
+        if undone_file is not None and undone_file.tenant_id == tenant_id:
+            previous_ingestion_version = details.get("previous_ingestion_version")
+            if previous_ingestion_version is not None:
+                undone_file.ingestion_version = previous_ingestion_version
+            undone_file.reread_status = REREAD_STATUS_NEEDS_REVIEW
+            undone_file.reread_at = datetime.now(UTC)
+
     run.status = "REVERTED"
     run.completed_at = datetime.now(UTC)
     await session.flush()
@@ -1779,6 +1847,7 @@ __all__ = [
     "RereadApplyResult",
     "RereadPreview",
     "apply_reread",
+    "build_reread_summary",
     "file_has_user_edits",
     "latest_applied_run_for_file",
     "preview_reread",

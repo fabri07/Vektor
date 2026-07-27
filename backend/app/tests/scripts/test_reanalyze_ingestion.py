@@ -24,6 +24,15 @@ Cubre (ver brief Task 4):
   - (fix round post-review) Aislamiento de errores por archivo en
     ``run_scan``: un archivo que revienta durante ``evaluate_file`` no aborta
     el resto del batch.
+  - (fix round post-review, hallazgo Critical) Aislamiento de errores CON una
+    query real de por medio antes del fallo (el escenario que el fake anterior
+    no cubría — un ``rollback()`` sobre una sesión donde NO corrió ninguna
+    query real es un no-op) y supervivencia de ``run_scan`` sin
+    ``expire_on_commit=False`` explícito en la sesión del test (regresión de
+    guardia si alguien vuelve a sacar el flag de ``main()``).
+  - (fix round post-review, hallazgo Important #5) ``--skip-scanned`` excluye
+    archivos con ``latest_preview_version >= to_version``; sin el flag, el
+    comportamiento actual se preserva.
 
 Nota sobre auditoría en SQLite: ``reanalyze_ingestion.py`` llama SIEMPRE al
 helper real ``_db.py::insert_decision_audit`` (sin bifurcación por dialecto en
@@ -49,7 +58,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.application.services import reread_service as reread_service_module
 from app.application.services.column_risk import apply_column_risk_decisions
@@ -312,6 +321,53 @@ async def test_select_candidate_files_filters_by_version_window(
         db_session, tenant_ids=[tenant.tenant_id], from_version=1, to_version=INGESTION_VERSION
     )
     assert file.id in {f.id for f in files}
+
+
+@pytest.mark.asyncio
+async def test_select_candidate_files_skip_scanned(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Important #5 (fix round post-review): ``--skip-scanned`` excluye
+    archivos ya escaneados con la versión objetivo actual (``
+    latest_preview_version >= to_version``) — evita re-descargar/re-parsear de
+    S3 en cada corrida de ``--all-active`` archivos sin riesgo detectado (que
+    nunca bumpean ``ingestion_version`` por diseño). Sin el flag, el
+    comportamiento actual se preserva (el archivo sigue apareciendo)."""
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+    file = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    # ingestion_version sigue en 1 (nunca bumpea sin REAPPLIED), pero ya fue
+    # escaneado con la versión objetivo actual.
+    file.latest_preview_version = INGESTION_VERSION
+    await db_session.commit()
+
+    # Sin el flag: comportamiento actual preservado, el archivo aparece.
+    files_default = await mod.select_candidate_files(
+        db_session, tenant_ids=[tenant.tenant_id], from_version=1, to_version=INGESTION_VERSION
+    )
+    assert file.id in {f.id for f in files_default}
+
+    # Con --skip-scanned: excluido, ya fue escaneado con la versión objetivo.
+    files_skip = await mod.select_candidate_files(
+        db_session,
+        tenant_ids=[tenant.tenant_id],
+        from_version=1,
+        to_version=INGESTION_VERSION,
+        skip_scanned=True,
+    )
+    assert file.id not in {f.id for f in files_skip}
+
+    # Si `latest_preview_version` es None (nunca escaneado) sigue apareciendo
+    # incluso con el flag.
+    file.latest_preview_version = None
+    await db_session.commit()
+    files_skip_none = await mod.select_candidate_files(
+        db_session,
+        tenant_ids=[tenant.tenant_id],
+        from_version=1,
+        to_version=INGESTION_VERSION,
+        skip_scanned=True,
+    )
+    assert file.id in {f.id for f in files_skip_none}
 
 
 # ── dry-run puro: cero escrituras ───────────────────────────────────────────────
@@ -651,3 +707,178 @@ async def test_run_scan_error_bucket_never_gets_bookkeeping(
     await db_session.refresh(file_bad)
     assert file_bad.latest_preview_version == before_latest_preview
     assert file_bad.reread_status == before_status
+
+
+# ── regresión del hallazgo Critical (fix round post-review) ──────────────────
+#
+# Los dos fakes de arriba (``_flaky_preview``/``_always_fails``) lanzan la
+# excepción ANTES de que ``preview_reread`` toque la sesión — precisamente lo
+# que ocultaba el bug real: un ``session.rollback()`` sobre una sesión donde
+# NO se ejecutó ninguna query real desde el último commit es un no-op (no
+# expira nada). El bug real solo se manifestaba cuando la excepción ocurría
+# DESPUÉS de al menos una query real (ej. el ``SELECT`` de ``_load_file``
+# dentro de ``preview_reread``, que siempre corre primero) — un escenario
+# realista (falla la descarga de S3 recién en el segundo paso). Los dos tests
+# siguientes cubren exactamente eso.
+
+
+@pytest.mark.asyncio
+async def test_run_scan_isolates_per_file_errors_after_real_query(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A diferencia de ``test_run_scan_isolates_per_file_errors``, este fake deja
+    correr ``preview_reread`` REAL primero (dispara sus queries reales — el
+    ``SELECT`` de ``_load_file`` entre otras) y RECIÉN DESPUÉS lanza la
+    excepción. El ``session.rollback()`` que sigue en ``run_scan`` SÍ expira
+    todos los objetos del identity map en este escenario (confirmado
+    empíricamente) — exactamente el camino que el fix de ``session.get`` +
+    ``inspect(...).identity`` en ``run_scan`` tiene que sobrevivir. Con 2
+    archivos candidatos: el archivo 1 falla, el archivo 2 se evalúa
+    correctamente pese al fallo del anterior."""
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+    file_bad = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    file_ok = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    # Capturados ANTES de ``run_scan``: el ``rollback()`` que sigue a un fallo
+    # DESPUÉS de una query real expira INCONDICIONALMENTE estos objetos (son
+    # el mismo identity map que usa ``run_scan`` — misma sesión). Leerlos
+    # DESPUÉS, en las aserciones de este test, sería exactamente el mismo bug
+    # que ``run_scan`` tuvo que dejar de tener — este test no puede cometerlo
+    # en su propio código de verificación.
+    file_bad_id = file_bad.id
+    file_ok_id = file_ok.id
+    file_bad_filename = file_bad.original_filename
+    tenant_id_value = tenant.tenant_id
+
+    real_preview = reread_service_module.preview_reread
+
+    async def _flaky_preview_after_real_query(
+        session: AsyncSession,
+        file_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        *,
+        s3: S3Client | None = None,
+    ) -> Any:
+        if file_id == file_bad_id:
+            # Dejamos correr la implementación REAL primero — hace queries de
+            # verdad (``_load_file`` y las de estimación) — y RECIÉN DESPUÉS
+            # fallamos, simulando un error tardío (ej. red) en la MISMA
+            # evaluación. Esto es lo que el fake anterior NO cubría.
+            await real_preview(session, file_id, tenant_id, s3=s3)
+            raise RuntimeError("s3 download failed after a real query")
+        return await real_preview(session, file_id, tenant_id, s3=s3)
+
+    monkeypatch.setattr(reread_service_module, "preview_reread", _flaky_preview_after_real_query)
+
+    s3 = S3Client()
+    entries = await mod.run_scan(
+        db_session, s3, [file_bad, file_ok], do_apply=False, record_scan=False
+    )
+
+    assert len(entries) == 2
+    by_id = {e.file_id: e for e in entries}
+
+    bad_entry = by_id[file_bad_id]
+    assert bad_entry.bucket == mod.BUCKET_ERROR
+    assert bad_entry.tenant_id == tenant_id_value
+    assert bad_entry.filename == file_bad_filename
+    assert bad_entry.applied is False
+    assert bad_entry.exclusion_reason is not None
+    assert "RuntimeError" in bad_entry.exclusion_reason
+
+    # Garantía central: el archivo SIGUIENTE se evaluó normalmente pese al
+    # rollback-con-expiración disparado por el fallo del anterior.
+    ok_entry = by_id[file_ok_id]
+    assert ok_entry.bucket == mod.BUCKET_FORCED_UNVERIFIED
+    assert ok_entry.outcome == "FORCED_UNVERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_survives_without_expire_on_commit_false(
+    mod: ModuleType,
+    isolated_db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regresión de guardia contra revertir la Parte 1 del fix Critical: si
+    alguien vuelve a construir la sesión de ``main()`` SIN
+    ``expire_on_commit=False`` (el default de SQLAlchemy es ``True``), CUALQUIER
+    commit a mitad del loop expira TODOS los objetos cargados en el identity
+    map — no solo tras un error. A diferencia del fixture ``db_session`` (que
+    fija ``expire_on_commit=False`` explícitamente para TODOS los tests), este
+    test arma su PROPIA sesión sobre ``isolated_db_engine`` sin ese override,
+    para que una regresión futura de ``run_scan`` (sacar el re-fetch
+    defensivo) rompa acá aunque ``main()`` siga bien, y viceversa.
+
+    Con 2 archivos y ``record_scan=True`` (dispara ``record_bookkeeping`` +
+    commit tras CADA archivo): sin el re-fetch defensivo de ``run_scan``, el
+    segundo archivo reventaría con ``MissingGreenlet`` al leer cualquier
+    atributo (incluido el primary key) tras el commit del primero."""
+    monkeypatch.setattr(mod, "insert_decision_audit", _sqlite_insert_decision_audit)
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+
+    # IDs generados como variables Python planas ANTES de cualquier commit —
+    # nunca se leen desde un objeto ORM post-commit en este test (a
+    # diferencia de ``_make_file``, que asume ``expire_on_commit=False`` como
+    # el resto de esta suite). Es la única forma de armar el fixture sin
+    # pisar el propio escenario que este test quiere ejercitar.
+    tenant_id_value = uuid.uuid4()
+    file_a_id = uuid.uuid4()
+    file_b_id = uuid.uuid4()
+
+    summary = parse_uploaded_content(_CSV_FORCED_UNVERIFIED, "text/csv", "gastos.csv")
+    confirmed = default_confirmed_fields(summary)
+
+    def _build_file(file_id: uuid.UUID) -> UploadedFile:
+        return UploadedFile(
+            id=file_id,
+            tenant_id=tenant_id_value,
+            uploaded_by=None,
+            original_filename="gastos.csv",
+            s3_key=f"tenants/{tenant_id_value}/{file_id}.csv",
+            content_type="text/csv",
+            size_bytes=len(_CSV_FORCED_UNVERIFIED),
+            purpose="gastos",
+            processing_status=PROCESSING_STATUS_DONE,
+            parsed_summary_json={
+                "inferred_type": summary.get("inferred_type"),
+                "confirmed_fields": confirmed,
+            },
+        )
+
+    async with AsyncSession(isolated_db_engine) as session:  # SIN expire_on_commit=False
+        session.add(
+            Tenant(
+                tenant_id=tenant_id_value,
+                legal_name="Kiosco Expire Test",
+                display_name="Kiosco Expire Test",
+                currency="ARS",
+                pricing_reference_mode="MEP",
+                status="ACTIVE",
+            )
+        )
+        file_a = _build_file(file_a_id)
+        file_b = _build_file(file_b_id)
+        session.add(file_a)
+        session.add(file_b)
+        # UN solo commit para tenant + ambos archivos: con el default
+        # ``expire_on_commit=True`` de esta sesión, esto ya deja file_a/file_b
+        # expirados ANTES de que ``run_scan`` arranque — el escenario más
+        # exigente posible para el re-fetch defensivo.
+        await session.commit()
+
+        s3 = S3Client()
+        entries = await mod.run_scan(
+            session, s3, [file_a, file_b], do_apply=False, record_scan=True
+        )
+
+        assert len(entries) == 2
+        assert {e.file_id for e in entries} == {file_a_id, file_b_id}
+        for e in entries:
+            assert e.bucket == mod.BUCKET_FORCED_UNVERIFIED
+            assert e.outcome == "FORCED_UNVERIFIED"
+
+        # Bookkeeping realmente se persistió para AMBOS (no solo para el
+        # primero antes de una posible expiración silenciosa del segundo).
+        refreshed_a = await session.get(UploadedFile, file_a_id)
+        refreshed_b = await session.get(UploadedFile, file_b_id)
+        assert refreshed_a is not None and refreshed_a.latest_preview_version == INGESTION_VERSION
+        assert refreshed_b is not None and refreshed_b.latest_preview_version == INGESTION_VERSION

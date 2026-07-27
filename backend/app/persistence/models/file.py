@@ -23,6 +23,12 @@ PROCESSING_STATUS_REJECTED = "REJECTED"
 
 # Valid reread_status values (F9a: versionado de ingestión)
 REREAD_STATUS_NONE = "NONE"
+# PREVIEWED/UP_TO_DATE están reservados para un estado más granular a futuro
+# (ej. cuando se defina un criterio de confiabilidad del mapeo re-derivado que
+# hoy no existe — ver ``ResolvedRisk`` en ``reread_service.py``). Hoy NINGÚN
+# outcome de riesgo (ni siquiera ``NO_RISK_FOUND``) escribe estos dos valores
+# a propósito: el diseño actual es deliberadamente conservador y marca todo lo
+# que no sea ``REAPPLIED`` como ``NEEDS_REVIEW``, sin excepción.
 REREAD_STATUS_PREVIEWED = "PREVIEWED"
 REREAD_STATUS_UP_TO_DATE = "UP_TO_DATE"
 REREAD_STATUS_NEEDS_REVIEW = "NEEDS_REVIEW"

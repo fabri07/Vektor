@@ -14,10 +14,12 @@ La migración contiene SQL dialect-specific:
 
 Un test con SQLite pasaría aunque la migración genere el tipo equivocado en Neon.
 
-Aislamiento: como en test_tcm_entity_type_check_pg.py, monkeyparched el nombre de
-la tabla a una tabla scratch única, evitando pisar la tabla real ``uploaded_files``
-que el CI ya migró vía ``alembic upgrade head``. Además, sembramos un ``Tenant``
-ANTES de cada ``UploadedFile`` para respetar la FK.
+Aislamiento: como en test_tcm_entity_type_check_pg.py, monkeypatcheamos el nombre
+de la tabla a una tabla scratch única (``scratch_table``, sin FKs — ver su
+definición más abajo), evitando pisar la tabla real ``uploaded_files`` que el CI
+ya migró vía ``alembic upgrade head``. La tabla scratch se crea SIN foreign keys
+(``tenant_id`` es una columna UUID cualquiera), así que no hace falta sembrar un
+``Tenant`` real para respetar ninguna FK.
 
 Gating: se **skippea limpio** sin ``TEST_PG_DSN``. Para correrlo::
 
