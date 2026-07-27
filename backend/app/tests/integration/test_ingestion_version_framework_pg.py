@@ -6,7 +6,7 @@ La migración contiene SQL dialect-specific:
 
 1. El `UPDATE ... WHERE parsed_summary_json ? 'column_risk_decisions'` usa el
    operador JSONB `?` de PostgreSQL — SQLite no lo entiende ni lo parsea.
-   Con SQLite, ese UPDATE se ejecutaría como un NOOP (la condición seria siempre
+   Con SQLite, ese UPDATE se ejecutaría como un NOOP (la condición sería siempre
    falsa, sin error). Ver ``[[feedback_sqlite_masks_postgres]]``.
 
 2. La columna `reread_summary` debe ser `jsonb` en Postgres (no `json`), para
@@ -14,8 +14,10 @@ La migración contiene SQL dialect-specific:
 
 Un test con SQLite pasaría aunque la migración genere el tipo equivocado en Neon.
 
-Aislamiento: como en test_tcm_entity_type_check_pg.py, creamos un ``UploadedFile``
-temporario en PG real y verificamos que la migración funciona end-to-end.
+Aislamiento: como en test_tcm_entity_type_check_pg.py, monkeyparched el nombre de
+la tabla a una tabla scratch única, evitando pisar la tabla real ``uploaded_files``
+que el CI ya migró vía ``alembic upgrade head``. Además, sembramos un ``Tenant``
+ANTES de cada ``UploadedFile`` para respetar la FK.
 
 Gating: se **skippea limpio** sin ``TEST_PG_DSN``. Para correrlo::
 
@@ -92,24 +94,64 @@ async def pg_engine() -> AsyncGenerator[AsyncEngine, None]:
         await engine.dispose()
 
 
+@pytest_asyncio.fixture
+async def scratch_table(pg_engine: AsyncEngine) -> AsyncGenerator[str, None]:
+    """Tabla scratch con nombre único que replica la estructura de uploaded_files.
+
+    Evita pisar la tabla real, que el CI ya migró vía ``alembic upgrade head``.
+    Aislamiento bajo xdist: cada test usa su propia tabla temporal.
+    """
+    nombre = f"f9a_ingestion_probe_{uuid.uuid4().hex[:12]}"
+    async with pg_engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        # Crear tabla con columnas suficientes para el test (sin FKs).
+        await conn.execute(
+            text(f"""
+                CREATE TABLE {nombre} (
+                    id UUID NOT NULL PRIMARY KEY,
+                    tenant_id UUID NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    s3_key TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    size_bytes INT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    status TEXT,
+                    processing_status TEXT NOT NULL,
+                    parsed_summary_json JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
+        )
+    try:
+        yield nombre
+    finally:
+        async with pg_engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f"DROP TABLE IF EXISTS {nombre} CASCADE"))
+
+
 async def test_upgrade_agrega_columnas_con_tipos_correctos(
     pg_engine: AsyncEngine,
+    scratch_table: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tras ``upgrade``: las 5 columnas se agregan con tipos correctos.
+    """Tras ``upgrade`` sobre tabla scratch: las 5 columnas se agregan con tipos correctos.
 
     Verificamos especialmente que ``reread_summary`` es JSONB (no JSON) y que
     el CHECK de ``reread_status`` está en lugar.
     """
+    monkeypatch.setattr(mig, "TABLE_NAME", scratch_table)
     async with pg_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
         await conn.run_sync(_run_upgrade)
 
         # Verificar que las columnas existen con los tipos correctos.
         result = await conn.execute(
-            text("""
+            text(f"""
             SELECT column_name, data_type
             FROM information_schema.columns
-            WHERE table_name = 'uploaded_files'
+            WHERE table_name = '{scratch_table}'
             AND column_name IN ('ingestion_version', 'latest_preview_version',
                                 'reread_status', 'reread_at', 'reread_summary')
             ORDER BY column_name
@@ -130,10 +172,10 @@ async def test_upgrade_agrega_columnas_con_tipos_correctos(
 
         # Verificar que el CHECK existe
         constraint_result = await conn.execute(
-            text("""
+            text(f"""
             SELECT constraint_name
             FROM information_schema.table_constraints
-            WHERE table_name = 'uploaded_files'
+            WHERE table_name = '{scratch_table}'
             AND constraint_name = 'ck_uploaded_files_reread_status'
             AND constraint_type = 'CHECK'
             """)
@@ -144,11 +186,13 @@ async def test_upgrade_agrega_columnas_con_tipos_correctos(
 
 async def test_upgrade_marca_archivos_confirmados_con_column_risk_decisions(
     pg_engine: AsyncEngine,
+    scratch_table: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tras ``upgrade``: los archivos ya confirmados (``processing_status='DONE'``)
-    que tienen la key ``column_risk_decisions`` en ``parsed_summary_json``
+    """Tras ``upgrade`` sobre tabla scratch: archivos con ``column_risk_decisions``
     se marcan con ``ingestion_version=2``. Los demás quedan en 1.
     """
+    monkeypatch.setattr(mig, "TABLE_NAME", scratch_table)
     tenant_id = uuid.uuid4()
 
     async with pg_engine.connect() as conn:
@@ -159,8 +203,8 @@ async def test_upgrade_marca_archivos_confirmados_con_column_risk_decisions(
         file_without_risk_key = uuid.uuid4()
 
         await conn.execute(
-            text("""
-            INSERT INTO uploaded_files
+            text(f"""
+            INSERT INTO {scratch_table}
             (id, tenant_id, original_filename, s3_key, content_type, size_bytes,
              purpose, status, processing_status, parsed_summary_json, created_at, updated_at)
             VALUES (:id, :tenant_id, :name, :s3_key, :ct, :size, :purpose, :status,
@@ -188,8 +232,8 @@ async def test_upgrade_marca_archivos_confirmados_con_column_risk_decisions(
         )
 
         await conn.execute(
-            text("""
-            INSERT INTO uploaded_files
+            text(f"""
+            INSERT INTO {scratch_table}
             (id, tenant_id, original_filename, s3_key, content_type, size_bytes,
              purpose, status, processing_status, parsed_summary_json, created_at, updated_at)
             VALUES (:id, :tenant_id, :name, :s3_key, :ct, :size, :purpose, :status,
@@ -220,8 +264,8 @@ async def test_upgrade_marca_archivos_confirmados_con_column_risk_decisions(
 
         # Verificar que los valores de ingestion_version se asignaron correctamente
         result_with_risk = await conn.execute(
-            text("""
-            SELECT ingestion_version FROM uploaded_files WHERE id = :id
+            text(f"""
+            SELECT ingestion_version FROM {scratch_table} WHERE id = :id
             """),
             {"id": file_with_risk_key},
         )
@@ -232,8 +276,8 @@ async def test_upgrade_marca_archivos_confirmados_con_column_risk_decisions(
         )
 
         result_without_risk = await conn.execute(
-            text("""
-            SELECT ingestion_version FROM uploaded_files WHERE id = :id
+            text(f"""
+            SELECT ingestion_version FROM {scratch_table} WHERE id = :id
             """),
             {"id": file_without_risk_key},
         )
@@ -243,15 +287,14 @@ async def test_upgrade_marca_archivos_confirmados_con_column_risk_decisions(
             f"pero tiene {version_without_risk}"
         )
 
-        # Cleanup
-        await conn.execute(
-            text("DELETE FROM uploaded_files WHERE tenant_id = :tid"),
-            {"tid": tenant_id},
-        )
 
-
-async def test_downgrade_elimina_columnas(pg_engine: AsyncEngine) -> None:
-    """Tras ``downgrade``: las 5 columnas se eliminan y el CHECK desaparece."""
+async def test_downgrade_elimina_columnas(
+    pg_engine: AsyncEngine,
+    scratch_table: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tras ``downgrade`` sobre tabla scratch: las 5 columnas se eliminan y el CHECK desaparece."""
+    monkeypatch.setattr(mig, "TABLE_NAME", scratch_table)
     async with pg_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
 
@@ -260,9 +303,9 @@ async def test_downgrade_elimina_columnas(pg_engine: AsyncEngine) -> None:
 
         # Verificar que existen
         result = await conn.execute(
-            text("""
+            text(f"""
             SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_name = 'uploaded_files'
+            WHERE table_name = '{scratch_table}'
             AND column_name IN ('ingestion_version', 'latest_preview_version',
                                 'reread_status', 'reread_at', 'reread_summary')
             """)
@@ -275,9 +318,9 @@ async def test_downgrade_elimina_columnas(pg_engine: AsyncEngine) -> None:
 
         # Verificar que desaparecieron
         result = await conn.execute(
-            text("""
+            text(f"""
             SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_name = 'uploaded_files'
+            WHERE table_name = '{scratch_table}'
             AND column_name IN ('ingestion_version', 'latest_preview_version',
                                 'reread_status', 'reread_at', 'reread_summary')
             """)
@@ -287,9 +330,9 @@ async def test_downgrade_elimina_columnas(pg_engine: AsyncEngine) -> None:
 
         # Verificar que el CHECK desapareció
         constraint_result = await conn.execute(
-            text("""
+            text(f"""
             SELECT COUNT(*) FROM information_schema.table_constraints
-            WHERE table_name = 'uploaded_files'
+            WHERE table_name = '{scratch_table}'
             AND constraint_name = 'ck_uploaded_files_reread_status'
             """)
         )

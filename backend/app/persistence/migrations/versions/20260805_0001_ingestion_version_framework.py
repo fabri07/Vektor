@@ -63,34 +63,38 @@ down_revision = "20260804_0001"
 branch_labels = None
 depends_on = None
 
+# Constantes de módulo para permitir monkeypatch en tests PG-gated.
+TABLE_NAME = "uploaded_files"
+CONSTRAINT_NAME = "ck_uploaded_files_reread_status"
+
 
 def upgrade() -> None:
     # Agregar las columnas nuevas (additive puro, con defaults).
     op.add_column(
-        "uploaded_files",
+        TABLE_NAME,
         sa.Column("ingestion_version", sa.Integer, nullable=False, server_default="1"),
     )
     op.add_column(
-        "uploaded_files",
+        TABLE_NAME,
         sa.Column("latest_preview_version", sa.Integer, nullable=True),
     )
     op.add_column(
-        "uploaded_files",
+        TABLE_NAME,
         sa.Column("reread_status", sa.String(30), nullable=False, server_default="NONE"),
     )
     op.add_column(
-        "uploaded_files",
+        TABLE_NAME,
         sa.Column("reread_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.add_column(
-        "uploaded_files",
+        TABLE_NAME,
         sa.Column("reread_summary", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     )
 
     # CHECK constraint para reread_status (valores válidos).
     op.create_check_constraint(
-        "ck_uploaded_files_reread_status",
-        "uploaded_files",
+        CONSTRAINT_NAME,
+        TABLE_NAME,
         "reread_status IN ('NONE','PREVIEWED','UP_TO_DATE','NEEDS_REVIEW',"
         "'AUTO_APPLIED','APPLIED','FAILED')",
     )
@@ -100,7 +104,7 @@ def upgrade() -> None:
     # inequívoca de que pasó por F8+.
     op.execute(
         sa.text(
-            "UPDATE uploaded_files SET ingestion_version = 2 "
+            f"UPDATE {TABLE_NAME} SET ingestion_version = 2 "
             "WHERE processing_status = 'DONE' AND parsed_summary_json ? 'column_risk_decisions'"
         )
     )
@@ -108,9 +112,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Revertir en orden inverso de creación.
-    op.drop_constraint("ck_uploaded_files_reread_status", "uploaded_files", type_="check")
-    op.drop_column("uploaded_files", "reread_summary")
-    op.drop_column("uploaded_files", "reread_at")
-    op.drop_column("uploaded_files", "reread_status")
-    op.drop_column("uploaded_files", "latest_preview_version")
-    op.drop_column("uploaded_files", "ingestion_version")
+    op.drop_constraint(CONSTRAINT_NAME, TABLE_NAME, type_="check")
+    op.drop_column(TABLE_NAME, "reread_summary")
+    op.drop_column(TABLE_NAME, "reread_at")
+    op.drop_column(TABLE_NAME, "reread_status")
+    op.drop_column(TABLE_NAME, "latest_preview_version")
+    op.drop_column(TABLE_NAME, "ingestion_version")
