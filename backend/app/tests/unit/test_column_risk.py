@@ -21,6 +21,7 @@ from app.application.services.column_risk import (
     build_contextual_column_risk,
     split_derivable_decisions,
 )
+from app.schemas.ingestion import ColumnRiskDecision
 
 
 def _ctx(context_id: str, entity_type: str, headers: list[str]) -> dict[str, Any]:
@@ -429,3 +430,32 @@ def test_split_derivable_decisions_mezcla_casos() -> None:
     assert len(ambiguous) == 1
     assert forced[0].source_column == "col1"
     assert ambiguous[0]["source_column"] == "col2"
+
+
+def test_column_risk_decision_estructura_exacta() -> None:
+    """Valida que ColumnRiskDecision tiene exactamente 4 campos (no 5 con reason).
+
+    La función split_derivable_decisions construye ColumnRiskDecision sin 'reason'
+    (hallazgo review: se eliminó el kwarg reason que no existe en el schema).
+    Este test confirma que la estructura es exacta y detectaría una regresión futura.
+    """
+    decision = ColumnRiskDecision(
+        context_id="table",
+        source_column="col1",
+        target_field="field1",
+        action="drop_column",
+    )
+
+    # Validar que tiene exactamente esos 4 campos en el modelo
+    model_fields = decision.model_fields
+    expected_fields = {"context_id", "source_column", "target_field", "action"}
+    assert set(model_fields.keys()) == expected_fields
+
+    # Validar que NO tiene campo 'reason'
+    assert "reason" not in model_fields
+
+    # Validar valores construidos
+    assert decision.context_id == "table"
+    assert decision.source_column == "col1"
+    assert decision.target_field == "field1"
+    assert decision.action == "drop_column"

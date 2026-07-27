@@ -72,6 +72,9 @@ _ROW_BUCKETS: tuple[str, ...] = (
 
 _ACTIONABLE_REQUIREMENTS = frozenset({"required", "explicitly_selected"})
 
+# Entidades riesgosas (F8a): contextos que generan diagnóstico de riesgo contextual.
+_RISK_ENTITIES = ("sale", "expense", "product", "customer", "supplier")
+
 # entity_type del contexto → clave de bucket en confirmed_fields (inclusión legacy).
 _ENTITY_TO_CONFIRM_KEY: dict[str, str] = {
     "sale": "ventas",
@@ -718,7 +721,7 @@ async def derive_context_mapping_entries(
         if not context_id or not headers:
             continue
         entity = context_entity.get(context_id) or ctx.get("entity_type")
-        if entity not in ("sale", "expense", "product", "customer", "supplier"):
+        if entity not in _RISK_ENTITIES:
             continue
         effective_entities[context_id] = entity
 
@@ -782,7 +785,6 @@ def split_derivable_decisions(
                 source_column=row["source_column"],
                 target_field=row["target_field"],
                 action=action,
-                reason=f"Acción forzada por riesgo contextual: {action}",
             )
             forced.append(decision)
         else:
