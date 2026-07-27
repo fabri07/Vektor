@@ -511,7 +511,11 @@ async def main() -> None:
         "--to-version",
         type=int,
         default=INGESTION_VERSION,
-        help="ingestion_version tope (exclusive); default INGESTION_VERSION actual",
+        help=(
+            "ingestion_version tope (exclusive); default INGESTION_VERSION actual. "
+            "DEBE ser exactamente ese valor — el código solo puede ejecutar/estampar "
+            "la versión real, cualquier otro valor se rechaza antes de tocar la DB."
+        ),
     )
     parser.add_argument("--limit", type=int, default=None, help="Tope de archivos (pilotos)")
     parser.add_argument(
