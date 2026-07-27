@@ -36,12 +36,18 @@ rechaza) tienen ``invalid_rows == 0`` (solo su vaciedad importa):
 from __future__ import annotations
 
 import copy
+import uuid
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from app.application.services.column_mapping_service import REQUIRED_FIELDS
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.application.services.column_mapping_service import (
+    REQUIRED_FIELDS,
+    ColumnMappingService,
+)
 from app.application.services.file_parsing import (
     _NULL_STRINGS,
     _TYPE_TO_ENTITY,
@@ -50,7 +56,7 @@ from app.application.services.file_parsing import (
 from app.application.services.ingestion_import_service import _parse_amount
 from app.domain.date_parsing import parse_business_datetime
 from app.schemas._ar_fiscal import validate_cuit, validate_dni
-from app.schemas.ingestion import ColumnRiskDecision
+from app.schemas.ingestion import ColumnMapping, ColumnRiskDecision
 
 # Buckets del summary que contienen las filas COMPLETAS del archivo (no solo el
 # preview de 10). En multi-hoja/texto las filas llevan un marcador ``__context__``;
@@ -673,3 +679,114 @@ def apply_column_risk_decisions(
         routed_entity=routed_entity,
         routed_totals=routed_totals,
     )
+
+
+# ── F8a: Construcción del mapeo contextual (mudado desde ingestion.py) ────
+
+
+async def derive_context_mapping_entries(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+    *,
+    user_mappings: list[ColumnMapping] | None = None,
+    context_entity: dict[str, str] | None = None,
+) -> tuple[dict[str, list[MappingEntry]], dict[str, str]]:
+    """F8a: arma el mapeo efectivo por contexto (las 5 entidades) para el motor de
+    riesgo, y devuelve además la ENTIDAD EFECTIVA por contexto (override de
+    reasignación aplicado) para que el helper use los ``REQUIRED_FIELDS`` correctos.
+
+    Base = sugerencias determinísticas (``allow_llm=False`` — este builder corre en
+    el preview de cada poll, igual criterio que el preview de maestros). Si
+    ``user_mappings`` viene (endpoint ``/column-risk``), overlaya el target elegido
+    por el usuario con ``user_selected`` real, preservando el ``mapping_source`` de
+    la sugerencia de esa columna. Solo contextos con ``headers`` (tabulares); los de
+    texto/OCR no tienen columnas que dropear.
+    """
+    context_entity = context_entity or {}
+    mapping_svc = ColumnMappingService(session)
+
+    user_by_ctx: dict[str, dict[str, ColumnMapping]] = defaultdict(dict)
+    for m in user_mappings or []:
+        user_by_ctx[m.context_id or "table"][m.source_column] = m
+
+    result: dict[str, list[MappingEntry]] = {}
+    effective_entities: dict[str, str] = {}
+    for ctx in resolve_contexts(summary):
+        context_id = ctx.get("context_id")
+        headers = ctx.get("headers")
+        if not context_id or not headers:
+            continue
+        entity = context_entity.get(context_id) or ctx.get("entity_type")
+        if entity not in ("sale", "expense", "product", "customer", "supplier"):
+            continue
+        effective_entities[context_id] = entity
+
+        sample_rows = ctx.get("preview_rows") or []
+        suggestions = await mapping_svc.suggest_mappings(
+            tenant_id, entity, list(headers), sample_rows, allow_llm=False
+        )
+        source_by_col = {s["source_column"]: s["source"] for s in suggestions}
+        by_col: dict[str, MappingEntry] = {
+            s["source_column"]: MappingEntry(
+                source_column=s["source_column"],
+                target_field=s["target_field"],
+                mapping_source=s["source"],
+                user_selected=False,
+            )
+            for s in suggestions
+            if s["status"] == "mapped" and s["target_field"]
+        }
+        for col, mapping in user_by_ctx.get(context_id, {}).items():
+            by_col[col] = MappingEntry(
+                source_column=col,
+                target_field=mapping.target_field,
+                mapping_source=source_by_col.get(col, "none"),
+                user_selected=mapping.user_selected,
+            )
+        if by_col:
+            result[context_id] = list(by_col.values())
+    return result, effective_entities
+
+
+# ── F8c: Separación de decisiones derivables (función pura) ────
+
+
+def split_derivable_decisions(
+    risk_rows: list[dict[str, Any]],
+) -> tuple[list[ColumnRiskDecision], list[dict[str, Any]]]:
+    """Separa filas de riesgo contextual en decisiones forzadas y ambiguas.
+
+    Recorre cada row (salida de `build_contextual_column_risk`):
+    - Si `allowed_actions == []` (informativa, sin acción posible) → ignorar.
+    - Si `len(allowed_actions) == 1` → decisión FORZADA: construir
+      `ColumnRiskDecision` con esa acción única.
+    - Si `len(allowed_actions) >= 2` → AMBIGUA: agregar row cruda a lista ambigua.
+
+    Devuelve `(decisiones_forzadas, filas_ambiguas)`.
+    """
+    forced: list[ColumnRiskDecision] = []
+    ambiguous: list[dict[str, Any]] = []
+
+    for row in risk_rows:
+        allowed = row.get("allowed_actions") or []
+
+        if len(allowed) == 0:
+            # Informativa, sin acción posible → ignorar
+            continue
+        elif len(allowed) == 1:
+            # Decisión forzada
+            action = allowed[0]
+            decision = ColumnRiskDecision(
+                context_id=row["context_id"],
+                source_column=row["source_column"],
+                target_field=row["target_field"],
+                action=action,
+                reason=f"Acción forzada por riesgo contextual: {action}",
+            )
+            forced.append(decision)
+        else:
+            # Ambigua (múltiples acciones posibles)
+            ambiguous.append(row)
+
+    return forced, ambiguous

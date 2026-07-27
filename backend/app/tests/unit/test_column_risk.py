@@ -19,6 +19,7 @@ from typing import Any
 from app.application.services.column_risk import (
     MappingEntry,
     build_contextual_column_risk,
+    split_derivable_decisions,
 )
 
 
@@ -344,3 +345,87 @@ def test_quantity_garbage_no_cuenta_porque_el_importador_coerce() -> None:
     assert cant is not None  # explicitly_selected + affected>0
     assert cant["invalid_rows"] == 0
     assert cant["null_rows"] == 1  # solo la celda vacía
+
+
+# ── F8c: Separación de decisiones derivables (función pura) ────────────────────
+
+
+def test_split_derivable_decisions_una_accion_forzada() -> None:
+    """Una row con allowed_actions=[\"drop_column\"] → decisión forzada."""
+    risk_rows = [
+        {
+            "context_id": "table",
+            "source_column": "col1",
+            "target_field": "field1",
+            "allowed_actions": ["drop_column"],
+        }
+    ]
+    forced, ambiguous = split_derivable_decisions(risk_rows)
+    assert len(forced) == 1
+    assert len(ambiguous) == 0
+    assert forced[0].context_id == "table"
+    assert forced[0].source_column == "col1"
+    assert forced[0].target_field == "field1"
+    assert forced[0].action == "drop_column"
+
+
+def test_split_derivable_decisions_multiples_acciones_ambigua() -> None:
+    """Una row con allowed_actions=[\"drop_column\", \"route_affected_rows_to_others\"]
+    → ambigua."""
+    risk_rows = [
+        {
+            "context_id": "table",
+            "source_column": "col1",
+            "target_field": "field1",
+            "allowed_actions": ["drop_column", "route_affected_rows_to_others"],
+        }
+    ]
+    forced, ambiguous = split_derivable_decisions(risk_rows)
+    assert len(forced) == 0
+    assert len(ambiguous) == 1
+    assert ambiguous[0]["context_id"] == "table"
+    assert ambiguous[0]["source_column"] == "col1"
+
+
+def test_split_derivable_decisions_sin_acciones_ignorada() -> None:
+    """Una row con allowed_actions=[] → ignorada (ni forzada ni ambigua)."""
+    risk_rows = [
+        {
+            "context_id": "table",
+            "source_column": "col1",
+            "target_field": "field1",
+            "allowed_actions": [],
+        }
+    ]
+    forced, ambiguous = split_derivable_decisions(risk_rows)
+    assert len(forced) == 0
+    assert len(ambiguous) == 0
+
+
+def test_split_derivable_decisions_mezcla_casos() -> None:
+    """Mezcla de tres tipos: 1 forzada, 1 ambigua, 1 ignorada."""
+    risk_rows = [
+        {
+            "context_id": "table",
+            "source_column": "col1",
+            "target_field": "field1",
+            "allowed_actions": ["drop_column"],  # forzada
+        },
+        {
+            "context_id": "table",
+            "source_column": "col2",
+            "target_field": "field2",
+            "allowed_actions": ["drop_column", "route_affected_rows_to_others"],  # ambigua
+        },
+        {
+            "context_id": "table",
+            "source_column": "col3",
+            "target_field": "field3",
+            "allowed_actions": [],  # ignorada
+        },
+    ]
+    forced, ambiguous = split_derivable_decisions(risk_rows)
+    assert len(forced) == 1
+    assert len(ambiguous) == 1
+    assert forced[0].source_column == "col1"
+    assert ambiguous[0]["source_column"] == "col2"

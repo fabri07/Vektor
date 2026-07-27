@@ -43,7 +43,7 @@ from app.application.services.column_risk import (
     apply_column_risk_decisions,
     build_contextual_column_risk,
     context_is_included,
-    resolve_contexts,
+    derive_context_mapping_entries,
     validate_column_risk_decisions,
 )
 from app.application.services.file_parsing import (
@@ -541,77 +541,6 @@ async def _build_master_previews(
     return previews
 
 
-# Las 5 entidades participan del protocolo (maestros incluidos: `name` requerido,
-# fiscal validado). Los maestros usan needs_review para identidad, pero la vaciedad
-# de sus columnas requeridas/seleccionadas sí es un riesgo contextual.
-_RISK_ENTITIES = ("sale", "expense", "product", "customer", "supplier")
-
-
-async def _build_context_mapping_entries(
-    session: AsyncSession,
-    tenant_id: uuid.UUID,
-    summary: dict[str, Any],
-    *,
-    user_mappings: list[ColumnMapping] | None = None,
-    context_entity: dict[str, str] | None = None,
-) -> tuple[dict[str, list[MappingEntry]], dict[str, str]]:
-    """F8a: arma el mapeo efectivo por contexto (las 5 entidades) para el motor de
-    riesgo, y devuelve además la ENTIDAD EFECTIVA por contexto (override de
-    reasignación aplicado) para que el helper use los ``REQUIRED_FIELDS`` correctos.
-
-    Base = sugerencias determinísticas (``allow_llm=False`` — este builder corre en
-    el preview de cada poll, igual criterio que el preview de maestros). Si
-    ``user_mappings`` viene (endpoint ``/column-risk``), overlaya el target elegido
-    por el usuario con ``user_selected`` real, preservando el ``mapping_source`` de
-    la sugerencia de esa columna. Solo contextos con ``headers`` (tabulares); los de
-    texto/OCR no tienen columnas que dropear.
-    """
-    context_entity = context_entity or {}
-    mapping_svc = ColumnMappingService(session)
-
-    user_by_ctx: dict[str, dict[str, ColumnMapping]] = defaultdict(dict)
-    for m in user_mappings or []:
-        user_by_ctx[m.context_id or "table"][m.source_column] = m
-
-    result: dict[str, list[MappingEntry]] = {}
-    effective_entities: dict[str, str] = {}
-    for ctx in resolve_contexts(summary):
-        context_id = ctx.get("context_id")
-        headers = ctx.get("headers")
-        if not context_id or not headers:
-            continue
-        entity = context_entity.get(context_id) or ctx.get("entity_type")
-        if entity not in _RISK_ENTITIES:
-            continue
-        effective_entities[context_id] = entity
-
-        sample_rows = ctx.get("preview_rows") or []
-        suggestions = await mapping_svc.suggest_mappings(
-            tenant_id, entity, list(headers), sample_rows, allow_llm=False
-        )
-        source_by_col = {s["source_column"]: s["source"] for s in suggestions}
-        by_col: dict[str, MappingEntry] = {
-            s["source_column"]: MappingEntry(
-                source_column=s["source_column"],
-                target_field=s["target_field"],
-                mapping_source=s["source"],
-                user_selected=False,
-            )
-            for s in suggestions
-            if s["status"] == "mapped" and s["target_field"]
-        }
-        for col, mapping in user_by_ctx.get(context_id, {}).items():
-            by_col[col] = MappingEntry(
-                source_column=col,
-                target_field=mapping.target_field,
-                mapping_source=source_by_col.get(col, "none"),
-                user_selected=mapping.user_selected,
-            )
-        if by_col:
-            result[context_id] = list(by_col.values())
-    return result, effective_entities
-
-
 @router.get(
     "/files/{file_id}/preview",
     response_model=FilePreviewResponse,
@@ -650,7 +579,7 @@ async def get_file_preview(
     # Sin inclusión (preview no conoce aún la decisión del usuario → muestra todo).
     contextual_risk: list[ContextualColumnRisk] = []
     try:
-        entries, entities = await _build_context_mapping_entries(session, tenant.tenant_id, summary)
+        entries, entities = await derive_context_mapping_entries(session, tenant.tenant_id, summary)
         contextual_risk = [
             ContextualColumnRisk(**row)
             for row in build_contextual_column_risk(
@@ -695,7 +624,7 @@ async def compute_column_risk(
         )
 
     summary = record.parsed_summary_json or {}
-    entries, entities = await _build_context_mapping_entries(
+    entries, entities = await derive_context_mapping_entries(
         session,
         tenant.tenant_id,
         summary,
