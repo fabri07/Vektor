@@ -54,6 +54,7 @@ los datos. La presencia de la key es evidencia inequívoca.
 from __future__ import annotations
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
@@ -83,14 +84,15 @@ def upgrade() -> None:
     )
     op.add_column(
         "uploaded_files",
-        sa.Column("reread_summary", sa.JSON, nullable=True),
+        sa.Column("reread_summary", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     )
 
     # CHECK constraint para reread_status (valores válidos).
     op.create_check_constraint(
         "ck_uploaded_files_reread_status",
         "uploaded_files",
-        "reread_status IN ('NONE','PREVIEWED','UP_TO_DATE','NEEDS_REVIEW','AUTO_APPLIED','APPLIED','FAILED')",
+        "reread_status IN ('NONE','PREVIEWED','UP_TO_DATE','NEEDS_REVIEW',"
+        "'AUTO_APPLIED','APPLIED','FAILED')",
     )
 
     # UPDATE de evidencia: marcar archivos ya confirmados con ``column_risk_decisions``
