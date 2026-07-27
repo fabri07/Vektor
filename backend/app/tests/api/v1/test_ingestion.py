@@ -824,6 +824,85 @@ class TestConfirmEndpoint:
         assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
         assert refreshed.import_attempt_id is None
 
+    async def test_confirm_contexto_reasignado_valida_requeridos_de_la_entidad_efectiva(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Reproduce el hallazgo de review: un contexto de producto (requiere
+        solo 'name') reasignado a venta (requiere 'amount'+'transaction_date')
+        vía context_entity. Antes del fix, `_entity_for` ignoraba el override y
+        validaba requeridos contra la entidad ORIGINAL ('product') — 'amount'
+        sin mapear pasaba sin 422 pese a que el importador (que sí honra el
+        override) lo procesaría como venta. La fecha SÍ está mapeada para
+        aislar este check del gate F6-A1 (fecha faltante), que es otro guard."""
+        summary = {
+            "confidence": "HIGH",
+            "file_type": "spreadsheet",
+            "inferred_type": "stock",
+            "mapping_contexts": [
+                {
+                    "context_id": "table",
+                    "entity_type": "product",
+                    "label": "Catálogo",
+                    "headers": ["producto", "fecha"],
+                }
+            ],
+            "stock_detectado": [
+                {"__context__": "table", "producto": "Vela", "fecha": "2026-07-01"}
+            ],
+        }
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="catalogo.xlsx",
+            s3_key="uploads/test/uuid/catalogo.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="productos",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json=summary,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"table": True},
+                "context_entity": {"table": "sale"},  # reasignado a venta
+                "column_mappings": [
+                    {
+                        "context_id": "table",
+                        "source_column": "producto",
+                        "target_field": "name",
+                        "entity_type": "product",
+                    },
+                    {
+                        "context_id": "table",
+                        "source_column": "fecha",
+                        "target_field": "transaction_date",
+                        "entity_type": "product",
+                    },
+                ],
+            },
+        )
+        assert response.status_code == 422
+        assert "amount" in response.json()["detail"]
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == record.id)
+            )
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
     async def test_confirm_drop_requerido_sin_reemplazo_devuelve_422_antes_del_lease(
         self,
         client: AsyncClient,

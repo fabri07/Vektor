@@ -421,6 +421,32 @@ def validate_column_risk_decisions(
             ):
                 matched_entry = entry
 
+        if matched_entry is None:
+            # El par (source_column, target_field) que declara la decisión no
+            # existe en el mapeo efectivo actual del contexto — puede ser un
+            # payload manipulado o una decisión stale (mapeo cambió después de
+            # calcularla). Si esto pasara, `field_requirement` se derivaría
+            # SOLO de `decision.target_field` (declarado por el cliente) sin
+            # verificar que `decision.source_column` sea realmente la columna
+            # mapeada a ese target — dejando que `apply_column_risk_decisions`
+            # rutee/dropee una columna arbitraria bajo la apariencia de una
+            # decisión sobre un campo requerido/seleccionado. Se rechaza ANTES
+            # de evaluar acciones permitidas (bug reportado por review F8b/F8c).
+            violations.append(
+                ColumnRiskViolation(
+                    context_id=decision.context_id,
+                    source_column=decision.source_column,
+                    target_field=decision.target_field,
+                    action=decision.action,
+                    reason=(
+                        f"La columna '{decision.source_column}' no está mapeada a "
+                        f"'{decision.target_field}' en el contexto '{decision.context_id}' "
+                        "según el mapeo efectivo actual."
+                    ),
+                )
+            )
+            continue
+
         required = set(REQUIRED_FIELDS.get(entity, []))
         if decision.target_field in required:
             field_requirement = "required"

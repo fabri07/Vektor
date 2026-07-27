@@ -244,12 +244,48 @@ def test_decision_en_contexto_excluido_no_genera_violacion() -> None:
     assert violations == []
 
 
+def test_decision_con_source_column_falso_sobre_target_requerido_es_violacion() -> None:
+    """Reproduce el hallazgo de review: el mapeo real es `Monto -> amount`, pero
+    la decisión declara `Notas -> amount` (columna que NUNCA estuvo mapeada a
+    `amount`). Antes del fix, `field_requirement` se derivaba solo de
+    `decision.target_field` (que SÍ es requerido) sin verificar que
+    `source_column` fuera la columna real — dejando pasar la decisión y, en
+    `apply_column_risk_decisions`, ruteando filas por el estado de una columna
+    (`Notas`) que no tiene nada que ver con el campo requerido real."""
+    context_mappings = {
+        "table": [
+            MappingEntry("fecha", "transaction_date", user_selected=False),
+            MappingEntry("monto", "amount", user_selected=False),
+            MappingEntry("notas", "notes", user_selected=False),
+        ]
+    }
+    context_entities = {"table": "sale"}
+    decisions = [
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="notas",
+            target_field="amount",
+            action="route_affected_rows_to_others",
+        )
+    ]
+
+    violations = validate_column_risk_decisions(decisions, context_mappings, context_entities)
+
+    assert len(violations) == 1
+    assert violations[0].source_column == "notas"
+    assert violations[0].target_field == "amount"
+
+
 def test_decision_sobre_columna_no_mapeada_no_es_explicitly_selected() -> None:
-    """Si la decisión referencia una columna que no aparece en el mapeo
-    efectivo (caso raro, payload inconsistente), no hay `user_selected` que
-    la salve: un target opcional sin match en el mapeo se trata como
-    `optional` (no accionable) → route es violación."""
-    context_mappings: dict[str, list[MappingEntry]] = {"table": []}
+    """Un target opcional que existe en el mapeo pero SIN `user_selected` no
+    tiene ningún `user_selected` que lo salve: se trata como `optional` (no
+    accionable) → route es violación. `matched_entry` SÍ existe acá (la
+    columna está realmente mapeada) para aislar este branch del de
+    `matched_entry is None` (ver `test_decision_con_source_column_falso_...`),
+    que intercepta antes si la columna no está en el mapeo en absoluto."""
+    context_mappings: dict[str, list[MappingEntry]] = {
+        "table": [MappingEntry("notas", "notes", user_selected=False)]
+    }
     context_entities = {"table": "product"}
     decisions = [
         ColumnRiskDecision(
