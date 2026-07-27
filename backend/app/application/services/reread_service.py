@@ -54,10 +54,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,6 +68,9 @@ from app.application.services import maintenance_lock_service
 from app.application.services.column_risk import (
     AppliedColumnRisk,
     apply_column_risk_decisions,
+    build_contextual_column_risk,
+    derive_context_mapping_entries,
+    split_derivable_decisions,
 )
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
@@ -77,11 +81,18 @@ from app.application.services.stock_service import (
     unvoid_movement,
     void_movement,
 )
+from app.domain.ingestion_version import INGESTION_VERSION
 from app.integrations.s3 import S3Client
 from app.observability.logger import get_logger
-from app.persistence.models.file import UploadedFile
+from app.persistence.models.file import (
+    REREAD_STATUS_APPLIED,
+    REREAD_STATUS_AUTO_APPLIED,
+    REREAD_STATUS_NEEDS_REVIEW,
+    UploadedFile,
+)
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
+from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
@@ -90,6 +101,12 @@ from app.persistence.models.unclassified_record import (
     UnclassifiedRecord,
 )
 from app.schemas.ingestion import ColumnRiskDecision
+
+# F9a: outcome explícito de la resolución de riesgo de columnas en la relectura.
+# Reemplaza el booleano implícito de ``_apply_risk_decisions`` (None/no-None) por
+# un resultado que distingue "reaplicado tal cual" (mapeo REAL, F8b+) de un mapeo
+# RE-DERIVADO (guess) para archivos pre-F8 — ver ``ResolvedRisk``.
+RiskOutcome = Literal["REAPPLIED", "NO_RISK_FOUND", "FORCED_UNVERIFIED", "AMBIGUOUS"]
 
 # Helpers/constantes de parseo compartidos con el import — reusados en el estimado
 # del preview para clasificar/anclar las filas IGUAL que ``insert_confirmed_data``.
@@ -160,6 +177,11 @@ class RereadPreview:
     products_restock: int = 0
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = field(default_factory=list)
+    # F9a: resultado de la resolución de riesgo de columnas (ver ``ResolvedRisk``).
+    # Default "NO_RISK_FOUND" — el valor conservador si nadie lo pisa explícitamente.
+    column_risk_outcome: str = "NO_RISK_FOUND"
+    column_risk_ambiguous: list[dict[str, Any]] = field(default_factory=list)
+    column_risk_forced_unverified: list[dict[str, Any]] = field(default_factory=list)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -191,6 +213,10 @@ class RereadApplyResult:
     # summary (sin mapeo, no se adivina el shape — mismo criterio que el confirm).
     clientes: int = 0
     proveedores: int = 0
+    # F9a: resultado de la resolución de riesgo de columnas (ver ``ResolvedRisk``).
+    column_risk_outcome: str = "NO_RISK_FOUND"
+    column_risk_ambiguous: list[dict[str, Any]] = field(default_factory=list)
+    column_risk_forced_unverified: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── snapshots para auditoría ───────────────────────────────────────────────────
@@ -278,6 +304,67 @@ async def _load_existing_records(
         )
     )
     return list(sales_res.scalars().all()), list(expenses_res.scalars().all())
+
+
+async def file_has_user_edits(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> bool:
+    """``True`` si algún registro derivado de este archivo tiene ediciones
+    manuales (``has_user_edits=True``), NO anulado.
+
+    F9a (Task 4): el batch de relectura usa esto para decidir si un archivo es
+    seguro de reprocesar sin supervisión — un archivo con ediciones manuales NO
+    debería auto-aplicarse (aunque el outcome de riesgo fuera REAPPLIED), porque
+    la relectura reimporta corregido y podría pisar contexto que el humano ya
+    ajustó a mano en otras filas del mismo archivo.
+
+    Chequea tres fuentes, cualquiera en ``True`` alcanza:
+    - ``SaleEntry`` de este archivo con ``has_user_edits=True`` (no anulada).
+    - ``ExpenseEntry`` de este archivo con ``has_user_edits=True`` (no anulada).
+    - ``Product`` con ``has_user_edits=True`` vinculado INDIRECTAMENTE: ``Product``
+      no tiene ``source_upload_id`` propio (no existe esa columna en el modelo);
+      el vínculo es vía ``ExpenseEntry.source_upload_id == file_id`` →
+      ``ExpenseEntry.product_id == Product.id`` (compra de mercadería que creó/
+      actualizó el producto), acotado a gastos no anulados.
+    """
+    sale_edit = await session.execute(
+        select(SaleEntry.id)
+        .where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.source_upload_id == file_id,
+            SaleEntry.has_user_edits.is_(True),
+            SaleEntry.voided_at.is_(None),
+        )
+        .limit(1)
+    )
+    if sale_edit.scalar_one_or_none() is not None:
+        return True
+
+    expense_edit = await session.execute(
+        select(ExpenseEntry.id)
+        .where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.source_upload_id == file_id,
+            ExpenseEntry.has_user_edits.is_(True),
+            ExpenseEntry.voided_at.is_(None),
+        )
+        .limit(1)
+    )
+    if expense_edit.scalar_one_or_none() is not None:
+        return True
+
+    product_edit = await session.execute(
+        select(Product.id)
+        .join(ExpenseEntry, ExpenseEntry.product_id == Product.id)
+        .where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.source_upload_id == file_id,
+            ExpenseEntry.voided_at.is_(None),
+            Product.has_user_edits.is_(True),
+        )
+        .limit(1)
+    )
+    return product_edit.scalar_one_or_none() is not None
 
 
 async def _fresh_summary(file: UploadedFile, s3: S3Client) -> dict[str, Any]:
@@ -1074,6 +1161,116 @@ def _apply_risk_decisions(
     return apply_column_risk_decisions(fresh, decisions, {})
 
 
+# ── F9a: sanitización de nombres de columna no confiables ─────────────────────
+# Vienen de headers de archivos subidos por el usuario — nunca confiar en ellos
+# antes de persistirlos en ``reread_summary`` o devolverlos al caller.
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SANITIZE_MAX_LEN = 200
+
+
+def _sanitize_column_name(name: str) -> str:
+    """Quita caracteres de control y trunca a ``_SANITIZE_MAX_LEN`` caracteres."""
+    cleaned = _CONTROL_CHARS_RE.sub("", name)
+    return cleaned[:_SANITIZE_MAX_LEN]
+
+
+def _sanitize_risk_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sanitiza ``source_column``/``target_field`` en una lista de filas de riesgo
+    (ambiguas o forzadas) antes de exponerlas al caller o persistirlas. El resto
+    de las claves (montos agregados, ratios, flags) no vienen de un header crudo
+    y se preservan tal cual."""
+    sanitized: list[dict[str, Any]] = []
+    for row in rows:
+        new_row = dict(row)
+        for key in ("source_column", "target_field"):
+            value = new_row.get(key)
+            if isinstance(value, str):
+                new_row[key] = _sanitize_column_name(value)
+        sanitized.append(new_row)
+    return sanitized
+
+
+# ── F9a: outcome explícito de la resolución de riesgo de columnas ────────────
+
+
+@dataclass
+class ResolvedRisk:
+    """Resultado de ``_resolve_risk_decisions`` — outcome explícito que reemplaza
+    el booleano implícito (None/no-None) de ``_apply_risk_decisions``.
+
+    Invariante de seguridad (no negociable, ver Global Constraints del plan): solo
+    ``outcome == "REAPPLIED"`` puede traer ``applied`` no-``None`` — es el ÚNICO
+    caso donde el mapeo reaplicado es el REAL que el usuario eligió en el confirm
+    (F8b+). Para archivos confirmados ANTES de F8, cualquier mapeo que
+    ``derive_context_mapping_entries`` derive es un GUESS sobre datos ya
+    importados: ``NO_RISK_FOUND``, ``FORCED_UNVERIFIED`` y ``AMBIGUOUS`` NUNCA
+    tocan el summary ni se auto-aplican, aunque una acción sea la única legal
+    (``FORCED_UNVERIFIED``) — existen solo para el reporte."""
+
+    outcome: RiskOutcome
+    applied: AppliedColumnRisk | None = None
+    ambiguous_rows: list[dict[str, Any]] = field(default_factory=list)
+    forced_rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+async def _resolve_risk_decisions(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file: UploadedFile,
+    fresh: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+) -> ResolvedRisk:
+    """Resuelve el riesgo de columnas para la relectura, con outcome explícito.
+
+    1. Si el confirm original guardó ``column_risk_decisions`` (F8b+): se
+       REAPLICAN tal cual (``_apply_risk_decisions``, comportamiento idéntico al
+       histórico) → ``REAPPLIED``. Es el mapeo REAL que el usuario eligió.
+    2. Si no hay decisiones guardadas (archivo pre-F8): se DERIVA un mapeo nuevo
+       (``derive_context_mapping_entries``) para diagnosticar, nunca para aplicar
+       — es un GUESS sobre datos ya importados. Sin contextos tabulares con
+       headers válidos → ``NO_RISK_FOUND``.
+    3. Con mapeo derivado: ``build_contextual_column_risk`` + ``split_derivable_
+       decisions`` separan filas forzadas (una sola acción legal) de ambiguas
+       (2+ acciones legales).
+    4. Sin ninguna fila accionable → ``NO_RISK_FOUND``.
+    5. Con al menos una fila AMBIGUA (con o sin forzadas junto) → ``AMBIGUOUS``,
+       todo-o-nada: ninguna decisión (ni siquiera las forzadas) se aplica. Evita
+       reconciliación parcial difícil de auditar.
+    6. Solo forzadas, sin ambiguas → ``FORCED_UNVERIFIED``. A diferencia de
+       ``REAPPLIED``, acá NUNCA se llama ``apply_column_risk_decisions`` — el
+       mapeo es un guess no verificado (ver docstring de ``ResolvedRisk``); este
+       outcome existe para el reporte, no para aplicar.
+    """
+    applied = _apply_risk_decisions(file, fresh)
+    if applied is not None:
+        return ResolvedRisk(outcome="REAPPLIED", applied=applied)
+
+    entries, entities = await derive_context_mapping_entries(session, tenant_id, fresh)
+    if not entries:
+        return ResolvedRisk(outcome="NO_RISK_FOUND")
+
+    risk_rows = build_contextual_column_risk(
+        fresh, entries, context_entities=entities, confirmed_fields=confirmed_fields
+    )
+    decisions, ambiguous = split_derivable_decisions(risk_rows)
+
+    if not decisions and not ambiguous:
+        return ResolvedRisk(outcome="NO_RISK_FOUND")
+
+    forced_rows = _sanitize_risk_rows([d.model_dump() for d in decisions])
+    if ambiguous:
+        # Todo-o-nada: cualquier ambigüedad hace AMBIGUO al archivo entero, aunque
+        # haya forzadas junto — no se aplican ni siquiera esas.
+        return ResolvedRisk(
+            outcome="AMBIGUOUS",
+            ambiguous_rows=_sanitize_risk_rows(ambiguous),
+            forced_rows=forced_rows,
+        )
+    # Solo forzadas: NO se aplican (ver docstring) — solo para el reporte.
+    return ResolvedRisk(outcome="FORCED_UNVERIFIED", forced_rows=forced_rows)
+
+
 def _parse_risk_ref(row_data: dict[str, Any] | None) -> tuple[str, int] | None:
     """``(context_id, row_index)`` desde la clave de correlación ``__risk_ref__``
     que la captura (Task 5) guardó en el ``UnclassifiedRecord``. ``None`` si el
@@ -1171,19 +1368,28 @@ async def preview_reread(
     s3 = s3 or S3Client()
     fresh = await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
-    # F8b (Task 5): reaplicar decisiones de riesgo para que el estimado refleje los
+    # F9a: resuelve el riesgo de columnas con outcome explícito — REAPPLIED (mapeo
+    # real, F8b+) es el ÚNICO que muta ``fresh`` para que el estimado refleje el
     # drop/route (filas ruteadas salen de los buckets → no se cuentan como nuevas).
-    _applied = _apply_risk_decisions(file, fresh)
-    if _applied is not None:
-        fresh = _applied.summary
+    # Los demás outcomes (mapeo derivado/guess sobre archivos pre-F8) NO tocan el
+    # summary — ver invariante en ``ResolvedRisk``.
+    resolved = await _resolve_risk_decisions(
+        session, tenant_id, file, fresh, confirmed_fields
+    )
+    if resolved.applied is not None:
+        fresh = resolved.applied.summary
     sales, expenses = await _load_existing_records(session, file_id, tenant_id)
     # Huellas de import (lo que el apply usa para deduplicar) + catálogo de productos
     # (para estimar altas/reposiciones). Dos queries, en memoria.
     fingerprints = await _load_import_fingerprints(session, tenant_id)
     catalog = await _load_product_index(session, tenant_id)
-    return _estimate_reread(
+    preview = _estimate_reread(
         file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog
     )
+    preview.column_risk_outcome = resolved.outcome
+    preview.column_risk_ambiguous = resolved.ambiguous_rows
+    preview.column_risk_forced_unverified = resolved.forced_rows
+    return preview
 
 
 async def apply_reread(
@@ -1192,12 +1398,19 @@ async def apply_reread(
     tenant_id: uuid.UUID,
     s3: S3Client | None = None,
     run: DataRepairRun | None = None,
+    origin: Literal["interactive", "batch_auto", "batch_manual"] = "interactive",
 ) -> RereadApplyResult:
     """Aplica la relectura: void no-editados + reimport corregido, auditado y
     reversible. El commit lo hace el caller (get_db_session o el worker).
 
     Si se pasa ``run`` (creado por ``start_background_apply`` y ejecutado por el
-    worker), se reusa; si no, se crea uno (camino síncrono / tests)."""
+    worker), se reusa; si no, se crea uno (camino síncrono / tests).
+
+    ``origin`` distingue quién disparó el reread — el servicio no puede inferirlo
+    por sí solo: ``"interactive"`` (default, humano vía UI/endpoint HTTP),
+    ``"batch_auto"`` (batch sin supervisión, Task 4) o ``"batch_manual"`` (batch
+    con revisión humana previa). Solo afecta el ``reread_status`` cuando el
+    outcome de riesgo es ``REAPPLIED`` (ver stamping más abajo)."""
     # F3-T3: la relectura crea/void productos+stock. Shared lock ANTES de mutar.
     # No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
@@ -1209,13 +1422,17 @@ async def apply_reread(
     fresh = await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
 
-    # F8b (Task 5): reaplicar las decisiones de riesgo persistidas por el confirm
-    # sobre el summary fresco (copia; recomputando afectadas — invariante 3). El
-    # summary resultante honra drop/route: la reconciliación importa desde ÉL, así
-    # una fila corregida vuelve al bucket y se importa, y una que sigue mal queda
-    # fuera. ``None`` si el archivo se confirmó sin decisiones (relectura clásica).
-    _applied = _apply_risk_decisions(file, fresh)
-    summary_for_import = _applied.summary if _applied is not None else fresh
+    # F9a: resuelve el riesgo de columnas con outcome explícito. Solo REAPPLIED
+    # (mapeo real, F8b+) muta el summary usado para reimportar — honra drop/route:
+    # una fila corregida vuelve al bucket y se importa, una que sigue mal queda
+    # fuera. Los demás outcomes (mapeo derivado/guess sobre un archivo pre-F8) NO
+    # tocan el summary — invariante de seguridad, ver ``ResolvedRisk``.
+    resolved = await _resolve_risk_decisions(
+        session, tenant_id, file, fresh, confirmed_fields
+    )
+    summary_for_import = (
+        resolved.applied.summary if resolved.applied is not None else fresh
+    )
 
     if run is None:
         run = DataRepairRun(
@@ -1241,12 +1458,35 @@ async def apply_reread(
     )
     result.clientes = clientes_count
     result.proveedores = proveedores_count
+    result.column_risk_outcome = resolved.outcome
+    result.column_risk_ambiguous = resolved.ambiguous_rows
+    result.column_risk_forced_unverified = resolved.forced_rows
 
     # F8b (Task 5): tras el reimport, honrar las decisiones de riesgo — re-capturar
     # afectadas (dedup) y resolver el "Otros" de las filas corregidas. Dentro de la
-    # transacción del apply (atómico con el resto de la relectura).
-    if _applied is not None:
-        await _reconcile_column_risk(session, file, tenant_id, _applied)
+    # transacción del apply (atómico con el resto de la relectura). Solo ocurre en
+    # REAPPLIED (único outcome con ``applied`` no-``None``).
+    if resolved.applied is not None:
+        await _reconcile_column_risk(session, file, tenant_id, resolved.applied)
+
+    # F9a: stamping de versionado/estado de la relectura sobre el archivo.
+    # REAPPLIED es el ÚNICO outcome que bumpea ``ingestion_version`` — es el único
+    # caso donde el mapeo reaplicado es el REAL (F8b+), no un guess re-derivado.
+    if resolved.outcome == "REAPPLIED":
+        file.ingestion_version = INGESTION_VERSION
+        file.reread_status = (
+            REREAD_STATUS_AUTO_APPLIED if origin == "batch_auto" else REREAD_STATUS_APPLIED
+        )
+    else:
+        file.reread_status = REREAD_STATUS_NEEDS_REVIEW
+    file.reread_at = datetime.now(UTC)
+    file.reread_summary = {
+        "outcome": resolved.outcome,
+        "algorithm_version": INGESTION_VERSION,
+        "ambiguous_columns": resolved.ambiguous_rows,
+        "forced_unverified_columns": resolved.forced_rows,
+        "run_id": str(run.id),
+    }
 
     run.status = "APPLIED"
     run.completed_at = datetime.now(UTC)
@@ -1262,6 +1502,7 @@ async def apply_reread(
         "legacy_fallback": result.legacy_fallback,
         "clientes": result.clientes,
         "proveedores": result.proveedores,
+        "column_risk_outcome": result.column_risk_outcome,
         # Sample para el diff antes/después en el frontend (limitado para no inflar).
         "sample_changes": list(result.items)[:24],
         "products_limitation": (
@@ -1534,9 +1775,11 @@ __all__ = [
     "ACTION_VOID",
     "REPAIR_TYPE_REREAD",
     "VOID_REASON_REREAD",
+    "ResolvedRisk",
     "RereadApplyResult",
     "RereadPreview",
     "apply_reread",
+    "file_has_user_edits",
     "latest_applied_run_for_file",
     "preview_reread",
     "undo_reread",

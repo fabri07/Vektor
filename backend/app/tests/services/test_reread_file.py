@@ -13,6 +13,7 @@ de fixture. Cubren:
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -28,15 +29,18 @@ from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.domain.ingestion_version import INGESTION_VERSION
 from app.integrations.s3 import S3Client
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
+    REREAD_STATUS_APPLIED,
+    REREAD_STATUS_NEEDS_REVIEW,
     UploadedFile,
 )
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
-from app.persistence.models.transaction import ExpenseEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_DISMISSED,
     UNCLASSIFIED_STATUS_PENDING,
@@ -803,3 +807,308 @@ async def test_reread_conserva_decision_y_no_duplica_otros(
     # no se duplicó (sigue 1 pendiente).
     assert len(await _active_expenses(db_session, tenant, file)) == 1
     assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 1
+
+
+@pytest.mark.asyncio
+async def test_reread_reapplied_outcome_bumps_version_and_status(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un archivo F8b+ (con ``column_risk_decisions`` guardadas) resuelve a
+    ``REAPPLIED`` — el ÚNICO outcome que bumpea ``ingestion_version`` y deja
+    ``reread_status=APPLIED`` (no ``NEEDS_REVIEW``)."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.column_risk_outcome == "REAPPLIED"
+    assert file.ingestion_version == INGESTION_VERSION
+    assert file.reread_status == REREAD_STATUS_APPLIED
+    assert file.reread_summary is not None
+    assert file.reread_summary["outcome"] == "REAPPLIED"
+    assert file.reread_summary["algorithm_version"] == INGESTION_VERSION
+
+
+# ── F9a (Task 3): outcomes explícitos para archivos pre-F8 (mapeo re-derivado) ──
+#
+# Invariante de seguridad: para un archivo confirmado ANTES de F8 (sin
+# ``column_risk_decisions`` guardadas), el mapeo que ``derive_context_mapping_
+# entries`` deriva es un GUESS sobre datos ya importados — NUNCA el que el
+# usuario eligió. Por eso NINGUNO de estos outcomes (NO_RISK_FOUND,
+# FORCED_UNVERIFIED, AMBIGUOUS) toca el summary ni se auto-aplica, aunque una
+# acción sea la única legal (FORCED_UNVERIFIED).
+
+# "monto" (requerido → amount) vacío en TODAS las filas, sin columna de
+# reemplazo: la única acción legal es ``route_affected_rows_to_others`` (un
+# requerido con una sola columna mapeada no se puede dropear) → FORCED_UNVERIFIED.
+_CSV_FORCED_UNVERIFIED = (
+    b"fecha,producto,monto,proveedor\n"
+    b"2026-01-05,Coca Cola,,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,,Panaderia Norte\n"
+)
+
+# "monto" e "importe" mapean AMBOS a ``amount`` (requerido, 2 columnas → hay
+# reemplazo): "importe" vacío en una fila habilita 2 acciones legales
+# (route_affected_rows_to_others + drop_column) → AMBIGUOUS.
+_CSV_AMBIGUOUS_RISK = (
+    b"fecha,producto,monto,importe,proveedor\n"
+    b"2026-01-05,Coca Cola,1500,1500,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,800,,Panaderia Norte\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_reread_forced_unverified_does_not_auto_apply(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Archivo pre-F8 (sin ``column_risk_decisions``) con una columna requerida
+    100% nula y SIN reemplazo: ``preview_reread`` devuelve outcome
+    ``FORCED_UNVERIFIED`` — la única acción legal existe, pero NO se aplica.
+    Tras ``apply_reread``, ``ingestion_version`` NO cambia y ``reread_status``
+    queda ``NEEDS_REVIEW`` (nunca ``APPLIED``). Documenta explícitamente que
+    "acción no ambigua" no implica auto-apply."""
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+    file = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    original_version = file.ingestion_version
+
+    preview = await reread_service.preview_reread(db_session, file.id, tenant.tenant_id)
+    assert preview.column_risk_outcome == "FORCED_UNVERIFIED"
+    assert preview.column_risk_ambiguous == []
+    assert len(preview.column_risk_forced_unverified) == 1
+    forced = preview.column_risk_forced_unverified[0]
+    assert forced["source_column"] == "monto"
+    assert forced["target_field"] == "amount"
+    assert forced["action"] == "route_affected_rows_to_others"
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.column_risk_outcome == "FORCED_UNVERIFIED"
+    # Ni se dropeó ni se ruteó nada: no se creó ningún registro en "Otros" (eso
+    # solo ocurre en el outcome REAPPLIED, vía ``_reconcile_column_risk``).
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 0
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_DISMISSED)) == 0
+    assert file.ingestion_version == original_version
+    assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
+    assert file.reread_summary is not None
+    assert file.reread_summary["outcome"] == "FORCED_UNVERIFIED"
+    assert len(file.reread_summary["forced_unverified_columns"]) == 1
+    assert file.reread_summary["ambiguous_columns"] == []
+
+
+@pytest.mark.asyncio
+async def test_reread_ambiguous_does_not_touch_summary(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Archivo pre-F8 con una columna requerida con reemplazo disponible (2+
+    acciones legales): outcome ``AMBIGUOUS`` — mismo resultado que
+    ``FORCED_UNVERIFIED``, nada se toca ni se auto-aplica."""
+    _patch_s3(monkeypatch, _CSV_AMBIGUOUS_RISK)
+    file = await _make_file(db_session, tenant, _CSV_AMBIGUOUS_RISK)
+    original_version = file.ingestion_version
+
+    preview = await reread_service.preview_reread(db_session, file.id, tenant.tenant_id)
+    assert preview.column_risk_outcome == "AMBIGUOUS"
+    assert len(preview.column_risk_ambiguous) == 1
+    ambiguous = preview.column_risk_ambiguous[0]
+    assert ambiguous["source_column"] == "importe"
+    assert ambiguous["target_field"] == "amount"
+    assert set(ambiguous["allowed_actions"]) == {
+        "route_affected_rows_to_others",
+        "drop_column",
+    }
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.column_risk_outcome == "AMBIGUOUS"
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 0
+    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_DISMISSED)) == 0
+    assert file.ingestion_version == original_version
+    assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
+
+
+@pytest.mark.asyncio
+async def test_reread_no_risk_found_does_not_bump_without_confirmation(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture existente sin columnas riesgosas (``_CSV_BASE``): outcome
+    ``NO_RISK_FOUND``. No bumpea ``ingestion_version`` sin una confirmación
+    explícita (F8b+) — ni siquiera la ausencia de riesgo alcanza."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+    original_version = file.ingestion_version
+
+    preview = await reread_service.preview_reread(db_session, file.id, tenant.tenant_id)
+    assert preview.column_risk_outcome == "NO_RISK_FOUND"
+    assert preview.column_risk_ambiguous == []
+    assert preview.column_risk_forced_unverified == []
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.column_risk_outcome == "NO_RISK_FOUND"
+    assert file.ingestion_version == original_version
+    assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
+
+
+# ── F9a (Task 3): ``file_has_user_edits`` ───────────────────────────────────────
+
+
+async def _make_bare_file(session: AsyncSession, tenant: Tenant) -> UploadedFile:
+    """Archivo mínimo, sin parseo — alcanza para las pruebas de
+    ``file_has_user_edits`` (no leen ``parsed_summary_json``)."""
+    f = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="dummy.csv",
+        s3_key=f"tenants/{tenant.tenant_id}/dummy.csv",
+        content_type="text/csv",
+        size_bytes=1,
+        purpose="gastos",
+        processing_status=PROCESSING_STATUS_DONE,
+    )
+    session.add(f)
+    await session.commit()
+    return f
+
+
+@pytest.mark.asyncio
+async def test_file_has_user_edits_false_without_any_edit(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    file = await _make_bare_file(db_session, tenant)
+    db_session.add(
+        ExpenseEntry(
+            tenant_id=tenant.tenant_id,
+            source_upload_id=file.id,
+            amount=Decimal("100"),
+            category="OTHER",
+            transaction_date=datetime.now(UTC),
+            description="Gasto sin editar",
+            has_user_edits=False,
+        )
+    )
+    await db_session.commit()
+
+    assert (
+        await reread_service.file_has_user_edits(db_session, file.id, tenant.tenant_id)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_has_user_edits_true_for_sale_entry(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    file = await _make_bare_file(db_session, tenant)
+    db_session.add(
+        SaleEntry(
+            tenant_id=tenant.tenant_id,
+            source_upload_id=file.id,
+            amount=Decimal("1500"),
+            transaction_date=datetime.now(UTC),
+            has_user_edits=True,
+        )
+    )
+    await db_session.commit()
+
+    assert (
+        await reread_service.file_has_user_edits(db_session, file.id, tenant.tenant_id)
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_has_user_edits_true_for_expense_entry(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    file = await _make_bare_file(db_session, tenant)
+    db_session.add(
+        ExpenseEntry(
+            tenant_id=tenant.tenant_id,
+            source_upload_id=file.id,
+            amount=Decimal("800"),
+            category="OTHER",
+            transaction_date=datetime.now(UTC),
+            description="Gasto editado a mano",
+            has_user_edits=True,
+        )
+    )
+    await db_session.commit()
+
+    assert (
+        await reread_service.file_has_user_edits(db_session, file.id, tenant.tenant_id)
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_has_user_edits_true_for_product_via_expense_link(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """``Product`` no tiene ``source_upload_id`` propio — el vínculo es
+    INDIRECTO vía ``ExpenseEntry.source_upload_id`` + ``ExpenseEntry.product_id``
+    (compra de mercadería que creó/actualizó el producto)."""
+    file = await _make_bare_file(db_session, tenant)
+    product = Product(
+        tenant_id=tenant.tenant_id,
+        name="Coca Cola",
+        sale_price_ars=Decimal("1500"),
+        unit_cost_ars=Decimal("1000"),
+        stock_units=10,
+        has_user_edits=True,
+    )
+    db_session.add(product)
+    await db_session.flush()
+    db_session.add(
+        ExpenseEntry(
+            tenant_id=tenant.tenant_id,
+            source_upload_id=file.id,
+            product_id=product.id,
+            amount=Decimal("1000"),
+            category="INVENTORY",
+            expense_type="COGS",
+            transaction_date=datetime.now(UTC),
+            description="Compra de mercaderia",
+            has_user_edits=False,
+        )
+    )
+    await db_session.commit()
+
+    assert (
+        await reread_service.file_has_user_edits(db_session, file.id, tenant.tenant_id)
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_has_user_edits_ignores_voided_records(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """Una edición manual en un registro YA ANULADO no cuenta: ``voided_at`` debe
+    ser ``NULL`` para que la edición sea evidencia vigente."""
+    file = await _make_bare_file(db_session, tenant)
+    db_session.add(
+        ExpenseEntry(
+            tenant_id=tenant.tenant_id,
+            source_upload_id=file.id,
+            amount=Decimal("800"),
+            category="OTHER",
+            transaction_date=datetime.now(UTC),
+            description="Gasto editado pero anulado",
+            has_user_edits=True,
+            voided_at=datetime.now(UTC),
+            void_reason="USER_CANCELLED",
+        )
+    )
+    await db_session.commit()
+
+    assert (
+        await reread_service.file_has_user_edits(db_session, file.id, tenant.tenant_id)
+        is False
+    )
