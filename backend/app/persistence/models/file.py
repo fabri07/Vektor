@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,15 @@ PROCESSING_STATUS_IMPORTING = "IMPORTING"
 PROCESSING_STATUS_DONE = "DONE"
 PROCESSING_STATUS_FAILED = "FAILED"
 PROCESSING_STATUS_REJECTED = "REJECTED"
+
+# Valid reread_status values (F9a: versionado de ingestión)
+REREAD_STATUS_NONE = "NONE"
+REREAD_STATUS_PREVIEWED = "PREVIEWED"
+REREAD_STATUS_UP_TO_DATE = "UP_TO_DATE"
+REREAD_STATUS_NEEDS_REVIEW = "NEEDS_REVIEW"
+REREAD_STATUS_AUTO_APPLIED = "AUTO_APPLIED"
+REREAD_STATUS_APPLIED = "APPLIED"
+REREAD_STATUS_FAILED = "FAILED"
 
 
 class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -76,6 +85,32 @@ class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     # Fase del import en curso (inserting/finalizing) — trazabilidad opcional.
     import_phase: Mapped[str | None] = mapped_column(String(30), nullable=True, default=None)
+
+    # ── F9a: versionado de lógica de ingestión ───────────────────────────────
+    # Qué versión del protocolo de interpretación de ingestión fue usada
+    # cuando este archivo se procesó/confirmó. Permite evolucionar el pipeline
+    # sin perder trazabilidad (ej. pre/post-F8 riesgo contextual de columnas).
+    ingestion_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    # La versión más reciente de la preview que se mostró. Separada de
+    # ingestion_version para distinguir "reread y visto" de "procesado".
+    latest_preview_version: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
+    # Estado del reprocesamiento (reread): NONE, PREVIEWED, UP_TO_DATE, etc.
+    # Permite reprocess multipass del archivo sin resubir (F9a+).
+    reread_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=REREAD_STATUS_NONE
+    )
+    # Cuándo se hizo el reprocesamiento más reciente. Reloj de PG.
+    reread_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    # Summary del reread (diagnóstico, cambios detectados, etc.). JSONB para
+    # flexibilidad: puede contener {has_column_risk_changes: bool, ...} u otro
+    # formato según la versión del protocolo que lo generó.
+    reread_summary: Mapped[Any] = mapped_column(PGJSONB, nullable=True, default=None)
 
     def __repr__(self) -> str:
         return (

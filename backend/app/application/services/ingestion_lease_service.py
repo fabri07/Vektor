@@ -46,6 +46,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import get_settings
+from app.domain.ingestion_version import INGESTION_VERSION
 from app.observability.logger import get_logger
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
@@ -204,6 +205,7 @@ async def finalize_import_lease(
             import_attempt_id=None,
             import_started_at=None,
             import_phase=None,
+            ingestion_version=INGESTION_VERSION,
         )
     )
     if cast("CursorResult[Any]", result).rowcount != 1:
