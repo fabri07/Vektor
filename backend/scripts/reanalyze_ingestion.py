@@ -1,0 +1,448 @@
+"""Reanálisis de ingestión por versión — el comando operativo de F9a (Task 4).
+
+Recorre archivos con ``ingestion_version`` desactualizada (por defecto: `< la
+versión actual del protocolo, INGESTION_VERSION`) y usa ``reread_service`` para
+diagnosticar qué les pasaría con el pipeline actual, sin reinventar la
+reconciliación.
+
+Tres modos, cada uno estrictamente más invasivo que el anterior:
+
+    # Dry-run puro (default): CERO escrituras, ni siquiera bookkeeping.
+    DATABASE_URL='...' .venv/bin/python scripts/reanalyze_ingestion.py --tenant <uuid>
+
+    # Persiste bookkeeping (latest_preview_version/reread_status/reread_summary),
+    # nunca toca negocio ni auto-aplica.
+    ... scripts/reanalyze_ingestion.py --tenant <uuid> --record-scan
+
+    # Además de lo anterior, auto-aplica donde sea elegible (ver invariante).
+    ... scripts/reanalyze_ingestion.py --all-active --apply
+
+Invariante de seguridad (no negociable — ver ``ResolvedRisk`` en
+``reread_service.py``): el ÚNICO ``column_risk_outcome`` que este script puede
+auto-aplicar es ``"REAPPLIED"`` (mapeo REAL que el usuario eligió en el confirm
+F8b+). Los outcomes ``"NO_RISK_FOUND"``, ``"FORCED_UNVERIFIED"`` y
+``"AMBIGUOUS"`` son SIEMPRE un mapeo re-derivado/guess sobre un archivo pre-F8:
+van al reporte de revisión manual, nunca a ``apply_reread``, sin importar qué
+flag se pase. Un archivo con ediciones humanas (``file_has_user_edits``) tampoco
+se auto-aplica nunca, aunque el outcome sea REAPPLIED.
+
+NUNCA imprime la connection URL. Correr desde ``backend/``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from _db import async_engine_config, insert_decision_audit  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
+
+from app.application.services import reread_service  # noqa: E402
+from app.domain.ingestion_version import INGESTION_VERSION  # noqa: E402
+from app.integrations.s3 import S3Client  # noqa: E402
+from app.persistence.models.audit import DecisionAuditLog  # noqa: E402
+from app.persistence.models.file import (  # noqa: E402
+    PROCESSING_STATUS_DONE,
+    REREAD_STATUS_NEEDS_REVIEW,
+    UploadedFile,
+)
+from app.persistence.models.tenant import Tenant  # noqa: E402
+
+TRIGGERED_BY = "scripts/reanalyze_ingestion.py"
+DECISION_TYPE_AUTO_APPLY = "INGESTION_REANALYSIS_AUTO_APPLY"
+
+# ── buckets de reporte ─────────────────────────────────────────────────────────
+
+BUCKET_NO_RISK_FOUND = "no_risk_found"
+BUCKET_FORCED_UNVERIFIED = "forced_unverified"
+BUCKET_AMBIGUOUS = "ambiguous"
+BUCKET_HAS_USER_EDITS = "has_user_edits"
+BUCKET_APPLIED = "applied"
+BUCKET_ELIGIBLE_NOT_APPLIED = "eligible_not_applied"
+
+# Los outcomes de riesgo re-derivado (archivo pre-F8, GUESS — nunca el mapeo
+# real) mapean 1:1 a un bucket homónimo. Solo "REAPPLIED" no está acá: requiere
+# el chequeo adicional de ``file_has_user_edits`` antes de decidir su bucket.
+_OUTCOME_TO_BUCKET: dict[str, str] = {
+    "NO_RISK_FOUND": BUCKET_NO_RISK_FOUND,
+    "FORCED_UNVERIFIED": BUCKET_FORCED_UNVERIFIED,
+    "AMBIGUOUS": BUCKET_AMBIGUOUS,
+}
+
+_EXCLUSION_REASONS: dict[str, str] = {
+    BUCKET_NO_RISK_FOUND: (
+        "sin decisiones F8b+ guardadas para reaplicar (un mapeo derivado sobre "
+        "datos ya importados no es el elegido por el usuario) — revisión manual"
+    ),
+    BUCKET_FORCED_UNVERIFIED: (
+        "outcome FORCED_UNVERIFIED: única acción legal pero sobre un mapeo "
+        "re-derivado (guess), no verificado — nunca auto-aplicable"
+    ),
+    BUCKET_AMBIGUOUS: (
+        "outcome AMBIGUOUS: 2+ acciones legales sobre un mapeo re-derivado — "
+        "requiere decisión humana explícita"
+    ),
+    BUCKET_HAS_USER_EDITS: (
+        "el archivo tiene registros (venta/gasto/producto) con "
+        "has_user_edits=True — la relectura podría pisar una corrección manual"
+    ),
+    BUCKET_ELIGIBLE_NOT_APPLIED: (
+        "outcome REAPPLIED sin ediciones humanas, pero no se pasó --apply"
+    ),
+}
+
+
+@dataclass
+class ScanEntry:
+    """Resultado de evaluar UN archivo candidato — unidad del reporte."""
+
+    file_id: uuid.UUID
+    tenant_id: uuid.UUID
+    filename: str
+    bucket: str
+    outcome: str
+    risk_rows: list[dict[str, Any]] = field(default_factory=list)
+    exclusion_reason: str | None = None
+    applied: bool = False
+    from_version: int = 1
+    to_version: int = INGESTION_VERSION
+
+
+# ── selección de candidatos ────────────────────────────────────────────────────
+
+
+async def select_active_tenant_ids(session: AsyncSession) -> list[uuid.UUID]:
+    rows = await session.execute(select(Tenant.tenant_id).where(Tenant.status == "ACTIVE"))
+    return [r[0] for r in rows.all()]
+
+
+async def select_candidate_files(
+    session: AsyncSession,
+    *,
+    tenant_ids: list[uuid.UUID],
+    from_version: int,
+    to_version: int,
+    limit: int | None = None,
+) -> list[UploadedFile]:
+    """Archivos candidatos a reanálisis: procesados, no borrados, con crudo en S3
+    y ``ingestion_version`` dentro de ``[from_version, to_version)``."""
+    stmt = (
+        select(UploadedFile)
+        .where(
+            UploadedFile.tenant_id.in_(tenant_ids),
+            UploadedFile.processing_status == PROCESSING_STATUS_DONE,
+            UploadedFile.deleted_at.is_(None),
+            UploadedFile.s3_key.is_not(None),
+            UploadedFile.ingestion_version >= from_version,
+            UploadedFile.ingestion_version < to_version,
+        )
+        .order_by(UploadedFile.created_at)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+# ── auditoría ──────────────────────────────────────────────────────────────────
+
+
+async def _insert_audit_entry(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    decision_type: str,
+    decision_data: dict[str, Any],
+    triggered_by: str,
+) -> str:
+    """INSERT en ``decision_audit_log``.
+
+    En Postgres (real) delega 1:1 en el helper canónico de ``_db.py``
+    (``gen_random_uuid()``/``now()`` server-side). SQLite no soporta esas
+    funciones — solo lo ejercita esta suite de tests contra el fixture
+    ``db_session`` — así que ahí se arma el mismo shape de columnas vía el ORM
+    con generación client-side (mismo comportamiento observable, sin tocar el
+    helper compartido por los demás scripts de este directorio).
+    """
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        return await insert_decision_audit(
+            session,
+            tenant_id=str(tenant_id),
+            decision_type=decision_type,
+            decision_data=decision_data,
+            triggered_by=triggered_by,
+        )
+    audit_id = uuid.uuid4()
+    session.add(
+        DecisionAuditLog(
+            id=audit_id,
+            tenant_id=tenant_id,
+            decision_type=decision_type,
+            decision_data=decision_data,
+            triggered_by=triggered_by,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    return str(audit_id)
+
+
+# ── evaluación por archivo ─────────────────────────────────────────────────────
+
+
+async def evaluate_file(
+    session: AsyncSession,
+    s3: S3Client,
+    file: UploadedFile,
+    *,
+    do_apply: bool,
+) -> ScanEntry:
+    """Pasos 1–3 del flujo: preview + clasificación + auto-apply condicional.
+
+    NO hace bookkeeping sobre ``file`` (eso es responsabilidad de
+    ``record_bookkeeping``, que el caller invoca solo si corresponde según los
+    flags) — así el modo dry-run puro puede llamar esto sin mutar nada.
+
+    Invariante de seguridad: SOLO ``outcome == "REAPPLIED"`` sin ediciones
+    humanas puede llegar a ``apply_reread`` — y solo si ``do_apply=True``.
+    """
+    previous_version = file.ingestion_version
+    preview = await reread_service.preview_reread(session, file.id, file.tenant_id, s3=s3)
+    outcome = preview.column_risk_outcome
+    risk_rows = [*preview.column_risk_forced_unverified, *preview.column_risk_ambiguous]
+
+    def _entry(bucket: str, *, applied: bool = False) -> ScanEntry:
+        return ScanEntry(
+            file_id=file.id,
+            tenant_id=file.tenant_id,
+            filename=file.original_filename,
+            bucket=bucket,
+            outcome=outcome,
+            risk_rows=risk_rows,
+            exclusion_reason=None if applied else _EXCLUSION_REASONS.get(bucket),
+            applied=applied,
+            from_version=previous_version,
+            to_version=INGESTION_VERSION,
+        )
+
+    if outcome != "REAPPLIED":
+        # Mapeo re-derivado (guess) sobre un archivo pre-F8 — NUNCA se aplica,
+        # ni siquiera con --apply. Ver invariante de seguridad en el docstring
+        # del módulo y en ``ResolvedRisk`` (reread_service.py).
+        return _entry(_OUTCOME_TO_BUCKET.get(outcome, BUCKET_NO_RISK_FOUND))
+
+    has_edits = await reread_service.file_has_user_edits(session, file.id, file.tenant_id)
+    if has_edits:
+        return _entry(BUCKET_HAS_USER_EDITS)
+
+    if not do_apply:
+        return _entry(BUCKET_ELIGIBLE_NOT_APPLIED)
+
+    # Único camino legal de auto-apply: REAPPLIED + sin ediciones humanas + --apply.
+    await reread_service.apply_reread(session, file.id, file.tenant_id, s3=s3, origin="batch_auto")
+    await session.commit()
+    await _insert_audit_entry(
+        session,
+        tenant_id=file.tenant_id,
+        decision_type=DECISION_TYPE_AUTO_APPLY,
+        decision_data={
+            "file_id": str(file.id),
+            "from_version": previous_version,
+            "to_version": INGESTION_VERSION,
+        },
+        triggered_by=TRIGGERED_BY,
+    )
+    await session.commit()
+    return _entry(BUCKET_APPLIED, applied=True)
+
+
+def record_bookkeeping(file: UploadedFile, entry: ScanEntry) -> None:
+    """Persiste ``latest_preview_version``/``reread_status``/``reread_summary``.
+
+    El caller decide si commitear (y si llamar esto: nunca en dry-run puro). Si
+    ``entry.applied`` es ``True``, ``apply_reread`` YA seteó
+    ``reread_status``/``reread_summary`` con más detalle (incluyendo
+    ``run_id``) — acá no se pisa, solo se completa ``latest_preview_version``
+    (que ``apply_reread`` no toca)."""
+    file.latest_preview_version = INGESTION_VERSION
+    if entry.applied:
+        return
+    file.reread_status = REREAD_STATUS_NEEDS_REVIEW
+    file.reread_summary = {
+        "outcome": entry.outcome,
+        "algorithm_version": INGESTION_VERSION,
+        "bucket": entry.bucket,
+        "has_user_edits": entry.bucket == BUCKET_HAS_USER_EDITS,
+        "risk_columns": entry.risk_rows,
+        "scanned_at": datetime.now(UTC).isoformat(),
+        "scanned_by": TRIGGERED_BY,
+    }
+
+
+async def run_scan(
+    session: AsyncSession,
+    s3: S3Client,
+    files: list[UploadedFile],
+    *,
+    do_apply: bool,
+    record_scan: bool,
+) -> list[ScanEntry]:
+    """Orquesta ``evaluate_file`` + bookkeeping condicional sobre una lista de
+    candidatos ya seleccionada (``select_candidate_files``). Reusado por
+    ``main()`` y por los tests — la idempotencia real de correr el comando dos
+    veces sale de que la SEGUNDA ``select_candidate_files`` ya no devuelve un
+    archivo bumpeado a ``INGESTION_VERSION`` (fuera del filtro
+    ``ingestion_version < to_version``), no de que ``evaluate_file`` sea
+    idempotente por sí solo — llamarlo dos veces sobre el MISMO archivo
+    seleccionado explícitamente SÍ reaplicaría de nuevo."""
+    entries: list[ScanEntry] = []
+    for file in files:
+        entry = await evaluate_file(session, s3, file, do_apply=do_apply)
+        if record_scan:
+            record_bookkeeping(file, entry)
+            await session.commit()
+        entries.append(entry)
+    return entries
+
+
+# ── reporte ────────────────────────────────────────────────────────────────────
+
+
+def _format_risk_row(row: dict[str, Any]) -> str:
+    return (
+        f"context_id={row.get('context_id')} source_column={row.get('source_column')!r} "
+        f"target_field={row.get('target_field')!r} "
+        f"action/allowed_actions={row.get('action') or row.get('allowed_actions')} "
+        f"null_ratio={row.get('null_ratio')} affected_rows={row.get('affected_rows')}"
+    )
+
+
+def print_report(entries: list[ScanEntry]) -> None:
+    for e in entries:
+        print(
+            f"  · {e.filename!r} tenant={e.tenant_id} file={e.file_id} "
+            f"[{e.bucket}] outcome={e.outcome} v{e.from_version}→{e.to_version}"
+        )
+        for row in e.risk_rows:
+            print(f"      columna riesgosa: {_format_risk_row(row)}")
+        if e.exclusion_reason:
+            print(f"      excluido de auto-apply: {e.exclusion_reason}")
+
+    totals: dict[str, int] = {}
+    for e in entries:
+        totals[e.bucket] = totals.get(e.bucket, 0) + 1
+    print("\nRESUMEN por bucket:")
+    for bucket, count in sorted(totals.items()):
+        print(f"  {bucket}: {count}")
+    print(f"  TOTAL: {len(entries)}")
+
+
+def build_report(entries: list[ScanEntry]) -> dict[str, Any]:
+    totals: dict[str, int] = {}
+    files: list[dict[str, Any]] = []
+    for e in entries:
+        totals[e.bucket] = totals.get(e.bucket, 0) + 1
+        files.append(
+            {
+                "file_id": str(e.file_id),
+                "tenant_id": str(e.tenant_id),
+                "filename": e.filename,
+                "bucket": e.bucket,
+                "outcome": e.outcome,
+                "applied": e.applied,
+                "exclusion_reason": e.exclusion_reason,
+                "from_version": e.from_version,
+                "to_version": e.to_version,
+                "risk_columns": e.risk_rows,
+            }
+        )
+    return {"files": files, "totals": totals, "total_files": len(entries)}
+
+
+# ── entrypoint ─────────────────────────────────────────────────────────────────
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tenant", help="UUID de tenant puntual (piloto)")
+    parser.add_argument("--all-active", action="store_true", help="Todos los tenants activos")
+    parser.add_argument(
+        "--from-version", type=int, default=1, help="ingestion_version mínima (inclusive)"
+    )
+    parser.add_argument(
+        "--to-version",
+        type=int,
+        default=INGESTION_VERSION,
+        help="ingestion_version tope (exclusive); default INGESTION_VERSION actual",
+    )
+    parser.add_argument("--limit", type=int, default=None, help="Tope de archivos (pilotos)")
+    parser.add_argument(
+        "--record-scan",
+        action="store_true",
+        help="Persiste bookkeeping (latest_preview_version/reread_summary/reread_status)",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Además de --record-scan, auto-aplica donde el outcome sea REAPPLIED",
+    )
+    parser.add_argument("--json", action="store_true", help="Imprime además un resumen JSON")
+    args = parser.parse_args()
+
+    if not args.tenant and not args.all_active:
+        print("ERROR: indicá --tenant <uuid> (piloto) o --all-active.")
+        sys.exit(2)
+
+    url, connect_args = async_engine_config()
+    engine = create_async_engine(url, connect_args=connect_args)
+    s3 = S3Client()
+    record_scan = args.record_scan or args.apply
+
+    async with AsyncSession(engine) as session:
+        tenant_ids = (
+            [uuid.UUID(args.tenant)] if args.tenant else await select_active_tenant_ids(session)
+        )
+        files = await select_candidate_files(
+            session,
+            tenant_ids=tenant_ids,
+            from_version=args.from_version,
+            to_version=args.to_version,
+            limit=args.limit,
+        )
+
+        mode = "APPLY" if args.apply else ("RECORD-SCAN" if args.record_scan else "DRY-RUN")
+        print(
+            f"[{mode}] reanálisis de ingestión: {len(files)} archivo(s) candidato(s) "
+            f"(from_version={args.from_version}, to_version={args.to_version})"
+        )
+
+        entries = await run_scan(
+            session, s3, files, do_apply=args.apply, record_scan=record_scan
+        )
+
+        print()
+        print_report(entries)
+
+        if args.json:
+            print("\n" + json.dumps(build_report(entries), ensure_ascii=False, default=str))
+
+        if not record_scan:
+            await session.rollback()
+            print("\nDry-run: nada se escribió (ni bookkeeping).")
+
+    await engine.dispose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

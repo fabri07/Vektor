@@ -1,0 +1,496 @@
+"""Tests de ``scripts/reanalyze_ingestion.py`` (Task 4 — comando de reanálisis).
+
+``scripts/`` no es un paquete: el módulo se carga por ruta de archivo, mismo
+patrón que ``test_reconcile_untagged_adjustments.py``/
+``test_detect_misvoided_purchases.py``. A diferencia de esos precedentes (que
+solo testean funciones puras sin DB), acá SÍ ejercitamos el flujo completo
+contra el fixture ``db_session`` (SQLite in-memory) — reusa el mismo patrón de
+fixtures que ``app/tests/services/test_reread_file.py`` (``_patch_s3``,
+``_make_file``, ``_first_confirm_with_risk`` con una decisión de riesgo F8b+
+persistida) para poner un archivo en cada outcome de ``column_risk_outcome``.
+
+Cubre (ver brief Task 4):
+  - Dry-run puro: no llama ``apply_reread``, no persiste bookkeeping, cero
+    escrituras — ni siquiera bookkeeping (confirmado con ``session.expire`` +
+    re-lectura desde la DB dentro de la misma transacción).
+  - ``--record-scan``: persiste bookkeeping, ninguna tabla de negocio cambia.
+  - ``--apply`` con outcome REAPPLIED sin ediciones: sí aplica (``DataRepairRun``
+    creado, ``decision_audit_log`` recibe la entrada), ``ingestion_version``
+    queda en ``INGESTION_VERSION``.
+  - ``--apply`` con outcome FORCED_UNVERIFIED: NUNCA se aplica, aunque se pase
+    --apply — la garantía explícita contra la corrección del plan original.
+  - ``--apply`` con ``has_user_edits=True``: nunca se aplica.
+  - Idempotencia: correr dos veces no duplica auditoría ni ``DataRepairRun``.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import uuid
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.application.services.column_risk import apply_column_risk_decisions
+from app.application.services.file_parsing import parse_uploaded_content
+from app.application.services.ingestion_import_service import (
+    _capture_column_risk_rows,
+    default_confirmed_fields,
+    insert_confirmed_data,
+)
+from app.domain.ingestion_version import INGESTION_VERSION
+from app.integrations.s3 import S3Client
+from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
+from app.persistence.models.repair import DataRepairRun
+from app.persistence.models.tenant import Tenant
+from app.persistence.models.transaction import ExpenseEntry
+from app.schemas.ingestion import ColumnRiskDecision
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
+
+
+def _load_module() -> ModuleType:
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    spec = importlib.util.spec_from_file_location(
+        "reanalyze_ingestion", _SCRIPTS_DIR / "reanalyze_ingestion.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Registrar en sys.modules ANTES de ejecutar: el módulo usa `@dataclass` con
+    # `from __future__ import annotations` (anotaciones diferidas a string) —
+    # dataclasses.fields() necesita resolverlas vía `sys.modules[cls.__module__]`,
+    # que solo existe si el módulo está registrado antes de exec_module.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def mod() -> ModuleType:
+    return _load_module()
+
+
+# ── fixtures (mismo patrón que app/tests/services/test_reread_file.py) ────────
+
+
+@pytest_asyncio.fixture
+async def tenant(db_session: AsyncSession) -> Tenant:
+    t = Tenant(
+        tenant_id=uuid.uuid4(),
+        legal_name="Kiosco Reanalisis",
+        display_name="Kiosco Reanalisis",
+        currency="ARS",
+        pricing_reference_mode="MEP",
+        status="ACTIVE",
+    )
+    db_session.add(t)
+    await db_session.commit()
+    return t
+
+
+def _patch_s3(monkeypatch: pytest.MonkeyPatch, content: bytes) -> None:
+    async def _fake_download(self: S3Client, key: str) -> bytes:  # noqa: ARG001
+        return content
+
+    monkeypatch.setattr(S3Client, "download", _fake_download)
+
+
+async def _make_file(session: AsyncSession, tenant_row: Tenant, content: bytes) -> UploadedFile:
+    summary = parse_uploaded_content(content, "text/csv", "gastos.csv")
+    f = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant_row.tenant_id,
+        uploaded_by=None,
+        original_filename="gastos.csv",
+        s3_key=f"tenants/{tenant_row.tenant_id}/gastos.csv",
+        content_type="text/csv",
+        size_bytes=len(content),
+        purpose="gastos",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={
+            "inferred_type": summary.get("inferred_type"),
+            "confirmed_fields": default_confirmed_fields(summary),
+        },
+    )
+    session.add(f)
+    await session.commit()
+    return f
+
+
+# CSV donde la 2ª fila tiene "monto" vacío → ruteada a "Otros" por la decisión de
+# riesgo persistida (simula el confirm F8b+). FIXED la corrige.
+_CSV_RISK_BAD = (
+    b"fecha,producto,monto,proveedor\n"
+    b"2026-01-05,Coca Cola,1500,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,,Panaderia Norte\n"
+)
+_CSV_RISK_FIXED = (
+    b"fecha,producto,monto,proveedor\n"
+    b"2026-01-05,Coca Cola,1500,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,800,Panaderia Norte\n"
+)
+_RISK_DECISION = {
+    "context_id": "table",
+    "source_column": "monto",
+    "target_field": "amount",
+    "action": "route_affected_rows_to_others",
+}
+
+# Archivo pre-F8 (sin column_risk_decisions guardadas): "monto" 100% nulo, sin
+# columna de reemplazo → única acción legal (route_affected_rows_to_others)
+# pero sobre un mapeo re-derivado (guess) → outcome FORCED_UNVERIFIED.
+_CSV_FORCED_UNVERIFIED = (
+    b"fecha,producto,monto,proveedor\n"
+    b"2026-01-05,Coca Cola,,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,,Panaderia Norte\n"
+)
+
+
+async def _first_confirm_with_risk(
+    session: AsyncSession, tenant_row: Tenant, content: bytes
+) -> UploadedFile:
+    """Simula el confirm original (F8b+): persiste la decisión de riesgo en el
+    summary, importa solo las filas válidas y captura la afectada en "Otros"."""
+    summary = parse_uploaded_content(content, "text/csv", "gastos.csv")
+    confirmed = default_confirmed_fields(summary)
+    file = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant_row.tenant_id,
+        uploaded_by=None,
+        original_filename="gastos.csv",
+        s3_key=f"tenants/{tenant_row.tenant_id}/gastos.csv",
+        content_type="text/csv",
+        size_bytes=len(content),
+        purpose="gastos",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={
+            "inferred_type": summary.get("inferred_type"),
+            "confirmed_fields": confirmed,
+            "column_risk_decisions": [_RISK_DECISION],
+        },
+    )
+    session.add(file)
+    await session.commit()
+
+    applied = apply_column_risk_decisions(summary, [ColumnRiskDecision(**_RISK_DECISION)], {})
+    await insert_confirmed_data(
+        session,
+        tenant_row.tenant_id,
+        applied.summary,
+        confirmed,
+        source="ingestion",
+        uploaded_file_id=file.id,
+    )
+    for cid, rows_by_idx in applied.routed_rows.items():
+        if rows_by_idx:
+            await _capture_column_risk_rows(
+                session,
+                tenant_row.tenant_id,
+                file.id,
+                cid,
+                applied.routed_entity.get(cid) or "otros",
+                rows_by_idx,
+                source="ingestion",
+            )
+    await session.commit()
+    return file
+
+
+async def _active_expenses(session: AsyncSession, file: UploadedFile) -> list[ExpenseEntry]:
+    res = await session.execute(
+        select(ExpenseEntry).where(
+            ExpenseEntry.source_upload_id == file.id,
+            ExpenseEntry.voided_at.is_(None),
+        )
+    )
+    return list(res.scalars().all())
+
+
+async def _audit_count(session: AsyncSession, decision_type: str) -> int:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(DecisionAuditLog)
+        .where(DecisionAuditLog.decision_type == decision_type)
+    )
+    return int(count or 0)
+
+
+async def _repair_run_count(session: AsyncSession) -> int:
+    count = await session.scalar(select(func.count()).select_from(DataRepairRun))
+    return int(count or 0)
+
+
+# ── selección de candidatos ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_select_candidate_files_filters_by_version_window(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    file = await _make_file(db_session, tenant, _CSV_RISK_FIXED)
+    # Fuera de rango: ya está en la versión objetivo.
+    file.ingestion_version = INGESTION_VERSION
+    await db_session.commit()
+
+    files = await mod.select_candidate_files(
+        db_session, tenant_ids=[tenant.tenant_id], from_version=1, to_version=INGESTION_VERSION
+    )
+    assert file.id not in {f.id for f in files}
+
+    file.ingestion_version = 1
+    await db_session.commit()
+    files = await mod.select_candidate_files(
+        db_session, tenant_ids=[tenant.tenant_id], from_version=1, to_version=INGESTION_VERSION
+    )
+    assert file.id in {f.id for f in files}
+
+
+# ── dry-run puro: cero escrituras ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dry_run_writes_nothing(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sin --record-scan ni --apply: ni bookkeeping ni negocio se tocan."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+
+    # Snapshot antes.
+    before_version = file.ingestion_version
+    before_latest_preview = file.latest_preview_version
+    before_status = file.reread_status
+    before_summary = file.reread_summary
+    before_updated_at = file.updated_at
+    before_expenses = len(await _active_expenses(db_session, file))
+    before_audit = await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY)
+    before_runs = await _repair_run_count(db_session)
+
+    # Fila corregida en S3 → outcome sería REAPPLIED, elegible de no ser dry-run.
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    s3 = S3Client()
+    entry = await mod.evaluate_file(db_session, s3, file, do_apply=False)
+
+    assert entry.bucket == mod.BUCKET_ELIGIBLE_NOT_APPLIED
+    assert entry.applied is False
+
+    # Re-lee desde la DB dentro de la MISMA transacción (refresh fuerza el
+    # roundtrip): si algo se hubiera flusheado, esto lo revelaría.
+    await db_session.refresh(file)
+    assert file.ingestion_version == before_version
+    assert file.latest_preview_version == before_latest_preview
+    assert file.reread_status == before_status
+    assert file.reread_summary == before_summary
+    # SQLite no persiste tzinfo (el refresh vuelve naive) — comparar el valor
+    # naive de ambos lados es lo que importa acá, no la representación.
+    after_updated_at = file.updated_at
+    assert after_updated_at.replace(tzinfo=None) == before_updated_at.replace(tzinfo=None)
+    assert len(await _active_expenses(db_session, file)) == before_expenses
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == before_audit
+    assert await _repair_run_count(db_session) == before_runs
+
+
+# ── --record-scan: bookkeeping sí, negocio no ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_record_scan_persists_bookkeeping_only(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+    file = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    before_version = file.ingestion_version
+    before_expenses = len(await _active_expenses(db_session, file))
+    before_runs = await _repair_run_count(db_session)
+
+    s3 = S3Client()
+    entry = await mod.evaluate_file(db_session, s3, file, do_apply=False)
+    assert entry.bucket == mod.BUCKET_FORCED_UNVERIFIED
+
+    mod.record_bookkeeping(file, entry)
+    await db_session.commit()
+
+    assert file.latest_preview_version == INGESTION_VERSION
+    assert file.reread_status == mod.REREAD_STATUS_NEEDS_REVIEW
+    assert file.reread_summary is not None
+    assert file.reread_summary["outcome"] == "FORCED_UNVERIFIED"
+    assert file.reread_summary["bucket"] == mod.BUCKET_FORCED_UNVERIFIED
+    assert file.reread_summary["has_user_edits"] is False
+
+    # Nada de negocio cambió.
+    assert file.ingestion_version == before_version
+    assert len(await _active_expenses(db_session, file)) == before_expenses
+    assert await _repair_run_count(db_session) == before_runs
+
+
+# ── --apply: solo REAPPLIED sin ediciones humanas ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_apply_reapplied_without_edits_applies_and_audits(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+    assert len(await _active_expenses(db_session, file)) == 1  # 1 válida, 1 en Otros
+
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    s3 = S3Client()
+    entry = await mod.evaluate_file(db_session, s3, file, do_apply=True)
+
+    assert entry.bucket == mod.BUCKET_APPLIED
+    assert entry.applied is True
+    assert entry.outcome == "REAPPLIED"
+
+    mod.record_bookkeeping(file, entry)
+    await db_session.commit()
+
+    assert file.ingestion_version == INGESTION_VERSION
+    assert len(await _active_expenses(db_session, file)) == 2  # la corregida entró
+    assert await _repair_run_count(db_session) == 1
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 1
+
+    audit_row = (
+        await db_session.execute(
+            select(DecisionAuditLog).where(
+                DecisionAuditLog.decision_type == mod.DECISION_TYPE_AUTO_APPLY
+            )
+        )
+    ).scalar_one()
+    assert audit_row.decision_data["file_id"] == str(file.id)
+    assert audit_row.decision_data["from_version"] == 1
+    assert audit_row.decision_data["to_version"] == INGESTION_VERSION
+    assert audit_row.triggered_by == mod.TRIGGERED_BY
+
+
+@pytest.mark.asyncio
+async def test_apply_forced_unverified_never_auto_applies(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Garantía explícita: FORCED_UNVERIFIED (acción única, pero mapeo re-derivado
+    no verificado) NUNCA se aplica, aunque se pase --apply."""
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+    file = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    before_expenses = len(await _active_expenses(db_session, file))
+    before_runs = await _repair_run_count(db_session)
+    before_audit = await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY)
+
+    s3 = S3Client()
+    entry = await mod.evaluate_file(db_session, s3, file, do_apply=True)
+
+    assert entry.bucket == mod.BUCKET_FORCED_UNVERIFIED
+    assert entry.outcome == "FORCED_UNVERIFIED"
+    assert entry.applied is False
+
+    assert file.ingestion_version == 1  # sin cambios — NUNCA se bumpea
+    assert len(await _active_expenses(db_session, file)) == before_expenses
+    assert await _repair_run_count(db_session) == before_runs
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == before_audit
+
+    mod.record_bookkeeping(file, entry)
+    await db_session.commit()
+    assert file.reread_status == mod.REREAD_STATUS_NEEDS_REVIEW
+    assert file.reread_summary["outcome"] == "FORCED_UNVERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_apply_ambiguous_never_auto_applies(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mismo espíritu que FORCED_UNVERIFIED: AMBIGUOUS tampoco se aplica jamás."""
+    csv_ambiguous = (
+        b"fecha,producto,monto,importe,proveedor\n"
+        b"2026-01-05,Coca Cola,1500,1500,Distribuidora Sur\n"
+        b"2026-01-06,Pan Lactal,800,,Panaderia Norte\n"
+    )
+    _patch_s3(monkeypatch, csv_ambiguous)
+    file = await _make_file(db_session, tenant, csv_ambiguous)
+
+    s3 = S3Client()
+    entry = await mod.evaluate_file(db_session, s3, file, do_apply=True)
+
+    assert entry.bucket == mod.BUCKET_AMBIGUOUS
+    assert entry.outcome == "AMBIGUOUS"
+    assert entry.applied is False
+    assert file.ingestion_version == 1
+    assert await _repair_run_count(db_session) == 0
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_with_user_edits_never_auto_applies(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REAPPLIED pero con has_user_edits=True: nunca se aplica."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+    active = await _active_expenses(db_session, file)
+    assert len(active) == 1
+    active[0].has_user_edits = True
+    await db_session.commit()
+
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    s3 = S3Client()
+    entry = await mod.evaluate_file(db_session, s3, file, do_apply=True)
+
+    assert entry.bucket == mod.BUCKET_HAS_USER_EDITS
+    assert entry.outcome == "REAPPLIED"
+    assert entry.applied is False
+    assert file.ingestion_version == 1
+    assert await _repair_run_count(db_session) == 0
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 0
+
+
+# ── idempotencia ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_running_twice_does_not_duplicate_audit_or_runs(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Correr el comando dos veces seguidas (selección + scan completo, como
+    hace ``main()``) sobre el mismo set de archivos: la segunda corrida no debe
+    generar nuevas filas en ``decision_audit_log`` ni ``DataRepairRun`` para el
+    archivo ya resuelto en la primera — porque ya no lo selecciona (Task 4, ver
+    docstring de ``run_scan``), NO porque ``evaluate_file`` sea idempotente por
+    sí solo."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    s3 = S3Client()
+
+    # Primera corrida completa (selección + scan + apply).
+    files_run1 = await mod.select_candidate_files(
+        db_session, tenant_ids=[tenant.tenant_id], from_version=1, to_version=INGESTION_VERSION
+    )
+    assert file.id in {f.id for f in files_run1}
+    entries1 = await mod.run_scan(db_session, s3, files_run1, do_apply=True, record_scan=True)
+    assert len(entries1) == 1
+    assert entries1[0].applied is True
+
+    await db_session.refresh(file)
+    assert file.ingestion_version == INGESTION_VERSION
+    assert await _repair_run_count(db_session) == 1
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 1
+
+    # Segunda corrida completa: el archivo ya no entra en el filtro de
+    # selección (ingestion_version == to_version, fuera de `< to_version`) —
+    # `run_scan` sobre una lista vacía es un no-op.
+    files_run2 = await mod.select_candidate_files(
+        db_session, tenant_ids=[tenant.tenant_id], from_version=1, to_version=INGESTION_VERSION
+    )
+    assert file.id not in {f.id for f in files_run2}
+    entries2 = await mod.run_scan(db_session, s3, files_run2, do_apply=True, record_scan=True)
+    assert entries2 == []
+
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 1
+    assert await _repair_run_count(db_session) == 1
