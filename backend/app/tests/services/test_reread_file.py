@@ -1015,6 +1015,51 @@ async def test_reread_no_risk_found_does_not_bump_without_confirmation(
     assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
 
 
+@pytest.mark.asyncio
+async def test_resolve_risk_decisions_degrades_on_derive_context_mapping_failure(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo post-review: ``_resolve_risk_decisions`` llama a
+    ``derive_context_mapping_entries`` SIN try/except, a diferencia del mismo
+    llamado en ``get_file_preview`` (api/v1/ingestion.py), que lo envuelve en
+    un try/except best-effort porque la derivación puede fallar de forma
+    transitoria (ej. DB en ``ColumnMappingService.suggest_mappings``). Sin
+    protección acá, ese mismo fallo transitorio rompía el reread preview/apply
+    con un 500 genérico en vez de degradar con gracia como su hermano.
+
+    Simula el fallo monkeypatcheando ``derive_context_mapping_entries`` (tal
+    como el módulo lo importó) para que lance, y confirma que tanto
+    ``_resolve_risk_decisions`` como ``preview_reread``/``apply_reread``
+    devuelven ``NO_RISK_FOUND`` en vez de propagar la excepción."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+    original_version = file.ingestion_version
+
+    async def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("fallo transitorio simulado de DB")
+
+    monkeypatch.setattr(reread_service, "derive_context_mapping_entries", _boom)
+
+    summary = parse_uploaded_content(_CSV_BASE, "text/csv", "gastos.csv")
+    confirmed_fields = reread_service._confirmed_fields_for(file, summary)
+    resolved = await reread_service._resolve_risk_decisions(
+        db_session, tenant.tenant_id, file, summary, confirmed_fields
+    )
+    assert resolved.outcome == "NO_RISK_FOUND"
+    assert resolved.applied is None
+
+    preview = await reread_service.preview_reread(db_session, file.id, tenant.tenant_id)
+    assert preview.column_risk_outcome == "NO_RISK_FOUND"
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.column_risk_outcome == "NO_RISK_FOUND"
+    assert file.ingestion_version == original_version
+    assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
+
+
 # ── F9a (Task 3): ``file_has_user_edits`` ───────────────────────────────────────
 
 

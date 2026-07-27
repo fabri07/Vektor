@@ -309,10 +309,29 @@ def record_bookkeeping(file: UploadedFile, entry: ScanEntry) -> None:
     fix round post-review (hallazgo Important #3): antes este módulo escribía
     un shape propio (``bucket``/``risk_columns`` plano) incompatible con el que
     escribe ``apply_reread`` (``ambiguous_columns``/``forced_unverified_columns``
-    sueltos); ahora ambos convergen al mismo shape único."""
-    file.latest_preview_version = INGESTION_VERSION
+    sueltos); ahora ambos convergen al mismo shape único.
+
+    Excepción a estampar ``latest_preview_version`` (hallazgo post-review,
+    fix round posterior): ``BUCKET_ELIGIBLE_NOT_APPLIED`` (outcome REAPPLIED,
+    elegible para auto-apply, pero esta corrida NO pasó ``--apply``) es el
+    ÚNICO bucket que NO se estampa — el archivo sigue pendiente de una
+    decisión real de aplicar o no, no "resuelto" en el sentido de que
+    ``--skip-scanned`` deba saltearlo. Estamparlo acá rompía exactamente el
+    workflow de 2 pasos que el propio comando pretende soportar:
+    ``--record-scan`` primero (bookkeeping sin aplicar) y ``--apply
+    --skip-scanned`` después (aplicar lo pendiente, saltando lo ya
+    resuelto) — con el bug, la segunda corrida excluía el archivo porque
+    ``latest_preview_version >= to_version`` aunque todavía necesitara que se
+    lo aplicara. El resto de los buckets terminales/informativos
+    (``no_risk_found``, ``forced_unverified``, ``ambiguous``,
+    ``has_user_edits``, y el ``applied`` de más arriba) SÍ se estampan: no
+    van a cambiar de resultado al re-escanearse con la misma versión de
+    código, así que es seguro saltearlos en corridas futuras."""
     if entry.applied:
+        file.latest_preview_version = INGESTION_VERSION
         return
+    if entry.bucket != BUCKET_ELIGIBLE_NOT_APPLIED:
+        file.latest_preview_version = INGESTION_VERSION
     file.reread_status = REREAD_STATUS_NEEDS_REVIEW
     file.reread_summary = reread_service.build_reread_summary(
         entry.outcome,

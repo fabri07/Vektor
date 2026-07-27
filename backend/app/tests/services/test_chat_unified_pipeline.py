@@ -17,6 +17,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
 )
 from app.application.services.pending_action_service import execute_pending_action
+from app.domain.ingestion_version import INGESTION_VERSION
 from app.persistence.models.chat_session_log import ChatSessionLog
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.pending_action import PendingAction
@@ -92,6 +93,55 @@ async def test_import_tabular_file_inserta_en_sale_entry(
     log = (await db_session.execute(select(ChatSessionLog))).scalar_one()
     assert log.entry_type == "DATA_LOADED"
     assert log.uploaded_file_id == uploaded.id
+
+
+@pytest.mark.asyncio
+async def test_import_tabular_file_stampea_ingestion_version(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_user: User,
+    redis_mock: AsyncMock,
+) -> None:
+    """Hallazgo post-review: el confirm vía CHAT (execute_pending_action,
+    IMPORT_TABULAR_FILE) es un path de escritura directa separado del confirm
+    HTTP normal — NO pasa por ``finalize_import_lease()`` (la función que
+    stampea ``ingestion_version``). Sin stampear acá, todo archivo confirmado
+    por chat quedaba en el default (1) para siempre y
+    ``scripts/reanalyze_ingestion.py`` lo re-seleccionaría como candidato
+    "pre-F8" en cada corrida, re-descargando de S3 innecesariamente."""
+    uploaded = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=sample_user.user_id,
+        original_filename="ventas.csv",
+        s3_key="uploads/test/ventas.csv",
+        content_type="text/csv",
+        size_bytes=100,
+        purpose="chat",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json=_sales_summary(),
+    )
+    db_session.add(uploaded)
+    await db_session.flush()
+    assert uploaded.ingestion_version == 1  # default pre-confirm
+
+    action = PendingAction(
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_user.user_id,
+        action_type=ActionType.IMPORT_TABULAR_FILE,
+        payload={
+            "file_id": str(uploaded.id),
+            "conversation_id": "conv-import-version",
+            "confirmed_fields": {"ventas": True},
+        },
+        risk_level="MEDIUM",
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await execute_pending_action(action, db_session, redis=redis_mock)
+
+    assert uploaded.ingestion_version == INGESTION_VERSION
 
 
 @pytest.mark.asyncio

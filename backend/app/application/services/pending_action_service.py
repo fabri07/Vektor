@@ -33,6 +33,7 @@ from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.domain.ingestion_version import INGESTION_VERSION
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
@@ -748,6 +749,15 @@ async def execute_pending_action(
             # queda FAILED y el archivo NO se marca DONE).
             check_nonempty_import(counts, summary, confirmed_fields)
             uploaded_file.processing_status = PROCESSING_STATUS_DONE
+            # F9a (hallazgo post-review): este es el confirm vía CHAT — un path
+            # de escritura directa separado del confirm HTTP normal, que NO pasa
+            # por `finalize_import_lease()` (la función que stampea
+            # `ingestion_version`). Sin esto, todo archivo confirmado por este
+            # camino quedaba en el `ingestion_version` default (1) para siempre,
+            # aunque se haya procesado con la lógica F8+ actual — el batch de
+            # `scripts/reanalyze_ingestion.py` lo re-seleccionaría como candidato
+            # "pre-F8" en cada corrida, re-descargando de S3 innecesariamente.
+            uploaded_file.ingestion_version = INGESTION_VERSION
             # Compactar antes de escribir de vuelta: los buckets de filas pueden
             # pesar varios MB de JSONB (mismo criterio que el confirm de la API).
             uploaded_file.parsed_summary_json = {

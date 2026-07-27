@@ -1282,7 +1282,19 @@ async def _resolve_risk_decisions(
     if applied is not None:
         return ResolvedRisk(outcome="REAPPLIED", applied=applied)
 
-    entries, entities = await derive_context_mapping_entries(session, tenant_id, fresh)
+    # F9a (hallazgo post-review): ``derive_context_mapping_entries`` es una
+    # derivación best-effort (mismo criterio que su hermano en
+    # ``get_file_preview``, api/v1/ingestion.py, que envuelve la MISMA llamada
+    # en un try/except) — un fallo transitorio (ej. DB en
+    # ``ColumnMappingService.suggest_mappings``) NO debe romper el reread
+    # preview/apply con un 500 genérico. Degradamos al outcome más
+    # conservador: ``NO_RISK_FOUND`` ya significa "no se pudo/no hizo falta
+    # derivar nada" — no auto-aplica ni confía sin revisión humana.
+    try:
+        entries, entities = await derive_context_mapping_entries(session, tenant_id, fresh)
+    except Exception:  # noqa: BLE001 — degradación best-effort, ver comentario arriba.
+        logger.warning("reread.resolve_risk.derive_context_mapping_failed", file_id=str(file.id))
+        return ResolvedRisk(outcome="NO_RISK_FOUND")
     if not entries:
         return ResolvedRisk(outcome="NO_RISK_FOUND")
 

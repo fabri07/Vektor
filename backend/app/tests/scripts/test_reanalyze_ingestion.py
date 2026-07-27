@@ -448,6 +448,57 @@ async def test_record_scan_persists_bookkeeping_only(
     assert await _repair_run_count(db_session) == before_runs
 
 
+@pytest.mark.asyncio
+async def test_record_scan_eligible_not_applied_does_not_stamp_latest_preview(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo post-review: ``record_bookkeeping`` NO debe estampar
+    ``latest_preview_version`` para el bucket ``BUCKET_ELIGIBLE_NOT_APPLIED``
+    (outcome REAPPLIED, elegible, pero esta corrida no pasó ``--apply``) — el
+    archivo sigue pendiente de una decisión real de aplicar. Si se estampara,
+    una corrida POSTERIOR con ``--apply --skip-scanned`` lo excluiría de los
+    candidatos (``latest_preview_version >= to_version``) aunque todavía
+    necesite que se lo aplique, rompiendo el workflow de 2 pasos
+    (``--record-scan`` primero, ``--apply`` después)."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+    before_latest_preview = file.latest_preview_version
+    assert before_latest_preview is None  # nunca escaneado todavía
+
+    # Fila corregida en S3 → outcome REAPPLIED, elegible de aplicarse, pero
+    # esta corrida es solo --record-scan (do_apply=False).
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    s3 = S3Client()
+    entry = await mod.evaluate_file(db_session, s3, file, do_apply=False)
+    assert entry.bucket == mod.BUCKET_ELIGIBLE_NOT_APPLIED
+    assert entry.applied is False
+
+    mod.record_bookkeeping(file, entry)
+    await db_session.commit()
+
+    # latest_preview_version NO se tocó (sigue en su valor previo) — a
+    # diferencia de los demás buckets (ver test_record_scan_persists_
+    # bookkeeping_only, que SÍ lo estampa para FORCED_UNVERIFIED).
+    assert file.latest_preview_version == before_latest_preview
+    # El resto del bookkeeping informativo sí se persiste normalmente.
+    assert file.reread_status == mod.REREAD_STATUS_NEEDS_REVIEW
+    assert file.reread_summary is not None
+    assert file.reread_summary["outcome"] == "REAPPLIED"
+    assert file.reread_summary["bucket"] == mod.BUCKET_ELIGIBLE_NOT_APPLIED
+
+    # El archivo SIGUE apareciendo como candidato en una corrida posterior con
+    # --skip-scanned — no quedó excluido por un latest_preview_version que no
+    # refleja una decisión real de aplicar.
+    candidates = await mod.select_candidate_files(
+        db_session,
+        tenant_ids=[tenant.tenant_id],
+        from_version=1,
+        to_version=INGESTION_VERSION,
+        skip_scanned=True,
+    )
+    assert file.id in {f.id for f in candidates}
+
+
 # ── --apply: solo REAPPLIED sin ediciones humanas ──────────────────────────────
 
 
