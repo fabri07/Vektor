@@ -13,6 +13,7 @@ de fixture. Cubren:
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -872,6 +873,26 @@ async def test_reread_forced_unverified_does_not_auto_apply(
     _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
     file = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
     original_version = file.ingestion_version
+
+    # Verificación LITERAL del contrato del brief ("el summary resultante es
+    # idéntico al de entrada, nada se dropea/rutea"): no basta con inferirlo por
+    # ausencia de efectos colaterales (0 capturas en "Otros", versión sin
+    # cambios) — eso es necesario pero no prueba la igualdad del summary en sí.
+    # Se re-parsea el mismo contenido de forma independiente (misma llamada que
+    # usa el servicio internamente vía ``_fresh_summary``), se toma una copia
+    # profunda ANTES de pasarlo por ``_resolve_risk_decisions`` y se compara con
+    # el diccionario después de la llamada: para FORCED_UNVERIFIED,
+    # ``resolved.applied`` debe ser ``None`` y el dict de entrada no debe haber
+    # sido mutado (ninguna columna dropeada, ninguna fila ruteada).
+    input_summary = parse_uploaded_content(_CSV_FORCED_UNVERIFIED, "text/csv", "gastos.csv")
+    summary_before = deepcopy(input_summary)
+    confirmed_fields_direct = reread_service._confirmed_fields_for(file, input_summary)
+    resolved_direct = await reread_service._resolve_risk_decisions(
+        db_session, tenant.tenant_id, file, input_summary, confirmed_fields_direct
+    )
+    assert resolved_direct.outcome == "FORCED_UNVERIFIED"
+    assert resolved_direct.applied is None
+    assert input_summary == summary_before
 
     preview = await reread_service.preview_reread(db_session, file.id, tenant.tenant_id)
     assert preview.column_risk_outcome == "FORCED_UNVERIFIED"
