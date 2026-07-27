@@ -82,3 +82,33 @@ async def test_listener_handles_none_barcode(
     await db_session.flush()
 
     assert product.barcode_normalized is None
+
+
+def test_name_normalized_column_is_not_null() -> None:
+    """F8d (``20260804_0001``): ``name_normalized`` es NOT NULL en el ORM.
+
+    SKU/barcode/brand siguen nullable a propósito (recorte fijado de F8d) — solo
+    ``name_normalized`` se endurece, porque el listener SIEMPRE lo llena
+    (``normalize_product_name`` nunca devuelve ``None``, en el peor caso ``""``).
+    """
+    assert Product.__table__.c.name_normalized.nullable is False
+    assert Product.__table__.c.sku_normalized.nullable is True
+    assert Product.__table__.c.barcode_normalized.nullable is True
+    assert Product.__table__.c.brand_normalized.nullable is True
+
+
+async def test_listener_fills_name_normalized_never_null(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Insertar un producto con nombre normal nunca deja ``name_normalized`` en
+    NULL — cubre el caso feliz que hace seguro el ``NOT NULL`` de F8d."""
+    product = Product(
+        tenant_id=sample_tenant.tenant_id,
+        name="Café Molido",
+        sale_price_ars=Decimal("100"),
+    )
+    db_session.add(product)
+    await db_session.flush()
+
+    assert product.name_normalized is not None
+    assert product.name_normalized == "cafe molido"

@@ -51,7 +51,7 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     barcode_normalized: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sku_normalized: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    name_normalized: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    name_normalized: Mapped[str] = mapped_column(String(400), nullable=False)
     brand_normalized: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Vencimiento informativo (se USA recién en F6; acá solo la columna).
     expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)

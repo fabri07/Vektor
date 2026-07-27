@@ -38,6 +38,16 @@ class TestProductsCRUD:
         assert data["acquired_at"] is None
         assert data["created_at"] is not None
 
+    async def test_create_product_rechaza_nombre_solo_espacios(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Un ``name`` de solo espacios no puede pasar (F8d): sin strip previo,
+        Pydantic ``min_length=1`` lo aceptaría y el listener de identidad lo
+        normalizaría a ``""``, colando un producto sin nombre real."""
+        payload = {**_PRODUCT_PAYLOAD, "name": "   "}
+        resp = await client.post("/api/v1/products", json=payload, headers=auth_headers)
+        assert resp.status_code == 422
+
     async def test_create_and_update_acquired_at(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
