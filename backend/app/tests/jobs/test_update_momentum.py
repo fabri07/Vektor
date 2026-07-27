@@ -206,6 +206,53 @@ async def test_milestone_m1_unlocks_on_first_improvement(session: AsyncSession) 
 
 
 @pytest.mark.asyncio
+async def test_run_momentum_update_no_crashea_con_milestone_sin_code(
+    session: AsyncSession,
+) -> None:
+    """Al menos un tenant en producción tiene un milestone histórico en
+    `milestones_json` sin la clave `code` (dato preexistente corrupto). Antes
+    del fix, `{m["code"] for m in mp.milestones_json}` (línea del `already_unlocked`)
+    tiraba `KeyError` y rompía TODO el recálculo de momentum del worker para ese
+    tenant — no solo el milestone corrupto. El fix debe saltear la entrada
+    corrupta y seguir procesando el resto (incluido desbloquear M1 si corresponde)."""
+    tenant = _tenant()
+    session.add(tenant)
+    await session.commit()
+
+    week_start, _ = _current_week()
+    prev_start = week_start - timedelta(days=7)
+    session.add(_week_history(tenant.tenant_id, prev_start, Decimal("50")))
+    session.add(_score(tenant.tenant_id, total=60, days_ago=0))
+
+    now = datetime.now(tz=UTC)
+    session.add(
+        MomentumProfile(
+            tenant_id=tenant.tenant_id,
+            milestones_json=[
+                {"label": "Milestone huérfano", "unlocked_at": now.isoformat()},
+            ],
+            updated_at=now,
+        )
+    )
+    await session.commit()
+
+    # No debe levantar KeyError.
+    await run_momentum_update(tenant.tenant_id, session)
+
+    mp_q = await session.execute(
+        select(MomentumProfile).where(MomentumProfile.tenant_id == tenant.tenant_id)
+    )
+    mp = mp_q.scalar_one()
+
+    # La entrada corrupta preexistente sobrevive tal cual (no se descarta el
+    # dato histórico, solo se saltea al construir already_unlocked/serializar).
+    codes = [m.get("code") for m in mp.milestones_json]
+    assert None in codes
+    # Y el resto del cálculo (delta=10 → M1) siguió funcionando con normalidad.
+    assert "M1" in codes
+
+
+@pytest.mark.asyncio
 async def test_value_protected_increases_with_margin_improvement(session: AsyncSession) -> None:
     """
     When margin score improves from 30 days ago and monthly_sales_estimate is set,
