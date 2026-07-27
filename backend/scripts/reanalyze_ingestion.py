@@ -261,8 +261,20 @@ async def evaluate_file(
         return _entry(BUCKET_ELIGIBLE_NOT_APPLIED)
 
     # Único camino legal de auto-apply: REAPPLIED + sin ediciones humanas + --apply.
+    #
+    # Atomicidad (fix round post-review, hallazgo 1): `apply_reread` NO comitea
+    # internamente ("el commit lo hace el caller", ver su docstring en
+    # `reread_service.py`) — por eso encadenamos la mutación de negocio y el
+    # insert de auditoría en la MISMA transacción, con UN SOLO commit al final.
+    # Antes había dos `session.commit()` separados: si el insert de auditoría
+    # (o su commit) fallaba DESPUÉS de que `apply_reread` ya hubiera comiteado,
+    # la mutación quedaba durable pero la entrada de `decision_audit_log` se
+    # perdía — y como `apply_reread` ya bumpeó `ingestion_version` en ESE
+    # commit, el archivo queda fuera del filtro `ingestion_version < to_version`
+    # en toda corrida futura del batch, así que la auditoría faltante nunca se
+    # reintenta. Con un solo commit, un fallo en cualquiera de los dos pasos
+    # hace rollback de ambos — o se aplican los dos, o ninguno.
     await reread_service.apply_reread(session, file.id, file.tenant_id, s3=s3, origin="batch_auto")
-    await session.commit()
     # Delega 1:1 en el helper canónico de `_db.py` — sin bifurcación por
     # dialecto acá. En producción esto SIEMPRE corre contra Postgres real
     # (`gen_random_uuid()`/`now()` server-side); no existe una segunda
@@ -480,8 +492,18 @@ def build_report(entries: list[ScanEntry]) -> dict[str, Any]:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tenant", help="UUID de tenant puntual (piloto)")
-    parser.add_argument("--all-active", action="store_true", help="Todos los tenants activos")
+    # Hallazgo 3 (fix round post-review): grupo mutuamente excluyente y
+    # `required=True` — argparse rechaza automáticamente pasar ambos flags
+    # juntos (antes `--tenant` ganaba en silencio sobre `--all-active`, sin
+    # avisar) y también cubre "ninguno de los dos" (antes validado a mano
+    # después de parsear; confirmado que `required=True` en el grupo alcanza,
+    # ver test `test_main_rejects_tenant_and_all_active_together` y
+    # `test_main_rejects_neither_tenant_nor_all_active`).
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument("--tenant", help="UUID de tenant puntual (piloto)")
+    target_group.add_argument(
+        "--all-active", action="store_true", help="Todos los tenants activos"
+    )
     parser.add_argument(
         "--from-version", type=int, default=1, help="ingestion_version mínima (inclusive)"
     )
@@ -515,8 +537,28 @@ async def main() -> None:
     parser.add_argument("--json", action="store_true", help="Imprime además un resumen JSON")
     args = parser.parse_args()
 
-    if not args.tenant and not args.all_active:
-        print("ERROR: indicá --tenant <uuid> (piloto) o --all-active.")
+    # Hallazgo 2 (fix round post-review): `apply_reread` SIEMPRE ejecuta la
+    # lógica de `INGESTION_VERSION` (la versión real del código corriendo) y
+    # estampa ESE valor en `file.ingestion_version` — nunca el `--to-version`
+    # que pidió el usuario. Si se aceptara un `--to-version` distinto, el
+    # reporte/auditoría mentirían sobre "hacia qué versión" se transicionó
+    # (ej. `--to-version 3` con el código todavía en la versión 2: se
+    # ejecutaría y estamparía la lógica de 2, pero el reporte diría 3, y el
+    # archivo podría volver a seleccionarse contra ese `--to-version` engañoso
+    # en el futuro). Mientras el framework solo pueda ejecutar la versión
+    # actual del código, se rechaza cualquier otro valor ANTES de tocar la DB.
+    if args.to_version != INGESTION_VERSION:
+        print(
+            f"ERROR: --to-version debe ser exactamente INGESTION_VERSION actual "
+            f"({INGESTION_VERSION}) — el código solo puede ejecutar y estampar esa "
+            f"versión, sin importar qué valor se pida acá. Recibido: {args.to_version}."
+        )
+        sys.exit(2)
+    if not (1 <= args.from_version < args.to_version):
+        print(
+            "ERROR: se requiere 1 <= --from-version < --to-version "
+            f"(recibido: from_version={args.from_version}, to_version={args.to_version})."
+        )
         sys.exit(2)
 
     url, connect_args = async_engine_config()
@@ -525,14 +567,16 @@ async def main() -> None:
     record_scan = args.record_scan or args.apply
 
     # F9a fix (Critical, fix round post-review): `expire_on_commit=False` evita
-    # que los commits intermedios (dos DENTRO de `evaluate_file` en el camino
-    # REAPPLIED+apply, uno en `record_bookkeeping`) expiren TODOS los objetos
-    # cargados del identity map — incluidos los archivos candidatos que
-    # `run_scan` todavía no procesó en esta misma corrida. `run_scan` además
-    # se protege por sí solo (re-fetch defensivo vía `session.get` en cada
-    # iteración, ver su docstring) contra la expiración INCONDICIONAL que un
-    # `rollback()` (tras un error aislado por archivo) sigue disparando pese a
-    # este flag — las dos partes del fix son necesarias.
+    # que los commits intermedios (uno DENTRO de `evaluate_file` en el camino
+    # REAPPLIED+apply — unificado a un solo commit por el hallazgo de
+    # atomicidad, ver su docstring —, y otro en `record_bookkeeping`) expiren
+    # TODOS los objetos cargados del identity map — incluidos los archivos
+    # candidatos que `run_scan` todavía no procesó en esta misma corrida.
+    # `run_scan` además se protege por sí solo (re-fetch defensivo vía
+    # `session.get` en cada iteración, ver su docstring) contra la expiración
+    # INCONDICIONAL que un `rollback()` (tras un error aislado por archivo)
+    # sigue disparando pese a este flag — las dos partes del fix son
+    # necesarias.
     async with AsyncSession(engine, expire_on_commit=False) as session:
         tenant_ids = (
             [uuid.UUID(args.tenant)] if args.tenant else await select_active_tenant_ids(session)

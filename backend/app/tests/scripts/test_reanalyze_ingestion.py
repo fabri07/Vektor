@@ -566,6 +566,60 @@ async def test_apply_with_user_edits_never_auto_applies(
     assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 0
 
 
+# ── atomicidad apply + auditoría (fix round post-review, hallazgo 1) ──────────
+
+
+@pytest.mark.asyncio
+async def test_apply_and_audit_are_atomic_rollback_on_audit_failure(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Antes había DOS commits separados en el camino REAPPLIED+apply: uno tras
+    `apply_reread`, otro tras `insert_decision_audit`. Un fallo en el SEGUNDO
+    paso dejaba la mutación de negocio ya durable pero la entrada de auditoría
+    perdida — y como `apply_reread` ya bumpeó `ingestion_version` en ESE
+    primer commit, el archivo queda fuera del filtro de selección de toda
+    corrida futura del batch, así que la auditoría faltante nunca se
+    reintenta. Ahora es UN SOLO commit al final: simulamos que
+    `insert_decision_audit` revienta DESPUÉS de que `apply_reread` ya corrió
+    (mutó/flusheó, pero NO comiteó nada) y confirmamos que un rollback
+    deshace TODO — ni la mutación de negocio ni la auditoría quedan
+    persistidas (todo o nada)."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    file = await _first_confirm_with_risk(db_session, tenant, _CSV_RISK_BAD)
+    before_version = file.ingestion_version
+    before_expenses = len(await _active_expenses(db_session, file))
+    assert before_expenses == 1  # 1 válida, 1 en Otros
+    before_audit = await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY)
+    before_runs = await _repair_run_count(db_session)
+
+    async def _boom_audit(
+        session: AsyncSession,  # noqa: ARG001
+        *,
+        tenant_id: str,  # noqa: ARG001
+        decision_type: str,  # noqa: ARG001
+        decision_data: dict[str, Any],  # noqa: ARG001
+        triggered_by: str,  # noqa: ARG001
+    ) -> str:
+        raise RuntimeError("simulated audit insert failure")
+
+    monkeypatch.setattr(mod, "insert_decision_audit", _boom_audit)
+
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    s3 = S3Client()
+    with pytest.raises(RuntimeError, match="simulated audit insert failure"):
+        await mod.evaluate_file(db_session, s3, file, do_apply=True)
+
+    # Ningún commit ocurrió entre `apply_reread` y el fallo — un solo rollback
+    # deshace ambos pasos.
+    await db_session.rollback()
+    await db_session.refresh(file)
+
+    assert file.ingestion_version == before_version
+    assert len(await _active_expenses(db_session, file)) == before_expenses
+    assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == before_audit
+    assert await _repair_run_count(db_session) == before_runs
+
+
 # ── idempotencia ────────────────────────────────────────────────────────────────
 
 
@@ -882,3 +936,129 @@ async def test_run_scan_survives_without_expire_on_commit_false(
         refreshed_b = await session.get(UploadedFile, file_b_id)
         assert refreshed_a is not None and refreshed_a.latest_preview_version == INGESTION_VERSION
         assert refreshed_b is not None and refreshed_b.latest_preview_version == INGESTION_VERSION
+
+
+# ── validaciones de main() (fix round post-review, hallazgos 2 y 3) ──────────
+#
+# Estos tests NO tocan la DB real: `main()` valida argumentos ANTES de llamar
+# `async_engine_config()`, así que interceptamos ese punto con un marcador
+# (`_ReachedDBConnectionError`) para distinguir "la validación bloqueó, nunca
+# llegamos a intentar conectar" de "la validación pasó, seguimos de largo".
+
+
+class _ReachedDBConnectionError(Exception):
+    """Se lanza en vez de conectar de verdad — confirma que `main()` pasó las
+    validaciones de argumentos y llegó al punto de conectarse a la DB."""
+
+
+def _raise_reached_db(*args: Any, **kwargs: Any) -> Any:
+    raise _ReachedDBConnectionError
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_to_version_mismatch(
+    mod: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo 2: `apply_reread` SIEMPRE ejecuta y estampa `INGESTION_VERSION`
+    (la versión real del código corriendo), nunca el `--to-version` que pida
+    el usuario. Aceptar un valor distinto haría que el reporte/auditoría
+    mientan sobre qué versión se ejecutó realmente. `main()` debe rechazar
+    cualquier `--to-version != INGESTION_VERSION` con exit code != 0, SIN
+    llegar a `async_engine_config()` (sin tocar la DB)."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reanalyze_ingestion.py",
+            "--tenant",
+            str(uuid.uuid4()),
+            "--to-version",
+            str(INGESTION_VERSION + 1),
+        ],
+    )
+    monkeypatch.setattr(mod, "async_engine_config", _raise_reached_db)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await mod.main()
+    assert exc_info.value.code != 0
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_from_version_not_less_than_to_version(
+    mod: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo 2 (rango): `--from-version >= --to-version` es un rango vacío o
+    invertido (acá `--from-version == INGESTION_VERSION` con el `--to-version`
+    default, también `INGESTION_VERSION`) — rechazado con exit code != 0, sin
+    tocar la DB."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reanalyze_ingestion.py",
+            "--tenant",
+            str(uuid.uuid4()),
+            "--from-version",
+            str(INGESTION_VERSION),
+        ],
+    )
+    monkeypatch.setattr(mod, "async_engine_config", _raise_reached_db)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await mod.main()
+    assert exc_info.value.code != 0
+
+
+@pytest.mark.asyncio
+async def test_main_valid_version_arguments_pass_validation(
+    mod: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caso válido (`--to-version == INGESTION_VERSION` por default,
+    `--from-version 1 < to_version`): las validaciones nuevas no deben romper
+    el camino normal — confirmado porque `main()` SIGUE de largo hasta
+    intentar conectarse a la DB (propaga el marcador `_ReachedDBConnectionError`)
+    en vez de cortar con `SystemExit`."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["reanalyze_ingestion.py", "--tenant", str(uuid.uuid4()), "--from-version", "1"],
+    )
+    monkeypatch.setattr(mod, "async_engine_config", _raise_reached_db)
+
+    with pytest.raises(_ReachedDBConnectionError):
+        await mod.main()
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_tenant_and_all_active_together(
+    mod: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo 3: `--tenant` y `--all-active` ahora son un grupo mutuamente
+    excluyente de argparse — pasar ambos juntos ya NO hace que `--tenant` gane
+    en silencio (comportamiento viejo); argparse lo rechaza con exit code != 0
+    antes de que `main()` llegue a tocar la DB."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["reanalyze_ingestion.py", "--tenant", str(uuid.uuid4()), "--all-active"],
+    )
+    monkeypatch.setattr(mod, "async_engine_config", _raise_reached_db)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await mod.main()
+    assert exc_info.value.code != 0
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_neither_tenant_nor_all_active(
+    mod: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El grupo mutuamente excluyente con `required=True` también cubre el
+    caso "ninguno de los dos pasado" — confirma que ya no hace falta (y sigue
+    funcionando sin) el chequeo manual post-parseo que existía antes."""
+    monkeypatch.setattr(sys, "argv", ["reanalyze_ingestion.py"])
+    monkeypatch.setattr(mod, "async_engine_config", _raise_reached_db)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await mod.main()
+    assert exc_info.value.code != 0
