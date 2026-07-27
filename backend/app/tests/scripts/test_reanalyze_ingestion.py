@@ -21,6 +21,19 @@ Cubre (ver brief Task 4):
     --apply — la garantía explícita contra la corrección del plan original.
   - ``--apply`` con ``has_user_edits=True``: nunca se aplica.
   - Idempotencia: correr dos veces no duplica auditoría ni ``DataRepairRun``.
+  - (fix round post-review) Aislamiento de errores por archivo en
+    ``run_scan``: un archivo que revienta durante ``evaluate_file`` no aborta
+    el resto del batch.
+
+Nota sobre auditoría en SQLite: ``reanalyze_ingestion.py`` llama SIEMPRE al
+helper real ``_db.py::insert_decision_audit`` (sin bifurcación por dialecto en
+el módulo bajo test — ver fix round post-review, hallazgo 2). Ese helper usa
+``gen_random_uuid()``/``now()`` de Postgres vía SQL crudo, que SQLite no
+soporta, así que el fixture ``_patch_audit_insert`` (autouse, abajo) lo
+reemplaza por un fake equivalente vía ``monkeypatch`` en TODA esta suite. Esto
+elimina el código de producción test-only: no hay una segunda implementación
+real del INSERT en ``reanalyze_ingestion.py`` que pueda divergir en silencio
+del helper canónico si este cambia de columnas en el futuro.
 """
 
 from __future__ import annotations
@@ -28,14 +41,17 @@ from __future__ import annotations
 import importlib.util
 import sys
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import reread_service as reread_service_module
 from app.application.services.column_risk import apply_column_risk_decisions
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
@@ -75,6 +91,51 @@ def _load_module() -> ModuleType:
 @pytest.fixture(scope="module")
 def mod() -> ModuleType:
     return _load_module()
+
+
+async def _sqlite_insert_decision_audit(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    decision_type: str,
+    decision_data: dict[str, Any],
+    triggered_by: str,
+) -> str:
+    """Fake SQLite-compatible de ``_db.py::insert_decision_audit`` para esta
+    suite (fix round post-review, hallazgo 2).
+
+    El real usa ``gen_random_uuid()``/``now()`` de Postgres server-side vía SQL
+    crudo — SQLite (el dialecto de ``db_session``, in-memory) no los soporta.
+    En vez de mantener una segunda implementación REAL de este INSERT dentro
+    de ``reanalyze_ingestion.py`` (el wrapper dialect-aware que tenía la
+    primera versión de esta tarea, sin ningún test que atara ambos caminos),
+    el módulo bajo test llama SIEMPRE al helper canónico — y acá lo
+    reemplazamos por este fake vía ``monkeypatch`` (fixture
+    ``_patch_audit_insert``, autouse). Mismo shape de columnas
+    (id/tenant_id/decision_type/decision_data/triggered_by/created_at) que el
+    real, con generación client-side de ``id``/``created_at``."""
+    audit_id = uuid.uuid4()
+    session.add(
+        DecisionAuditLog(
+            id=audit_id,
+            tenant_id=uuid.UUID(tenant_id),
+            decision_type=decision_type,
+            decision_data=decision_data,
+            triggered_by=triggered_by,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    return str(audit_id)
+
+
+@pytest.fixture(autouse=True)
+def _patch_audit_insert(mod: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reemplaza, en TODOS los tests de este archivo, el ``insert_decision_audit``
+    importado dentro del namespace de ``reanalyze_ingestion`` por el fake
+    SQLite de arriba. Producción llama siempre al helper real de ``_db.py``
+    (sin bifurcación) — este monkeypatch es puramente de test."""
+    monkeypatch.setattr(mod, "insert_decision_audit", _sqlite_insert_decision_audit)
 
 
 # ── fixtures (mismo patrón que app/tests/services/test_reread_file.py) ────────
@@ -494,3 +555,99 @@ async def test_running_twice_does_not_duplicate_audit_or_runs(
 
     assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 1
     assert await _repair_run_count(db_session) == 1
+
+
+# ── aislamiento de errores por archivo (fix round post-review, hallazgo 1) ────
+
+
+@pytest.mark.asyncio
+async def test_run_scan_isolates_per_file_errors(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un fallo puntual de I/O (ej. descarga S3) evaluando UN archivo no debe
+    abortar el resto del batch: los demás candidatos se evalúan normalmente y
+    el que falló aparece en ``BUCKET_ERROR`` con tenant/file_id/filename y el
+    mensaje sanitizado, sin que la excepción se propague fuera de ``run_scan``.
+
+    El archivo que falla va PRIMERO en la lista — así confirmamos que
+    ``run_scan`` sigue procesando los archivos siguientes, no solo que no
+    revienta con la lista completa."""
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+    file_bad = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    file_ok = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+
+    real_preview = reread_service_module.preview_reread
+
+    async def _flaky_preview(
+        session: AsyncSession,
+        file_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        *,
+        s3: S3Client | None = None,
+    ) -> Any:
+        if file_id == file_bad.id:
+            raise RuntimeError("s3 download failed: /internal/bucket/path/object-not-found")
+        return await real_preview(session, file_id, tenant_id, s3=s3)
+
+    monkeypatch.setattr(reread_service_module, "preview_reread", _flaky_preview)
+
+    s3 = S3Client()
+    entries = await mod.run_scan(
+        db_session, s3, [file_bad, file_ok], do_apply=False, record_scan=False
+    )
+
+    assert len(entries) == 2
+    by_id = {e.file_id: e for e in entries}
+
+    bad_entry = by_id[file_bad.id]
+    assert bad_entry.bucket == mod.BUCKET_ERROR
+    assert bad_entry.tenant_id == tenant.tenant_id
+    assert bad_entry.filename == file_bad.original_filename
+    assert bad_entry.applied is False
+    assert bad_entry.exclusion_reason is not None
+    assert "RuntimeError" in bad_entry.exclusion_reason
+    assert "s3 download failed" in bad_entry.exclusion_reason
+
+    # El archivo SIGUIENTE en la lista se evaluó normalmente pese al fallo del
+    # anterior — esta es la garantía central del hallazgo 1.
+    ok_entry = by_id[file_ok.id]
+    assert ok_entry.bucket == mod.BUCKET_FORCED_UNVERIFIED
+    assert ok_entry.outcome == "FORCED_UNVERIFIED"
+
+    # La sesión quedó utilizable tras el rollback del fallo (evaluate_file de
+    # file_ok pudo leer/flushear sin arrastrar el error del archivo anterior).
+    await db_session.refresh(file_bad)
+    await db_session.refresh(file_ok)
+
+
+@pytest.mark.asyncio
+async def test_run_scan_error_bucket_never_gets_bookkeeping(
+    mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Con ``record_scan=True``, un archivo en ``BUCKET_ERROR`` no debe recibir
+    bookkeeping (no completamos una evaluación que no terminó)."""
+    _patch_s3(monkeypatch, _CSV_FORCED_UNVERIFIED)
+    file_bad = await _make_file(db_session, tenant, _CSV_FORCED_UNVERIFIED)
+    before_latest_preview = file_bad.latest_preview_version
+    before_status = file_bad.reread_status
+
+    async def _always_fails(
+        session: AsyncSession,
+        file_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        *,
+        s3: S3Client | None = None,
+    ) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(reread_service_module, "preview_reread", _always_fails)
+
+    s3 = S3Client()
+    entries = await mod.run_scan(
+        db_session, s3, [file_bad], do_apply=False, record_scan=True
+    )
+    assert entries[0].bucket == mod.BUCKET_ERROR
+
+    await db_session.refresh(file_bad)
+    assert file_bad.latest_preview_version == before_latest_preview
+    assert file_bad.reread_status == before_status

@@ -50,7 +50,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E4
 from app.application.services import reread_service  # noqa: E402
 from app.domain.ingestion_version import INGESTION_VERSION  # noqa: E402
 from app.integrations.s3 import S3Client  # noqa: E402
-from app.persistence.models.audit import DecisionAuditLog  # noqa: E402
 from app.persistence.models.file import (  # noqa: E402
     PROCESSING_STATUS_DONE,
     REREAD_STATUS_NEEDS_REVIEW,
@@ -69,6 +68,21 @@ BUCKET_AMBIGUOUS = "ambiguous"
 BUCKET_HAS_USER_EDITS = "has_user_edits"
 BUCKET_APPLIED = "applied"
 BUCKET_ELIGIBLE_NOT_APPLIED = "eligible_not_applied"
+# Fallo puntual de I/O (S3/DB) durante la evaluación de UN archivo — aislado
+# por `run_scan` para que no aborte el resto del batch (ver docstring de
+# `run_scan`).
+BUCKET_ERROR = "error"
+
+_MAX_ERROR_MESSAGE_LEN = 300
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """Mensaje de excepción truncado, sin stack trace — evita filtrar paths
+    internos/frames en el reporte que puede terminar en stdout/logs."""
+    message = f"{type(exc).__name__}: {exc}"
+    if len(message) > _MAX_ERROR_MESSAGE_LEN:
+        message = message[:_MAX_ERROR_MESSAGE_LEN] + "…(truncado)"
+    return message
 
 # Los outcomes de riesgo re-derivado (archivo pre-F8, GUESS — nunca el mapeo
 # real) mapean 1:1 a un bucket homónimo. Solo "REAPPLIED" no está acá: requiere
@@ -154,50 +168,6 @@ async def select_candidate_files(
     return list(result.scalars().all())
 
 
-# ── auditoría ──────────────────────────────────────────────────────────────────
-
-
-async def _insert_audit_entry(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    decision_type: str,
-    decision_data: dict[str, Any],
-    triggered_by: str,
-) -> str:
-    """INSERT en ``decision_audit_log``.
-
-    En Postgres (real) delega 1:1 en el helper canónico de ``_db.py``
-    (``gen_random_uuid()``/``now()`` server-side). SQLite no soporta esas
-    funciones — solo lo ejercita esta suite de tests contra el fixture
-    ``db_session`` — así que ahí se arma el mismo shape de columnas vía el ORM
-    con generación client-side (mismo comportamiento observable, sin tocar el
-    helper compartido por los demás scripts de este directorio).
-    """
-    bind = session.get_bind()
-    if bind.dialect.name == "postgresql":
-        return await insert_decision_audit(
-            session,
-            tenant_id=str(tenant_id),
-            decision_type=decision_type,
-            decision_data=decision_data,
-            triggered_by=triggered_by,
-        )
-    audit_id = uuid.uuid4()
-    session.add(
-        DecisionAuditLog(
-            id=audit_id,
-            tenant_id=tenant_id,
-            decision_type=decision_type,
-            decision_data=decision_data,
-            triggered_by=triggered_by,
-            created_at=datetime.now(UTC),
-        )
-    )
-    await session.flush()
-    return str(audit_id)
-
-
 # ── evaluación por archivo ─────────────────────────────────────────────────────
 
 
@@ -252,9 +222,15 @@ async def evaluate_file(
     # Único camino legal de auto-apply: REAPPLIED + sin ediciones humanas + --apply.
     await reread_service.apply_reread(session, file.id, file.tenant_id, s3=s3, origin="batch_auto")
     await session.commit()
-    await _insert_audit_entry(
+    # Delega 1:1 en el helper canónico de `_db.py` — sin bifurcación por
+    # dialecto acá. En producción esto SIEMPRE corre contra Postgres real
+    # (`gen_random_uuid()`/`now()` server-side); no existe una segunda
+    # implementación de este INSERT en el módulo. Los tests (SQLite
+    # in-memory) reemplazan esta función por un fake vía monkeypatch — ver
+    # `app/tests/scripts/test_reanalyze_ingestion.py`.
+    await insert_decision_audit(
         session,
-        tenant_id=file.tenant_id,
+        tenant_id=str(file.tenant_id),
         decision_type=DECISION_TYPE_AUTO_APPLY,
         decision_data={
             "file_id": str(file.id),
@@ -305,10 +281,38 @@ async def run_scan(
     archivo bumpeado a ``INGESTION_VERSION`` (fuera del filtro
     ``ingestion_version < to_version``), no de que ``evaluate_file`` sea
     idempotente por sí solo — llamarlo dos veces sobre el MISMO archivo
-    seleccionado explícitamente SÍ reaplicaría de nuevo."""
+    seleccionado explícitamente SÍ reaplicaría de nuevo.
+
+    Aislamiento de errores por archivo: este comando corre potencialmente
+    contra TODOS los tenants activos (``--all-active``); un fallo puntual de
+    I/O (objeto S3 faltante, red transitoria, contenido corrupto) en UN
+    archivo no debe abortar la evaluación del resto del batch. Cualquier
+    excepción durante ``evaluate_file`` se captura acá, se hace
+    ``session.rollback()`` (la sesión puede quedar en estado "pending
+    rollback" tras un fallo dentro de un `flush`/`commit`; sin esto, TODOS los
+    archivos siguientes fallarían en cascada) y el archivo se reporta en
+    ``BUCKET_ERROR`` con el mensaje sanitizado — nunca bookkeeping para un
+    archivo cuya evaluación no se completó."""
     entries: list[ScanEntry] = []
     for file in files:
-        entry = await evaluate_file(session, s3, file, do_apply=do_apply)
+        try:
+            entry = await evaluate_file(session, s3, file, do_apply=do_apply)
+        except Exception as exc:  # noqa: BLE001 — aislamiento por archivo, ver docstring.
+            await session.rollback()
+            entries.append(
+                ScanEntry(
+                    file_id=file.id,
+                    tenant_id=file.tenant_id,
+                    filename=file.original_filename,
+                    bucket=BUCKET_ERROR,
+                    outcome="error",
+                    exclusion_reason=_sanitize_error(exc),
+                    applied=False,
+                    from_version=file.ingestion_version,
+                    to_version=INGESTION_VERSION,
+                )
+            )
+            continue
         if record_scan:
             record_bookkeeping(file, entry)
             await session.commit()
@@ -336,7 +340,9 @@ def print_report(entries: list[ScanEntry]) -> None:
         )
         for row in e.risk_rows:
             print(f"      columna riesgosa: {_format_risk_row(row)}")
-        if e.exclusion_reason:
+        if e.bucket == BUCKET_ERROR:
+            print(f"      ERROR: {e.exclusion_reason}")
+        elif e.exclusion_reason:
             print(f"      excluido de auto-apply: {e.exclusion_reason}")
 
     totals: dict[str, int] = {}
@@ -346,6 +352,12 @@ def print_report(entries: list[ScanEntry]) -> None:
     for bucket, count in sorted(totals.items()):
         print(f"  {bucket}: {count}")
     print(f"  TOTAL: {len(entries)}")
+
+    errors = [e for e in entries if e.bucket == BUCKET_ERROR]
+    if errors:
+        print(f"\n{len(errors)} archivo(s) con ERROR durante el scan (no abortaron el batch):")
+        for e in errors:
+            print(f"  · tenant={e.tenant_id} file={e.file_id} {e.filename!r}: {e.exclusion_reason}")
 
 
 def build_report(entries: list[ScanEntry]) -> dict[str, Any]:
