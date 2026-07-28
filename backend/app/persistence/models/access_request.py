@@ -46,7 +46,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.access_request import AccessRequestStatus, RequestedPlan
 from app.domain.contact_lead import EmailNotificationStatus
-from app.domain.verticals import Vertical
+from app.domain.verticals import RequestedVertical, Vertical
 from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
@@ -62,6 +62,7 @@ def _sql_in(values: tuple[str, ...]) -> str:
 _STATUS_VALUES = tuple(s.value for s in AccessRequestStatus)
 _PLAN_VALUES = tuple(p.value for p in RequestedPlan)
 _VERTICAL_VALUES = tuple(v.value for v in Vertical)
+_REQUESTED_VERTICAL_VALUES = tuple(v.value for v in RequestedVertical)
 
 
 class AccessRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -164,6 +165,14 @@ class AccessRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             f"requested_plan IN ({_sql_in(_PLAN_VALUES)})",
             name="ck_access_requests_requested_plan",
+        ),
+        # El rubro declarado también es vocabulario cerrado. Sin este CHECK,
+        # una sola fila con un valor fuera del catálogo (un script, un backfill)
+        # hace levantar `AccessRequestAdminItem.model_validate` —que lo tipa
+        # como `RequestedVertical`— y el listado ENTERO de la cola devuelve 500.
+        CheckConstraint(
+            f"requested_vertical IN ({_sql_in(_REQUESTED_VERTICAL_VALUES)})",
+            name="ck_access_requests_requested_vertical",
         ),
         # Declarar 'otros' obliga a explicar de qué es el negocio.
         CheckConstraint(

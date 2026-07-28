@@ -25,6 +25,10 @@ no debe poder violar:
   es INESCRIBIBLE como vertical asignado (solo los 3 operativos).
 * ``ck_access_requests_approved_needs_vertical``: una solicitud aprobada no puede
   quedarse sin vertical asignado.
+* ``ck_access_requests_requested_vertical``: el rubro DECLARADO también es
+  vocabulario cerrado (los 3 operativos + ``'otros'``). El schema administrativo
+  lo tipa como enum, así que una sola fila fuera del catálogo tira el listado
+  completo con 500 — no degrada esa fila sola.
 
 Los literales van hardcodeados a propósito: una migración es una foto del pasado,
 no sigue la evolución del código. El espejo vivo está derivado de los enums en
@@ -57,6 +61,29 @@ branch_labels: str | None = None
 depends_on: str | None = None
 
 _OPEN_EMAIL_INDEX = "uq_access_requests_open_email"
+
+
+def _create_open_email_index(bind: sa.Connection) -> None:
+    """Un solo trámite abierto por email. Parcial + sobre ``lower(email)``: PG only.
+
+    Función a nivel de módulo —y no SQL inline en ``upgrade()``— para que el
+    test de integración Postgres la IMPORTE en vez de copiar el DDL a mano
+    (mismo patrón que ``_add_vertical_check`` en ``20260806_0002``). Con la
+    copia, borrar este índice de la migración o cambiarle el predicado dejaba
+    los tests del índice igual de verdes: probaban su propia copia.
+
+    Idempotente (``IF NOT EXISTS``): el ``preDeployCommand`` puede correr dos
+    veces en un mismo deploy.
+    """
+    if bind.dialect.name != "postgresql":
+        return
+    bind.execute(
+        sa.text(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {_OPEN_EMAIL_INDEX} "
+            "ON access_requests (lower(email)) "
+            "WHERE status IN ('unverified', 'pending', 'waitlist')"
+        )
+    )
 
 
 def upgrade() -> None:
@@ -173,6 +200,11 @@ def upgrade() -> None:
                 name="ck_access_requests_requested_plan",
             ),
             sa.CheckConstraint(
+                "requested_vertical IN ('kiosco_almacen', 'decoracion_hogar', "
+                "'limpieza', 'otros')",
+                name="ck_access_requests_requested_vertical",
+            ),
+            sa.CheckConstraint(
                 "requested_vertical <> 'otros' OR vertical_other_text IS NOT NULL",
                 name="ck_access_requests_vertical_other_text",
             ),
@@ -196,12 +228,7 @@ def upgrade() -> None:
         )
         # Un solo trámite abierto por email. Parcial + sobre lower(email): solo
         # en PostgreSQL (ver docstring).
-        if bind.dialect.name == "postgresql":
-            op.execute(
-                f"CREATE UNIQUE INDEX {_OPEN_EMAIL_INDEX} "
-                "ON access_requests (lower(email)) "
-                "WHERE status IN ('unverified', 'pending', 'waitlist')"
-            )
+        _create_open_email_index(bind)
 
     if "access_request_tokens" not in existing:
         op.create_table(
