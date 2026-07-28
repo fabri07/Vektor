@@ -799,6 +799,23 @@ class AccessRequestService:
 
         ``notify=False`` existe porque a veces se descarta spam sin escribirle de
         vuelta. Repetir el rechazo es idempotente y no re-notifica.
+
+        **Postura de consentimiento — la tercera del módulo, y es deliberada.**
+        Conviven tres reglas distintas y conviene que se lean juntas:
+
+        - ``expire_stale`` nunca escribe: nadie confirmó esa casilla.
+        - ``waitlist`` se niega a actuar sin ``email_verified_at``.
+        - ``reject`` **sí** notifica por default aunque el email no esté
+          verificado.
+
+        La tercera no es un olvido. El daño es de otra clase: ``waitlist``
+        escribía *y* dejaba el trámite trabado, mientras que ``reject`` manda un
+        único mail transaccional a una dirección que la persona tipeó ella misma
+        y **no** bloquea un reintento del formulario (``rejected`` no está en
+        ``OPEN_ACCESS_REQUEST_STATUSES``). Cambiar este default es una decisión
+        de producto sobre una operación que ya se usa por CLI, no un arreglo; si
+        alguna vez se quiere una regla única, el cambio es gatear este encolado
+        por ``email_verified_at`` igual que ``waitlist``.
         """
         motivo = reason.strip()
         if len(motivo) < 3:

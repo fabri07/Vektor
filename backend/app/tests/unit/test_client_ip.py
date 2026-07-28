@@ -12,10 +12,13 @@ inventarlo.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.requests import Request
+from structlog.testing import capture_logs
 
 from app.api.v1.deps import _SIN_IP, client_ip, rate_limit_key
 
@@ -115,3 +118,69 @@ def test_el_limiter_global_usa_esta_key() -> None:
     from app.main import limiter
 
     assert limiter._key_func is rate_limit_key
+
+
+# ── La suposición sobre X-Real-IP se autodenuncia ─────────────────────────────
+
+
+@pytest.fixture
+def aviso_rearmado(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Devuelve el flag de "ya avisé" a su estado inicial para cada test.
+
+    Es global por proceso a propósito (el aviso es de configuración del deploy,
+    no por request), así que sin esto el orden de los tests decidiría el
+    resultado.
+    """
+    monkeypatch.setattr("app.api.v1.deps._aviso_sin_x_real_ip_emitido", False)
+
+
+def _eventos(capturados: Sequence[Mapping[str, Any]]) -> list[str]:
+    return [str(e.get("event")) for e in capturados]
+
+
+def test_en_produccion_sin_x_real_ip_se_avisa_una_sola_vez(
+    entorno, aviso_rearmado: None
+) -> None:
+    """Si el edge no manda el header, el `ip_hash` deja de identificar visitantes
+    y pasa a guardar el hash del proxy para todos — un valor que PARECE un dato.
+    El aviso existe para que eso se note en los logs y no dependa de que alguien
+    se acuerde de ir a mirar."""
+    entorno(produccion=True)
+
+    with capture_logs() as capturados:
+        assert client_ip(_request(peer=_IP_PEER)) == _IP_PEER
+        assert client_ip(_request(peer=_IP_PEER)) == _IP_PEER
+
+    assert _eventos(capturados).count("client_ip.sin_x_real_ip") == 1
+
+
+def test_el_aviso_no_filtra_la_ip(entorno, aviso_rearmado: None) -> None:
+    """El `ip_hash` nunca se imprime, y la IP cruda menos todavía."""
+    entorno(produccion=True)
+
+    with capture_logs() as capturados:
+        client_ip(_request(peer=_IP_PEER))
+
+    assert _IP_PEER not in repr(capturados)
+
+
+def test_con_x_real_ip_no_se_avisa(entorno, aviso_rearmado: None) -> None:
+    """Control positivo: sin esto el test de arriba pasaría con un aviso que se
+    emite siempre, incluso cuando el header llega bien."""
+    entorno(produccion=True)
+
+    with capture_logs() as capturados:
+        assert client_ip(_request(headers={"X-Real-IP": _IP_EDGE}, peer=_IP_PEER)) == _IP_EDGE
+
+    assert "client_ip.sin_x_real_ip" not in _eventos(capturados)
+
+
+def test_fuera_de_produccion_no_se_avisa(entorno, aviso_rearmado: None) -> None:
+    """En dev y tests el header no se lee a propósito, así que su ausencia no es
+    una anomalía que reportar."""
+    entorno(produccion=False)
+
+    with capture_logs() as capturados:
+        client_ip(_request(peer=_IP_PEER))
+
+    assert "client_ip.sin_x_real_ip" not in _eventos(capturados)

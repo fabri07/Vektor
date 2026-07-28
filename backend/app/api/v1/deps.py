@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services import maintenance_lock_service
 from app.application.services.pin_service import PinService
 from app.config.settings import get_settings
-from app.observability.logger import bind_request_context
+from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
@@ -125,6 +125,30 @@ _HEADER_IP_REAL = "x-real-ip"
 #: una IP real y compartido por todos los clientes sin IP.
 _SIN_IP = "unknown"
 
+#: Se avisa UNA sola vez por proceso: es una condición de configuración del
+#: despliegue, no un evento por request — loguearla en cada uno inundaría.
+_aviso_sin_x_real_ip_emitido = False
+
+
+def _avisar_sin_x_real_ip() -> None:
+    """Denuncia una sola vez que el edge no manda `X-Real-IP` en producción.
+
+    Nunca loguea la IP ni el hash: solo que la suposición del diseño no se
+    cumple, que es lo único que hace falta saber para ir a mirar.
+    """
+    global _aviso_sin_x_real_ip_emitido
+    if _aviso_sin_x_real_ip_emitido:
+        return
+    _aviso_sin_x_real_ip_emitido = True
+    get_logger(__name__).warning(
+        "client_ip.sin_x_real_ip",
+        detalle=(
+            "En producción no llegó X-Real-IP: el rate limit y el ip_hash caen "
+            "a request.client.host, que detrás de un proxy es la IP del edge e "
+            "igual para todos los visitantes."
+        ),
+    )
+
 
 def client_ip(request: Request) -> str | None:
     """IP del cliente. **Definición única** de "el cliente" en toda la app.
@@ -141,9 +165,18 @@ def client_ip(request: Request) -> str | None:
     puede inventarlo. Fuera de producción (dev y tests) se usa siempre
     `request.client.host`.
 
-    Sin header, degrada a `request.client.host` — exactamente lo que hacía
-    `get_remote_address`, así que el comportamiento no empeora aunque el edge
-    resulte no mandar `X-Real-IP` (queda pendiente verificarlo en prod).
+    Sin header, degrada a `request.client.host`. Para el limiter eso es
+    exactamente lo que hacía `get_remote_address` y no empeora nada; para el
+    `ip_hash` **sí** sería una regresión, porque antes leía `X-Forwarded-For`
+    incondicionalmente: si el edge mandara solo XFF y no `X-Real-IP`, la columna
+    pasaría a guardar un único hash (el del edge) para todos los visitantes, y
+    eso no se nota mirando los datos — un hash de la IP del proxy es
+    indistinguible de uno de cliente.
+
+    Por eso la suposición se autodenuncia: en producción, la primera vez que
+    falte `X-Real-IP` se loguea una advertencia (sin IP ni hash). Si aparece en
+    los logs de prod, hay que revisar qué manda el edge — no queda pendiente de
+    que alguien se acuerde de ir a mirar.
 
     `None` cuando no hay forma de saberla: no se inventa un valor.
     """
@@ -151,6 +184,7 @@ def client_ip(request: Request) -> str | None:
         real = request.headers.get(_HEADER_IP_REAL)
         if real and real.strip():
             return real.strip()
+        _avisar_sin_x_real_ip()
     return request.client.host if request.client else None
 
 
@@ -161,7 +195,8 @@ def rate_limit_key(request: Request) -> str:
     a un centinela: todos los requests sin IP comparten cubeta, que es el
     comportamiento conservador y equivale a lo que ya hacía `get_remote_address`.
     """
-    return client_ip(request) or _SIN_IP
+    ip = client_ip(request)
+    return ip if ip is not None else _SIN_IP
 
 
 def require_open_registration() -> None:

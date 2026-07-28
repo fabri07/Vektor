@@ -67,6 +67,12 @@ async def _tenant_con_vertical_legacy(session: AsyncSession) -> Tenant:
     `PRAGMA ignore_check_constraints` es de conexión y la fixture `db_session`
     comparte una sola conexión (StaticPool): se restaura en `finally` sí o sí,
     porque dejarla prendida desactivaría los CHECK del resto de la suite.
+
+    El `rollback()` del `finally` NO es decorativo: si el `commit()` falla con un
+    error real de base, la sesión queda en *pending-rollback* y el `execute` que
+    apaga el PRAGMA **también** explota — el PRAGMA quedaría prendido para todos
+    los tests siguientes del worker, en silencio, y la excepción del `finally`
+    taparía la original. El assert final convierte esa fuga en un fallo ruidoso.
     """
     tenant = await _tenant_sin_perfil(session)
     await session.execute(text("PRAGMA ignore_check_constraints=ON"))
@@ -83,7 +89,16 @@ async def _tenant_con_vertical_legacy(session: AsyncSession) -> Tenant:
         )
         await session.commit()
     finally:
+        if not session.is_active:
+            await session.rollback()
         await session.execute(text("PRAGMA ignore_check_constraints=OFF"))
+        prendido = (
+            await session.execute(text("PRAGMA ignore_check_constraints"))
+        ).scalar()
+        assert not prendido, (
+            "FUGA: el PRAGMA quedó prendido y los CHECK del resto de la suite "
+            "están desactivados"
+        )
     return tenant
 
 
