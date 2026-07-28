@@ -1,10 +1,11 @@
 """Test compuerta de `app/domain/verticals.py`.
 
 Parametrizado sobre `Vertical`: para cada vertical operativo, asegura que
-existen sus heurísticas, sus campos de vertical, su label, su rango de margen
-y su catálogo de categorías de producto. Este test vuelve imposible agregar un
-4º vertical a medias — y va a proteger todo lo que Task 2 y Task 3 construyen
-encima del enum.
+existen sus heurísticas, sus campos de vertical, su label, su rango de margen,
+su catálogo de categorías de producto, su tabla de aliases y su ruleset (y que
+el ruleset sea el SUYO, no el de otro vertical). Este test vuelve imposible
+agregar un 4º vertical a medias — y protege todo lo que Task 2 y Task 3
+construyen encima del enum.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from app.domain.product_categories import PRODUCT_CATEGORY_LABELS
+from app.domain.product_categories import _ALIASES, PRODUCT_CATEGORY_LABELS
 from app.domain.verticals import (
     OPERATIONAL_VERTICALS,
     VERTICAL_LABELS,
@@ -26,6 +27,7 @@ from app.domain.verticals import (
     try_parse_vertical,
 )
 from app.heuristics.insight_templates import _MARGIN_RANGES
+from app.state.business_state_service import _RULESET_INSTANCES
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 _HEURISTICS_DIR = _BACKEND_ROOT / "app" / "application" / "data" / "heuristics"
@@ -85,6 +87,37 @@ class TestCatalogoCompleto:
         assert vertical in PRODUCT_CATEGORY_LABELS
         assert PRODUCT_CATEGORY_LABELS[vertical]
 
+    @pytest.mark.parametrize("vertical", list(Vertical))
+    def test_tiene_ruleset_y_es_el_suyo(self, vertical: Vertical) -> None:
+        """`_RULESET_INSTANCES` se accede INDEXADO en los dos caminos de
+        `business_state_service` (`compute` y `_deserialize_state`): un vertical
+        sin entrada revienta con `KeyError` adentro de `compute()`, o sea
+        dashboard + health score + chat + el job de Celery a la vez, para el
+        primer tenant del rubro nuevo. `mypy` no lo agarra: a un dict literal al
+        que le falta una clave no le falta un tipo.
+
+        El segundo assert es el que vale: sin él, pegar `KioscoHeuristicRuleSet()`
+        bajo la clave nueva (el copy-paste natural) pasaría igual, y el rubro
+        nuevo se scorearía con los benchmarks de kiosco — exactamente el bug que
+        esta rama vino a matar."""
+        assert vertical in _RULESET_INSTANCES, (
+            f"{vertical.value}: falta su ruleset en "
+            "`app/state/business_state_service._RULESET_INSTANCES`"
+        )
+        ruleset = _RULESET_INSTANCES[vertical]
+        assert ruleset.vertical is vertical
+        assert ruleset.get_rules().vertical is vertical
+
+    @pytest.mark.parametrize("vertical", list(Vertical))
+    def test_tiene_aliases_de_categoria(self, vertical: Vertical) -> None:
+        """`_ALIASES` se accede con `.get(vertical, {})`: un vertical sin entrada
+        no revienta — normaliza TODO a `OTHER` en silencio, que es peor."""
+        assert vertical in _ALIASES, (
+            f"{vertical.value}: falta su tabla de aliases en "
+            "`app/domain/product_categories._ALIASES`"
+        )
+        assert _ALIASES[vertical]
+
     def test_operational_verticals_coincide_con_el_enum(self) -> None:
         assert {v.value for v in Vertical} == OPERATIONAL_VERTICALS
 
@@ -101,6 +134,8 @@ class TestParseVertical:
         "raw",
         [
             "kiosco",  # código corto legado — NO es un alias
+            "almacen",  # ídem
+            "decoracion",  # ídem
             "otros",  # valor de RequestedVertical, no de Vertical
             "",
             "  ",

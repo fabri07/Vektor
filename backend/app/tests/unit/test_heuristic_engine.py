@@ -6,15 +6,20 @@ test_async_override_applies usa SQLite in-memory para verificar que
 los overrides almacenados en business_heuristic_overrides se aplican correctamente.
 """
 
+import json
+import shutil
 import uuid
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import app.persistence.models  # noqa: F401 — registra todos los modelos en Base
+from app.application.agents.shared import heuristic_engine
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
-from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
+from app.domain.verticals import Vertical
 from app.persistence.db.base import Base
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.tenant import Tenant
@@ -117,12 +122,47 @@ def test_cash_critical():
     assert config.is_cash_critical(5) is False  # exactamente en el límite, no es crítico
 
 
-@pytest.mark.parametrize("raw", ["ferreteria", "kiosco", "almacen", "decoracion"])
-def test_unknown_business_type_raises(raw: str):
-    """Un rubro desconocido —o un alias histórico— ya NO cae al perfil de kiosco:
-    el vertical se parsea en el borde y levanta."""
-    with pytest.raises(UnknownVerticalError):
-        HeuristicEngine.get(parse_vertical(raw))
+def test_json_faltante_levanta_en_vez_de_servir_el_de_otro_rubro(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """El JSON del rubro es un contrato de deploy: si falta, `get` levanta.
+
+    Esto es lo que reemplazó al viejo `_load_default` con fallback a kiosco. NO
+    se prueba con `HeuristicEngine.get(parse_vertical("kiosco"))`: ahí la
+    excepción la tira `parse_vertical` al evaluar el argumento y el SUT ni
+    siquiera se ejecuta — el test quedaría verde aunque se borrara el cuerpo
+    entero de `get`. El rechazo del alias legado vive en `test_verticals.py`,
+    donde sí mide a `parse_vertical`.
+
+    El directorio temporal tiene el JSON de kiosco y NO el de limpieza a
+    propósito: con un directorio vacío, un `get` que volviera a caer al JSON de
+    kiosco levantaría igual (por el archivo de destino, que tampoco estaría) y
+    el test pasaría por la razón equivocada. Así, un fallback silencioso
+    devuelve el config de kiosco y el test lo caza.
+    """
+    shutil.copy(
+        heuristic_engine.DATA_DIR / f"{Vertical.KIOSCO_ALMACEN.value}.json",
+        tmp_path / f"{Vertical.KIOSCO_ALMACEN.value}.json",
+    )
+    monkeypatch.setattr(heuristic_engine, "DATA_DIR", tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        HeuristicEngine.get(Vertical.LIMPIEZA)
+
+
+def test_json_incompleto_levanta(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Los sub-configs no tienen defaults a propósito (los que había eran los de
+    kiosco): a un JSON con una clave-hoja faltante ya no se le inyectan los
+    umbrales de otro rubro en silencio, pydantic lo grita."""
+    completo = json.loads(
+        (heuristic_engine.DATA_DIR / f"{Vertical.KIOSCO_ALMACEN.value}.json").read_text()
+    )
+    del completo["margin"]["net_expected_min"]
+    (tmp_path / f"{Vertical.KIOSCO_ALMACEN.value}.json").write_text(json.dumps(completo))
+    monkeypatch.setattr(heuristic_engine, "DATA_DIR", tmp_path)
+
+    with pytest.raises(ValidationError):
+        HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
 
 
 # ── Test asíncrono con override en BD ────────────────────────────────────────

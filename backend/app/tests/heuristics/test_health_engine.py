@@ -11,13 +11,16 @@ Formula v2: cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
-from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
+from app.domain.verticals import Vertical
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
+from app.heuristics.verticals import loader
 from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
 
@@ -259,12 +262,39 @@ def test_vertical_json_loader_reads_complete_config() -> None:
     assert config.supplier.stockout_sensitivity == "muy_alta"
 
 
-@pytest.mark.parametrize("raw", ["vertical_inexistente", "kiosco", None])
-def test_vertical_json_loader_raises_for_unknown_vertical(raw: str | None) -> None:
-    """Sin fallback: un vertical desconocido (o el código corto legado) levanta
-    en vez de scorear el negocio con los benchmarks de kiosco."""
-    with pytest.raises(UnknownVerticalError):
-        load_vertical_heuristics(parse_vertical(raw))
+def test_vertical_json_loader_raises_instead_of_serving_another_vertical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sin fallback: si falta el JSON del rubro, el loader propaga en vez de
+    scorear el negocio con los benchmarks de otro.
+
+    NO se prueba con `load_vertical_heuristics(parse_vertical("kiosco"))`: ahí
+    la excepción la tira `parse_vertical` al evaluar el argumento y el loader ni
+    se ejecuta — el test quedaría verde aunque se borrara su cuerpo entero. El
+    rechazo del código corto legado se mide en `test_verticals.py`, donde el SUT
+    ES `parse_vertical`.
+
+    El temporal tiene el JSON de kiosco y NO el de limpieza a propósito: con un
+    directorio vacío, un loader que volviera a caer a kiosco levantaría igual
+    (por el archivo destino, que tampoco estaría) y el test pasaría por la razón
+    equivocada.
+
+    El `cache_clear()` de los dos lados es obligatorio: `load_vertical_heuristics`
+    tiene `lru_cache`, así que sin limpiar antes devolvería el config ya cargado
+    (verde por la razón equivocada) y sin limpiar después envenenaría al resto de
+    la suite con el directorio temporal.
+    """
+    shutil.copy(
+        loader._HEURISTICS_DIR / f"{Vertical.KIOSCO_ALMACEN.value}.json",
+        tmp_path / f"{Vertical.KIOSCO_ALMACEN.value}.json",
+    )
+    load_vertical_heuristics.cache_clear()
+    monkeypatch.setattr(loader, "_HEURISTICS_DIR", tmp_path)
+    try:
+        with pytest.raises(FileNotFoundError):
+            load_vertical_heuristics(Vertical.LIMPIEZA)
+    finally:
+        load_vertical_heuristics.cache_clear()
 
 
 # ── Modo cobertura de caja (sin saldo: cash_source="flujo") ───────────────────
