@@ -13,7 +13,17 @@ Qué imprime
    nunca alcanza su ``min_samples=5`` y los benchmarks data-driven dejan de
    computarse en silencio.
 3. Histograma de ``heuristic_rule_sets.vertical``.
-4. **Tenants SIN ``BusinessProfile``.** Ese número es el agujero de los signups
+4. Histograma de ``vertical_field_definitions.vertical_code`` — el catálogo base
+   de campos por rubro. ``field_definition_service`` filtra por IGUALDAD
+   (``VerticalFieldDefinition.vertical_code == vertical_code``), así que una fila
+   con el código corto no explota: devuelve **menos definiciones, en silencio**,
+   que es exactamente el modo de falla que este PR vino a borrar. La probabilidad
+   de que haya filas legadas es baja (``scripts/seed_vertical_fields.py`` deriva
+   el código del nombre de archivo y los tres JSON de
+   ``app/application/data/vertical_fields/`` ya usan códigos largos), pero la
+   corrida contra Neon es de UNA sola oportunidad: si no se pregunta acá, no nos
+   enteramos nunca.
+5. **Tenants SIN ``BusinessProfile``.** Ese número es el agujero de los signups
    viejos por Google (``google_oauth_service._create_social_user`` no crea
    perfil): hasta las Tasks 2-3 sobrevivían gracias a los fallbacks silenciosos
    a kiosco; ahora que el código parsea estricto, cada uno de esos tenants es un
@@ -27,9 +37,15 @@ que decidir a mano a qué rubro corresponde).
 
 Solo los desconocidos de ``business_profiles`` BLOQUEAN el deploy: es la única
 tabla sobre la que corren ``_verify_verticals_canonical`` (que aborta con
-``RuntimeError``) y el CHECK final. Un desconocido en las otras dos no corta el
-deploy, pero sí degrada en silencio los benchmarks data-driven, así que también
-se reporta.
+``RuntimeError``) y el CHECK final. Un desconocido en las otras tres no corta el
+deploy, pero sí degrada en silencio (benchmarks data-driven, catálogo de campos),
+así que también se reporta.
+
+**Este script INFORMA, no repara.** En particular
+``vertical_field_definitions`` NO entra al ``UPDATE`` de la migración: su clave
+lógica es compuesta (``vertical_code``, ``field_key``, ``entity_type``), así que
+una reescritura ciega podría colisionar con filas ya canónicas. Primero se mira
+el histograma; si aparece algo, se decide a mano.
 
 ``heuristic_rule_sets.vertical = 'ALL'`` NO es un código roto: es el ruleset base
 "para todos los verticales" que sembró la migración inicial
@@ -81,10 +97,19 @@ SENTINELAS_POR_TABLA: dict[str, frozenset[str]] = {
 #: (etiqueta, tabla, columna, ¿un desconocido acá bloquea el deploy?). Solo
 #: ``business_profiles`` bloquea: es la única tabla que miran
 #: ``_verify_verticals_canonical`` y el CHECK de la migración.
+#:
+#: ``vertical_field_definitions`` se REPORTA pero la migración NO la reescribe
+#: (clave lógica compuesta — ver docstring del módulo).
 VERTICAL_COLUMNS: tuple[tuple[str, str, str, bool], ...] = (
     ("business_profiles.vertical_code", "business_profiles", "vertical_code", True),
     ("analytics_events.vertical_code", "analytics_events", "vertical_code", False),
     ("heuristic_rule_sets.vertical", "heuristic_rule_sets", "vertical", False),
+    (
+        "vertical_field_definitions.vertical_code",
+        "vertical_field_definitions",
+        "vertical_code",
+        False,
+    ),
 )
 
 
@@ -182,9 +207,10 @@ async def run_report(session: AsyncSession) -> None:
 
     if no_bloqueantes:
         print(
-            "\n  NO bloquea el deploy, pero conviene revisarlo: códigos desconocidos en\n"
-            "  las tablas analíticas. La migración no los adivina (no-invention) y\n"
-            "  quedan fuera de las muestras de compute_margin_benchmark:"
+            "\n  NO bloquea el deploy, pero conviene revisarlo: códigos desconocidos\n"
+            "  fuera de business_profiles. La migración no los adivina (no-invention);\n"
+            "  degradan en silencio (muestras de compute_margin_benchmark, catálogo de\n"
+            "  campos por rubro). Decidí a mano qué hacer con cada uno:"
         )
         for item in no_bloqueantes:
             print(f"    - {item}")
