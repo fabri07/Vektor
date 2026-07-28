@@ -24,6 +24,9 @@ import pandas as pd
 import pytest
 
 from app.application.services.facts_service import (
+    SOBRESTOCK_DIAS_WARNING,
+    VENTAS_DROP_CRITICAL,
+    VENTAS_DROP_WARNING,
     FactsService,
     Period,
     Provenance,
@@ -71,11 +74,12 @@ class FakeProvider:
 
 
 def _service(sales_rows: list[dict], expenses_rows: list[dict] | None = None,
-             products_rows: list[dict] | None = None) -> FactsService:
+             products_rows: list[dict] | None = None,
+             thresholds: SeverityThresholds | None = KIOSCO_THRESHOLDS) -> FactsService:
     sales = pd.DataFrame(sales_rows, columns=_SALES_COLS)
     expenses = pd.DataFrame(expenses_rows or [], columns=_EXPENSES_COLS)
     products = pd.DataFrame(products_rows or [], columns=_PRODUCTS_COLS)
-    return FactsService(FakeProvider(sales, expenses, products), KIOSCO_THRESHOLDS)
+    return FactsService(FakeProvider(sales, expenses, products), thresholds)
 
 
 @pytest.fixture
@@ -429,3 +433,93 @@ def test_caja_y_fiado_sin_datos_tambien_son_none():
     assert caja.provenance == Provenance.EMPTY and caja.value is None
     assert fiado.provenance == Provenance.EMPTY and fiado.value is None
     assert caja.confidence == 0.0 and fiado.confidence == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVICIO SIN UMBRALES DE VERTICAL — `SeverityThresholds` ya no trae los de
+# kiosco de default, así que `FactsService(provider)` (sin umbrales) es un estado
+# legítimo: el caller no sabe el rubro. La decisión clavada es:
+#   · margen NETO  → depende del vertical  ⇒ SIN severity (no se hereda otro rubro)
+#   · ventas / sobrestock → NO dependen del vertical ⇒ siguen con sus umbrales,
+#     que viven como constantes de módulo
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.fixture
+def svc_sin_umbrales():
+    """Mismo dataset que `svc`, pero construido SIN `SeverityThresholds`."""
+    sales = pd.DataFrame([
+        {"sale_date": TODAY, "amount_ars": 10000, "cost_ars": 6000,
+         "payment_method": "cash", "provenance": "REAL"},
+    ])
+    expenses = pd.DataFrame([
+        {"expense_date": TODAY, "amount_ars": 9900, "category": "RENT",
+         "expense_type": "OPEX", "provenance": "REAL"},
+    ])
+    products = pd.DataFrame([], columns=_PRODUCTS_COLS)
+    return FactsService(FakeProvider(sales, expenses, products))
+
+
+def test_margen_neto_sin_umbrales_no_lleva_severity(svc_sin_umbrales):
+    # Margen 1% — con los umbrales de kiosco sería "critical". Sin vertical no hay
+    # con qué compararlo: el hecho sale SIN severity antes que con la severidad de
+    # otro rubro (no-invention).
+    f = svc_sin_umbrales.margen_neto("t", P30)
+    assert f.value == 1.0
+    assert f.severity is None
+
+
+def test_margen_neto_con_umbrales_si_lleva_severity():
+    # Contraparte: el MISMO dato, con los umbrales del vertical, sí se clasifica.
+    # (Si no fuera así, el test de arriba pasaría por la razón equivocada.)
+    svc_kiosco = _service(
+        sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": 6000,
+                     "payment_method": "cash", "provenance": "REAL"}],
+        expenses_rows=[{"expense_date": TODAY, "amount_ars": 9900, "category": "RENT",
+                        "expense_type": "OPEX", "provenance": "REAL"}],
+    )
+    assert svc_kiosco.margen_neto("t", P30).severity == "critical"
+
+
+@pytest.mark.parametrize(
+    ("caida_pct", "severity_esperada"),
+    [
+        (VENTAS_DROP_CRITICAL - 5.0, "critical"),   # peor que el piso crítico
+        (VENTAS_DROP_WARNING - 5.0, "warning"),     # entre warning y critical
+        (VENTAS_DROP_WARNING + 5.0, None),          # caída tolerable
+    ],
+)
+def test_ventas_sin_umbrales_usa_las_constantes_de_modulo(caida_pct, severity_esperada):
+    """Los umbrales de caída de ventas NO dependen del rubro: sin
+    `SeverityThresholds` siguen aplicando desde las constantes del módulo."""
+    anterior = 100000.0
+    actual = anterior * (1.0 + caida_pct / 100.0)
+    svc = _service(
+        sales_rows=[
+            {"sale_date": TODAY, "amount_ars": actual, "cost_ars": 0,
+             "payment_method": "cash", "provenance": "REAL"},
+            {"sale_date": TODAY - timedelta(days=40), "amount_ars": anterior, "cost_ars": 0,
+             "payment_method": "cash", "provenance": "REAL"},
+        ],
+        thresholds=None,
+    )
+    f = svc.ventas_periodo("t", P30)
+    assert f.variation_pct == pytest.approx(caida_pct)
+    assert f.severity == severity_esperada
+
+
+def test_sobrestock_sin_umbrales_usa_la_constante_de_modulo():
+    """Los días de sobrestock tampoco dependen del rubro. `congelado` supera la
+    constante por un día; `al_limite` está justo en el borde y NO se flaggea."""
+    svc = _service(
+        sales_rows=[],
+        products_rows=[
+            {"product_id": "congelado", "stock_units": 10, "unit_cost_ars": 100,
+             "last_sold_date": TODAY - timedelta(days=SOBRESTOCK_DIAS_WARNING + 1),
+             "first_seen_date": None, "provenance": "REAL"},
+            {"product_id": "al_limite", "stock_units": 10, "unit_cost_ars": 100,
+             "last_sold_date": TODAY - timedelta(days=SOBRESTOCK_DIAS_WARNING),
+             "first_seen_date": None, "provenance": "REAL"},
+        ],
+        thresholds=None,
+    )
+    ids = {f.fact_id for f in svc.sobrestock("t", today=TODAY)}
+    assert ids == {"sobrestock_congelado"}

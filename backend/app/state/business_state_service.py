@@ -10,8 +10,11 @@ reaches score computation directly.
 
 Cache strategy
 --------------
-  Redis key  : business_state:{tenant_id}        — JSON blob, TTL 24 h
-  Redis key  : last_inputs_hash:{tenant_id}      — SHA-256 of input fingerprint, TTL 24 h
+  Redis key  : business_state:v2:{tenant_id}     — JSON blob, TTL 24 h
+  Redis key  : last_inputs_hash:v2:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
+
+  El prefijo de versión (`v2:`) se bumpea cuando cambia el FORMATO del blob, para
+  no leer con el código nuevo lo que escribió el viejo. Ver `_cache_key`.
 
 On every call:
   1. Compute inputs fingerprint (sale_count, expense_count, product_count, profile.updated_at).
