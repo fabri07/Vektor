@@ -9,6 +9,17 @@
  *
  * El reenvío responde SIEMPRE lo mismo, exista o no una solicitud con ese
  * email: distinguir los casos sería un oráculo de "este correo pidió acceso".
+ *
+ * **Nunca es un callejón sin salida.** Esta pantalla afirma que mandamos un
+ * mail, y hay un caso en el que eso no es cierto sin que nadie pueda saberlo
+ * desde acá: si el anti-bot del backend marcó el envío (el honeypot lo llena a
+ * veces el autofill del navegador), no se persistió ninguna solicitud y la
+ * respuesta fue el mismo 201 genérico. Distinguirlo del lado del cliente
+ * rompería la neutralidad de enumeración, así que no se intenta — pero la
+ * salida está siempre visible: volver a mandar el formulario, que sirve igual
+ * para el falso positivo del anti-bot, para el mail que se perdió y para el
+ * prefill de Google que venció. Por el mismo motivo el reenvío es reusable:
+ * cuando el cooldown termina, el botón vuelve.
  */
 
 import { Suspense, useEffect, useState } from "react";
@@ -28,7 +39,16 @@ function SolicitudEnviada() {
   const [restante, setRestante] = useState(RESEND_COOLDOWN);
 
   useEffect(() => {
-    if (restante <= 0) return;
+    if (restante <= 0) {
+      /*
+       * El contador dice "podés pedir otro en N segundos". Cumplir esa promesa
+       * es devolver el botón, no solo dejar de contar: `"enviado"` es la
+       * primera rama del render y sin esto queda terminal — el visitante ve un
+       * cartel de éxito, el contador llega a cero, y no aparece nada.
+       */
+      setEstado((e) => (e === "enviado" ? "idle" : e));
+      return;
+    }
     const id = setTimeout(() => setRestante((c) => c - 1), 1000);
     return () => clearTimeout(id);
   }, [restante]);
@@ -45,7 +65,8 @@ function SolicitudEnviada() {
     }
   }
 
-  const puedeReenviar = restante <= 0 && estado !== "enviando" && !!email;
+  const hayEmail = !!email;
+  const puedeReenviar = restante <= 0 && estado !== "enviando" && hayEmail;
 
   return (
     <div className="space-y-6 text-center">
@@ -86,7 +107,18 @@ function SolicitudEnviada() {
       </div>
 
       <div className="rounded-lg border border-vk-border-w bg-vk-bg-light px-5 py-4 text-sm text-vk-text-secondary">
-        {estado === "enviado" ? (
+        {!hayEmail ? (
+          /*
+           * Sin `?email` el reenvío no tiene a dónde ir (un bookmark, un
+           * refresh que perdió la query, el historial). Un botón gris para
+           * siempre y sin explicación es peor que no tenerlo: acá se dice por
+           * qué, y la salida de abajo sigue sirviendo.
+           */
+          <p>
+            Para reenviarte el link necesitamos saber a qué dirección lo mandamos, y
+            esta pantalla ya no la tiene.
+          </p>
+        ) : estado === "enviado" ? (
           <>
             <p className="font-medium text-vk-success">
               Listo. Si hay una solicitud pendiente de confirmar con ese correo, te
@@ -129,6 +161,24 @@ function SolicitudEnviada() {
             </button>
           </>
         )}
+
+        {/*
+          Salida permanente, en todas las ramas. Es lo único que rescata al
+          visitante cuyo envío quedó descartado por el anti-bot: para él no hay
+          solicitud que reenviar, y el reenvío le va a responder que sí igual
+          (neutralidad de enumeración). Volver a mandar el formulario es
+          idempotente del lado del backend y reemite el token.
+        */}
+        <p className="mt-3 border-t border-vk-border-w pt-3 text-vk-text-muted">
+          ¿Pasaron unos minutos y no llegó nada?{" "}
+          <Link
+            href="/solicitar-acceso"
+            className="font-medium text-vk-blue hover:text-vk-blue-hover hover:underline"
+          >
+            Volvé a mandar el formulario
+          </Link>
+          .
+        </p>
       </div>
 
       <p className="text-sm text-vk-text-muted">
