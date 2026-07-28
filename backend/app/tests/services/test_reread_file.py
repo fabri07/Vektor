@@ -48,6 +48,7 @@ from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
 )
+from app.tests.conftest import add_business_profile
 
 # CSV original (2 filas). El reread vuelve a leer ESTE contenido salvo cuando el
 # test pide una variante (fila extra).
@@ -75,6 +76,8 @@ async def tenant(db_session: AsyncSession) -> Tenant:
         status="ACTIVE",
     )
     db_session.add(t)
+    await db_session.flush()
+    await add_business_profile(db_session, t.tenant_id)
     await db_session.commit()
     return t
 

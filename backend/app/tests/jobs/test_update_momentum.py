@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.domain.verticals import Vertical
 from app.jobs.update_momentum import _current_week, compute_trend_label, run_momentum_update
 from app.persistence.db.base import Base
 from app.persistence.models.business import BusinessProfile, MomentumProfile
@@ -264,7 +265,7 @@ async def test_value_protected_increases_with_margin_improvement(session: AsyncS
     # Business profile with monthly sales estimate
     bp = BusinessProfile(
         tenant_id=tenant.tenant_id,
-        vertical_code="kiosco",
+        vertical_code=Vertical.KIOSCO_ALMACEN.value,
         data_mode="M1",
         data_confidence="HIGH",
         monthly_sales_estimate_ars=Decimal("100000"),

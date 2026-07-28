@@ -34,6 +34,8 @@ from passlib.context import CryptContext
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.domain.verticals import Vertical
+
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -155,7 +157,7 @@ async def _seed_kiosco(session: AsyncSession) -> None:
         BusinessProfile(
             profile_id=uuid.uuid4(),
             tenant_id=tenant_id,
-            vertical_code="kiosco",
+            vertical_code=Vertical.KIOSCO_ALMACEN.value,
             data_mode="M1",
             data_confidence="HIGH",
             monthly_sales_estimate_ars=Decimal("3200000"),
@@ -481,7 +483,7 @@ async def _seed_limpieza(session: AsyncSession) -> None:
         BusinessProfile(
             profile_id=uuid.uuid4(),
             tenant_id=tenant_id,
-            vertical_code="limpieza",
+            vertical_code=Vertical.LIMPIEZA.value,
             data_mode="M1",
             data_confidence="MEDIUM",
             monthly_sales_estimate_ars=Decimal("2800000"),
@@ -851,7 +853,7 @@ async def _seed_deco(session: AsyncSession) -> None:
         BusinessProfile(
             profile_id=uuid.uuid4(),
             tenant_id=tenant_id,
-            vertical_code="decoracion_hogar",
+            vertical_code=Vertical.DECORACION_HOGAR.value,
             data_mode="M0",
             data_confidence="LOW",
             monthly_sales_estimate_ars=Decimal("1800000"),

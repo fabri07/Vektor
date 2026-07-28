@@ -51,6 +51,7 @@ from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
 )
+from app.tests.conftest import add_business_profile
 
 
 def _stock_summary(rows: list[dict[str, object]]) -> dict[str, object]:
@@ -327,6 +328,8 @@ async def test_single_sheet_two_rows_same_name_same_run_creates_one_product(
             status="ACTIVE",
         )
         session.add(tenant)
+        await session.flush()
+        await add_business_profile(session, tenant.tenant_id)
         await session.commit()
 
         summary = _stock_summary(
@@ -370,6 +373,8 @@ async def test_multisheet_two_rows_same_name_same_run_creates_one_product(
             status="ACTIVE",
         )
         session.add(tenant)
+        await session.flush()
+        await add_business_profile(session, tenant.tenant_id)
         await session.commit()
 
         summary = _multisheet_product_summary(
@@ -726,6 +731,8 @@ async def test_same_name_in_other_tenant_is_not_a_candidate(
         status="ACTIVE",
     )
     db_session.add(other_tenant)
+    await db_session.flush()
+    await add_business_profile(db_session, other_tenant.tenant_id)
     await db_session.commit()
     # 2 productos "Coca Cola" en el OTRO tenant (colisión ajena, no debe pesar).
     await _create_two_active_products_same_name(db_session, other_tenant.tenant_id)

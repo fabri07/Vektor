@@ -11,6 +11,8 @@ Required tests:
 import pytest
 from httpx import AsyncClient
 
+from app.domain.verticals import Vertical
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 _REGISTER_PAYLOAD = {
@@ -18,11 +20,11 @@ _REGISTER_PAYLOAD = {
     "password": "Secure123",
     "full_name": "Juan Pérez",
     "business_name": "Kiosco El Rápido",
-    "vertical_code": "kiosco",
+    "vertical_code": Vertical.KIOSCO_ALMACEN.value,
 }
 
 _ONBOARDING_PAYLOAD = {
-    "vertical_code": "kiosco",
+    "vertical_code": Vertical.KIOSCO_ALMACEN.value,
     "weekly_sales_estimate_ars": 50000,
     "monthly_inventory_cost_ars": 80000,
     "monthly_fixed_expenses_ars": 30000,
@@ -123,7 +125,7 @@ class TestOnboarding:
         assert resp_after.status_code == 200
         after_data = resp_after.json()
         assert after_data["completed"] is True
-        assert after_data["vertical_code"] == "kiosco"
+        assert after_data["vertical_code"] == Vertical.KIOSCO_ALMACEN.value
         assert after_data["data_completeness_score"] == 100
 
 

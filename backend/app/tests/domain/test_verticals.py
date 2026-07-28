@@ -74,36 +74,19 @@ class TestCatalogoCompleto:
         assert vertical in VERTICAL_LABELS
         assert VERTICAL_LABELS[vertical].strip()
 
-    @pytest.mark.parametrize(
-        "vertical",
-        [
-            pytest.param(
-                Vertical.KIOSCO_ALMACEN,
-                marks=pytest.mark.xfail(
-                    reason=(
-                        "_MARGIN_RANGES en app/heuristics/insight_templates.py "
-                        "todavía usa el código corto 'kiosco' en vez de "
-                        "'kiosco_almacen'; se re-keyea en Task 2"
-                    ),
-                    strict=True,
-                ),
-            ),
-            Vertical.DECORACION_HOGAR,
-            Vertical.LIMPIEZA,
-        ],
-    )
+    @pytest.mark.parametrize("vertical", list(Vertical))
     def test_tiene_rango_de_margen(self, vertical: Vertical) -> None:
-        assert vertical.value in _MARGIN_RANGES
+        assert vertical in _MARGIN_RANGES
 
     @pytest.mark.parametrize("vertical", list(Vertical))
     def test_tiene_catalogo_de_categorias_de_producto(
         self, vertical: Vertical
     ) -> None:
-        assert vertical.value in PRODUCT_CATEGORY_LABELS
-        assert PRODUCT_CATEGORY_LABELS[vertical.value]
+        assert vertical in PRODUCT_CATEGORY_LABELS
+        assert PRODUCT_CATEGORY_LABELS[vertical]
 
     def test_operational_verticals_coincide_con_el_enum(self) -> None:
-        assert OPERATIONAL_VERTICALS == {v.value for v in Vertical}
+        assert {v.value for v in Vertical} == OPERATIONAL_VERTICALS
 
 
 class TestParseVertical:

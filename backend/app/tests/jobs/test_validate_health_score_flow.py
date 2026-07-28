@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.domain.verticals import Vertical
 from app.persistence.db.base import Base
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -99,7 +100,7 @@ async def kiosco_profile(session: AsyncSession, tenant: Tenant) -> BusinessProfi
     profile = BusinessProfile(
         profile_id=uuid.uuid4(),
         tenant_id=tenant.tenant_id,
-        vertical_code="kiosco",
+        vertical_code=Vertical.KIOSCO_ALMACEN.value,
         data_mode="M0",
         data_confidence="MEDIUM",
         monthly_sales_estimate_ars=Decimal("100000"),

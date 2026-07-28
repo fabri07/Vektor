@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import auth_service
+from app.domain.verticals import Vertical
 from app.persistence.models.auth_token import EmailVerificationToken, PasswordResetToken
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -32,7 +33,7 @@ _REGISTER_PAYLOAD = {
     "password": "Secure123",
     "full_name": "Juan Pérez",
     "business_name": "Kiosco El Rápido",
-    "vertical_code": "kiosco",
+    "vertical_code": Vertical.KIOSCO_ALMACEN.value,
 }
 
 

@@ -27,9 +27,22 @@ from app.application.services.facts_service import (
     FactsService,
     Period,
     Provenance,
+    SeverityThresholds,
 )
+from app.domain.verticals import Vertical
+from app.heuristics.verticals.loader import load_margin_benchmark
 
 TODAY = date(2026, 6, 30)  # ancla determinista para los tests
+
+# Umbrales EXPLÍCITOS del vertical: `SeverityThresholds` ya no trae los de kiosco
+# de default, así que el servicio de prueba declara cuál es su rubro. Salen del
+# MISMO benchmark JSON que usa el health engine (igual que
+# `facts_provider.thresholds_for_vertical`), no de números copiados a mano.
+_KIOSCO_MARGIN = load_margin_benchmark(Vertical.KIOSCO_ALMACEN)
+KIOSCO_THRESHOLDS = SeverityThresholds(
+    margen_neto_floor=float(_KIOSCO_MARGIN.warning_below) * 100.0,
+    margen_neto_critical=float(_KIOSCO_MARGIN.critical_below) * 100.0,
+)
 
 _SALES_COLS = ["sale_date", "amount_ars", "cost_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
@@ -62,7 +75,7 @@ def _service(sales_rows: list[dict], expenses_rows: list[dict] | None = None,
     sales = pd.DataFrame(sales_rows, columns=_SALES_COLS)
     expenses = pd.DataFrame(expenses_rows or [], columns=_EXPENSES_COLS)
     products = pd.DataFrame(products_rows or [], columns=_PRODUCTS_COLS)
-    return FactsService(FakeProvider(sales, expenses, products))
+    return FactsService(FakeProvider(sales, expenses, products), KIOSCO_THRESHOLDS)
 
 
 @pytest.fixture
@@ -99,7 +112,7 @@ def svc():
          "last_sold_date": TODAY - timedelta(days=200),
          "first_seen_date": TODAY - timedelta(days=300), "provenance": "REAL"},  # sobrestock
     ])
-    return FactsService(FakeProvider(sales, expenses, products))
+    return FactsService(FakeProvider(sales, expenses, products), KIOSCO_THRESHOLDS)
 
 
 P30 = Period.last_n_days(30, today=TODAY)

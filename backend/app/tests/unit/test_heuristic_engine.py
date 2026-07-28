@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.persistence.models  # noqa: F401 — registra todos los modelos en Base
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
 from app.persistence.db.base import Base
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.tenant import Tenant
@@ -46,7 +47,7 @@ async def sqlite_session(sqlite_engine):
 
 
 def test_default_kiosco_loads():
-    config = HeuristicEngine.get("kiosco_almacen")
+    config = HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
     assert config.margin.net_expected_min == 0.12
     assert config.margin.net_expected_max == 0.18
     assert config.cash_health.critical_days_below == 5
@@ -54,7 +55,7 @@ def test_default_kiosco_loads():
 
 
 def test_default_limpieza_loads():
-    config = HeuristicEngine.get("limpieza")
+    config = HeuristicEngine.get(Vertical.LIMPIEZA)
     assert config.margin.net_expected_min == 0.18
     assert config.margin.net_expected_max == 0.28
     assert config.cash_health.healthy_days_min == 20
@@ -62,7 +63,7 @@ def test_default_limpieza_loads():
 
 
 def test_default_decoracion_loads():
-    config = HeuristicEngine.get("decoracion_hogar")
+    config = HeuristicEngine.get(Vertical.DECORACION_HOGAR)
     assert config.margin.net_expected_min == 0.25
     assert config.margin.net_expected_max == 0.45
     assert config.cash_health.healthy_days_min == 30
@@ -70,7 +71,7 @@ def test_default_decoracion_loads():
 
 
 def test_prompt_fragment_contains_numbers():
-    config = HeuristicEngine.get("kiosco_almacen")
+    config = HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
     fragment = config.to_prompt_fragment()
     assert "%" in fragment
     assert any(ch.isdigit() for ch in fragment)
@@ -80,7 +81,7 @@ def test_prompt_fragment_contains_numbers():
 
 
 def test_prompt_fragment_has_all_params():
-    config = HeuristicEngine.get("kiosco_almacen")
+    config = HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
     fragment = config.to_prompt_fragment()
     # Debe incluir días de cobertura de caja
     assert "días de cobertura" in fragment
@@ -99,7 +100,7 @@ def test_overstock_detection():
     decoracion_hogar: rotation_days_max=180, threshold=180*2=360.
     400 > 360 → overstock. 250 < 360 → no overstock.
     """
-    config = HeuristicEngine.get("decoracion_hogar")
+    config = HeuristicEngine.get(Vertical.DECORACION_HOGAR)
     assert config.is_overstock(400) is True
     assert config.is_overstock(250) is False
     assert config.is_overstock(360) is False  # exactamente en el límite, no supera
@@ -110,19 +111,18 @@ def test_cash_critical():
     kiosco: critical_days_below=5.
     3 < 5 → crítico. 6 >= 5 → no crítico.
     """
-    config = HeuristicEngine.get("kiosco_almacen")
+    config = HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
     assert config.is_cash_critical(3) is True
     assert config.is_cash_critical(6) is False
     assert config.is_cash_critical(5) is False  # exactamente en el límite, no es crítico
 
 
-def test_unknown_business_type_uses_fallback():
-    """Un rubro desconocido ("ferreteria") carga sin error usando el fallback de kiosco."""
-    config = HeuristicEngine.get("ferreteria")
-    assert config is not None
-    # Fallback usa kiosco_almacen defaults
-    assert config.margin.net_expected_min == 0.12
-    assert config.inventory.rotation_days_min == 7
+@pytest.mark.parametrize("raw", ["ferreteria", "kiosco", "almacen", "decoracion"])
+def test_unknown_business_type_raises(raw: str):
+    """Un rubro desconocido —o un alias histórico— ya NO cae al perfil de kiosco:
+    el vertical se parsea en el borde y levanta."""
+    with pytest.raises(UnknownVerticalError):
+        HeuristicEngine.get(parse_vertical(raw))
 
 
 # ── Test asíncrono con override en BD ────────────────────────────────────────
@@ -156,7 +156,9 @@ async def test_async_override_applies(sqlite_session: AsyncSession) -> None:
     sqlite_session.add(override)
     await sqlite_session.commit()
 
-    config = await HeuristicEngine.get_async("kiosco_almacen", str(tenant_id), sqlite_session)
+    config = await HeuristicEngine.get_async(
+        Vertical.KIOSCO_ALMACEN, str(tenant_id), sqlite_session
+    )
 
     assert config.margin.net_expected_min == 0.30
     # El resto de los valores deben seguir siendo los defaults

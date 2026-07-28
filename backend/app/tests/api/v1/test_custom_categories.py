@@ -5,22 +5,17 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.business import BusinessProfile
-from app.persistence.models.tenant import Tenant
 
 _TODAY = str(date.today())
 
 
 @pytest.fixture
-async def _business_profile(db_session: AsyncSession, sample_tenant: Tenant) -> None:
-    # Las categorías custom viven en business_profiles.custom_fields; en prod el
-    # perfil siempre existe (onboarding). Los fixtures base no lo crean.
-    db_session.add(
-        BusinessProfile(tenant_id=sample_tenant.tenant_id, vertical_code="kiosco_almacen")
-    )
-    await db_session.commit()
+async def _business_profile(sample_business_profile: BusinessProfile) -> None:
+    # Las categorías custom viven en business_profiles.custom_fields; el perfil
+    # lo crea `sample_tenant` (en prod siempre existe, lo hace el alta).
+    return None
 
 
 @pytest.mark.asyncio

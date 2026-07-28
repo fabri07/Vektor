@@ -21,9 +21,11 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.config.settings import get_settings
+from app.domain.verticals import Vertical
 from app.main import create_app
 from app.persistence.db.base import Base
 from app.persistence.db.session import get_db_session
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.utils.security import create_access_token, hash_password
@@ -246,8 +248,41 @@ async def isolated_db_engine() -> AsyncGenerator[AsyncEngine, None]:
 # ── Sample entities ───────────────────────────────────────────────────────────
 
 
+async def add_business_profile(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    vertical: Vertical = Vertical.KIOSCO_ALMACEN,
+) -> BusinessProfile:
+    """Crea el `BusinessProfile` de un tenant armado a mano por un test.
+
+    Todo tenant real nace con perfil, y los servicios que necesitan el vertical
+    ya no asumen kiosco cuando falta: un fixture que crea un `Tenant` suelto
+    modela un estado imposible. Usar esto en vez de omitirlo.
+    """
+    profile = BusinessProfile(
+        profile_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        vertical_code=vertical.value,
+        data_mode="M0",
+        data_confidence="LOW",
+        onboarding_completed=False,
+    )
+    session.add(profile)
+    await session.flush()
+    return profile
+
+
 @pytest_asyncio.fixture
 async def sample_tenant(db_session: AsyncSession) -> Tenant:
+    """Tenant de prueba CON su `BusinessProfile` (vertical kiosco).
+
+    En producción todo tenant nace con perfil (lo crea el alta), así que un
+    tenant sin perfil es un estado roto; desde que se eliminaron los fallbacks
+    de vertical, los servicios que necesitan el rubro levantan en vez de asumir
+    kiosco. Los tests que quieren estimaciones propias MODIFICAN este perfil
+    (`sample_business_profile`) en vez de crear otro: `business_profiles.
+    tenant_id` es único.
+    """
     tenant = Tenant(
         tenant_id=uuid.uuid4(),
         legal_name="Kiosco El Rápido",
@@ -257,8 +292,32 @@ async def sample_tenant(db_session: AsyncSession) -> Tenant:
         status="ACTIVE",
     )
     db_session.add(tenant)
+    await db_session.flush()
+    db_session.add(
+        BusinessProfile(
+            profile_id=uuid.uuid4(),
+            tenant_id=tenant.tenant_id,
+            vertical_code=Vertical.KIOSCO_ALMACEN.value,
+            data_mode="M0",
+            data_confidence="LOW",
+            onboarding_completed=False,
+        )
+    )
     await db_session.commit()
     return tenant
+
+
+@pytest_asyncio.fixture
+async def sample_business_profile(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> BusinessProfile:
+    """El `BusinessProfile` que ya creó `sample_tenant`, para modificarlo."""
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    result = await db_session.execute(
+        _select(BusinessProfile).where(BusinessProfile.tenant_id == sample_tenant.tenant_id)
+    )
+    return result.scalar_one()
 
 
 @pytest_asyncio.fixture
@@ -302,6 +361,8 @@ async def auth_headers(
 
 @pytest_asyncio.fixture
 async def second_tenant(db_session: AsyncSession) -> Tenant:
+    """Segundo tenant (vertical limpieza) con su `BusinessProfile`, para los
+    tests de aislamiento entre negocios."""
     tenant = Tenant(
         tenant_id=uuid.uuid4(),
         legal_name="Limpieza Brillante",
@@ -311,6 +372,17 @@ async def second_tenant(db_session: AsyncSession) -> Tenant:
         status="ACTIVE",
     )
     db_session.add(tenant)
+    await db_session.flush()
+    db_session.add(
+        BusinessProfile(
+            profile_id=uuid.uuid4(),
+            tenant_id=tenant.tenant_id,
+            vertical_code=Vertical.LIMPIEZA.value,
+            data_mode="M0",
+            data_confidence="LOW",
+            onboarding_completed=False,
+        )
+    )
     await db_session.commit()
     return tenant
 

@@ -10,9 +10,12 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
+from app.domain.verticals import Vertical
 from app.heuristics.health_engine import calculate_health_score
-from app.heuristics.verticals.kiosco import BENCHMARK as KIOSCO_BENCHMARK
+from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
+
+KIOSCO_BENCHMARK = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -41,7 +44,7 @@ def _state(
     return BusinessState(
         snapshot_id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
-        vertical_code="kiosco",
+        vertical_code=Vertical.KIOSCO_ALMACEN.value,
         data_completeness_score=completeness,
         confidence_level=confidence,
         ruleset=KIOSCO_BENCHMARK,  # type: ignore[arg-type]  # test double / fixture

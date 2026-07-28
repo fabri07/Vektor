@@ -7,6 +7,7 @@ from app.application.agents.shared.risk_engine import (  # type: ignore[attr-def
     RiskLevel,
 )
 from app.application.agents.shared.schemas import ActionType
+from app.domain.verticals import Vertical
 
 
 def test_all_agents_importable():
@@ -71,7 +72,7 @@ def test_context_builder_respects_budget():
 
 
 def test_heuristic_to_prompt_fragment_is_numeric():
-    config = HeuristicEngine.get("kiosco_almacen")
+    config = HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
     fragment = config.to_prompt_fragment()
     assert "%" in fragment
     assert any(char.isdigit() for char in fragment)

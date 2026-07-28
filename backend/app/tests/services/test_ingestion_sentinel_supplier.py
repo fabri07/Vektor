@@ -18,6 +18,7 @@ import app.application.services.ingestion_import_service as importer
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
+from app.tests.conftest import add_business_profile
 
 
 def _purchase_summary(rows: list[dict]) -> dict:
@@ -40,6 +41,7 @@ async def _make_tenant(db_session: AsyncSession) -> Tenant:
     )
     db_session.add(t)
     await db_session.flush()
+    await add_business_profile(db_session, t.tenant_id)
     return t
 
 

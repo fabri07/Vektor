@@ -40,6 +40,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.verticals import Vertical
 from app.jobs.update_momentum import _current_week, run_momentum_update
 from app.persistence.models.business import MomentumProfile
 from app.persistence.models.product import Product
@@ -78,7 +79,7 @@ async def test_s1_kiosco_saludable(session: AsyncSession, fake_redis: FakeRedis)
     await make_profile(
         session,
         tenant.tenant_id,
-        "kiosco",
+        Vertical.KIOSCO_ALMACEN.value,
         monthly_sales=Decimal("1400000"),
         monthly_inventory=Decimal("180000"),
         monthly_fixed=Decimal("80000"),
@@ -127,7 +128,7 @@ async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedi
     await make_profile(
         session,
         tenant.tenant_id,
-        "kiosco",
+        Vertical.KIOSCO_ALMACEN.value,
         monthly_sales=Decimal("800000"),
         monthly_inventory=Decimal("160000"),
         monthly_fixed=Decimal("90000"),
@@ -213,7 +214,7 @@ async def test_s4_proveedor_unico(session: AsyncSession, fake_redis: FakeRedis) 
     await make_profile(
         session,
         tenant.tenant_id,
-        "kiosco",
+        Vertical.KIOSCO_ALMACEN.value,
         monthly_sales=Decimal("700000"),
         monthly_inventory=Decimal("100000"),
         monthly_fixed=Decimal("50000"),
@@ -256,7 +257,7 @@ async def test_s5_tenant_isolation(
     await make_profile(
         session,
         tenant_a.tenant_id,
-        "kiosco",
+        Vertical.KIOSCO_ALMACEN.value,
         monthly_sales=Decimal("1000000"),
         monthly_inventory=Decimal("200000"),
         monthly_fixed=Decimal("80000"),
@@ -362,7 +363,7 @@ async def test_s6_end_to_end(
             "password": "Secure123",
             "full_name": "E2E Test Owner",
             "business_name": "Kiosco E2E",
-            "vertical_code": "kiosco",
+            "vertical_code": Vertical.KIOSCO_ALMACEN.value,
         },
     )
     assert r.status_code == 201, r.text
@@ -383,7 +384,7 @@ async def test_s6_end_to_end(
         r = await client.post(
             "/api/v1/onboarding/submit",
             json={
-                "vertical_code": "kiosco",
+                "vertical_code": Vertical.KIOSCO_ALMACEN.value,
                 "weekly_sales_estimate_ars": "350000",
                 "monthly_inventory_cost_ars": "180000",
                 "monthly_fixed_expenses_ars": "80000",
@@ -437,7 +438,7 @@ async def test_s7_momentum_dos_semanas(session: AsyncSession, fake_redis: FakeRe
     await make_profile(
         session,
         tenant.tenant_id,
-        "kiosco",
+        Vertical.KIOSCO_ALMACEN.value,
         monthly_sales=Decimal("800000"),
         monthly_inventory=Decimal("150000"),
         monthly_fixed=Decimal("70000"),
@@ -599,7 +600,7 @@ async def test_s8_celery_task_run() -> None:
         await make_profile(
             setup_session,
             tenant.tenant_id,
-            "kiosco",
+            Vertical.KIOSCO_ALMACEN.value,
             monthly_sales=Decimal("900000"),
             monthly_inventory=Decimal("150000"),
             monthly_fixed=Decimal("60000"),

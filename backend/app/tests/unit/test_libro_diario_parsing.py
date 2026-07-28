@@ -27,6 +27,7 @@ from app.application.services.file_parsing import (
 )
 from app.application.services.ingestion_import_service import insert_confirmed_data
 from app.domain.expense_categories import classify_expense_with_vertical
+from app.domain.verticals import Vertical
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
@@ -256,17 +257,17 @@ def test_normalize_payment_method(raw: str | None, expected: str) -> None:
 @pytest.mark.parametrize(
     ("raw", "vertical", "code", "is_merch"),
     [
-        ("Bebidas", "kiosco_almacen", "INVENTORY", True),
-        ("Golosinas", None, "INVENTORY", True),  # fallback kiosco_almacen
-        ("Cigarrillos", "kiosco_almacen", "INVENTORY", True),
-        ("Textiles", "decoracion_hogar", "INVENTORY", True),
-        ("Mercadería", "kiosco_almacen", "INVENTORY", True),
-        ("Alquiler", "kiosco_almacen", "RENT", False),
-        ("Sueldos", "decoracion_hogar", "PAYROLL", False),
+        ("Bebidas", Vertical.KIOSCO_ALMACEN, "INVENTORY", True),
+        ("Golosinas", Vertical.KIOSCO_ALMACEN, "INVENTORY", True),
+        ("Cigarrillos", Vertical.KIOSCO_ALMACEN, "INVENTORY", True),
+        ("Textiles", Vertical.DECORACION_HOGAR, "INVENTORY", True),
+        ("Mercadería", Vertical.KIOSCO_ALMACEN, "INVENTORY", True),
+        ("Alquiler", Vertical.KIOSCO_ALMACEN, "RENT", False),
+        ("Sueldos", Vertical.DECORACION_HOGAR, "PAYROLL", False),
     ],
 )
 def test_classify_expense_with_vertical_merchandise(
-    raw: str, vertical: str | None, code: str, is_merch: bool
+    raw: str, vertical: Vertical, code: str, is_merch: bool
 ) -> None:
     got_code, _label, got_merch = classify_expense_with_vertical(raw, vertical)
     assert got_code == code
@@ -275,10 +276,12 @@ def test_classify_expense_with_vertical_merchandise(
 
 def test_classify_expense_with_vertical_preserves_label() -> None:
     # Categoría de producto → INVENTORY preservando el texto original.
-    code, label, merch = classify_expense_with_vertical("Bebidas", "kiosco_almacen")
+    code, label, merch = classify_expense_with_vertical("Bebidas", Vertical.KIOSCO_ALMACEN)
     assert (code, label, merch) == ("INVENTORY", "Bebidas", True)
     # Sin match en ningún catálogo → OTHER con label (comportamiento previo).
-    code, label, merch = classify_expense_with_vertical("Gasto rarísimo xyz", "kiosco_almacen")
+    code, label, merch = classify_expense_with_vertical(
+        "Gasto rarísimo xyz", Vertical.KIOSCO_ALMACEN
+    )
     assert code == "OTHER"
     assert label == "Gasto rarísimo xyz"
     assert merch is False

@@ -14,10 +14,16 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+import pytest
+
+from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
-from app.heuristics.verticals.kiosco import BENCHMARK as KIOSCO_BENCHMARK
 from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
+
+# Benchmark de kiosco desde la MISMA fuente que el engine (el módulo estático
+# app/heuristics/verticals/kiosco.py se eliminó: era una 4ª copia de los JSON).
+KIOSCO_BENCHMARK = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -33,7 +39,7 @@ def _product(stock: int, threshold: int) -> ProductSummary:
 
 
 def _make_state(
-    vertical_code: str = "kiosco",
+    vertical_code: str = Vertical.KIOSCO_ALMACEN.value,
     monthly_sales_est: Decimal = Decimal("100000"),
     monthly_inventory_cost_est: Decimal = Decimal("60000"),
     monthly_fixed_expenses_est: Decimal = Decimal("17000"),
@@ -244,20 +250,21 @@ def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
 
 
 def test_vertical_json_loader_reads_complete_config() -> None:
-    config = load_vertical_heuristics("kiosco")
+    config = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN)
 
-    assert config.business_type == "kiosco_almacen"
+    assert config.business_type == Vertical.KIOSCO_ALMACEN
     assert config.cash_health.healthy_days_min == 10
     assert config.margin.healthy_min == 0.18
     assert config.inventory.rotation_days_max == 21
     assert config.supplier.stockout_sensitivity == "muy_alta"
 
 
-def test_vertical_json_loader_falls_back_to_kiosco_for_unknown_vertical() -> None:
-    config = load_vertical_heuristics("vertical_inexistente")
-
-    assert config.business_type == "kiosco_almacen"
-    assert config.margin.healthy_max == 0.28
+@pytest.mark.parametrize("raw", ["vertical_inexistente", "kiosco", None])
+def test_vertical_json_loader_raises_for_unknown_vertical(raw: str | None) -> None:
+    """Sin fallback: un vertical desconocido (o el código corto legado) levanta
+    en vez de scorear el negocio con los benchmarks de kiosco."""
+    with pytest.raises(UnknownVerticalError):
+        load_vertical_heuristics(parse_vertical(raw))
 
 
 # ── Modo cobertura de caja (sin saldo: cash_source="flujo") ───────────────────

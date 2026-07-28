@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.application.agents.shared.schemas import AgentRequest, RiskLevel
+from app.domain.verticals import Vertical
 
 
 def _make_request(message: str = "test") -> AgentRequest:
@@ -45,7 +46,9 @@ async def test_overstock_kiosco():
         from app.application.agents.stock.agent import AgentStock
 
         agent = AgentStock()
-        result = await agent.detect_overstock("prod-1", rotation_days=50, business_type="kiosco")
+        result = await agent.detect_overstock(
+            "prod-1", rotation_days=50, business_type=Vertical.KIOSCO_ALMACEN.value
+        )
 
     assert result is True
 
@@ -58,7 +61,7 @@ async def test_overstock_decoracion():
 
         agent = AgentStock()
         result = await agent.detect_overstock(
-            "prod-1", rotation_days=350, business_type="decoracion"
+            "prod-1", rotation_days=350, business_type=Vertical.DECORACION_HOGAR.value
         )
 
     assert result is False

@@ -27,6 +27,7 @@ from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
+from app.tests.conftest import add_business_profile
 
 # ── A5: stock inicial de catálogo genera COGS ─────────────────────────────────
 
@@ -226,6 +227,8 @@ async def test_rc2_dual_bucket_no_duplicate_product_autoflush_off(
             status="ACTIVE",
         )
         session.add(tenant)
+        await session.flush()
+        await add_business_profile(session, tenant.tenant_id)
         await session.commit()
 
         await importer.insert_confirmed_data(

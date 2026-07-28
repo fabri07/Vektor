@@ -12,6 +12,8 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.verticals import Vertical
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
@@ -21,7 +23,16 @@ from app.tests.integration.conftest import make_tenant, make_user
 
 @pytest_asyncio.fixture
 async def tenant(session: AsyncSession):
-    return await make_tenant(session, legal_name="Kiosco Repair Test")
+    # Con perfil: la reparación reimporta productos vía `insert_confirmed_data`,
+    # que necesita el vertical del tenant (ya no lo asume kiosco).
+    t = await make_tenant(session, legal_name="Kiosco Repair Test")
+    session.add(
+        BusinessProfile(
+            tenant_id=t.tenant_id, vertical_code=Vertical.KIOSCO_ALMACEN.value
+        )
+    )
+    await session.commit()
+    return t
 
 
 @pytest_asyncio.fixture
@@ -541,11 +552,7 @@ async def test_opex_merchandise_reclassified_to_cogs(session: AsyncSession, tena
         apply_repair,
         detect_misclassified_opex_to_cogs,
     )
-    from app.persistence.models.business import BusinessProfile
-
-    session.add(
-        BusinessProfile(tenant_id=tenant.tenant_id, vertical_code="kiosco_almacen")
-    )
+    # El perfil (vertical kiosco) ya lo crea la fixture `tenant`.
     # mercadería mal clasificada como OPEX
     merch = await _make_expense(
         session,
