@@ -8,6 +8,8 @@ Required tests:
   - test_onboarding_status_before_and_after
 """
 
+from decimal import Decimal
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -15,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import get_settings
 from app.domain.verticals import Vertical
-from app.persistence.models.business import BusinessProfile
+from app.persistence.models.business import BusinessProfile, BusinessSnapshot
 
 
 @pytest.fixture(autouse=True)
@@ -241,6 +243,123 @@ class TestOnboarding:
         )
 
         assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+class TestOnboardingMontosAusentes:
+    """Dejar un monto en blanco NO es lo mismo que contestar cero.
+
+    El formulario mandaba `parseFloat(campo) || 0` porque el schema exigía los
+    tres montos: un campo sin contestar entraba como un cero afirmado, se
+    persistía como estimación del dueño y el score lo usaba para calcular. Peor:
+    el completeness sumaba 20 puntos por caja de forma incondicional, así que un
+    `cash_on_hand_ars` que nunca se tipeó contaba como dato presente.
+
+    Los dos tests de esta clase son un par: uno prueba la ausencia, el otro el
+    cero explícito. Solos no distinguen el fix del bug.
+    """
+
+    async def test_montos_ausentes_no_se_guardan_como_cero(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        payload_sin_montos = {
+            k: v
+            for k, v in _ONBOARDING_PAYLOAD.items()
+            if k
+            not in (
+                "monthly_inventory_cost_ars",
+                "monthly_fixed_expenses_ars",
+                "cash_on_hand_ars",
+            )
+        }
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_montos,
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        # 100 − 20 (mercadería) − 15 (fijos) − 20 (caja) = 45 → LOW.
+        assert data["data_completeness_score"] == 45
+        assert data["confidence_level"] == "LOW"
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        # NULL en la base, no `Decimal("0")`: el negocio no dijo que no gasta.
+        assert bp.monthly_inventory_spend_estimate_ars is None
+        assert bp.monthly_fixed_expenses_estimate_ars is None
+        assert bp.cash_on_hand_estimate_ars is None
+
+        snapshot = (
+            await db_session.execute(
+                select(BusinessSnapshot).where(BusinessSnapshot.tenant_id == bp.tenant_id)
+            )
+        ).scalar_one()
+        # Y `None` en el snapshot, no el string "None" — es la materia prima
+        # del score y de cualquier auditoría posterior.
+        crudos = snapshot.raw_inputs_json
+        assert crudos is not None
+        assert crudos["monthly_inventory_cost_ars"] is None
+        assert crudos["monthly_fixed_expenses_ars"] is None
+        assert crudos["cash_on_hand_ars"] is None
+
+    async def test_cero_explicito_si_cuenta_como_dato(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """El espejo del test anterior: contestar 0 es contestar.
+
+        Un negocio sin gastos fijos dio un dato tan bueno como el que paga cien
+        mil. Antes puntuaba igual que no contestar (`> 0`), que es la misma
+        confusión al revés.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json={
+                **_ONBOARDING_PAYLOAD,
+                "monthly_inventory_cost_ars": 0,
+                "monthly_fixed_expenses_ars": 0,
+                "cash_on_hand_ars": 0,
+            },
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data_completeness_score"] == 100
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        assert bp.monthly_fixed_expenses_estimate_ars == Decimal("0")
+        assert bp.cash_on_hand_estimate_ars == Decimal("0")
+
+    async def test_monto_negativo_sigue_siendo_422(self, client: AsyncClient) -> None:
+        """Opcional no es "cualquier cosa": el `ge=0` sigue vigente."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json={**_ONBOARDING_PAYLOAD, "cash_on_hand_ars": -1},
+            headers=headers,
+        )
+
+        assert response.status_code == 422
 
 
 class TestOnboardingWorkScheduleValidation:

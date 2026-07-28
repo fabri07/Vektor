@@ -11,9 +11,17 @@ import type { FiscalCondition } from "@/lib/fiscalCondition";
  */
 export interface OnboardingSubmitPayload {
   weekly_sales_estimate_ars: number;
-  monthly_inventory_cost_ars: number;
-  monthly_fixed_expenses_ars: number;
-  cash_on_hand_ars: number;
+  /*
+   * Los tres montos aceptan `null` = "no contestó", que NO es cero.
+   *
+   * Antes eran `number` y el formulario mandaba `parseFloat(campo) || 0`: un
+   * campo en blanco entraba como un cero afirmado, el backend lo persistía como
+   * estimación del dueño y el score lo usaba para calcular. `null` viaja como
+   * ausencia y el backend baja la confianza en vez de inventar el número.
+   */
+  monthly_inventory_cost_ars: number | null;
+  monthly_fixed_expenses_ars: number | null;
+  cash_on_hand_ars: number | null;
   product_count_estimate: number;
   supplier_count_estimate: number;
   main_concern: "MARGIN" | "STOCK" | "CASH";

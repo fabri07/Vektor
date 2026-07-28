@@ -112,4 +112,56 @@ describe("OnboardingWizard", () => {
     });
     expect(mockUpload).not.toHaveBeenCalled();
   });
+
+  /**
+   * Dejar un monto en blanco NO es contestar cero.
+   *
+   * `validate()` armaba el payload con `parseFloat(campo) || 0`: los tres
+   * campos de plata son opcionales en la UI, así que saltearlos mandaba un
+   * cero afirmado que el backend persistía como estimación del dueño y el
+   * score usaba para calcular. El usuario no tenía forma de enterarse de que
+   * saltear la pregunta equivalía a decir "no gasto nada".
+   *
+   * Los dos tests van juntos: uno prueba la ausencia, el otro el cero
+   * explícito. Solos no distinguen el fix del bug.
+   */
+  test("los montos en blanco viajan como null, no como 0", async () => {
+    const user = userEvent.setup({ delay: null });
+    renderWizard();
+
+    await completarDatos(user); // no toca ninguno de los tres montos
+    await user.click(screen.getByRole("button", { name: "Continuar" }));
+
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
+    const payload = mockSubmit.mock.calls[0]![0];
+    expect(payload.monthly_inventory_cost_ars).toBeNull();
+    expect(payload.monthly_fixed_expenses_ars).toBeNull();
+    expect(payload.cash_on_hand_ars).toBeNull();
+  });
+
+  test("un cero tipeado a propósito sí viaja como 0", async () => {
+    const user = userEvent.setup({ delay: null });
+    renderWizard();
+
+    await user.type(screen.getByLabelText(/Cuánto vendés por semana/i), "100000");
+    await user.type(screen.getByLabelText(/gastás en mercadería/i), "0");
+    await user.type(screen.getByLabelText(/productos distintos/i), "20");
+    await user.type(screen.getByLabelText(/proveedores/i), "3");
+    await user.click(screen.getByRole("button", { name: "Mi caja" }));
+    await user.click(screen.getByRole("button", { name: "Siguiente" }));
+    await user.click(screen.getByRole("button", { name: "Continuar" }));
+
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
+    const payload = mockSubmit.mock.calls[0]![0];
+    expect(payload.monthly_inventory_cost_ars).toBe(0);
+    // Y los que sí quedaron en blanco siguen siendo null.
+    expect(payload.cash_on_hand_ars).toBeNull();
+  });
+
+  test("el copy avisa que dejar en blanco no es poner cero", () => {
+    renderWizard();
+    expect(
+      screen.getAllByText(/no es lo mismo que poner 0/i).length,
+    ).toBeGreaterThanOrEqual(3);
+  });
 });

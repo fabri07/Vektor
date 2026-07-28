@@ -250,6 +250,31 @@ def _derive_confidence(score: float) -> str:
     return "LOW"
 
 
+def _estimado_o_cero(real: Decimal, estimado_del_perfil: Decimal | None) -> Decimal:
+    """Costo/gasto mensual: lo real si existe, si no el estimado del onboarding.
+
+    **Hoy esto no cambia ningún número.** Reemplaza a
+    ``estimado_del_perfil or Decimal("0")``, y como las dos ramas devuelven
+    ``Decimal("0")`` el resultado es idéntico. Está escrito así para que la
+    distinción entre "no contestó" y "contestó cero" quede explícita en el punto
+    donde importa, y para que el día que alguien quiera usarla no tenga que
+    descubrir primero que un ``or`` la estaba borrando.
+
+    Y sobre por qué la lectura NO la usa todavía: ``has_inventory_cost`` y
+    ``has_fixed_expenses`` siguen midiendo ``> 0``, así que un cero declarado no
+    suma completeness. Es deliberado. Los ceros ya guardados en la base son
+    ambiguos —el formulario viejo convertía cada campo en blanco en un cero— y
+    no hay forma de distinguir cuáles fueron una respuesta real. Contarlos como
+    dato presente le daría puntos justamente a las filas que fabricó el bug. La
+    ambigüedad se drena sola: desde ahora un campo en blanco se guarda NULL.
+    """
+    if real > 0:
+        return real
+    if estimado_del_perfil is not None:
+        return estimado_del_perfil
+    return Decimal("0")
+
+
 def _derive_main_concern(
     score: float,
     has_sales: bool,
@@ -483,15 +508,17 @@ async def compute_business_state(
             )
     else:
         monthly_sales_est = real_sales
-    monthly_inventory_cost_est = (
-        real_inventory_cost
-        if real_inventory_cost > 0
-        else (profile.monthly_inventory_spend_estimate_ars or Decimal("0"))
+    # `or Decimal("0")` acá volvería a fabricar el cero que el onboarding dejó
+    # de inventar: un `None` (el dueño no contestó) y un `Decimal("0")` (contestó
+    # que no gasta nada) son datos distintos y no pueden colapsar en el mismo
+    # número. Con `is not None` el estimado del perfil solo entra si existe; si
+    # no, el fallback a cero es una decisión propia de esta capa, no un dato del
+    # negocio disfrazado.
+    monthly_inventory_cost_est = _estimado_o_cero(
+        real_inventory_cost, profile.monthly_inventory_spend_estimate_ars
     )
-    monthly_fixed_expenses_est = (
-        real_fixed_expenses
-        if real_fixed_expenses > 0
-        else (profile.monthly_fixed_expenses_estimate_ars or Decimal("0"))
+    monthly_fixed_expenses_est = _estimado_o_cero(
+        real_fixed_expenses, profile.monthly_fixed_expenses_estimate_ars
     )
     # Tiering de la fuente de caja (de más a menos confiable):
     #   1. arqueo       → saldo medido (CashClose.counted_total_ars)

@@ -31,17 +31,31 @@ class AlreadyOnboardedError(Exception):
 
 
 def _calculate_completeness(body: OnboardingSubmitRequest) -> int:
-    score = 25  # ventas: always > 0 (validated by schema)
-    if body.monthly_inventory_cost_ars > 0:
+    """Cuánto sabemos del negocio, medido por lo que el dueño CONTESTÓ.
+
+    Los tres montos puntúan por presencia (``is not None``), no por ser mayores
+    a cero. Un negocio que contesta "cero gastos fijos" dio un dato tan bueno
+    como el que contesta cien mil; el que dejó el campo en blanco no dio
+    ninguno. Con ``> 0`` los dos casos valían lo mismo, y con los 20 puntos de
+    caja incondicionales un campo que nunca se tipeó contaba como dato presente.
+    """
+    score = 25  # ventas: siempre > 0 (lo valida el schema)
+    if body.monthly_inventory_cost_ars is not None:
         score += 20
-    if body.monthly_fixed_expenses_ars > 0:
+    if body.monthly_fixed_expenses_ars is not None:
         score += 15
-    score += 20  # caja: always counted (>= 0 validated, data presence = 20 pts)
+    if body.cash_on_hand_ars is not None:
+        score += 20
     if body.product_count_estimate >= 5:
         score += 10
     if body.supplier_count_estimate >= 1:
         score += 10
     return score
+
+
+def _monto_crudo(valor: Decimal | None) -> str | None:
+    """Serializa un monto para `raw_inputs_json`, preservando la ausencia."""
+    return None if valor is None else str(valor)
 
 
 def _derive_confidence(score: int) -> str:
@@ -129,11 +143,14 @@ class OnboardingService:
 
         # Step 7: create business snapshot
         now = datetime.now(UTC)
+        # Un monto ausente viaja como `None`, no como el string "None": el
+        # snapshot es la materia prima del score y de cualquier auditoría
+        # posterior, así que tiene que distinguir "no contestó" de "contestó 0".
         raw_inputs: dict[str, Any] = {
             "weekly_sales_estimate_ars": str(body.weekly_sales_estimate_ars),
-            "monthly_inventory_cost_ars": str(body.monthly_inventory_cost_ars),
-            "monthly_fixed_expenses_ars": str(body.monthly_fixed_expenses_ars),
-            "cash_on_hand_ars": str(body.cash_on_hand_ars),
+            "monthly_inventory_cost_ars": _monto_crudo(body.monthly_inventory_cost_ars),
+            "monthly_fixed_expenses_ars": _monto_crudo(body.monthly_fixed_expenses_ars),
+            "cash_on_hand_ars": _monto_crudo(body.cash_on_hand_ars),
             "product_count_estimate": body.product_count_estimate,
             "supplier_count_estimate": body.supplier_count_estimate,
             "vertical_code": bp.vertical_code,

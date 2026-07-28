@@ -119,6 +119,67 @@ async def test_compute_business_state_from_onboarding_only(
     assert "last_inputs_hash:v2:" in _hash_key(sample_tenant.tenant_id)
 
 
+# ── Montos del onboarding sin contestar ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_montos_sin_contestar_no_se_leen_como_cero(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """Con la caja sin contestar, la fuente no puede ser "onboarding".
+
+    El tiering de caja ya distinguía `is not None` desde antes, así que este
+    test **no protege un fix**: documenta un camino que hasta ahora era
+    inalcanzable. El formulario mandaba `parseFloat(campo) || 0`, de modo que
+    `cash_on_hand_estimate_ars` nunca quedaba NULL después de un onboarding y
+    esta rama no se ejercitaba nunca en la práctica.
+
+    Ahora sí se llega, y lo que hace es lo correcto: sin saldo declarado el
+    score cae al tier siguiente en vez de operar sobre un $0 inventado.
+    """
+    bp = kiosco_profile
+    bp.monthly_inventory_spend_estimate_ars = None
+    bp.monthly_fixed_expenses_estimate_ars = None
+    bp.cash_on_hand_estimate_ars = None
+    await db_session.commit()
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert state.cash_source != "onboarding"
+    assert state.cash_source in ("flujo", "desconocido")
+
+
+@pytest.mark.asyncio
+async def test_cero_declarado_si_es_el_estimado_del_onboarding(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """El espejo: un cero CONTESTADO sí es el saldo del negocio.
+
+    Sin este test, el de arriba pasaría igual con un `or Decimal("0")` que
+    tratara todo cero como ausencia. Los dos juntos fijan la distinción.
+    """
+    bp = kiosco_profile
+    bp.cash_on_hand_estimate_ars = Decimal("0")
+    await db_session.commit()
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert state.cash_source == "onboarding"
+    assert state.cash_on_hand_est == Decimal("0")
+
+
 # ── Test 2: completeness increases with ≥5 active products ───────────────────
 
 

@@ -30,9 +30,23 @@ class BusinessSurveyMixin(BaseModel):
     """
 
     weekly_sales_estimate_ars: Decimal = Field(gt=0)
-    monthly_inventory_cost_ars: Decimal = Field(ge=0)
-    monthly_fixed_expenses_ars: Decimal = Field(ge=0)
-    cash_on_hand_ars: Decimal = Field(ge=0)
+    # Los tres montos son OPCIONALES y `None` significa "no contestó", que no es
+    # lo mismo que contestar cero.
+    #
+    # Cuando eran obligatorios, el frontend no tenía forma de expresar la
+    # ausencia y mandaba `parseFloat(campo) || 0`: un campo en blanco entraba
+    # como un cero afirmado. "No tengo gastos fijos" y "no sé cuánto pago de
+    # gastos fijos" terminaban siendo el mismo dato, y el segundo se persistía
+    # como si el dueño lo hubiera dicho. Eso es exactamente lo que prohíbe la
+    # regla de no-invención: si falta un dato, baja la confianza; no se
+    # completa con un default neutral.
+    #
+    # `product_count_estimate` y `supplier_count_estimate` NO se tocan: el
+    # formulario los valida como obligatorios, así que hacerlos nullable
+    # ampliaría el contrato sin resolver ningún caso real.
+    monthly_inventory_cost_ars: Decimal | None = Field(default=None, ge=0)
+    monthly_fixed_expenses_ars: Decimal | None = Field(default=None, ge=0)
+    cash_on_hand_ars: Decimal | None = Field(default=None, ge=0)
     product_count_estimate: int = Field(ge=0)
     supplier_count_estimate: int = Field(ge=0)
     # Días y horarios laborales (Sprint 20) — opcionales; si faltan, se usan defaults.
