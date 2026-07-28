@@ -17,7 +17,7 @@ from app.application.services.contact_lead_service import (
     create_lead,
     hash_ip,
 )
-from app.domain.contact_lead import CONSENT_VERSION, MIN_SUBMIT_ELAPSED_MS
+from app.domain.contact_lead import CONSENT_VERSION, looks_like_bot
 from app.main import limiter
 from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
@@ -38,10 +38,13 @@ def _client_ip(request: Request) -> str | None:
 
 
 def _looks_like_bot(body: CreateLeadRequest) -> bool:
-    """Honeypot completado o envío sospechosamente rápido ⇒ bot."""
-    if body.website:  # el honeypot debe venir vacío
-        return True
-    return body.elapsed_ms is not None and body.elapsed_ms < MIN_SUBMIT_ELAPSED_MS
+    """Honeypot completado o envío sospechosamente rápido ⇒ bot.
+
+    La regla se movió a ``app.domain.contact_lead.looks_like_bot`` para que el
+    formulario de solicitud de acceso la reuse tal cual en vez de copiarla. Este
+    wrapper conserva la firma que ya usa el endpoint.
+    """
+    return looks_like_bot(website=body.website, elapsed_ms=body.elapsed_ms)
 
 
 @router.post(

@@ -62,6 +62,19 @@ class LeadCantidadUsuarios(StrEnum):
     R80_PLUS = "80_plus"
 
 
+def looks_like_bot(*, website: str | None, elapsed_ms: int | None) -> bool:
+    """Honeypot completado o envío sospechosamente rápido ⇒ bot.
+
+    La regla vive en el dominio (y no en el router de contacto) porque la usan los
+    DOS formularios públicos anónimos del sistema —contacto y solicitud de acceso—
+    y una segunda copia se desincroniza. ``api/v1/contact.py:_looks_like_bot``
+    delega acá sin cambiar su firma ni su comportamiento.
+    """
+    if website:  # el honeypot debe venir vacío
+        return True
+    return elapsed_ms is not None and elapsed_ms < MIN_SUBMIT_ELAPSED_MS
+
+
 def normalize_email(raw: str) -> str:
     """Normaliza un email: trim + lowercase. La validez de formato la garantiza
     Pydantic (EmailStr) antes de llamar acá."""
