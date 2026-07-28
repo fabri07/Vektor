@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom";
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -149,8 +149,8 @@ describe("AccessRequestForm", () => {
     expect(screen.queryByText(/Escribí tu nombre/i)).toBeNull();
     expect(screen.queryByText(/Email inválido/i)).toBeNull();
     expect(screen.queryByText(/Escribí el nombre de tu negocio/i)).toBeNull();
-    // Tampoco el resumen de faltantes: no hubo intento de envío.
-    expect(screen.queryByRole("status")).toBeNull();
+    // El `queryAllByRole("alert")` de arriba cubre también el resumen de
+    // faltantes: no hubo intento de envío, así que no existe.
   });
 
   test("el resumen de faltantes NO se abre con el primer blur", async () => {
@@ -162,7 +162,7 @@ describe("AccessRequestForm", () => {
 
     // El campo propio ya puede hablar, pero el panel "Te faltan N respuestas"
     // no tiene por qué abrirse cuando recién vas por el campo 1.
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   test("un campo de texto solo muestra su error después de tocarlo", async () => {
@@ -177,33 +177,101 @@ describe("AccessRequestForm", () => {
     expect(await screen.findByText(/Escribí tu nombre/i)).toBeInTheDocument();
   });
 
-  test("un grupo de opción sin elegir muestra su error al intentar enviar", async () => {
-    const user = userEvent.setup({ delay: null });
-    const { container } = renderForm();
+  /**
+   * El P0 que estos tests protegen.
+   *
+   * Antes el botón de envío quedaba `disabled` mientras faltara una respuesta.
+   * El handler que revela los faltantes existía, pero era inalcanzable: el HTML
+   * Standard no dispara envío implícito cuando el botón por defecto existe y
+   * está deshabilitado, así que ni el click ni Enter llegaban nunca. El
+   * visitante veía un botón gris y no tenía forma de averiguar qué le faltaba.
+   *
+   * La versión vieja de este test lo tapaba usando `fireEvent.submit()` sobre
+   * el `<form>`, que despacha el evento directo y saltea exactamente la regla
+   * del botón deshabilitado: probaba el handler, no que se pudiera llegar a él.
+   *
+   * **Por eso estos tests aprietan el botón real.** Si alguien vuelve a poner
+   * `disabled={!parse.success || enviando}`, tienen que ponerse en rojo.
+   */
+  describe("un formulario incompleto se puede intentar enviar", () => {
+    test("con todo vacío, el botón real abre el resumen y se lleva el foco", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
 
-    await fillContacto(user);
-    await user.click(screen.getByRole("button", { name: /Kiosco/i }));
-    await fillScreening(user, ["staff_size"]);
-    await user.click(screen.getByRole("checkbox"));
+      expect(submitButton()).toBeEnabled();
+      expect(screen.queryByRole("alert")).toBeNull();
 
-    // Mientras no se intente enviar, el grupo sin tocar sigue callado.
-    expect(screen.queryByText("Elegí una opción")).toBeNull();
+      await user.click(submitButton());
 
-    // El botón está gris, así que el intento llega por envío implícito.
-    fireEvent.submit(container.querySelector("form")!);
+      const resumen = await screen.findByRole("alert");
+      expect(resumen).toHaveTextContent("Te faltan 13 respuestas:");
+      // El foco cae en el TÍTULO del resumen, no en el primer campo: ver la
+      // lista entera antes de saltar (jest.setup.ts mockea scrollIntoView).
+      expect(document.activeElement).toBe(
+        screen.getByText(/Te faltan 13 respuestas:/),
+      );
+      expect(mockPost).not.toHaveBeenCalled();
+    });
 
-    expect(await screen.findByText("Elegí una opción")).toBeInTheDocument();
-    // El foco va al primer control del campo faltante: es la mitad que vuelve
-    // útil al panel (jest.setup.ts ya mockea scrollIntoView).
-    expect(document.activeElement).toBe(
-      document.getElementById("campo-staff_size"),
-    );
-    // Y el resumen nombra exactamente el campo que falta.
-    const resumen = screen.getByRole("status");
-    expect(resumen).toHaveTextContent("Te falta responder una cosa:");
-    expect(resumen).toHaveTextContent("¿Cuánta gente trabaja?");
-    expect(mockPost).not.toHaveBeenCalled();
-  }, TIMEOUT_FORMULARIO_COMPLETO);
+    test("un grupo de opción sin elegir muestra su error al intentar enviar", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      await fillContacto(user);
+      await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+      await fillScreening(user, ["staff_size"]);
+      await user.click(screen.getByRole("checkbox"));
+
+      // Mientras no se intente enviar, el grupo sin tocar sigue callado.
+      expect(screen.queryByText("Elegí una opción")).toBeNull();
+
+      await user.click(submitButton());
+
+      expect(await screen.findByText("Elegí una opción")).toBeInTheDocument();
+      // Y el resumen nombra exactamente el campo que falta.
+      const resumen = screen.getByRole("alert");
+      expect(resumen).toHaveTextContent("Te falta responder una cosa:");
+      expect(resumen).toHaveTextContent("¿Cuánta gente trabaja?");
+      expect(mockPost).not.toHaveBeenCalled();
+    }, TIMEOUT_FORMULARIO_COMPLETO);
+
+    test("desde el resumen se navega al campo que falta", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      await user.click(submitButton());
+      await screen.findByRole("alert");
+
+      await user.click(screen.getByRole("button", { name: "¿Cuánta gente trabaja?" }));
+
+      expect(document.activeElement).toBe(
+        document.getElementById("campo-staff_size"),
+      );
+    });
+
+    test("el segundo intento vuelve a llevar el foco al resumen", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      await user.click(submitButton());
+      await screen.findByRole("alert");
+
+      // El usuario se va a un campo y vuelve a intentar sin completar todo.
+      await user.click(screen.getByLabelText(/Nombre y apellido/i));
+      expect(document.activeElement).not.toBe(
+        screen.getByText(/Te faltan 13 respuestas:/),
+      );
+
+      await user.click(submitButton());
+
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByText(/Te faltan 13 respuestas:/),
+        ),
+      );
+      expect(mockPost).not.toHaveBeenCalled();
+    });
+  });
 
   /**
    * Accesibilidad de los campos de texto.
@@ -279,7 +347,7 @@ describe("AccessRequestForm", () => {
     expect(honeypot).toHaveAttribute("autocomplete", "new-password");
   });
 
-  test("elegir 'Otro' revela el textarea y sin texto el submit sigue bloqueado", async () => {
+  test("elegir 'Otro' revela el textarea y sin texto el envío no sale", async () => {
     const user = userEvent.setup({ delay: null });
     renderForm();
 
@@ -292,35 +360,73 @@ describe("AccessRequestForm", () => {
 
     const textarea = screen.getByLabelText(/Contanos de qué es tu negocio/i);
     expect(textarea).toBeInTheDocument();
+
     // "Otros" sin descripción: el backend lo rechazaría (validación no-vacío).
-    expect(submitButton()).toBeDisabled();
+    // El botón se aprieta igual, y lo que corta es la validación, que además
+    // dice cuál es el campo — no un botón gris sin explicación.
+    await user.click(submitButton());
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("De qué es tu negocio");
 
     // Espacios en blanco tampoco alcanzan: se recortan antes de medir.
     await user.type(textarea, "   ");
-    expect(submitButton()).toBeDisabled();
+    await user.click(submitButton());
+    expect(mockPost).not.toHaveBeenCalled();
 
+    mockPost.mockResolvedValueOnce({ data: { status: "ok", message: "ok" } });
     await user.type(textarea, "Ferretería de barrio");
-    await waitFor(() => expect(submitButton()).toBeEnabled());
+    await user.click(submitButton());
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
   }, TIMEOUT_FORMULARIO_COMPLETO);
 
-  test("el submit está bloqueado hasta que el formulario es válido", async () => {
+  test("el envío solo sale cuando el formulario es válido, sin deshabilitar el botón", async () => {
     const user = userEvent.setup({ delay: null });
     renderForm();
 
-    expect(submitButton()).toBeDisabled();
+    // En ningún momento del recorrido el botón está gris: siempre se puede
+    // preguntar qué falta.
+    expect(submitButton()).toBeEnabled();
+    await user.click(submitButton());
+    expect(mockPost).not.toHaveBeenCalled();
 
     await fillContacto(user);
-    expect(submitButton()).toBeDisabled();
+    expect(submitButton()).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: /Kiosco/i }));
-    expect(submitButton()).toBeDisabled();
-
     await fillScreening(user);
-    // Falta el consentimiento: es obligatorio, no decorativo.
-    expect(submitButton()).toBeDisabled();
 
+    // Falta el consentimiento: es obligatorio, no decorativo.
+    await user.click(submitButton());
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Te falta responder una cosa:");
+
+    mockPost.mockResolvedValueOnce({ data: { status: "ok", message: "ok" } });
     await user.click(screen.getByRole("checkbox"));
-    await waitFor(() => expect(submitButton()).toBeEnabled());
+    await user.click(submitButton());
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+  }, TIMEOUT_FORMULARIO_COMPLETO);
+
+  test("doble click rápido en enviar postea una sola vez", async () => {
+    mockPost.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ data: { status: "ok", message: "ok" } }), 30),
+        ) as ReturnType<typeof api.post>,
+    );
+    const user = userEvent.setup({ delay: null });
+    renderForm();
+
+    await fillContacto(user);
+    await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+    await fillScreening(user);
+    await user.click(screen.getByRole("checkbox"));
+
+    const boton = submitButton();
+    await user.click(boton);
+    await user.click(boton);
+
+    await waitFor(() => expect(mockPush).toHaveBeenCalled());
+    expect(mockPost).toHaveBeenCalledTimes(1);
   }, TIMEOUT_FORMULARIO_COMPLETO);
 
   test("envío exitoso: postea el contrato exacto (con consent, sin password)", async () => {

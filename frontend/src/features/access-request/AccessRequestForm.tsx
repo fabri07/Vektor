@@ -31,6 +31,11 @@
  * suyo, y arriba del botón hay un resumen de lo que falta con foco directo a
  * cada campo. Las dos mitades son la misma regla — decir lo que falta, cuando
  * corresponde, y nada más.
+ *
+ * Y para que esa segunda mitad exista, **el botón de envío nunca se deshabilita
+ * por formulario incompleto**: intentar enviar es el gesto con el que el
+ * visitante pregunta qué le falta. Solo se bloquea mientras hay un envío en
+ * curso.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -66,12 +71,23 @@ import {
   inputClass,
 } from "./BusinessScreeningFields";
 
+/** Respeta `prefers-reduced-motion`: sin animación para quien la desactivó. */
+function comportamientoDeScroll(): ScrollBehavior {
+  if (typeof window === "undefined" || !window.matchMedia) return "smooth";
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+}
+
+/** Lleva el foco (y la vista) al elemento, sin doble scroll. */
+function enfocarYMostrar(elemento: HTMLElement) {
+  elemento.focus({ preventScroll: true });
+  elemento.scrollIntoView({ block: "center", behavior: comportamientoDeScroll() });
+}
+
 /** Lleva el foco (y la vista) al primer control del campo indicado. */
 function enfocarCampo(campo: string) {
   const control = document.getElementById(fieldAnchorId(campo));
   if (!control) return;
-  control.focus({ preventScroll: true });
-  control.scrollIntoView({ block: "center", behavior: "smooth" });
+  enfocarYMostrar(control);
 }
 
 const HINT_TELEFONO = "Si nos lo dejás, te escribimos por acá.";
@@ -107,6 +123,14 @@ export function AccessRequestForm() {
   // visitante escriba una letra.
   const [tocados, setTocados] = useState<Record<string, true>>({});
   const [intentado, setIntentado] = useState(false);
+  /*
+   * Cuenta de envíos rechazados por incompletos. Es un contador y no un
+   * booleano porque el foco tiene que volver al resumen en CADA intento, no
+   * solo en el primero: quien aprieta enviar dos veces sin completar nada
+   * necesita que se lo digan las dos veces.
+   */
+  const [intentosFallidos, setIntentosFallidos] = useState(0);
+  const resumenTituloRef = useRef<HTMLParagraphElement>(null);
 
   // `?plan=` precarga la intención de plan pero la deja EDITABLE: el visitante
   // llegó desde el card de /precios, no firmó nada.
@@ -216,14 +240,34 @@ export function AccessRequestForm() {
   // se re-anunciaba entero con cada respuesta.
   const enviando = crear.isPending || enviado;
 
+  /*
+   * Tras un envío rechazado por incompleto, el foco va al TÍTULO del resumen,
+   * no al primer campo faltante: ver la lista entera antes de saltar es más
+   * informativo que aterrizar a ciegas en el campo 4 sin saber cuántos quedan.
+   *
+   * Va en un efecto y no en el handler porque el resumen se monta recién
+   * después de que `intentado` se aplique al render.
+   *
+   * El contenedor lleva `role="alert"` y el foco cae en un hijo, no en el
+   * mismo nodo, para no pedir dos anuncios del mismo texto. Si la prueba con
+   * VoiceOver/NVDA igual muestra lectura duplicada, lo que sobra es el
+   * `role="alert"`: el movimiento de foco ya anuncia por sí solo.
+   */
+  useEffect(() => {
+    if (intentosFallidos === 0) return;
+    const titulo = resumenTituloRef.current;
+    if (titulo) enfocarYMostrar(titulo);
+  }, [intentosFallidos]);
+
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (enviando) return; // anti doble-submit
     if (!parse.success) {
-      // Alcanzable por envío implícito (Enter) aunque el botón esté gris.
-      // Destapa TODOS los errores y manda el foco al primero que falta.
+      // El botón NO está deshabilitado por incompleto justamente para que se
+      // pueda llegar hasta acá: destapa todos los errores y el efecto de abajo
+      // manda el foco al resumen.
       setIntentado(true);
-      if (faltantes[0]) enfocarCampo(faltantes[0]);
+      setIntentosFallidos((n) => n + 1);
       return;
     }
 
@@ -502,9 +546,7 @@ export function AccessRequestForm() {
           </label>
 
           {errores.consent && (
-            <p className="text-xs text-vektor-red" role="alert">
-              {errores.consent}
-            </p>
+            <p className="text-xs text-vektor-red">{errores.consent}</p>
           )}
 
           {/*
@@ -514,10 +556,19 @@ export function AccessRequestForm() {
           */}
           {intentado && faltantes.length > 0 && (
             <div
-              role="status"
+              role="alert"
               className="rounded-xl border border-vektor-border bg-vektor-surface/60 p-4 text-sm text-vektor-body"
             >
-              <p className="font-semibold text-vektor-white">
+              {/*
+                `tabIndex={-1}` lo hace enfocable por código sin meterlo en el
+                orden de tabulación. Conserva anillo de foco: quien navega con
+                teclado tiene que VER adónde saltó, no solo escucharlo.
+              */}
+              <p
+                ref={resumenTituloRef}
+                tabIndex={-1}
+                className="rounded font-semibold text-vektor-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-vektor-blue"
+              >
                 {faltantes.length === 1
                   ? "Te falta responder una cosa:"
                   : `Te faltan ${faltantes.length} respuestas:`}
@@ -527,11 +578,8 @@ export function AccessRequestForm() {
                   <li key={campo}>
                     <button
                       type="button"
-                      onClick={() => {
-                        setIntentado(true);
-                        enfocarCampo(campo);
-                      }}
-                      className="text-vektor-blue underline-offset-2 hover:underline"
+                      onClick={() => enfocarCampo(campo)}
+                      className="inline-block py-1.5 text-vektor-blue underline-offset-2 hover:underline"
                     >
                       {accessRequestFieldLabel(campo)}
                     </button>
@@ -561,9 +609,21 @@ export function AccessRequestForm() {
             </p>
           )}
 
+          {/*
+            El botón NO se deshabilita por formulario incompleto.
+
+            Deshabilitarlo era el bug: un submit `disabled` esconde el motivo
+            del fallo, y encima el HTML Standard no dispara envío implícito
+            cuando el botón por defecto existe y está deshabilitado — así que
+            ni con Enter se llegaba al handler. El resumen de faltantes, el
+            foco y los errores de los nueve grupos eran código inalcanzable.
+
+            Solo se deshabilita mientras hay un envío en curso, que es la única
+            razón real para no aceptar otro click.
+          */}
           <button
             type="submit"
-            disabled={!parse.success || enviando}
+            disabled={enviando}
             className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-6 py-3.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {enviando ? "Enviando..." : "Pedir acceso"}

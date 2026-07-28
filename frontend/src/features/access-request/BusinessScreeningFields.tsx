@@ -74,8 +74,15 @@ export function Field({
         </p>
       )}
       {children}
+      {/*
+        Sin `role="alert"`: el error ya viaja como descripción del control vía
+        `aria-describedby` (ver `fieldAria`), y se lee al llegar al campo. Con
+        un live region por campo, un intento de envío incompleto dispararía
+        diez anuncios simultáneos encima del resumen. El aviso inmediato lo da
+        el resumen de faltantes; acá va el detalle.
+      */}
       {error && (
-        <p id={`${id}-error`} className="mt-1.5 block text-xs text-vektor-red" role="alert">
+        <p id={`${id}-error`} className="mt-1.5 block text-xs text-vektor-red">
           {error}
         </p>
       )}
@@ -181,11 +188,9 @@ export function RadioGroup<T extends string>({
           </label>
         ))}
       </div>
-      {error && (
-        <p className="mt-1.5 text-xs text-vektor-red" role="alert">
-          {error}
-        </p>
-      )}
+      {/* Sin `role="alert"`, por lo mismo que en `Field`: el resumen de
+          faltantes anuncia una vez; acá va el detalle, no un segundo grito. */}
+      {error && <p className="mt-1.5 text-xs text-vektor-red">{error}</p>}
     </fieldset>
   );
 }
