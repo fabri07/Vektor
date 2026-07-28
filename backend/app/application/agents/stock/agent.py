@@ -25,6 +25,7 @@ from app.application.agents.shared.schemas import (
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.domain.product import effective_threshold
+from app.domain.verticals import parse_vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
 
@@ -108,7 +109,7 @@ class AgentStock(BaseAgent):
         rotation_days: float,
         business_type: str,
     ) -> bool:
-        config = HeuristicEngine.get(business_type)
+        config = HeuristicEngine.get(parse_vertical(business_type))
         return config.is_overstock(rotation_days)
 
     async def generate_replenishment_ranking(self, tenant_id: str) -> list[dict[str, Any]]:
@@ -1200,7 +1201,7 @@ class AgentStock(BaseAgent):
 
         # ── detectar_sobrestock ───────────────────────────────────────────────
         if intent == "detectar_sobrestock":
-            config = HeuristicEngine.get(await self._business_vertical(tenant_id))
+            config = HeuristicEngine.get(parse_vertical(await self._business_vertical(tenant_id)))
             # Umbral de sobrestock: el doble de la rotación máxima esperada del rubro
             overstock_days = float(config.inventory.rotation_days_max * 2)
             over = analytics.detect_overstock(products, velocity, overstock_days)

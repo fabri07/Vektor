@@ -11,6 +11,7 @@ from app.application.services.work_schedule_service import (
     DEFAULT_OPEN_HOUR,
     DEFAULT_WORK_DAYS,
 )
+from app.domain.verticals import heuristic_profile_version, parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessSnapshot
 from app.persistence.repositories.business_profile_repository import (
@@ -23,13 +24,6 @@ from app.schemas.onboarding import (
 )
 
 logger = get_logger(__name__)
-
-_HEURISTIC_PROFILE_BY_VERTICAL = {
-    "kiosco": "kiosco_almacen:v1",
-    "decoracion_hogar": "decoracion_hogar:v1",
-    "limpieza": "limpieza:v1",
-}
-
 
 class AlreadyOnboardedError(Exception):
     """Raised when a tenant tries to submit onboarding more than once."""
@@ -97,7 +91,9 @@ class OnboardingService:
         bp.cash_on_hand_estimate_ars = body.cash_on_hand_ars
         bp.product_count_estimate = body.product_count_estimate
         bp.supplier_count_estimate = body.supplier_count_estimate
-        bp.heuristic_profile_version = _HEURISTIC_PROFILE_BY_VERTICAL[body.vertical_code]
+        bp.heuristic_profile_version = heuristic_profile_version(
+            parse_vertical(body.vertical_code)
+        )
         bp.heuristics_version = "v1"
 
         # Días y horarios laborales (Sprint 20): persistir lo enviado o defaults

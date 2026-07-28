@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.verticals import try_parse_vertical
 from app.heuristics.verticals import MarginBenchmark
 from app.heuristics.verticals.loader import load_margin_benchmark
 from app.observability.logger import get_logger
@@ -81,8 +82,15 @@ class AnalyticsService:
         result: list[dict[str, object]] = []
 
         for code in vertical_codes:
+            vertical = try_parse_vertical(code)
+            if vertical is None:
+                # Evento con un vertical fuera del catálogo (dato legado o
+                # corrupto): no tiene benchmark canónico y NO se le presta el de
+                # otro rubro — se omite de la vista y queda registrado.
+                logger.warning("analytics.benchmarks.unknown_vertical", vertical_code=code)
+                continue
             data_bm = await self._repo.compute_margin_benchmark(code)
-            static_bm = load_margin_benchmark(code)
+            static_bm = load_margin_benchmark(vertical)
             stats = await self._repo.get_vertical_stats(code)
             active_bm = data_bm if data_bm is not None else static_bm
 

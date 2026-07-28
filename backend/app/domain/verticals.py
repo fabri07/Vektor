@@ -45,6 +45,11 @@ class RequestedVertical(StrEnum):
 #: `frozenset[str]` para chequeos de pertenencia sin importar el enum).
 OPERATIONAL_VERTICALS: Final[frozenset[str]] = frozenset(v.value for v in Vertical)
 
+#: Regex de validación para los schemas Pydantic que reciben un `vertical_code`
+#: crudo. Derivado del enum a propósito: escrito a mano se desincroniza (así fue
+#: como `auth.py`/`onboarding.py` siguieron aceptando SOLO el código corto).
+VERTICAL_CODE_PATTERN: Final[str] = "^(" + "|".join(v.value for v in Vertical) + ")$"
+
 #: Nombre visible por vertical, para UI y narrativas.
 VERTICAL_LABELS: Final[dict[Vertical, str]] = {
     Vertical.KIOSCO_ALMACEN: "Kiosco / Almacén",

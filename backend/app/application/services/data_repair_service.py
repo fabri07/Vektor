@@ -35,6 +35,7 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
 )
+from app.domain.verticals import Vertical, try_parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.file import UploadedFile
@@ -1279,13 +1280,26 @@ async def _process_duplicate_group(
 async def _load_vertical_by_tenant(
     db: AsyncSession,
     tenant_id: uuid.UUID | None,
-) -> dict[uuid.UUID, str | None]:
-    """Vertical de cada tenant (una query) para clasificar gastos en lote."""
+) -> dict[uuid.UUID, Vertical]:
+    """Vertical de cada tenant (una query) para clasificar gastos en lote.
+
+    Los tenants cuyo `vertical_code` no es canónico quedan FUERA del dict: sus
+    gastos se saltean en vez de clasificarse con el catálogo de otro rubro.
+    """
     q = select(BusinessProfile.tenant_id, BusinessProfile.vertical_code)
     if tenant_id is not None:
         q = q.where(BusinessProfile.tenant_id == tenant_id)
     rows = (await db.execute(q)).all()
-    return {row[0]: row[1] for row in rows}
+    verticals: dict[uuid.UUID, Vertical] = {}
+    for row in rows:
+        vertical = try_parse_vertical(row[1])
+        if vertical is None:
+            logger.warning(
+                "data_repair.unknown_vertical", tenant_id=str(row[0]), vertical_code=row[1]
+            )
+            continue
+        verticals[row[0]] = vertical
+    return verticals
 
 
 def _expense_match_text(expense: ExpenseEntry) -> str | None:
@@ -1320,9 +1334,10 @@ async def detect_misclassified_opex_to_cogs(
         text_to_match = _expense_match_text(expense)
         if not text_to_match:
             continue
-        code, label, is_merch = classify_expense_with_vertical(
-            text_to_match, verticals.get(expense.tenant_id)
-        )
+        vertical = verticals.get(expense.tenant_id)
+        if vertical is None:
+            continue
+        code, label, is_merch = classify_expense_with_vertical(text_to_match, vertical)
         if not is_merch or code != "INVENTORY":
             continue
         candidates.append(

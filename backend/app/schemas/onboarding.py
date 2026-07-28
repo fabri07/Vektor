@@ -8,10 +8,11 @@ from uuid import UUID
 from pydantic import BaseModel, Field, model_validator
 
 from app.domain.fiscal_condition import FiscalCondition
+from app.domain.verticals import VERTICAL_CODE_PATTERN
 
 
 class OnboardingSubmitRequest(BaseModel):
-    vertical_code: str = Field(pattern=r"^(kiosco|decoracion_hogar|limpieza)$")
+    vertical_code: str = Field(pattern=VERTICAL_CODE_PATTERN)
     weekly_sales_estimate_ars: Decimal = Field(gt=0)
     monthly_inventory_cost_ars: Decimal = Field(ge=0)
     monthly_fixed_expenses_ars: Decimal = Field(ge=0)

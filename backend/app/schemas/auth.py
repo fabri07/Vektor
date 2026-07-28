@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pydantic_core import PydanticCustomError
 
+from app.domain.verticals import VERTICAL_CODE_PATTERN
 from app.schemas._ar_fiscal import normalize_phone
 
 
@@ -18,7 +19,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     full_name: str = Field(min_length=2, max_length=200)
     business_name: str = Field(min_length=2, max_length=200)
-    vertical_code: str = Field(pattern=r"^(kiosco|decoracion_hogar|limpieza)$")
+    vertical_code: str = Field(pattern=VERTICAL_CODE_PATTERN)
     # Teléfono/WhatsApp de contacto (opcional). Editable después en /settings.
     phone: str | None = Field(default=None, max_length=50)
 

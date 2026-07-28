@@ -34,6 +34,7 @@ from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     normalize_expense_category,
 )
+from app.domain.verticals import parse_vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
@@ -629,7 +630,9 @@ class AgentExpense(BaseAgent):
             classify_expense_with_vertical,
         )
 
-        code, _label, es_mercaderia = classify_expense_with_vertical(text, business_type)
+        code, _label, es_mercaderia = classify_expense_with_vertical(
+            text, parse_vertical(business_type)
+        )
         if es_mercaderia:
             return "INVENTORY", "reventa", True
         if code in ("SUPPLIES", "MAINTENANCE"):

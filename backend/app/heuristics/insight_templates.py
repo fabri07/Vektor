@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.domain.product import effective_threshold
+from app.domain.verticals import VERTICAL_LABELS, Vertical, parse_vertical
 
 
 @dataclass(frozen=True)
@@ -23,20 +24,14 @@ class InsightTemplate:
     action_tpl: str
 
 
-# ── Vertical display names ─────────────────────────────────────────────────────
-
-_VERTICAL_NAMES: dict[str, str] = {
-    "kiosco": "kiosco",
-    "decoracion_hogar": "decoración hogar",
-    "limpieza": "limpieza",
-}
-
 # ── Margin benchmarks (pct strings) per vertical ──────────────────────────────
+# Sin default: un vertical fuera del catálogo levanta en parse_vertical antes de
+# llegar acá. El nombre visible sale de VERTICAL_LABELS (app/domain/verticals.py).
 
-_MARGIN_RANGES: dict[str, tuple[int, int]] = {
-    "kiosco": (18, 28),
-    "decoracion_hogar": (30, 45),
-    "limpieza": (20, 35),
+_MARGIN_RANGES: dict[Vertical, tuple[int, int]] = {
+    Vertical.KIOSCO_ALMACEN: (18, 28),
+    Vertical.DECORACION_HOGAR: (30, 45),
+    Vertical.LIMPIEZA: (20, 35),
 }
 
 # ── Templates ─────────────────────────────────────────────────────────────────
@@ -135,7 +130,7 @@ def render_insight(
             )
 
     elif risk_code == "MARGIN_LOW":
-        vertical = state.vertical_code
+        vertical = parse_vertical(state.vertical_code)
         sales = state.monthly_sales_est
         if sales > 0:
             margin_raw = float(
@@ -145,11 +140,11 @@ def render_insight(
         else:
             margin_raw = 0.0
         margin_pct = round(margin_raw * 100, 1)
-        min_pct, max_pct = _MARGIN_RANGES.get(vertical, (20, 35))
+        min_pct, max_pct = _MARGIN_RANGES[vertical]
         # impact: 5% price increase on monthly sales
         impacto = state.monthly_sales_est * Decimal("0.05")
         vars_ = {
-            "vertical": _VERTICAL_NAMES.get(vertical, vertical),
+            "vertical": VERTICAL_LABELS[vertical],
             "margin_pct": str(margin_pct),
             "min": str(min_pct),
             "max": str(max_pct),

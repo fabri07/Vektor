@@ -33,6 +33,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.verticals import Vertical, try_parse_vertical
 from app.heuristics.base import VerticalRules
 from app.heuristics.decoracion import DecoracionHogarHeuristicRuleSet
 from app.heuristics.kiosco import KioscoHeuristicRuleSet
@@ -57,10 +58,10 @@ type RuleSetInstance = (
     KioscoHeuristicRuleSet | DecoracionHogarHeuristicRuleSet | LimpiezaHeuristicRuleSet
 )
 
-_RULESET_INSTANCES: dict[str, RuleSetInstance] = {
-    "kiosco": KioscoHeuristicRuleSet(),
-    "decoracion_hogar": DecoracionHogarHeuristicRuleSet(),
-    "limpieza": LimpiezaHeuristicRuleSet(),
+_RULESET_INSTANCES: dict[Vertical, RuleSetInstance] = {
+    Vertical.KIOSCO_ALMACEN: KioscoHeuristicRuleSet(),
+    Vertical.DECORACION_HOGAR: DecoracionHogarHeuristicRuleSet(),
+    Vertical.LIMPIEZA: LimpiezaHeuristicRuleSet(),
 }
 
 CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 h
@@ -114,12 +115,17 @@ class BusinessState:
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 
+# v2: los rulesets pasaron del código corto ("kiosco") al canónico
+# ("kiosco_almacen"). Todo blob escrito por la versión anterior guarda el código
+# viejo en `ruleset`, así que `_deserialize_state` lo rechazaría durante las 24 h
+# de CACHE_TTL_SECONDS posteriores al deploy. El bump de key los deja huérfanos
+# (expiran solos) en vez de romper el score de cada tenant kiosco por un día.
 def _cache_key(tenant_id: UUID) -> str:
-    return f"business_state:{tenant_id}"
+    return f"business_state:v2:{tenant_id}"
 
 
 def _hash_key(tenant_id: UUID) -> str:
-    return f"last_inputs_hash:{tenant_id}"
+    return f"last_inputs_hash:v2:{tenant_id}"
 
 
 def _make_fingerprint(
@@ -169,9 +175,10 @@ def _deserialize_state(raw: str) -> BusinessState:
     """Restore BusinessState from JSON string."""
     d = json.loads(raw)
     vertical_code: str = d["ruleset"]
-    ruleset_instance = _RULESET_INSTANCES.get(vertical_code)
-    if ruleset_instance is None:
+    vertical = try_parse_vertical(vertical_code)
+    if vertical is None:
         raise ValueError(f"Unknown vertical in cached state: {vertical_code!r}")
+    ruleset_instance = _RULESET_INSTANCES[vertical]
     products = [
         ProductSummary(
             product_id=UUID(p["product_id"]),
@@ -283,9 +290,10 @@ async def compute_business_state(
     if profile is None:
         raise ValueError(f"No BusinessProfile found for tenant {tenant_id}")
 
-    ruleset_instance = _RULESET_INSTANCES.get(profile.vertical_code)
-    if ruleset_instance is None:
+    vertical = try_parse_vertical(profile.vertical_code)
+    if vertical is None:
         raise ValueError(f"Unknown vertical_code: {profile.vertical_code!r}")
+    ruleset_instance = _RULESET_INSTANCES[vertical]
 
     # ── 2. Aggregate sales (last 30 days) ────────────────────────────────────
     sale_sum_result = await session.execute(

@@ -28,6 +28,7 @@ from app.application.services.product_identity import (
     add_product_or_reuse,
 )
 from app.domain.product_categories import normalize_product_category
+from app.domain.verticals import Vertical, parse_vertical
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
@@ -51,11 +52,13 @@ def _margin_pct(unit_cost: Decimal, sale_price: Decimal) -> float | None:
     return round(float((sale_price - unit_cost) / sale_price * 100), 1)
 
 
-async def _business_type(session: AsyncSession, tenant_id: uuid.UUID) -> str | None:
+async def _tenant_vertical(session: AsyncSession, tenant_id: uuid.UUID) -> Vertical:
+    """Vertical del tenant. Sin fallback: una compra siempre corre bajo un
+    negocio dado de alta, así que un perfil ausente es un estado roto."""
     result = await session.execute(
         select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
     )
-    return result.scalar_one_or_none()
+    return parse_vertical(result.scalar_one_or_none())
 
 
 def _audit(
@@ -127,7 +130,7 @@ async def register_manual_purchase(
             .with_for_update()
         )
 
-    business_type = await _business_type(session, tenant_id)
+    vertical = await _tenant_vertical(session, tenant_id)
     group_id = uuid.uuid4()
     source_event = f"manual_purchase:{group_id}"
 
@@ -137,7 +140,7 @@ async def register_manual_purchase(
     total_cogs = Decimal("0")
 
     for line in body.lines:
-        product, created = await _resolve_product(session, tenant_id, business_type, line)
+        product, created = await _resolve_product(session, tenant_id, vertical, line)
 
         await stock_service.increment_stock(
             product.id,
@@ -220,7 +223,7 @@ async def register_manual_purchase(
 async def _resolve_product(
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    business_type: str | None,
+    vertical: Vertical,
     line: PurchaseLine,
 ) -> tuple[Product, bool]:
     """Devuelve ``(producto, creado)``. Existente por id, o crea uno nuevo."""
@@ -252,7 +255,7 @@ async def _resolve_product(
     if custom_cat is not None:
         code, label = custom_cat["code"], None
     else:
-        code, label = normalize_product_category(line.category, business_type)
+        code, label = normalize_product_category(line.category, vertical)
     custom_fields: dict[str, str] = {}
     if label:
         custom_fields["category_label"] = label

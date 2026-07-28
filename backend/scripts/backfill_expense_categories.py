@@ -51,6 +51,7 @@ from app.domain.product_categories import (  # noqa: E402
     normalize_product_category,
 )
 from app.domain.transaction import PaymentMethod  # noqa: E402
+from app.domain.verticals import Vertical, parse_vertical
 
 _PAYMENT_CODES = {m.value for m in PaymentMethod}
 
@@ -62,13 +63,16 @@ async def _tenant_ids(session: AsyncSession, tenant: str | None) -> list[uuid.UU
     return [r[0] for r in rows.all()]
 
 
-async def _load_vertical(session: AsyncSession, tid: uuid.UUID) -> str | None:
-    return (
+async def _load_vertical(session: AsyncSession, tid: uuid.UUID) -> Vertical:
+    """Vertical del tenant. Sin fallback: normalizar categorías con el catálogo
+    de otro rubro es peor que abortar el backfill del tenant."""
+    code = (
         await session.execute(
             text("SELECT vertical_code FROM business_profiles WHERE tenant_id = :tid"),
             {"tid": tid},
         )
     ).scalar_one_or_none()
+    return parse_vertical(code)
 
 
 async def backfill_expenses(session: AsyncSession, tid: uuid.UUID, apply: bool) -> None:
@@ -187,14 +191,8 @@ async def backfill_payment_methods(session: AsyncSession, tid: uuid.UUID, apply:
 
 
 async def backfill_products(session: AsyncSession, tid: uuid.UUID, apply: bool) -> None:
-    vertical = (
-        await session.execute(
-            text("SELECT vertical_code FROM business_profiles WHERE tenant_id = :tid"),
-            {"tid": tid},
-        )
-    ).scalar_one_or_none()
-    canonical = set(PRODUCT_CATEGORY_LABELS.get(vertical or "kiosco_almacen",
-                                                PRODUCT_CATEGORY_LABELS["kiosco_almacen"]))
+    vertical = await _load_vertical(session, tid)
+    canonical = set(PRODUCT_CATEGORY_LABELS[vertical])
     rows = (
         await session.execute(
             text(

@@ -36,6 +36,7 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.application.services.health_config_service import get_margin_benchmark
+from app.domain.verticals import parse_vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
@@ -282,7 +283,9 @@ class AgentHealth(BaseAgent):
                 HeuristicEngine,
             )
 
-            critical_days = HeuristicEngine.get(vertical).cash_health.critical_days_below
+            critical_days = HeuristicEngine.get(
+                parse_vertical(vertical)
+            ).cash_health.critical_days_below
             if first_negative_day is not None and first_negative_day <= horizon:
                 msg = (
                     f"⚠ Alerta de liquidez: con la tendencia actual, tu caja se pondría "

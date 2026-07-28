@@ -33,6 +33,7 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.domain.business_time import now_ar_naive
+from app.domain.verticals import parse_vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
@@ -115,7 +116,9 @@ class AgentIncome(BaseAgent):
     async def _extract_sale_entities(
         self, message: str, business_context: dict[str, Any]
     ) -> tuple[dict[str, Any], LLMCall]:
-        heuristics = HeuristicEngine.get(business_context.get("type", "kiosco_almacen"))
+        heuristics = HeuristicEngine.get(
+            parse_vertical(business_context.get("type", "kiosco_almacen"))
+        )
         system = (
             "Extraé del mensaje los datos de una venta y devolvé SOLO JSON con: "
             "amount (número o null si no se menciona en el mensaje), "

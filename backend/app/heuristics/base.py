@@ -9,6 +9,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
 
+from app.domain.verticals import Vertical
+
 
 @dataclass
 class DimensionThresholds:
@@ -24,7 +26,7 @@ class DimensionThresholds:
 class VerticalRules:
     """Complete rule configuration for a business vertical."""
 
-    vertical: str
+    vertical: Vertical
     liquidity_thresholds: DimensionThresholds
     profitability_thresholds: DimensionThresholds
     cost_control_thresholds: DimensionThresholds
@@ -37,7 +39,7 @@ class BaseHeuristicRuleSet(ABC):
 
     @property
     @abstractmethod
-    def vertical(self) -> str: ...
+    def vertical(self) -> Vertical: ...
 
     @abstractmethod
     def get_rules(self) -> VerticalRules: ...

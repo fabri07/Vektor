@@ -60,6 +60,7 @@ from app.domain.expense_categories import (  # noqa: E402
     classify_expense_with_vertical,
     infer_expense_type,
 )
+from app.domain.verticals import parse_vertical
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement  # noqa: E402
 from app.persistence.models.product import Product  # noqa: E402
 from app.persistence.models.transaction import ExpenseEntry  # noqa: E402
@@ -205,7 +206,8 @@ async def run(session: AsyncSession, email: str, apply: bool, undo: bool) -> Non
             {"t": tid},
         )
     ).first()
-    business_type = biz[0] if biz else None
+    # Sin fallback: clasificar con el catálogo de otro rubro rompe la reparación.
+    vertical = parse_vertical(biz[0] if biz else None)
 
     frow = (
         await session.execute(
@@ -266,7 +268,7 @@ async def run(session: AsyncSession, email: str, apply: bool, undo: bool) -> Non
         sku = _col(row, "sku", "codigo", "código") or None
         proveedor = (_col(row, "proveedor") or "").strip()[:300] or None
         cat_code, cat_label, _ = classify_expense_with_vertical(
-            (_col(row, "categoria", "rubro") or None), business_type
+            (_col(row, "categoria", "rubro") or None), vertical
         )
         product_id = _resolve_product(by_sku, by_name, name, sku)
         pay_counts[pay] += 1

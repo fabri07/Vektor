@@ -48,6 +48,7 @@ from app.application.services.file_parsing import (
     summary_row_count,
 )
 from app.application.services.team_plan_executor import TeamPlanExecutor
+from app.domain.verticals import parse_vertical
 from app.integrations.anthropic_client import (
     AnthropicConfigurationError,
     get_anthropic_async_client,
@@ -204,7 +205,7 @@ class ChatOrchestrator:
 
         # 1. Contexto del negocio
         business_name, business_type = await self._load_business_context(tenant_id, db)
-        heuristics = HeuristicEngine.get(business_type)
+        heuristics = HeuristicEngine.get(parse_vertical(business_type))
 
         current_attachments = list(request.attachments or [])
         inherited_attachments: list[dict[str, str]] = []
@@ -1292,7 +1293,7 @@ class ChatOrchestrator:
             tenant = await db.get(Tenant, tenant_id)
             include_demo = bool(tenant and tenant.is_demo)
             facts_service = await build_facts_service(
-                db, tenant_id, period, vertical_code=business_type
+                db, tenant_id, period, vertical=parse_vertical(business_type)
             )
             blocks = resolve_alert_facts(
                 facts_service,

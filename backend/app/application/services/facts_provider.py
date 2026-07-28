@@ -37,6 +37,7 @@ from app.application.services.facts_service import (
     SeverityThresholds,
 )
 from app.domain.business_time import AR_TZ
+from app.domain.verticals import Vertical
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
@@ -249,16 +250,16 @@ class PreloadedFactsProvider:
         return self._frames.products.copy()
 
 
-def thresholds_for_vertical(vertical_code: str) -> SeverityThresholds:
+def thresholds_for_vertical(vertical: Vertical) -> SeverityThresholds:
     """Umbrales de severidad desde el benchmark canónico del vertical.
 
     MISMA fuente JSON que usa el health engine (heuristics/verticals/loader.py),
     convertida de fracciones a % — así el severity del fact y el health score
-    no pueden contradecirse. Fallback seguro del loader: kiosco_almacen.
+    no pueden contradecirse. Sin fallback: el vertical llega tipado.
     """
     from app.heuristics.verticals.loader import load_margin_benchmark  # noqa: PLC0415
 
-    margin = load_margin_benchmark(vertical_code)
+    margin = load_margin_benchmark(vertical)
     return SeverityThresholds(
         margen_neto_floor=float(margin.warning_below) * 100.0,
         margen_neto_critical=float(margin.critical_below) * 100.0,
@@ -270,18 +271,19 @@ async def build_facts_service(
     tenant_id: uuid.UUID,
     period: Period,
     *,
-    vertical_code: str | None = None,
+    vertical: Vertical | None = None,
     thresholds: SeverityThresholds | None = None,
 ) -> FactsService:
     """Carga [período_anterior.start, período.end] en UNA pasada y arma el servicio.
 
     La cobertura incluye el período previo porque ventas_periodo/ticket_promedio
-    computan la variación % contra él. Si se pasa `vertical_code`, los umbrales
-    de severidad salen del benchmark JSON del vertical (`thresholds` explícito
-    tiene precedencia).
+    computan la variación % contra él. Si se pasa `vertical`, los umbrales de
+    severidad salen del benchmark JSON del vertical (`thresholds` explícito tiene
+    precedencia). Con ambos en `None` el servicio queda sin umbrales de margen
+    —y `margen_neto` sin severity— en vez de heredar los de un rubro ajeno.
     """
-    if thresholds is None and vertical_code is not None:
-        thresholds = thresholds_for_vertical(vertical_code)
+    if thresholds is None and vertical is not None:
+        thresholds = thresholds_for_vertical(vertical)
     frames = await load_facts_frames(
         session,
         tenant_id,

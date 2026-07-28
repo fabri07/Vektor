@@ -15,49 +15,46 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.verticals import Vertical
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "heuristics"
 
-BUSINESS_TYPE_FILES = {
-    "kiosco_almacen": "kiosco_almacen.json",
-    "kiosco": "kiosco_almacen.json",
-    "almacen": "kiosco_almacen.json",
-    "limpieza": "limpieza.json",
-    "decoracion_hogar": "decoracion_hogar.json",
-    "decoracion": "decoracion_hogar.json",
-}
+# Los sub-configs NO tienen defaults a propósito: los valores que había acá eran
+# los de kiosco, así que a un JSON con una clave faltante se le inyectaban los
+# umbrales de kiosco en silencio. Los tres JSON traen las 16 claves-hoja; si
+# alguna falta, pydantic levanta y el bug de datos se ve.
 
 
 class CashHealthConfig(BaseModel):
-    healthy_days_min: float = 10
-    warning_days_min: float = 7
-    critical_days_below: float = 5
+    healthy_days_min: float
+    warning_days_min: float
+    critical_days_below: float
 
 
 class MarginConfig(BaseModel):
-    net_expected_min: float = 0.12
-    net_expected_max: float = 0.18
+    net_expected_min: float
+    net_expected_max: float
 
 
 class InventoryConfig(BaseModel):
-    rotation_days_min: int = 7
-    rotation_days_max: int = 21
-    overstock_tolerance: str = "baja"
+    rotation_days_min: int
+    rotation_days_max: int
+    overstock_tolerance: str
 
 
 class SupplierConfig(BaseModel):
-    reorder_frequency: str = "semanal"
-    stockout_sensitivity: str = "muy_alta"
+    reorder_frequency: str
+    stockout_sensitivity: str
 
 
 class HeuristicConfig(BaseModel):
     business_type: str
-    cash_health: CashHealthConfig = CashHealthConfig()
-    margin: MarginConfig = MarginConfig()
-    inventory: InventoryConfig = InventoryConfig()
-    supplier: SupplierConfig = SupplierConfig()
-    seasonality: str = "baja"
+    cash_health: CashHealthConfig
+    margin: MarginConfig
+    inventory: InventoryConfig
+    supplier: SupplierConfig
+    seasonality: str
 
     def to_prompt_fragment(self) -> str:
         """
@@ -96,28 +93,24 @@ class HeuristicConfig(BaseModel):
 
 class HeuristicEngine:
     @staticmethod
-    def _load_default(business_type: str) -> dict[str, Any]:
-        filename = BUSINESS_TYPE_FILES.get(business_type.lower())
-        if not filename:
-            # Fallback a kiosco si el rubro no se reconoce
-            filename = "kiosco_almacen.json"
-        path = DATA_DIR / filename
+    def _load_default(vertical: Vertical) -> dict[str, Any]:
+        path = DATA_DIR / f"{vertical.value}.json"
         if not path.exists():
             raise FileNotFoundError(f"Archivo de heurística no encontrado: {path}")
         return cast("dict[str, Any]", json.loads(path.read_text()))
 
     @staticmethod
-    def get(business_type: str, business_id: str | None = None) -> HeuristicConfig:
+    def get(vertical: Vertical, business_id: str | None = None) -> HeuristicConfig:
         """
         Versión síncrona — usa solo los defaults del rubro.
         Para aplicar overrides por negocio usar get_async().
         """
-        defaults = HeuristicEngine._load_default(business_type)
+        defaults = HeuristicEngine._load_default(vertical)
         return HeuristicConfig(**defaults)
 
     @staticmethod
     async def get_async(
-        business_type: str,
+        vertical: Vertical,
         business_id: str,
         db: AsyncSession,
     ) -> HeuristicConfig:
@@ -125,7 +118,7 @@ class HeuristicEngine:
         Versión asíncrona — aplica overrides del negocio sobre los defaults.
         El parámetro business_id corresponde al tenant_id del negocio.
         """
-        config_dict = HeuristicEngine._load_default(business_type)
+        config_dict = HeuristicEngine._load_default(vertical)
 
         # Buscar overrides del negocio en la BD (tenant_id = business_id)
         stmt = select(BusinessHeuristicOverride).where(

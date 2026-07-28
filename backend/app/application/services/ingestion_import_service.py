@@ -59,6 +59,7 @@ from app.domain.text_norm import (
     normalize_sku,
     normalize_text,
 )
+from app.domain.verticals import Vertical, parse_vertical
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1029,8 +1030,12 @@ async def _capture_column_risk_rows(
     return created
 
 
-async def _load_business_type(session: AsyncSession, tenant_id: uuid.UUID) -> str | None:
-    """Vertical del tenant para normalizar categorías de producto (1 query por import)."""
+async def _load_tenant_vertical(session: AsyncSession, tenant_id: uuid.UUID) -> Vertical:
+    """Vertical del tenant para normalizar categorías de producto (1 query por import).
+
+    Sin fallback: importar con el catálogo de otro rubro clasifica mal cada fila
+    del archivo. Un tenant que importa siempre tiene `BusinessProfile`.
+    """
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
@@ -1038,7 +1043,7 @@ async def _load_business_type(session: AsyncSession, tenant_id: uuid.UUID) -> st
     result = await session.execute(
         select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
     )
-    return result.scalar_one_or_none()
+    return parse_vertical(result.scalar_one_or_none())
 
 
 # ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
@@ -2812,11 +2817,7 @@ async def _insert_confirmed_data_impl(
         # FASE E: vertical del tenant para normalizar categorías de producto.
         # También para gastos: una categoría que matchea el catálogo de productos
         # del vertical es compra de mercadería → INVENTORY/COGS.
-        _business_type = (
-            await _load_business_type(session, tenant_id)
-            if (wants_productos or wants_gastos)
-            else None
-        )
+        _vertical = await _load_tenant_vertical(session, tenant_id)
         # Batch: balances del tenant en una query (evita un SELECT por fila
         # en los movimientos de stock del import).
         _balance_index: dict[uuid.UUID, Any] | None = (
@@ -3007,7 +3008,7 @@ async def _insert_confirmed_data_impl(
                     # Categoría de producto del vertical ("Bebidas") = compra de
                     # mercadería → INVENTORY/COGS, preservando el texto como label.
                     cat_code, cat_label, _ = classify_expense_with_vertical(
-                        _clean_str(cat_raw), _business_type
+                        _clean_str(cat_raw), _vertical
                     )
 
                     # Método de pago real del archivo (antes hardcodeado "transfer").
@@ -3392,7 +3393,7 @@ async def _insert_confirmed_data_impl(
                 prod_cat_label: str | None = None
                 if prod_cat_raw:
                     prod_cat, prod_cat_label = normalize_product_category(
-                        prod_cat_raw, _business_type
+                        prod_cat_raw, _vertical
                     )
 
                 # F2-T2: resolución de identidad por claves independientes
@@ -3863,7 +3864,7 @@ async def _insert_multisheet_data(
     # Índice de proveedores para find-or-create en compras (una carga).
     _supplier_index = await _load_supplier_index(session, tenant_id)
     # FASE E: vertical del tenant para normalizar categorías de producto.
-    _business_type = await _load_business_type(session, tenant_id)
+    _vertical = await _load_tenant_vertical(session, tenant_id)
     # Batch: balances en una query (evita un SELECT por fila en movimientos).
     _balance_index = await _load_balance_index(session, tenant_id)
     # F7c: índice de identidad de clientes para resolver la referencia por fila
@@ -4059,7 +4060,7 @@ async def _insert_multisheet_data(
         )
         # Categoría de producto del vertical ("Bebidas") = compra de mercadería
         # → INVENTORY/COGS, preservando el texto original como label.
-        cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw, _business_type)
+        cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw, _vertical)
         recurring = _parse_bool_es(_val(row, cols.get("is_recurring"), _RECURRENTE_COLS))
         expense = ExpenseEntry(
             tenant_id=tenant_id,
@@ -4319,7 +4320,7 @@ async def _insert_multisheet_data(
         cat: str | None = None
         cat_label: str | None = None
         if cat_raw:
-            cat, cat_label = normalize_product_category(cat_raw, _business_type)
+            cat, cat_label = normalize_product_category(cat_raw, _vertical)
         # F6-B2: fechas de producto (columna mapeada o keyword; la genérica "fecha"
         # NO cuenta). Sin columna/celda vacía/heurística ilegible → None (un producto
         # es válido sin fecha, no se inventa). PERO si un campo MAPEADO A MANO trae un
@@ -4809,7 +4810,7 @@ async def bulk_import_unclassified(
     _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
     # F2-T5: índices de identidad solo para el tier de barcode del link.
     _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
-    _business_type = await _load_business_type(session, tenant_id)
+    _vertical = await _load_tenant_vertical(session, tenant_id)
     _flush_every = 500
 
     for i, rec in enumerate(records):
@@ -4872,7 +4873,7 @@ async def bulk_import_unclassified(
             counts["imported_sales"] += 1
         else:
             cat_code, cat_label, _ = classify_expense_with_vertical(
-                _clean_str(_row_val_categoria(row), 99), _business_type
+                _clean_str(_row_val_categoria(row), 99), _vertical
             )
             expense = ExpenseEntry(
                 tenant_id=tenant_id,

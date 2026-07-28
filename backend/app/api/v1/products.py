@@ -28,6 +28,7 @@ from app.domain.product_categories import (
 )
 from app.domain.product_completion import recompute_requires_completion
 from app.domain.text_norm import normalize_barcode, normalize_sku
+from app.domain.verticals import Vertical, parse_vertical
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -43,15 +44,25 @@ router = APIRouter()
 DEACTIVATION_REASON_MANUAL = "MANUAL_ADMIN_VOID"
 
 
-async def _tenant_business_type(session: AsyncSession, tenant_id: UUID) -> str | None:
+async def _tenant_vertical(session: AsyncSession, tenant_id: UUID) -> Vertical:
+    """Vertical del tenant, tipado. Sin fallback: sin perfil no hay catálogo.
+
+    Un tenant logueado sin `BusinessProfile` es un estado roto real (signups
+    viejos de Google); servirle el catálogo de kiosco era peor que decírselo.
+    """
     result = await session.execute(
         select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
     )
-    return result.scalar_one_or_none()
+    code = result.scalar_one_or_none()
+    if code is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="business_profile_not_found"
+        )
+    return parse_vertical(code)
 
 
 async def _resolve_category(
-    session: AsyncSession, tenant_id: UUID, raw: str, business_type: str | None
+    session: AsyncSession, tenant_id: UUID, raw: str, vertical: Vertical
 ) -> tuple[str, str | None]:
     """Categoría libre → (code, label). Prioriza las custom del tenant; si no, el
     catálogo del vertical (label solo poblado cuando cae a OTHER)."""
@@ -60,7 +71,7 @@ async def _resolve_category(
     )
     if custom is not None:
         return custom["code"], None
-    return normalize_product_category(raw, business_type)
+    return normalize_product_category(raw, vertical)
 
 
 async def _find_identity_matches(
@@ -275,8 +286,8 @@ async def list_product_categories(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[dict[str, str]]:
-    business_type = await _tenant_business_type(session, tenant.tenant_id)
-    catalog = product_category_catalog(business_type)
+    vertical = await _tenant_vertical(session, tenant.tenant_id)
+    catalog = product_category_catalog(vertical)
     custom = await tenant_categories_service.list_product_categories(session, tenant.tenant_id)
     # Las custom se insertan antes de "OTHER" para que "Otros" quede al final.
     other = [c for c in catalog if c["code"] == "OTHER"]
@@ -302,11 +313,11 @@ async def create_product_category(
     # Si el label coincide con una categoría canónica del vertical, devolver ESA
     # (no crear una custom que colisione: evita CUSTOM_BEBIDAS vs BEBIDAS y mantiene
     # consistente el código entre carga manual e import/chat).
-    business_type = await _tenant_business_type(session, tenant.tenant_id)
-    code, _label = normalize_product_category(body.label, business_type)
+    vertical = await _tenant_vertical(session, tenant.tenant_id)
+    code, _label = normalize_product_category(body.label, vertical)
     if code != "OTHER":
         match = next(
-            (c for c in product_category_catalog(business_type) if c["code"] == code), None
+            (c for c in product_category_catalog(vertical) if c["code"] == code), None
         )
         if match is not None:
             return match
@@ -355,9 +366,9 @@ async def create_product(
         raise conflict
     # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     if data.get("category"):
-        business_type = await _tenant_business_type(session, tenant.tenant_id)
+        vertical = await _tenant_vertical(session, tenant.tenant_id)
         code, label = await _resolve_category(
-            session, tenant.tenant_id, data["category"], business_type
+            session, tenant.tenant_id, data["category"], vertical
         )
         data["category"] = code
         if label:
@@ -452,9 +463,9 @@ async def update_product(
             raise conflict
     # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     if updates.get("category"):
-        business_type = await _tenant_business_type(session, tenant.tenant_id)
+        vertical = await _tenant_vertical(session, tenant.tenant_id)
         code, label = await _resolve_category(
-            session, tenant.tenant_id, updates["category"], business_type
+            session, tenant.tenant_id, updates["category"], vertical
         )
         updates["category"] = code
         if label:
