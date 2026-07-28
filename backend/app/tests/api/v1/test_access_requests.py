@@ -575,7 +575,9 @@ async def test_onboarding_submit_no_esta_gateado_por_el_registro(
     res = await client.post(
         _ONBOARDING,
         json={
-            "vertical_code": "kiosco_almacen",
+            # Sin `vertical_code`: el rubro ya lo fijó la aprobación de la
+            # solicitud (o, en este fixture, el alta de `sample_tenant`) —
+            # el usuario ya no lo manda acá.
             "weekly_sales_estimate_ars": 350000,
             "monthly_inventory_cost_ars": 180000,
             "monthly_fixed_expenses_ars": 80000,

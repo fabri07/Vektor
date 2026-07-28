@@ -6,10 +6,9 @@ from decimal import Decimal
 from typing import Final, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.fiscal_condition import FiscalCondition
-from app.domain.verticals import VERTICAL_CODE_PATTERN
 
 #: Preocupación principal declarada por el dueño del negocio. Definida acá una
 #: sola vez porque la preguntan DOS formularios distintos: el onboarding
@@ -74,8 +73,23 @@ class BusinessSurveyMixin(BaseModel):
 
 
 class OnboardingSubmitRequest(BusinessSurveyMixin):
-    vertical_code: str = Field(pattern=VERTICAL_CODE_PATTERN)
-    main_concern: str = Field(pattern=MAIN_CONCERN_PATTERN)
+    """Números financieros del primer login — el rubro NO se pide acá.
+
+    El vertical ya lo fijó el dueño al aprobar la solicitud de acceso
+    (`business_profiles.vertical_code`); el usuario recién aprobado no puede
+    reescribirlo. `extra="forbid"` convierte un bundle viejo del frontend que
+    todavía mande `vertical_code` en un 422 ruidoso en vez de un valor
+    ignorado en silencio — exactamente el punto de este cambio.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Preocupación principal: ahora se pregunta en el formulario público de
+    # solicitud de acceso (`CreateAccessRequestRequest.main_concern`), no acá.
+    # Opcional: si no viene, el service la busca en
+    # `business_profiles.custom_fields["main_concern"]` (la copió la
+    # aprobación); si tampoco está ahí, se omite del snapshot — no se inventa.
+    main_concern: str | None = Field(default=None, pattern=MAIN_CONCERN_PATTERN)
     # Condición fiscal — opcional y solo informativa. Si viene, se guarda en el
     # profile; si falta, queda NULL (no configurado) y NO bloquea el onboarding.
     fiscal_condition: FiscalCondition | None = Field(default=None)

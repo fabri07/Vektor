@@ -400,7 +400,8 @@ async def test_s6_end_to_end(
         r = await client.post(
             "/api/v1/onboarding/submit",
             json={
-                "vertical_code": Vertical.KIOSCO_ALMACEN.value,
+                # Sin `vertical_code`: el rubro ya lo fijó el registro (arriba)
+                # y el onboarding no lo puede reescribir.
                 "weekly_sales_estimate_ars": "350000",
                 "monthly_inventory_cost_ars": "180000",
                 "monthly_fixed_expenses_ars": "80000",

@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,17 +84,19 @@ class OnboardingService:
         # Step 2-3: calculate monthly sales estimate
         monthly_sales = body.weekly_sales_estimate_ars * Decimal("4.3")
 
-        # Step 4: persist vertical and financial estimates to business_profile
-        bp.vertical_code = body.vertical_code
+        # Step 4: persist financial estimates to business_profile. El vertical
+        # NO se toca acá: ya lo fijó el dueño al aprobar la solicitud de
+        # acceso y el usuario no puede reescribirlo (`vertical_code` salió del
+        # request). Se lee del profile y se parsea estricto — un dato
+        # corrupto/legado tiene que fallar ruidoso, no autodeterminarse.
+        vertical = parse_vertical(bp.vertical_code)
         bp.monthly_sales_estimate_ars = monthly_sales
         bp.monthly_inventory_spend_estimate_ars = body.monthly_inventory_cost_ars
         bp.monthly_fixed_expenses_estimate_ars = body.monthly_fixed_expenses_ars
         bp.cash_on_hand_estimate_ars = body.cash_on_hand_ars
         bp.product_count_estimate = body.product_count_estimate
         bp.supplier_count_estimate = body.supplier_count_estimate
-        bp.heuristic_profile_version = heuristic_profile_version(
-            parse_vertical(body.vertical_code)
-        )
+        bp.heuristic_profile_version = heuristic_profile_version(vertical)
         bp.heuristics_version = "v1"
 
         # Días y horarios laborales (Sprint 20): persistir lo enviado o defaults
@@ -116,22 +119,32 @@ class OnboardingService:
         completeness = _calculate_completeness(body)
         confidence = _derive_confidence(completeness)
 
+        # Step 6b: resolver main_concern. Ahora se pregunta en el formulario
+        # público de solicitud de acceso; si no vino en este body, se busca en
+        # custom_fields (la aprobación lo copió ahí). Si tampoco está, se omite
+        # del snapshot — no se inventa un valor.
+        main_concern = body.main_concern
+        if main_concern is None:
+            main_concern = bp.custom_fields.get("main_concern")
+
         # Step 7: create business snapshot
         now = datetime.now(UTC)
+        raw_inputs: dict[str, Any] = {
+            "weekly_sales_estimate_ars": str(body.weekly_sales_estimate_ars),
+            "monthly_inventory_cost_ars": str(body.monthly_inventory_cost_ars),
+            "monthly_fixed_expenses_ars": str(body.monthly_fixed_expenses_ars),
+            "cash_on_hand_ars": str(body.cash_on_hand_ars),
+            "product_count_estimate": body.product_count_estimate,
+            "supplier_count_estimate": body.supplier_count_estimate,
+            "vertical_code": bp.vertical_code,
+        }
+        if main_concern is not None:
+            raw_inputs["main_concern"] = main_concern
         snapshot = BusinessSnapshot(
             tenant_id=tenant_id,
             snapshot_date=now,
             snapshot_version="onboarding_v1",
-            raw_inputs_json={
-                "weekly_sales_estimate_ars": str(body.weekly_sales_estimate_ars),
-                "monthly_inventory_cost_ars": str(body.monthly_inventory_cost_ars),
-                "monthly_fixed_expenses_ars": str(body.monthly_fixed_expenses_ars),
-                "cash_on_hand_ars": str(body.cash_on_hand_ars),
-                "product_count_estimate": body.product_count_estimate,
-                "supplier_count_estimate": body.supplier_count_estimate,
-                "main_concern": body.main_concern,
-                "vertical_code": body.vertical_code,
-            },
+            raw_inputs_json=raw_inputs,
             data_completeness_score=Decimal(completeness),
             data_mode="M0",
             confidence_level=confidence,

@@ -10,9 +10,12 @@ Required tests:
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import get_settings
 from app.domain.verticals import Vertical
+from app.persistence.models.business import BusinessProfile
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +42,6 @@ _REGISTER_PAYLOAD = {
 }
 
 _ONBOARDING_PAYLOAD = {
-    "vertical_code": Vertical.KIOSCO_ALMACEN.value,
     "weekly_sales_estimate_ars": 50000,
     "monthly_inventory_cost_ars": 80000,
     "monthly_fixed_expenses_ars": 30000,
@@ -142,6 +144,103 @@ class TestOnboarding:
         assert after_data["completed"] is True
         assert after_data["vertical_code"] == Vertical.KIOSCO_ALMACEN.value
         assert after_data["data_completeness_score"] == 100
+
+    async def test_onboarding_vertical_code_en_el_body_es_422(
+        self, client: AsyncClient
+    ) -> None:
+        """Mandar `vertical_code` en /onboarding/submit es 422 (extra="forbid").
+
+        El vertical ya lo fijó el dueño al aprobar la solicitud de acceso; el
+        usuario no puede reescribirlo. Un bundle viejo del frontend que
+        todavía mande `vertical_code` tiene que fallar ruidoso, no ser
+        ignorado en silencio.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json={**_ONBOARDING_PAYLOAD, "vertical_code": Vertical.LIMPIEZA.value},
+            headers=headers,
+        )
+
+        assert response.status_code == 422
+
+    async def test_onboarding_no_reescribe_el_vertical_del_perfil(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """Aunque no se pueda mandar `vertical_code`, confirmamos que el
+        vertical persistido después del submit sigue siendo el que ya tenía
+        el `BusinessProfile` (el que fijó la aprobación), no uno inventado."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        await client.post(
+            "/api/v1/onboarding/submit",
+            json=_ONBOARDING_PAYLOAD,
+            headers=headers,
+        )
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        assert bp.vertical_code == Vertical.KIOSCO_ALMACEN.value
+
+    async def test_onboarding_main_concern_sale_de_custom_fields_si_no_viene(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """Si el body no manda `main_concern`, se lee de
+        `business_profiles.custom_fields["main_concern"]` (lo escribió la
+        aprobación de la solicitud de acceso). Simulamos esa escritura previa
+        a mano porque el registro abierto de este test no pasa por ese flujo."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "STOCK"}
+        await db_session.commit()
+
+        payload_sin_main_concern = {
+            k: v for k, v in _ONBOARDING_PAYLOAD.items() if k != "main_concern"
+        }
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_main_concern,
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["data_completeness_score"] == 100
+
+    async def test_onboarding_sin_main_concern_en_ningun_lado_no_lo_inventa(
+        self, client: AsyncClient
+    ) -> None:
+        """Sin `main_concern` en el body ni en `custom_fields`, el submit igual
+        tiene que completarse (200) — no se inventa un valor por default."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        payload_sin_main_concern = {
+            k: v for k, v in _ONBOARDING_PAYLOAD.items() if k != "main_concern"
+        }
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_main_concern,
+            headers=headers,
+        )
+
+        assert response.status_code == 200
 
 
 class TestOnboardingWorkScheduleValidation:
