@@ -10,13 +10,14 @@ JWT payload expected keys: sub (user_id), tenant_id, role_code.
 from collections.abc import Callable
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service
 from app.application.services.pin_service import PinService
+from app.config.settings import get_settings
 from app.observability.logger import bind_request_context
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -102,6 +103,46 @@ def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
         return current_user
 
     return _check
+
+
+# ── Endpoints públicos (sin auth) ───────────────────────────────────────────────
+
+#: Código que devuelven `POST /auth/register` y `POST /onboarding/submit` cuando el
+#: registro abierto está apagado. Lo lee el frontend para mostrar el copy de "el
+#: acceso ahora se pide" en lugar de un error genérico.
+REGISTRATION_CLOSED_CODE = "registration_closed"
+
+
+def client_ip(request: Request) -> str | None:
+    """IP real detrás del proxy (Railway) o la del cliente directo.
+
+    Definición única: la comparten los dos formularios públicos anónimos
+    (contacto y solicitud de acceso), que la usan para el `ip_hash` anti-abuso.
+    """
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+def require_open_registration() -> None:
+    """Corta con 410 los endpoints del registro abierto mientras el flag esté OFF.
+
+    El alta de cuentas pasa por `POST /access-requests` (solicitud + aprobación
+    manual). Los endpoints viejos NO se borran: conservan la ruta y devuelven un
+    410 con código estable, así un bundle desactualizado del frontend recibe una
+    señal accionable en vez de un 404. Prender `ENABLE_OPEN_REGISTRATION`
+    restituye el comportamiento histórico completo (rollback de una línea).
+
+    Va como `dependencies=[...]` del endpoint —no como primera línea del cuerpo—
+    para que se resuelva ANTES de validar el body: un payload viejo tiene que ver
+    el 410, no un 422 de esquema.
+    """
+    if not get_settings().ENABLE_OPEN_REGISTRATION:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail=REGISTRATION_CLOSED_CODE,
+        )
 
 
 # ── Step-up auth (PIN) ──────────────────────────────────────────────────────────

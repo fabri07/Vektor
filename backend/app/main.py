@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -157,9 +158,16 @@ def create_app() -> FastAPI:
             errors=exc.errors(),
             raw_body=body,
         )
+        # `jsonable_encoder` NO es decorativo (y es lo que hace el handler default
+        # de FastAPI): cuando la validación viene de un `field_validator` o un
+        # `model_validator` que levanta `ValueError`, Pydantic v2 mete la excepción
+        # cruda en `error["ctx"]["error"]`. Serializar eso directo tira
+        # `TypeError: Object of type ValueError is not JSON serializable` y el 422
+        # se convierte en un 500 — el cliente recibe "error del servidor" cuando en
+        # realidad mandó un payload inválido.
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"detail": exc.errors()},
+            content={"detail": jsonable_encoder(exc.errors())},
         )
 
     @app.exception_handler(ValidationError)
@@ -171,7 +179,7 @@ def create_app() -> FastAPI:
         )
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"detail": exc.errors()},
+            content={"detail": jsonable_encoder(exc.errors())},
         )
 
     @app.exception_handler(InsufficientStockError)

@@ -6,7 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_open_registration
 from app.application.services.auth_service import AuthService
 from app.application.services.pin_service import PinError, PinService
 from app.main import limiter
@@ -44,7 +44,12 @@ router = APIRouter()
     "/register",
     response_model=RegisterResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a new tenant and owner user",
+    summary="Register a new tenant and owner user (410 si el registro abierto está cerrado)",
+    # El registro abierto está APAGADO por defecto: el alta pasa por
+    # `POST /access-requests` (solicitud + aprobación manual). La ruta se conserva
+    # para que un bundle viejo del frontend reciba un 410 accionable en vez de un
+    # 404. Prender `ENABLE_OPEN_REGISTRATION` restituye este endpoint tal cual.
+    dependencies=[Depends(require_open_registration)],
 )
 @limiter.limit("5/10minutes")
 async def register(

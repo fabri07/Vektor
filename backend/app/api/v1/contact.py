@@ -12,6 +12,7 @@ nunca pierde el lead ni le muestra error al visitante.
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import client_ip
 from app.application.services.contact_lead_service import (
     LeadInput,
     create_lead,
@@ -27,14 +28,6 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 _OK = LeadResponse()
-
-
-def _client_ip(request: Request) -> str | None:
-    """IP real detrás del proxy (Railway) o la del cliente directo."""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _looks_like_bot(body: CreateLeadRequest) -> bool:
@@ -73,7 +66,7 @@ async def create_contact_lead(
             server_version=CONSENT_VERSION,
         )
 
-    ip_hash = hash_ip(_client_ip(request))
+    ip_hash = hash_ip(client_ip(request))
     lead, created = await create_lead(
         session,
         data=LeadInput(

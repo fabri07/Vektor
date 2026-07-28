@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import auth_service
+from app.config.settings import get_settings
 from app.domain.verticals import Vertical
 from app.persistence.models.auth_token import EmailVerificationToken, PasswordResetToken
 from app.persistence.models.tenant import Tenant
@@ -35,6 +36,20 @@ _REGISTER_PAYLOAD = {
     "business_name": "Kiosco El Rápido",
     "vertical_code": Vertical.KIOSCO_ALMACEN.value,
 }
+
+
+@pytest.fixture(autouse=True)
+def _registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prende `ENABLE_OPEN_REGISTRATION` para todo este módulo.
+
+    El default de producción es `False`: el alta pasa por una solicitud de acceso
+    y `POST /auth/register` responde 410 `registration_closed`. Estos tests son la
+    cobertura del camino histórico, que sigue existiendo tal cual detrás del flag
+    —es el rollback de una línea—, y además muchos lo usan solo como fixture para
+    conseguir un tenant logueado. El 410 se testea en
+    `app/tests/api/v1/test_access_requests.py`.
+    """
+    monkeypatch.setattr(get_settings(), "ENABLE_OPEN_REGISTRATION", True)
 
 
 # ── Register ──────────────────────────────────────────────────────────────────

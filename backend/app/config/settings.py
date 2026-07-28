@@ -138,6 +138,7 @@ class Settings(BaseSettings):
         "ENABLE_AGENT_AUTOMATIONS",
         "ENABLE_WHATSAPP",
         "ENABLE_SOCIAL_SYNC",
+        "ENABLE_OPEN_REGISTRATION",
         "DEMO_MODE",
         "USE_LOCAL_FALLBACK",
         mode="before",
@@ -221,6 +222,14 @@ class Settings(BaseSettings):
     TIKTOK_CLIENT_SECRET: str = ""
 
     # ── Feature flags ─────────────────────────────────────────────────────────
+    # Registro abierto (autoservicio). **Default False**: el alta de cuentas pasa
+    # por una solicitud de acceso que el dueño aprueba a mano
+    # (`POST /access-requests`). Con el flag apagado, `POST /auth/register` y
+    # `POST /onboarding/submit` responden 410 `registration_closed` — conservan la
+    # ruta a propósito, para que un bundle viejo del frontend reciba una señal
+    # clara en vez de un 404 o un 422 raro. Prenderlo es el rollback de una línea
+    # que devuelve el comportamiento histórico completo.
+    ENABLE_OPEN_REGISTRATION: bool = False
     ENABLE_SCORE_RECALCULATION: bool = True
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
     ENABLE_EMAIL_VERIFICATION: bool = True

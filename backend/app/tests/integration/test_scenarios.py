@@ -55,6 +55,20 @@ from .conftest import (
     run_pipeline,
 )
 
+
+@pytest.fixture
+def registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prende `ENABLE_OPEN_REGISTRATION` (default de producción: `False`).
+
+    Solo la pide S6, que entra por `POST /auth/register` + `POST /onboarding/submit`.
+    Con el flag apagado esos dos endpoints responden 410 `registration_closed`; el
+    camino histórico sigue existiendo tal cual detrás del flag y este escenario es
+    su cobertura end-to-end.
+    """
+    from app.config.settings import get_settings  # noqa: PLC0415
+
+    monkeypatch.setattr(get_settings(), "ENABLE_OPEN_REGISTRATION", True)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCENARIO 1 — Kiosco saludable
 #
@@ -354,6 +368,7 @@ async def test_s6_end_to_end(
     session: AsyncSession,
     fake_redis: FakeRedis,
     client: AsyncClient,
+    registro_abierto: None,
 ) -> None:
     # ── 1. Register ───────────────────────────────────────────────────────────
     r = await client.post(

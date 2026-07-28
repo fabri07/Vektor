@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    access_requests,
     admin,
     agent,
     auth,
@@ -39,6 +40,15 @@ from app.api.v1 import (
 api_router = APIRouter()
 
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
+# Solicitudes de acceso: el formulario es público, la cola de revisión es SUPERADMIN.
+api_router.include_router(
+    access_requests.router, prefix="/access-requests", tags=["Access Requests"]
+)
+api_router.include_router(
+    access_requests.admin_router,
+    prefix="/admin/access-requests",
+    tags=["Access Requests — Admin"],
+)
 api_router.include_router(agent.router, prefix="/agent", tags=["Agent"])
 api_router.include_router(automations.router, prefix="/automations", tags=["Automations"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Auth"])

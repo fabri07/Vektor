@@ -11,7 +11,20 @@ Required tests:
 import pytest
 from httpx import AsyncClient
 
+from app.config.settings import get_settings
 from app.domain.verticals import Vertical
+
+
+@pytest.fixture(autouse=True)
+def _registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prende `ENABLE_OPEN_REGISTRATION` para todo este módulo.
+
+    Con el flag en su default (`False`), `POST /auth/register` y
+    `POST /onboarding/submit` responden 410 `registration_closed`. Estos tests
+    cubren el camino histórico, que sigue vivo tal cual detrás del flag; el 410 se
+    testea en `app/tests/api/v1/test_access_requests.py`.
+    """
+    monkeypatch.setattr(get_settings(), "ENABLE_OPEN_REGISTRATION", True)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
