@@ -272,6 +272,18 @@ export function LoginForm() {
       </button>
 
       {/*
+        La bifurcación se avisa ANTES del redirect, no después. "Continuar con
+        Google" se lee como un login de un click; si ese email todavía no tiene
+        cuenta, el visitante vuelve de Google a un formulario largo sin haber
+        aceptado nunca ese trato. Véktor no crea cuentas por Google: el registro
+        es cerrado y el alta la aprueba el dueño a mano.
+      */}
+      <p className="text-center text-xs text-vk-text-muted">
+        Si ese email todavía no tiene cuenta, te llevamos a pedir acceso: el alta
+        la aprobamos a mano.
+      </p>
+
+      {/*
         "Creá una gratis" era la promesa exacta que el registro cerrado retira:
         el visitante no crea nada, manda una solicitud de acceso que el dueño
         revisa a mano. El link va directo a /solicitar-acceso (no al redirect de

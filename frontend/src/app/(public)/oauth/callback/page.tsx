@@ -50,6 +50,14 @@ export default function OAuthCallbackPage() {
         if ("status" in result && result.status === "link_required") {
           setLinkData(result as OAuthLinkRequiredResponse);
           setStage("link_required");
+        } else if ("status" in result && result.status === "access_request_required") {
+          // Ese email no tiene cuenta y Google no crea ninguna: el alta pasa por
+          // una solicitud que el dueño aprueba a mano. El token de prefill viaja
+          // en la URL para que el formulario muestre el email verificado y la
+          // solicitud quede ligada a esta identidad.
+          router.replace(
+            `/solicitar-acceso?prefill=${encodeURIComponent(result.prefill_token)}&src=google`,
+          );
         } else {
           const auth = result as {
             access_token: string;

@@ -5,7 +5,7 @@ Responsabilidades:
   2. handle_callback()       → valida state+PKCE, intercambia code, verifica id_token
                                guarda resultado en Redis, devuelve session_id para exchange
   3. exchange_session()      → GETDEL del resultado (single-use),
-                               devuelve AuthResponse o LinkRequiredResponse
+                               devuelve AuthResponse, LinkRequired o AccessRequestRequired
   4. complete_link()         → GETDEL del pending_oauth_session,
                                verifica password, vincula identidad
 
@@ -22,14 +22,23 @@ Flujo completo:
 
   POST /exchange {session_id}
     → GETDEL oauth:exchange:{session_id}
-    → devuelve AuthResponse (nuevo usuario o identidad ya vinculada)
-       o OAuthLinkRequiredResponse (email ya existe en cuenta local)
+    → devuelve AuthResponse (identidad ya vinculada),
+       OAuthLinkRequiredResponse (email ya existe en cuenta local)
+       u OAuthAccessRequestRequiredResponse (email desconocido)
 
   POST /link-pending {pending_oauth_session_id, email, password}
     → GETDEL oauth:link:{id}  ← single-use atómico
     → autentica con password (fail si is_active=False)
     → vincula UserAuthIdentity
     → devuelve AuthResponse
+
+**El login con Google NO acuña cuentas.** Un email que Google verificó pero que
+no existe en Véktor abre una SOLICITUD de acceso, igual que el formulario
+público: el registro es cerrado y la cuenta la acuña la aprobación manual del
+dueño. Este archivo emite el prefill (`oauth:prefill:{token}`) que liga esa
+solicitud a la identidad de Google; quien lo canjea es
+`api/v1/access_requests.py`, y quien crea el `UserAuthIdentity` es
+`AccessRequestService.approve()`.
 
 Invariantes de seguridad:
   - id_token verificado contra Google JWKS (RS256)
@@ -44,10 +53,10 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-import uuid
 from base64 import urlsafe_b64encode
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
@@ -63,18 +72,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import get_settings
 from app.observability.logger import get_logger
-from app.persistence.models.business import MomentumProfile
-from app.persistence.models.tenant import Subscription, Tenant
+from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.models.user_auth_identity import UserAuthIdentity
 from app.persistence.repositories.tenant_repository import TenantRepository
 from app.persistence.repositories.user_repository import UserRepository
 from app.schemas.auth import AuthResponse, UserInAuthResponse
-from app.schemas.oauth import OAuthLinkRequiredResponse, OAuthStartResponse
+from app.schemas.oauth import (
+    OAuthAccessRequestRequiredResponse,
+    OAuthLinkRequiredResponse,
+    OAuthStartResponse,
+)
 from app.utils.security import (
     create_access_token,
     create_refresh_token,
-    hash_password,
     verify_password,
 )
 
@@ -89,11 +100,78 @@ _GOOGLE_VALID_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 _STATE_TTL_SECONDS = 600  # 10 min — tiempo que el usuario tiene para completar el flujo OAuth
 _EXCHANGE_TTL_SECONDS = 60  # 60 seg — ventana para que el frontend haga el exchange post-redirect
 _LINK_TTL_SECONDS = 600  # 10 min — tiempo para completar el link_required
+#: Prefill del alta por Google. Misma forma y TTL que `oauth:link:{id}`: es el
+#: mismo tipo de objeto (una identidad verificada esperando que el usuario
+#: complete un paso en el frontend), así que no se inventa una segunda
+#: convención.
+_PREFILL_TTL_SECONDS = 600  # 10 min
+_PREFILL_KEY_PREFIX = "oauth:prefill:"
 
 # Cache en memoria del JWKS de Google (se invalida cada hora)
 _jwks_cache: dict[str, Any] | None = None
 _jwks_cached_at: datetime | None = None
 _JWKS_CACHE_TTL_SECONDS = 3600
+
+
+# ── Prefill del alta por Google ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class GooglePrefill:
+    """Identidad de Google esperando que el visitante mande su solicitud.
+
+    ``provider_subject`` NUNCA sale al browser: el endpoint público de prefill
+    devuelve solo lo que el formulario tiene que mostrar (email y nombre). El
+    subject se resuelve del lado del servidor al canjear el token.
+
+    ``full_name`` es opcional a propósito: Google no siempre manda el claim
+    ``name`` y derivarlo del email sería inventar el nombre del solicitante.
+    """
+
+    email: str
+    full_name: str | None
+    provider_subject: str
+    provider: str = "google"
+
+
+def _prefill_key(token: str) -> str:
+    return f"{_PREFILL_KEY_PREFIX}{token}"
+
+
+def _decode_prefill(raw: str | None) -> GooglePrefill | None:
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        return GooglePrefill(
+            email=data["email"],
+            full_name=data["full_name"],
+            provider_subject=data["provider_subject"],
+            provider=data["provider"],
+        )
+    except (ValueError, KeyError, TypeError):  # pragma: no cover - payload corrupto
+        logger.warning("oauth.prefill.corrupt_payload")
+        return None
+
+
+async def read_google_prefill(redis: Redis, token: str) -> GooglePrefill | None:
+    """Lee el prefill **sin consumirlo**. Devuelve ``None`` si no existe o venció.
+
+    Es un GET y no un GETDEL a propósito: el formulario público llama acá para
+    mostrar el email y el nombre, y recién DESPUÉS manda el mismo token en el
+    POST de la solicitud, que es donde se resuelve el ``provider_subject``. Si
+    esta lectura borrara la key, el POST llegaría con un token inexistente y el
+    linkeo con Google se perdería en silencio.
+    """
+    return _decode_prefill(await redis.get(_prefill_key(token)))
+
+
+async def consume_google_prefill(redis: Redis, token: str) -> GooglePrefill | None:
+    """GETDEL del prefill: **esta es la única toma del token** (single-use).
+
+    Devuelve ``None`` si el token no existe, venció o ya se canjeó.
+    """
+    return _decode_prefill(await redis.getdel(_prefill_key(token)))
 
 
 # ── PKCE helpers ──────────────────────────────────────────────────────────────
@@ -332,7 +410,10 @@ class GoogleOAuthService:
 
         provider_subject: str = claims["sub"]
         provider_email: str = claims["email"].lower()
-        full_name: str = claims.get("name", provider_email.split("@")[0])
+        # Sin claim `name` el nombre queda en None y el formulario lo pide: la
+        # parte local del email NO es el nombre del solicitante, y prellenar con
+        # eso sería inventarle una respuesta a la ficha que el dueño revisa.
+        full_name: str | None = claims.get("name")
 
         # 2e. Resolver identidad → resultado
         result = await self._resolve_identity(
@@ -353,10 +434,14 @@ class GoogleOAuthService:
 
     # ── 3. Exchange ───────────────────────────────────────────────────────────
 
-    async def exchange_session(self, session_id: str) -> AuthResponse | OAuthLinkRequiredResponse:
+    async def exchange_session(
+        self, session_id: str
+    ) -> AuthResponse | OAuthLinkRequiredResponse | OAuthAccessRequestRequiredResponse:
         """GETDEL del resultado del callback. Single-use.
 
-        Devuelve AuthResponse (login exitoso) o OAuthLinkRequiredResponse.
+        Devuelve AuthResponse (login exitoso), OAuthLinkRequiredResponse o
+        OAuthAccessRequestRequiredResponse (email que no tiene cuenta: el alta
+        pasa por una solicitud de acceso, no por un tenant nuevo).
         """
         raw = await self._redis.getdel(f"oauth:exchange:{session_id}")
         if raw is None:
@@ -368,6 +453,8 @@ class GoogleOAuthService:
             return AuthResponse(**data["payload"])
         elif data["type"] == "link_required":
             return OAuthLinkRequiredResponse(**data["payload"])
+        elif data["type"] == "access_request_required":
+            return OAuthAccessRequestRequiredResponse(**data["payload"])
         else:
             logger.error("oauth.exchange.unknown_type", type=data.get("type"))
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "internal_error")
@@ -465,11 +552,12 @@ class GoogleOAuthService:
         self,
         provider_subject: str,
         provider_email: str,
-        full_name: str,
+        full_name: str | None,
     ) -> dict[str, Any]:
         """Determina qué hacer con la identidad Google.
 
-        Returns un dict serializable con {"type": "auth"|"link_required", "payload": {...}}
+        Returns un dict serializable con
+        ``{"type": "auth"|"link_required"|"access_request_required", "payload": {...}}``
         """
         # Caso 1: identidad ya vinculada → login directo
         result = await self._session.execute(
@@ -527,89 +615,39 @@ class GoogleOAuthService:
                 },
             }
 
-        # Caso 3: usuario nuevo → crear tenant + user + identity
-        user, tenant = await self._create_social_user(
-            provider_email=provider_email,
-            provider_subject=provider_subject,
-            full_name=full_name,
+        # Caso 3: email desconocido → NO se acuña ninguna cuenta.
+        #
+        # El registro de Véktor es cerrado: el alta la hace la aprobación manual
+        # del dueño (`AccessRequestService.approve`), que es la única que asigna
+        # el vertical operativo. Entrar con Google no puede ser un atajo que
+        # esquive esa revisión, así que este camino termina exactamente donde
+        # termina el formulario público: en una solicitud de acceso.
+        #
+        # Lo único que se persiste acá es el prefill en Redis, para que la
+        # solicitud quede ligada a esta identidad verificada por Google y el
+        # usuario aprobado pueda entrar con Google sin pasar por la contraseña.
+        prefill_token = secrets.token_urlsafe(32)
+        await self._redis.set(
+            _prefill_key(prefill_token),
+            json.dumps(
+                {
+                    "provider": "google",
+                    "provider_subject": provider_subject,
+                    "email": provider_email,
+                    "full_name": full_name,
+                }
+            ),
+            ex=_PREFILL_TTL_SECONDS,
         )
-        logger.info(
-            "oauth.callback.new_user",
-            user_id=str(user.user_id),
-            tenant_id=str(tenant.tenant_id),
-        )
-        auth_resp = self._build_auth_response(user, tenant)
-        return {"type": "auth", "payload": auth_resp.model_dump(mode="json")}
-
-    async def _create_social_user(
-        self,
-        provider_email: str,
-        provider_subject: str,
-        full_name: str,
-    ) -> tuple[User, Tenant]:
-        """Crea Tenant + User + Subscription + MomentumProfile + UserAuthIdentity.
-
-        No crea BusinessProfile — se hace en el flujo de onboarding.
-        El usuario es is_active=True porque Google garantizó email_verified=True.
-        password_hash = hash de UUID aleatorio (el usuario nunca lo usa).
-        """
-        # Tenant
-        tenant = Tenant(
-            legal_name=full_name,
-            display_name=full_name,
-            currency="ARS",
-            pricing_reference_mode="MEP",
-            status="ACTIVE",
-        )
-        await self._tenant_repo.save(tenant)
-
-        # User — is_active=True, sin verificación de email
-        random_password = str(uuid.uuid4())
-        user = User(
-            tenant_id=tenant.tenant_id,
-            email=provider_email,
-            full_name=full_name,
-            password_hash=hash_password(random_password),
-            role_code="OWNER",
-            is_active=True,
-            last_login_at=datetime.now(UTC),
-        )
-        await self._user_repo.save(user)
-
-        # Subscription FREE
-        subscription = Subscription(
-            tenant_id=tenant.tenant_id,
-            plan_code="FREE",
-            billing_index_reference="MEP",
-            seats_included=1,
-            status="ACTIVE",
-        )
-        self._session.add(subscription)
-        await self._session.flush()
-
-        # MomentumProfile vacío
-        momentum = MomentumProfile(
-            tenant_id=tenant.tenant_id,
-            improving_streak_weeks=0,
-            milestones_json=[],
-            updated_at=datetime.now(UTC),
-        )
-        self._session.add(momentum)
-        await self._session.flush()
-
-        # UserAuthIdentity
-        identity = UserAuthIdentity(
-            tenant_id=tenant.tenant_id,
-            user_id=user.user_id,
-            provider="google",
-            provider_subject=provider_subject,
-            provider_email=provider_email,
-            last_login_at=datetime.now(UTC),
-        )
-        self._session.add(identity)
-        await self._session.flush()
-
-        return user, tenant
+        logger.info("oauth.callback.access_request_required", email=provider_email)
+        return {
+            "type": "access_request_required",
+            "payload": {
+                "prefill_token": prefill_token,
+                "email": provider_email,
+                "full_name": full_name,
+            },
+        }
 
     def _build_auth_response(self, user: User, tenant: Tenant) -> AuthResponse:
         jwt_payload = {

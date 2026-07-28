@@ -34,11 +34,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import client_ip, get_current_user, require_role
 from app.application.services.access_request_service import (
     AccessRequestEmailTaken,
+    AccessRequestGoogleIdentityTaken,
     AccessRequestInput,
     AccessRequestInvalidTransition,
     AccessRequestNotApprovable,
@@ -46,9 +48,15 @@ from app.application.services.access_request_service import (
     AccessRequestService,
 )
 from app.application.services.contact_lead_service import hash_ip
+from app.application.services.google_oauth_service import (
+    consume_google_prefill,
+    read_google_prefill,
+)
 from app.domain.access_request import AccessRequestStatus, RequestedPlan
+from app.domain.contact_lead import normalize_email
 from app.main import limiter
 from app.observability.logger import get_logger
+from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.user import User
 from app.schemas.access_request import (
@@ -64,6 +72,7 @@ from app.schemas.access_request import (
     WaitlistAccessRequest,
 )
 from app.schemas.common import MessageResponse, PaginatedResponse
+from app.schemas.oauth import GooglePrefillResponse
 
 router = APIRouter()
 admin_router = APIRouter()
@@ -89,6 +98,45 @@ _VIA_API = "api"
 # ── Formulario público ────────────────────────────────────────────────────────
 
 
+async def _resolver_google_subject(
+    redis: Redis, token: str | None, email: str
+) -> str | None:
+    """Canjea el token de prefill por el `google_subject` de la identidad.
+
+    **Acá se consume el token** (GETDEL): el `GET /prefill/{token}` que hizo el
+    formulario para mostrar el email es una lectura, la única toma es esta.
+
+    Tres desenlaces:
+
+    * Sin token → `None`. Es el alta normal del formulario público.
+    * Token vencido o ya canjeado → `None` **y la solicitud se manda igual**.
+      El TTL del prefill es de 10 minutos y este formulario es largo: abortar el
+      envío por eso tiraría a la basura todo lo que el visitante contestó, y no
+      hay nada que proteger — sin subject la solicitud sigue siendo válida, el
+      usuario aprobado simplemente entra con el link de contraseña. Lo que NO se
+      hace es inventar un subject.
+    * Token válido pero de OTRO email → 403. Es el mismo agujero que tapa
+      `complete_link` con `email_mismatch`: sin este chequeo, quien controla una
+      cuenta de Google podría ligar su identidad a una solicitud hecha con el
+      email de otra persona.
+    """
+    if not token:
+        return None
+
+    prefill = await consume_google_prefill(redis, token)
+    if prefill is None:
+        logger.warning("access_request.google_prefill_expired")
+        return None
+
+    if prefill.email != normalize_email(email):
+        logger.warning("access_request.google_prefill_email_mismatch")
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="google_prefill_email_mismatch",
+        )
+    return prefill.provider_subject
+
+
 @router.post(
     "",
     response_model=AccessRequestAcceptedResponse,
@@ -100,6 +148,7 @@ async def create_access_request(
     request: Request,
     body: CreateAccessRequestRequest,
     session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
 ) -> AccessRequestAcceptedResponse:
     """Recibe una solicitud. **No crea ninguna cuenta.**
 
@@ -110,6 +159,9 @@ async def create_access_request(
     Devuelve el MISMO cuerpo en todos los desenlaces —incluido "ese email ya
     tiene cuenta" y "el envío parece un bot"—, por neutralidad a enumeración.
     """
+    google_subject = await _resolver_google_subject(
+        redis, body.google_prefill_token, str(body.email)
+    )
     servicio = AccessRequestService(session)
     _, desenlace = await servicio.create(
         AccessRequestInput(
@@ -130,11 +182,10 @@ async def create_access_request(
             records_notes=body.records_notes,
             applicant_notes=body.applicant_notes,
             cta_source=body.cta_source,
-            # `google_subject` lo va a poblar el alta por Google, canjeando
-            # `body.google_prefill_token` contra el prefill guardado en Redis. Hasta
-            # entonces el token viaja en el contrato pero no se resuelve: inventar
-            # acá un subject a partir de un token que nadie emitió sería peor.
-            google_subject=None,
+            # Sale del prefill de "Continuar con Google" (ver
+            # `_resolver_google_subject`): `None` cuando el alta es del
+            # formulario público a secas o cuando el token venció.
+            google_subject=google_subject,
             consent_version=body.consent_version,
             website=body.website,
             elapsed_ms=body.elapsed_ms,
@@ -189,6 +240,39 @@ async def resend_access_request_verification(
     """
     await AccessRequestService(session).resend_verification(str(body.email))
     return _REENVIO_OK
+
+
+@router.get(
+    "/prefill/{token}",
+    response_model=GooglePrefillResponse,
+    summary="Datos de la identidad de Google para prellenar el formulario",
+)
+@limiter.limit("10/5minutes")
+async def get_google_prefill(
+    request: Request,
+    token: str,
+    redis: Redis = Depends(get_redis),
+) -> GooglePrefillResponse:
+    """Devuelve el email (y el nombre, si Google lo mandó) de un prefill vigente.
+
+    **No consume el token**: el formulario lo devuelve después en el POST, que es
+    donde se resuelve el `google_subject`. Si esta lectura lo borrara, el linkeo
+    con Google se perdería en silencio.
+
+    Token inexistente, vencido o ya canjeado → 404. El frontend cae al
+    formulario vacío: no hay nada que revelar ni que inventar.
+    """
+    prefill = await read_google_prefill(redis, token)
+    if prefill is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="prefill_invalido_o_expirado",
+        )
+    return GooglePrefillResponse(
+        email=prefill.email,
+        full_name=prefill.full_name,
+        provider=prefill.provider,
+    )
 
 
 # ── Cola de revisión (SUPERADMIN) ─────────────────────────────────────────────
@@ -264,8 +348,9 @@ async def approve_access_request(
     Idempotente: re-aprobar devuelve el tenant existente con
     `already_approved=true` y no acuña un segundo.
 
-    Dos motivos distintos de 409 (el `detail` es el mensaje de
-    `AccessRequestNotApprovable`, que los distingue):
+    Tres motivos distintos de 409, que el `detail` distingue (el email de la
+    solicitud ya tiene cuenta, la identidad de Google ya está vinculada a otro
+    usuario, o la solicitud no es aprobable — con estos dos submotivos):
 
     1. **Estado**: la solicitud no está en la cola (`unverified`, `rejected`,
        `expired`).
@@ -291,11 +376,13 @@ async def approve_access_request(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="access_request_not_found",
         ) from None
-    except AccessRequestNotApprovable as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from None
-    except AccessRequestEmailTaken as exc:
+    except (
+        AccessRequestNotApprovable,
+        AccessRequestEmailTaken,
+        AccessRequestGoogleIdentityTaken,
+    ) as exc:
+        # Los tres son 409 y el `detail` (el mensaje de la excepción) es lo que
+        # los distingue; ver el docstring.
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT, detail=str(exc)
         ) from None

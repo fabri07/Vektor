@@ -8,6 +8,7 @@
  */
 
 import { api } from "@/lib/api";
+import type { GooglePrefillResponse } from "@/types/api";
 import type {
   CanShareFiles,
   HistoryDepth,
@@ -145,4 +146,21 @@ export async function verifyAccessRequest(
 /** Reenvío del mail de confirmación. Responde 200 genérico siempre. */
 export async function resendAccessRequestVerification(email: string): Promise<void> {
   await api.post("/access-requests/resend", { email });
+}
+
+/**
+ * Datos de la identidad de Google detrás de un token de prefill.
+ *
+ * **Es una lectura: NO consume el token.** El mismo token viaja después en el
+ * POST de la solicitud, que es donde el backend resuelve el `google_subject` y
+ * recién ahí lo consume. Un token vencido o ya canjeado devuelve 404 y el
+ * formulario se completa a mano.
+ */
+export async function fetchGooglePrefill(
+  token: string,
+): Promise<GooglePrefillResponse> {
+  const res = await api.get<GooglePrefillResponse>(
+    `/access-requests/prefill/${encodeURIComponent(token)}`,
+  );
+  return res.data;
 }

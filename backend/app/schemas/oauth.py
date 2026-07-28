@@ -38,6 +38,43 @@ class OAuthLinkRequiredResponse(BaseModel):
     provider: str = "google"
 
 
+class OAuthAccessRequestRequiredResponse(BaseModel):
+    """El email de Google no tiene cuenta: hay que pedir acceso, no se crea nada.
+
+    Véktor cerró el registro abierto, así que entrar con Google con un email
+    desconocido NO acuña un tenant. El frontend lleva al visitante a
+    `/solicitar-acceso?prefill=<prefill_token>`; ese token se canjea en
+    `GET /access-requests/prefill/{token}` para prellenar el formulario y se
+    devuelve en el POST de la solicitud, que es donde se resuelve el
+    `google_subject`.
+
+    `full_name` es opcional: Google no siempre manda el claim `name`, y
+    derivarlo del email sería inventar el nombre del solicitante.
+    """
+
+    status: str = "access_request_required"
+    prefill_token: str
+    email: str
+    full_name: str | None = None
+    provider: str = "google"
+
+
+# ── GET /access-requests/prefill/{token} ──────────────────────────────────────
+
+
+class GooglePrefillResponse(BaseModel):
+    """Lo que el formulario público muestra de una identidad de Google.
+
+    **No expone `provider_subject`**: el identificador de la identidad no tiene
+    por qué viajar al browser. El token opaco es la única referencia que el
+    frontend maneja, y el subject se resuelve del lado del servidor al canjearlo.
+    """
+
+    email: str
+    full_name: str | None = None
+    provider: str = "google"
+
+
 # ── POST /auth/oauth/google/link-pending ──────────────────────────────────────
 
 

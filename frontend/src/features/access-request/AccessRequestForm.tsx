@@ -11,6 +11,13 @@
  * solicitud que el dueño revisa a mano. La contraseña la define el usuario
  * recién cuando la solicitud se aprueba, con el link del mail de decisión.
  *
+ * **Alta por Google.** Con `?prefill=<token>` el formulario viene de "Continuar
+ * con Google" con un email que Google ya verificó: se prellenan email y nombre,
+ * el email queda de solo lectura (es lo que liga la solicitud a esa identidad)
+ * y el token se devuelve en el POST para que el backend persista el
+ * `google_subject`. La lectura del prefill NO consume el token — la única toma
+ * es el POST.
+ *
  * Anti-spam en capas, igual que `/contacto`: honeypot invisible (`website`) +
  * `elapsed_ms` medido desde el montaje. El rate limit por IP lo pone el backend.
  *
@@ -37,7 +44,10 @@ import {
 } from "@/lib/accessRequestOptions";
 import { ctaSourceFromUrl, trackLandingEvent } from "@/lib/landingAnalytics";
 import { REQUESTED_VERTICAL_OPTIONS, type RequestedVertical } from "@/lib/verticals";
-import { buildAccessRequestPayload } from "@/services/accessRequest.service";
+import {
+  buildAccessRequestPayload,
+  fetchGooglePrefill,
+} from "@/services/accessRequest.service";
 import {
   EMPTY_ACCESS_REQUEST_DRAFT,
   fieldErrors,
@@ -84,6 +94,38 @@ export function AccessRequestForm() {
       setDraft((d) => (d.requested_plan ? d : { ...d, requested_plan: planDeUrl }));
     }
   }, [planDeUrl]);
+
+  // `?prefill=` viene de "Continuar con Google". El token solo se devuelve en el
+  // POST si el prefill respondió: mandar uno que sabemos muerto no liga nada, y
+  // mandarlo con otro email sería un 403 después de un formulario largo.
+  const prefillDeUrl = searchParams.get("prefill");
+  const [tokenGoogle, setTokenGoogle] = useState<string | null>(null);
+  useEffect(() => {
+    if (!prefillDeUrl) return;
+    let vigente = true;
+    void (async () => {
+      try {
+        const identidad = await fetchGooglePrefill(prefillDeUrl);
+        if (!vigente) return;
+        // Merge parcial: toca SOLO email y nombre. Cualquier otra respuesta que
+        // el visitante ya haya dado —incluida la de `?plan=`— sobrevive.
+        setDraft((d) => ({
+          ...d,
+          email: identidad.email,
+          full_name: d.full_name || identidad.full_name || "",
+        }));
+        setTokenGoogle(prefillDeUrl);
+      } catch {
+        // Token vencido, ya canjeado o inexistente: formulario a mano, sin
+        // prometer un linkeo que no vamos a poder hacer.
+        if (vigente) setTokenGoogle(null);
+      }
+    })();
+    return () => {
+      vigente = false;
+    };
+  }, [prefillDeUrl]);
+  const emailVerificadoPorGoogle = tokenGoogle !== null;
 
   useEffect(() => {
     trackLandingEvent("access_request_form_view", {
@@ -168,6 +210,7 @@ export function AccessRequestForm() {
           ctaSource,
           website: websiteRef.current?.value ?? "",
           elapsedMs: Date.now() - montadoEn,
+          googlePrefillToken: tokenGoogle ?? undefined,
         }),
       );
       setEnviado(true);
@@ -220,13 +263,28 @@ export function AccessRequestForm() {
             />
           </Field>
 
-          <Field label="Email" required error={errores.email}>
+          <Field
+            label="Email"
+            required
+            hint={
+              emailVerificadoPorGoogle
+                ? "Lo verificó Google. Es el email con el que vas a entrar."
+                : undefined
+            }
+            error={errores.email}
+          >
             <input
               type="email"
               className={inputClass}
               maxLength={255}
               id={fieldAnchorId("email")}
               value={draft.email}
+              /*
+               * Con prefill de Google el email NO se edita: es lo que liga la
+               * solicitud a esa identidad, y cambiarlo acá haría que el backend
+               * rechace el canje del token (403 `google_prefill_email_mismatch`).
+               */
+              readOnly={emailVerificadoPorGoogle}
               onChange={(e) => update("email", e.target.value)}
               onBlur={() => marcarTocado("email")}
             />

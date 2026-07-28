@@ -2,6 +2,7 @@ import { api } from "@/lib/api";
 import type {
   AuthResponse,
   MeResponse,
+  OAuthAccessRequestRequiredResponse,
   OAuthStartResponse,
   OAuthLinkRequiredResponse,
 } from "@/types/api";
@@ -54,13 +55,19 @@ export async function getGoogleOAuthUrl(): Promise<OAuthStartResponse> {
   return res.data;
 }
 
+/**
+ * Tres desenlaces posibles: sesión iniciada, hay que vincular con la contraseña
+ * de una cuenta existente, o ese email todavía no tiene cuenta y hay que pedir
+ * acceso (el registro es cerrado: Google no acuña cuentas).
+ */
 export async function exchangeGoogleSession(
   session_id: string,
-): Promise<AuthResponse | OAuthLinkRequiredResponse> {
-  const res = await api.post<AuthResponse | OAuthLinkRequiredResponse>(
-    "/auth/oauth/google/exchange",
-    { session_id },
-  );
+): Promise<
+  AuthResponse | OAuthLinkRequiredResponse | OAuthAccessRequestRequiredResponse
+> {
+  const res = await api.post<
+    AuthResponse | OAuthLinkRequiredResponse | OAuthAccessRequestRequiredResponse
+  >("/auth/oauth/google/exchange", { session_id });
   return res.data;
 }
 

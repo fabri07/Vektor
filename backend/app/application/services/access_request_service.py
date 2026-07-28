@@ -5,7 +5,7 @@ mano. Este módulo concentra toda la máquina de estados de ese trámite —crea
 verificar el email, listar la cola, aprobar, rechazar, poner en lista de espera—
 más los armadores (puros) de los emails del flujo.
 
-Cinco invariantes que este archivo sostiene y que un cambio no puede aflojar:
+Seis invariantes que este archivo sostiene y que un cambio no puede aflojar:
 
 1. **Neutralidad a enumeración de cuentas.** ``create()`` devuelve el MISMO
    resultado exista o no una cuenta con ese email. ``POST /auth/register``
@@ -24,6 +24,10 @@ Cinco invariantes que este archivo sostiene y que un cambio no puede aflojar:
    docstring de ``provision_tenant``).
 5. **``onboarding_completed`` queda en ``False`` al aprobar**: los números
    financieros se piden en el primer login, no en el formulario público.
+6. **``approve()`` vincula la identidad de Google si la solicitud la trae**
+   (``google_subject``, que puebla el canje del prefill en
+   ``api/v1/access_requests.py``). Sin ese ``UserAuthIdentity``, quien pidió
+   acceso con "Continuar con Google" es aprobado y no puede entrar con Google.
 
 **Regla cardinal** (documentada en ``app/jobs/contact_lead_worker.py``): se
 persiste y se COMMITEA antes de intentar cualquier email. Encolar nunca puede
@@ -80,6 +84,7 @@ from app.observability.logger import get_logger
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
+from app.persistence.models.user_auth_identity import UserAuthIdentity
 from app.persistence.repositories.user_repository import UserRepository
 
 if TYPE_CHECKING:  # pragma: no cover - solo para tipos
@@ -106,6 +111,10 @@ DECISION_REJECTED = "ACCESS_REQUEST_REJECTED"
 DECISION_WAITLISTED = "ACCESS_REQUEST_WAITLISTED"
 DECISION_EXPIRED = "ACCESS_REQUEST_EXPIRED"
 DECISION_INVITE_RESENT = "ACCESS_REQUEST_INVITE_RESENT"
+
+#: Único proveedor social del flujo hoy. Es el mismo literal que usa
+#: ``google_oauth_service`` al buscar la identidad en el login.
+_GOOGLE_PROVIDER = "google"
 
 #: Los dos únicos estados que forman la COLA de revisión. Una solicitud
 #: ``unverified`` —aunque sea Premium— no desplaza a una verificada: el doble
@@ -273,6 +282,25 @@ class AccessRequestEmailTaken(AccessRequestError):  # noqa: N818
     def __init__(self, email: str) -> None:
         super().__init__(f"Ya existe una cuenta con el email de la solicitud ({email})")
         self.email = email
+
+
+class AccessRequestGoogleIdentityTaken(AccessRequestError):  # noqa: N818
+    """La identidad de Google de la solicitud ya está vinculada a otro usuario.
+
+    Pasa cuando la misma cuenta de Google abrió dos solicitudes con emails
+    distintos y las dos se aprueban. Se levanta ANTES de acuñar nada: la
+    alternativa —insertar y dejar que reviente la unique
+    ``uq_auth_identity_provider_subject``— sería un 500 sin explicación, y
+    saltear el linkeo en silencio dejaría al usuario aprobado sin poder entrar
+    con Google sin que nadie se entere.
+    """
+
+    def __init__(self, provider_subject: str) -> None:
+        super().__init__(
+            "La identidad de Google de esta solicitud ya está vinculada a otra "
+            f"cuenta (subject {provider_subject[:8]}…)"
+        )
+        self.provider_subject = provider_subject
 
 
 class AccessRequestNotResendable(AccessRequestError):  # noqa: N818
@@ -659,6 +687,11 @@ class AccessRequestService:
         if await self._user_repo.get_by_email_any_tenant(solicitud.email) is not None:
             raise AccessRequestEmailTaken(solicitud.email)
 
+        # Y si la solicitud vino por "Continuar con Google", esa identidad tiene
+        # que estar libre ANTES de acuñar nada (ver el docstring de la excepción).
+        if solicitud.google_subject is not None:
+            await self._exigir_identidad_google_libre(solicitud.google_subject)
+
         if solicitud.requested_vertical != vertical.value:
             # No es un error: el dueño puede corregir legítimamente el rubro
             # declarado (y 'otros' SIEMPRE termina corregido acá).
@@ -671,6 +704,7 @@ class AccessRequestService:
 
         tenant, user = await self._provision(solicitud, vertical)
         await self._sellar_screening_en_el_perfil(solicitud, tenant)
+        await self._vincular_identidad_google(solicitud, tenant, user)
 
         ahora = datetime.now(UTC)
         solicitud.status = AccessRequestStatus.APPROVED.value
@@ -703,6 +737,7 @@ class AccessRequestService:
                 "approved_tenant_id": str(tenant.tenant_id),
                 "approved_user_id": str(user.user_id),
                 "review_notes": notes,
+                "google_identity_linked": solicitud.google_subject is not None,
             },
         )
         await self._session.commit()
@@ -1230,6 +1265,48 @@ class AccessRequestService:
             password_hash=None,
             is_active=True,
         )
+
+    async def _exigir_identidad_google_libre(self, provider_subject: str) -> None:
+        """Falla si ese ``provider_subject`` ya está vinculado a algún usuario."""
+        ya_vinculada = (
+            await self._session.execute(
+                select(UserAuthIdentity.id).where(
+                    UserAuthIdentity.provider == _GOOGLE_PROVIDER,
+                    UserAuthIdentity.provider_subject == provider_subject,
+                )
+            )
+        ).first()
+        if ya_vinculada is not None:
+            raise AccessRequestGoogleIdentityTaken(provider_subject)
+
+    async def _vincular_identidad_google(
+        self, solicitud: AccessRequest, tenant: Tenant, user: User
+    ) -> None:
+        """Liga la identidad de Google de la solicitud al usuario recién acuñado.
+
+        Sin esto, quien pidió acceso con "Continuar con Google" es aprobado y NO
+        puede entrar con Google: tendría que usar el link de contraseña, que es
+        justo la fricción que ese camino venía a evitar.
+
+        ``last_login_at`` queda en ``None`` a propósito: la identidad existe pero
+        todavía nadie la usó para entrar, y sellar un login que no ocurrió sería
+        inventarlo. Va en la MISMA transacción que el resto de la aprobación.
+        """
+        if solicitud.google_subject is None:
+            return
+        self._session.add(
+            UserAuthIdentity(
+                tenant_id=tenant.tenant_id,
+                user_id=user.user_id,
+                provider=_GOOGLE_PROVIDER,
+                provider_subject=solicitud.google_subject,
+                # El email de la solicitud ES el que verificó Google: el prefill
+                # solo se canjea cuando los dos coinciden (ver el 403
+                # `google_prefill_email_mismatch` del router).
+                provider_email=solicitud.email,
+            )
+        )
+        await self._session.flush()
 
     async def _sellar_screening_en_el_perfil(
         self, solicitud: AccessRequest, tenant: Tenant

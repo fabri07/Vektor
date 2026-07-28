@@ -1,13 +1,14 @@
 """Alta de cuenta (acuñado de tenant) — extraído de `AuthService.register`.
 
 `provision_tenant` es el único lugar que crea las 5 filas de una cuenta nueva:
-Tenant → User → Subscription → BusinessProfile → MomentumProfile. Hoy lo llama
-`AuthService.register`; la aprobación de una solicitud de acceso (Task 8) lo va
-a llamar también, sin duplicar esta lógica.
+Tenant → User → Subscription → BusinessProfile → MomentumProfile. Lo llaman
+`AuthService.register` y `AccessRequestService.approve`, sin duplicar esta
+lógica.
 
-`google_oauth_service._create_social_user` NO usa esta función: ese camino no
-tiene un `Vertical` (no crea `BusinessProfile`) y se elimina por completo
-cuando el alta social pase a abrir una solicitud de acceso.
+El login con Google NO acuña cuentas y por eso no llama acá: un email
+desconocido abre una solicitud de acceso
+(`google_oauth_service._resolve_identity`, caso 3), y la cuenta la acuña recién
+la aprobación manual — que es la única que conoce el `Vertical` asignado.
 """
 
 from __future__ import annotations
@@ -40,9 +41,8 @@ async def provision_tenant(
     """Crea Tenant + User + Subscription + BusinessProfile + MomentumProfile.
 
     `password_hash=None` genera un hash de contraseña aleatoria
-    (`hash_password(str(uuid4()))`) para cuentas cuyo usuario nunca inicia
-    sesión con password — mismo patrón que ya usa
-    `google_oauth_service._create_social_user`.
+    (`hash_password(str(uuid4()))`) para cuentas cuyo usuario todavía no definió
+    su contraseña: la define con el link de invitación del mail de aprobación.
 
     **`Subscription.plan_code` es siempre `"FREE"`, por decisión de producto,
     no por omisión.** La solicitud de acceso le pregunta al visitante si
