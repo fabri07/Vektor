@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.fields import _get_vertical_code
@@ -52,23 +54,78 @@ async def _tenant_sin_perfil(session: AsyncSession) -> Tenant:
 async def _tenant_con_vertical_legacy(session: AsyncSession) -> Tenant:
     """Tenant CON perfil pero con `vertical_code` no canónico.
 
-    Es el estado que existe hoy en Neon: `business_profiles.vertical_code`
-    guarda el código corto `"kiosco"` hasta que corra la migración de
-    unificación. Todas las capas tienen que degradar, no reventar.
+    Es el estado que había en Neon antes de la migración de unificación:
+    `business_profiles.vertical_code` guardaba el código corto `"kiosco"`.
+
+    El CHECK `ck_business_profiles_vertical_code` (migración `20260806_0002`,
+    espejado en el modelo) ahora vuelve ese estado **inescribible** — que es el
+    punto de la migración. Para poder seguir probando que las capas de
+    aplicación son un backstop INDEPENDIENTE del CHECK (si mañana alguien
+    dropea la constraint, o si aparece un código raro por otra vía), la fila se
+    fuerza suspendiendo el CHECK solo mientras dura el INSERT.
+
+    `PRAGMA ignore_check_constraints` es de conexión y la fixture `db_session`
+    comparte una sola conexión (StaticPool): se restaura en `finally` sí o sí,
+    porque dejarla prendida desactivaría los CHECK del resto de la suite.
     """
     tenant = await _tenant_sin_perfil(session)
-    session.add(
+    await session.execute(text("PRAGMA ignore_check_constraints=ON"))
+    try:
+        session.add(
+            BusinessProfile(
+                profile_id=uuid.uuid4(),
+                tenant_id=tenant.tenant_id,
+                vertical_code=_VERTICAL_LEGACY,
+                data_mode="M0",
+                data_confidence="LOW",
+                onboarding_completed=False,
+            )
+        )
+        await session.commit()
+    finally:
+        await session.execute(text("PRAGMA ignore_check_constraints=OFF"))
+    return tenant
+
+
+# ── El CHECK de `business_profiles` (backstop a nivel DB) ─────────────────────
+
+
+@pytest.mark.parametrize("codigo", [_VERTICAL_LEGACY, "otros", "ferreteria"])
+async def test_business_profiles_rechaza_un_vertical_no_canonico(
+    db_session: AsyncSession, codigo: str
+) -> None:
+    """`ck_business_profiles_vertical_code` es *la* garantía a nivel DB de que no
+    vuelven los verticales desconocidos. Vive en la migración `20260806_0002` y
+    espejado en el modelo — sin el espejo, ninguna base de test lo tendría
+    (el conftest arma el esquema con `create_all`, nunca con Alembic) y este
+    test pasaría en verde sin que la constraint existiera en ningún lado."""
+    tenant = await _tenant_sin_perfil(db_session)
+    db_session.add(
         BusinessProfile(
             profile_id=uuid.uuid4(),
             tenant_id=tenant.tenant_id,
-            vertical_code=_VERTICAL_LEGACY,
+            vertical_code=codigo,
             data_mode="M0",
             data_confidence="LOW",
             onboarding_completed=False,
         )
     )
-    await session.commit()
-    return tenant
+
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+    await db_session.rollback()
+
+
+async def test_business_profiles_acepta_los_tres_canonicos(
+    db_session: AsyncSession,
+) -> None:
+    """Control positivo: sin esto el test de arriba podría estar pasando por una
+    columna NOT NULL sin llenar en vez de por el CHECK."""
+    for vertical in Vertical:
+        tenant = await _tenant_sin_perfil(db_session)
+        await add_business_profile(db_session, tenant.tenant_id, vertical)
+    await db_session.flush()
 
 
 # ── Helper compartido ─────────────────────────────────────────────────────────

@@ -10,11 +10,29 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.domain.verticals import Vertical
 from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+#: Predicado del CHECK de `business_profiles.vertical_code`, derivado del enum
+#: canónico (escrito a mano se desincroniza). La migración 20260806_0002 lo
+#: repite como literales a propósito —una migración es una foto del pasado— y
+#: usa EL MISMO nombre de constraint, así que las dos definiciones son
+#: idempotentes entre sí: `create_all` (tests) y Alembic (prod) producen la
+#: misma garantía.
+_VERTICAL_CODE_CHECK = "vertical_code IN (" + ", ".join(f"'{v.value}'" for v in Vertical) + ")"
 
 
 class BusinessProfile(TimestampMixin, Base):
@@ -83,6 +101,17 @@ class BusinessProfile(TimestampMixin, Base):
 
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
+    )
+
+    # El backstop a nivel DB del invariante de verticales: ni el código corto
+    # legado ('kiosco') ni 'otros' pueden volver a entrar por un import, un
+    # script o un SQL a mano. Espejado acá —y no solo en la migración— para que
+    # exista también en las bases de test, que se arman con `create_all`.
+    __table_args__ = (
+        CheckConstraint(
+            _VERTICAL_CODE_CHECK,
+            name="ck_business_profiles_vertical_code",
+        ),
     )
 
     def __repr__(self) -> str:
