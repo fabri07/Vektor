@@ -23,10 +23,15 @@ from app.application.agents.shared.vertical_lookup import load_tenant_vertical
 from app.application.agents.stock.agent import AgentStock
 from app.application.services.chat_orchestrator import ChatOrchestrator
 from app.domain.verticals import UnknownVerticalError, Vertical
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
 from app.tests.conftest import add_business_profile
 
 _ORCHESTRATOR = "app.application.services.chat_orchestrator"
+
+#: Código corto legado, el que todavía vive en producción hasta la migración de
+#: unificación. `parse_vertical` NO lo aliasea a propósito.
+_VERTICAL_LEGACY = "kiosco"
 
 
 async def _tenant_sin_perfil(session: AsyncSession) -> Tenant:
@@ -40,6 +45,28 @@ async def _tenant_sin_perfil(session: AsyncSession) -> Tenant:
         status="ACTIVE",
     )
     session.add(tenant)
+    await session.commit()
+    return tenant
+
+
+async def _tenant_con_vertical_legacy(session: AsyncSession) -> Tenant:
+    """Tenant CON perfil pero con `vertical_code` no canónico.
+
+    Es el estado que existe hoy en Neon: `business_profiles.vertical_code`
+    guarda el código corto `"kiosco"` hasta que corra la migración de
+    unificación. Todas las capas tienen que degradar, no reventar.
+    """
+    tenant = await _tenant_sin_perfil(session)
+    session.add(
+        BusinessProfile(
+            profile_id=uuid.uuid4(),
+            tenant_id=tenant.tenant_id,
+            vertical_code=_VERTICAL_LEGACY,
+            data_mode="M0",
+            data_confidence="LOW",
+            onboarding_completed=False,
+        )
+    )
     await session.commit()
     return tenant
 
@@ -62,6 +89,14 @@ async def test_load_tenant_vertical_sin_perfil_levanta(db_session: AsyncSession)
         await load_tenant_vertical(db_session, tenant.tenant_id)
 
 
+async def test_load_tenant_vertical_codigo_no_canonico_levanta(db_session: AsyncSession) -> None:
+    """El código corto legado NO se aliasea: se rechaza igual que uno inventado."""
+    tenant = await _tenant_con_vertical_legacy(db_session)
+
+    with pytest.raises(UnknownVerticalError, match=_VERTICAL_LEGACY):
+        await load_tenant_vertical(db_session, tenant.tenant_id)
+
+
 # ── API /fields ───────────────────────────────────────────────────────────────
 
 
@@ -75,6 +110,18 @@ async def test_fields_sin_perfil_es_404(db_session: AsyncSession) -> None:
 
     assert exc.value.status_code == 404
     assert exc.value.detail == "business_profile_not_found"
+
+
+async def test_fields_vertical_no_canonico_es_409_no_500(db_session: AsyncSession) -> None:
+    """Con perfil pero `vertical_code` legado, `/fields` traduce el fallo a una
+    respuesta de dominio en vez de caer al handler global (500 genérico)."""
+    tenant = await _tenant_con_vertical_legacy(db_session)
+
+    with pytest.raises(HTTPException) as exc:
+        await _get_vertical_code(tenant.tenant_id, db_session)
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "vertical_no_canonico"
 
 
 async def test_fields_con_perfil_devuelve_el_vertical(db_session: AsyncSession) -> None:
@@ -191,6 +238,30 @@ async def test_orchestrator_sin_perfil_pide_configurar(db_session: AsyncSession)
     assert isinstance(response, AgentResponse)
     assert response.status == "requires_clarification"
     assert response.risk_level == RiskLevel.LOW
+    assert response.message is not None
+    assert "todavía no está configurado" in response.message
+
+
+async def test_orchestrator_vertical_no_canonico_degrada(db_session: AsyncSession) -> None:
+    """Con perfil pero `vertical_code` legado el chat degrada al mismo pedido de
+    configuración — no revienta ni contesta con heurísticas de otro rubro."""
+    tenant = await _tenant_con_vertical_legacy(db_session)
+    with patch(f"{_ORCHESTRATOR}.get_anthropic_async_client"):
+        orchestrator = ChatOrchestrator()
+
+    response = await orchestrator.handle(
+        request=AgentRequest(
+            user_id=str(uuid.uuid4()),
+            business_id=str(tenant.tenant_id),
+            message="¿cuánto vendí este mes?",
+        ),
+        db=db_session,
+        redis=MagicMock(),
+        user_id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+    )
+
+    assert response.status == "requires_clarification"
     assert response.message is not None
     assert "todavía no está configurado" in response.message
 

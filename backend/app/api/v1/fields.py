@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user, require_modify_access
 from app.application.services import field_definition_service as svc
-from app.domain.verticals import Vertical, parse_vertical
+from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
+from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.field_definitions import VerticalFieldDefinition
 from app.persistence.models.tenant import Tenant
@@ -22,15 +23,22 @@ from app.schemas.fields import (
     UpdateCustomFieldRequest,
 )
 
+logger = get_logger(__name__)
+
 router = APIRouter()
 
 
 async def _get_vertical_code(tenant_id: UUID, session: AsyncSession) -> Vertical:
     """Vertical del tenant dueño de la request.
 
-    Sin `BusinessProfile` → 404: un tenant logueado sin perfil es un estado roto
-    real (los signups sociales viejos), y devolverle el set de campos de otro
-    rubro lo enmascara.
+    Dos estados rotos, dos respuestas de dominio explícitas (nunca un 500
+    genérico, y nunca el set de campos de otro rubro):
+
+    - Sin `BusinessProfile` → **404** `business_profile_not_found`. Un tenant
+      logueado sin perfil es un estado roto real (los signups sociales viejos).
+    - Con perfil pero `vertical_code` no canónico (p. ej. el código corto
+      legado `"kiosco"`, hasta que corra la migración de unificación) → **409**
+      `vertical_no_canonico`.
     """
     from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
 
@@ -39,7 +47,17 @@ async def _get_vertical_code(tenant_id: UUID, session: AsyncSession) -> Vertical
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="business_profile_not_found"
         )
-    return parse_vertical(profile.vertical_code)
+    try:
+        return parse_vertical(profile.vertical_code)
+    except UnknownVerticalError as exc:
+        logger.warning(
+            "fields_vertical_no_canonico",
+            tenant_id=str(tenant_id),
+            vertical_code=profile.vertical_code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="vertical_no_canonico"
+        ) from exc
 
 
 async def _resolve_data_type(
