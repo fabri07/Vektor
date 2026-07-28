@@ -35,8 +35,9 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
+from app.application.agents.shared.vertical_lookup import load_tenant_vertical
 from app.application.services.health_config_service import get_margin_benchmark
-from app.domain.verticals import parse_vertical
+from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
@@ -74,10 +75,15 @@ class AgentHealth(BaseAgent):
     def client(self, value: Any) -> None:
         self._client = value
 
-    async def _load_business_meta(self, business_id: str) -> tuple[str, str]:
-        """Retorna (display_name, vertical_code). Fallback a valores neutros."""
+    async def _load_business_meta(self, business_id: str) -> tuple[str, Vertical]:
+        """Retorna (display_name, vertical).
+
+        El display_name puede degradar a un genérico (es cosmético, no entra a
+        ninguna heurística); el vertical NO: sin fila de negocio levanta
+        `UnknownVerticalError` en vez de scorear con las heurísticas de kiosco.
+        """
         if self._db is None:
-            return "el negocio", "kiosco_almacen"
+            raise RuntimeError("AgentHealth requiere sesión de DB para resolver el negocio")
         tid = uuid.UUID(business_id)
         result = await self._db.execute(
             select(Tenant.display_name, BusinessProfile.vertical_code)
@@ -85,9 +91,11 @@ class AgentHealth(BaseAgent):
             .where(Tenant.tenant_id == tid)
         )
         row = result.first()
-        if row:
-            return row.display_name, row.vertical_code
-        return "el negocio", "kiosco_almacen"
+        if row is None:
+            raise UnknownVerticalError(
+                f"El tenant {business_id} no tiene BusinessProfile: no hay vertical que aplicar."
+            )
+        return row.display_name or "el negocio", parse_vertical(row.vertical_code)
 
     def _suggest_actions(self, scores: ComponentScoresV2) -> list[str]:
         suggestions: list[str] = []
@@ -127,10 +135,12 @@ class AgentHealth(BaseAgent):
         if action_type == ActionType.SIMULATE_SCENARIO:
             return await self._handle_cashflow_scenario(request, analysis_intent)
 
-        business_name, _vertical = await self._load_business_meta(request.business_id)
-
-        # ── 1. Recolectar estado de negocio ───────────────────────────────────
+        # ── 1. Negocio + estado ───────────────────────────────────────────────
+        # `_load_business_meta` levanta `UnknownVerticalError` (ValueError) cuando
+        # el tenant no tiene perfil: mismo empty state honesto que `collect`, en
+        # vez de informar la salud del negocio con las heurísticas de otro rubro.
         try:
+            business_name, _vertical = await self._load_business_meta(request.business_id)
             state = await collect(
                 request.business_id, self._db, cast("Redis", self._redis)
             )
@@ -278,14 +288,22 @@ class AgentHealth(BaseAgent):
                 first_negative_day = i
 
         if intent == "alertar_falta_liquidez":
-            vertical = await self._vertical_code(tenant_id)
+            try:
+                vertical = await self._vertical_code(tenant_id)
+            except UnknownVerticalError:
+                return self._analysis_response(
+                    request,
+                    "negocio_sin_rubro",
+                    "Todavía no tengo el rubro de tu negocio configurado, así que no puedo "
+                    "aplicar los umbrales de liquidez que le corresponden. Completá el perfil "
+                    "del negocio y vuelvo a calcular.",
+                    confidence="LOW",
+                )
             from app.application.agents.shared.heuristic_engine import (  # noqa: PLC0415
                 HeuristicEngine,
             )
 
-            critical_days = HeuristicEngine.get(
-                parse_vertical(vertical)
-            ).cash_health.critical_days_below
+            critical_days = HeuristicEngine.get(vertical).cash_health.critical_days_below
             if first_negative_day is not None and first_negative_day <= horizon:
                 msg = (
                     f"⚠ Alerta de liquidez: con la tendencia actual, tu caja se pondría "
@@ -427,16 +445,13 @@ class AgentHealth(BaseAgent):
             pct = -pct
         return variable, pct
 
-    async def _vertical_code(self, tenant_id: uuid.UUID) -> str:
+    async def _vertical_code(self, tenant_id: uuid.UUID) -> Vertical:
+        """Vertical del tenant. Sin perfil (o con código no canónico) levanta:
+        una proyección de caja con los umbrales de otro rubro es peor que no
+        darla."""
         if self._db is None:
-            return "kiosco_almacen"
-        try:
-            result = await self._db.execute(
-                select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
-            )
-            return result.scalar_one_or_none() or "kiosco_almacen"
-        except Exception:
-            return "kiosco_almacen"
+            raise RuntimeError("AgentHealth requiere sesión de DB para resolver el vertical")
+        return await load_tenant_vertical(self._db, tenant_id)
 
     def _build_alerts(self, scores: ComponentScoresV2) -> list[dict[str, str]]:
         alerts: list[dict[str, str]] = []

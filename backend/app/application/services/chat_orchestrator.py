@@ -48,7 +48,7 @@ from app.application.services.file_parsing import (
     summary_row_count,
 )
 from app.application.services.team_plan_executor import TeamPlanExecutor
-from app.domain.verticals import parse_vertical
+from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
 from app.integrations.anthropic_client import (
     AnthropicConfigurationError,
     get_anthropic_async_client,
@@ -137,6 +137,12 @@ _ACLARACION_NEGOCIO_MESSAGE = (
     "Puedo ayudarte con ventas, gastos, stock, precios, márgenes, proveedores o flujo de caja."
 )
 
+_NEGOCIO_SIN_CONFIGURAR_MESSAGE = (
+    "Tu negocio todavía no está configurado: me falta saber de qué rubro es. "
+    "Sin eso no puedo aplicarte los parámetros que te corresponden y prefiero no "
+    "darte números que no son tuyos. Completá el perfil del negocio y seguimos."
+)
+
 _NO_AGENT_MESSAGES: dict[str, str] = {
     "out_of_scope": _OUT_OF_SCOPE_MESSAGE,
     "intent_desconocido": _OUT_OF_SCOPE_MESSAGE,
@@ -204,8 +210,24 @@ class ChatOrchestrator:
         self._file_cache: dict[str, UploadedFile] = {}
 
         # 1. Contexto del negocio
-        business_name, business_type = await self._load_business_context(tenant_id, db)
-        heuristics = HeuristicEngine.get(parse_vertical(business_type))
+        try:
+            business_name, business_type = await self._load_business_context(tenant_id, db)
+        except UnknownVerticalError:
+            # Sin BusinessProfile no hay rubro, y sin rubro no hay heurísticas ni
+            # umbrales aplicables. No-invention: se lo decimos, no improvisamos
+            # con los de otro rubro.
+            logger.warning("chat_business_profile_missing", tenant_id=str(tenant_id))
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name="chat_orchestrator",
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence="LOW",
+                requires_approval=False,
+                message=_NEGOCIO_SIN_CONFIGURAR_MESSAGE,
+                result={"summary": "El negocio todavía no está configurado."},
+            )
+        heuristics = HeuristicEngine.get(business_type)
 
         current_attachments = list(request.attachments or [])
         inherited_attachments: list[dict[str, str]] = []
@@ -1165,16 +1187,26 @@ class ChatOrchestrator:
 
     async def _load_business_context(
         self, tenant_id: uuid.UUID, db: AsyncSession
-    ) -> tuple[str, str]:
+    ) -> tuple[str, Vertical]:
+        """Nombre + vertical del negocio del tenant.
+
+        El nombre puede degradar a un genérico; el vertical no: sin
+        `BusinessProfile` levanta `UnknownVerticalError`, que `handle()` traduce
+        en un pedido de configurar el negocio. Contestar con las heurísticas y
+        los números de otro rubro sería peor que no contestar.
+        """
         tenant = await db.get(Tenant, tenant_id)
         business_name = tenant.display_name if tenant else "tu negocio"
 
         stmt = select(BusinessProfile).where(BusinessProfile.tenant_id == tenant_id)
         result = await db.execute(stmt)
         profile = result.scalar_one_or_none()
-        business_type = profile.vertical_code if profile else "kiosco_almacen"
+        if profile is None:
+            raise UnknownVerticalError(
+                f"El tenant {tenant_id} no tiene BusinessProfile: no hay vertical que aplicar."
+            )
 
-        return business_name, business_type
+        return business_name, parse_vertical(profile.vertical_code)
 
     @staticmethod
     def _strip_markdown(text: str) -> str:
@@ -1266,7 +1298,7 @@ class ChatOrchestrator:
         user_id: uuid.UUID,
         alert_ids: list[str],
         business_name: str,
-        business_type: str,
+        business_type: Vertical,
         prior_calls: list[LLMCall],
     ) -> AgentResponse:
         """Explica el/los alert(s) del dashboard con el número fresco de FactsService.
@@ -1293,7 +1325,7 @@ class ChatOrchestrator:
             tenant = await db.get(Tenant, tenant_id)
             include_demo = bool(tenant and tenant.is_demo)
             facts_service = await build_facts_service(
-                db, tenant_id, period, vertical=parse_vertical(business_type)
+                db, tenant_id, period, vertical=business_type
             )
             blocks = resolve_alert_facts(
                 facts_service,

@@ -30,6 +30,7 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.application.security.prompt_defense import wrap_user_input
+from app.domain.verticals import VERTICAL_LABELS, Vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
 
@@ -77,7 +78,9 @@ class AgentChat(BaseAgent):
                 result={},
             ),
             business_name="el negocio",
-            business_type="kiosco_almacen",
+            # Camino de saludo / sin agente: legítimamente no hay contexto de
+            # tenant. `None` explícito — nunca un vertical inventado.
+            business_type=None,
             heuristics=None,
             conversation_ctx={},
         )
@@ -95,7 +98,7 @@ class AgentChat(BaseAgent):
         request: AgentRequest,
         agent_response: AgentResponse,
         business_name: str,
-        business_type: str,
+        business_type: Vertical | None,
         heuristics: object | None,
         conversation_ctx: dict[str, Any],
         bm_data: dict[str, Any] | None = None,
@@ -159,7 +162,7 @@ class AgentChat(BaseAgent):
         request: AgentRequest,
         agent_response: AgentResponse,
         business_name: str,
-        business_type: str,
+        business_type: Vertical | None,
         heuristics: object | None,
         conversation_ctx: dict[str, Any],
         agent_memory_fragment: str,
@@ -180,6 +183,10 @@ class AgentChat(BaseAgent):
             if isinstance(heuristics, HeuristicConfig)
             else ""
         )
+
+        # Sin vertical (saludo / camino sin agente) el prompt no nombra ningún
+        # rubro: mejor omitirlo que atribuirle al negocio uno que no es.
+        rubro = f" ({VERTICAL_LABELS[business_type]})" if business_type is not None else ""
 
         # Datos financieros determinísticos del tenant
         memory_fragment = await self._load_financial_context(tenant_id, db)
@@ -217,7 +224,7 @@ class AgentChat(BaseAgent):
             )
 
         return (
-            f"Sos el asistente financiero de Véktor para {business_name} ({business_type}).\n\n"
+            f"Sos el asistente financiero de Véktor para {business_name}{rubro}.\n\n"
             "CAPACIDADES DE VÉKTOR: registro de ventas, gastos, compras y movimientos de caja; "
             "modificar productos (precio, costo, umbral de stock, activar/desactivar, renombrar); "
             "ajustar stock e inventario; preparar borradores de email a proveedores (Gmail); "

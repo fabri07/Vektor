@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user, require_modify_access
 from app.application.services import field_definition_service as svc
+from app.domain.verticals import Vertical, parse_vertical
 from app.persistence.db.session import get_db_session
 from app.persistence.models.field_definitions import VerticalFieldDefinition
 from app.persistence.models.tenant import Tenant
@@ -24,18 +25,28 @@ from app.schemas.fields import (
 router = APIRouter()
 
 
-async def _get_vertical_code(tenant_id: UUID, session: AsyncSession) -> str:
+async def _get_vertical_code(tenant_id: UUID, session: AsyncSession) -> Vertical:
+    """Vertical del tenant dueño de la request.
+
+    Sin `BusinessProfile` → 404: un tenant logueado sin perfil es un estado roto
+    real (los signups sociales viejos), y devolverle el set de campos de otro
+    rubro lo enmascara.
+    """
     from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
 
     profile = await BusinessProfileRepository(session).get_by_tenant_id(tenant_id)
-    return profile.vertical_code if profile else "kiosco_almacen"
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="business_profile_not_found"
+        )
+    return parse_vertical(profile.vertical_code)
 
 
 async def _resolve_data_type(
     field_key: str,
     entity_type: str,
     override_data_type: str | None,
-    vertical_code: str,
+    vertical_code: Vertical,
     session: AsyncSession,
 ) -> str:
     if override_data_type:

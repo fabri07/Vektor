@@ -27,6 +27,7 @@ from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.tests.conftest import add_business_profile
 
 from .conftest import FakeRedis, make_auth_headers, make_tenant, make_user
 
@@ -43,6 +44,10 @@ class FakeRedisCounter(FakeRedis):
 @pytest_asyncio.fixture
 async def tenant_and_user(session: AsyncSession):
     tenant = await make_tenant(session)
+    # Todo tenant real nace con `BusinessProfile`; sin él el chat ya no asume
+    # kiosco: pide configurar el negocio antes de despachar ningún agente.
+    await add_business_profile(session, tenant.tenant_id)
+    await session.commit()
     user = await make_user(session, tenant.tenant_id)
     return tenant, user
 

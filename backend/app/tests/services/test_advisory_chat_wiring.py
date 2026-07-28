@@ -22,6 +22,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
 )
 from app.application.services.chat_orchestrator import ChatOrchestrator
+from app.domain.verticals import Vertical
 
 ORCHESTRATOR = "app.application.services.chat_orchestrator"
 GAP_SERVICE = "app.application.services.coverage_gap_service"
@@ -207,6 +208,9 @@ async def test_income_handler_routes_advisory_intent_to_handle_advice() -> None:
     agent._db = MagicMock()
     agent.client = MagicMock()
     agent._tenant_uuid = AsyncMock(return_value=uuid.uuid4())  # type: ignore[method-assign]
+    agent._business_vertical = AsyncMock(  # type: ignore[method-assign]
+        return_value=Vertical.LIMPIEZA
+    )
 
     task = AgentTask(
         task_id=str(uuid.uuid4()),
@@ -233,6 +237,11 @@ async def test_income_handler_routes_advisory_intent_to_handle_advice() -> None:
         response = await agent._handle_data_query(request, task)
 
     handle_advice_mock.assert_awaited_once()
+    # El vertical del tenant viaja al advisory: sin él, FactsService queda sin
+    # umbrales y `margen_neto` pierde la anotación de severidad en el prompt.
+    call = handle_advice_mock.await_args
+    assert call is not None
+    assert call.kwargs["vertical"] == Vertical.LIMPIEZA
     assert response.result["advisory"] is True
 
 

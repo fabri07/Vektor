@@ -24,6 +24,7 @@ from app.application.agents.shared.schemas import (
     Confidence,
     RiskLevel,
 )
+from app.domain.verticals import Vertical
 
 
 class AgentCash(BaseAgent):
@@ -34,10 +35,13 @@ class AgentCash(BaseAgent):
         db: AsyncSession | None = None,
         redis: Redis | None = None,
         gateway: Any | None = None,
+        default_vertical: Vertical | None = None,
     ) -> None:
         self._db = db
         self._redis = redis
         self._gateway = gateway
+        # Se reenvía tal cual al delegado: el shim no decide verticales.
+        self._default_vertical = default_vertical
 
     # ── Helpers de dispatch legacy ─────────────────────────────────────────────
 
@@ -133,12 +137,20 @@ class AgentCash(BaseAgent):
             from app.application.agents.expense.agent import AgentExpense  # noqa: PLC0415
 
             delegate: BaseAgent = AgentExpense(
-                db=self._db, redis=self._redis, gateway=self._gateway
+                db=self._db,
+                redis=self._redis,
+                gateway=self._gateway,
+                default_vertical=self._default_vertical,
             )
         else:
             from app.application.agents.income.agent import AgentIncome  # noqa: PLC0415
 
-            delegate = AgentIncome(db=self._db, redis=self._redis, gateway=self._gateway)
+            delegate = AgentIncome(
+                db=self._db,
+                redis=self._redis,
+                gateway=self._gateway,
+                default_vertical=self._default_vertical,
+            )
 
         response = await delegate.process(request, task=task)
         response.agent_name = self.agent_name  # preservar "agent_cash" para audit log legacy

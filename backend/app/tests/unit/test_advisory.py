@@ -19,6 +19,7 @@ from app.application.agents.shared.advisory import (
 )
 from app.application.agents.shared.schemas import AgentRequest, Confidence
 from app.application.services.facts_service import BusinessFact, Provenance
+from app.domain.verticals import Vertical
 
 ADVISORY = "app.application.agents.shared.advisory"
 
@@ -217,6 +218,7 @@ async def test_handle_advice_empty_mode_skips_llm(monkeypatch) -> None:
         agent_name="agent_income",
         domain="ventas",
         tenant_id=uuid.uuid4(),
+        vertical=Vertical.KIOSCO_ALMACEN,
     )
 
     client.messages.create.assert_not_called()
@@ -252,6 +254,7 @@ async def test_handle_advice_grounded_calls_llm_and_returns_high(monkeypatch) ->
         agent_name="agent_income",
         domain="ventas",
         tenant_id=uuid.uuid4(),
+        vertical=Vertical.KIOSCO_ALMACEN,
     )
 
     client.messages.create.assert_awaited_once()
@@ -284,6 +287,7 @@ async def test_handle_advice_llm_failure_degrades_gracefully(monkeypatch) -> Non
         agent_name="agent_income",
         domain="ventas",
         tenant_id=uuid.uuid4(),
+        vertical=Vertical.KIOSCO_ALMACEN,
     )
 
     assert response.status == "success"
@@ -312,6 +316,7 @@ async def test_handle_advice_facts_load_failure_degrades_gracefully(monkeypatch)
         agent_name="agent_income",
         domain="ventas",
         tenant_id=uuid.uuid4(),
+        vertical=Vertical.KIOSCO_ALMACEN,
     )
 
     client.messages.create.assert_not_called()

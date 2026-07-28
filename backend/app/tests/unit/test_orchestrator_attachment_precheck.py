@@ -26,6 +26,7 @@ from app.application.services.chat_orchestrator import (
 )
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.tenant import Tenant
+from app.tests.conftest import add_business_profile
 
 ORCHESTRATOR = "app.application.services.chat_orchestrator"
 
@@ -53,6 +54,9 @@ async def tenant_with_product_file(db_session: AsyncSession) -> tuple[uuid.UUID,
             status="ACTIVE",
         )
     )
+    # Todo tenant real nace con perfil; sin él el orchestrator ya no asume
+    # kiosco, pide configurar el negocio.
+    await add_business_profile(db_session, tid)
     f = UploadedFile(
         tenant_id=tid,
         uploaded_by=uid,
@@ -214,6 +218,9 @@ async def tenant_with_imported_file(db_session: AsyncSession) -> tuple[uuid.UUID
             status="ACTIVE",
         )
     )
+    # Todo tenant real nace con perfil; sin él el orchestrator ya no asume
+    # kiosco, pide configurar el negocio.
+    await add_business_profile(db_session, tid)
     f = UploadedFile(
         tenant_id=tid,
         uploaded_by=uid,

@@ -277,11 +277,20 @@ async def build_facts_service(
     """Carga [período_anterior.start, período.end] en UNA pasada y arma el servicio.
 
     La cobertura incluye el período previo porque ventas_periodo/ticket_promedio
-    computan la variación % contra él. Si se pasa `vertical`, los umbrales de
-    severidad salen del benchmark JSON del vertical (`thresholds` explícito tiene
-    precedencia). Con ambos en `None` el servicio queda sin umbrales de margen
-    —y `margen_neto` sin severity— en vez de heredar los de un rubro ajeno.
+    computan la variación % contra él. Los umbrales de severidad salen del
+    benchmark JSON de `vertical`, salvo que se pasen `thresholds` explícitos (que
+    tienen precedencia).
+
+    Exige al menos uno de los dos: construir el servicio sin umbrales deja
+    `margen_neto` sin `severity` y apaga en silencio las alertas de margen río
+    abajo. Si un caller legítimamente no tiene vertical, tiene que declarar sus
+    umbrales — no omitir ambos.
     """
+    if vertical is None and thresholds is None:
+        raise ValueError(
+            "build_facts_service requiere `vertical` o `thresholds` explícitos: "
+            "sin umbrales, margen_neto queda sin severity."
+        )
     if thresholds is None and vertical is not None:
         thresholds = thresholds_for_vertical(vertical)
     frames = await load_facts_frames(

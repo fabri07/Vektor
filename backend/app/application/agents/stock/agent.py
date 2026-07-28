@@ -25,7 +25,7 @@ from app.application.agents.shared.schemas import (
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.domain.product import effective_threshold
-from app.domain.verticals import parse_vertical
+from app.domain.verticals import Vertical, parse_vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
 
@@ -42,9 +42,15 @@ class StockAdjustEntity(BaseModel):
 class AgentStock(BaseAgent):
     agent_name = "agent_stock"
 
-    def __init__(self, db: AsyncSession | None = None) -> None:
+    def __init__(
+        self, db: AsyncSession | None = None, default_vertical: Vertical | None = None
+    ) -> None:
+        """`default_vertical` es el vertical a usar cuando el agente corre sin
+        sesión de DB (tests). En producción nunca se inyecta: sin DB y sin
+        default, `_business_vertical` levanta en vez de asumir un rubro."""
         self._client: Any | None = None
         self._db = db
+        self._default_vertical = default_vertical
 
     @property
     def client(self) -> Any:
@@ -617,17 +623,21 @@ class AgentStock(BaseAgent):
         except (ValueError, TypeError):
             return None
 
-    async def _business_vertical(self, tenant_id: uuid.UUID) -> str:
-        """Devuelve el vertical_code del tenant o fallback a kiosco_almacen."""
-        if self._db is None:
-            return "kiosco_almacen"
-        from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+    async def _business_vertical(self, tenant_id: uuid.UUID | None) -> Vertical:
+        """Vertical del tenant. Sin DB ni tenant identificado cae al
+        `default_vertical` inyectado (tests); si tampoco lo hay, levanta."""
+        if self._db is not None and tenant_id is not None:
+            from app.application.agents.shared.vertical_lookup import (  # noqa: PLC0415
+                load_tenant_vertical,
+            )
 
-        result = await self._db.execute(
-            select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+            return await load_tenant_vertical(self._db, tenant_id)
+        if self._default_vertical is not None:
+            return self._default_vertical
+        raise RuntimeError(
+            "AgentStock requiere sesión de DB con tenant identificado "
+            "o default_vertical explícito"
         )
-        code = result.scalar_one_or_none()
-        return code or "kiosco_almacen"
 
     async def _get_margin_config(self, tenant_id: uuid.UUID) -> tuple[float, float]:
         """Devuelve (target_margin_pct, warning_margin_pct) del tenant o defaults vertical."""
@@ -1201,7 +1211,7 @@ class AgentStock(BaseAgent):
 
         # ── detectar_sobrestock ───────────────────────────────────────────────
         if intent == "detectar_sobrestock":
-            config = HeuristicEngine.get(parse_vertical(await self._business_vertical(tenant_id)))
+            config = HeuristicEngine.get(await self._business_vertical(tenant_id))
             # Umbral de sobrestock: el doble de la rotación máxima esperada del rubro
             overstock_days = float(config.inventory.rotation_days_max * 2)
             over = analytics.detect_overstock(products, velocity, overstock_days)
