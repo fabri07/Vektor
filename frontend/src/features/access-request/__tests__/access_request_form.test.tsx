@@ -193,12 +193,78 @@ describe("AccessRequestForm", () => {
     expect(mockPost).not.toHaveBeenCalled();
   }, TIMEOUT_FORMULARIO_COMPLETO);
 
-  test("el honeypot está presente pero oculto", () => {
+  /**
+   * Accesibilidad de los campos de texto.
+   *
+   * El defecto que esto protege es sutil: envolviendo label + hint + control +
+   * error en un mismo `<label>`, la asociación es implícita y TODO el contenido
+   * del label entra en el nombre accesible. El input terminaba llamándose
+   * "Nombre y apellido * Escribí tu nombre y apellido" —el error leído como
+   * parte de la etiqueta— y ningún campo se anunciaba como inválido. Por eso
+   * los tests miran el NOMBRE ACCESIBLE resultante, no solo que los atributos
+   * existan: `aria-invalid` puesto sobre un label contaminado no arregla nada.
+   */
+  describe("accesibilidad de los campos", () => {
+    test("el error no se cuela en el nombre accesible del campo", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      // Antes del error: el nombre es la etiqueta, y nada más.
+      expect(
+        screen.getByRole("textbox", { name: "Nombre y apellido *" }),
+      ).toBeInTheDocument();
+
+      await user.type(screen.getByLabelText(/Nombre y apellido/i), "A");
+      await user.tab();
+      await screen.findByText(/Escribí tu nombre/i);
+
+      // Y después del error: sigue siendo la etiqueta.
+      const nombre = screen.getByRole("textbox", { name: "Nombre y apellido *" });
+      expect(nombre).toHaveAccessibleName("Nombre y apellido *");
+      expect(nombre.getAttribute("aria-label")).toBeNull();
+    });
+
+    test("un campo con error se anuncia inválido y describe el error", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      const nombre = screen.getByLabelText(/Nombre y apellido/i);
+      // Mudo mientras nadie lo tocó: no se anuncia inválido de arranque.
+      expect(nombre).not.toHaveAttribute("aria-invalid");
+      expect(nombre).not.toHaveAttribute("aria-describedby");
+
+      await user.type(nombre, "A");
+      await user.tab();
+      await screen.findByText(/Escribí tu nombre/i);
+
+      expect(nombre).toHaveAttribute("aria-invalid", "true");
+      expect(nombre).toHaveAccessibleDescription("Escribí tu nombre y apellido");
+    });
+
+    test("el hint describe el campo sin meterse en su nombre", () => {
+      renderForm();
+      const telefono = screen.getByRole("textbox", {
+        name: "Teléfono / WhatsApp (opcional)",
+      });
+      expect(telefono).toHaveAccessibleDescription("Si nos lo dejás, te escribimos por acá.");
+    });
+  });
+
+  test("el honeypot está presente, oculto, y con un name que el autofill no conoce", () => {
     const { container } = renderForm();
-    const honeypot = container.querySelector<HTMLInputElement>('input[name="website"]');
+    const honeypot = container.querySelector<HTMLInputElement>('input[name="empresa_url"]');
     expect(honeypot).not.toBeNull();
     expect(honeypot).toHaveClass("hidden");
     expect(honeypot).toHaveAttribute("tabindex", "-1");
+    /*
+     * Lo que este test protege de verdad: NINGÚN input del formulario se llama
+     * `website`. Ese nombre lo completa solo el autofill de Chrome y los
+     * gestores de contraseñas, y un honeypot lleno hace que el backend
+     * descarte la solicitud sin persistir nada y devolviendo el mismo 201
+     * genérico — el visitante ve "te mandamos un link" y nunca llega nada.
+     */
+    expect(container.querySelector('input[name="website"]')).toBeNull();
+    expect(honeypot).toHaveAttribute("autocomplete", "new-password");
   });
 
   test("elegir 'Otro' revela el textarea y sin texto el submit sigue bloqueado", async () => {

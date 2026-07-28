@@ -139,7 +139,9 @@ describe("AccessRequestForm — prefill de Google", () => {
   });
 
   test("el token viaja en el POST para que la solicitud quede ligada a Google", async () => {
-    mockGet.mockResolvedValueOnce({
+    // `mockResolvedValue` y no `...Once`: el envío revalida el prefill, así que
+    // hay dos lecturas — la del montaje y la del submit.
+    mockGet.mockResolvedValue({
       data: { email: EMAIL, full_name: "Ana Pérez", provider: "google" },
     } as never);
     const user = userEvent.setup({ delay: null });
@@ -152,7 +154,74 @@ describe("AccessRequestForm — prefill de Google", () => {
     const cuerpo = mockPost.mock.calls[0]![1] as Record<string, unknown>;
     expect(cuerpo.google_prefill_token).toBe(TOKEN);
     expect(cuerpo.email).toBe(EMAIL);
+    // La revalidación es una lectura del mismo endpoint (el backend hace GET,
+    // no GETDEL): no consume el token, así que el POST lo sigue pudiendo canjear.
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockGet).toHaveBeenNthCalledWith(2, `/access-requests/prefill/${TOKEN}`);
   }, TIMEOUT_FORMULARIO_COMPLETO);
+
+  /**
+   * El prefill vence mientras se completa el formulario.
+   *
+   * Es el caso que se perdía en silencio: el backend persiste la solicitud sin
+   * `google_subject` (hace bien, no inventa un subject ni tira 16 respuestas),
+   * pero al aprobarla no se crea la identidad de Google y el usuario termina
+   * obligado a definir contraseña — justo la fricción que "Continuar con
+   * Google" evitaba. La UI seguía diciendo "Lo verificó Google".
+   */
+  describe("el prefill se vence entre el montaje y el envío", () => {
+    /** Prefill OK al montar, muerto al revalidar en el submit. */
+    function prefillQueVence() {
+      mockGet
+        .mockResolvedValueOnce({
+          data: { email: EMAIL, full_name: "Ana Pérez", provider: "google" },
+        } as never)
+        .mockRejectedValueOnce(new Error("404"));
+    }
+
+    test("el primer envío NO manda: avisa qué cambió y degrada el email a editable", async () => {
+      prefillQueVence();
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+      await waitFor(() => expect(emailInput()).toHaveValue(EMAIL));
+      expect(screen.getByText(/Lo verificó Google/i)).toBeInTheDocument();
+
+      await completarYEnviar(user);
+
+      // Nada se mandó: el aviso tiene que llegar a leerse, y navegando a
+      // /solicitud-enviada en el mismo gesto no se leería.
+      expect(mockPost).not.toHaveBeenCalled();
+      expect(mockPush).not.toHaveBeenCalled();
+
+      // Y se dice la verdad: ya no lo verifica Google, y se explica cómo va a entrar.
+      expect(screen.queryByText(/Lo verificó Google/i)).toBeNull();
+      expect(emailInput()).not.toHaveAttribute("readonly");
+      const aviso = await screen.findByText(/ese vínculo ya no vale/i);
+      expect(aviso).toHaveTextContent(/No se pierde nada de lo que contestaste/i);
+      expect(aviso).toHaveTextContent(/definiendo una contraseña/i);
+    }, TIMEOUT_FORMULARIO_COMPLETO);
+
+    test("el segundo envío manda la solicitud, sin el token muerto", async () => {
+      prefillQueVence();
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+      await waitFor(() => expect(emailInput()).toHaveValue(EMAIL));
+
+      await completarYEnviar(user);
+      await screen.findByText(/ese vínculo ya no vale/i);
+
+      // El visitante leyó el aviso y aprieta de nuevo: las 16 respuestas siguen ahí.
+      await user.click(screen.getByRole("button", { name: /Pedir acceso/i }));
+
+      await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+      const cuerpo = mockPost.mock.calls[0]![1] as Record<string, unknown>;
+      // Mandar un token que sabemos muerto no liga nada.
+      expect(cuerpo).not.toHaveProperty("google_prefill_token");
+      expect(cuerpo.email).toBe(EMAIL);
+      // Y no se revalida de nuevo: ya no hay token que revalidar.
+      expect(mockGet).toHaveBeenCalledTimes(2);
+    }, TIMEOUT_FORMULARIO_COMPLETO);
+  });
 
   test("token vencido: formulario a mano y el POST no manda el token", async () => {
     mockGet.mockRejectedValueOnce(new Error("404"));

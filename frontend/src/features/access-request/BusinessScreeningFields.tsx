@@ -36,33 +36,50 @@ import type { AccessRequestDraft } from "@/validation/accessRequest";
 export const inputClass =
   "w-full rounded-xl border border-vektor-border bg-vektor-ink px-4 py-3 text-vektor-white placeholder:text-vektor-muted focus:border-vektor-blue focus:outline-none";
 
-/** Campo con etiqueta y, si corresponde, el mensaje de error del schema. */
+/**
+ * Campo con etiqueta y, si corresponde, hint y mensaje de error.
+ *
+ * La etiqueta es **explícita** (`htmlFor` → `id`), no un `<label>` que envuelve
+ * todo. Envolviendo, el hint y el error quedan dentro del nombre accesible y un
+ * lector de pantalla anuncia el campo como *"Nombre y apellido * Escribí tu
+ * nombre y apellido"*: el error se lee como parte de la etiqueta y el campo
+ * nunca se anuncia como inválido. Acá el nombre es solo la etiqueta, y hint y
+ * error se asocian como DESCRIPCIÓN vía `aria-describedby` (ver `fieldAria`).
+ */
 export function Field({
+  campo,
   label,
   required,
   hint,
   error,
   children,
 }: {
+  /** Clave del borrador. Deriva el `id` del control y los de hint/error. */
+  campo: string;
   label: string;
   required?: boolean;
   hint?: string;
   error?: string;
   children: ReactNode;
 }) {
+  const id = fieldAnchorId(campo);
   return (
-    <label className="block">
-      <span className="mb-2 block text-sm font-medium text-vektor-body">
+    <div className="block">
+      <label htmlFor={id} className="mb-2 block text-sm font-medium text-vektor-body">
         {label} {required && <span className="text-vektor-red">*</span>}
-      </span>
-      {hint && <span className="mb-2 block text-xs text-vektor-muted">{hint}</span>}
+      </label>
+      {hint && (
+        <p id={`${id}-hint`} className="mb-2 block text-xs text-vektor-muted">
+          {hint}
+        </p>
+      )}
       {children}
       {error && (
-        <span className="mt-1.5 block text-xs text-vektor-red" role="alert">
+        <p id={`${id}-error`} className="mt-1.5 block text-xs text-vektor-red" role="alert">
           {error}
-        </span>
+        </p>
       )}
-    </label>
+    </div>
   );
 }
 
@@ -72,6 +89,30 @@ export function Field({
  */
 export function fieldAnchorId(field: string): string {
   return `campo-${field}`;
+}
+
+/**
+ * Atributos que el control de un `Field` tiene que llevar: el `id` con el que
+ * la etiqueta lo nombra, `aria-invalid` cuando hay error, y la asociación de
+ * hint y error como descripción.
+ *
+ * Va en el caller y no dentro de `Field` (que tendría que clonar el hijo)
+ * porque el control es distinto en cada campo — input, textarea — y clonar a
+ * ciegas es la clase de magia que rompe callado cuando alguien anida un `div`.
+ */
+export function fieldAria(
+  campo: string,
+  { error, hint }: { error?: string; hint?: string } = {},
+) {
+  const id = fieldAnchorId(campo);
+  const descrito = [hint ? `${id}-hint` : null, error ? `${id}-error` : null]
+    .filter(Boolean)
+    .join(" ");
+  return {
+    id,
+    "aria-invalid": error ? true : undefined,
+    "aria-describedby": descrito || undefined,
+  };
 }
 
 /**
@@ -265,8 +306,9 @@ export function BusinessScreeningFields({
           columns={3}
         />
 
-        <Field label="Contanos cómo lo llevás (opcional)">
+        <Field campo="records_notes" label="Contanos cómo lo llevás (opcional)">
           <textarea
+            {...fieldAria("records_notes")}
             className={`${inputClass} min-h-[110px] resize-y`}
             maxLength={2000}
             placeholder={RECORDS_NOTES_PLACEHOLDER}
@@ -275,8 +317,9 @@ export function BusinessScreeningFields({
           />
         </Field>
 
-        <Field label="Algo más que quieras contarnos (opcional)">
+        <Field campo="applicant_notes" label="Algo más que quieras contarnos (opcional)">
           <textarea
+            {...fieldAria("applicant_notes")}
             className={`${inputClass} min-h-[90px] resize-y`}
             maxLength={2000}
             value={draft.applicant_notes}

@@ -59,6 +59,7 @@ import {
   Field,
   RadioGroup,
   fieldAnchorId,
+  fieldAria,
   inputClass,
 } from "./BusinessScreeningFields";
 
@@ -69,6 +70,24 @@ function enfocarCampo(campo: string) {
   control.focus({ preventScroll: true });
   control.scrollIntoView({ block: "center", behavior: "smooth" });
 }
+
+const HINT_TELEFONO = "Si nos lo dejás, te escribimos por acá.";
+const HINT_EMAIL_GOOGLE = "Lo verificó Google. Es el email con el que vas a entrar.";
+
+/**
+ * Lo que se le dice al visitante cuando el prefill de Google ya no existe al
+ * momento de enviar.
+ *
+ * Es la verdad completa y en el orden en el que le importa: qué dejó de valer,
+ * qué NO se pierde, y cómo va a entrar. No menciona "token" ni "sesión
+ * expirada" a secas — el visitante no tiene contexto para traducir eso a una
+ * consecuencia.
+ */
+const AVISO_GOOGLE_VENCIDO =
+  "Pasó mucho tiempo desde que entraste con Google y ese vínculo ya no vale. " +
+  "No se pierde nada de lo que contestaste: apretá 'Pedir acceso' otra vez y " +
+  "mandamos la solicitud igual. Cuando la aprobemos vas a entrar definiendo " +
+  "una contraseña, en vez de con el botón de Google.";
 
 export function AccessRequestForm() {
   const router = useRouter();
@@ -126,6 +145,9 @@ export function AccessRequestForm() {
     };
   }, [prefillDeUrl]);
   const emailVerificadoPorGoogle = tokenGoogle !== null;
+  const hintEmail = emailVerificadoPorGoogle ? HINT_EMAIL_GOOGLE : undefined;
+  // Se prende cuando el prefill se cayó entre el montaje y el envío.
+  const [googleVencido, setGoogleVencido] = useState(false);
 
   useEffect(() => {
     trackLandingEvent("access_request_form_view", {
@@ -204,6 +226,34 @@ export function AccessRequestForm() {
 
     const ctaSource = ctaSourceFromUrl("solicitar_acceso");
     setErrorMsg("");
+
+    /*
+     * El prefill de Google se lee al montar y el formulario es largo: para
+     * cuando el visitante aprieta enviar, el token puede haber vencido.
+     * Mandarlo igual no rompe nada —el backend guarda la solicitud sin
+     * `google_subject`— pero deja al visitante creyendo que entró por Google
+     * cuando en realidad va a tener que definir una contraseña, y nadie se lo
+     * dice nunca. Eso es afirmar un estado que el sistema no sostiene.
+     *
+     * Revalidar acá es barato: `GET /access-requests/prefill/{token}` es una
+     * lectura y NO consume el token (el GETDEL lo hace el POST). Si falla,
+     * degradamos la UI, contamos qué implica y NO enviamos todavía: el aviso
+     * tiene que llegar a leerse, y navegando a `/solicitud-enviada` en el
+     * mismo gesto no se leería. El siguiente click envía sin token.
+     */
+    if (tokenGoogle) {
+      try {
+        await fetchGooglePrefill(tokenGoogle);
+      } catch {
+        setTokenGoogle(null);
+        setGoogleVencido(true);
+        trackLandingEvent("access_request_google_prefill_expired", {
+          cta_source: ctaSource,
+        });
+        return;
+      }
+    }
+
     try {
       await crear.mutateAsync(
         buildAccessRequestPayload(parse.data, {
@@ -235,13 +285,23 @@ export function AccessRequestForm() {
   return (
     <form onSubmit={onSubmit} className="mx-auto max-w-2xl px-6 pb-24">
       <div className="vektor-card space-y-10 p-6 sm:p-8">
-        {/* Honeypot: oculto para humanos, tentador para bots. */}
+        {/*
+          Honeypot: oculto para humanos, tentador para bots.
+
+          El `name` NO es `website`: ese es exactamente el campo que el autofill
+          de Chrome y los gestores de contraseñas completan solos, y un
+          honeypot lleno descarta la solicitud en silencio (`looks_like_bot()`
+          no persiste nada y devuelve el mismo 201 genérico). `empresa_url` no
+          está en ningún diccionario de autofill, y `new-password` desalienta
+          al resto. Lo que viaja en el POST se sigue llamando `website`: el
+          valor se lee por ref, el `name` del DOM no lo determina.
+        */}
         <input
           ref={websiteRef}
           type="text"
-          name="website"
+          name="empresa_url"
           tabIndex={-1}
-          autoComplete="off"
+          autoComplete="new-password"
           aria-hidden
           className="hidden"
         />
@@ -252,11 +312,16 @@ export function AccessRequestForm() {
             Contacto
           </h2>
 
-          <Field label="Nombre y apellido" required error={errores.full_name}>
+          <Field
+            campo="full_name"
+            label="Nombre y apellido"
+            required
+            error={errores.full_name}
+          >
             <input
+              {...fieldAria("full_name", { error: errores.full_name })}
               className={inputClass}
               maxLength={200}
-              id={fieldAnchorId("full_name")}
               value={draft.full_name}
               onChange={(e) => update("full_name", e.target.value)}
               onBlur={() => marcarTocado("full_name")}
@@ -264,20 +329,17 @@ export function AccessRequestForm() {
           </Field>
 
           <Field
+            campo="email"
             label="Email"
             required
-            hint={
-              emailVerificadoPorGoogle
-                ? "Lo verificó Google. Es el email con el que vas a entrar."
-                : undefined
-            }
+            hint={hintEmail}
             error={errores.email}
           >
             <input
+              {...fieldAria("email", { error: errores.email, hint: hintEmail })}
               type="email"
               className={inputClass}
               maxLength={255}
-              id={fieldAnchorId("email")}
               value={draft.email}
               /*
                * Con prefill de Google el email NO se edita: es lo que liga la
@@ -291,26 +353,32 @@ export function AccessRequestForm() {
           </Field>
 
           <Field
+            campo="phone"
             label="Teléfono / WhatsApp (opcional)"
-            hint="Si nos lo dejás, te escribimos por acá."
+            hint={HINT_TELEFONO}
             error={errores.phone}
           >
             <input
+              {...fieldAria("phone", { error: errores.phone, hint: HINT_TELEFONO })}
               className={inputClass}
               maxLength={50}
               placeholder="+54 9 11 1234 5678"
-              id={fieldAnchorId("phone")}
               value={draft.phone}
               onChange={(e) => update("phone", e.target.value)}
               onBlur={() => marcarTocado("phone")}
             />
           </Field>
 
-          <Field label="Nombre del negocio" required error={errores.business_name}>
+          <Field
+            campo="business_name"
+            label="Nombre del negocio"
+            required
+            error={errores.business_name}
+          >
             <input
+              {...fieldAria("business_name", { error: errores.business_name })}
               className={inputClass}
               maxLength={200}
-              id={fieldAnchorId("business_name")}
               value={draft.business_name}
               onChange={(e) => update("business_name", e.target.value)}
               onBlur={() => marcarTocado("business_name")}
@@ -373,12 +441,15 @@ export function AccessRequestForm() {
 
           {draft.requested_vertical === "otros" && (
             <Field
+              campo="vertical_other_text"
               label="Contanos de qué es tu negocio"
               required
               error={errores.vertical_other_text}
             >
               <textarea
-                id={fieldAnchorId("vertical_other_text")}
+                {...fieldAria("vertical_other_text", {
+                  error: errores.vertical_other_text,
+                })}
                 className={`${inputClass} min-h-[90px] resize-y`}
                 maxLength={2000}
                 value={draft.vertical_other_text}
@@ -465,6 +536,20 @@ export function AccessRequestForm() {
                 ))}
               </ul>
             </div>
+          )}
+
+          {/*
+            No es un error del visitante ni un fallo del envío: es un cambio de
+            estado que le cambia cómo va a entrar. Va en tono de aviso, no en
+            rojo, y no bloquea nada.
+          */}
+          {googleVencido && (
+            <p
+              role="alert"
+              className="rounded-xl border border-vektor-border bg-vektor-surface/60 p-4 text-sm leading-relaxed text-vektor-body"
+            >
+              {AVISO_GOOGLE_VENCIDO}
+            </p>
           )}
 
           {errorMsg && (
