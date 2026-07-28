@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom";
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -39,17 +39,50 @@ async function fillContacto(user: User) {
   await user.type(screen.getByLabelText(/Nombre del negocio/i), "Kiosco Ana");
 }
 
+/** Los 8 grupos de opción cerrada, con una etiqueta unívoca de cada uno. */
+const GRUPOS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["years_operating", /Más de 5 años/i],
+  ["staff_size", /Solo yo/i],
+  ["main_concern", /El margen/i],
+  ["monthly_revenue_band", /Prefiero no decirlo/i],
+  ["records_format", /Excel o Google Sheets/i],
+  ["history_depth", /Entre 1 y 3 años/i],
+  ["can_share_files", /Sí, y están ordenados/i],
+  ["requested_plan", /Cuenta gratuita/i],
+];
+
 /** Completa el screening (tu negocio + tu info) y el plan. */
-async function fillScreening(user: User) {
-  await user.click(screen.getByLabelText(/Más de 5 años/i));
-  await user.click(screen.getByLabelText(/Solo yo/i));
-  await user.click(screen.getByLabelText(/El margen/i));
-  await user.click(screen.getByLabelText(/Prefiero no decirlo/i));
-  await user.click(screen.getByLabelText(/Excel o Google Sheets/i));
-  await user.click(screen.getByLabelText(/Entre 1 y 3 años/i));
-  await user.click(screen.getByLabelText(/Sí, y están ordenados/i));
-  await user.click(screen.getByLabelText(/Cuenta gratuita/i));
+async function fillScreening(user: User, omitir: readonly string[] = []) {
+  for (const [campo, etiqueta] of GRUPOS) {
+    if (omitir.includes(campo)) continue;
+    await user.click(screen.getByLabelText(etiqueta));
+  }
 }
+
+/** Claves exactas del cuerpo de `POST /access-requests`. */
+const CLAVES_DEL_PAYLOAD = [
+  "full_name",
+  "email",
+  "phone",
+  "business_name",
+  "requested_vertical",
+  "vertical_other_text",
+  "requested_plan",
+  "years_operating",
+  "staff_size",
+  "monthly_revenue_band",
+  "main_concern",
+  "records_format",
+  "history_depth",
+  "can_share_files",
+  "records_notes",
+  "applicant_notes",
+  "consent",
+  "consent_version",
+  "cta_source",
+  "website",
+  "elapsed_ms",
+];
 
 function submitButton() {
   return screen.getByRole("button", { name: /Pedir acceso/i });
@@ -79,6 +112,53 @@ describe("AccessRequestForm", () => {
     expect(container.querySelectorAll('input[type="password"]')).toHaveLength(0);
   });
 
+  test("al montar NO hay ningún mensaje de error visible", () => {
+    renderForm();
+    // El borrador vacío es inválido, pero el usuario todavía no tocó nada: la
+    // puerta de entrada pública no puede abrir con campos en rojo.
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.queryByText(/Escribí tu nombre/i)).toBeNull();
+    expect(screen.queryByText(/Email inválido/i)).toBeNull();
+    expect(screen.queryByText(/Escribí el nombre de tu negocio/i)).toBeNull();
+    // Tampoco el resumen de faltantes: no hubo interacción.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  test("un campo de texto solo muestra su error después de tocarlo", async () => {
+    const user = userEvent.setup({ delay: null });
+    renderForm();
+
+    const nombre = screen.getByLabelText(/Nombre y apellido/i);
+    await user.type(nombre, "A"); // corto, pero todavía sin salir del campo
+    expect(screen.queryByText(/Escribí tu nombre/i)).toBeNull();
+
+    await user.tab(); // blur → recién ahora hablamos
+    expect(await screen.findByText(/Escribí tu nombre/i)).toBeInTheDocument();
+  });
+
+  test("un grupo de opción sin elegir muestra su error al intentar enviar", async () => {
+    const user = userEvent.setup({ delay: null });
+    const { container } = renderForm();
+
+    await fillContacto(user);
+    await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+    await fillScreening(user, ["staff_size"]);
+    await user.click(screen.getByRole("checkbox"));
+
+    // Mientras no se intente enviar, el grupo sin tocar sigue callado.
+    expect(screen.queryByText("Elegí una opción")).toBeNull();
+
+    // El botón está gris, así que el intento llega por envío implícito.
+    fireEvent.submit(container.querySelector("form")!);
+
+    expect(await screen.findByText("Elegí una opción")).toBeInTheDocument();
+    // Y el resumen nombra exactamente el campo que falta.
+    const resumen = screen.getByRole("status");
+    expect(resumen).toHaveTextContent("Te falta responder una cosa:");
+    expect(resumen).toHaveTextContent("¿Cuánta gente trabaja?");
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
   test("el honeypot está presente pero oculto", () => {
     const { container } = renderForm();
     const honeypot = container.querySelector<HTMLInputElement>('input[name="website"]');
@@ -88,7 +168,7 @@ describe("AccessRequestForm", () => {
   });
 
   test("elegir 'Otro' revela el textarea y sin texto el submit sigue bloqueado", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderForm();
 
     expect(screen.queryByLabelText(/Contanos de qué es tu negocio/i)).toBeNull();
@@ -112,7 +192,7 @@ describe("AccessRequestForm", () => {
   });
 
   test("el submit está bloqueado hasta que el formulario es válido", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderForm();
 
     expect(submitButton()).toBeDisabled();
@@ -133,7 +213,7 @@ describe("AccessRequestForm", () => {
 
   test("envío exitoso: postea el contrato exacto (con consent, sin password)", async () => {
     mockPost.mockResolvedValueOnce({ data: { status: "ok", message: "ok" } });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderForm();
 
     await fillContacto(user);
@@ -165,9 +245,11 @@ describe("AccessRequestForm", () => {
     });
     // Sin rubro "otros" el texto libre viaja null: mandarlo sería 422.
     expect(cuerpo.vertical_other_text).toBeNull();
-    // El endpoint usa extra="forbid": un campo de más rompe el alta.
-    expect(cuerpo).not.toHaveProperty("password");
     expect(typeof cuerpo.elapsed_ms).toBe("number");
+    // El endpoint usa extra="forbid": un campo de MÁS es 422. `toMatchObject`
+    // no detecta claves de sobra, así que se comparan exactamente.
+    expect(Object.keys(cuerpo).sort()).toEqual([...CLAVES_DEL_PAYLOAD].sort());
+    expect(cuerpo).not.toHaveProperty("password");
 
     await waitFor(() =>
       expect(mockPush).toHaveBeenCalledWith(
@@ -178,7 +260,7 @@ describe("AccessRequestForm", () => {
 
   test("?plan=premium precarga el plan y lo deja editable", async () => {
     searchParams = new URLSearchParams("plan=premium");
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderForm();
 
     await waitFor(() =>
@@ -192,7 +274,7 @@ describe("AccessRequestForm", () => {
 
   test("un error del backend muestra el mensaje y no navega", async () => {
     mockPost.mockRejectedValueOnce(new Error("network"));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderForm();
 
     await fillContacto(user);

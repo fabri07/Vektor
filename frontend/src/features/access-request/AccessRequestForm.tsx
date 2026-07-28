@@ -13,15 +13,25 @@
  *
  * Anti-spam en capas, igual que `/contacto`: honeypot invisible (`website`) +
  * `elapsed_ms` medido desde el montaje. El rate limit por IP lo pone el backend.
+ *
+ * **Superficie de errores.** El formulario arranca en silencio: un campo solo
+ * muestra su error después de que el usuario lo tocó (`onBlur` en los textos,
+ * la selección en los grupos) o después de un intento de envío. Al revés,
+ * ningún campo requerido se queda mudo: los 9 grupos de opción muestran el
+ * suyo, y arriba del botón hay un resumen de lo que falta con foco directo a
+ * cada campo. Las dos mitades son la misma regla — decir lo que falta, cuando
+ * corresponde, y nada más.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AxiosError } from "axios";
 
 import { useCreateAccessRequest } from "@/hooks/useAccessRequest";
 import {
+  ACCESS_REQUEST_FIELD_LABELS,
+  accessRequestFieldLabel,
   isRequestedPlan,
   REQUESTED_PLAN_OPTIONS,
 } from "@/lib/accessRequestOptions";
@@ -38,8 +48,17 @@ import {
   BusinessScreeningFields,
   Field,
   RadioGroup,
+  fieldAnchorId,
   inputClass,
 } from "./BusinessScreeningFields";
+
+/** Lleva el foco (y la vista) al primer control del campo indicado. */
+function enfocarCampo(campo: string) {
+  const control = document.getElementById(fieldAnchorId(campo));
+  if (!control) return;
+  control.focus({ preventScroll: true });
+  control.scrollIntoView({ block: "center", behavior: "smooth" });
+}
 
 export function AccessRequestForm() {
   const router = useRouter();
@@ -51,6 +70,11 @@ export function AccessRequestForm() {
   const [draft, setDraft] = useState<AccessRequestDraft>(EMPTY_ACCESS_REQUEST_DRAFT);
   const [enviado, setEnviado] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  // Qué campos ya tocó el usuario, y si hubo un intento de envío. Sin esto el
+  // formulario abriría con los tres campos de texto en rojo antes de que el
+  // visitante escriba una letra.
+  const [tocados, setTocados] = useState<Record<string, true>>({});
+  const [intentado, setIntentado] = useState(false);
 
   // `?plan=` precarga la intención de plan pero la deja EDITABLE: el visitante
   // llegó desde el card de /precios, no firmó nada.
@@ -74,6 +98,22 @@ export function AccessRequestForm() {
     setDraft((d) => ({ ...d, [key]: value }));
   }
 
+  function marcarTocado(campo: keyof AccessRequestDraft) {
+    setTocados((t) => (t[campo] ? t : { ...t, [campo]: true }));
+  }
+
+  /**
+   * Para controles de un solo gesto (radios, tarjetas, casilla): elegir ES
+   * tocar, así que el error del campo se apaga en el mismo click.
+   */
+  function elegir<K extends keyof AccessRequestDraft>(
+    key: K,
+    value: AccessRequestDraft[K],
+  ) {
+    update(key, value);
+    marcarTocado(key);
+  }
+
   /**
    * Cambiar de rubro limpia el texto libre: con un rubro soportado el backend
    * rechaza `vertical_other_text`, y dejarlo cargado convertiría un cambio de
@@ -85,16 +125,37 @@ export function AccessRequestForm() {
       requested_vertical: code,
       vertical_other_text: code === "otros" ? d.vertical_other_text : "",
     }));
+    marcarTocado("requested_vertical");
   }
 
-  const parse = parseAccessRequestDraft(draft);
-  const errores = fieldErrors(parse);
+  // Memoizado: sin esto el schema entero se re-valida en cada render, incluso
+  // en los que no cambian el borrador.
+  const parse = useMemo(() => parseAccessRequestDraft(draft), [draft]);
+  const todosLosErrores = useMemo(() => fieldErrors(parse), [parse]);
+  // Solo se muestran los errores de campos ya tocados (o todos, tras intentar
+  // enviar). Es la mitad "no grites antes de tiempo" de la regla.
+  const errores: Record<string, string> = {};
+  for (const [campo, mensaje] of Object.entries(todosLosErrores)) {
+    if (intentado || tocados[campo]) errores[campo] = mensaje;
+  }
+
+  /** Campos requeridos sin contestar, en el orden en el que aparecen. */
+  const faltantes = ACCESS_REQUEST_FIELD_LABELS.map(([campo]) => campo).filter(
+    (campo) => campo in todosLosErrores,
+  );
+  const hayInteraccion = intentado || Object.keys(tocados).length > 0;
   const enviando = crear.isPending || enviado;
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (enviando) return; // anti doble-submit
-    if (!parse.success) return; // el botón ya está deshabilitado; guard defensivo
+    if (!parse.success) {
+      // Alcanzable por envío implícito (Enter) aunque el botón esté gris.
+      // Destapa TODOS los errores y manda el foco al primero que falta.
+      setIntentado(true);
+      if (faltantes[0]) enfocarCampo(faltantes[0]);
+      return;
+    }
 
     const ctaSource = ctaSourceFromUrl("solicitar_acceso");
     setErrorMsg("");
@@ -149,8 +210,10 @@ export function AccessRequestForm() {
             <input
               className={inputClass}
               maxLength={200}
+              id={fieldAnchorId("full_name")}
               value={draft.full_name}
               onChange={(e) => update("full_name", e.target.value)}
+              onBlur={() => marcarTocado("full_name")}
             />
           </Field>
 
@@ -159,8 +222,10 @@ export function AccessRequestForm() {
               type="email"
               className={inputClass}
               maxLength={255}
+              id={fieldAnchorId("email")}
               value={draft.email}
               onChange={(e) => update("email", e.target.value)}
+              onBlur={() => marcarTocado("email")}
             />
           </Field>
 
@@ -173,8 +238,10 @@ export function AccessRequestForm() {
               className={inputClass}
               maxLength={50}
               placeholder="+54 9 11 1234 5678"
+              id={fieldAnchorId("phone")}
               value={draft.phone}
               onChange={(e) => update("phone", e.target.value)}
+              onBlur={() => marcarTocado("phone")}
             />
           </Field>
 
@@ -182,8 +249,10 @@ export function AccessRequestForm() {
             <input
               className={inputClass}
               maxLength={200}
+              id={fieldAnchorId("business_name")}
               value={draft.business_name}
               onChange={(e) => update("business_name", e.target.value)}
+              onBlur={() => marcarTocado("business_name")}
             />
           </Field>
         </section>
@@ -199,11 +268,12 @@ export function AccessRequestForm() {
               ¿De qué es tu negocio? <span className="text-vektor-red">*</span>
             </legend>
             <div className="grid gap-3 sm:grid-cols-2">
-              {REQUESTED_VERTICAL_OPTIONS.map((opcion) => {
+              {REQUESTED_VERTICAL_OPTIONS.map((opcion, indice) => {
                 const seleccionado = draft.requested_vertical === opcion.code;
                 return (
                   <button
                     key={opcion.code}
+                    id={indice === 0 ? fieldAnchorId("requested_vertical") : undefined}
                     type="button"
                     aria-pressed={seleccionado}
                     onClick={() => seleccionarRubro(opcion.code)}
@@ -211,7 +281,9 @@ export function AccessRequestForm() {
                       "flex flex-col items-start gap-3 rounded-xl border-2 p-4 text-left transition-all duration-150",
                       seleccionado
                         ? "border-vektor-blue bg-vektor-surface"
-                        : "border-vektor-border hover:border-vektor-blue/50",
+                        : errores.requested_vertical
+                          ? "border-vektor-red/60 hover:border-vektor-blue/50"
+                          : "border-vektor-border hover:border-vektor-blue/50",
                     ].join(" ")}
                   >
                     <span
@@ -245,16 +317,18 @@ export function AccessRequestForm() {
               error={errores.vertical_other_text}
             >
               <textarea
+                id={fieldAnchorId("vertical_other_text")}
                 className={`${inputClass} min-h-[90px] resize-y`}
                 maxLength={2000}
                 value={draft.vertical_other_text}
                 onChange={(e) => update("vertical_other_text", e.target.value)}
+                onBlur={() => marcarTocado("vertical_other_text")}
               />
             </Field>
           )}
         </section>
 
-        <BusinessScreeningFields draft={draft} update={update} />
+        <BusinessScreeningFields draft={draft} update={elegir} errores={errores} />
 
         {/* ── Cómo querés usar Véktor ──────────────────────────────────────── */}
         <section className="space-y-5">
@@ -267,7 +341,8 @@ export function AccessRequestForm() {
             legend="¿Con qué cuenta te gustaría comenzar?"
             options={REQUESTED_PLAN_OPTIONS}
             value={draft.requested_plan}
-            onChange={(v) => update("requested_plan", v)}
+            onChange={(v) => elegir("requested_plan", v)}
+            error={errores.requested_plan}
             columns={1}
           />
         </section>
@@ -276,10 +351,11 @@ export function AccessRequestForm() {
         <div className="space-y-5">
           <label className="flex items-start gap-3 text-sm text-vektor-body">
             <input
+              id={fieldAnchorId("consent")}
               type="checkbox"
               className="mt-1 accent-vektor-blue"
               checked={draft.consent}
-              onChange={(e) => update("consent", e.target.checked)}
+              onChange={(e) => elegir("consent", e.target.checked)}
             />
             <span>
               Acepto la{" "}
@@ -289,6 +365,46 @@ export function AccessRequestForm() {
               y el tratamiento de mis datos para que revisen mi solicitud.
             </span>
           </label>
+
+          {errores.consent && (
+            <p className="text-xs text-vektor-red" role="alert">
+              {errores.consent}
+            </p>
+          )}
+
+          {/*
+            Resumen de faltantes: es lo que convierte un botón gris en una
+            instrucción. Cada faltante lleva el foco a su campo, así el usuario
+            no tiene que barrer cinco secciones a ojo.
+          */}
+          {hayInteraccion && faltantes.length > 0 && (
+            <div
+              role="status"
+              className="rounded-xl border border-vektor-border bg-vektor-surface/60 p-4 text-sm text-vektor-body"
+            >
+              <p className="font-semibold text-vektor-white">
+                {faltantes.length === 1
+                  ? "Te falta responder una cosa:"
+                  : `Te faltan ${faltantes.length} respuestas:`}
+              </p>
+              <ul className="mt-2 flex flex-wrap gap-x-2 gap-y-1">
+                {faltantes.map((campo) => (
+                  <li key={campo}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIntentado(true);
+                        enfocarCampo(campo);
+                      }}
+                      className="text-vektor-blue underline-offset-2 hover:underline"
+                    >
+                      {accessRequestFieldLabel(campo)}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {errorMsg && (
             <p className="text-sm text-vektor-red" role="alert">

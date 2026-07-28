@@ -66,7 +66,21 @@ export function Field({
   );
 }
 
-/** Grupo de radios de opción cerrada. Sin preselección: nada arranca marcado. */
+/**
+ * `id` del primer control de un campo. Lo usa el resumen de faltantes para
+ * llevar el foco al campo que quedó sin contestar.
+ */
+export function fieldAnchorId(field: string): string {
+  return `campo-${field}`;
+}
+
+/**
+ * Grupo de radios de opción cerrada. Sin preselección: nada arranca marcado.
+ *
+ * Muestra su propio error: con 12 campos requeridos repartidos en cinco
+ * secciones, un grupo mudo deja al usuario con el botón gris y sin idea de qué
+ * le falta.
+ */
 export function RadioGroup<T extends string>({
   name,
   legend,
@@ -74,6 +88,7 @@ export function RadioGroup<T extends string>({
   value,
   onChange,
   columns = 2,
+  error,
 }: {
   name: string;
   legend: string;
@@ -81,6 +96,7 @@ export function RadioGroup<T extends string>({
   value: string;
   onChange: (value: T) => void;
   columns?: 1 | 2 | 3;
+  error?: string;
 }) {
   const grid =
     columns === 1
@@ -94,16 +110,20 @@ export function RadioGroup<T extends string>({
         {legend} <span className="text-vektor-red">*</span>
       </legend>
       <div className={`grid gap-2 ${grid}`}>
-        {options.map((opt) => (
+        {options.map((opt, indice) => (
           <label
             key={opt.value}
             className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
               value === opt.value
                 ? "border-vektor-blue text-vektor-white"
-                : "border-vektor-border text-vektor-muted hover:border-vektor-blue/50"
+                : error
+                  ? "border-vektor-red/60 text-vektor-muted hover:border-vektor-blue/50"
+                  : "border-vektor-border text-vektor-muted hover:border-vektor-blue/50"
             }`}
           >
             <input
+              // Solo el primero lleva ancla: es el destino del foco.
+              id={indice === 0 ? fieldAnchorId(name) : undefined}
               type="radio"
               name={name}
               className="mt-0.5 accent-vektor-blue"
@@ -120,6 +140,11 @@ export function RadioGroup<T extends string>({
           </label>
         ))}
       </div>
+      {error && (
+        <p className="mt-1.5 text-xs text-vektor-red" role="alert">
+          {error}
+        </p>
+      )}
     </fieldset>
   );
 }
@@ -147,9 +172,19 @@ export interface BusinessScreeningFieldsProps {
     key: K,
     value: AccessRequestDraft[K],
   ) => void;
+  /**
+   * Errores YA filtrados por el contenedor: acá solo llegan los que
+   * corresponde mostrar (campo tocado o intento de envío). Este componente no
+   * decide cuándo mostrarlos, solo los pinta.
+   */
+  errores: Record<string, string>;
 }
 
-export function BusinessScreeningFields({ draft, update }: BusinessScreeningFieldsProps) {
+export function BusinessScreeningFields({
+  draft,
+  update,
+  errores,
+}: BusinessScreeningFieldsProps) {
   return (
     <>
       <section className="space-y-5">
@@ -163,6 +198,7 @@ export function BusinessScreeningFields({ draft, update }: BusinessScreeningFiel
           options={YEARS_OPERATING_OPTIONS}
           value={draft.years_operating}
           onChange={(v) => update("years_operating", v)}
+          error={errores.years_operating}
         />
 
         <RadioGroup
@@ -171,6 +207,7 @@ export function BusinessScreeningFields({ draft, update }: BusinessScreeningFiel
           options={STAFF_SIZE_OPTIONS}
           value={draft.staff_size}
           onChange={(v) => update("staff_size", v)}
+          error={errores.staff_size}
         />
 
         <RadioGroup
@@ -179,6 +216,7 @@ export function BusinessScreeningFields({ draft, update }: BusinessScreeningFiel
           options={MAIN_CONCERN_OPTIONS}
           value={draft.main_concern}
           onChange={(v) => update("main_concern", v)}
+          error={errores.main_concern}
           columns={3}
         />
 
@@ -190,6 +228,7 @@ export function BusinessScreeningFields({ draft, update }: BusinessScreeningFiel
           options={REVENUE_BAND_OPTIONS}
           value={draft.monthly_revenue_band}
           onChange={(v) => update("monthly_revenue_band", v)}
+          error={errores.monthly_revenue_band}
         />
       </section>
 
@@ -204,6 +243,7 @@ export function BusinessScreeningFields({ draft, update }: BusinessScreeningFiel
           options={RECORDS_FORMAT_OPTIONS}
           value={draft.records_format}
           onChange={(v) => update("records_format", v)}
+          error={errores.records_format}
         />
 
         <RadioGroup
@@ -212,6 +252,7 @@ export function BusinessScreeningFields({ draft, update }: BusinessScreeningFiel
           options={HISTORY_DEPTH_OPTIONS}
           value={draft.history_depth}
           onChange={(v) => update("history_depth", v)}
+          error={errores.history_depth}
         />
 
         <RadioGroup
@@ -220,6 +261,7 @@ export function BusinessScreeningFields({ draft, update }: BusinessScreeningFiel
           options={CAN_SHARE_FILES_OPTIONS}
           value={draft.can_share_files}
           onChange={(v) => update("can_share_files", v)}
+          error={errores.can_share_files}
           columns={3}
         />
 

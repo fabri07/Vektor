@@ -127,6 +127,36 @@ export function isRequestedPlan(value: string | null | undefined): value is Requ
 }
 
 /**
+ * Nombre corto de cada campo del formulario, en el ORDEN en el que aparece en
+ * pantalla. Alimenta el resumen de "esto te falta" y define cuál es el primer
+ * campo faltante al que se lleva el foco. El orden importa: mandar al usuario a
+ * un campo del final cuando le falta uno del principio lo hace scrollear dos
+ * veces.
+ */
+export const ACCESS_REQUEST_FIELD_LABELS: readonly (readonly [string, string])[] = [
+  ["full_name", "Nombre y apellido"],
+  ["email", "Email"],
+  ["phone", "Teléfono / WhatsApp"],
+  ["business_name", "Nombre del negocio"],
+  ["requested_vertical", "Rubro"],
+  ["vertical_other_text", "De qué es tu negocio"],
+  ["years_operating", "¿Hace cuánto opera?"],
+  ["staff_size", "¿Cuánta gente trabaja?"],
+  ["main_concern", "¿Qué te preocupa más?"],
+  ["monthly_revenue_band", "Facturación mensual aproximada"],
+  ["records_format", "¿Guardás registro de ventas y gastos?"],
+  ["history_depth", "¿Desde cuándo tenés esos registros?"],
+  ["can_share_files", "¿Podrías subir esos archivos?"],
+  ["requested_plan", "¿Con qué cuenta querés comenzar?"],
+  ["consent", "Consentimiento"],
+] as const;
+
+/** Etiqueta corta de un campo; el nombre crudo si no está catalogado. */
+export function accessRequestFieldLabel(field: string): string {
+  return ACCESS_REQUEST_FIELD_LABELS.find(([k]) => k === field)?.[1] ?? field;
+}
+
+/**
  * Placeholder del textarea "contanos cómo lo llevás". El ejemplo concreto es lo
  * que le muestra al usuario qué nivel de detalle esperamos.
  */
