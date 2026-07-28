@@ -20,10 +20,16 @@ class DecisionAuditLog(UUIDPrimaryKeyMixin, Base):
 
     __tablename__ = "decision_audit_log"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
+    #: NULLABLE desde la migración ``20260806_0003``. Casi todas las decisiones
+    #: del sistema pertenecen a un tenant, pero las del flujo de solicitudes de
+    #: acceso (crear, verificar el email, rechazar, poner en lista de espera)
+    #: ocurren ANTES de que exista ningún tenant — y son justamente las que hay
+    #: que poder auditar. ``approve()`` sí graba el tenant, porque para cuando
+    #: escribe la decisión ya lo acuñó en la misma transacción.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     decision_type: Mapped[str] = mapped_column(String(100), nullable=False)

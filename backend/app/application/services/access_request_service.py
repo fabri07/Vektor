@@ -78,6 +78,7 @@ from app.domain.verticals import Vertical
 from app.integrations.email_templates import render_action_email
 from app.observability.logger import get_logger
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
 from app.persistence.repositories.user_repository import UserRepository
 
@@ -94,6 +95,15 @@ TASK_VERIFICACION = "notify_access_request_verification"
 TASK_AVISO_DUENIO = "notify_access_request_owner"
 TASK_DECISION = "notify_access_request_decision"
 TASK_CUENTA_EXISTENTE = "notify_access_request_account_exists"
+
+# ── `decision_type` de cada decisión del flujo en `decision_audit_log` ───────
+# Tres de las cuatro no tienen tenant (recién existe al aprobar); por eso la
+# migración 20260806_0003 hizo `decision_audit_log.tenant_id` nullable.
+DECISION_CREATED = "ACCESS_REQUEST_CREATED"
+DECISION_VERIFIED = "ACCESS_REQUEST_VERIFIED"
+DECISION_APPROVED = "ACCESS_REQUEST_APPROVED"
+DECISION_REJECTED = "ACCESS_REQUEST_REJECTED"
+DECISION_WAITLISTED = "ACCESS_REQUEST_WAITLISTED"
 
 #: Los dos únicos estados que forman la COLA de revisión. Una solicitud
 #: ``unverified`` —aunque sea Premium— no desplaza a una verificada: el doble
@@ -216,14 +226,19 @@ class AccessRequestNotFound(AccessRequestError):  # noqa: N818
 
 
 class AccessRequestNotApprovable(AccessRequestError):  # noqa: N818
-    """El estado actual no admite aprobación (``unverified``/``rejected``/``expired``)."""
+    """La solicitud no cumple alguna precondición de aprobación.
 
-    def __init__(self, current_status: str) -> None:
+    Dos motivos: el estado no admite aprobación
+    (``unverified``/``rejected``/``expired``) o nadie confirmó el email.
+    """
+
+    def __init__(self, current_status: str, *, motivo: str | None = None) -> None:
+        detalle = motivo or f"aprobables: {', '.join(ESTADOS_APROBABLES)}"
         super().__init__(
-            f"Una solicitud en estado '{current_status}' no se puede aprobar; "
-            f"aprobables: {', '.join(ESTADOS_APROBABLES)}"
+            f"Una solicitud en estado '{current_status}' no se puede aprobar; {detalle}"
         )
         self.current_status = current_status
+        self.motivo = motivo
 
 
 class AccessRequestEmailTaken(AccessRequestError):  # noqa: N818
@@ -357,6 +372,12 @@ class AccessRequestService:
             return existente, CreateOutcome.DUPLICATE_OPEN
 
         token = await self._emitir_token(solicitud)
+        self._auditar(
+            solicitud,
+            decision_type=DECISION_CREATED,
+            triggered_by="public:access_request_form",
+            extra={"cta_source": solicitud.cta_source},
+        )
         # REGLA CARDINAL: la solicitud está a salvo ANTES de tocar el email.
         await self._session.commit()
 
@@ -443,6 +464,12 @@ class AccessRequestService:
         solicitud.status = AccessRequestStatus.PENDING.value
         if solicitud.email_verified_at is None:
             solicitud.email_verified_at = ahora
+        self._auditar(
+            solicitud,
+            decision_type=DECISION_VERIFIED,
+            triggered_by="public:access_request_verify",
+            extra={"token_id": str(token_uuid)},
+        )
         await self._session.commit()
 
         _encolar(TASK_AVISO_DUENIO, str(solicitud.id))
@@ -539,6 +566,16 @@ class AccessRequestService:
             )
         if solicitud.status not in ESTADOS_APROBABLES:
             raise AccessRequestNotApprovable(solicitud.status)
+        # El estado NO alcanza como prueba del doble opt-in: `waitlist()` acepta
+        # una solicitud `unverified` (postergar algo sin revisar es legítimo) y
+        # `waitlist` es aprobable, así que encadenar waitlist+approve acuñaría un
+        # tenant contra un email que nadie confirmó. La condición que importa es
+        # esta, no el estado.
+        if solicitud.email_verified_at is None:
+            raise AccessRequestNotApprovable(
+                solicitud.status,
+                motivo="nadie confirmó el email (doble opt-in pendiente)",
+            )
 
         # Alguien pudo crear la cuenta a mano entre el envío y la aprobación.
         if await self._user_repo.get_by_email_any_tenant(solicitud.email) is not None:
@@ -574,6 +611,21 @@ class AccessRequestService:
         # que cree tokens de reset (y que se olvide de invalidar los vigentes).
         invitacion = await AuthService(self._session)._create_password_reset_token(
             user.user_id, ttl_hours=_INVITE_TOKEN_TTL_HOURS
+        )
+        # Única decisión del flujo que SÍ tiene tenant: lo acuñamos recién, en
+        # esta misma transacción.
+        self._auditar(
+            solicitud,
+            decision_type=DECISION_APPROVED,
+            triggered_by=f"{via}:access_request_review",
+            tenant_id=tenant.tenant_id,
+            actor_user_id=reviewer_user_id,
+            extra={
+                "assigned_vertical_code": vertical.value,
+                "approved_tenant_id": str(tenant.tenant_id),
+                "approved_user_id": str(user.user_id),
+                "review_notes": notes,
+            },
         )
         await self._session.commit()
 
@@ -625,6 +677,13 @@ class AccessRequestService:
         solicitud.status = AccessRequestStatus.REJECTED.value
         solicitud.rejection_reason = motivo
         self._sellar_revision(solicitud, reviewer_user_id, via, notes=None)
+        self._auditar(
+            solicitud,
+            decision_type=DECISION_REJECTED,
+            triggered_by=f"{via}:access_request_review",
+            actor_user_id=reviewer_user_id,
+            extra={"rejection_reason": motivo, "notify": notify},
+        )
         await self._session.commit()
 
         if notify:
@@ -664,6 +723,13 @@ class AccessRequestService:
 
         solicitud.status = AccessRequestStatus.WAITLIST.value
         self._sellar_revision(solicitud, reviewer_user_id, via, notes=notes)
+        self._auditar(
+            solicitud,
+            decision_type=DECISION_WAITLISTED,
+            triggered_by=f"{via}:access_request_review",
+            actor_user_id=reviewer_user_id,
+            extra={"review_notes": notes},
+        )
         await self._session.commit()
 
         _encolar(
@@ -673,6 +739,45 @@ class AccessRequestService:
         return solicitud
 
     # ── Helpers privados ──────────────────────────────────────────────────────
+
+    def _auditar(
+        self,
+        solicitud: AccessRequest,
+        *,
+        decision_type: str,
+        triggered_by: str,
+        tenant_id: uuid.UUID | None = None,
+        actor_user_id: uuid.UUID | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Agrega la traza a ``decision_audit_log`` DENTRO de la transacción.
+
+        Se hace ``add`` y NO ``commit``: la auditoría tiene que viajar en la
+        misma transacción que la decisión que audita. Si se persistiera aparte,
+        el caso que importa —la decisión se guarda y la traza no— sería posible.
+
+        ``tenant_id`` es ``None`` en tres de las cuatro decisiones porque el
+        tenant recién existe al aprobar (ver la migración ``20260806_0003``).
+        """
+        self._session.add(
+            DecisionAuditLog(
+                tenant_id=tenant_id,
+                decision_type=decision_type,
+                decision_data={
+                    "access_request_id": str(solicitud.id),
+                    "email": solicitud.email,
+                    "business_name": solicitud.business_name,
+                    "requested_vertical": solicitud.requested_vertical,
+                    "requested_plan": solicitud.requested_plan,
+                    "status": solicitud.status,
+                    **(extra or {}),
+                },
+                triggered_by=triggered_by,
+                actor_user_id=actor_user_id,
+                context={"endpoint": "access_requests"},
+                created_at=datetime.now(UTC),
+            )
+        )
 
     async def _get_open_by_email(self, email: str) -> AccessRequest | None:
         """La solicitud ABIERTA (unverified/pending/waitlist) de ese email, si hay.
@@ -783,17 +888,25 @@ class AccessRequestService:
         )
 
     async def _lock(self, request_id: uuid.UUID) -> AccessRequest:
-        """Carga la solicitud con ``FOR UPDATE``.
+        """Carga la solicitud con ``FOR UPDATE``, releyendo la fila real.
 
         Serializa la doble decisión script↔API. En SQLite es un no-op inocuo (el
         dialecto no emite la cláusula), así que los tests no lo ejercitan: lo que
         lo cubre es la idempotencia explícita de cada transición.
+
+        ``populate_existing=True`` no es decorativo: sin él, si la instancia ya
+        está en el identity map, SQLAlchemy devuelve la copia cacheada y el
+        ``status`` que se chequea puede ser el viejo — el lock bloquearía la fila
+        pero la decisión se tomaría sobre datos rancios, que es justo la mitad
+        del valor del ``FOR UPDATE``. El autoflush previo drena lo pendiente, así
+        que la relectura no pisa cambios sin escribir.
         """
         solicitud = (
             await self._session.execute(
                 select(AccessRequest)
                 .where(AccessRequest.id == request_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if solicitud is None:

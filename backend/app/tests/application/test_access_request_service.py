@@ -42,6 +42,7 @@ from app.domain.access_request import (
 from app.domain.contact_lead import DEDUP_WINDOW_SECONDS
 from app.domain.verticals import Vertical
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.auth_token import PasswordResetToken
 from app.persistence.models.business import BusinessProfile, MomentumProfile
 from app.persistence.models.tenant import Subscription, Tenant
@@ -207,6 +208,42 @@ async def test_create_con_email_que_ya_tiene_cuenta_es_neutro(
 
     assert solicitud is None
     assert outcome is CreateOutcome.ACCOUNT_EXISTS
+    assert await _contar(db_session, AccessRequest) == 0
+    assert encolados == [(srv.TASK_CUENTA_EXISTENTE, sample_user.email)]
+
+
+async def test_create_es_neutro_con_el_mismo_email_en_dos_tenants(
+    service: AccessRequestService,
+    db_session: AsyncSession,
+    encolados: list[tuple],
+    sample_user: User,
+    second_tenant: Tenant,
+):
+    """`users.email` NO es único global: dos filas no pueden volverse un 500.
+
+    El unique es `uq_users_tenant_email` (por tenant) y `POST /users` valida
+    per-tenant, así que un OWNER puede dar de alta una sub-cuenta con un email
+    que ya es OWNER de otro tenant. Con `scalar_one_or_none()` eso era
+    `MultipleResultsFound` → 500 en el endpoint público: 500 para ese email y
+    201 para todos los demás, o sea el oráculo de enumeración que este flujo
+    existe para eliminar.
+    """
+    db_session.add(
+        User(
+            tenant_id=second_tenant.tenant_id,
+            email=sample_user.email,
+            full_name="Homónimo",
+            password_hash=hash_password("Secure123"),
+            role_code="ADMIN",
+        )
+    )
+    await db_session.commit()
+
+    solicitud, outcome = await service.create(
+        _input(email=sample_user.email), ip_hash=None
+    )
+
+    assert (solicitud, outcome) == (None, CreateOutcome.ACCOUNT_EXISTS)
     assert await _contar(db_session, AccessRequest) == 0
     assert encolados == [(srv.TASK_CUENTA_EXISTENTE, sample_user.email)]
 
@@ -662,6 +699,37 @@ async def test_approve_con_email_tomado_en_el_medio_no_acuna(
     assert await _contar(db_session, Tenant) == 1  # solo el del fixture
 
 
+async def test_no_se_puede_aprobar_una_unverified_pasada_por_waitlist(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """Bypass del doble opt-in: `waitlist` es legal desde `unverified` Y es aprobable.
+
+    Encadenadas, acuñarían un tenant contra un email que nadie confirmó. La
+    guardia que lo corta es `email_verified_at is None` en `approve()`, no el
+    estado.
+    """
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    await service.waitlist(
+        solicitud.id, reviewer_user_id=None, via="api", notes="parece serio"
+    )
+    await db_session.refresh(solicitud)
+    assert solicitud.status == AccessRequestStatus.WAITLIST.value  # estado aprobable
+    assert solicitud.email_verified_at is None  # …pero nadie confirmó el email
+
+    with pytest.raises(AccessRequestNotApprovable, match="doble opt-in"):
+        await service.approve(
+            solicitud.id,
+            vertical=Vertical.KIOSCO_ALMACEN,
+            reviewer_user_id=None,
+            via="api",
+            notes=None,
+        )
+
+    assert await _contar(db_session, Tenant) == 0
+    assert await _contar(db_session, User) == 0
+
+
 async def test_approve_de_una_solicitud_inexistente(service: AccessRequestService):
     with pytest.raises(AccessRequestNotFound):
         await service.approve(
@@ -772,6 +840,125 @@ async def test_waitlist_no_es_terminal_y_es_idempotente(
 
     await service.waitlist(solicitud.id, reviewer_user_id=None, via="api", notes="otra")
     assert encolados == []  # repetir el mismo estado no re-notifica
+
+
+# ── Auditoría (decision_audit_log) ───────────────────────────────────────────
+
+
+async def _auditorias(session: AsyncSession) -> list[DecisionAuditLog]:
+    return list(
+        (
+            await session.execute(
+                select(DecisionAuditLog).order_by(DecisionAuditLog.created_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def test_create_y_verify_se_auditan_sin_tenant(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """Las decisiones previas al acuñado no tienen tenant — por eso la columna es nullable."""
+    solicitud = await _crear_verificada(service, db_session, encolados)
+
+    filas = await _auditorias(db_session)
+    assert [f.decision_type for f in filas] == [
+        srv.DECISION_CREATED,
+        srv.DECISION_VERIFIED,
+    ]
+    assert all(f.tenant_id is None for f in filas)
+    assert all(f.actor_user_id is None for f in filas)
+    assert all(f.decision_data["access_request_id"] == str(solicitud.id) for f in filas)
+    assert filas[0].triggered_by == "public:access_request_form"
+    assert filas[1].triggered_by == "public:access_request_verify"
+
+
+async def test_approve_se_audita_con_el_tenant_recien_acunado(
+    service: AccessRequestService,
+    db_session: AsyncSession,
+    encolados: list[tuple],
+    sample_user: User,
+):
+    solicitud = await _crear_verificada(service, db_session, encolados)
+
+    resultado = await service.approve(
+        solicitud.id,
+        vertical=Vertical.LIMPIEZA,
+        reviewer_user_id=sample_user.user_id,
+        via="api",
+        notes="ok",
+    )
+
+    aprobacion = [
+        f
+        for f in await _auditorias(db_session)
+        if f.decision_type == srv.DECISION_APPROVED
+    ]
+    assert len(aprobacion) == 1
+    fila = aprobacion[0]
+    # Sólo es posible porque la auditoría va en la MISMA transacción que acuñó
+    # el tenant: si se escribiera después del commit, la FK no existiría todavía.
+    assert fila.tenant_id == resultado.tenant_id
+    assert fila.actor_user_id == sample_user.user_id
+    assert fila.triggered_by == "api:access_request_review"
+    assert fila.decision_data["assigned_vertical_code"] == Vertical.LIMPIEZA.value
+    assert fila.decision_data["requested_plan"] == RequestedPlan.FREE.value
+
+
+async def test_reject_y_waitlist_se_auditan_con_su_decision_type(
+    service: AccessRequestService,
+    db_session: AsyncSession,
+    encolados: list[tuple],
+    sample_user: User,
+):
+    postergada = await _crear_verificada(service, db_session, encolados)
+    rechazada = await _crear_verificada(
+        service, db_session, encolados, email="otra@e.com"
+    )
+
+    await service.waitlist(
+        postergada.id, reviewer_user_id=sample_user.user_id, via="api", notes="sin cupo"
+    )
+    await service.reject(
+        rechazada.id, reviewer_user_id=None, via="script", reason="fuera de rubro"
+    )
+
+    tipos = {
+        f.decision_type: f
+        for f in await _auditorias(db_session)
+        if f.decision_type in (srv.DECISION_WAITLISTED, srv.DECISION_REJECTED)
+    }
+    assert set(tipos) == {srv.DECISION_WAITLISTED, srv.DECISION_REJECTED}
+    assert tipos[srv.DECISION_WAITLISTED].tenant_id is None
+    assert tipos[srv.DECISION_WAITLISTED].actor_user_id == sample_user.user_id
+    assert tipos[srv.DECISION_REJECTED].triggered_by == "script:access_request_review"
+    assert (
+        tipos[srv.DECISION_REJECTED].decision_data["rejection_reason"]
+        == "fuera de rubro"
+    )
+
+
+async def test_las_decisiones_idempotentes_no_duplican_la_auditoria(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    solicitud = await _crear_verificada(service, db_session, encolados)
+    for _ in range(2):
+        await service.approve(
+            solicitud.id,
+            vertical=Vertical.KIOSCO_ALMACEN,
+            reviewer_user_id=None,
+            via="script",
+            notes=None,
+        )
+
+    filas = [
+        f
+        for f in await _auditorias(db_session)
+        if f.decision_type == srv.DECISION_APPROVED
+    ]
+    assert len(filas) == 1
 
 
 # ── Armadores de email (puros) ───────────────────────────────────────────────
