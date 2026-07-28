@@ -120,3 +120,7 @@ class OnboardingStatusResponse(BaseModel):
     completed: bool
     vertical_code: str
     data_completeness_score: int | None
+    # Preocupación principal ya declarada al pedir acceso (la selló la
+    # aprobación en `business_profiles.custom_fields`). El frontend la usa para
+    # NO volver a preguntarla. `None` = no hay valor confiable → se pregunta.
+    main_concern: str | None = None

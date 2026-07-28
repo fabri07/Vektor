@@ -7,6 +7,7 @@ import {
   type FiscalCondition,
 } from "@/lib/fiscalCondition";
 import { CONFIDENTIALITY_NOTICE } from "@/lib/privacyNotices";
+import { MAIN_CONCERN_OPTIONS } from "@/lib/accessRequestOptions";
 
 export type MainConcern = "MARGIN" | "STOCK" | "CASH";
 
@@ -18,7 +19,11 @@ export interface Step2Data {
   cash_on_hand_ars: number | null;
   product_count_estimate: number;
   supplier_count_estimate: number;
-  main_concern: MainConcern;
+  /**
+   * `null` = no se preguntó acá porque ya vino de la solicitud de acceso. El
+   * wizard omite el campo del payload y el backend la toma del perfil.
+   */
+  main_concern: MainConcern | null;
   work_days: number[];
   work_open_hour: number;
   work_close_hour: number;
@@ -44,6 +49,12 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => h);
 interface Step2FormProps {
   initialData: Step2Data | null;
   onSubmit: (data: Step2Data) => void;
+  /**
+   * Preocupación principal que el visitante ya declaró al pedir acceso. Si
+   * viene, la pregunta NO se muestra: volver a hacerla y quedarse con la
+   * segunda respuesta borra la primera sin que nadie se entere.
+   */
+  mainConcernDeLaSolicitud?: MainConcern | null;
 }
 
 interface FormErrors {
@@ -54,11 +65,16 @@ interface FormErrors {
   work_schedule?: string;
 }
 
-const CONCERN_OPTIONS: { value: MainConcern; label: string }[] = [
-  { value: "MARGIN", label: "Mis márgenes" },
-  { value: "STOCK", label: "Mi stock" },
-  { value: "CASH", label: "Mi caja" },
-];
+/*
+ * Un solo catálogo para las dos pantallas que preguntan lo mismo.
+ *
+ * Antes había dos listas escritas a mano —"Mis márgenes / Mi stock / Mi caja"
+ * acá, "El margen / El stock / La caja" en la solicitud— sobre los mismos tres
+ * valores. Dos textos para la misma pregunta se desincronizan solos, y el
+ * visitante que ya la contestó en el formulario público no reconoce la
+ * segunda como la misma.
+ */
+const CONCERN_OPTIONS = MAIN_CONCERN_OPTIONS;
 
 function FieldHint({ text }: { text: string }) {
   return <p className="mt-1.5 text-xs text-vk-text-muted">{text}</p>;
@@ -129,7 +145,12 @@ function NumberInput({
   );
 }
 
-export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
+export function Step2Form({
+  initialData,
+  onSubmit,
+  mainConcernDeLaSolicitud = null,
+}: Step2FormProps) {
+  const yaLaContesto = mainConcernDeLaSolicitud !== null;
   const [fields, setFields] = useState({
     weekly_sales_estimate_ars: String(
       initialData?.weekly_sales_estimate_ars ?? "",
@@ -204,7 +225,8 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
       errs.supplier_count_estimate = "Ingresá un número válido.";
     }
 
-    if (!fields.main_concern) {
+    // Solo es obligatoria si se está preguntando acá.
+    if (!yaLaContesto && !fields.main_concern) {
       errs.main_concern = "Seleccioná una opción.";
     }
 
@@ -226,7 +248,9 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
       // que acá nunca pueden ser NaN y el fallback era inalcanzable.
       product_count_estimate: productCount,
       supplier_count_estimate: supplierCount,
-      main_concern: fields.main_concern as MainConcern,
+      // `null` cuando vino de la solicitud: el wizard lo omite del payload y
+      // el backend lo resuelve desde el perfil.
+      main_concern: yaLaContesto ? null : (fields.main_concern as MainConcern),
       work_days: workDays,
       work_open_hour: openHour,
       work_close_hour: closeHour,
@@ -317,6 +341,13 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           isInteger
         />
 
+        {/*
+          La pregunta solo aparece si NO vino de la solicitud de acceso. Allá
+          ya se contesta ("¿Qué te preocupa más?"), y el backend la sella en el
+          perfil al aprobar. Repetirla y quedarse con la segunda respuesta
+          borraba la primera sin que nadie se enterara.
+        */}
+        {yaLaContesto ? null : (
         <div>
           <p className="mb-3 text-sm font-medium text-gray-800">
             ¿Qué te preocupa más hoy?
@@ -351,6 +382,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           )}
           <FieldHint text="Esto nos ayuda a personalizar los análisis para vos." />
         </div>
+        )}
 
         <div>
           <p className="mb-1 text-sm font-medium text-gray-800">

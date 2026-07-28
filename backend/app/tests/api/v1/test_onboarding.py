@@ -246,6 +246,116 @@ class TestOnboarding:
 
 
 @pytest.mark.asyncio
+class TestOnboardingStatusMainConcern:
+    """`GET /onboarding/status` expone la preocupación ya declarada.
+
+    Sin esto el frontend no tenía forma de saber que el dato ya existía, así
+    que la volvía a preguntar y la mandaba siempre — con lo cual el fallback
+    del submit era código muerto y la respuesta del onboarding pisaba la del
+    screening.
+    """
+
+    async def test_status_devuelve_el_main_concern_sellado(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "STOCK"}
+        await db_session.commit()
+
+        resp = await client.get("/api/v1/onboarding/status", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json()["main_concern"] == "STOCK"
+
+    async def test_status_sin_sellar_devuelve_none(self, client: AsyncClient) -> None:
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp = await client.get("/api/v1/onboarding/status", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json()["main_concern"] is None
+
+    async def test_un_valor_corrupto_se_trata_como_ausente(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """`custom_fields` es JSONB sin validación en write time.
+
+        Si un valor basura pasara al frontend, el onboarding se saltearía la
+        pregunta y después el submit lo rechazaría con 422: el usuario quedaría
+        sin forma de completar el alta. Ante la duda se vuelve a preguntar.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "PLATA"}
+        await db_session.commit()
+
+        resp = await client.get("/api/v1/onboarding/status", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json()["main_concern"] is None
+
+    async def test_el_submit_ignora_el_valor_corrupto_igual_que_el_status(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """Status y submit tienen que leer el sellado con el MISMO criterio.
+
+        Si divergieran, el frontend se saltearía la pregunta apoyado en un
+        valor que el submit después descarta.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "PLATA"}
+        await db_session.commit()
+        tenant_id = bp.tenant_id
+
+        payload_sin_main_concern = {
+            k: v for k, v in _ONBOARDING_PAYLOAD.items() if k != "main_concern"
+        }
+        resp = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_main_concern,
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        snapshot = (
+            await db_session.execute(
+                select(BusinessSnapshot).where(BusinessSnapshot.tenant_id == tenant_id)
+            )
+        ).scalar_one()
+        crudos = snapshot.raw_inputs_json
+        assert crudos is not None
+        # No se inventa ni se propaga basura: se omite del snapshot.
+        assert "main_concern" not in crudos
+
+
+@pytest.mark.asyncio
 class TestOnboardingMontosAusentes:
     """Dejar un monto en blanco NO es lo mismo que contestar cero.
 

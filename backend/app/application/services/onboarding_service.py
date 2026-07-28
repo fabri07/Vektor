@@ -1,5 +1,6 @@
 """Onboarding service: processes initial business data for a tenant."""
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -19,6 +20,7 @@ from app.persistence.repositories.business_profile_repository import (
     BusinessProfileRepository,
 )
 from app.schemas.onboarding import (
+    MAIN_CONCERN_PATTERN,
     OnboardingStatusResponse,
     OnboardingSubmitRequest,
     OnboardingSubmitResponse,
@@ -51,6 +53,23 @@ def _calculate_completeness(body: OnboardingSubmitRequest) -> int:
     if body.supplier_count_estimate >= 1:
         score += 10
     return score
+
+
+def _main_concern_sellado(custom_fields: dict[str, Any] | None) -> str | None:
+    """La preocupación principal que copió la aprobación, si es válida.
+
+    Se valida contra el catálogo cerrado antes de devolverla: `custom_fields`
+    es un JSONB sin validación en write time, y un valor corrupto haría que el
+    onboarding se saltee la pregunta y después el submit la rechace con 422
+    —el usuario quedaría sin forma de completar el alta—. Ante cualquier duda,
+    se devuelve `None` y se vuelve a preguntar.
+    """
+    if not custom_fields:
+        return None
+    valor = custom_fields.get("main_concern")
+    if isinstance(valor, str) and re.fullmatch(MAIN_CONCERN_PATTERN, valor):
+        return valor
+    return None
 
 
 def _monto_crudo(valor: Decimal | None) -> str | None:
@@ -137,9 +156,13 @@ class OnboardingService:
         # público de solicitud de acceso; si no vino en este body, se busca en
         # custom_fields (la aprobación lo copió ahí). Si tampoco está, se omite
         # del snapshot — no se inventa un valor.
+        #
+        # Va por el mismo helper que `get_status` a propósito: si el status
+        # dijera "ya lo tengo" y el submit leyera otra cosa, el frontend se
+        # saltearía la pregunta apoyado en un valor que después no se usa.
         main_concern = body.main_concern
         if main_concern is None:
-            main_concern = bp.custom_fields.get("main_concern")
+            main_concern = _main_concern_sellado(bp.custom_fields)
 
         # Step 7: create business snapshot
         now = datetime.now(UTC)
@@ -198,6 +221,7 @@ class OnboardingService:
                 completed=False,
                 vertical_code="",
                 data_completeness_score=None,
+                main_concern=None,
             )
 
         completeness: int | None = None
@@ -210,4 +234,10 @@ class OnboardingService:
             completed=bp.onboarding_completed,
             vertical_code=bp.vertical_code,
             data_completeness_score=completeness,
+            # La preocupación principal que el visitante ya declaró al pedir
+            # acceso; la aprobación la selló acá. Se expone para que el
+            # onboarding NO la vuelva a preguntar. Sin esto, el frontend la
+            # pedía igual, la mandaba siempre, y el fallback del submit —que ya
+            # existía— era código muerto.
+            main_concern=_main_concern_sellado(bp.custom_fields),
         )

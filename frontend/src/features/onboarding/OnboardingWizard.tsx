@@ -10,12 +10,18 @@
  */
 
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ProgressBar } from "./ProgressBar";
-import { Step2Form, type Step2Data } from "./Step2Form";
+import { Step2Form, type MainConcern, type Step2Data } from "./Step2Form";
 import { Step3Upload } from "./Step3Upload";
 import { Step4Loading } from "./Step4Loading";
 import { onboardingService } from "@/services/onboarding.service";
 import { ingestionService } from "@/services/ingestion.service";
+
+/** ¿Es una preocupación del catálogo cerrado? */
+function esMainConcern(valor: string | null | undefined): valor is MainConcern {
+  return valor === "MARGIN" || valor === "STOCK" || valor === "CASH";
+}
 
 /** 1 = datos principales · 2 = archivos · 3 = tu score. */
 type Step = 1 | 2 | 3;
@@ -40,6 +46,30 @@ export function OnboardingWizard() {
     pendingFile: null,
   });
 
+  /*
+   * ¿La preocupación principal ya vino de la solicitud de acceso?
+   *
+   * El backend la sella en el perfil al aprobar, y el submit ya la tomaba de
+   * ahí cuando el body no la traía. Pero el formulario la preguntaba igual y
+   * la mandaba siempre, así que ese fallback era código muerto y la respuesta
+   * del onboarding pisaba la del screening. Preguntar dos veces lo mismo y
+   * quedarse con la segunda respuesta es peor que no preguntar: el visitante
+   * ya contestó, y si contesta distinto no hay forma de saber cuál vale.
+   *
+   * `retry: false` y fail-safe: si el status no responde, se pregunta. Nunca
+   * al revés — saltear la pregunta con un valor que no llegó dejaría el alta
+   * sin `main_concern` y sin manera de cargarla.
+   */
+  const status = useQuery({
+    queryKey: ["onboarding", "status"],
+    queryFn: () => onboardingService.getStatus(),
+    retry: false,
+    staleTime: Infinity,
+  });
+  const concernDeLaSolicitud = esMainConcern(status.data?.main_concern)
+    ? status.data.main_concern
+    : null;
+
   function goToStep(step: Step) {
     setState((prev) => ({ ...prev, step, submitError: null }));
   }
@@ -62,7 +92,12 @@ export function OnboardingWizard() {
           cash_on_hand_ars: state.formData.cash_on_hand_ars,
           product_count_estimate: state.formData.product_count_estimate,
           supplier_count_estimate: state.formData.supplier_count_estimate,
-          main_concern: state.formData.main_concern,
+          // Solo si el usuario la contestó ACÁ. Si vino de la solicitud, se
+          // omite y el backend la toma del perfil: mandarla de vuelta sería
+          // hacerle un viaje de ida y vuelta a un dato que ya tiene.
+          ...(state.formData.main_concern
+            ? { main_concern: state.formData.main_concern }
+            : {}),
           work_days: state.formData.work_days,
           work_open_hour: state.formData.work_open_hour,
           work_close_hour: state.formData.work_close_hour,
@@ -127,9 +162,21 @@ export function OnboardingWizard() {
           {/* Card */}
           <div className="rounded-2xl border border-gray-200 bg-white px-4 py-6 shadow-sm sm:px-8 sm:py-8 md:px-10">
             {/* El formulario es ahora el primer paso: no hay "Anterior". */}
-            {step === 1 && (
-              <Step2Form initialData={formData} onSubmit={handleFormSubmit} />
-            )}
+            {step === 1 &&
+              // Se espera al status antes de pintar el formulario: si se
+              // renderizara ya y la respuesta llegara después, la pregunta de
+              // "¿qué te preocupa más?" aparecería y desaparecería sola.
+              (status.isPending ? (
+                <p className="py-10 text-center text-sm text-vk-text-muted">
+                  Cargando…
+                </p>
+              ) : (
+                <Step2Form
+                  initialData={formData}
+                  onSubmit={handleFormSubmit}
+                  mainConcernDeLaSolicitud={concernDeLaSolicitud}
+                />
+              ))}
 
             {step === 2 && (
               <>
