@@ -40,7 +40,14 @@ const inputErrorClass =
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const justRegistered = searchParams.get("registered") === "1";
+  /*
+   * `registered=1` murió con el registro abierto: nadie redirige más acá desde
+   * un alta, porque el alta ya no existe. El circuito nuevo termina en
+   * `password_set=1` — el último paso de solicitud → verificación → aprobación
+   * → mail → definir contraseña —, y sin banner el usuario acaba de escribir
+   * una contraseña dos veces, ve la pantalla recargarse y no sabe si se guardó.
+   */
+  const justPasswordSet = searchParams.get("password_set") === "1";
   const justReset = searchParams.get("reset") === "1";
   const login = useLogin();
 
@@ -202,10 +209,14 @@ export function LoginForm() {
         </div>
       )}
 
-      {/* Account just created (no email verification required) */}
-      {justRegistered && (
+      {/*
+        Contraseña recién creada desde `/definir-password`. El copy dice
+        "creada", no "actualizada": para esta persona es la primera, y reusar el
+        banner de `reset=1` le afirmaría que cambió algo que nunca tuvo.
+      */}
+      {justPasswordSet && (
         <p role="status" className="rounded-lg border border-vk-success/20 bg-vk-success-bg px-4 py-3 text-sm text-vk-success">
-          ¡Cuenta creada! Ingresá con tu email y contraseña.
+          Contraseña creada. Ingresá con tu email y tu contraseña nueva.
         </p>
       )}
 
