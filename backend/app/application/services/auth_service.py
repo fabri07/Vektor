@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.tenant_provisioning import provision_tenant
 from app.config.settings import get_settings
 from app.domain.verticals import parse_vertical
+from app.integrations.email_templates import render_action_email
 from app.observability.logger import get_logger
 from app.persistence.models.auth_token import EmailVerificationToken, PasswordResetToken
 from app.persistence.models.tenant import Tenant
@@ -49,6 +50,11 @@ settings = get_settings()
 
 _VERIFICATION_TOKEN_TTL_HOURS = 24
 _RESET_TOKEN_TTL_HOURS = 1
+# TTL largo para el link de invitación tras aprobar una solicitud de acceso
+# (Task 8): el usuario puede ser aprobado horas después de haber pedido acceso,
+# a diferencia del forgot-password que se pide y usa en el momento. No
+# ensanchar _RESET_TOKEN_TTL_HOURS — ese sigue en 1 hora.
+_INVITE_TOKEN_TTL_HOURS = 72
 
 
 def _is_demo_auth_blocked(tenant: Tenant) -> bool:
@@ -303,6 +309,34 @@ class AuthService:
         logger.info("auth.password_changed", user_id=str(user.user_id))
         return True
 
+    async def _create_password_reset_token(
+        self, user_id: uuid.UUID, *, ttl_hours: int
+    ) -> PasswordResetToken:
+        """Invalida los tokens de reset vigentes del usuario y crea uno nuevo.
+
+        ``ttl_hours`` es paramétrico: el forgot-password usa
+        ``_RESET_TOKEN_TTL_HOURS`` (1h); un TTL largo (``_INVITE_TOKEN_TTL_HOURS``)
+        queda disponible para el flujo de invitación por aprobación (Task 8),
+        que no ejecuta este método con ese valor todavía.
+        """
+        await self._session.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user_id,
+                PasswordResetToken.used.is_(False),
+            )
+            .values(used=True)
+        )
+
+        token = PasswordResetToken(
+            user_id=user_id,
+            expires_at=datetime.now(UTC) + timedelta(hours=ttl_hours),
+            used=False,
+        )
+        self._session.add(token)
+        await self._session.flush()
+        return token
+
     async def request_password_reset(self, email: str) -> None:
         """
         Generate a password reset token and email the link.
@@ -312,22 +346,9 @@ class AuthService:
         if user is None:
             return
 
-        await self._session.execute(
-            update(PasswordResetToken)
-            .where(
-                PasswordResetToken.user_id == user.user_id,
-                PasswordResetToken.used.is_(False),
-            )
-            .values(used=True)
+        token = await self._create_password_reset_token(
+            user.user_id, ttl_hours=_RESET_TOKEN_TTL_HOURS
         )
-
-        token = PasswordResetToken(
-            user_id=user.user_id,
-            expires_at=datetime.now(UTC) + timedelta(hours=_RESET_TOKEN_TTL_HOURS),
-            used=False,
-        )
-        self._session.add(token)
-        await self._session.flush()
         await self._session.commit()
 
         try:
@@ -414,65 +435,24 @@ class AuthService:
 
         verify_url = f"{settings.FRONTEND_URL}/verify-email?token={token_str}"
 
-        html = f"""<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background-color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f9fafb;padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
-          <tr>
-            <td style="background-color:#1A1A2E;padding:28px 32px;">
-              <p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Véktor</p>
-              <p style="margin:4px 0 0 0;font-size:13px;color:rgba(255,255,255,0.5);">Verificación de email</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:32px;">
-              <p style="margin:0 0 16px 0;font-size:16px;font-weight:600;color:#111827;">Confirmá tu dirección de email</p>
-              <p style="margin:0 0 24px 0;font-size:14px;color:#6b7280;line-height:1.6;">
-                Hacé click en el botón de abajo para verificar tu cuenta y empezar a usar Véktor.
-                El link es válido por {_VERIFICATION_TOKEN_TTL_HOURS} horas.
-              </p>
-              <a href="{verify_url}"
-                 style="display:inline-block;background-color:#2B7FD4;color:#ffffff;font-size:14px;font-weight:600;
-                        text-decoration:none;padding:12px 28px;border-radius:8px;letter-spacing:0.01em;">
-                Verificar mi email →
-              </a>
-              <p style="margin:24px 0 0 0;font-size:12px;color:#9ca3af;">
-                Si no creaste una cuenta en Véktor, podés ignorar este email.
-              </p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:16px 32px 24px 32px;border-top:1px solid #f3f4f6;">
-              <p style="margin:0;font-size:11px;color:#9ca3af;">
-                O copiá este link en tu navegador:<br/>
-                <span style="color:#6b7280;word-break:break-all;">{verify_url}</span>
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
-
-        plain = (
-            f"Verificá tu email en Véktor.\n\n"
-            f"Copiá este link en tu navegador:\n{verify_url}\n\n"
-            f"El link es válido por {_VERIFICATION_TOKEN_TTL_HOURS} horas.\n"
-            f"Si no creaste una cuenta, podés ignorar este email."
+        html_content, plain_text = render_action_email(
+            eyebrow="Verificación de email",
+            heading="Confirmá tu dirección de email",
+            body=(
+                "Hacé click en el botón de abajo para verificar tu cuenta y empezar a usar Véktor. "
+                f"El link es válido por {_VERIFICATION_TOKEN_TTL_HOURS} horas."
+            ),
+            cta_label="Verificar mi email →",
+            cta_url=verify_url,
+            footnote="Si no creaste una cuenta en Véktor, podés ignorar este email.",
         )
 
         smtp = SMTPClient()
         smtp.send(
             to_email=to_email,
             subject="Verificá tu email — Véktor",
-            body_html=html,
-            body_text=plain,
+            body_html=html_content,
+            body_text=plain_text,
         )
 
     def _send_reset_email(self, to_email: str, token_str: str) -> None:
@@ -480,63 +460,22 @@ class AuthService:
 
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token_str}"
 
-        html = f"""<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background-color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f9fafb;padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
-          <tr>
-            <td style="background-color:#1A1A2E;padding:28px 32px;">
-              <p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Véktor</p>
-              <p style="margin:4px 0 0 0;font-size:13px;color:rgba(255,255,255,0.5);">Recuperación de contraseña</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:32px;">
-              <p style="margin:0 0 16px 0;font-size:16px;font-weight:600;color:#111827;">Restablecé tu contraseña</p>
-              <p style="margin:0 0 24px 0;font-size:14px;color:#6b7280;line-height:1.6;">
-                Recibiste este email porque solicitaste restablecer tu contraseña en Véktor.
-                Hacé click en el botón de abajo para continuar. Este link expira en {_RESET_TOKEN_TTL_HOURS} hora.
-              </p>
-              <a href="{reset_url}"
-                 style="display:inline-block;background-color:#2B7FD4;color:#ffffff;font-size:14px;font-weight:600;
-                        text-decoration:none;padding:12px 28px;border-radius:8px;letter-spacing:0.01em;">
-                Restablecer contraseña →
-              </a>
-              <p style="margin:24px 0 0 0;font-size:12px;color:#9ca3af;">
-                Si no solicitaste este cambio, podés ignorar este email. Tu contraseña no cambia.
-              </p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:16px 32px 24px 32px;border-top:1px solid #f3f4f6;">
-              <p style="margin:0;font-size:11px;color:#9ca3af;">
-                O copiá este link en tu navegador:<br/>
-                <span style="color:#6b7280;word-break:break-all;">{reset_url}</span>
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
-
-        plain = (
-            f"Restablecé tu contraseña en Véktor.\n\n"
-            f"Copiá este link en tu navegador:\n{reset_url}\n\n"
-            f"Este link expira en {_RESET_TOKEN_TTL_HOURS} hora.\n"
-            f"Si no solicitaste este cambio, podés ignorar este email."
+        html_content, plain_text = render_action_email(
+            eyebrow="Recuperación de contraseña",
+            heading="Restablecé tu contraseña",
+            body=(
+                "Recibiste este email porque solicitaste restablecer tu contraseña en Véktor. "
+                f"Hacé click en el botón de abajo para continuar. Este link expira en {_RESET_TOKEN_TTL_HOURS} hora."
+            ),
+            cta_label="Restablecer contraseña →",
+            cta_url=reset_url,
+            footnote="Si no solicitaste este cambio, podés ignorar este email. Tu contraseña no cambia.",
         )
 
         smtp = SMTPClient()
         smtp.send(
             to_email=to_email,
             subject="Restablecé tu contraseña — Véktor",
-            body_html=html,
-            body_text=plain,
+            body_html=html_content,
+            body_text=plain_text,
         )
