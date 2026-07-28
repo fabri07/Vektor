@@ -104,6 +104,8 @@ DECISION_VERIFIED = "ACCESS_REQUEST_VERIFIED"
 DECISION_APPROVED = "ACCESS_REQUEST_APPROVED"
 DECISION_REJECTED = "ACCESS_REQUEST_REJECTED"
 DECISION_WAITLISTED = "ACCESS_REQUEST_WAITLISTED"
+DECISION_EXPIRED = "ACCESS_REQUEST_EXPIRED"
+DECISION_INVITE_RESENT = "ACCESS_REQUEST_INVITE_RESENT"
 
 #: Los dos únicos estados que forman la COLA de revisión. Una solicitud
 #: ``unverified`` —aunque sea Premium— no desplaza a una verificada: el doble
@@ -191,6 +193,30 @@ class AccessRequestInput:
     elapsed_ms: int | None = None
 
 
+class ResendKind(StrEnum):
+    """Qué mail reencoló ``resend_invite`` — depende del estado de la solicitud."""
+
+    VERIFICATION = "verification"
+    """Solicitud ``unverified``: se reemitió el token de doble opt-in."""
+
+    INVITE = "invite"
+    """Solicitud ``approved``: se acuñó una invitación nueva para la contraseña."""
+
+
+@dataclass(frozen=True)
+class ResendResult:
+    """Resultado de reencolar el mail pendiente de una solicitud.
+
+    ``enqueued=False`` con ``token_id=None`` significa que el cooldown de tokens
+    frenó la reemisión: no es un error, es la protección contra el mail por click.
+    """
+
+    request: AccessRequest
+    kind: ResendKind
+    enqueued: bool
+    token_id: uuid.UUID | None
+
+
 @dataclass(frozen=True)
 class ApprovalResult:
     """Resultado de aprobar una solicitud.
@@ -247,6 +273,28 @@ class AccessRequestEmailTaken(AccessRequestError):  # noqa: N818
     def __init__(self, email: str) -> None:
         super().__init__(f"Ya existe una cuenta con el email de la solicitud ({email})")
         self.email = email
+
+
+class AccessRequestNotResendable(AccessRequestError):  # noqa: N818
+    """No hay ningún mail que reencolar para esa solicitud.
+
+    Solo dos estados tienen un mail pendiente que le sirva al destinatario:
+    ``unverified`` (el link de doble opt-in) y ``approved`` (la invitación para
+    definir la contraseña). Una ``pending``/``waitlist`` está esperando al dueño,
+    no al solicitante; una ``rejected``/``expired`` no espera nada.
+    """
+
+    def __init__(self, current_status: str, *, motivo: str | None = None) -> None:
+        detalle = motivo or (
+            f"reencolables: {AccessRequestStatus.UNVERIFIED.value} (verificación) "
+            f"y {AccessRequestStatus.APPROVED.value} (invitación)"
+        )
+        super().__init__(
+            f"Una solicitud en estado '{current_status}' no tiene mail para "
+            f"reencolar; {detalle}"
+        )
+        self.current_status = current_status
+        self.motivo = motivo
 
 
 class AccessRequestInvalidTransition(AccessRequestError):  # noqa: N818
@@ -768,7 +816,194 @@ class AccessRequestService:
         logger.info("access_request.waitlisted", request_id=str(request_id), via=via)
         return solicitud
 
+    # ── Operación: reenvío de mails y limpieza de la cola ─────────────────────
+
+    async def resend_invite(self, request_id: uuid.UUID, *, via: str) -> ResendResult:
+        """Reencola el mail que el SOLICITANTE está esperando, según su estado.
+
+        Existe porque sin panel de administración un mail perdido no tiene
+        reintento manual por ningún otro lado:
+
+        * ``unverified`` → se reemite el token de doble opt-in. Respeta el
+          cooldown (``enqueued=False`` si todavía corre): un click no puede
+          disparar un mail.
+        * ``approved`` → se acuña una invitación NUEVA. Es el caso caro: la
+          cuenta ya existe pero el usuario nunca pudo entrar —el mail quedó en
+          ``failed`` o el link venció— y no tiene forma de darse cuenta solo
+          (``/auth/register`` responde 410 y él ni sabe que fue aprobado, así que
+          no se le va a ocurrir usar "olvidé mi contraseña").
+
+        NO cambia el estado de la solicitud ni acuña un segundo tenant: la
+        invitación sale del MISMO helper que usa ``approve()``
+        (``_create_password_reset_token`` con el TTL largo), que además invalida
+        los tokens de reset vigentes del usuario.
+        """
+        solicitud = await self._lock(request_id)
+
+        if solicitud.status == AccessRequestStatus.UNVERIFIED.value:
+            return await self._reencolar_verificacion(solicitud)
+        if solicitud.status == AccessRequestStatus.APPROVED.value:
+            return await self._reencolar_invitacion(solicitud, via)
+        raise AccessRequestNotResendable(solicitud.status)
+
+    async def find_stale(self, *, older_than_days: int) -> list[AccessRequest]:
+        """Las ``unverified`` más viejas que ``older_than_days`` días. **No escribe.**
+
+        Es el preview de ``expire_stale``: el dry-run del script lista con esto
+        exactamente las filas que se van a tocar.
+        """
+        return list(
+            (
+                await self._session.execute(
+                    select(AccessRequest)
+                    .where(*self._condicion_rancia(older_than_days))
+                    .order_by(AccessRequest.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def expire_stale(
+        self, *, older_than_days: int, via: str
+    ) -> list[AccessRequest]:
+        """Pasa a ``expired`` las ``unverified`` que nadie confirmó hace mucho.
+
+        **Es higiene de la cola, no rescate de nadie.** Una ``unverified`` vieja
+        NO deja trabado a su dueño: si vuelve a mandar el formulario, ``create()``
+        deriva a ``_reintento_de_solicitud_abierta`` y —vencido el cooldown— le
+        reemite el token. Lo único que resuelve expirarlas es que dejen de
+        acumularse para siempre ensuciando el listado de ``unverified`` y
+        ocupando el índice único parcial sin nadie del otro lado.
+
+        Solo toca ``unverified``: ``pending`` y ``waitlist`` son la cola de
+        revisión del dueño, y ``approved``/``rejected`` ya son terminales.
+
+        No manda ningún mail: nadie confirmó esa casilla, así que escribirle
+        sería mandar correo a una dirección sin consentimiento verificado.
+
+        Tampoco sella ``reviewed_at``/``reviewed_by_user_id``/``reviewed_via``:
+        expirar no es una revisión, y marcarlo como tal haría parecer que el
+        dueño triageó la solicitud. El origen queda en el ``triggered_by`` de la
+        auditoría.
+        """
+        candidatas = (
+            (
+                await self._session.execute(
+                    select(AccessRequest)
+                    .where(*self._condicion_rancia(older_than_days))
+                    .order_by(AccessRequest.created_at.asc())
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for solicitud in candidatas:
+            solicitud.status = AccessRequestStatus.EXPIRED.value
+            self._auditar(
+                solicitud,
+                decision_type=DECISION_EXPIRED,
+                triggered_by=f"{via}:access_request_expire_stale",
+                extra={"older_than_days": older_than_days},
+            )
+        await self._session.commit()
+
+        logger.info(
+            "access_request.expired_stale",
+            total=len(candidatas),
+            older_than_days=older_than_days,
+            via=via,
+        )
+        return list(candidatas)
+
     # ── Helpers privados ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _condicion_rancia(older_than_days: int) -> tuple[Any, ...]:
+        """Predicado único de "``unverified`` rancia": preview y escritura comparten esto.
+
+        La comparación de fechas se resuelve EN SQL (mismo motivo que
+        ``_token_en_cooldown``: SQLite devuelve los ``DateTime`` sin tzinfo y
+        compararlos en Python contra un aware explota).
+        """
+        if older_than_days < 1:
+            raise ValueError("older_than_days tiene que ser al menos 1")
+        corte = datetime.now(UTC) - timedelta(days=older_than_days)
+        return (
+            AccessRequest.status == AccessRequestStatus.UNVERIFIED.value,
+            AccessRequest.created_at < corte,
+        )
+
+    async def _reencolar_verificacion(self, solicitud: AccessRequest) -> ResendResult:
+        """Reemite el token de doble opt-in de una ``unverified`` (respeta el cooldown).
+
+        No se audita, igual que ``resend_verification``: no hay decisión ni
+        transición de estado, solo un mail que se repite.
+        """
+        if await self._token_en_cooldown(solicitud.id):
+            logger.info("access_request.resend_cooldown", request_id=str(solicitud.id))
+            return ResendResult(
+                request=solicitud,
+                kind=ResendKind.VERIFICATION,
+                enqueued=False,
+                token_id=None,
+            )
+
+        token = await self._emitir_token(solicitud)
+        await self._session.commit()
+        _encolar(TASK_VERIFICACION, str(solicitud.id), str(token.token_id))
+        logger.info("access_request.verification_resent", request_id=str(solicitud.id))
+        return ResendResult(
+            request=solicitud,
+            kind=ResendKind.VERIFICATION,
+            enqueued=True,
+            token_id=token.token_id,
+        )
+
+    async def _reencolar_invitacion(
+        self, solicitud: AccessRequest, via: str
+    ) -> ResendResult:
+        """Acuña una invitación nueva para una solicitud ya aprobada."""
+        if solicitud.approved_user_id is None:
+            # FK ON DELETE SET NULL: el usuario que se había acuñado ya no existe.
+            # No hay a quién invitar, y elegir otro sería inventar.
+            raise AccessRequestNotResendable(
+                solicitud.status,
+                motivo="la solicitud aprobada ya no apunta a ningún usuario",
+            )
+
+        invitacion = await AuthService(self._session)._create_password_reset_token(
+            solicitud.approved_user_id, ttl_hours=_INVITE_TOKEN_TTL_HOURS
+        )
+        # Vuelve a `pending` para que `--email-failed` deje de listarla: el
+        # reintento está en curso y el worker la marcará `sent` o `failed`.
+        solicitud.decision_email_status = EmailNotificationStatus.PENDING.value
+        self._auditar(
+            solicitud,
+            decision_type=DECISION_INVITE_RESENT,
+            triggered_by=f"{via}:access_request_resend_invite",
+            tenant_id=solicitud.approved_tenant_id,
+            extra={"approved_user_id": str(solicitud.approved_user_id)},
+        )
+        await self._session.commit()
+
+        _encolar(
+            TASK_DECISION,
+            str(solicitud.id),
+            AccessRequestStatus.APPROVED.value,
+            str(invitacion.token_id),
+        )
+        logger.info(
+            "access_request.invite_resent", request_id=str(solicitud.id), via=via
+        )
+        return ResendResult(
+            request=solicitud,
+            kind=ResendKind.INVITE,
+            enqueued=True,
+            token_id=invitacion.token_id,
+        )
 
     def _auditar(
         self,
