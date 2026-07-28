@@ -19,10 +19,12 @@ from app.domain.verticals import Vertical
 def _registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prende `ENABLE_OPEN_REGISTRATION` para todo este módulo.
 
-    Con el flag en su default (`False`), `POST /auth/register` y
-    `POST /onboarding/submit` responden 410 `registration_closed`. Estos tests
-    cubren el camino histórico, que sigue vivo tal cual detrás del flag; el 410 se
-    testea en `app/tests/api/v1/test_access_requests.py`.
+    Lo necesita `_register_and_token`, que consigue el JWT entrando por
+    `POST /auth/register` — el único endpoint que el apagado alcanza.
+    **`POST /onboarding/submit` NO está gateado** (está detrás de JWT, lo usa un
+    usuario ya aprobado y no crea cuentas); eso lo fija
+    `test_onboarding_submit_no_esta_gateado_por_el_registro` en
+    `app/tests/api/v1/test_access_requests.py`.
     """
     monkeypatch.setattr(get_settings(), "ENABLE_OPEN_REGISTRATION", True)
 

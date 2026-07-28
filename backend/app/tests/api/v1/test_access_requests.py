@@ -529,14 +529,47 @@ async def test_register_410_gana_sobre_el_422_de_esquema(client: AsyncClient) ->
     assert res.json()["detail"] == "registration_closed"
 
 
-async def test_onboarding_submit_responde_410(client: AsyncClient) -> None:
-    res = await client.post(_ONBOARDING, json={})
-    assert res.status_code == 410
-    assert res.json()["detail"] == "registration_closed"
+async def test_onboarding_submit_no_esta_gateado_por_el_registro(
+    client: AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    """`POST /onboarding/submit` NO se apaga, con el flag en su default (`False`).
+
+    La encuesta se partió en dos a propósito: el formulario público es de
+    SCREENING (lo lee el dueño para decidir la admisión) y los 6 números
+    financieros se piden DESPUÉS de aprobar, en el primer login. Este endpoint
+    está detrás de JWT, lo usa un usuario YA aprobado y no crea ninguna cuenta —
+    no es una pieza del registro abierto.
+
+    Gatearlo dejaría a todo tenant aprobado sin poder completar el onboarding, con
+    el health score nunca calculándose. Este test existe para que nadie lo vuelva
+    a gatear dentro de tres meses leyendo una versión vieja del plan.
+    """
+    from app.config.settings import get_settings
+
+    assert get_settings().ENABLE_OPEN_REGISTRATION is False, (
+        "El test tiene que correr con el default de producción"
+    )
+
+    res = await client.post(
+        _ONBOARDING,
+        json={
+            "vertical_code": "kiosco_almacen",
+            "weekly_sales_estimate_ars": 350000,
+            "monthly_inventory_cost_ars": 180000,
+            "monthly_fixed_expenses_ars": 80000,
+            "cash_on_hand_ars": 150000,
+            "product_count_estimate": 45,
+            "supplier_count_estimate": 3,
+            "main_concern": "CASH",
+        },
+        headers=auth_headers,
+    )
+    assert res.status_code != 410, "El apagado del registro NO alcanza a /onboarding/submit"
+    assert res.status_code == 200, res.text
 
 
 async def test_onboarding_status_sigue_vivo(client: AsyncClient) -> None:
-    """`GET /onboarding/status` NO se apaga: `/auth/me` y los guards del frontend lo leen.
+    """`GET /onboarding/status` tampoco se apaga: `/auth/me` y los guards lo leen.
 
     Sin token es 401 (no 410): la compuerta del registro no lo toca.
     """

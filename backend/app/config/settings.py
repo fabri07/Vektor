@@ -224,11 +224,13 @@ class Settings(BaseSettings):
     # ── Feature flags ─────────────────────────────────────────────────────────
     # Registro abierto (autoservicio). **Default False**: el alta de cuentas pasa
     # por una solicitud de acceso que el dueño aprueba a mano
-    # (`POST /access-requests`). Con el flag apagado, `POST /auth/register` y
-    # `POST /onboarding/submit` responden 410 `registration_closed` — conservan la
-    # ruta a propósito, para que un bundle viejo del frontend reciba una señal
-    # clara en vez de un 404 o un 422 raro. Prenderlo es el rollback de una línea
-    # que devuelve el comportamiento histórico completo.
+    # (`POST /access-requests`). Con el flag apagado, `POST /auth/register`
+    # responde 410 `registration_closed` — conserva la ruta a propósito, para que
+    # un bundle viejo del frontend reciba una señal clara en vez de un 404 o un
+    # 422 raro. Prenderlo es el rollback de una línea que devuelve el
+    # comportamiento histórico completo.
+    # Alcance: SOLO ese endpoint. `POST /onboarding/submit` no se gatea (está
+    # detrás de JWT, lo usa un usuario ya aprobado y no crea cuentas).
     ENABLE_OPEN_REGISTRATION: bool = False
     ENABLE_SCORE_RECALCULATION: bool = True
     ENABLE_EMAIL_NOTIFICATIONS: bool = False

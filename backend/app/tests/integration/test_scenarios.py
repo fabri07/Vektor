@@ -60,10 +60,11 @@ from .conftest import (
 def registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prende `ENABLE_OPEN_REGISTRATION` (default de producción: `False`).
 
-    Solo la pide S6, que entra por `POST /auth/register` + `POST /onboarding/submit`.
-    Con el flag apagado esos dos endpoints responden 410 `registration_closed`; el
-    camino histórico sigue existiendo tal cual detrás del flag y este escenario es
-    su cobertura end-to-end.
+    Solo la pide S6, que arranca por `POST /auth/register` — el único endpoint que
+    el apagado alcanza (con el flag en `False` responde 410 `registration_closed`).
+    El camino histórico sigue existiendo tal cual detrás del flag y este escenario
+    es su cobertura end-to-end. El `POST /onboarding/submit` de más abajo NO está
+    gateado y funcionaría igual sin esta fixture.
     """
     from app.config.settings import get_settings  # noqa: PLC0415
 

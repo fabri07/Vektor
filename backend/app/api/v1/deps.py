@@ -107,9 +107,9 @@ def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
 
 # ── Endpoints públicos (sin auth) ───────────────────────────────────────────────
 
-#: Código que devuelven `POST /auth/register` y `POST /onboarding/submit` cuando el
-#: registro abierto está apagado. Lo lee el frontend para mostrar el copy de "el
-#: acceso ahora se pide" en lugar de un error genérico.
+#: Código que devuelve `POST /auth/register` cuando el registro abierto está
+#: apagado. Lo lee el frontend para mostrar el copy de "el acceso ahora se pide"
+#: en lugar de un error genérico.
 REGISTRATION_CLOSED_CODE = "registration_closed"
 
 
@@ -126,17 +126,22 @@ def client_ip(request: Request) -> str | None:
 
 
 def require_open_registration() -> None:
-    """Corta con 410 los endpoints del registro abierto mientras el flag esté OFF.
+    """Corta con 410 el registro abierto mientras el flag esté OFF.
 
     El alta de cuentas pasa por `POST /access-requests` (solicitud + aprobación
-    manual). Los endpoints viejos NO se borran: conservan la ruta y devuelven un
-    410 con código estable, así un bundle desactualizado del frontend recibe una
-    señal accionable en vez de un 404. Prender `ENABLE_OPEN_REGISTRATION`
-    restituye el comportamiento histórico completo (rollback de una línea).
+    manual). El endpoint viejo NO se borra: conserva la ruta y devuelve un 410 con
+    código estable, así un bundle desactualizado del frontend recibe una señal
+    accionable en vez de un 404. Prender `ENABLE_OPEN_REGISTRATION` restituye el
+    comportamiento histórico completo (rollback de una línea).
 
     Va como `dependencies=[...]` del endpoint —no como primera línea del cuerpo—
     para que se resuelva ANTES de validar el body: un payload viejo tiene que ver
     el 410, no un 422 de esquema.
+
+    ⚠️ **Alcance: solo `POST /auth/register`.** NO gatear `POST /onboarding/submit`:
+    la encuesta se partió en dos y esa mitad —los 6 números financieros— se pide
+    DESPUÉS de aprobar, en el primer login, detrás de JWT y sin crear cuentas. No
+    es parte del registro abierto.
     """
     if not get_settings().ENABLE_OPEN_REGISTRATION:
         raise HTTPException(
