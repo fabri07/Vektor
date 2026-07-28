@@ -244,8 +244,8 @@ class Settings(BaseSettings):
     # el opt-in mete en la cola de revisión emails que nadie confirmó, que es
     # exactamente lo que el doble opt-in existe para evitar.
     #
-    # Se fuerza a True bajo DEBUG **fuera de producción**, y a False en
-    # producción aunque alguien la setee: en prod nunca puede estar activa.
+    # Se fuerza a True bajo DEBUG **solo en desarrollo**, y a False en cualquier
+    # otro entorno (producción, staging, demo) aunque alguien la setee.
     ACCESS_REQUEST_AUTOVERIFY: bool = False
     ENABLE_SCORE_RECALCULATION: bool = True
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
@@ -338,17 +338,22 @@ class Settings(BaseSettings):
         # es INDEPENDIENTE de ENABLE_EMAIL_VERIFICATION (ver el campo). DEMO_MODE
         # no la prende: un demo con dominio público seguiría siendo un lugar
         # donde saltear el opt-in tiene consecuencias reales.
-        if self.DEBUG and not self.is_production:
+        # El corte es `is_development`, NO `not is_production`: un `staging` con
+        # dominio público es exactamente el mismo riesgo que un demo (emails sin
+        # confirmar entrando a la cola de revisión), y ahí `ENVIRONMENT` no dice
+        # "production".
+        if self.DEBUG and self.is_development:
             self.ACCESS_REQUEST_AUTOVERIFY = True
-        if self.is_production and self.ACCESS_REQUEST_AUTOVERIFY:
+        if not self.is_development and self.ACCESS_REQUEST_AUTOVERIFY:
             # Se apaga en vez de levantar para no dejar la API sin arrancar por
             # una variable de conveniencia; el log es ruidoso a propósito.
             import logging as _logging  # noqa: PLC0415
 
             _logging.getLogger(__name__).error(
                 "config.access_request.autoverify_ignored: "
-                "ACCESS_REQUEST_AUTOVERIFY no puede estar activa en producción "
-                "(saltearía el doble opt-in). Se fuerza a False."
+                "ACCESS_REQUEST_AUTOVERIFY solo puede estar activa en desarrollo "
+                f"(ENVIRONMENT={self.ENVIRONMENT!r} saltearía el doble opt-in). "
+                "Se fuerza a False."
             )
             self.ACCESS_REQUEST_AUTOVERIFY = False
 

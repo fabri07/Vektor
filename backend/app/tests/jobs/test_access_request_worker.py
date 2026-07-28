@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from celery.exceptions import MaxRetriesExceededError, Retry
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -106,18 +107,38 @@ class _SMTPEspia:
         return "msg-1"
 
 
+class _Peticion:
+    """El ``self.request`` de Celery, con lo único que el worker mira."""
+
+    def __init__(self, retries: int = 0) -> None:
+        self.retries = retries
+
+
 class _SelfFalso:
-    """Lo único que el worker usa de ``self``: ``retry`` y su excepción."""
+    """``self`` de una tarea Celery, modelando el contrato REAL de ``retry``.
+
+    ⚠️ La parte que importa: ``Task.retry(exc=exc)`` con los reintentos agotados
+    hace ``raise_with_context(exc)`` — **re-lanza la excepción original**, y solo
+    levanta ``MaxRetriesExceededError`` cuando ``exc`` es falsy
+    (``celery/app/task.py``). Un fake que levantara ``MaxRetriesExceededError``
+    con ``exc`` presente certificaría una rama inalcanzable en producción: el
+    test daría verde, el mutation-check también, y el mail perdido seguiría sin
+    quedar marcado. El fake modela la dependencia, no lo que nos convendría.
+    """
 
     MaxRetriesExceededError = MaxRetriesExceededError
 
-    def __init__(self, *, max_retries: int = 3) -> None:
+    def __init__(self, *, max_retries: int = 3, retries: int = 0) -> None:
+        self.max_retries = max_retries
+        self.request = _Peticion(retries)
         self.intentos = 0
-        self._max = max_retries
 
     def retry(self, exc: BaseException | None = None) -> None:
         self.intentos += 1
-        if self.intentos > self._max:
+        self.request.retries += 1
+        if self.request.retries > self.max_retries:
+            if exc is not None:
+                raise exc
             raise MaxRetriesExceededError
         raise Retry(exc=exc)
 
@@ -304,8 +325,15 @@ def test_al_agotar_reintentos_se_marca_failed_en_su_columna(
     columna: str,
     esperada: str,
 ) -> None:
+    """Con los reintentos ya consumidos, el fallo se sella ANTES de tocar ``retry``.
+
+    Si el worker llamara a ``retry`` acá, Celery re-lanzaría la ``SMTPError``
+    original (no ``MaxRetriesExceededError``), la tarea moriría y la columna
+    quedaría en ``pending`` para siempre: el dueño no vería a nadie en
+    ``list --email-failed`` mientras alguien espera un mail que nunca salió.
+    """
     smtp.falla = True
-    falso = _SelfFalso(max_retries=0)  # el primer retry ya agota
+    falso = _SelfFalso(max_retries=3, retries=3)  # ya se consumieron los 3
 
     worker._despachar(
         falso,
@@ -317,6 +345,27 @@ def test_al_agotar_reintentos_se_marca_failed_en_su_columna(
     )
 
     assert marcados == [("rid", esperada, EmailNotificationStatus.FAILED.value)]
+    # No se pidió un reintento más: pedirlo habría propagado la excepción real.
+    assert falso.intentos == 0
+    # Y la columna existe de verdad en la tabla (`setattr` con un nombre mal
+    # escrito no falla: crearía un atributo de instancia y no commitearía nada).
+    assert esperada in AccessRequest.__table__.columns
+
+
+def test_el_fake_de_celery_relanza_la_excepcion_original_al_agotarse() -> None:
+    """Compuerta del fake: si esto se afloja, los tests de arriba dejan de probar.
+
+    ``Task.retry(exc=exc)`` sin reintentos disponibles hace
+    ``raise_with_context(exc)``. Un fake que levantara
+    ``MaxRetriesExceededError`` volvería alcanzable —solo en los tests— una rama
+    que en producción nunca corre.
+    """
+    falso = _SelfFalso(max_retries=1, retries=1)
+    original = RuntimeError("resend caído")
+
+    with pytest.raises(RuntimeError) as capturada:
+        falso.retry(exc=original)
+    assert capturada.value is original
 
 
 def test_cuenta_existente_no_marca_nada_al_agotar_reintentos(
@@ -414,17 +463,24 @@ def test_la_escotilla_no_hereda_de_enable_email_verification() -> None:
     assert demo.ACCESS_REQUEST_AUTOVERIFY is False
 
 
-def test_en_produccion_la_escotilla_queda_apagada_aunque_la_seteen() -> None:
-    """Saltear el opt-in en prod metería emails no confirmados en la cola."""
+@pytest.mark.parametrize("entorno", ["production", "staging"])
+def test_fuera_de_desarrollo_la_escotilla_queda_apagada_aunque_la_seteen(
+    entorno: str,
+) -> None:
+    """Saltear el opt-in metería emails no confirmados en la cola de revisión.
+
+    ``staging`` importa tanto como ``production``: es un dominio público con
+    gente real del otro lado, y ahí ``ENVIRONMENT`` no dice "production".
+    """
     secreto = "x" * 40
-    prod = Settings(
+    s = Settings(
         APP_DEBUG=True,
-        ENVIRONMENT="production",
+        ENVIRONMENT=entorno,
         ACCESS_REQUEST_AUTOVERIFY=True,
         SECRET_KEY=secreto,
         JWT_SECRET_KEY=secreto,
     )
-    assert prod.ACCESS_REQUEST_AUTOVERIFY is False
+    assert s.ACCESS_REQUEST_AUTOVERIFY is False
 
 
 # ── Decisión ─────────────────────────────────────────────────────────────────
@@ -536,6 +592,36 @@ def sesion_del_worker(
         yield sesion
 
     monkeypatch.setattr(worker, "_sesion", _stub)
+
+
+@pytest.mark.parametrize(
+    "columna",
+    [worker.COLUMNA_VERIFICACION, worker.COLUMNA_AVISO_DUENIO, worker.COLUMNA_DECISION],
+)
+async def test_marcar_escribe_la_columna_real_de_la_tabla(
+    sesion: AsyncSession, sesion_del_worker: None, columna: str
+) -> None:
+    """``_marcar`` usa ``setattr``: un nombre mal escrito no falla, escribe en un
+    atributo de instancia fantasma y no persiste nada. Se lee de vuelta desde la
+    base para que el test no pueda pasar contra ese fantasma."""
+    solicitud = _solicitud()
+    sesion.add(solicitud)
+    await sesion.commit()
+
+    await worker._marcar(
+        str(solicitud.id), columna, EmailNotificationStatus.FAILED.value
+    )
+
+    # `getattr(AccessRequest, columna)` explota si la columna no existe, y el
+    # SELECT trae el valor persistido, no el del identity map.
+    persistido = (
+        await sesion.execute(
+            select(getattr(AccessRequest, columna)).where(
+                AccessRequest.id == solicitud.id
+            )
+        )
+    ).scalar_one()
+    assert persistido == EmailNotificationStatus.FAILED.value
 
 
 async def test_autoverificar_deja_la_solicitud_lista_para_revisar(

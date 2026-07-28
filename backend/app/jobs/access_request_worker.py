@@ -134,6 +134,12 @@ async def _autoverificar(request_id: str, token_id: str) -> bool:
     de producción. Lo que sí hace es dejar la solicitud en el MISMO estado que
     dejaría un click real en el mail, para que lo que se prueba después sea el
     flujo de verdad.
+
+    ⚠️ El log lleva el token de verificación en claro (nivel WARNING). Es
+    aceptable SOLO porque la escotilla no puede estar activa fuera de desarrollo
+    (``settings.ACCESS_REQUEST_AUTOVERIFY``): los logs de una máquina de
+    desarrollo no van a un sink compartido. Si algún día estos logs se envían a
+    un agregador externo, este ``logger.warning`` hay que revisarlo antes.
     """
     import uuid  # noqa: PLC0415
     from datetime import UTC, datetime  # noqa: PLC0415
@@ -190,6 +196,17 @@ def _despachar(
     ``request_id``/``columna`` van juntos y son opcionales porque
     ``notify_account_exists`` no tiene fila que marcar: ese caso no persiste nada
     (neutralidad a enumeración), así que su único rastro es el log.
+
+    ⚠️ **El fallo definitivo se detecta ANTES de llamar a ``retry``, no
+    capturando ``MaxRetriesExceededError``.** ``Task.retry(exc=exc)`` con los
+    reintentos agotados hace ``raise_with_context(exc)``
+    (``celery/app/task.py``): re-lanza la excepción ORIGINAL, y solo levanta
+    ``MaxRetriesExceededError`` cuando ``exc`` es falsy. Como acá siempre se le
+    pasa la excepción real, un ``except self.MaxRetriesExceededError`` sería
+    código muerto: la ``SMTPError`` se propagaría, la tarea fallaría y la columna
+    quedaría en ``pending`` PARA SIEMPRE. El dueño correría
+    ``access_requests.py list --email-failed``, no vería a nadie, y concluiría que
+    está todo bien mientras alguien espera un mail que nunca salió.
     """
     import asyncio  # noqa: PLC0415
 
@@ -204,13 +221,23 @@ def _despachar(
 
     try:
         SMTPClient().send(destinatario, subject, cuerpo_html, texto, raise_on_error=True)
-    except Exception as exc:  # noqa: BLE001 — reintenta; si se agota, marca failed
+    except Exception as exc:  # noqa: BLE001 — reintenta; si se agotó, marca failed
         logger.warning(f"{evento}.email_failed", request_id=request_id, error=str(exc))
-        try:
-            raise self.retry(exc=exc)
-        except self.MaxRetriesExceededError:
+        maximo = self.max_retries
+        # `max_retries=None` en Celery significa "reintentar para siempre", que NO
+        # es lo mismo que 0: por eso se compara `is not None` en vez de `or 0`
+        # (regla del repo: nunca un default neutral cuando 0 es un valor válido).
+        # Las cuatro tareas de este módulo declaran 3, así que en la práctica esta
+        # rama siempre puede decidir.
+        if maximo is not None and self.request.retries >= maximo:
             _sellar(EmailNotificationStatus.FAILED)
             return
+        # `retry()` NO retorna: levanta `Retry` para que el worker reencole. El
+        # `raise` es el idiom de Celery y deja explícito que el flujo corta acá.
+        # El `from exc` que pide B904 sería sintaxis muerta: Python evalúa
+        # `self.retry(...)` primero, esa llamada ya levanta, y la cláusula nunca
+        # llega a aplicarse. La causa real viaja en `Retry(exc=exc)`.
+        raise self.retry(exc=exc)  # noqa: B904
 
     _sellar(EmailNotificationStatus.SENT)
     logger.info(f"{evento}.email_sent", request_id=request_id)
