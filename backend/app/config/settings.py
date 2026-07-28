@@ -139,6 +139,7 @@ class Settings(BaseSettings):
         "ENABLE_WHATSAPP",
         "ENABLE_SOCIAL_SYNC",
         "ENABLE_OPEN_REGISTRATION",
+        "ACCESS_REQUEST_AUTOVERIFY",
         "DEMO_MODE",
         "USE_LOCAL_FALLBACK",
         mode="before",
@@ -232,6 +233,20 @@ class Settings(BaseSettings):
     # Alcance: SOLO ese endpoint. `POST /onboarding/submit` no se gatea (está
     # detrás de JWT, lo usa un usuario ya aprobado y no crea cuentas).
     ENABLE_OPEN_REGISTRATION: bool = False
+    # Escotilla de DESARROLLO del flujo de solicitudes de acceso. En True, el
+    # worker NO manda el mail de doble opt-in: loguea el link de verificación y
+    # pasa la solicitud a `pending` directo, para no depender de una casilla real
+    # mientras se prueba el flujo local.
+    #
+    # **NO hereda de ENABLE_EMAIL_VERIFICATION** a propósito, aunque suene
+    # parecido: ese flag se fuerza a False bajo DEBUG/DEMO (abajo), y heredarlo
+    # significaría que cualquier entorno con DEMO_MODE saltee el opt-in. Saltear
+    # el opt-in mete en la cola de revisión emails que nadie confirmó, que es
+    # exactamente lo que el doble opt-in existe para evitar.
+    #
+    # Se fuerza a True bajo DEBUG **fuera de producción**, y a False en
+    # producción aunque alguien la setee: en prod nunca puede estar activa.
+    ACCESS_REQUEST_AUTOVERIFY: bool = False
     ENABLE_SCORE_RECALCULATION: bool = True
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
     ENABLE_EMAIL_VERIFICATION: bool = True
@@ -318,6 +333,24 @@ class Settings(BaseSettings):
         if self.DEBUG or self.DEMO_MODE:
             # In debug/demo mode, skip email verification so local testing isn't blocked.
             self.ENABLE_EMAIL_VERIFICATION = False
+
+        # Escotilla de las solicitudes de acceso: se prende sola en desarrollo y
+        # es INDEPENDIENTE de ENABLE_EMAIL_VERIFICATION (ver el campo). DEMO_MODE
+        # no la prende: un demo con dominio público seguiría siendo un lugar
+        # donde saltear el opt-in tiene consecuencias reales.
+        if self.DEBUG and not self.is_production:
+            self.ACCESS_REQUEST_AUTOVERIFY = True
+        if self.is_production and self.ACCESS_REQUEST_AUTOVERIFY:
+            # Se apaga en vez de levantar para no dejar la API sin arrancar por
+            # una variable de conveniencia; el log es ruidoso a propósito.
+            import logging as _logging  # noqa: PLC0415
+
+            _logging.getLogger(__name__).error(
+                "config.access_request.autoverify_ignored: "
+                "ACCESS_REQUEST_AUTOVERIFY no puede estar activa en producción "
+                "(saltearía el doble opt-in). Se fuerza a False."
+            )
+            self.ACCESS_REQUEST_AUTOVERIFY = False
 
         if self.ENVIRONMENT == "production":
             insecure_defaults = {"insecure-change-me", "insecure-jwt-change-me", ""}
