@@ -109,6 +109,22 @@ export function fieldAnchorId(field: string): string {
  */
 export function fieldAria(
   campo: string,
+  opciones: { error?: string; hint?: string } = {},
+) {
+  return { id: fieldAnchorId(campo), ...describeAria(campo, opciones) };
+}
+
+/**
+ * La mitad de `fieldAria` que NO trae `id`: solo el estado de validez y la
+ * descripción.
+ *
+ * Existe para los grupos de opción, donde el `id` ancla ya está puesto en el
+ * primer control (es el destino del foco) y quien tiene que anunciarse
+ * inválido es el contenedor —el `<fieldset>` o el `radiogroup`—, no cada radio
+ * por separado. Spreadear `fieldAria` ahí duplicaría el `id`.
+ */
+export function describeAria(
+  campo: string,
   { error, hint }: { error?: string; hint?: string } = {},
 ) {
   const id = fieldAnchorId(campo);
@@ -116,7 +132,6 @@ export function fieldAria(
     .filter(Boolean)
     .join(" ");
   return {
-    id,
     "aria-invalid": error ? true : undefined,
     "aria-describedby": descrito || undefined,
   };
@@ -153,7 +168,17 @@ export function RadioGroup<T extends string>({
         ? "grid-cols-1 sm:grid-cols-3"
         : "grid-cols-1 sm:grid-cols-2";
   return (
-    <fieldset>
+    /*
+     * `<fieldset>` + `<legend>` con radios NATIVOS del mismo `name`: la
+     * semántica de grupo y la navegación con flechas vienen del navegador, no
+     * hace falta `role="radiogroup"` ni roving tabindex a mano.
+     *
+     * Lo que sí hay que poner es el estado: `aria-invalid` y la asociación del
+     * error van en el FIELDSET, que es lo que un lector anuncia al entrar al
+     * grupo. En cada radio por separado no serviría — el usuario tiene que
+     * enterarse de que le falta el grupo, no que le falta la opción 3.
+     */
+    <fieldset {...describeAria(name, { error })}>
       <legend className="mb-2 block text-sm font-medium text-vektor-body">
         {legend} <span className="text-vektor-red">*</span>
       </legend>
@@ -190,7 +215,11 @@ export function RadioGroup<T extends string>({
       </div>
       {/* Sin `role="alert"`, por lo mismo que en `Field`: el resumen de
           faltantes anuncia una vez; acá va el detalle, no un segundo grito. */}
-      {error && <p className="mt-1.5 text-xs text-vektor-red">{error}</p>}
+      {error && (
+        <p id={`${fieldAnchorId(name)}-error`} className="mt-1.5 text-xs text-vektor-red">
+          {error}
+        </p>
+      )}
     </fieldset>
   );
 }

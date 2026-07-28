@@ -68,7 +68,7 @@ async function completarYEnviar(user: User, { conNombre = false } = {}) {
     await user.type(screen.getByLabelText(/Nombre y apellido/i), "Ana Pérez");
   }
   await user.type(screen.getByLabelText(/Nombre del negocio/i), "Kiosco Ana");
-  await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+  await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
   for (const etiqueta of GRUPOS) {
     await user.click(screen.getByLabelText(etiqueta));
   }

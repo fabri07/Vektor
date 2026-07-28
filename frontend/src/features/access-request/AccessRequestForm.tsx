@@ -66,6 +66,7 @@ import {
   BusinessScreeningFields,
   Field,
   RadioGroup,
+  describeAria,
   fieldAnchorId,
   fieldAria,
   inputClass,
@@ -217,6 +218,33 @@ export function AccessRequestForm() {
       vertical_other_text: code === "otros" ? d.vertical_other_text : "",
     }));
     marcarTocado("requested_vertical");
+  }
+
+  /*
+   * Navegación con flechas del grupo de rubros, que un `<input type="radio">`
+   * traería gratis. Mover el foco TAMBIÉN elige: es lo que hace un radio
+   * nativo, y es lo que un lector de pantalla anuncia al recorrer el grupo.
+   */
+  const rubroRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const indiceRubroSeleccionado = REQUESTED_VERTICAL_OPTIONS.findIndex(
+    (o) => o.code === draft.requested_vertical,
+  );
+  // Sin elección todavía, el tabstop del grupo es la primera opción.
+  const indiceRubroTabulable = indiceRubroSeleccionado === -1 ? 0 : indiceRubroSeleccionado;
+
+  function moverEntreRubros(evento: React.KeyboardEvent, desde: number) {
+    const total = REQUESTED_VERTICAL_OPTIONS.length;
+    const paso =
+      evento.key === "ArrowRight" || evento.key === "ArrowDown"
+        ? 1
+        : evento.key === "ArrowLeft" || evento.key === "ArrowUp"
+          ? -1
+          : 0;
+    if (paso === 0) return;
+    evento.preventDefault(); // sin esto, las flechas scrollean la página
+    const destino = (desde + paso + total) % total;
+    seleccionarRubro(REQUESTED_VERTICAL_OPTIONS[destino]!.code);
+    rubroRefs.current[destino]?.focus();
   }
 
   // Memoizado: sin esto el schema entero se re-valida en cada render, incluso
@@ -439,8 +467,28 @@ export function AccessRequestForm() {
             Rubro
           </h2>
 
-          <fieldset>
-            <legend className="mb-3 block text-sm font-medium text-vektor-body">
+          {/*
+            Las tarjetas son botones, no `<input type="radio">`, porque llevan
+            icono y descripción. Eso obliga a reponer a mano todo lo que un
+            radio nativo trae gratis: rol de grupo, `aria-checked`, un solo
+            tabstop para todo el grupo y navegación con flechas.
+
+            Antes eran `aria-pressed` (patrón de interruptor): un lector las
+            anunciaba como seis botones independientes que se prenden y apagan,
+            no como "opción 2 de 6" de una elección única. Y cada tarjeta era
+            su propio tabstop.
+          */}
+          <fieldset
+            role="radiogroup"
+            aria-labelledby="rubro-legend"
+            {...describeAria("requested_vertical", {
+              error: errores.requested_vertical,
+            })}
+          >
+            <legend
+              id="rubro-legend"
+              className="mb-3 block text-sm font-medium text-vektor-body"
+            >
               ¿De qué es tu negocio? <span className="text-vektor-red">*</span>
             </legend>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -450,8 +498,16 @@ export function AccessRequestForm() {
                   <button
                     key={opcion.code}
                     id={indice === 0 ? fieldAnchorId("requested_vertical") : undefined}
+                    ref={(nodo) => {
+                      rubroRefs.current[indice] = nodo;
+                    }}
                     type="button"
-                    aria-pressed={seleccionado}
+                    role="radio"
+                    aria-checked={seleccionado}
+                    // Roving tabindex: el grupo entero es UN tabstop. Entra en
+                    // la opción elegida, o en la primera si no hay ninguna.
+                    tabIndex={indice === indiceRubroTabulable ? 0 : -1}
+                    onKeyDown={(evento) => moverEntreRubros(evento, indice)}
                     onClick={() => seleccionarRubro(opcion.code)}
                     className={[
                       "flex flex-col items-start gap-3 rounded-xl border-2 p-4 text-left transition-all duration-150",
@@ -484,6 +540,18 @@ export function AccessRequestForm() {
                 );
               })}
             </div>
+            {/*
+              El error del rubro era SOLO un borde rojo. Feedback exclusivo por
+              color: invisible para un lector de pantalla y falla WCAG 1.4.1.
+            */}
+            {errores.requested_vertical && (
+              <p
+                id={`${fieldAnchorId("requested_vertical")}-error`}
+                className="mt-1.5 text-xs text-vektor-red"
+              >
+                {errores.requested_vertical}
+              </p>
+            )}
           </fieldset>
 
           {draft.requested_vertical === "otros" && (
@@ -530,7 +598,7 @@ export function AccessRequestForm() {
         <div className="space-y-5">
           <label className="flex items-start gap-3 text-sm text-vektor-body">
             <input
-              id={fieldAnchorId("consent")}
+              {...fieldAria("consent", { error: errores.consent })}
               type="checkbox"
               className="mt-1 accent-vektor-blue"
               checked={draft.consent}
@@ -546,7 +614,9 @@ export function AccessRequestForm() {
           </label>
 
           {errores.consent && (
-            <p className="text-xs text-vektor-red">{errores.consent}</p>
+            <p id={`${fieldAnchorId("consent")}-error`} className="text-xs text-vektor-red">
+              {errores.consent}
+            </p>
           )}
 
           {/*

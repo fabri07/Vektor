@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom";
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -86,6 +86,23 @@ const CLAVES_DEL_PAYLOAD = [
 
 function submitButton() {
   return screen.getByRole("button", { name: /Pedir acceso/i });
+}
+
+/** El grupo de tarjetas de rubro. */
+function grupoDeRubro() {
+  return screen.getByRole("radiogroup", { name: /De qué es tu negocio/i });
+}
+
+/**
+ * Las tarjetas de rubro, y solo ellas.
+ *
+ * Hay que acotar la búsqueda al grupo: los ocho `RadioGroup` del screening
+ * usan `<input type="radio">` nativos, que también responden al rol "radio".
+ * Un `getAllByRole("radio")` global devuelve las tarjetas MÁS los treinta y
+ * pico de radios nativos.
+ */
+function tarjetasDeRubro() {
+  return within(grupoDeRubro()).getAllByRole("radio");
 }
 
 /**
@@ -218,7 +235,7 @@ describe("AccessRequestForm", () => {
       renderForm();
 
       await fillContacto(user);
-      await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+      await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
       await fillScreening(user, ["staff_size"]);
       await user.click(screen.getByRole("checkbox"));
 
@@ -321,6 +338,96 @@ describe("AccessRequestForm", () => {
       expect(nombre).toHaveAccessibleDescription("Escribí tu nombre y apellido");
     });
 
+    /**
+     * Los nueve grupos de opción.
+     *
+     * Antes ninguno se anunciaba inválido: `fieldAria` existía pero solo se
+     * usaba en inputs de texto. Un usuario de lector de pantalla podía
+     * recorrer los ocho grupos de radios enteros sin enterarse de cuál le
+     * faltaba, y el noveno —el rubro— señalaba su error SOLO con un borde
+     * rojo: feedback exclusivo por color, invisible para el lector y falla
+     * WCAG 1.4.1.
+     */
+    test("un grupo de radios sin elegir se anuncia inválido y describe su error", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      const grupo = screen.getByRole("group", { name: /Cuánta gente trabaja/i });
+      expect(grupo).not.toHaveAttribute("aria-invalid");
+
+      await user.click(submitButton());
+      await screen.findByRole("alert");
+
+      expect(grupo).toHaveAttribute("aria-invalid", "true");
+      expect(grupo).toHaveAccessibleDescription("Elegí una opción");
+    });
+
+    test("el rubro es un radiogroup, no seis interruptores sueltos", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      const opciones = tarjetasDeRubro();
+      expect(opciones.length).toBeGreaterThan(1);
+      // Ninguna arranca elegida, y el grupo entero es UN solo tabstop.
+      expect(opciones.every((o) => o.getAttribute("aria-checked") === "false")).toBe(true);
+      expect(opciones.filter((o) => o.getAttribute("tabindex") === "0")).toHaveLength(1);
+
+      await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
+      expect(screen.getByRole("radio", { name: /Kiosco/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(grupoDeRubro()).not.toHaveAttribute("aria-invalid");
+    });
+
+    test("el rubro sin elegir dice su error con TEXTO, no solo con un borde rojo", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      await user.click(submitButton());
+      await screen.findByRole("alert");
+
+      expect(grupoDeRubro()).toHaveAttribute("aria-invalid", "true");
+      expect(grupoDeRubro()).toHaveAccessibleDescription("Elegí tu rubro");
+      // Y el texto existe de verdad en pantalla, no solo como descripción.
+      expect(screen.getByText("Elegí tu rubro")).toBeInTheDocument();
+    });
+
+    test("las flechas recorren el grupo de rubros y eligen al pasar", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      const opciones = tarjetasDeRubro();
+      const primera = opciones[0]!;
+      primera.focus();
+
+      await user.keyboard("{ArrowRight}");
+      expect(document.activeElement).toBe(opciones[1]);
+      expect(opciones[1]).toHaveAttribute("aria-checked", "true");
+
+      // Y hacia atrás desde la primera, envuelve al final del grupo.
+      await user.keyboard("{ArrowLeft}");
+      expect(document.activeElement).toBe(primera);
+      await user.keyboard("{ArrowLeft}");
+      expect(document.activeElement).toBe(opciones[opciones.length - 1]);
+    });
+
+    test("el consentimiento sin marcar se anuncia inválido", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      const casilla = screen.getByRole("checkbox");
+      expect(casilla).not.toHaveAttribute("aria-invalid");
+
+      await user.click(submitButton());
+      await screen.findByRole("alert");
+
+      expect(casilla).toHaveAttribute("aria-invalid", "true");
+      expect(casilla).toHaveAccessibleDescription(
+        "Necesitamos tu consentimiento para revisar la solicitud",
+      );
+    });
+
     test("el hint describe el campo sin meterse en su nombre", () => {
       renderForm();
       const telefono = screen.getByRole("textbox", {
@@ -355,7 +462,7 @@ describe("AccessRequestForm", () => {
 
     await fillContacto(user);
     await fillScreening(user);
-    await user.click(screen.getByRole("button", { name: /Otro/i }));
+    await user.click(screen.getByRole("radio", { name: /Otro/i }));
     await user.click(screen.getByRole("checkbox"));
 
     const textarea = screen.getByLabelText(/Contanos de qué es tu negocio/i);
@@ -392,7 +499,7 @@ describe("AccessRequestForm", () => {
     await fillContacto(user);
     expect(submitButton()).toBeEnabled();
 
-    await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+    await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
     await fillScreening(user);
 
     // Falta el consentimiento: es obligatorio, no decorativo.
@@ -417,7 +524,7 @@ describe("AccessRequestForm", () => {
     renderForm();
 
     await fillContacto(user);
-    await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+    await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
     await fillScreening(user);
     await user.click(screen.getByRole("checkbox"));
 
@@ -435,7 +542,7 @@ describe("AccessRequestForm", () => {
     renderForm();
 
     await fillContacto(user);
-    await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+    await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
     await fillScreening(user);
     await user.click(screen.getByRole("checkbox"));
     await user.click(submitButton());
@@ -496,7 +603,7 @@ describe("AccessRequestForm", () => {
     renderForm();
 
     await fillContacto(user);
-    await user.click(screen.getByRole("button", { name: /Kiosco/i }));
+    await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
     await fillScreening(user);
     await user.click(screen.getByRole("checkbox"));
     await user.click(submitButton());
