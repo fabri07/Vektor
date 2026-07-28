@@ -59,7 +59,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from app.domain.access_request import AccessRequestStatus, RequestedPlan
-from app.domain.verticals import OPERATIONAL_VERTICALS
+from app.domain.verticals import OPERATIONAL_VERTICALS, RequestedVertical
 from app.persistence.db.base import Base
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
 from app.persistence.models.analytics_event import AnalyticsEvent
@@ -77,27 +77,45 @@ pytestmark = [
 
 _DDL_ADVISORY_KEY = 0x5645_4B54_4F52_0F86  # "VEKTOR" + 20260806_0002
 
-_OPEN_EMAIL_INDEX = "uq_access_requests_open_email"
 _CHECK_VERTICAL = "ck_business_profiles_vertical_code"
 
 
-def _load_migration() -> Any:
-    """Importa la migración por path: ``versions/`` no es un paquete importable."""
+def _load_migration(nombre: str, alias: str) -> Any:
+    """Importa una migración por path: ``versions/`` no es un paquete importable."""
     ruta = (
         pathlib.Path(__file__).resolve().parents[2]
         / "persistence"
         / "migrations"
         / "versions"
-        / "20260806_0002_unify_vertical_codes.py"
+        / nombre
     )
-    spec = importlib.util.spec_from_file_location("_unify_verticals_migration", ruta)
+    spec = importlib.util.spec_from_file_location(alias, ruta)
     assert spec is not None and spec.loader is not None
     modulo = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(modulo)
     return modulo
 
 
-mig = _load_migration()
+mig = _load_migration("20260806_0002_unify_vertical_codes.py", "_unify_verticals_migration")
+#: La migración que CREA `access_requests`: el fixture llama a su propio DDL del
+#: índice parcial en vez de copiarlo, para que borrarlo (o cambiarle el
+#: predicado) haga fallar los tests del índice en vez de dejarlos verdes contra
+#: una copia local.
+mig_solicitudes = _load_migration("20260806_0001_access_requests.py", "_access_requests_migration")
+
+
+async def _esquema_migrado(conn: Any) -> bool:
+    """¿La base la armó Alembic (y no ``create_all``)?
+
+    ``alembic_version`` solo existe si la cadena corrió: es la señal de que los
+    objetos que viven únicamente en las migraciones ya están puestos por quien
+    corresponde.
+    """
+    return bool(
+        (
+            await conn.execute(text("SELECT to_regclass('alembic_version') IS NOT NULL"))
+        ).scalar_one()
+    )
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -122,13 +140,13 @@ async def pg_engine() -> AsyncGenerator[AsyncEngine, None]:
         # que `create_all` no los produce. Ambas llamadas son idempotentes: en CI,
         # donde alembic ya corrió, quedan en no-op.
         await conn.run_sync(lambda c: mig._add_vertical_check(c))
-        await conn.execute(
-            text(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS {_OPEN_EMAIL_INDEX} "
-                "ON access_requests (lower(email)) "
-                "WHERE status IN ('unverified', 'pending', 'waitlist')"
-            )
-        )
+        # El índice parcial se construye SOLO cuando el esquema no salió de
+        # Alembic. Si salió de Alembic (CI, y cualquier base migrada), armarlo
+        # acá enmascararía que `upgrade()` dejó de crearlo: el fixture pondría
+        # el suyo y los dos tests del índice quedarían verdes contra su propia
+        # copia. Con este guard, borrar la llamada de `upgrade()` los rompe.
+        if not await _esquema_migrado(conn):
+            await conn.run_sync(lambda c: mig_solicitudes._create_open_email_index(c))
     try:
         yield engine
     finally:
@@ -594,6 +612,10 @@ def _literales(definicion: str) -> set[str]:
     [
         ("ck_access_requests_status", {s.value for s in AccessRequestStatus}),
         ("ck_access_requests_requested_plan", {p.value for p in RequestedPlan}),
+        (
+            "ck_access_requests_requested_vertical",
+            {v.value for v in RequestedVertical},
+        ),
         ("ck_access_requests_assigned_vertical_code", set(OPERATIONAL_VERTICALS)),
         (_CHECK_VERTICAL, set(OPERATIONAL_VERTICALS)),
     ],
