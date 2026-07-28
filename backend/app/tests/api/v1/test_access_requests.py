@@ -198,12 +198,34 @@ async def test_doble_envio_crea_una_sola_solicitud(
 async def test_honeypot_descarta_en_silencio(
     client: AsyncClient, db_session: AsyncSession, encolar: Any
 ) -> None:
-    res = await client.post(URL, json={**_VALIDO, "website": "http://spam.example"})
-    assert res.status_code == 201
-    assert res.json() == (await client.post(URL, json=_VALIDO)).json()
-    # Solo persistió la segunda (la legítima); el bot no dejó nada.
+    """El honeypot completado ⇒ 201 al bot y CERO filas.
+
+    ⚠️ El email del bot tiene que ser DISTINTO del legítimo. Con el mismo email,
+    un honeypot roto daría igual una sola fila —el bot insertaría y el envío
+    legítimo caería en `DUPLICATE_OPEN`—, y el test pasaría sin poder fallar
+    nunca. Por eso el conteo en cero se asierta ANTES de mandar el legítimo.
+    """
+    bot = await client.post(
+        URL,
+        json={
+            **_VALIDO,
+            "email": "bot@spam.example",
+            "website": "http://spam.example",
+        },
+    )
+    assert bot.status_code == 201
+    # Lo que realmente prueba que el honeypot funciona: no persistió NADA.
+    assert await _solicitudes(db_session) == 0
+    encolar.assert_not_called()
+
+    # Y al bot se le respondió exactamente lo mismo que a un envío legítimo.
+    legitimo = await client.post(URL, json=_VALIDO)
+    assert legitimo.status_code == 201
+    assert bot.json() == legitimo.json()
+
+    # La única fila es la legítima, no la del bot.
     filas = (await db_session.execute(select(AccessRequest))).scalars().all()
-    assert len(filas) == 1
+    assert [f.email for f in filas] == ["juan@kiosco.example.com"]
 
 
 async def test_envio_demasiado_rapido_descartado(
