@@ -20,11 +20,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.tenant_provisioning import provision_tenant
 from app.config.settings import get_settings
+from app.domain.verticals import parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.auth_token import EmailVerificationToken, PasswordResetToken
-from app.persistence.models.business import BusinessProfile, MomentumProfile
-from app.persistence.models.tenant import Subscription, Tenant
+from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.tenant_repository import TenantRepository
 from app.persistence.repositories.user_repository import UserRepository
@@ -83,61 +84,18 @@ class AuthService:
                 detail="An account with this email already exists.",
             )
 
-        # 2. Crear Tenant (status ACTIVE)
-        tenant = Tenant(
-            legal_name=body.business_name,
-            display_name=body.business_name,
-            currency="ARS",
-            pricing_reference_mode="MEP",
-            status="ACTIVE",
-        )
-        await self._tenant_repo.save(tenant)
-
-        # 3. Crear User — is_active depends on email verification flag
+        # 2-6. Acuñar la cuenta: Tenant + User + Subscription + BusinessProfile + MomentumProfile
         is_active = not settings.ENABLE_EMAIL_VERIFICATION
-        user = User(
-            tenant_id=tenant.tenant_id,
-            email=body.email.lower(),
+        tenant, user = await provision_tenant(
+            self._session,
+            business_name=body.business_name,
+            email=body.email,
             full_name=body.full_name,
-            password_hash=hash_password(body.password),
-            role_code="OWNER",
             phone=body.phone,
+            vertical=parse_vertical(body.vertical_code),
+            password_hash=hash_password(body.password),
             is_active=is_active,
         )
-        await self._user_repo.save(user)
-
-        # 4. Crear Subscription (plan FREE)
-        subscription = Subscription(
-            tenant_id=tenant.tenant_id,
-            plan_code="FREE",
-            billing_index_reference="MEP",
-            seats_included=1,
-            status="ACTIVE",
-        )
-        self._session.add(subscription)
-        await self._session.flush()
-
-        # 5. Crear BusinessProfile vacío con vertical_code
-        profile = BusinessProfile(
-            tenant_id=tenant.tenant_id,
-            vertical_code=body.vertical_code,
-            data_mode="M0",
-            data_confidence="LOW",
-            onboarding_completed=False,
-            heuristic_profile_version="v1",
-        )
-        self._session.add(profile)
-        await self._session.flush()
-
-        # 6. Crear MomentumProfile vacío
-        momentum = MomentumProfile(
-            tenant_id=tenant.tenant_id,
-            improving_streak_weeks=0,
-            milestones_json=[],
-            updated_at=datetime.now(UTC),
-        )
-        self._session.add(momentum)
-        await self._session.flush()
 
         # 7. Si verificación activa: crear token y enviar email
         if settings.ENABLE_EMAIL_VERIFICATION:
