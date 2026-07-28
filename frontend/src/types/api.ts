@@ -63,12 +63,6 @@ export interface AuthResponse {
   user: AuthUserResponse;
 }
 
-export interface RegisterResponse {
-  message: string;
-  email: string;
-  requires_verification: boolean;
-}
-
 export interface ForecastPoint {
   date: string;
   income: number;

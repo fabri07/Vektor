@@ -5,7 +5,7 @@ import { PageHeader } from "@/components/public/PageHeader";
 export const metadata = {
   title: "Precios | Véktor",
   description:
-    "Empezá gratis con Véktor. Plan Gratuito con lo esencial y plan Premium sin límites, con beneficios a definir próximamente.",
+    "Pedí acceso a Véktor. Plan Gratuito con lo esencial y plan Premium sin límites, con beneficios a definir próximamente.",
 };
 
 const gratuitoFeatures = [
@@ -28,7 +28,7 @@ export default function PreciosPage() {
         title="Precios simples"
         subtitle={
           <>
-            Empezá gratis y pasate a Premium cuando tu negocio lo pida. Sin
+            Arrancá con el plan Gratuito y pasate a Premium cuando tu negocio lo pida. Sin
             letra chica.
           </>
         }
@@ -58,10 +58,10 @@ export default function PreciosPage() {
               ))}
             </ul>
             <Link
-              href="/register"
+              href="/solicitar-acceso?plan=free&src=precios_free"
               className="mt-8 inline-flex items-center justify-center rounded-full bg-white px-7 py-3 text-sm font-semibold text-vektor-night transition hover:bg-white/90"
             >
-              Empezar gratis
+              Pedir acceso gratuito
             </Link>
           </div>
 
@@ -95,17 +95,18 @@ export default function PreciosPage() {
               Beneficios y límites sujetos a definición.
             </p>
             <Link
-              href="/contacto"
+              href="/solicitar-acceso?plan=premium&src=precios_premium"
               className="mt-8 inline-flex items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-7 py-3 text-sm font-semibold text-white transition hover:opacity-90"
             >
-              Hablar con nosotros
+              Solicitar Premium
             </Link>
           </div>
         </div>
 
         <p className="mx-auto mt-8 max-w-2xl text-center text-sm text-vektor-muted">
           Las condiciones, precios y beneficios definitivos se anunciarán
-          pronto. Mientras tanto, podés arrancar con el plan Gratuito sin costo.
+          pronto. El acceso es por solicitud: revisamos cada pedido a mano antes
+          de habilitar la cuenta.
         </p>
       </section>
     </>

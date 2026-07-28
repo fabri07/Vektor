@@ -24,7 +24,12 @@ export const CONFIDENTIALITY_NOTICE = {
   paragraphs: [
     "Te preguntamos esto para entender tu negocio y darte números que te sirvan — nada más.",
     "Véktor no audita, no reporta a ARCA (ex-AFIP) ni comparte tu información con ningún organismo ni con terceros. No vendemos tus datos. Contestanos con los números reales de tu negocio, no con los declarados: si no coinciden, a nosotros no nos cambia nada y a vos te sirve muchísimo más.",
-    "Cuidamos tu información siguiendo la Ley 25.326 de Protección de Datos Personales de Argentina —autoridad de aplicación: AAIP— y las normativas de protección de datos de la región. Todas estas preguntas son opcionales.",
+    // La última frase decía "Todas estas preguntas son opcionales" y era falsa:
+    // el schema del backend exige los siete campos del screening y la única con
+    // escape real es la de facturación (`no_contesta`). Prometer lo que el
+    // formulario no cumple destruye exactamente la confianza que este aviso
+    // viene a construir.
+    "Cuidamos tu información siguiendo la Ley 25.326 de Protección de Datos Personales de Argentina —autoridad de aplicación: AAIP— y las normativas de protección de datos de la región. La pregunta de facturación es opcional: si preferís no contestarla, elegí \"prefiero no decirlo\".",
   ],
 } as const;
 

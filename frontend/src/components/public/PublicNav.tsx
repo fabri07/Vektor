@@ -163,10 +163,10 @@ export function PublicNav() {
             Iniciar sesión
           </Link>
           <Link
-            href="/contacto"
+            href="/solicitar-acceso?src=nav_desktop"
             className="inline-flex rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
           >
-            Contactanos
+            Pedir acceso
           </Link>
         </div>
 
@@ -218,11 +218,11 @@ export function PublicNav() {
               Iniciar sesión
             </Link>
             <Link
-              href="/contacto"
+              href="/solicitar-acceso?src=nav_mobile"
               onClick={() => setMobileOpen(false)}
               className="inline-flex justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-5 py-2.5 text-sm font-semibold text-white"
             >
-              Contactanos
+              Pedir acceso
             </Link>
           </div>
         </div>

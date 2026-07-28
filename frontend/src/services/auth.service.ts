@@ -2,30 +2,15 @@ import { api } from "@/lib/api";
 import type {
   AuthResponse,
   MeResponse,
-  RegisterResponse,
   OAuthStartResponse,
   OAuthLinkRequiredResponse,
 } from "@/types/api";
-import type { LoginInput, RegisterInput } from "@/validation/auth";
+import type { LoginInput } from "@/validation/auth";
 
 export async function loginRequest(data: LoginInput): Promise<AuthResponse> {
   const res = await api.post<AuthResponse>("/auth/login", {
     email: data.email,
     password: data.password,
-  });
-  return res.data;
-}
-
-export async function registerRequest(data: RegisterInput): Promise<RegisterResponse> {
-  const res = await api.post<RegisterResponse>("/auth/register", {
-    email: data.email,
-    password: data.password,
-    full_name: data.full_name,
-    business_name: data.business_name,
-    vertical_code: data.vertical_code,
-    // Omitir si quedó vacío: el backend lo normaliza a NULL igual, pero así
-    // el payload no arrastra strings en blanco.
-    phone: data.phone?.trim() || undefined,
   });
   return res.data;
 }

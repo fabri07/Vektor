@@ -6,6 +6,7 @@ import {
   FISCAL_PRIVACY_NOTE,
   type FiscalCondition,
 } from "@/lib/fiscalCondition";
+import { CONFIDENTIALITY_NOTICE } from "@/lib/privacyNotices";
 
 export type MainConcern = "MARGIN" | "STOCK" | "CASH";
 
@@ -381,6 +382,27 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
             </select>
           </div>
           {errors.work_schedule && <FieldError text={errors.work_schedule} />}
+        </div>
+
+        {/*
+          Aviso de confidencialidad — el MISMO texto que el formulario público
+          de solicitud (`lib/privacyNotices.ts`), reusado, no duplicado. Va acá
+          arriba porque a partir de este punto el onboarding pregunta números y
+          régimen fiscal, que es justo donde un negocio chico argentino se pone
+          a la defensiva. `FISCAL_PRIVACY_NOTE` (abajo, en el selector) es otro
+          aviso y convive con este: explica para qué sirve el dato, no qué
+          hacemos con él.
+        */}
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-gray-800">
+            <span aria-hidden>🔒</span>
+            {CONFIDENTIALITY_NOTICE.title}
+          </p>
+          {CONFIDENTIALITY_NOTICE.paragraphs.map((parrafo) => (
+            <p key={parrafo.slice(0, 24)} className="mt-2 text-xs leading-relaxed text-gray-500">
+              {parrafo}
+            </p>
+          ))}
         </div>
 
         <div>

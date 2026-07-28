@@ -1,8 +1,15 @@
 import { api } from "@/lib/api";
 import type { FiscalCondition } from "@/lib/fiscalCondition";
 
+/**
+ * Cuerpo de `POST /onboarding/submit`.
+ *
+ * **No lleva `vertical_code`.** El schema del backend
+ * (`OnboardingSubmitRequest`) lo sacó cuando el vertical pasó a asignarse al
+ * aprobar la solicitud, y usa `extra="forbid"`: mandarlo es un 422 que deja al
+ * tenant sin poder completar el onboarding ni obtener su score.
+ */
 export interface OnboardingSubmitPayload {
-  vertical_code: string;
   weekly_sales_estimate_ars: number;
   monthly_inventory_cost_ars: number;
   monthly_fixed_expenses_ars: number;

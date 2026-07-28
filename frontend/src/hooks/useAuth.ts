@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/authStore";
-import { loginRequest, registerRequest, verifyEmailRequest } from "@/services/auth.service";
-import type { LoginInput, RegisterInput } from "@/validation/auth";
+import { loginRequest, verifyEmailRequest } from "@/services/auth.service";
+import type { LoginInput } from "@/validation/auth";
 
 export function useLogin() {
   const setAuth = useAuthStore((s) => s.setAuth);
@@ -18,14 +18,6 @@ export function useLogin() {
         phone: user.phone ?? null,
       });
     },
-  });
-}
-
-export function useRegister() {
-  // Registration no longer issues tokens — user must verify email first.
-  // The caller (RegisterForm) handles the redirect to /verify-email-sent.
-  return useMutation({
-    mutationFn: (data: RegisterInput) => registerRequest(data),
   });
 }
 

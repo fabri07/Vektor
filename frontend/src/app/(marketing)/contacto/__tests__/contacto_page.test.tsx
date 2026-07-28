@@ -45,6 +45,22 @@ describe("ContactoPage", () => {
     expect(dataLayer().some((e) => e.event === "contact_form_view")).toBe(true);
   });
 
+  test("el select de rubro usa el vocabulario de /contact/leads, no el de solicitudes", () => {
+    render(<ContactoPage />);
+    const select = screen.getByLabelText(/Rubro/i) as HTMLSelectElement;
+    const valores = Array.from(select.options)
+      .map((o) => o.value)
+      .filter(Boolean);
+    // Los tres rubros reales vienen de lib/verticals.ts...
+    expect(valores).toEqual(
+      expect.arrayContaining(["kiosco_almacen", "limpieza", "decoracion_hogar"]),
+    );
+    // ...pero el "Otro" es el de `LeadRubro` ("otro"), NO el `RequestedVertical`
+    // ("otros"): son endpoints distintos y mezclarlos es un 422 por lead.
+    expect(valores).toContain("otro");
+    expect(valores).not.toContain("otros");
+  });
+
   test("el honeypot está presente pero oculto", () => {
     const { container } = render(<ContactoPage />);
     const honeypot = container.querySelector<HTMLInputElement>('input[name="website"]');
