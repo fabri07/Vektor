@@ -70,10 +70,27 @@ describe("OnboardingWizard", () => {
     renderWizard();
     expect(screen.getByText(/Esta información es confidencial/)).toBeInTheDocument();
     expect(
-      screen.getByText(/no reporta a ARCA \(ex-AFIP\) ni comparte tu información/),
+      screen.getByText(/no reporta a ARCA ni comparte tu información/),
     ).toBeInTheDocument();
     // El aviso del selector fiscal es OTRO y sigue existiendo.
     expect(screen.getByText(/no bloquea ninguna función/i)).toBeInTheDocument();
+  });
+
+  test("el aviso NO ofrece el escape de la facturación: acá el campo es obligatorio", () => {
+    // El aviso es una constante compartida con el formulario público, donde la
+    // banda de facturación sí tiene "prefiero no decirlo". Acá el campo
+    // equivalente es `weekly_sales_estimate_ars`, que el backend exige con
+    // `Field(gt=0)`: mostrar la frase prometería una salida que este formulario
+    // no da, en el único texto cuyo propósito es generar confianza.
+    renderWizard();
+    expect(screen.queryByText(/La pregunta de facturación es opcional/)).toBeNull();
+    // OJO: acá SÍ hay un "Prefiero no decirlo ahora", pero es del selector de
+    // RÉGIMEN FISCAL, que es opcional de verdad. Por eso el assert de arriba
+    // mira la frase del aviso y no ese texto suelto, que daría un falso
+    // negativo. El campo que la frase prometería poder saltear es este, y no
+    // tiene ninguna opción de omitirlo: el backend lo exige con `Field(gt=0)`
+    // y `Step2Form.validate()` corta con "Ingresá un monto mayor a 0.".
+    expect(screen.getByLabelText(/Cuánto vendés por semana/i)).toBeInTheDocument();
   });
 
   test("el submit NO manda vertical_code: el schema del backend lo prohíbe", async () => {

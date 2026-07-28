@@ -120,8 +120,20 @@ describe("AccessRequestForm", () => {
     expect(screen.getByText("Cómo querés usar Véktor")).toBeInTheDocument();
     expect(screen.getByText(/Esta información es confidencial/)).toBeInTheDocument();
     expect(
-      screen.getByText(/no reporta a ARCA \(ex-AFIP\) ni comparte tu información/),
+      screen.getByText(/no reporta a ARCA ni comparte tu información/),
     ).toBeInTheDocument();
+  });
+
+  test("el aviso SÍ ofrece el escape de la facturación: acá existe", () => {
+    // Su contraparte vive en `onboarding_wizard.test.tsx`: el mismo aviso, sin
+    // esta frase, porque allá el campo de facturación es obligatorio (`gt=0`) y
+    // no hay "prefiero no decirlo". Los dos tests juntos son la red; uno solo
+    // pasaría en verde con el texto compartido y la promesa incumplida.
+    renderForm();
+    expect(
+      screen.getByText(/La pregunta de facturación es opcional/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/prefiero no decirlo/i)).toBeInTheDocument();
   });
 
   test("NO existe ningún campo de contraseña: este formulario no crea la cuenta", () => {

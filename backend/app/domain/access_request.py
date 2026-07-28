@@ -139,4 +139,11 @@ ACCESS_REQUEST_TOKEN_TTL_HOURS: Final[int] = 48
 
 #: Versión del texto de consentimiento que acepta el solicitante al enviar el
 #: formulario. Se persiste con la solicitud; subirla cuando cambie el copy legal.
-CONSENT_VERSION: Final[str] = "v1"
+#:
+#: Tiene que coincidir con `frontend/src/lib/privacyNotices.ts::CONSENT_NOTICE_VERSION`.
+#: Si el cliente manda otra, el servicio lo loguea como `consent_version_mismatch`
+#: y persiste SIEMPRE esta — el valor del cliente es declarativo, no autoritativo.
+#:
+#: `v2`: reescritura del cuerpo del aviso y separación de la nota de facturación,
+#: que antes se mostraba también en el onboarding, donde es falsa.
+CONSENT_VERSION: Final[str] = "v2"

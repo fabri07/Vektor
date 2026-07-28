@@ -31,8 +31,8 @@ export default function SolicitarAccesoPage() {
           subtitle={
             <>
               Revisamos cada solicitud a mano: queremos entender tu negocio antes de
-              darte una cuenta, para asegurarnos de que los números que te vamos a
-              mostrar te sirvan de verdad. Te lleva unos minutos.
+              darte una cuenta, para asegurarnos de que podemos ayudarte. Te lleva un
+              minuto.
             </>
           }
         />

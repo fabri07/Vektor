@@ -30,7 +30,7 @@ import {
   YEARS_OPERATING_OPTIONS,
   type Choice,
 } from "@/lib/accessRequestOptions";
-import { CONFIDENTIALITY_NOTICE } from "@/lib/privacyNotices";
+import { CONFIDENTIALITY_NOTICE, NOTA_FACTURACION_OPCIONAL } from "@/lib/privacyNotices";
 import type { AccessRequestDraft } from "@/validation/accessRequest";
 
 export const inputClass =
@@ -190,15 +190,22 @@ export function RadioGroup<T extends string>({
   );
 }
 
-/** Aviso de confidencialidad: texto fijo, sin variantes por contexto. */
+/**
+ * Aviso de confidencialidad del formulario público.
+ *
+ * Suma `NOTA_FACTURACION_OPCIONAL` al cuerpo común porque acá —y solo acá— la
+ * banda de facturación tiene la opción "prefiero no decirlo". El mismo aviso en
+ * el onboarding post-login NO la lleva: ver `lib/privacyNotices.ts`.
+ */
 export function ConfidentialityNotice() {
+  const parrafos = [...CONFIDENTIALITY_NOTICE.paragraphs, NOTA_FACTURACION_OPCIONAL];
   return (
     <div className="rounded-xl border border-vektor-border bg-vektor-surface/60 p-4">
       <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-vektor-white">
         <span aria-hidden>🔒</span>
         {CONFIDENTIALITY_NOTICE.title}
       </p>
-      {CONFIDENTIALITY_NOTICE.paragraphs.map((parrafo) => (
+      {parrafos.map((parrafo) => (
         <p key={parrafo.slice(0, 24)} className="mt-2 text-xs leading-relaxed text-vektor-muted">
           {parrafo}
         </p>
