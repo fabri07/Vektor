@@ -707,22 +707,80 @@ async def test_approve_con_email_tomado_en_el_medio_no_acuna(
     assert await _contar(db_session, Tenant) == 1  # solo el del fixture
 
 
-async def test_no_se_puede_aprobar_una_unverified_pasada_por_waitlist(
-    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+@pytest.mark.parametrize(
+    "estado_previo",
+    [
+        AccessRequestStatus.UNVERIFIED,
+        AccessRequestStatus.REJECTED,
+        AccessRequestStatus.EXPIRED,
+    ],
+)
+async def test_no_se_puede_postergar_sin_doble_opt_in(
+    service: AccessRequestService,
+    db_session: AsyncSession,
+    encolados: list[tuple],
+    estado_previo: AccessRequestStatus,
 ):
-    """Bypass del doble opt-in: `waitlist` es legal desde `unverified` Y es aprobable.
+    """Postergar sin email confirmado rompía dos cosas a la vez.
 
-    Encadenadas, acuñarían un tenant contra un email que nadie confirmó. La
-    guardia que lo corta es `email_verified_at is None` en `approve()`, no el
-    estado.
+    (a) Consentimiento: encolaba el mail de decisión a una casilla que nadie
+    confirmó — justo lo que `expire_stale` se niega a hacer. (b) Recuperabilidad:
+    `waitlist` cuenta como trámite ABIERTO, así que dejaba a la solicitud sin
+    aprobar (falta el opt-in), sin resend (`resend_invite` no la atiende) y sin
+    reintento del formulario (`DUPLICATE_OPEN` sin mail). Desde
+    `rejected`-sin-verificar encima EMPEORABA: `rejected` no bloquea un trámite
+    nuevo y `waitlist` sí.
     """
     solicitud, _ = await service.create(_input(), ip_hash=None)
     assert solicitud is not None
-    await service.waitlist(
-        solicitud.id, reviewer_user_id=None, via="api", notes="parece serio"
-    )
+    solicitud.status = estado_previo.value
+    await db_session.commit()
+    encolados.clear()
+
+    with pytest.raises(AccessRequestInvalidTransition, match="doble opt-in"):
+        await service.waitlist(
+            solicitud.id, reviewer_user_id=None, via="api", notes="parece serio"
+        )
+
     await db_session.refresh(solicitud)
-    assert solicitud.status == AccessRequestStatus.WAITLIST.value  # estado aprobable
+    assert solicitud.status == estado_previo.value  # sin transición
+    assert encolados == []  # y sin mail a una casilla sin consentimiento
+
+
+async def test_postergar_una_verificada_si_anda_y_avisa(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """Control positivo: sin esto, el test de arriba pasaría aunque `waitlist`
+    estuviera rota para todo el mundo."""
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    token = await _token_vigente(db_session, solicitud.id)
+    await service.verify(str(token.token_id))
+    encolados.clear()
+
+    postergada = await service.waitlist(
+        solicitud.id, reviewer_user_id=None, via="api", notes="a revisar"
+    )
+
+    assert postergada.status == AccessRequestStatus.WAITLIST.value
+    assert [llamada[0] for llamada in encolados] == [srv.TASK_DECISION]
+
+
+async def test_la_guardia_de_approve_no_depende_de_la_de_waitlist(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """`approve()` sigue exigiendo el doble opt-in por su cuenta.
+
+    Hoy `waitlist()` ya no deja entrar una sin verificar, así que este estado no
+    se puede armar a través del servicio — se arma a mano a propósito. La
+    invariante es "no se acuña una cuenta contra un email que nadie confirmó", y
+    no puede quedar delegada en que ningún otro método deje pasar una
+    `unverified` a un estado aprobable.
+    """
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    solicitud.status = AccessRequestStatus.WAITLIST.value  # estado aprobable…
+    await db_session.commit()
     assert solicitud.email_verified_at is None  # …pero nadie confirmó el email
 
     with pytest.raises(AccessRequestNotApprovable, match="doble opt-in"):
@@ -738,33 +796,42 @@ async def test_no_se_puede_aprobar_una_unverified_pasada_por_waitlist(
     assert await _contar(db_session, User) == 0
 
 
-async def test_verificar_despues_de_waitlist_sella_el_email_y_deja_aprobar(
+async def test_verificar_despues_de_rechazar_sella_el_email_y_permite_rescatarla(
     service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
 ):
-    """La cadena completa: create → waitlist → verify → approve.
+    """La cadena de rescate completa: create → reject → verify → waitlist → approve.
 
-    El dueño puede postergar una solicitud ANTES de que el usuario clickee el
-    link (triar spam sin esperar el opt-in es legítimo). Cuando después clickea,
-    el doble opt-in ocurrió igual y `verify()` tiene que sellar
-    `email_verified_at` aunque el estado ya no sea `unverified` — si no, la
-    guardia de `approve()` deja la solicitud IRRECUPERABLE: no hay resend, no hay
-    solicitud nueva (cae en DUPLICATE_OPEN) y el segundo click da 400.
+    El dueño puede rechazar una solicitud ANTES de que el usuario clickee el link
+    (triar spam sin esperar el opt-in es legítimo, y `reject` tiene `notify` para
+    no escribirle). Cuando después clickea, el doble opt-in ocurrió igual y
+    `verify()` sella `email_verified_at` aunque el estado ya no sea `unverified`.
+
+    Ese sello es lo que hace RECUPERABLE el rechazo equivocado: recién con el
+    email confirmado el dueño puede corregirlo con `waitlist` y aprobar. Sin él,
+    `waitlist` rebota por el doble opt-in y la solicitud queda muerta.
     """
     solicitud, _ = await service.create(_input(), ip_hash=None)
     assert solicitud is not None
     token = await _token_vigente(db_session, solicitud.id)
 
-    await service.waitlist(
-        solicitud.id, reviewer_user_id=None, via="api", notes="a revisar"
+    await service.reject(
+        solicitud.id,
+        reviewer_user_id=None,
+        via="api",
+        reason="parecía spam",
+        notify=False,
     )
     encolados.clear()
 
     verificada = await service.verify(str(token.token_id))
 
     assert verificada.email_verified_at is not None  # el hecho quedó sellado
-    assert verificada.status == AccessRequestStatus.WAITLIST.value  # sin re-abrir
+    assert verificada.status == AccessRequestStatus.REJECTED.value  # sin re-abrir
     assert encolados == []  # el dueño ya la revisó: no se le vuelve a avisar
 
+    await service.waitlist(
+        solicitud.id, reviewer_user_id=None, via="api", notes="me equivoqué"
+    )
     resultado = await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
@@ -778,20 +845,42 @@ async def test_verificar_despues_de_waitlist_sella_el_email_y_deja_aprobar(
     assert await _contar(db_session, Tenant) == 1
 
 
-async def test_un_segundo_click_tras_verificar_desde_waitlist_no_da_400(
+async def test_un_segundo_click_tras_verificar_desde_rejected_no_da_400(
     service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
 ):
     """El link del mail lo abren dos veces (prefetchers, escáneres): sigue siendo 200."""
     solicitud, _ = await service.create(_input(), ip_hash=None)
     assert solicitud is not None
     token = await _token_vigente(db_session, solicitud.id)
-    await service.waitlist(solicitud.id, reviewer_user_id=None, via="api", notes=None)
+    await service.reject(
+        solicitud.id, reviewer_user_id=None, via="api", reason="spam", notify=False
+    )
     await service.verify(str(token.token_id))
 
     segunda = await service.verify(str(token.token_id))
 
     assert segunda.id == solicitud.id
-    assert segunda.status == AccessRequestStatus.WAITLIST.value
+    assert segunda.status == AccessRequestStatus.REJECTED.value
+
+
+async def test_una_unverified_que_no_se_pudo_postergar_sigue_recuperable(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """Lo que importa del rechazo de la transición no es el 409: es que la
+    solicitud queda EXACTAMENTE como estaba, o sea todavía verificable con su
+    token y todavía reemitible."""
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    token = await _token_vigente(db_session, solicitud.id)
+
+    with pytest.raises(AccessRequestInvalidTransition):
+        await service.waitlist(
+            solicitud.id, reviewer_user_id=None, via="api", notes=None
+        )
+
+    verificada = await service.verify(str(token.token_id))
+    assert verificada.status == AccessRequestStatus.PENDING.value
+    assert verificada.email_verified_at is not None
 
 
 async def test_approve_de_una_solicitud_inexistente(service: AccessRequestService):

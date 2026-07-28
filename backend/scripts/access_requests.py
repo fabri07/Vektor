@@ -779,6 +779,13 @@ async def cmd_waitlist(session: AsyncSession, args: argparse.Namespace) -> int:
     )
     if solicitud.status == AccessRequestStatus.APPROVED.value:
         print("\n  ⚠  Ya está aprobada: el servicio no la va a postergar.")
+    if solicitud.email_verified_at is None:
+        # Postergar manda mail y deja el trámite abierto: sin doble opt-in sería
+        # escribirle a una casilla sin consentimiento y trabarle el reintento.
+        print(
+            "\n  ⚠  Nadie confirmó el email: el servicio no la va a postergar.\n"
+            "     Para descartarla sin escribirle: reject --no-email."
+        )
 
     if not args.apply:
         print("\nDry-run: no se escribió nada. Repetí con --apply para postergarla.")

@@ -335,14 +335,19 @@ class AccessRequestNotResendable(AccessRequestError):  # noqa: N818
 
 
 class AccessRequestInvalidTransition(AccessRequestError):  # noqa: N818
-    """Transición ilegal (rechazar o postergar algo ya aprobado)."""
+    """Transición ilegal: rechazar/postergar algo ya aprobado, o postergar algo
+    que todavía no confirmó el email."""
 
-    def __init__(self, current_status: str, target_status: str) -> None:
+    def __init__(
+        self, current_status: str, target_status: str, *, motivo: str | None = None
+    ) -> None:
+        detalle = f" ({motivo})" if motivo else ""
         super().__init__(
-            f"No se puede pasar de '{current_status}' a '{target_status}'"
+            f"No se puede pasar de '{current_status}' a '{target_status}'{detalle}"
         )
         self.current_status = current_status
         self.target_status = target_status
+        self.motivo = motivo
 
 
 def _encolar(nombre_tarea: str, *args: object) -> None:
@@ -550,16 +555,16 @@ class AccessRequestService:
             # Token válido y NUNCA usado sobre una solicitud ya revisada: el
             # doble opt-in ocurrió igual —el usuario recibió el mail y clickeó—,
             # lo único distinto es que el dueño ya la había triado. Pasa de
-            # verdad: `waitlist()` acepta una `unverified` (descartar o postergar
-            # spam sin esperar el click es legítimo y útil).
+            # verdad: `reject()` acepta una `unverified` (descartar spam sin
+            # esperar el click es legítimo y útil). `waitlist()` ya NO, justo
+            # porque postergar sin verificar dejaba la solicitud sin salida.
             #
             # Por eso se sella `email_verified_at`: registra un hecho sobre el
-            # EMAIL, no sobre la cola de revisión. Sin esto la solicitud quedaba
-            # IRRECUPERABLE — `approve()` la rechaza para siempre por la guardia
-            # del doble opt-in, `resend_verification` es no-op fuera de
-            # `unverified`, una solicitud nueva cae en `DUPLICATE_OPEN` porque
-            # `waitlist` cuenta como abierta, y el segundo click da 400 en
-            # `_verify_idempotente` a un usuario que sí confirmó.
+            # EMAIL, no sobre la cola de revisión. Sin esto una `rejected` que
+            # después confirma quedaría con el hecho perdido, el segundo click
+            # daría 400 en `_verify_idempotente` a un usuario que sí confirmó, y
+            # si el dueño corrigiera el rechazo con un `waitlist` la solicitud ya
+            # no sería aprobable nunca.
             #
             # NO se re-abre el estado (sigue en waitlist/rejected) ni se avisa al
             # dueño: ya revisó esta solicitud, un aviso sería ruido.
@@ -687,10 +692,12 @@ class AccessRequestService:
             )
         if solicitud.status not in ESTADOS_APROBABLES:
             raise AccessRequestNotApprovable(solicitud.status)
-        # El estado NO alcanza como prueba del doble opt-in: `waitlist()` acepta
-        # una solicitud `unverified` (postergar algo sin revisar es legítimo) y
-        # `waitlist` es aprobable, así que encadenar waitlist+approve acuñaría un
-        # tenant contra un email que nadie confirmó. La condición que importa es
+        # El estado NO alcanza como prueba del doble opt-in, y esta guardia se
+        # queda aunque hoy `waitlist()` también exija `email_verified_at`: la
+        # invariante es "no se acuña una cuenta contra un email que nadie
+        # confirmó", y depender de que ningún otro método deje pasar una
+        # `unverified` a un estado aprobable es exactamente el acoplamiento que
+        # hizo falta cerrar acá la primera vez. La condición que importa es
         # esta, no el estado.
         if solicitud.email_verified_at is None:
             raise AccessRequestNotApprovable(
@@ -839,15 +846,45 @@ class AccessRequestService:
     ) -> AccessRequest:
         """Posterga la solicitud. **No es terminal**: después se puede aprobar o rechazar.
 
-        El único origen prohibido es ``approved`` (ya acuñó un tenant). Postergar
-        algo ``rejected`` o ``expired`` sí se permite: es una corrección manual del
-        dueño —el único que puede llamar acá— y vuelve a abrir el trámite en vez de
-        obligar al solicitante a completar el formulario de nuevo.
+        Dos precondiciones, y las dos son la misma decisión vista de dos lados.
+
+        1. El origen no puede ser ``approved`` (ya acuñó un tenant). Postergar
+           algo ``rejected`` o ``expired`` sí se permite: es una corrección
+           manual del dueño —el único que puede llamar acá— y vuelve a abrir el
+           trámite en vez de obligar al solicitante a completar el formulario de
+           nuevo.
+        2. **El email tiene que estar confirmado** (misma condición que
+           ``approve``, y por el mismo motivo). Antes se aceptaba una
+           ``unverified``, y eso rompía dos cosas a la vez:
+
+           * *Consentimiento.* Postergar encola el mail de decisión, así que se
+             le escribía a una casilla que nadie confirmó — exactamente lo que
+             ``expire_stale`` se niega a hacer 70 líneas más abajo. Las dos
+             reglas no podían ser ciertas al mismo tiempo.
+           * *Recuperabilidad.* ``waitlist`` cuenta como trámite ABIERTO
+             (``OPEN_ACCESS_REQUEST_STATUSES``), pero ``approve`` exige el doble
+             opt-in, ``resend_invite`` no la atiende y el reenvío del formulario
+             solo reemite token desde ``unverified``. Una waitlist sin verificar
+             cuyo token de 48 h venciera quedaba sin ninguna salida, y el
+             visitante recibía el 201 genérico "te mandamos un correo" para
+             siempre sin que llegara nada. Desde ``rejected``-sin-verificar
+             encima empeoraba: ``rejected`` no bloquea un trámite nuevo y
+             ``waitlist`` sí.
+
+        Para triar spam **antes** del click sigue estando ``reject(notify=False)``,
+        que es la herramienta correcta: no manda mail y no bloquea un reintento
+        legítimo.
         """
         solicitud = await self._lock(request_id)
         if solicitud.status == AccessRequestStatus.WAITLIST.value:
             return solicitud
         self._exigir_no_aprobada(solicitud, AccessRequestStatus.WAITLIST)
+        if solicitud.email_verified_at is None:
+            raise AccessRequestInvalidTransition(
+                solicitud.status,
+                AccessRequestStatus.WAITLIST.value,
+                motivo="nadie confirmó el email (doble opt-in pendiente)",
+            )
 
         solicitud.status = AccessRequestStatus.WAITLIST.value
         self._sellar_revision(solicitud, reviewer_user_id, via, notes=notes)

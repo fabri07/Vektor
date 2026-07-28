@@ -502,6 +502,26 @@ async def test_no_se_puede_rechazar_ni_postergar_una_aprobada(
     assert postergar.status_code == 409, postergar.text
 
 
+async def test_no_se_puede_postergar_una_sin_verificar(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    superadmin_headers: dict[str, str],
+    encolar: Any,
+) -> None:
+    """Postergar manda mail y deja el trámite abierto: sin doble opt-in sería
+    escribirle a una casilla sin consentimiento y trabarle el reintento. El
+    camino para descartarla es `reject` (que tiene `notify`)."""
+    solicitud = await _sembrar(db_session, status=AccessRequestStatus.UNVERIFIED)
+
+    postergar = await client.post(
+        f"{BASE}/{solicitud.id}/waitlist", json={}, headers=superadmin_headers
+    )
+
+    assert postergar.status_code == 409, postergar.text
+    assert "doble opt-in" in postergar.json()["detail"]
+    encolar.assert_not_called()
+
+
 async def test_decisiones_sobre_una_solicitud_inexistente_son_404(
     client: AsyncClient, superadmin_headers: dict[str, str]
 ) -> None:
