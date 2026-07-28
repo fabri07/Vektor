@@ -1,4 +1,5 @@
 # Re-export all models so Alembic autogenerate can discover them.
+from app.persistence.models.access_request import AccessRequest, AccessRequestToken
 from app.persistence.models.activity import UserActivityEvent
 from app.persistence.models.agent_automation_rule import AgentAutomationRule
 from app.persistence.models.analytics_event import AnalyticsEvent
@@ -102,4 +103,6 @@ __all__ = [
     "ExternalOperationLog",
     "SocialMetric",
     "TenantMaintenanceLock",
+    "AccessRequest",
+    "AccessRequestToken",
 ]
