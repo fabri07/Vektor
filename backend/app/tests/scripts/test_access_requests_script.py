@@ -12,6 +12,10 @@ formato:
 4. **La aprobación pasa por el servicio** y crea una suscripción ``FREE`` aunque
    la intención declarada haya sido ``premium``.
 5. **Nunca se imprime el ``ip_hash``.**
+6. **El script previene, el servicio decide.** Los avisos del dry-run son
+   diagnóstico: con ``--apply`` se delega igual y el código 1 sale de la
+   excepción del servicio, para que la CLI no tenga una copia propia —y algún
+   día desactualizada— de qué está permitido.
 
 Se carga el módulo por ruta de archivo (``scripts/`` no es un paquete) — mismo
 patrón que ``test_detect_misvoided_purchases.py``. Importar el módulo dispara
@@ -190,6 +194,16 @@ async def test_dry_run_de_reject_no_transiciona(
         ["reject", str(premium.id), "--reason", "fuera de los rubros soportados"]
     )
     assert await mod.cmd_reject(db_session, args) == 0
+    assert await _estado(db_session, premium.id) == AccessRequestStatus.PENDING.value
+
+
+async def test_dry_run_de_reject_avisa_que_el_motivo_es_muy_corto(
+    mod: Any, db_session: AsyncSession, premium: AccessRequest, capsys: Any
+) -> None:
+    """El dry-run no promete un rechazo que el ``--apply`` va a rebotar."""
+    args = mod.parse_args(["reject", str(premium.id), "--reason", "ab"])
+    assert await mod.cmd_reject(db_session, args) == 0
+    assert "mínimo 3 caracteres" in capsys.readouterr().out
     assert await _estado(db_session, premium.id) == AccessRequestStatus.PENDING.value
 
 
@@ -445,6 +459,15 @@ async def test_list_email_failed_solo_trae_las_que_fallaron(
     assert "MAIL FALLIDO: decisión" in salida
 
 
+async def test_list_email_failed_anuncia_el_filtro_de_estado_en_el_titulo(
+    mod: Any, db_session: AsyncSession, premium: AccessRequest, capsys: Any
+) -> None:
+    """Sin eso, un resultado corto se lee como "no hay fallidos" y hay otro filtro."""
+    args = mod.parse_args(["list", "--email-failed", "--status", "pending"])
+    assert await mod.cmd_list(db_session, args) == 0
+    assert "mail FALLIDO · estado: pending" in capsys.readouterr().out
+
+
 async def test_list_status_all_incluye_estados_terminales(
     mod: Any, db_session: AsyncSession, premium: AccessRequest, capsys: Any
 ) -> None:
@@ -498,10 +521,64 @@ async def test_otros_agrupa_por_descripcion_normalizada(
 async def test_resend_invite_rechaza_los_estados_sin_mail_pendiente(
     mod: Any, db_session: AsyncSession, premium: AccessRequest, capsys: Any
 ) -> None:
-    """Una ``pending`` espera al DUEÑO, no al solicitante: no hay qué reenviar."""
+    """Una ``pending`` espera al DUEÑO, no al solicitante: no hay qué reenviar.
+
+    Y el que lo rechaza es el SERVICIO, no el script: el aviso del preview no
+    corta: con ``--apply`` se delega igual y el código 1 sale de
+    ``AccessRequestNotResendable``. Si el script volviera a cortar por su cuenta,
+    su lista de estados reencolables divergiría de la del servicio en silencio.
+    """
     args = mod.parse_args(["resend-invite", str(premium.id), "--apply"])
     assert await mod.cmd_resend_invite(db_session, args) == 1
-    assert "no hay ningún mail" in capsys.readouterr().out
+    salida = capsys.readouterr().out
+    assert "no hay ningún mail" in salida  # el preview avisó
+    # ...y la decisión la tomó el servicio, no el script.
+    assert "ERROR: no se reenvió." in salida
+    assert "no tiene mail para reencolar" in salida
+
+
+async def test_dry_run_de_resend_invite_de_un_estado_sin_mail_no_escribe(
+    mod: Any, db_session: AsyncSession, premium: AccessRequest, capsys: Any
+) -> None:
+    """El preview de un estado no reencolable avisa, pero sigue siendo un dry-run."""
+    args = mod.parse_args(["resend-invite", str(premium.id)])
+    assert await mod.cmd_resend_invite(db_session, args) == 0
+    assert await _estado(db_session, premium.id) == AccessRequestStatus.PENDING.value
+    salida = capsys.readouterr().out
+    assert "no hay ningún mail" in salida
+    assert "no se escribió nada" in salida
+
+
+async def test_resend_invite_de_una_aprobada_sin_usuario_avisa_y_delega(
+    mod: Any, db_session: AsyncSession, capsys: Any
+) -> None:
+    """FK ``ON DELETE SET NULL``: el dry-run no promete un mail que el apply rebota."""
+    huerfana = _solicitud(
+        email="sinusuario@x.test",
+        business_name="Cuenta Borrada SA",
+        status=AccessRequestStatus.APPROVED,
+    )
+    db_session.add(huerfana)
+    await db_session.flush()
+    assert huerfana.approved_user_id is None
+
+    assert (
+        await mod.cmd_resend_invite(
+            db_session, mod.parse_args(["resend-invite", str(huerfana.id)])
+        )
+        == 0
+    )
+    assert "ya no apunta a ningún usuario" in capsys.readouterr().out
+
+    # Con --apply la autoridad es el servicio, que corta en vez de inventar a
+    # quién invitar.
+    assert (
+        await mod.cmd_resend_invite(
+            db_session, mod.parse_args(["resend-invite", str(huerfana.id), "--apply"])
+        )
+        == 1
+    )
+    assert "ERROR: no se reenvió." in capsys.readouterr().out
 
 
 async def test_dry_run_de_resend_invite_no_emite_token(

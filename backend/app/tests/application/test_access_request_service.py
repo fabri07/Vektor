@@ -6,6 +6,12 @@ tenants), `plan_code` siempre FREE pese a `requested_plan="premium"` y
 `onboarding_completed=False` al aprobar. Más el orden de la cola y los armadores
 de email.
 
+También las dos herramientas de operación que, sin panel de administración, son
+lo único que tiene el dueño: `resend_invite()` —que reemite un mail perdido sin
+volver a acuñar la cuenta y sin inventar destinatario— y `expire_stale()`, que
+es higiene de la cola y NO una revisión (no sella los campos de revisión ni le
+escribe a una casilla que nunca confirmó el doble opt-in).
+
 El encolado se intercepta con una fixture autouse (`encolados`): además de
 registrar las llamadas, verifica que en el momento de encolar la sesión ya no
 tiene nada pendiente — o sea, que se commiteó ANTES de tocar el email (regla
@@ -27,8 +33,10 @@ from app.application.services.access_request_service import (
     AccessRequestInvalidTransition,
     AccessRequestNotApprovable,
     AccessRequestNotFound,
+    AccessRequestNotResendable,
     AccessRequestService,
     CreateOutcome,
+    ResendKind,
     build_account_exists_email,
     build_decision_email,
     build_owner_notification_email,
@@ -39,7 +47,7 @@ from app.domain.access_request import (
     AccessRequestStatus,
     RequestedPlan,
 )
-from app.domain.contact_lead import DEDUP_WINDOW_SECONDS
+from app.domain.contact_lead import DEDUP_WINDOW_SECONDS, EmailNotificationStatus
 from app.domain.verticals import Vertical
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
 from app.persistence.models.audit import DecisionAuditLog
@@ -1015,6 +1023,234 @@ async def test_las_decisiones_idempotentes_no_duplican_la_auditoria(
         if f.decision_type == srv.DECISION_APPROVED
     ]
     assert len(filas) == 1
+
+
+# ── resend_invite() — el reintento manual de un mail perdido ─────────────────
+#
+# Sin panel de administración, este método y `expire_stale()` son las dos únicas
+# herramientas de operación del dueño: lo que no esté fijado acá se rompe sin que
+# nadie se entere hasta que un solicitante aprobado no puede entrar.
+
+
+async def _aprobada(
+    service: AccessRequestService,
+    db_session: AsyncSession,
+    encolados: list[tuple],
+    **overrides,
+):
+    """Una solicitud ya aprobada (con su tenant, su usuario y su invitación)."""
+    solicitud = await _crear_verificada(service, db_session, encolados, **overrides)
+    aprobacion = await service.approve(
+        solicitud.id,
+        vertical=Vertical.KIOSCO_ALMACEN,
+        reviewer_user_id=None,
+        via="script",
+        notes=None,
+    )
+    encolados.clear()
+    return solicitud, aprobacion
+
+
+async def test_resend_invite_de_una_aprobada_no_acuna_un_segundo_tenant(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """El caso caro: la cuenta ya existe y el mail se perdió. Se reemite SOLO el link.
+
+    Es el único camino que toca una solicitud ya aprobada, así que la propiedad
+    que no puede aflojar es que reenviar un mail no vuelva a acuñar la cuenta.
+    """
+    solicitud, aprobacion = await _aprobada(service, db_session, encolados)
+    # El escenario real: el mail de la decisión quedó `failed` y el usuario nunca
+    # se enteró de que lo aprobaron.
+    solicitud.decision_email_status = EmailNotificationStatus.FAILED.value
+    await db_session.commit()
+
+    resultado = await service.resend_invite(solicitud.id, via="script")
+
+    assert resultado.kind is ResendKind.INVITE
+    assert resultado.enqueued is True
+    assert resultado.token_id is not None
+    assert resultado.token_id != aprobacion.invite_token_id  # es una invitación NUEVA
+
+    # Lo que no puede pasar: acuñar la cuenta otra vez.
+    assert await _contar(db_session, Tenant) == 1
+    assert await _contar(db_session, User) == 1
+    assert await _contar(db_session, BusinessProfile) == 1
+
+    # La invitación anterior queda invalidada (la acuña el mismo helper que
+    # `approve`, que marca `used` los tokens vigentes del usuario).
+    tokens = {
+        t.token_id: t
+        for t in (await db_session.execute(select(PasswordResetToken))).scalars().all()
+    }
+    assert len(tokens) == 2
+    assert tokens[aprobacion.invite_token_id].used is True
+    assert tokens[resultado.token_id].used is False
+
+    await db_session.refresh(solicitud)
+    assert solicitud.status == AccessRequestStatus.APPROVED.value  # no transiciona
+    # Vuelve a `pending`: es exactamente lo que la saca de `list --email-failed`
+    # mientras el reintento está en curso.
+    assert solicitud.decision_email_status == EmailNotificationStatus.PENDING.value
+
+    reenvios = [
+        f
+        for f in await _auditorias(db_session)
+        if f.decision_type == srv.DECISION_INVITE_RESENT
+    ]
+    assert len(reenvios) == 1
+    assert reenvios[0].tenant_id == aprobacion.tenant_id
+    assert reenvios[0].triggered_by == "script:access_request_resend_invite"
+
+    assert encolados == [
+        (
+            srv.TASK_DECISION,
+            str(solicitud.id),
+            AccessRequestStatus.APPROVED.value,
+            str(resultado.token_id),
+        )
+    ]
+
+
+async def test_resend_invite_de_una_aprobada_sin_usuario_no_inventa_a_quien_invitar(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """FK ``ON DELETE SET NULL``: el usuario acuñado ya no existe.
+
+    Elegir otro destinatario sería inventar, así que corta ruidoso y no escribe.
+    """
+    solicitud, _ = await _aprobada(service, db_session, encolados)
+    solicitud.approved_user_id = None
+    await db_session.commit()
+    tokens_antes = await _contar(db_session, PasswordResetToken)
+
+    with pytest.raises(AccessRequestNotResendable, match="ningún usuario"):
+        await service.resend_invite(solicitud.id, via="script")
+
+    assert await _contar(db_session, PasswordResetToken) == tokens_antes
+    assert encolados == []
+
+
+async def test_resend_invite_de_una_unverified_respeta_el_cooldown(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """Un click no puede disparar un mail: el cooldown no es error, es `enqueued=False`."""
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    tokens_antes = await _contar(db_session, AccessRequestToken)
+    encolados.clear()
+
+    resultado = await service.resend_invite(solicitud.id, via="script")
+
+    assert resultado.kind is ResendKind.VERIFICATION
+    assert resultado.enqueued is False
+    assert resultado.token_id is None
+    assert await _contar(db_session, AccessRequestToken) == tokens_antes
+    assert encolados == []
+
+
+async def test_resend_invite_de_una_unverified_reemite_pasado_el_cooldown(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    await db_session.execute(
+        update(AccessRequestToken).values(
+            created_at=datetime.now(UTC) - timedelta(seconds=DEDUP_WINDOW_SECONDS + 60)
+        )
+    )
+    await db_session.commit()
+    encolados.clear()
+
+    resultado = await service.resend_invite(solicitud.id, via="script")
+
+    assert resultado.enqueued is True
+    nuevo = await _token_vigente(db_session, solicitud.id)
+    assert resultado.token_id == nuevo.token_id
+    assert encolados == [
+        (srv.TASK_VERIFICACION, str(solicitud.id), str(nuevo.token_id))
+    ]
+
+
+@pytest.mark.parametrize(
+    "estado",
+    [
+        AccessRequestStatus.PENDING,
+        AccessRequestStatus.WAITLIST,
+        AccessRequestStatus.REJECTED,
+        AccessRequestStatus.EXPIRED,
+    ],
+)
+async def test_resend_invite_de_un_estado_sin_mail_pendiente_levanta(
+    service: AccessRequestService,
+    db_session: AsyncSession,
+    encolados: list[tuple],
+    estado: AccessRequestStatus,
+):
+    """Una `pending`/`waitlist` espera al DUEÑO; una `rejected`/`expired`, a nadie."""
+    solicitud = await _crear_verificada(service, db_session, encolados)
+    solicitud.status = estado.value
+    await db_session.commit()
+
+    with pytest.raises(AccessRequestNotResendable, match=estado.value):
+        await service.resend_invite(solicitud.id, via="script")
+
+    assert await _contar(db_session, PasswordResetToken) == 0
+    assert encolados == []
+
+
+# ── expire_stale() — higiene de la cola, NO una revisión ─────────────────────
+
+
+async def _rancia(
+    service: AccessRequestService, db_session: AsyncSession, dias: int = 40, **overrides
+) -> AccessRequest:
+    """Una `unverified` creada hace `dias` (nadie confirmó nunca esa casilla)."""
+    solicitud, _ = await service.create(_input(**overrides), ip_hash=None)
+    assert solicitud is not None
+    await db_session.execute(
+        update(AccessRequest)
+        .where(AccessRequest.id == solicitud.id)
+        .values(created_at=datetime.now(UTC) - timedelta(days=dias))
+    )
+    await db_session.commit()
+    return solicitud
+
+
+async def test_expire_stale_no_sella_la_revision_ni_manda_mail(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """Expirar no es triage del dueño ni una decisión que se le comunique a nadie.
+
+    Las tres invariantes juntas: si se sellaran los campos de revisión la
+    solicitud parecería mirada por alguien, y encolar un mail sería escribirle a
+    una casilla que nunca confirmó el doble opt-in. El patrón copiable de
+    `reject()`/`waitlist()` hace las dos cosas, y está a 60 líneas en el mismo
+    archivo — de ahí que esto se fije con un test y no con un comentario.
+    """
+    solicitud = await _rancia(service, db_session)
+    encolados.clear()
+
+    expiradas = await service.expire_stale(older_than_days=14, via="script")
+
+    assert [f.id for f in expiradas] == [solicitud.id]
+    await db_session.refresh(solicitud)
+    assert solicitud.status == AccessRequestStatus.EXPIRED.value
+    assert solicitud.reviewed_at is None
+    assert solicitud.reviewed_by_user_id is None
+    assert solicitud.reviewed_via is None
+    assert solicitud.review_notes is None
+    assert encolados == []
+
+    expiraciones = [
+        f
+        for f in await _auditorias(db_session)
+        if f.decision_type == srv.DECISION_EXPIRED
+    ]
+    assert len(expiraciones) == 1
+    assert expiraciones[0].triggered_by == "script:access_request_expire_stale"
+    assert expiraciones[0].decision_data["access_request_id"] == str(solicitud.id)
+    assert expiraciones[0].decision_data["older_than_days"] == 14
 
 
 # ── Armadores de email (puros) ───────────────────────────────────────────────

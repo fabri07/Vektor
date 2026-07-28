@@ -185,7 +185,9 @@ def prioridad(solicitud: AccessRequest) -> str:
 
 def rubro(solicitud: AccessRequest) -> str:
     """Vertical asignado si ya se aprobó; si no, el declarado por el solicitante."""
-    return solicitud.assigned_vertical_code or solicitud.requested_vertical
+    if solicitud.assigned_vertical_code is None:
+        return solicitud.requested_vertical
+    return solicitud.assigned_vertical_code
 
 
 def emails_fallidos(solicitud: AccessRequest) -> list[str]:
@@ -351,7 +353,12 @@ async def cmd_list(session: AsyncSession, args: argparse.Namespace) -> int:
     plan = None if args.plan in (None, TODOS) else RequestedPlan(args.plan)
 
     if args.email_failed:
+        # El estado se anexa al título igual que el plan: sin eso, un
+        # `--email-failed --status pending` que devuelve poco se lee como si no
+        # hubiera mails fallidos, cuando en realidad hay un filtro más puesto.
         titulo = "Solicitudes con algún mail FALLIDO"
+        if estado is not None:
+            titulo += f" · estado: {estado.value}"
         filas, total = await listar_con_email_fallido(
             session, estado=estado, plan=plan, limit=args.limit
         )
@@ -424,9 +431,10 @@ def imprimir_ficha(solicitud: AccessRequest) -> None:
                 f"  {'Detalle:':<22}{opcional(solicitud.vertical_other_text)}", ancho
             )
         )
+    asignado = solicitud.assigned_vertical_code
     print(
         f"  {'Asignado:':<22}"
-        f"{solicitud.assigned_vertical_code or '— (lo decide el dueño al aprobar)'}"
+        f"{'— (lo decide el dueño al aprobar)' if asignado is None else asignado}"
     )
 
     print("\n  --- Screening del negocio ---")
@@ -679,6 +687,12 @@ async def cmd_approve(session: AsyncSession, args: argparse.Namespace) -> int:
 # ── reject / waitlist ────────────────────────────────────────────────────────
 
 
+#: Largo mínimo del motivo del rechazo. Espeja la validación de
+#: ``AccessRequestService.reject()`` para poder avisarlo en el dry-run: es
+#: PREVIEW, no control de acceso — el que valida de verdad es el servicio.
+_MINIMO_MOTIVO_RECHAZO = 3
+
+
 async def cmd_reject(session: AsyncSession, args: argparse.Namespace) -> int:
     request_id = exigir_uuid(args.request_id)
     servicio = AccessRequestService(session)
@@ -705,6 +719,13 @@ async def cmd_reject(session: AsyncSession, args: argparse.Namespace) -> int:
         print("\n  ⚠  Ya está aprobada: el servicio no la va a rechazar.")
     elif solicitud.status == AccessRequestStatus.REJECTED.value:
         print("\n  ⚠  Ya estaba rechazada: es idempotente y no re-notifica.")
+    if len(args.reason.strip()) < _MINIMO_MOTIVO_RECHAZO:
+        # Que el dry-run no prometa un rechazo que el --apply va a rebotar.
+        print(
+            "\n  ⚠  El servicio va a rechazar esta operación:\n"
+            f"     - el motivo es obligatorio (mínimo {_MINIMO_MOTIVO_RECHAZO} "
+            "caracteres)."
+        )
 
     if not args.apply:
         print("\nDry-run: no se escribió nada. Repetí con --apply para rechazar.")
@@ -831,6 +852,17 @@ async def cmd_otros(session: AsyncSession, args: argparse.Namespace) -> int:
 
 
 async def cmd_resend_invite(session: AsyncSession, args: argparse.Namespace) -> int:
+    """Reencola el mail que el solicitante está esperando (verificación o invitación).
+
+    Lo que se imprime antes del ``--apply`` es **preview, no control de acceso**
+    —mismo criterio que ``bloqueos_para_aprobar``—: avisa qué va a pasar, pero la
+    autoridad sobre qué estado es reencolable es ``AccessRequestService``, que
+    decide adentro de la transacción con ``FOR UPDATE``. Por eso el preview de un
+    estado sin mail pendiente NO corta: con ``--apply`` se llama al servicio
+    igual y su ``AccessRequestNotResendable`` es la que devuelve el código 1. Si
+    el script cortara por su cuenta, mañana el servicio cambia la lista de
+    estados reencolables y la CLI se queda con la regla vieja en silencio.
+    """
     request_id = exigir_uuid(args.request_id)
     servicio = AccessRequestService(session)
     solicitud = await servicio.get(request_id)
@@ -860,14 +892,23 @@ async def cmd_resend_invite(session: AsyncSession, args: argparse.Namespace) -> 
             f"  {'':<22}Invalida los links de reset vigentes del usuario.\n"
             f"  {'':<22}No cambia el estado ni acuña un segundo tenant."
         )
+        if solicitud.approved_user_id is None:
+            # FK ON DELETE SET NULL: el usuario acuñado ya no existe. El servicio
+            # no elige otro destinatario (sería inventar), así que se avisa acá
+            # en vez de prometer un mail que el --apply después rechaza.
+            print(
+                "\n  ⚠  El servicio va a rechazar este reenvío:\n"
+                "     - la solicitud aprobada ya no apunta a ningún usuario "
+                "(se borró la cuenta): no hay a quién invitar."
+            )
     else:
         print(
-            f"\n  ERROR: en estado '{solicitud.status}' no hay ningún mail que el "
-            "solicitante esté esperando.\n"
-            "  Solo 'unverified' (verificación) y 'approved' (invitación) se "
-            "pueden reenviar."
+            f"\n  ⚠  En estado '{solicitud.status}' no hay ningún mail que el "
+            "solicitante esté esperando;\n"
+            "     el servicio va a rechazar el reenvío. Solo 'unverified' "
+            "(verificación) y\n"
+            "     'approved' (invitación) tienen algo para reencolar."
         )
-        return 1
 
     if not args.apply:
         print("\nDry-run: no se escribió nada. Repetí con --apply para reenviarlo.")
