@@ -456,8 +456,38 @@ class AccessRequestService:
             raise self._token_invalido()
 
         if solicitud.status != AccessRequestStatus.UNVERIFIED.value:
-            # Token válido sobre una solicitud ya revisada: se consume igual (ya
-            # quedó en `used=True`), pero no se re-abre ni se re-notifica.
+            # Token válido y NUNCA usado sobre una solicitud ya revisada: el
+            # doble opt-in ocurrió igual —el usuario recibió el mail y clickeó—,
+            # lo único distinto es que el dueño ya la había triado. Pasa de
+            # verdad: `waitlist()` acepta una `unverified` (descartar o postergar
+            # spam sin esperar el click es legítimo y útil).
+            #
+            # Por eso se sella `email_verified_at`: registra un hecho sobre el
+            # EMAIL, no sobre la cola de revisión. Sin esto la solicitud quedaba
+            # IRRECUPERABLE — `approve()` la rechaza para siempre por la guardia
+            # del doble opt-in, `resend_verification` es no-op fuera de
+            # `unverified`, una solicitud nueva cae en `DUPLICATE_OPEN` porque
+            # `waitlist` cuenta como abierta, y el segundo click da 400 en
+            # `_verify_idempotente` a un usuario que sí confirmó.
+            #
+            # NO se re-abre el estado (sigue en waitlist/rejected) ni se avisa al
+            # dueño: ya revisó esta solicitud, un aviso sería ruido.
+            if solicitud.email_verified_at is None:
+                solicitud.email_verified_at = ahora
+                self._auditar(
+                    solicitud,
+                    decision_type=DECISION_VERIFIED,
+                    triggered_by="public:access_request_verify",
+                    extra={
+                        "token_id": str(token_uuid),
+                        "verificada_despues_de_revisar": True,
+                    },
+                )
+                logger.info(
+                    "access_request.verified_after_review",
+                    request_id=str(solicitud.id),
+                    status=solicitud.status,
+                )
             await self._session.commit()
             return solicitud
 
@@ -898,8 +928,17 @@ class AccessRequestService:
         está en el identity map, SQLAlchemy devuelve la copia cacheada y el
         ``status`` que se chequea puede ser el viejo — el lock bloquearía la fila
         pero la decisión se tomaría sobre datos rancios, que es justo la mitad
-        del valor del ``FOR UPDATE``. El autoflush previo drena lo pendiente, así
-        que la relectura no pisa cambios sin escribir.
+        del valor del ``FOR UPDATE``. Y hace falta MÁS de lo que parece, porque
+        la factory de sesiones usa ``expire_on_commit=False``
+        (``persistence/db/session.py``): tras un commit los atributos no se
+        expiran, así que sin esto la copia vieja sobrevive.
+
+        Contrapartida, explícita porque la factory también usa
+        ``autoflush=False``: si un caller llegara con cambios PENDIENTES sobre
+        esta misma fila, la relectura los pisaría en silencio (no hay autoflush
+        que los drene antes del SELECT). Hoy ningún caller está en esa
+        situación —los tres entran a decidir con la sesión limpia—, pero si eso
+        cambia hay que flushear antes de llamar acá.
         """
         solicitud = (
             await self._session.execute(

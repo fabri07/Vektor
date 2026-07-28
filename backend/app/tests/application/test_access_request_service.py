@@ -730,6 +730,62 @@ async def test_no_se_puede_aprobar_una_unverified_pasada_por_waitlist(
     assert await _contar(db_session, User) == 0
 
 
+async def test_verificar_despues_de_waitlist_sella_el_email_y_deja_aprobar(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """La cadena completa: create → waitlist → verify → approve.
+
+    El dueño puede postergar una solicitud ANTES de que el usuario clickee el
+    link (triar spam sin esperar el opt-in es legítimo). Cuando después clickea,
+    el doble opt-in ocurrió igual y `verify()` tiene que sellar
+    `email_verified_at` aunque el estado ya no sea `unverified` — si no, la
+    guardia de `approve()` deja la solicitud IRRECUPERABLE: no hay resend, no hay
+    solicitud nueva (cae en DUPLICATE_OPEN) y el segundo click da 400.
+    """
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    token = await _token_vigente(db_session, solicitud.id)
+
+    await service.waitlist(
+        solicitud.id, reviewer_user_id=None, via="api", notes="a revisar"
+    )
+    encolados.clear()
+
+    verificada = await service.verify(str(token.token_id))
+
+    assert verificada.email_verified_at is not None  # el hecho quedó sellado
+    assert verificada.status == AccessRequestStatus.WAITLIST.value  # sin re-abrir
+    assert encolados == []  # el dueño ya la revisó: no se le vuelve a avisar
+
+    resultado = await service.approve(
+        solicitud.id,
+        vertical=Vertical.KIOSCO_ALMACEN,
+        reviewer_user_id=None,
+        via="api",
+        notes=None,
+    )
+
+    assert resultado.already_approved is False
+    assert resultado.tenant_id is not None
+    assert await _contar(db_session, Tenant) == 1
+
+
+async def test_un_segundo_click_tras_verificar_desde_waitlist_no_da_400(
+    service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
+):
+    """El link del mail lo abren dos veces (prefetchers, escáneres): sigue siendo 200."""
+    solicitud, _ = await service.create(_input(), ip_hash=None)
+    assert solicitud is not None
+    token = await _token_vigente(db_session, solicitud.id)
+    await service.waitlist(solicitud.id, reviewer_user_id=None, via="api", notes=None)
+    await service.verify(str(token.token_id))
+
+    segunda = await service.verify(str(token.token_id))
+
+    assert segunda.id == solicitud.id
+    assert segunda.status == AccessRequestStatus.WAITLIST.value
+
+
 async def test_approve_de_una_solicitud_inexistente(service: AccessRequestService):
     with pytest.raises(AccessRequestNotFound):
         await service.approve(

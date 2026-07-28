@@ -262,9 +262,20 @@ async def approve_access_request(
     """Acuña Tenant + User + Subscription + BusinessProfile + MomentumProfile.
 
     Idempotente: re-aprobar devuelve el tenant existente con
-    `already_approved=true` y no acuña un segundo. Aprobar algo que no está en la
-    cola (`unverified`, `rejected`, `expired`) es 409: sin doble opt-in no hay
-    email confirmado detrás.
+    `already_approved=true` y no acuña un segundo.
+
+    Dos motivos distintos de 409 (el `detail` es el mensaje de
+    `AccessRequestNotApprovable`, que los distingue):
+
+    1. **Estado**: la solicitud no está en la cola (`unverified`, `rejected`,
+       `expired`).
+    2. **Email sin confirmar**: `email_verified_at is NULL`. Es un chequeo
+       aparte y no redundante — una solicitud `unverified` se puede mandar a
+       `waitlist` (triar spam sin esperar el click es legítimo), y `waitlist`
+       SÍ es un estado aprobable, así que sin este segundo motivo se acuñaría
+       una cuenta contra un email que nadie confirmó. Se sale del caso solo:
+       cuando el usuario clickea el link, `verify()` sella `email_verified_at`
+       aunque la solicitud ya esté en `waitlist`.
     """
     servicio = AccessRequestService(session)
     try:
