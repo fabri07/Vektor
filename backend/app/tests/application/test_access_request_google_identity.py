@@ -14,15 +14,20 @@ from __future__ import annotations
 import importlib.util
 import sys
 import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+import structlog.testing
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import access_request_service as srv
+from app.application.services._savepoint import SavepointConflictError
 from app.application.services.access_request_service import (
     AccessRequestGoogleIdentityTaken,
     AccessRequestInput,
@@ -74,6 +79,28 @@ def encolados(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
 @pytest.fixture
 def service(db_session: AsyncSession) -> AccessRequestService:
     return AccessRequestService(db_session)
+
+
+@pytest.fixture
+def commits(db_session: AsyncSession) -> Iterator[list[str]]:
+    """Cuenta los ``commit()`` REALES de la sesión del test.
+
+    Releer con ``refresh()`` NO prueba que algo se commiteó: la fixture
+    ``db_session`` corre dentro de una transacción externa con
+    ``join_transaction_mode="create_savepoint"``, así que la relectura pasa por
+    esa misma transacción y un valor flusheado es indistinguible de uno
+    commiteado. Lo único que distingue el commit es el evento.
+    """
+    hechos: list[str] = []
+
+    def _registrar(_sesion: object) -> None:
+        hechos.append("commit")
+
+    event.listen(db_session.sync_session, "after_commit", _registrar)
+    try:
+        yield hechos
+    finally:
+        event.remove(db_session.sync_session, "after_commit", _registrar)
 
 
 def _input(**overrides: Any) -> AccessRequestInput:
@@ -210,7 +237,7 @@ async def test_approve_audita_si_hubo_linkeo(
 
 
 async def test_una_solicitud_ya_abierta_adopta_la_identidad_de_google(
-    service: AccessRequestService, db_session: AsyncSession
+    service: AccessRequestService, db_session: AsyncSession, commits: list[str]
 ) -> None:
     """El caso común: primero el formulario público, después "Continuar con Google".
 
@@ -226,19 +253,28 @@ async def test_una_solicitud_ya_abierta_adopta_la_identidad_de_google(
     assert solicitud.google_subject is None
 
     # El mismo email vuelve, ahora por Google: no crea otra fila, pero adopta.
-    misma, segundo_outcome = await service.create(_input(), ip_hash=None)
+    commits.clear()
+    with structlog.testing.capture_logs() as eventos:
+        misma, segundo_outcome = await service.create(_input(), ip_hash=None)
 
-    assert segundo_outcome in (
-        CreateOutcome.DUPLICATE_OPEN,
-        CreateOutcome.TOKEN_REISSUED,
-    )
+    # `DUPLICATE_OPEN` y no reemisión de token: el token se emitió recién, así que
+    # el cooldown está corriendo. Importa que sea exactamente esta rama, porque es
+    # la que NO commitea por su cuenta — el commit que se cuenta abajo solo puede
+    # venir de la adopción.
+    assert segundo_outcome is CreateOutcome.DUPLICATE_OPEN
     assert misma is not None
     assert misma.id == solicitud.id
     assert (await _contar_solicitudes(db_session)) == 1
-
-    # Releído de la base: el subject se commiteó, no quedó pendiente en la sesión.
-    await db_session.refresh(misma)
     assert misma.google_subject == _SUBJECT
+
+    # El dato quedó COMMITEADO, no flusheado. `refresh()` no puede probar esto
+    # (ver la fixture `commits`): dentro de la transacción del test los dos casos
+    # se leen igual.
+    assert commits == ["commit"]
+    # Y el camino dejó rastro: el objeto de I1 era que dejara de ser mudo.
+    assert any(
+        e["event"] == "access_request.google_subject_adopted" for e in eventos
+    ), eventos
 
 
 async def test_la_identidad_adoptada_se_vincula_al_aprobar(
@@ -276,17 +312,78 @@ async def test_la_identidad_adoptada_se_vincula_al_aprobar(
     assert [i.provider_subject for i in identidades] == [_SUBJECT]
 
 
-async def test_no_pisa_una_identidad_distinta_ya_guardada(
-    service: AccessRequestService, db_session: AsyncSession
+async def test_la_carrera_del_alta_tambien_adopta_la_identidad(
+    service: AccessRequestService,
+    commits: list[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dos cuentas de Google sobre un mismo email en trámite: gana la primera."""
+    """La rama que PIERDE contra el índice único parcial también tiene que adoptar.
+
+    Ese índice solo existe en PostgreSQL, así que el disparador se simula; lo que
+    se ejercita es el `except` real: re-consultar la solicitud que ganó y colgarle
+    la identidad. Sin eso, el objeto perdedor —que era el que traía el
+    `google_subject`— se descarta y el drop silencioso de I1 revive en esta rama.
+    """
+    ganadora, _ = await service.create(_input(google_subject=None), ip_hash=None)
+    assert ganadora is not None
+
+    # 1. La primera consulta no ve la solicitud abierta: eso ES la carrera (la
+    #    otra fila todavía no estaba cuando miramos).
+    consulta_real = service._get_open_by_email
+    vistas = {"n": 0}
+
+    async def _recien_la_segunda_vez(email: str) -> AccessRequest | None:
+        vistas["n"] += 1
+        return None if vistas["n"] == 1 else await consulta_real(email)
+
+    monkeypatch.setattr(service, "_get_open_by_email", _recien_la_segunda_vez)
+
+    # 2. El INSERT pierde contra el índice único parcial.
+    @asynccontextmanager
+    async def _conflicto(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+        raise SavepointConflictError(
+            "solicitud_abierta", IntegrityError("INSERT", {}, Exception("uq"))
+        )
+        yield  # pragma: no cover - inalcanzable, el raise es el punto
+
+    monkeypatch.setattr(srv, "guarded_savepoint", _conflicto)
+
+    commits.clear()
+    with structlog.testing.capture_logs() as eventos:
+        misma, outcome = await service.create(_input(), ip_hash=None)
+
+    assert outcome is CreateOutcome.DUPLICATE_OPEN
+    assert misma is not None
+    assert misma.id == ganadora.id
+    assert misma.google_subject == _SUBJECT
+    assert commits == ["commit"]
+    assert any(
+        e["event"] == "access_request.google_subject_adopted" for e in eventos
+    ), eventos
+
+
+async def test_no_pisa_una_identidad_distinta_ya_guardada(
+    service: AccessRequestService, commits: list[str]
+) -> None:
+    """Dos cuentas de Google sobre un mismo email en trámite: gana la primera.
+
+    Y **queda dicho en el log**: que este caso deje de ser mudo es la mitad del
+    arreglo que I1 pedía, así que sin esta aserción borrar el `logger.warning`
+    no rompería nada.
+    """
     solicitud, _ = await service.create(_input(), ip_hash=None)
     assert solicitud is not None
 
-    await service.create(_input(google_subject="otro-sub-de-google"), ip_hash=None)
+    commits.clear()
+    with structlog.testing.capture_logs() as eventos:
+        await service.create(_input(google_subject="otro-sub-de-google"), ip_hash=None)
 
-    await db_session.refresh(solicitud)
     assert solicitud.google_subject == _SUBJECT
+    # No se pisó nada, así que tampoco hay nada que commitear.
+    assert commits == []
+    assert any(
+        e["event"] == "access_request.google_subject_conflict" for e in eventos
+    ), eventos
 
 
 async def test_identidad_ya_vinculada_a_otro_usuario_es_conflicto(

@@ -456,6 +456,10 @@ class AccessRequestService:
             existente = await self._get_open_by_email(email)
             if existente is None:  # pragma: no cover - el índice garantiza que exista
                 raise conflicto.original from conflicto
+            # La solicitud que traía el `google_subject` se descarta, así que la
+            # identidad hay que colgarla de la que ganó: si no, este camino
+            # repite el drop silencioso que arreglamos en el reintento normal.
+            await self._adoptar_identidad_google(existente, data.google_subject)
             return existente, CreateOutcome.DUPLICATE_OPEN
 
         token = await self._emitir_token(solicitud)
@@ -1117,10 +1121,10 @@ class AccessRequestService:
     ) -> tuple[AccessRequest, CreateOutcome]:
         """Reenvío del formulario con un trámite ya abierto: nunca crea otra fila.
 
-        Nunca crea otra fila, pero sí **adopta** la identidad de Google si el
-        reenvío la trae y la solicitud abierta no la tenía (ver
-        ``_adoptar_identidad_google``): esta es la única oportunidad de ligarla,
-        porque el token de prefill se consume igual antes de llegar acá.
+        Sí **adopta** la identidad de Google si el reenvío la trae y la solicitud
+        abierta no la tenía (ver ``_adoptar_identidad_google``): esta es la única
+        oportunidad de ligarla, porque el token de prefill se consume igual antes
+        de llegar acá.
         """
         await self._adoptar_identidad_google(abierta, google_subject)
 
@@ -1175,9 +1179,13 @@ class AccessRequestService:
             return
 
         abierta.google_subject = google_subject
-        # Commit propio: la rama `DUPLICATE_OPEN` no commitea nada, así que sin
-        # esto el linkeo se perdería igual —solo que dentro de la sesión—. En la
-        # rama de reemisión el commit de abajo sería redundante, no incorrecto.
+        # Commit propio, no porque el dato se perdería sin él —el caller HTTP
+        # commitea al cerrar el request (`get_db_session`)— sino para que el
+        # servicio sea autocontenido: deja la adopción a salvo acá mismo, sin
+        # depender de que un paso posterior de `create()` no falle, y hace que
+        # este camino se comporte igual que las otras ramas de `create()`, que
+        # también commitean lo suyo. En la rama de reemisión de token el commit
+        # de más abajo queda redundante, no incorrecto.
         await self._session.commit()
         logger.info(
             "access_request.google_subject_adopted", request_id=str(abierta.id)
