@@ -80,6 +80,15 @@ function emailInput() {
   return screen.getByLabelText(/^Email/i) as HTMLInputElement;
 }
 
+/**
+ * Timeout de los tests que completan el formulario entero — mismo motivo que en
+ * `access_request_form.test.tsx`: llenar 12 campos requeridos encadena una
+ * docena larga de gestos de `user-event`, cada uno con su ciclo de `act()`, y
+ * los 5000 ms default de Jest no alcanzan cuando los workers compiten por CPU.
+ * No es lentitud del componente: con `--runInBand` pasan holgados.
+ */
+const TIMEOUT_FORMULARIO_COMPLETO = 20_000;
+
 describe("AccessRequestForm — prefill de Google", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -143,7 +152,7 @@ describe("AccessRequestForm — prefill de Google", () => {
     const cuerpo = mockPost.mock.calls[0]![1] as Record<string, unknown>;
     expect(cuerpo.google_prefill_token).toBe(TOKEN);
     expect(cuerpo.email).toBe(EMAIL);
-  });
+  }, TIMEOUT_FORMULARIO_COMPLETO);
 
   test("token vencido: formulario a mano y el POST no manda el token", async () => {
     mockGet.mockRejectedValueOnce(new Error("404"));
@@ -162,7 +171,7 @@ describe("AccessRequestForm — prefill de Google", () => {
     const cuerpo = mockPost.mock.calls[0]![1] as Record<string, unknown>;
     // Mandar un token que sabemos muerto no liga nada: mejor no mandarlo.
     expect(cuerpo).not.toHaveProperty("google_prefill_token");
-  });
+  }, TIMEOUT_FORMULARIO_COMPLETO);
 
   test("sin `?prefill` no se pide ningún prefill", async () => {
     searchParams = new URLSearchParams();

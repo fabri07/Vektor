@@ -88,6 +88,23 @@ function submitButton() {
   return screen.getByRole("button", { name: /Pedir acceso/i });
 }
 
+/**
+ * Timeout de los tests que completan el formulario entero.
+ *
+ * Este formulario tiene 12 campos requeridos, así que llenarlo encadena una
+ * docena larga de `user.click`/`user.type`, y cada uno de esos gestos arrastra
+ * su propio ciclo de `act()` + timers. Con los 5000 ms que Jest da por defecto
+ * entran holgados corriendo solos, pero no cuando los workers de jest compiten
+ * por CPU (el CI tiene menos cores y más lentos que una máquina de desarrollo).
+ *
+ * **No es lentitud del componente ni una carrera**: el mismo suite con
+ * `--runInBand` pasa entero y sin timeouts. Es el costo de simular a un humano
+ * completando un formulario largo, y va acotado a los tests que lo hacen — la
+ * config global de Jest sigue en 5000 ms para que un test genuinamente lento en
+ * cualquier otra parte del repo se siga notando.
+ */
+const TIMEOUT_FORMULARIO_COMPLETO = 20_000;
+
 describe("AccessRequestForm", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -174,7 +191,7 @@ describe("AccessRequestForm", () => {
     expect(resumen).toHaveTextContent("Te falta responder una cosa:");
     expect(resumen).toHaveTextContent("¿Cuánta gente trabaja?");
     expect(mockPost).not.toHaveBeenCalled();
-  });
+  }, TIMEOUT_FORMULARIO_COMPLETO);
 
   test("el honeypot está presente pero oculto", () => {
     const { container } = renderForm();
@@ -206,7 +223,7 @@ describe("AccessRequestForm", () => {
 
     await user.type(textarea, "Ferretería de barrio");
     await waitFor(() => expect(submitButton()).toBeEnabled());
-  });
+  }, TIMEOUT_FORMULARIO_COMPLETO);
 
   test("el submit está bloqueado hasta que el formulario es válido", async () => {
     const user = userEvent.setup({ delay: null });
@@ -226,7 +243,7 @@ describe("AccessRequestForm", () => {
 
     await user.click(screen.getByRole("checkbox"));
     await waitFor(() => expect(submitButton()).toBeEnabled());
-  });
+  }, TIMEOUT_FORMULARIO_COMPLETO);
 
   test("envío exitoso: postea el contrato exacto (con consent, sin password)", async () => {
     mockPost.mockResolvedValueOnce({ data: { status: "ok", message: "ok" } });
@@ -273,7 +290,7 @@ describe("AccessRequestForm", () => {
         "/solicitud-enviada?email=ana%40negocio.com",
       ),
     );
-  });
+  }, TIMEOUT_FORMULARIO_COMPLETO);
 
   test("?plan=premium precarga el plan y lo deja editable", async () => {
     searchParams = new URLSearchParams("plan=premium");
@@ -302,5 +319,5 @@ describe("AccessRequestForm", () => {
 
     expect(await screen.findByText(/No pudimos enviar tu solicitud/i)).toBeInTheDocument();
     expect(mockPush).not.toHaveBeenCalled();
-  });
+  }, TIMEOUT_FORMULARIO_COMPLETO);
 });
