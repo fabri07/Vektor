@@ -5,6 +5,10 @@ import { PublicNav } from "@/components/public/PublicNav";
 import { PublicFooter } from "@/components/public/PublicFooter";
 import { PageHeader } from "@/components/public/PageHeader";
 import { AccessRequestForm } from "@/features/access-request/AccessRequestForm";
+// El número de preguntas sale del schema, no de un literal: escrito a mano se
+// desincroniza en cuanto alguien agrega o saca un campo, y ya había cuatro
+// cifras distintas dando vueltas por el repo.
+import { REQUIRED_FIELD_COUNT } from "@/validation/accessRequest";
 
 export const metadata: Metadata = {
   title: "Pedir acceso | Véktor",
@@ -31,8 +35,8 @@ export default function SolicitarAccesoPage() {
           subtitle={
             <>
               Revisamos cada solicitud a mano: queremos entender tu negocio antes de
-              darte una cuenta, para asegurarnos de que podemos ayudarte. Son unas doce
-              preguntas y te lleva unos tres minutos.
+              darte una cuenta, para asegurarnos de que podemos ayudarte. Son{" "}
+              {REQUIRED_FIELD_COUNT} preguntas y te lleva unos tres minutos.
             </>
           }
         />

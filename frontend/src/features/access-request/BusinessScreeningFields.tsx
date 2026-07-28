@@ -140,7 +140,7 @@ export function describeAria(
 /**
  * Grupo de radios de opción cerrada. Sin preselección: nada arranca marcado.
  *
- * Muestra su propio error: con 12 campos requeridos repartidos en cinco
+ * Muestra su propio error: con 13 campos requeridos repartidos en cinco
  * secciones, un grupo mudo deja al usuario con el botón gris y sin idea de qué
  * le falta.
  */

@@ -82,7 +82,7 @@ function emailInput() {
 
 /**
  * Timeout de los tests que completan el formulario entero — mismo motivo que en
- * `access_request_form.test.tsx`: llenar 12 campos requeridos encadena una
+ * `access_request_form.test.tsx`: llenar 13 campos requeridos encadena una
  * docena larga de gestos de `user-event`, cada uno con su ciclo de `act()`, y
  * los 5000 ms default de Jest no alcanzan cuando los workers compiten por CPU.
  * No es lentitud del componente: con `--runInBand` pasan holgados.
@@ -97,6 +97,11 @@ describe("AccessRequestForm — prefill de Google", () => {
     // orden. Estos tests distinguen "el prefill responde" de "el prefill se
     // cayó", así que arrancar de cero no es opcional.
     mockGet.mockReset();
+    // Mismo razonamiento, para el borrador: el formulario lo persiste en
+    // `sessionStorage`, jsdom lo comparte entre tests, y acá importa el doble
+    // — un nombre sobreviviente haría pasar en verde el test de "sin claim
+    // `name` no se inventa nada".
+    window.sessionStorage.clear();
     searchParams = new URLSearchParams(`prefill=${TOKEN}`);
     mockPost.mockResolvedValue({ data: { status: "ok", message: "ok" } } as never);
   });

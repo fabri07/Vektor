@@ -183,3 +183,20 @@ export function fieldErrors(parse: AccessRequestParse): Record<string, string> {
   }
   return errores;
 }
+
+/**
+ * Cuántas respuestas requiere el formulario, contadas contra el schema.
+ *
+ * Se DERIVA en vez de escribirse a mano porque el número escrito se
+ * desincroniza solo: convivían cuatro cifras distintas —el copy del
+ * encabezado decía "unas doce preguntas", el docstring del formulario "los 16
+ * campos", el del test "12 campos requeridos", y los requeridos reales eran
+ * 13—. Con esto, agregar o sacar una pregunta actualiza el contador, el copy y
+ * los tests de una sola vez.
+ *
+ * `vertical_other_text` no entra: solo es requerido si el rubro es "otros", y
+ * un borrador vacío no lo pide.
+ */
+export const REQUIRED_FIELD_COUNT: number = Object.keys(
+  fieldErrors(parseAccessRequestDraft(EMPTY_ACCESS_REQUEST_DRAFT)),
+).length;

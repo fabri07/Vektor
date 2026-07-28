@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { AccessRequestForm } from "../AccessRequestForm";
 import { api } from "@/lib/api";
+import { REQUIRED_FIELD_COUNT } from "@/validation/accessRequest";
 
 jest.mock("@/lib/api", () => ({ api: { post: jest.fn() } }));
 
@@ -108,7 +109,7 @@ function tarjetasDeRubro() {
 /**
  * Timeout de los tests que completan el formulario entero.
  *
- * Este formulario tiene 12 campos requeridos, así que llenarlo encadena una
+ * Este formulario tiene 13 campos requeridos, así que llenarlo encadena una
  * docena larga de `user.click`/`user.type`, y cada uno de esos gestos arrastra
  * su propio ciclo de `act()` + timers. Con los 5000 ms que Jest da por defecto
  * entran holgados corriendo solos, pero no cuando los workers de jest compiten
@@ -126,6 +127,10 @@ describe("AccessRequestForm", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     searchParams = new URLSearchParams();
+    // El formulario persiste el borrador en `sessionStorage`, y jsdom lo
+    // comparte entre tests del mismo archivo: sin esto, el segundo test
+    // arrancaría con lo que tipeó el primero.
+    window.sessionStorage.clear();
   });
 
   test("renderiza las secciones del formulario y el aviso de confidencialidad", () => {
@@ -434,6 +439,76 @@ describe("AccessRequestForm", () => {
         name: "Teléfono / WhatsApp (opcional)",
       });
       expect(telefono).toHaveAccessibleDescription("Si nos lo dejás, te escribimos por acá.");
+    });
+  });
+
+  describe("borrador y progreso", () => {
+    test("el contador sale del schema, no de un número escrito a mano", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderForm();
+
+      expect(REQUIRED_FIELD_COUNT).toBe(13);
+      expect(screen.getByText(`0 de ${REQUIRED_FIELD_COUNT} respuestas`)).toBeInTheDocument();
+
+      await user.type(screen.getByLabelText(/Nombre y apellido/i), "Ana Pérez");
+      expect(screen.getByText(`1 de ${REQUIRED_FIELD_COUNT} respuestas`)).toBeInTheDocument();
+    });
+
+    /**
+     * El formulario lleva trece respuestas y unos tres minutos. Sin
+     * persistencia, un F5 o un back accidental lo borraba entero — y como el
+     * visitante todavía no tiene cuenta, no hay ningún otro lugar del que
+     * recuperarlo.
+     */
+    test("el borrador sobrevive a un remonte, pero el consentimiento no", async () => {
+      const user = userEvent.setup({ delay: null });
+      const { unmount } = renderForm();
+
+      await fillContacto(user);
+      await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
+      await user.click(screen.getByRole("checkbox"));
+      expect(screen.getByRole("checkbox")).toBeChecked();
+
+      unmount(); // = F5, back, o cerrar y volver a abrir la página
+      renderForm();
+
+      expect(screen.getByLabelText(/Nombre y apellido/i)).toHaveValue("Ana Pérez");
+      expect(screen.getByLabelText(/^Email/i)).toHaveValue("ana@negocio.com");
+      expect(screen.getByRole("radio", { name: /Kiosco/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      // El consentimiento NO se restaura: aceptar la política de privacidad
+      // tiene que ser un acto de esta sesión, no algo que el navegador
+      // recuerde por el visitante.
+      expect(screen.getByRole("checkbox")).not.toBeChecked();
+    });
+
+    test("un envío exitoso limpia el borrador", async () => {
+      mockPost.mockResolvedValueOnce({ data: { status: "ok", message: "ok" } });
+      const user = userEvent.setup({ delay: null });
+      const { unmount } = renderForm();
+
+      await fillContacto(user);
+      await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
+      await fillScreening(user);
+      await user.click(screen.getByRole("checkbox"));
+      await user.click(submitButton());
+      await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+
+      unmount();
+      renderForm();
+
+      // La solicitud ya está en el backend: no tiene por qué quedar una copia
+      // de los datos personales esperando en el navegador.
+      expect(screen.getByLabelText(/Nombre y apellido/i)).toHaveValue("");
+      expect(screen.getByText(`0 de ${REQUIRED_FIELD_COUNT} respuestas`)).toBeInTheDocument();
+    }, TIMEOUT_FORMULARIO_COMPLETO);
+
+    test("un borrador corrupto se descarta sin romper el formulario", () => {
+      window.sessionStorage.setItem("vektor:access-request-draft:v1", "{no es json");
+      renderForm();
+      expect(screen.getByLabelText(/Nombre y apellido/i)).toHaveValue("");
     });
   });
 

@@ -17,7 +17,7 @@
  * y el token se devuelve en el POST para que el backend persista el
  * `google_subject`. La lectura del prefill NO consume el token — la única toma
  * es el POST —, y por eso el submit lo revalida antes de mandar: el token puede
- * haber vencido mientras se completaban los 16 campos, y seguir afirmando que
+ * haber vencido mientras se completaban las trece respuestas, y seguir afirmando que
  * Google verificó el email sería afirmar un estado que el sistema ya no tiene.
  *
  * Anti-spam en capas, igual que `/contacto`: honeypot invisible (`empresa_url`,
@@ -60,8 +60,10 @@ import {
   EMPTY_ACCESS_REQUEST_DRAFT,
   fieldErrors,
   parseAccessRequestDraft,
+  REQUIRED_FIELD_COUNT,
   type AccessRequestDraft,
 } from "@/validation/accessRequest";
+import { borrarBorrador, guardarBorrador, leerBorrador } from "./draftStorage";
 import {
   BusinessScreeningFields,
   Field,
@@ -116,7 +118,18 @@ export function AccessRequestForm() {
   const websiteRef = useRef<HTMLInputElement>(null); // honeypot
   const crear = useCreateAccessRequest();
 
-  const [draft, setDraft] = useState<AccessRequestDraft>(EMPTY_ACCESS_REQUEST_DRAFT);
+  /*
+   * El borrador arranca de lo que haya en `sessionStorage`.
+   *
+   * Va como inicializador perezoso de `useState` —y no en un `useEffect`—
+   * porque el efecto del prefill de Google hace un merge parcial sobre el
+   * borrador: si la hidratación corriera después, pisaría el email que Google
+   * ya verificó. Acá el orden queda garantizado por construcción.
+   */
+  const [draft, setDraft] = useState<AccessRequestDraft>(() => ({
+    ...EMPTY_ACCESS_REQUEST_DRAFT,
+    ...(leerBorrador() ?? {}),
+  }));
   const [enviado, setEnviado] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   // Qué campos ya tocó el usuario, y si hubo un intento de envío. Sin esto el
@@ -182,6 +195,13 @@ export function AccessRequestForm() {
       cta_source: ctaSourceFromUrl("solicitar_acceso"),
     });
   }, []);
+
+  // Cada cambio del borrador se persiste. Es barato (un JSON chico en
+  // sessionStorage) y evita tener que elegir "momentos buenos" para guardar,
+  // que es como se pierden justo las últimas respuestas.
+  useEffect(() => {
+    guardarBorrador(draft);
+  }, [draft]);
 
   function update<K extends keyof AccessRequestDraft>(
     key: K,
@@ -262,6 +282,9 @@ export function AccessRequestForm() {
   const faltantes = ACCESS_REQUEST_FIELD_LABELS.map(([campo]) => campo).filter(
     (campo) => campo in todosLosErrores,
   );
+  // Acotado por abajo: con "otros" elegido y sin describirlo aparece un campo
+  // requerido de más, y sin el clamp el contador diría "-1 de 13".
+  const respondidas = Math.max(0, REQUIRED_FIELD_COUNT - faltantes.length);
   // Solo tras un intento de envío: con el primer blur se abría un panel "Te
   // faltan 12 respuestas" cuando el usuario iba por el campo 1 — la versión
   // atenuada de gritar antes de tiempo. Y al ser `role="status"` (live region)
@@ -339,6 +362,9 @@ export function AccessRequestForm() {
         }),
       );
       setEnviado(true);
+      // La solicitud ya está en el backend: el borrador cumplió su función y
+      // no tiene por qué quedar esperando en el navegador.
+      borrarBorrador();
       trackLandingEvent("access_request_submit_success", { cta_source: ctaSource });
       router.push(`/solicitud-enviada?email=${encodeURIComponent(parse.data.email)}`);
     } catch (err) {
@@ -678,6 +704,19 @@ export function AccessRequestForm() {
               {errorMsg}
             </p>
           )}
+
+          {/*
+            Cuántas van. Deliberadamente NO es sticky: un contador fijo en
+            móvil tapa el último campo o el propio resumen de errores, compite
+            con el CTA y obliga a lidiar con safe areas. Acá abajo, pegado al
+            botón, se lee justo cuando importa — antes de apretar.
+
+            El total sale del schema (`REQUIRED_FIELD_COUNT`), no de un número
+            escrito a mano.
+          */}
+          <p className="text-center text-xs text-vektor-muted">
+            {respondidas} de {REQUIRED_FIELD_COUNT} respuestas
+          </p>
 
           {/*
             El botón NO se deshabilita por formulario incompleto.
