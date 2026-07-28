@@ -143,7 +143,10 @@ export function AccessRequestForm() {
   const faltantes = ACCESS_REQUEST_FIELD_LABELS.map(([campo]) => campo).filter(
     (campo) => campo in todosLosErrores,
   );
-  const hayInteraccion = intentado || Object.keys(tocados).length > 0;
+  // Solo tras un intento de envío: con el primer blur se abría un panel "Te
+  // faltan 12 respuestas" cuando el usuario iba por el campo 1 — la versión
+  // atenuada de gritar antes de tiempo. Y al ser `role="status"` (live region)
+  // se re-anunciaba entero con cada respuesta.
   const enviando = crear.isPending || enviado;
 
   async function onSubmit(event: React.FormEvent) {
@@ -377,7 +380,7 @@ export function AccessRequestForm() {
             instrucción. Cada faltante lleva el foco a su campo, así el usuario
             no tiene que barrer cinco secciones a ojo.
           */}
-          {hayInteraccion && faltantes.length > 0 && (
+          {intentado && faltantes.length > 0 && (
             <div
               role="status"
               className="rounded-xl border border-vektor-border bg-vektor-surface/60 p-4 text-sm text-vektor-body"

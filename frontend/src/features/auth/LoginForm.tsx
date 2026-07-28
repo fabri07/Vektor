@@ -271,10 +271,16 @@ export function LoginForm() {
         {googleLoading ? "Redirigiendo..." : "Continuar con Google"}
       </button>
 
+      {/*
+        "Creá una gratis" era la promesa exacta que el registro cerrado retira:
+        el visitante no crea nada, manda una solicitud de acceso que el dueño
+        revisa a mano. El link va directo a /solicitar-acceso (no al redirect de
+        /register) para no gastar un salto de más.
+      */}
       <p className="text-center text-sm text-vk-text-secondary">
-        ¿No tenés cuenta?{" "}
-        <a href="/register" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
-          Creá una gratis
+        ¿Todavía no tenés cuenta?{" "}
+        <a href="/solicitar-acceso?src=login" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
+          Pedí acceso
         </a>
       </p>
     </form>

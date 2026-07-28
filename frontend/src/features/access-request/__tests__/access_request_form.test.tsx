@@ -120,7 +120,19 @@ describe("AccessRequestForm", () => {
     expect(screen.queryByText(/Escribí tu nombre/i)).toBeNull();
     expect(screen.queryByText(/Email inválido/i)).toBeNull();
     expect(screen.queryByText(/Escribí el nombre de tu negocio/i)).toBeNull();
-    // Tampoco el resumen de faltantes: no hubo interacción.
+    // Tampoco el resumen de faltantes: no hubo intento de envío.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  test("el resumen de faltantes NO se abre con el primer blur", async () => {
+    const user = userEvent.setup({ delay: null });
+    renderForm();
+
+    await user.type(screen.getByLabelText(/Nombre y apellido/i), "Ana Pérez");
+    await user.tab();
+
+    // El campo propio ya puede hablar, pero el panel "Te faltan N respuestas"
+    // no tiene por qué abrirse cuando recién vas por el campo 1.
     expect(screen.queryByRole("status")).toBeNull();
   });
 
@@ -152,6 +164,11 @@ describe("AccessRequestForm", () => {
     fireEvent.submit(container.querySelector("form")!);
 
     expect(await screen.findByText("Elegí una opción")).toBeInTheDocument();
+    // El foco va al primer control del campo faltante: es la mitad que vuelve
+    // útil al panel (jest.setup.ts ya mockea scrollIntoView).
+    expect(document.activeElement).toBe(
+      document.getElementById("campo-staff_size"),
+    );
     // Y el resumen nombra exactamente el campo que falta.
     const resumen = screen.getByRole("status");
     expect(resumen).toHaveTextContent("Te falta responder una cosa:");
