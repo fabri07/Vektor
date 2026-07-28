@@ -16,10 +16,13 @@
  * el email queda de solo lectura (es lo que liga la solicitud a esa identidad)
  * y el token se devuelve en el POST para que el backend persista el
  * `google_subject`. La lectura del prefill NO consume el token — la única toma
- * es el POST.
+ * es el POST —, y por eso el submit lo revalida antes de mandar: el token puede
+ * haber vencido mientras se completaban los 16 campos, y seguir afirmando que
+ * Google verificó el email sería afirmar un estado que el sistema ya no tiene.
  *
- * Anti-spam en capas, igual que `/contacto`: honeypot invisible (`website`) +
- * `elapsed_ms` medido desde el montaje. El rate limit por IP lo pone el backend.
+ * Anti-spam en capas, igual que `/contacto`: honeypot invisible (`empresa_url`,
+ * ver más abajo por qué NO se llama `website`) + `elapsed_ms` medido desde el
+ * montaje. El rate limit por IP lo pone el backend.
  *
  * **Superficie de errores.** El formulario arranca en silencio: un campo solo
  * muestra su error después de que el usuario lo tocó (`onBlur` en los textos,
