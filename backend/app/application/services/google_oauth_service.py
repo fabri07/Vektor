@@ -100,11 +100,18 @@ _GOOGLE_VALID_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 _STATE_TTL_SECONDS = 600  # 10 min — tiempo que el usuario tiene para completar el flujo OAuth
 _EXCHANGE_TTL_SECONDS = 60  # 60 seg — ventana para que el frontend haga el exchange post-redirect
 _LINK_TTL_SECONDS = 600  # 10 min — tiempo para completar el link_required
-#: Prefill del alta por Google. Misma forma y TTL que `oauth:link:{id}`: es el
-#: mismo tipo de objeto (una identidad verificada esperando que el usuario
-#: complete un paso en el frontend), así que no se inventa una segunda
-#: convención.
-_PREFILL_TTL_SECONDS = 600  # 10 min
+#: Prefill del alta por Google. Misma FORMA que `oauth:link:{id}`, pero TTL
+#: mucho más largo a propósito: del otro lado hay un formulario de 16 campos,
+#: con un aviso de confidencialidad para leer y una pregunta de facturación que
+#: la gente piensa. Con 10 min el token se vencía seguido, y un prefill vencido
+#: hace que la solicitud se persista sin `google_subject` — el aprobado termina
+#: obligado a definir contraseña, que es justo la fricción que este camino
+#: existía para evitar.
+#:
+#: Alargarlo no amplía la superficie: el token sigue siendo opaco, de un solo
+#: uso (el GETDEL lo hace el POST de la solicitud) y su canje exige que el email
+#: del formulario coincida con el de Google (403 `google_prefill_email_mismatch`).
+_PREFILL_TTL_SECONDS = 2700  # 45 min
 _PREFILL_KEY_PREFIX = "oauth:prefill:"
 
 # Cache en memoria del JWKS de Google (se invalida cada hora)

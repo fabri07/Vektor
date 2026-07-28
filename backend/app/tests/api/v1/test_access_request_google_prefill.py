@@ -202,7 +202,12 @@ async def test_el_token_es_single_use(
 async def test_token_vencido_no_bloquea_la_solicitud(
     client_prefill: AsyncClient, db_session: AsyncSession
 ) -> None:
-    """El TTL es de 10 min y el formulario es largo: no se pierde lo contestado."""
+    """El token tiene TTL y el formulario es largo: no se pierde lo contestado.
+
+    El TTL se subió a 45 min justamente para que este camino sea raro, pero raro
+    no es imposible (una pestaña abierta desde ayer lo alcanza), y cuando pasa
+    las 16 respuestas no se tiran.
+    """
     alta = await client_prefill.post(
         URL, json={**_PAYLOAD, "google_prefill_token": "token-que-vencio"}
     )
