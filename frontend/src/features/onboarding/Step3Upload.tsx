@@ -45,7 +45,7 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
         Si tenés una lista de productos o ventas, podés subirla. Esto mejora
         la precisión del análisis.
       </p>
-      <p className="mb-8 text-xs text-gray-400">
+      <p className="mb-8 text-xs text-vk-text-muted">
         Formatos aceptados: .xlsx, .csv, .txt, .docx, .jpg, .png
       </p>
 
@@ -88,7 +88,7 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
         {file ? (
           <div>
             <p className="text-sm font-medium text-green-700">{file.name}</p>
-            <p className="mt-1 text-xs text-gray-400">
+            <p className="mt-1 text-xs text-vk-text-muted">
               {(file.size / 1024).toFixed(0)} KB — hacé clic para cambiar
             </p>
           </div>
@@ -123,7 +123,7 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
         <button
           type="button"
           onClick={() => onNext(null)}
-          className="text-sm text-gray-400 underline underline-offset-2 hover:text-gray-600 transition-colors"
+          className="text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
         >
           Saltar por ahora
         </button>

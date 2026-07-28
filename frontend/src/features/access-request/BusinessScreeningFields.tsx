@@ -186,7 +186,7 @@ export function RadioGroup<T extends string>({
         {options.map((opt, indice) => (
           <label
             key={opt.value}
-            className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+            className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-3 text-sm transition-colors ${
               value === opt.value
                 ? "border-vektor-blue text-vektor-white"
                 : error

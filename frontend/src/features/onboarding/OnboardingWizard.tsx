@@ -172,7 +172,7 @@ export function OnboardingWizard() {
                   <button
                     type="button"
                     onClick={() => goToStep(1)}
-                    className="text-sm text-gray-400 underline underline-offset-2 hover:text-gray-600 transition-colors"
+                    className="text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
                   >
                     Anterior
                   </button>
@@ -185,7 +185,7 @@ export function OnboardingWizard() {
 
           {/* Footer note */}
           {step < 3 && (
-            <p className="mt-4 text-center text-xs text-gray-400">
+            <p className="mt-4 text-center text-xs text-vk-text-muted">
               Tu información es privada y solo se usa para calcular tu salud financiera.
             </p>
           )}

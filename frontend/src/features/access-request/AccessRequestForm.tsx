@@ -626,7 +626,7 @@ export function AccessRequestForm() {
             <input
               {...fieldAria("consent", { error: errores.consent })}
               type="checkbox"
-              className="mt-1 accent-vektor-blue"
+              className="mt-0.5 h-5 w-5 shrink-0 accent-vektor-blue"
               checked={draft.consent}
               onChange={(e) => elegir("consent", e.target.checked)}
             />
@@ -733,7 +733,7 @@ export function AccessRequestForm() {
           <button
             type="submit"
             disabled={enviando}
-            className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-6 py-3.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-6 py-3.5 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-wait"
           >
             {enviando ? "Enviando..." : "Pedir acceso"}
           </button>

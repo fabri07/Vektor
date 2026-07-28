@@ -71,7 +71,7 @@ export default function PreciosPage() {
               <h2 className="font-display text-2xl font-bold uppercase tracking-tight text-vektor-white">
                 Premium
               </h2>
-              <span className="rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white">
+              <span className="rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white">
                 Pronto
               </span>
             </div>
@@ -96,7 +96,7 @@ export default function PreciosPage() {
             </p>
             <Link
               href="/solicitar-acceso?plan=premium&src=precios_premium"
-              className="mt-8 inline-flex items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-7 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+              className="mt-8 inline-flex items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-7 py-3 text-sm font-semibold text-white transition hover:brightness-95"
             >
               Solicitar Premium
             </Link>

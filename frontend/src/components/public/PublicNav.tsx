@@ -164,7 +164,7 @@ export function PublicNav() {
           </Link>
           <Link
             href="/solicitar-acceso?src=nav_desktop"
-            className="inline-flex rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
+            className="inline-flex rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-5 py-2.5 text-sm font-semibold text-white hover:brightness-95"
           >
             Pedir acceso
           </Link>
@@ -176,7 +176,7 @@ export function PublicNav() {
           onClick={() => setMobileOpen((v) => !v)}
           aria-label={mobileOpen ? "Cerrar menú" : "Abrir menú"}
           aria-expanded={mobileOpen}
-          className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 text-vektor-body lg:hidden"
+          className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/15 text-vektor-body lg:hidden"
         >
           {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
@@ -193,7 +193,7 @@ export function PublicNav() {
               key={r.href}
               href={r.href}
               onClick={() => setMobileOpen(false)}
-              className="block rounded-lg px-1 py-2 text-sm text-vektor-body hover:text-vektor-white"
+              className="block rounded-lg px-1 py-3 text-sm text-vektor-body hover:text-vektor-white"
             >
               {r.label}
             </Link>
@@ -204,7 +204,7 @@ export function PublicNav() {
               key={link.href}
               href={link.href}
               onClick={() => setMobileOpen(false)}
-              className="block rounded-lg px-1 py-2 text-sm font-medium text-vektor-body hover:text-vektor-white"
+              className="block rounded-lg px-1 py-3 text-sm font-medium text-vektor-body hover:text-vektor-white"
             >
               {link.label}
             </Link>
@@ -220,7 +220,7 @@ export function PublicNav() {
             <Link
               href="/solicitar-acceso?src=nav_mobile"
               onClick={() => setMobileOpen(false)}
-              className="inline-flex justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-5 py-2.5 text-sm font-semibold text-white"
+              className="inline-flex justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-5 py-2.5 text-sm font-semibold text-white"
             >
               Pedir acceso
             </Link>

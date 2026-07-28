@@ -296,7 +296,7 @@ export default function ContactoPage() {
           <button
             type="submit"
             disabled={status === "sending"}
-            className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-6 py-3.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-60"
+            className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-6 py-3.5 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-wait"
           >
             {status === "sending" ? "Enviando..." : "Enviar"}
           </button>

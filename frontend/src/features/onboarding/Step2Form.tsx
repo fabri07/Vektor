@@ -61,7 +61,7 @@ const CONCERN_OPTIONS: { value: MainConcern; label: string }[] = [
 ];
 
 function FieldHint({ text }: { text: string }) {
-  return <p className="mt-1.5 text-xs text-gray-400">{text}</p>;
+  return <p className="mt-1.5 text-xs text-vk-text-muted">{text}</p>;
 }
 
 function FieldHelper({ text }: { text: string }) {
@@ -100,7 +100,7 @@ function NumberInput({
       </label>
       <div className="relative mt-2">
         {prefix && (
-          <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 text-base font-medium text-gray-400 select-none">
+          <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 text-base font-medium text-vk-text-muted select-none">
             {prefix}
           </span>
         )}
@@ -430,7 +430,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
         <div>
           <p className="mb-1 text-sm font-medium text-gray-800">
             ¿Cuál es tu régimen fiscal?{" "}
-            <span className="font-normal text-gray-400">(opcional)</span>
+            <span className="font-normal text-vk-text-muted">(opcional)</span>
           </p>
           <FieldHelper text="Adapta la guía de comprobantes del cierre de caja. Podés saltearlo y configurarlo después en Configuración." />
           <div
@@ -472,7 +472,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
                 "self-start text-xs underline underline-offset-2 transition-colors",
                 fiscalCondition === null
                   ? "text-gray-500"
-                  : "text-gray-400 hover:text-gray-600",
+                  : "text-vk-text-muted hover:text-vk-text-primary",
               ].join(" ")}
             >
               Prefiero no decirlo ahora
