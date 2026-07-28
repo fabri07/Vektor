@@ -557,11 +557,15 @@ async def bloqueos_para_aprobar(
 ) -> list[str]:
     """Motivos por los que ``approve()`` rechazaría esta solicitud. **Solo preview.**
 
-    Reproduce en modo lectura las tres guardias de
+    Reproduce en modo lectura las cuatro guardias de
     ``AccessRequestService.approve`` para que el dry-run no prometa una cuenta
     que después no se va a acuñar. La verificación AUTORITATIVA sigue siendo la
     del servicio, dentro de la transacción con ``FOR UPDATE``: esto es
     diagnóstico, no control de acceso.
+
+    La cuarta (identidad de Google ya vinculada) pregunta por el MISMO método
+    público que usa la guardia del servicio, ``google_identity_taken``: con una
+    consulta propia acá, el preview y el ``--apply`` podrían volver a divergir.
     """
     motivos: list[str] = []
     if solicitud.status == AccessRequestStatus.APPROVED.value:
@@ -578,6 +582,12 @@ async def bloqueos_para_aprobar(
         motivos.append("nadie confirmó el email (doble opt-in pendiente)")
     if await UserRepository(session).get_by_email_any_tenant(solicitud.email):
         motivos.append(f"ya existe una cuenta con {solicitud.email}")
+    if solicitud.google_subject is not None and await AccessRequestService(
+        session
+    ).google_identity_taken(solicitud.google_subject):
+        motivos.append(
+            "la identidad de Google de la solicitud ya está vinculada a otra cuenta"
+        )
     return motivos
 
 
@@ -662,8 +672,9 @@ async def cmd_approve(session: AsyncSession, args: argparse.Namespace) -> int:
             notes=args.notes,
         )
     except AccessRequestError as exc:
-        # Cubre las tres del flujo (NotFound / NotApprovable / EmailTaken): todas
-        # heredan de AccessRequestError y el mensaje ya explica cuál fue.
+        # Cubre las cuatro del flujo (NotFound / NotApprovable / EmailTaken /
+        # GoogleIdentityTaken): todas heredan de AccessRequestError y el mensaje
+        # ya explica cuál fue.
         print(f"\nERROR: no se aprobó. {exc}")
         return 1
 

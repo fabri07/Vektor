@@ -211,6 +211,31 @@ async def test_token_vencido_no_bloquea_la_solicitud(
     assert (await _solicitud(db_session, _EMAIL)).google_subject is None
 
 
+async def test_una_solicitud_ya_abierta_adopta_el_subject(
+    client_prefill: AsyncClient,
+    redis_prefill: _RedisConGetdel,
+    db_session: AsyncSession,
+) -> None:
+    """El caso que se perdía en silencio: primero el formulario, después Google.
+
+    El token se consume antes de saber si `create()` va a crear una fila nueva o
+    a derivar al reintento, así que el reintento tiene que adoptar el subject o
+    la identidad se pierde sin que ningún log lo mencione.
+    """
+    assert (await client_prefill.post(URL, json=_PAYLOAD)).status_code == 201
+    assert (await _solicitud(db_session, _EMAIL)).google_subject is None
+
+    _sembrar(redis_prefill, "tok-abierta")
+    segunda = await client_prefill.post(
+        URL, json={**_PAYLOAD, "google_prefill_token": "tok-abierta"}
+    )
+
+    assert segunda.status_code == 201
+    solicitud = await _solicitud(db_session, _EMAIL)  # sigue habiendo UNA sola
+    await db_session.refresh(solicitud)
+    assert solicitud.google_subject == _SUBJECT
+
+
 async def test_sin_token_la_solicitud_no_queda_ligada(
     client_prefill: AsyncClient, db_session: AsyncSession
 ) -> None:

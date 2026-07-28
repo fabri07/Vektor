@@ -4,19 +4,26 @@ Dos routers en un archivo porque son las dos caras del MISMO trámite, y separar
 invita a que la ficha administrativa y el payload público se desincronicen:
 
 * **Público** (`/access-requests`, sin auth ni tenant — excepción consciente, lo
-  usa un visitante anónimo): alta, doble opt-in y reenvío del mail. Anti-spam en
-  capas (rate limit por IP + honeypot + tiempo mínimo de envío), como
-  `api/v1/contact.py`.
+  usa un visitante anónimo): alta, doble opt-in, reenvío del mail y el prefill
+  de "Continuar con Google". Anti-spam en capas (rate limit por IP + honeypot +
+  tiempo mínimo de envío), como `api/v1/contact.py`.
 * **SUPERADMIN** (`/admin/access-requests`): listar la cola, ver una solicitud y
   las tres decisiones (aprobar / rechazar / postergar). `require_role("SUPERADMIN")`
   por endpoint, convención de `api/v1/admin.py`.
 
-**Neutralidad a enumeración de cuentas.** Los tres endpoints públicos devuelven
-SIEMPRE el mismo status y el mismo cuerpo, exista o no una cuenta con ese email.
-El `POST /auth/register` viejo respondía 409 *"An account with this email already
-exists"*, que es un oráculo de enumeración; este endpoint es anónimo y no puede
-repetirlo. El único canal que distingue el caso es la casilla del dueño del
-correo (el mail "ya tenés cuenta"), y ese mail lo manda el servicio.
+**Neutralidad a enumeración de cuentas.** Los tres endpoints del trámite (alta,
+verify, resend) devuelven SIEMPRE el mismo status y el mismo cuerpo, exista o no
+una cuenta con ese email. El `POST /auth/register` viejo respondía 409 *"An
+account with this email already exists"*, que es un oráculo de enumeración; este
+endpoint es anónimo y no puede repetirlo. El único canal que distingue el caso es
+la casilla del dueño del correo (el mail "ya tenés cuenta"), y ese mail lo manda
+el servicio.
+
+El cuarto endpoint público, `GET /prefill/{token}`, SÍ tiene un 404 discriminante,
+y no rompe esa neutralidad: no responde sobre un email sino sobre un token opaco
+que el propio visitante trajo, emitido para él al completar OAuth. Distingue
+"este token vive" de "venció o ya se canjeó" — nada sobre qué emails tienen
+cuenta en Véktor.
 
 Este archivo **no tiene lógica de negocio**: toda la máquina de estados vive en
 `AccessRequestService`. Acá solo se traduce HTTP ↔ servicio y errores de dominio ↔
@@ -119,6 +126,12 @@ async def _resolver_google_subject(
       `complete_link` con `email_mismatch`: sin este chequeo, quien controla una
       cuenta de Google podría ligar su identidad a una solicitud hecha con el
       email de otra persona.
+
+    El GETDEL va ANTES de comparar los emails, así que el 403 igual quema el
+    token. Es a propósito (fail-closed: un token que ya se usó para intentar un
+    linkeo que no correspondía no debería seguir vivo); la contrapartida es que
+    dos flujos de Google abiertos en paralelo se pisan entre sí, y el precio de
+    eso es rehacer el "Continuar con Google".
     """
     if not token:
         return None

@@ -3,8 +3,9 @@
 Por qué existe
 -------------
 ``scripts/preflight_vertical_codes.py`` reporta cuántos tenants NO tienen
-``BusinessProfile``: son, sobre todo, los signups viejos por Google
-(``google_oauth_service._create_social_user`` crea Tenant + User pero no perfil).
+``BusinessProfile``: son, sobre todo, los signups viejos por Google — el alta
+social que existió hasta la Task 15 creaba Tenant + User pero no perfil (esa
+función ya no existe: hoy entrar con Google abre una solicitud de acceso).
 Hasta las Tasks 2-3 esos tenants sobrevivían porque toda la app tenía un
 fallback silencioso a kiosco; ahora que ``parse_vertical`` es estricto, cada uno
 es un estado roto real (``/fields`` responde 409, el orquestador degrada).

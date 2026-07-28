@@ -144,6 +144,15 @@ _CONFLICTO_SOLICITUD_ABIERTA = unique_violation_classifier(
     columns=("access_requests.email",),
 )
 
+#: "Una identidad de Google pertenece a un solo usuario". A diferencia del de
+#: arriba, este índice SÍ existe en los dos motores (lo declara el modelo), así
+#: que la carrera es observable también en los tests.
+_CONFLICTO_IDENTIDAD_GOOGLE = unique_violation_classifier(
+    "identidad_google",
+    constraint="uq_auth_identity_provider_subject",
+    columns=("user_auth_identities.provider", "user_auth_identities.provider_subject"),
+)
+
 
 class CreateOutcome(StrEnum):
     """Qué pasó realmente al recibir una solicitud.
@@ -405,7 +414,9 @@ class AccessRequestService:
 
         abierta = await self._get_open_by_email(email)
         if abierta is not None:
-            return await self._reintento_de_solicitud_abierta(abierta)
+            return await self._reintento_de_solicitud_abierta(
+                abierta, data.google_subject
+            )
 
         solicitud = AccessRequest(
             full_name=data.full_name.strip(),
@@ -1102,9 +1113,17 @@ class AccessRequestService:
         )
 
     async def _reintento_de_solicitud_abierta(
-        self, abierta: AccessRequest
+        self, abierta: AccessRequest, google_subject: str | None
     ) -> tuple[AccessRequest, CreateOutcome]:
-        """Reenvío del formulario con un trámite ya abierto: nunca crea otra fila."""
+        """Reenvío del formulario con un trámite ya abierto: nunca crea otra fila.
+
+        Nunca crea otra fila, pero sí **adopta** la identidad de Google si el
+        reenvío la trae y la solicitud abierta no la tenía (ver
+        ``_adoptar_identidad_google``): esta es la única oportunidad de ligarla,
+        porque el token de prefill se consume igual antes de llegar acá.
+        """
+        await self._adoptar_identidad_google(abierta, google_subject)
+
         if abierta.status == AccessRequestStatus.UNVERIFIED.value and not (
             await self._token_en_cooldown(abierta.id)
         ):
@@ -1118,6 +1137,51 @@ class AccessRequestService:
 
         logger.info("access_request.duplicate_open", request_id=str(abierta.id))
         return abierta, CreateOutcome.DUPLICATE_OPEN
+
+    async def _adoptar_identidad_google(
+        self, abierta: AccessRequest, google_subject: str | None
+    ) -> None:
+        """Cuelga la identidad de Google de la solicitud que YA estaba abierta.
+
+        El escenario es común, no teórico: el visitante manda el formulario
+        público y después prueba "Continuar con Google" creyendo que es un login.
+        El token de prefill se consume igual en el router —antes de saber qué
+        camino va a tomar ``create()``—, así que si acá no se adopta el subject,
+        se quema el token y la identidad se pierde **en silencio**: al aprobar,
+        ``approve()`` ve ``None``, no crea el ``UserAuthIdentity`` y el usuario no
+        puede entrar con Google.
+
+        Es seguro ligarla en este punto: el canje del token ya exigió que el
+        email del prefill sea el del formulario (403
+        ``google_prefill_email_mismatch``), y esta solicitud se encontró por ese
+        MISMO email normalizado.
+
+        **Nunca pisa un subject distinto ya guardado.** Dos cuentas de Google
+        sobre un mismo email en trámite no se resuelve solo: se conserva la
+        primera y queda dicho en el log, que es lo que faltaba para que este
+        camino deje de ser mudo en cualquiera de sus variantes.
+
+        No se audita, igual que ``_reencolar_verificacion``: no hay decisión ni
+        transición de estado, solo un dato que se completa.
+        """
+        if google_subject is None or abierta.google_subject == google_subject:
+            return
+
+        if abierta.google_subject is not None:
+            logger.warning(
+                "access_request.google_subject_conflict",
+                request_id=str(abierta.id),
+            )
+            return
+
+        abierta.google_subject = google_subject
+        # Commit propio: la rama `DUPLICATE_OPEN` no commitea nada, así que sin
+        # esto el linkeo se perdería igual —solo que dentro de la sesión—. En la
+        # rama de reemisión el commit de abajo sería redundante, no incorrecto.
+        await self._session.commit()
+        logger.info(
+            "access_request.google_subject_adopted", request_id=str(abierta.id)
+        )
 
     async def _token_en_cooldown(self, request_id: uuid.UUID) -> bool:
         """¿Ya se emitió un token para esta solicitud hace muy poco?
@@ -1266,17 +1330,25 @@ class AccessRequestService:
             is_active=True,
         )
 
-    async def _exigir_identidad_google_libre(self, provider_subject: str) -> None:
-        """Falla si ese ``provider_subject`` ya está vinculado a algún usuario."""
-        ya_vinculada = (
+    async def google_identity_taken(self, provider_subject: str) -> bool:
+        """¿Ese ``provider_subject`` ya está vinculado a algún usuario? **No escribe.**
+
+        Público porque el dry-run del script (``bloqueos_para_aprobar``) necesita
+        el MISMO criterio que la guardia de ``approve()``: si preguntara distinto,
+        el preview volvería a prometer una cuenta que el ``--apply`` no acuña.
+        """
+        return (
             await self._session.execute(
                 select(UserAuthIdentity.id).where(
                     UserAuthIdentity.provider == _GOOGLE_PROVIDER,
                     UserAuthIdentity.provider_subject == provider_subject,
                 )
             )
-        ).first()
-        if ya_vinculada is not None:
+        ).first() is not None
+
+    async def _exigir_identidad_google_libre(self, provider_subject: str) -> None:
+        """Falla si ese ``provider_subject`` ya está vinculado a algún usuario."""
+        if await self.google_identity_taken(provider_subject):
             raise AccessRequestGoogleIdentityTaken(provider_subject)
 
     async def _vincular_identidad_google(
@@ -1291,22 +1363,36 @@ class AccessRequestService:
         ``last_login_at`` queda en ``None`` a propósito: la identidad existe pero
         todavía nadie la usó para entrar, y sellar un login que no ocurrió sería
         inventarlo. Va en la MISMA transacción que el resto de la aprobación.
+
+        El INSERT va bajo ``guarded_savepoint`` aunque
+        ``_exigir_identidad_google_libre`` ya haya chequeado: ese pre-chequeo es
+        un SELECT y el ``FOR UPDATE`` de ``_lock()`` toma la fila de la
+        SOLICITUD, no la de la identidad. Dos aprobaciones simultáneas de dos
+        solicitudes que comparten ``google_subject`` —el dueño aprobando desde la
+        API y desde el script a la vez— pasan las dos el pre-chequeo, y sin esto
+        la segunda revienta contra ``uq_auth_identity_provider_subject`` con un
+        500 opaco. Con esto termina en el MISMO 409 que el camino secuencial.
         """
         if solicitud.google_subject is None:
             return
-        self._session.add(
-            UserAuthIdentity(
-                tenant_id=tenant.tenant_id,
-                user_id=user.user_id,
-                provider=_GOOGLE_PROVIDER,
-                provider_subject=solicitud.google_subject,
-                # El email de la solicitud ES el que verificó Google: el prefill
-                # solo se canjea cuando los dos coinciden (ver el 403
-                # `google_prefill_email_mismatch` del router).
-                provider_email=solicitud.email,
-            )
-        )
-        await self._session.flush()
+        try:
+            async with guarded_savepoint(self._session, _CONFLICTO_IDENTIDAD_GOOGLE):
+                # El `add` va DENTRO del savepoint: `begin_nested()` flushea antes
+                # de crearlo, así que agregar afuera emitiría el INSERT afuera.
+                self._session.add(
+                    UserAuthIdentity(
+                        tenant_id=tenant.tenant_id,
+                        user_id=user.user_id,
+                        provider=_GOOGLE_PROVIDER,
+                        provider_subject=solicitud.google_subject,
+                        # El email de la solicitud ES el que verificó Google: el
+                        # prefill solo se canjea cuando los dos coinciden (ver el
+                        # 403 `google_prefill_email_mismatch` del router).
+                        provider_email=solicitud.email,
+                    )
+                )
+        except SavepointConflictError:
+            raise AccessRequestGoogleIdentityTaken(solicitud.google_subject) from None
 
     async def _sellar_screening_en_el_perfil(
         self, solicitud: AccessRequest, tenant: Tenant

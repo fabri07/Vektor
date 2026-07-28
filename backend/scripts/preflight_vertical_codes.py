@@ -24,10 +24,11 @@ Qué imprime
    corrida contra Neon es de UNA sola oportunidad: si no se pregunta acá, no nos
    enteramos nunca.
 5. **Tenants SIN ``BusinessProfile``.** Ese número es el agujero de los signups
-   viejos por Google (``google_oauth_service._create_social_user`` no crea
-   perfil): hasta las Tasks 2-3 sobrevivían gracias a los fallbacks silenciosos
-   a kiosco; ahora que el código parsea estricto, cada uno de esos tenants es un
-   estado roto real. Se reparan de a uno con
+   viejos por Google: el alta social que existió hasta la Task 15 creaba Tenant
+   + User sin perfil (esa función ya no existe — hoy entrar con Google abre una
+   solicitud de acceso). Hasta las Tasks 2-3 sobrevivían gracias a los fallbacks
+   silenciosos a kiosco; ahora que el código parsea estricto, cada uno de esos
+   tenants es un estado roto real. Se reparan de a uno con
    ``scripts/backfill_missing_business_profiles.py``, que EXIGE el vertical (no
    lo adivina).
 

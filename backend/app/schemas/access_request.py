@@ -133,10 +133,11 @@ class CreateAccessRequestRequest(BaseModel):
     # ── Trazabilidad ──────────────────────────────────────────────────────────
     cta_source: str | None = Field(default=None, max_length=60)
     #: Token opaco del prefill de "Continuar con Google". El formulario lo
-    #: devuelve tal cual lo recibió para que la solicitud quede ligada a esa
-    #: identidad. **Todavía no se resuelve**: quien lo emite y lo canjea (Redis
-    #: `oauth:prefill:{id}`, `GET /access-requests/prefill/{token}`) es la tarea
-    #: del alta por Google, que es la que va a poblar `google_subject`.
+    #: devuelve tal cual lo recibió y el router lo canjea contra Redis
+    #: (`oauth:prefill:{id}`) para poblar `google_subject`: **este POST es la
+    #: única toma del token**, el `GET /access-requests/prefill/{token}` que lo
+    #: precede solo lee. Un token vencido no invalida la solicitud (se manda sin
+    #: ligar); uno de otro email es 403.
     google_prefill_token: str | None = Field(default=None, max_length=100)
 
     # ── Anti-bot ──────────────────────────────────────────────────────────────
