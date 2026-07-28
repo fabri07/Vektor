@@ -113,16 +113,55 @@ def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
 REGISTRATION_CLOSED_CODE = "registration_closed"
 
 
-def client_ip(request: Request) -> str | None:
-    """IP real detrás del proxy (Railway) o la del cliente directo.
+#: Header que setea el edge de Railway: UN solo valor, sin la cadena ambigua de
+#: `X-Forwarded-For` (que puede traer varias IPs y cuyo primer valor no se puede
+#: creer sin una política de proxies confiables).
+_HEADER_IP_REAL = "x-real-ip"
 
-    Definición única: la comparten los dos formularios públicos anónimos
-    (contacto y solicitud de acceso), que la usan para el `ip_hash` anti-abuso.
+#: Key del limiter cuando no se pudo determinar la IP. Vive acá y NO en
+#: `client_ip` a propósito: `client_ip` devuelve `None` para decir "no la sé", y
+#: `hash_ip(None)` es `None`. Si `client_ip` devolviera este centinela, el
+#: `ip_hash` guardado sería el hash de un literal inventado, indistinguible de
+#: una IP real y compartido por todos los clientes sin IP.
+_SIN_IP = "unknown"
+
+
+def client_ip(request: Request) -> str | None:
+    """IP del cliente. **Definición única** de "el cliente" en toda la app.
+
+    La comparten el `ip_hash` anti-abuso de los dos formularios públicos
+    anónimos (contacto y solicitud de acceso) y la key del rate limiter global
+    (`rate_limit_key`). Antes eran dos nociones distintas dentro del MISMO
+    handler: el `ip_hash` leía `X-Forwarded-For` y el `@limiter.limit("5/hour")`
+    usaba `get_remote_address`, que lo ignora — detrás del edge de Railway eso
+    podía volver el 5/hour un techo GLOBAL del único embudo de alta.
+
+    La confianza en el header está atada al DESPLIEGUE, no al header: solo se
+    lee `X-Real-IP` en producción, porque cualquiera que alcance uvicorn directo
+    puede inventarlo. Fuera de producción (dev y tests) se usa siempre
+    `request.client.host`.
+
+    Sin header, degrada a `request.client.host` — exactamente lo que hacía
+    `get_remote_address`, así que el comportamiento no empeora aunque el edge
+    resulte no mandar `X-Real-IP` (queda pendiente verificarlo en prod).
+
+    `None` cuando no hay forma de saberla: no se inventa un valor.
     """
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    if get_settings().is_production:
+        real = request.headers.get(_HEADER_IP_REAL)
+        if real and real.strip():
+            return real.strip()
     return request.client.host if request.client else None
+
+
+def rate_limit_key(request: Request) -> str:
+    """Key del rate limiter global — la MISMA IP que hashea el `ip_hash`.
+
+    `slowapi` exige un `str`, así que acá (y solo acá) el "no la sé" se colapsa
+    a un centinela: todos los requests sin IP comparten cubeta, que es el
+    comportamiento conservador y equivale a lo que ya hacía `get_remote_address`.
+    """
+    return client_ip(request) or _SIN_IP
 
 
 def require_open_registration() -> None:

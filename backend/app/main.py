@@ -19,8 +19,8 @@ from pydantic import ValidationError
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
+from app.api.v1.deps import rate_limit_key
 from app.application.middleware.tenant import TenantMiddleware
 from app.application.services.stock_service import (
     InsufficientStockError,
@@ -35,7 +35,13 @@ settings = get_settings()
 
 # ── Rate limiter (shared instance, imported by routers) ───────────────────────
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
+# `key_func=rate_limit_key` y no `get_remote_address`: es la MISMA resolución de
+# IP que usa el `ip_hash` de los formularios públicos (ver `deps.client_ip`).
+# Con `get_remote_address` —que ignora los headers del proxy— detrás del edge de
+# Railway todos los visitantes podían compartir cubeta, y el `5/hour` del único
+# embudo de alta pasaba a ser un techo GLOBAL. Ojo al cambiarlo: este limiter lo
+# consumen TODOS los endpoints vía `default_limits`, no solo los públicos.
+limiter = Limiter(key_func=rate_limit_key, default_limits=["200/minute"])
 
 
 @asynccontextmanager
