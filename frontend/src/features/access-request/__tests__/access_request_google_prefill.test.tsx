@@ -92,6 +92,11 @@ const TIMEOUT_FORMULARIO_COMPLETO = 20_000;
 describe("AccessRequestForm — prefill de Google", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // `clearAllMocks` NO borra implementaciones: un `mockResolvedValue` puesto
+    // en un test se filtra a los siguientes y los vuelve dependientes del
+    // orden. Estos tests distinguen "el prefill responde" de "el prefill se
+    // cayó", así que arrancar de cero no es opcional.
+    mockGet.mockReset();
     searchParams = new URLSearchParams(`prefill=${TOKEN}`);
     mockPost.mockResolvedValue({ data: { status: "ok", message: "ok" } } as never);
   });
