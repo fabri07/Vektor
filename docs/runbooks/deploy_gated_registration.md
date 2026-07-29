@@ -147,13 +147,30 @@ Camino completo, con una cuenta de prueba:
 *(Sección viva: al cerrar cada ítem se anota el commit, no se borra la línea.)*
 
 - **P0 — `/solicitar-acceso` perdía solicitudes en silencio.** El botón de envío
-  quedaba `disabled` mientras faltara una respuesta, y Chrome no dispara envío
-  implícito con el submit deshabilitado: el resumen de faltantes, el foco
-  automático y los errores de los nueve grupos eran código muerto. El visitante
-  llegaba al último scroll, no podía mandar nada y **el abandono resultante era
-  invisible**. → *pendiente de commit*
-- **P0 — un campo financiero vacío del onboarding se guardaba como `$0`.** →
-  *pendiente de commit*
+  quedaba `disabled` mientras faltara una respuesta, y el HTML Standard no
+  dispara envío implícito cuando el botón por defecto existe y está
+  deshabilitado: el resumen de faltantes, el foco automático y los errores de
+  los nueve grupos eran código muerto. El visitante llegaba al último scroll, no
+  podía mandar nada y **el abandono resultante era invisible**.
+  → `579c03e1` (envío alcanzable + resumen anunciable) y `5b5c74f7` (ARIA de los
+  nueve grupos; el rubro señalaba su error solo con un borde rojo).
+- **P0 — un campo financiero vacío del onboarding se guardaba como `$0`.**
+  `parseFloat(campo) || 0` convertía "no sé" en "no gasto nada", y el
+  completeness sumaba 20 puntos de caja de forma incondicional.
+  → `b45fbfb6` (cambio bilateral frontend/backend, sin migración: las columnas
+  ya eran nullable).
+- **WCAG AA.** CTA a 2,11:1 y `text-gray-400` del onboarding a 2,54:1; filas de
+  opción a 38px. → `300dbd40`.
+- **Cero persistencia del borrador** y contador de progreso. → `64b53e8d`.
+- **`main_concern` se preguntaba dos veces** y la segunda respuesta pisaba la
+  primera. → `6ad543f0`.
+- **`<title>` genérico** en tres pantallas y cuatro copias del mismo shell.
+  → `ccf71767`.
+
+**Lo que este corte NO cerró y sigue abierto** (ver tabla de abajo): el salto de
+tema oscuro→blanco, la reciprocidad, el recorte de preguntas, la migración de
+tokens, y la telemetría de abandono — que sigue sin existir porque no hay
+colector. El corte se llama "P0 y P1 técnicos priorizados", no "P0/P1 completo".
 
 ### Diferido a propósito
 
@@ -174,6 +191,19 @@ Cada ítem quedó afuera del corte con un motivo, no por olvido:
 ## 6. Dos advertencias para el que venga después
 
 Ninguna de las dos es un bug abierto. Las dos hacen que un cambio "obvio" salga mal.
+
+### 6.0 `vektor-teal` no sirve para texto
+
+El teal de marca (`#27c7b8`) con texto blanco da **2,11:1**. Funciona para
+superficies, iconos y acentos; no para texto de ningún tamaño. Para eso está
+`vektor-teal-deep` (`#17776e`, mismo matiz al 60 % de brillo, 5,38:1), que es
+lo que usan los CTA. `frontend/src/__tests__/contraste_tokens.test.ts` lo mide
+en CI.
+
+Quedan con el defecto, a propósito y fuera del embudo:
+`DashboardLaunchpadNav` y `ManualEntryLauncher` (gradiente viejo con texto), y
+`RiskCard` / `ActionCard` (`text-gray-400` sobre blanco). Están detrás del
+login; cambiar el chrome del dashboard no era parte de este corte.
 
 ### 6.1 Las pantallas finales están a 4,71:1 — 0,21 puntos sobre AA
 
