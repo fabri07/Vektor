@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import ingestion_import_service as _iis
@@ -1582,6 +1582,29 @@ async def apply_reread(
 _STALE_RUNNING_AFTER_SECONDS = 15 * 60
 
 
+# Namespace propio (2 claves int4) para no acoplar este guard con el advisory
+# lock de mantenimiento general (maintenance_lock_service._advisory_key usa la
+# forma de 1 clave bigint — Postgres mantiene ambos espacios separados, nunca
+# colisionan aunque el valor numérico coincida).
+_REREAD_GUARD_LOCK_NAMESPACE = 0x52524447  # "RRDG" en hex, arbitrario y estable
+
+
+async def _acquire_reread_guard_lock(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Advisory lock transaccional que serializa el guard anti-duplicado de
+    ``start_background_apply`` para el mismo tenant. Se libera solo al
+    commit/rollback de la transacción actual del caller (la sesión de la
+    request, que commitea después de ``start_background_apply``). No-op en
+    SQLite — mismo criterio que ``maintenance_lock_service``."""
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    key = int.from_bytes(tenant_id.bytes[:4], "big", signed=True)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :key)"),
+        {"ns": _REREAD_GUARD_LOCK_NAMESPACE, "key": key},
+    )
+
+
 async def start_background_apply(
     session: AsyncSession,
     file_id: uuid.UUID,
@@ -1591,6 +1614,8 @@ async def start_background_apply(
     devuelve. Guard anti-duplicado: si ya hay una relectura RUNNING reciente del
     tenant, levanta ``ValueError`` (el caller responde 409). El caller commitea y
     encola la task. Evita el ciclo timeout→reintento→duplicados."""
+    await _acquire_reread_guard_lock(session, tenant_id)
+
     existing = await session.execute(
         select(DataRepairRun).where(
             DataRepairRun.tenant_id == tenant_id,
