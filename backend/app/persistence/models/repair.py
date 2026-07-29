@@ -82,7 +82,7 @@ class DataRepairItem(UUIDPrimaryKeyMixin, Base):
             "action IN ('VOID_SALE','CREATE_PRODUCT','UPDATE_PRODUCT','UPDATE_SALE',"
             "'REVIEW_SALE','VOID_DUPLICATE','RECLASSIFY_EXPENSE','REREAD_VOID','REREAD_INSERT',"
             "'MERGE_PRODUCT','DEACTIVATE_DUPLICATE','REPOINT_FK','CONSOLIDATE_BALANCE',"
-            "'DELETE_BALANCE')",
+            "'DELETE_BALANCE','REREAD_MASTER_CREATE','REREAD_MASTER_UPDATE')",
             name="ck_repair_items_action",
         ),
     )

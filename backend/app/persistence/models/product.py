@@ -88,7 +88,7 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_products_provenance"),
         CheckConstraint(
             "deactivation_reason IS NULL OR deactivation_reason IN ("
-            "'USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID')",
+            "'USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID','REREAD_UNDO')",
             name="ck_products_deactivation_reason",
         ),
         Index("ix_products_tenant_provenance", "tenant_id", "provenance"),
