@@ -16,6 +16,7 @@ import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -32,6 +33,7 @@ from app.application.services.ingestion_import_service import (
 )
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.integrations.s3 import S3Client
+from app.persistence.models.customer import Customer
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
     REREAD_STATUS_APPLIED,
@@ -41,6 +43,7 @@ from app.persistence.models.file import (
 )
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
+from app.persistence.models.repair import DataRepairItem
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
@@ -1249,3 +1252,105 @@ async def test_file_has_user_edits_ignores_voided_records(
         await reread_service.file_has_user_edits(db_session, file.id, tenant.tenant_id)
         is False
     )
+
+
+# ── F9b: auditoría before/after de maestros (clientes/proveedores) ─────────────
+
+
+async def _make_master_file(
+    session: AsyncSession, tenant: Tenant, master_column_mappings: dict[str, Any] | None
+) -> UploadedFile:
+    """Archivo con ``master_column_mappings`` guardado en el summary — mismo
+    shape que ``api/v1/ingestion.py::confirm_file`` persiste (ver
+    ``test_ingestion_counters_preview_f7d.py::_make_reread_file``, reusado acá
+    en vez de inventar el shape de nuevo)."""
+    parsed: dict[str, Any] = {"confirmed_fields": {"clientes": True}}
+    if master_column_mappings is not None:
+        parsed["master_column_mappings"] = master_column_mappings
+    f = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="clientes.csv",
+        s3_key=f"tenants/{tenant.tenant_id}/clientes.csv",
+        content_type="text/csv",
+        size_bytes=10,
+        purpose="clientes",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json=parsed,
+    )
+    session.add(f)
+    await session.commit()
+    return f
+
+
+def _patch_reread_fresh_summary(
+    monkeypatch: pytest.MonkeyPatch, fresh: dict[str, Any]
+) -> None:
+    async def _fake_download(self: S3Client, key: str) -> bytes:  # noqa: ARG001
+        return b""
+
+    monkeypatch.setattr(S3Client, "download", _fake_download)
+    monkeypatch.setattr(reread_service, "parse_uploaded_content", lambda *a, **k: fresh)
+
+
+@pytest.mark.asyncio
+async def test_reread_audita_masters_creados_y_actualizados(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F9b: la relectura de una hoja de clientes genera un ``DataRepairItem``
+    por cada cliente creado o actualizado (before/after), igual que ventas/
+    gastos, para poder revertirlos vía ``undo_reread`` (Task 7)."""
+    existing = Customer(tenant_id=tenant.tenant_id, name="Juan Pérez", dni="30111222")
+    db_session.add(existing)
+    await db_session.flush()
+    existing_id = existing.id
+
+    file = await _make_master_file(
+        db_session,
+        tenant,
+        {"flat": {"nombre": "name", "documento": "dni"}, "context": {}},
+    )
+
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "clientes",
+        "mapping_contexts": [
+            {
+                "context_id": "table",
+                "entity_type": "customer",
+                "headers": ["nombre", "documento"],
+            }
+        ],
+        "clientes_detectados": [
+            # matchea a `existing` por DNI -> actualiza el nombre.
+            {"nombre": "Juan Perez", "documento": "30111222"},
+            # sin match -> crea un cliente nuevo.
+            {"nombre": "Maria Lopez", "documento": "40987654"},
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.clientes == 2
+
+    items_res = await db_session.execute(
+        select(DataRepairItem).where(
+            DataRepairItem.run_id == result.run_id,
+            DataRepairItem.action.in_(["REREAD_MASTER_CREATE", "REREAD_MASTER_UPDATE"]),
+        )
+    )
+    items = items_res.scalars().all()
+    assert len(items) == 2
+    update_item = next(i for i in items if i.action == "REREAD_MASTER_UPDATE")
+    assert update_item.before_json is not None
+    assert update_item.before_json["name"] == "Juan Pérez"
+    assert update_item.after_json is not None
+    assert update_item.after_json["id"] == str(existing_id)
+    assert update_item.after_json["name"] == "Juan Perez"
+    create_item = next(i for i in items if i.action == "REREAD_MASTER_CREATE")
+    assert create_item.before_json is None
+    assert create_item.after_json is not None
+    assert create_item.after_json["name"] == "Maria Lopez"

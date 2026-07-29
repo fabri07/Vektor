@@ -58,6 +58,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 from sqlalchemy import delete, select, text
@@ -270,6 +271,31 @@ def _snapshot_expense(e: ExpenseEntry) -> dict[str, Any]:
     }
 
 
+_MASTER_SNAPSHOT_FIELDS = {
+    "customer": (
+        "customer_type", "name", "last_name", "doc_type", "dni", "cuit",
+        "iva_condition", "email", "phone", "address", "locality", "province",
+        "postal_code", "birthday", "notes", "credit_limit",
+    ),
+    "supplier": ("name", "last_name", "cuil", "payment_method", "email", "phone", "notes"),
+}
+
+
+def _snapshot_master(entity: Any, kind: Literal["customer", "supplier"]) -> dict[str, Any]:
+    """Serializa los campos editables + ``updated_at`` (para el touched-since
+    check del undo) de un Customer/Supplier a un dict JSON-safe."""
+    snap: dict[str, Any] = {"id": str(entity.id), "kind": kind}
+    for f in _MASTER_SNAPSHOT_FIELDS[kind]:
+        value = getattr(entity, f)
+        if isinstance(value, Decimal):
+            value = str(value)
+        elif hasattr(value, "isoformat"):
+            value = value.isoformat()
+        snap[f] = value
+    snap["updated_at"] = entity.updated_at.isoformat() if entity.updated_at else None
+    return snap
+
+
 # ── carga de estado ────────────────────────────────────────────────────────────
 
 
@@ -396,8 +422,10 @@ async def _reread_master_entities(
     file: UploadedFile,
     fresh: dict[str, Any],
     confirmed_fields: dict[str, bool],
+    run_id: uuid.UUID,
 ) -> tuple[int, int]:
-    """F7d — reread de hojas de maestro (clientes/proveedores).
+    """F7d + F9b — reread de hojas de maestro (clientes/proveedores), ahora con
+    auditoría before/after para poder revertirlos en ``undo_reread``.
 
     Reusa el MISMO motor que el confirm (``_import_master_entities``, F7c/F7d):
     upsert idempotente (crea o actualiza, solo setea los campos que el archivo
@@ -416,13 +444,44 @@ async def _reread_master_entities(
     confirm), así que un archivo confirmado ANTES de F7d simplemente no
     reaplica sus maestros en la relectura (cobertura documentada, no un bug).
 
+    Como el motor de identidad decide QUÉ registro tocar recién adentro de
+    ``apply_import`` (F7b), la forma más simple y segura de capturar el estado
+    "antes" es un snapshot completo de todos los Customer/Supplier del tenant
+    ANTES de llamar a ``_import_master_entities``, y comparar contra el estado
+    después usando los ids que ahora expone (``clientes_creados_ids`` etc.).
+    Un tenant tiene, en la práctica, de decenas a pocos miles de
+    clientes/proveedores — aceptable para una operación rara y manual como la
+    relectura.
+
     Devuelve ``(clientes_creados_o_actualizados, proveedores_creados_o_actualizados)``.
     """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
     stored = (file.parsed_summary_json or {}).get("master_column_mappings") or {}
     context_mappings = stored.get("context") or None
     flat_mapping = stored.get("flat") or None
     if not context_mappings and not flat_mapping:
         return 0, 0
+
+    # Snapshot COMPLETO antes de mutar — no sabemos qué registros va a tocar
+    # el motor de identidad hasta que corre.
+    before_customers = {
+        c.id: _snapshot_master(c, "customer")
+        for c in (
+            await session.execute(select(Customer).where(Customer.tenant_id == tenant_id))
+        )
+        .scalars()
+        .all()
+    }
+    before_suppliers = {
+        s.id: _snapshot_master(s, "supplier")
+        for s in (
+            await session.execute(select(Supplier).where(Supplier.tenant_id == tenant_id))
+        )
+        .scalars()
+        .all()
+    }
 
     counts: dict[str, Any] = {"clientes": 0, "proveedores": 0}
     await _iis._import_master_entities(
@@ -435,6 +494,55 @@ async def _reread_master_entities(
         flat_mapping,
         counts,
     )
+    await session.flush()
+
+    async def _audit(
+        ids_key: str,
+        before_map: dict[uuid.UUID, dict[str, Any]],
+        kind: Literal["customer", "supplier"],
+        model: type[Any],
+        action: str,
+    ) -> None:
+        for raw_id in counts.get(ids_key, []):
+            entity_id = uuid.UUID(raw_id)
+            entity = await session.get(model, entity_id)
+            if entity is None:
+                continue
+            # ``updated_at`` tiene ``onupdate=func.now()`` (server-side) — tras el
+            # flush de apply_import queda marcado expirado; un ``getattr`` directo
+            # fuera de un ``await`` dispara un lazy-load síncrono que revienta
+            # bajo AsyncSession (``MissingGreenlet``). Refrescar explícitamente.
+            await session.refresh(entity)
+            before = before_map.get(entity_id)  # None si fue CREADO ahora
+            session.add(
+                DataRepairItem(
+                    run_id=run_id,
+                    tenant_id=tenant_id,
+                    source_file_id=file.id,
+                    action=action,
+                    before_json=before,
+                    after_json=_snapshot_master(entity, kind),
+                    confidence="HIGH",
+                )
+            )
+
+    await _audit(
+        "clientes_actualizados_ids", before_customers, "customer", Customer,
+        "REREAD_MASTER_UPDATE",
+    )
+    await _audit(
+        "clientes_creados_ids", before_customers, "customer", Customer,
+        "REREAD_MASTER_CREATE",
+    )
+    await _audit(
+        "proveedores_actualizados_ids", before_suppliers, "supplier", Supplier,
+        "REREAD_MASTER_UPDATE",
+    )
+    await _audit(
+        "proveedores_creados_ids", before_suppliers, "supplier", Supplier,
+        "REREAD_MASTER_CREATE",
+    )
+
     return counts.get("clientes", 0), counts.get("proveedores", 0)
 
 
@@ -1498,7 +1606,7 @@ async def apply_reread(
     # venta/gasto de este archivo puede referenciar un cliente/proveedor recién
     # actualizado. No-op si el confirm original no guardó mapeo de columnas.
     clientes_count, proveedores_count = await _reread_master_entities(
-        session, tenant_id, file, summary_for_import, confirmed_fields
+        session, tenant_id, file, summary_for_import, confirmed_fields, run.id
     )
 
     result = await _reconcile(

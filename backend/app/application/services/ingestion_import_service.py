@@ -644,6 +644,12 @@ async def _import_master_entities(
             counts["clientes_invalidos"] = (
                 counts.get("clientes_invalidos", 0) + cust_result.invalid
             )
+            counts["clientes_creados_ids"] = counts.get("clientes_creados_ids", []) + [
+                str(i) for i in cust_result.created_ids
+            ]
+            counts["clientes_actualizados_ids"] = counts.get(
+                "clientes_actualizados_ids", []
+            ) + [str(i) for i in cust_result.updated_ids]
         else:
             supplier_records = [
                 {
@@ -673,6 +679,12 @@ async def _import_master_entities(
             counts["proveedores_invalidos"] = (
                 counts.get("proveedores_invalidos", 0) + sup_result.invalid
             )
+            counts["proveedores_creados_ids"] = counts.get(
+                "proveedores_creados_ids", []
+            ) + [str(i) for i in sup_result.created_ids]
+            counts["proveedores_actualizados_ids"] = counts.get(
+                "proveedores_actualizados_ids", []
+            ) + [str(i) for i in sup_result.updated_ids]
 
 
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
