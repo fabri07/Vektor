@@ -497,13 +497,13 @@ async def _reread_master_entities(
     await session.flush()
 
     async def _audit(
-        ids_key: str,
+        ids: list[str],
         before_map: dict[uuid.UUID, dict[str, Any]],
         kind: Literal["customer", "supplier"],
         model: type[Any],
         action: str,
     ) -> None:
-        for raw_id in counts.get(ids_key, []):
+        for raw_id in ids:
             entity_id = uuid.UUID(raw_id)
             entity = await session.get(model, entity_id)
             if entity is None:
@@ -526,20 +526,42 @@ async def _reread_master_entities(
                 )
             )
 
+    # Dedup: si dos filas del MISMO archivo matchean la misma identidad (ej. DNI
+    # repetido, o una fila posterior "corrige" la que ésta acaba de crear),
+    # apply_import indexa el recién creado en su dedup de batch — la segunda fila
+    # resuelve como "matched" y ese id termina en updated_ids AUNQUE ya esté en
+    # created_ids de la primera fila. Sin este filtro, esa entidad generaría DOS
+    # DataRepairItem: un REREAD_MASTER_UPDATE con before_json=None (mal etiquetado
+    # — no hubo estado previo real) y un REREAD_MASTER_CREATE redundante con el
+    # mismo after_json. El "antes" real de esa entidad relativo a TODO este run es
+    # "no existía", así que se audita UNA sola vez como CREATE.
+    clientes_creados_ids = counts.get("clientes_creados_ids", [])
+    clientes_actualizados_ids = [
+        i
+        for i in counts.get("clientes_actualizados_ids", [])
+        if i not in set(clientes_creados_ids)
+    ]
+    proveedores_creados_ids = counts.get("proveedores_creados_ids", [])
+    proveedores_actualizados_ids = [
+        i
+        for i in counts.get("proveedores_actualizados_ids", [])
+        if i not in set(proveedores_creados_ids)
+    ]
+
     await _audit(
-        "clientes_actualizados_ids", before_customers, "customer", Customer,
+        clientes_actualizados_ids, before_customers, "customer", Customer,
         "REREAD_MASTER_UPDATE",
     )
     await _audit(
-        "clientes_creados_ids", before_customers, "customer", Customer,
+        clientes_creados_ids, before_customers, "customer", Customer,
         "REREAD_MASTER_CREATE",
     )
     await _audit(
-        "proveedores_actualizados_ids", before_suppliers, "supplier", Supplier,
+        proveedores_actualizados_ids, before_suppliers, "supplier", Supplier,
         "REREAD_MASTER_UPDATE",
     )
     await _audit(
-        "proveedores_creados_ids", before_suppliers, "supplier", Supplier,
+        proveedores_creados_ids, before_suppliers, "supplier", Supplier,
         "REREAD_MASTER_CREATE",
     )
 

@@ -1354,3 +1354,66 @@ async def test_reread_audita_masters_creados_y_actualizados(
     assert create_item.before_json is None
     assert create_item.after_json is not None
     assert create_item.after_json["name"] == "Maria Lopez"
+
+
+@pytest.mark.asyncio
+async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F9b (fix post-review): dos filas del MISMO archivo con el mismo DNI —
+    ninguna matchea a un cliente preexistente, así que la primera CREA y la
+    segunda, al re-resolver contra el índice de dedup del propio batch
+    (``apply_import`` registra el recién creado ahí para no duplicar dentro del
+    mismo archivo), resuelve como "matched" contra ESE cliente recién creado y
+    termina en ``updated_ids``. Sin el dedup entre ``*_creados_ids`` y
+    ``*_actualizados_ids``, esto generaba DOS ``DataRepairItem`` para la MISMA
+    entidad: un REREAD_MASTER_UPDATE con ``before_json=None`` (mal etiquetado,
+    no hubo estado previo real) y un REREAD_MASTER_CREATE redundante. Debe
+    generarse UN solo item, REREAD_MASTER_CREATE."""
+    file = await _make_master_file(
+        db_session,
+        tenant,
+        {"flat": {"nombre": "name", "documento": "dni"}, "context": {}},
+    )
+
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "clientes",
+        "mapping_contexts": [
+            {
+                "context_id": "table",
+                "entity_type": "customer",
+                "headers": ["nombre", "documento"],
+            }
+        ],
+        "clientes_detectados": [
+            # crea el cliente.
+            {"nombre": "Juan Perez", "documento": "30111222"},
+            # mismo DNI que la fila anterior -> "actualiza" lo que la primera
+            # fila del MISMO archivo acaba de crear (no un cliente preexistente).
+            {"nombre": "Juan Perez Corregido", "documento": "30111222"},
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    customers = (await db_session.execute(select(Customer))).scalars().all()
+    assert len(customers) == 1  # una sola entidad física, no dos
+
+    items_res = await db_session.execute(
+        select(DataRepairItem).where(
+            DataRepairItem.run_id == result.run_id,
+            DataRepairItem.action.in_(["REREAD_MASTER_CREATE", "REREAD_MASTER_UPDATE"]),
+        )
+    )
+    items = items_res.scalars().all()
+    assert len(items) == 1  # NO dos (create + update fantasma) para la misma entidad
+    assert items[0].action == "REREAD_MASTER_CREATE"
+    assert items[0].before_json is None
+    assert items[0].after_json is not None
+    assert items[0].after_json["id"] == str(customers[0].id)
+    # El name final refleja la ÚLTIMA fila que la tocó (la segunda, "corregida"),
+    # aunque la auditoría la trate como parte del mismo CREATE.
+    assert items[0].after_json["name"] == "Juan Perez Corregido"
