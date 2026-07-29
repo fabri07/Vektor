@@ -1772,7 +1772,7 @@ async def reread_run_status(
 ) -> RereadRunStatusResponse:
     from app.application.services import reread_service  # noqa: PLC0415
 
-    run = await reread_service.get_reread_run(session, run_id, tenant.tenant_id)
+    run = await reread_service.get_reread_run(session, run_id, tenant.tenant_id, file_id)
     if run is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Relectura no encontrada."

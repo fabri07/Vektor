@@ -1653,11 +1653,18 @@ async def start_background_apply(
 
 
 async def get_reread_run(
-    session: AsyncSession, run_id: uuid.UUID, tenant_id: uuid.UUID
+    session: AsyncSession, run_id: uuid.UUID, tenant_id: uuid.UUID, file_id: uuid.UUID
 ) -> DataRepairRun | None:
-    """Devuelve el run de relectura (para el polling de estado), validando tenant."""
+    """Devuelve el run de relectura (para el polling de estado), validando
+    tenant Y que el run pertenezca al ``file_id`` pedido — evita que un
+    ``run_id`` válido de OTRO archivo del mismo tenant devuelva un
+    ``file_id`` que no le corresponde (el endpoint antes lo tomaba de la URL
+    sin chequear)."""
     run = await session.get(DataRepairRun, run_id)
     if run is None or run.tenant_id != tenant_id or run.repair_type != REPAIR_TYPE_REREAD:
+        return None
+    stored_file_id = (run.details_json or {}).get("file_id")
+    if stored_file_id != str(file_id):
         return None
     return run
 

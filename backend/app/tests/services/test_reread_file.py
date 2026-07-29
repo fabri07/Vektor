@@ -468,15 +468,44 @@ async def test_background_apply_run_status_and_guard(
     await db_session.commit()
     assert result.voided == 2  # los 2 no-editados del import inicial
 
-    fetched = await reread_service.get_reread_run(db_session, run.id, tenant.tenant_id)
+    fetched = await reread_service.get_reread_run(
+        db_session, run.id, tenant.tenant_id, file.id
+    )
     assert fetched is not None
     assert fetched.status == "APPLIED"
     assert (fetched.details_json or {}).get("voided") == 2
 
     # Otro tenant no ve el run.
     assert (
-        await reread_service.get_reread_run(db_session, run.id, uuid.uuid4()) is None
+        await reread_service.get_reread_run(db_session, run.id, uuid.uuid4(), file.id)
+        is None
     )
+
+
+@pytest.mark.asyncio
+async def test_get_reread_run_rechaza_file_id_incompatible(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El polling con el ``file_id`` de OTRO archivo (aunque el ``run_id`` sea
+    válido y del mismo tenant) debe devolver None — evita que la respuesta
+    mezcle el ``file_id`` de la URL con un run que en realidad pertenece a
+    otro archivo."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file_a = await _make_file(db_session, tenant, _CSV_BASE)
+    file_b = await _make_file(db_session, tenant, _CSV_BASE)
+
+    run = await reread_service.start_background_apply(db_session, file_a.id, tenant.tenant_id)
+    await db_session.commit()
+
+    # Pedirlo con el file_id de OTRO archivo debe devolver None (404 en el endpoint).
+    result = await reread_service.get_reread_run(db_session, run.id, tenant.tenant_id, file_b.id)
+    assert result is None
+
+    # Con el file_id correcto, sí lo devuelve.
+    result_ok = await reread_service.get_reread_run(
+        db_session, run.id, tenant.tenant_id, file_a.id
+    )
+    assert result_ok is not None
 
 
 # ── Inventario: la relectura no debe duplicar movimientos ni inflar el stock ────
