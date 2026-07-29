@@ -2500,6 +2500,45 @@ async def insert_confirmed_data(
     return counts
 
 
+async def _stamp_updated_at_on_product_details(
+    session: AsyncSession, product_details: list[dict[str, Any]]
+) -> None:
+    """F9b (Task 6): completa ``after["updated_at"]`` de cada entrada de
+    ``product_details`` — DEBE llamarse recién DESPUÉS de un ``session.flush()``.
+
+    ``Product.updated_at`` tiene ``onupdate=func.now()`` (server-side): tras el
+    UPDATE que este mismo flush acaba de emitir, el atributo queda expirado en
+    memoria (sin ``eager_defaults``) — leerlo directo dispara un lazy-load
+    síncrono que revienta con ``MissingGreenlet`` bajo ``AsyncSession`` (mismo
+    hallazgo de la Task 5 sobre clientes/proveedores, ver
+    ``_reread_master_entities._audit``). Por eso el ``session.refresh()`` acá,
+    nunca inline en el loop de filas: mientras se procesan las filas
+    (``autoflush=False`` de la sessionmaker) el UPDATE de un producto puede
+    seguir sin flushear —leer ``updated_at`` ahí daría el valor viejo, no el que
+    dejó esta relectura— o, si otra fila SÍ lo flusheó de rebote (el
+    ``begin_nested()`` de ``add_product_or_reuse`` al crear OTRO producto
+    flushea todo el session, no solo el que crea), el atributo ya estaría
+    expirado. Este valor es lo que la Task 7 compara contra el ``updated_at``
+    vivo del producto para el touched-since check del undo — no se agrega a
+    ``before`` (no hace falta para restaurar, y capturarlo ahí temprano tendría
+    el mismo problema de timing).
+
+    Sale_price_ars/stock_units/sku/barcode/category/fechas NO tienen
+    ``onupdate`` server-side — son seguros de leer en cualquier momento, por
+    eso solo ``updated_at`` necesita este paso aparte.
+    """
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    for pd in product_details:
+        product = await session.get(Product, uuid.UUID(pd["product_id"]))
+        if product is None:
+            continue
+        await session.refresh(product)
+        pd["after"]["updated_at"] = (
+            product.updated_at.isoformat() if product.updated_at else None
+        )
+
+
 async def _insert_confirmed_data_impl(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -3449,9 +3488,30 @@ async def _insert_confirmed_data_impl(
                     """
                     before_snap: dict[str, Any] | None = None
                     if return_details:
+                        # F9b (Task 6): antes solo antes/after de precio+stock (stock
+                        # SOLO informativo — el undo nunca lo restaura desde acá, ver
+                        # invariante 2d). Ampliado a los demás campos mutables no-stock
+                        # que esta misma función puede pisar más abajo, para que el
+                        # undo (Task 7) tenga qué restaurar. Todos son columnas
+                        # client-side (sin `onupdate` server-side) — seguro leerlas en
+                        # cualquier momento, a diferencia de `updated_at` (ver el
+                        # refresh post-flush más abajo en esta función).
                         before_snap = {
                             "sale_price_ars": str(existing.sale_price_ars),
                             "stock_units": existing.stock_units,
+                            "sku": existing.sku,
+                            "barcode": existing.barcode,
+                            "category": existing.category,
+                            "acquired_at": (
+                                existing.acquired_at.isoformat()
+                                if existing.acquired_at
+                                else None
+                            ),
+                            "expiry_date": (
+                                existing.expiry_date.isoformat()
+                                if existing.expiry_date
+                                else None
+                            ),
                         }
                     if price:
                         existing.sale_price_ars = price
@@ -3510,6 +3570,19 @@ async def _insert_confirmed_data_impl(
                                 "after": {
                                     "sale_price_ars": str(price or existing.sale_price_ars),
                                     "stock_units": stock_val or existing.stock_units,
+                                    "sku": existing.sku,
+                                    "barcode": existing.barcode,
+                                    "category": existing.category,
+                                    "acquired_at": (
+                                        existing.acquired_at.isoformat()
+                                        if existing.acquired_at
+                                        else None
+                                    ),
+                                    "expiry_date": (
+                                        existing.expiry_date.isoformat()
+                                        if existing.expiry_date
+                                        else None
+                                    ),
                                 },
                             }
                         )
@@ -3676,6 +3749,19 @@ async def _insert_confirmed_data_impl(
                                 "after": {
                                     "sale_price_ars": str(price or Decimal("0")),
                                     "stock_units": stock_val,
+                                    "sku": new_product.sku,
+                                    "barcode": new_product.barcode,
+                                    "category": new_product.category,
+                                    "acquired_at": (
+                                        new_product.acquired_at.isoformat()
+                                        if new_product.acquired_at
+                                        else None
+                                    ),
+                                    "expiry_date": (
+                                        new_product.expiry_date.isoformat()
+                                        if new_product.expiry_date
+                                        else None
+                                    ),
                                 },
                             }
                         )
@@ -3795,6 +3881,7 @@ async def _insert_confirmed_data_impl(
     if seen_fp is not None and _preloaded_fp is not None:
         await _persist_import_fingerprints(session, tenant_id, seen_fp - _preloaded_fp)
     if return_details:
+        await _stamp_updated_at_on_product_details(session, product_details)
         counts["product_details"] = product_details
     return counts
 
@@ -4381,6 +4468,25 @@ async def _insert_multisheet_data(
             ``delta=stock_val`` (desde 0), y aplicárselo a un producto preexistente le
             SUMARÍA su stock actual otra vez.
             """
+            before_snap: dict[str, Any] | None = None
+            if return_details:
+                # F9b (Task 6): ver el comentario análogo en
+                # ``_insert_confirmed_data_impl`` — mismo criterio, gap propio de
+                # esta función (antes NUNCA poblaba ``product_details``, ni
+                # siquiera con precio/stock; camino "mixed"/multi-hoja, F8+).
+                before_snap = {
+                    "sale_price_ars": str(existing.sale_price_ars),
+                    "stock_units": existing.stock_units,
+                    "sku": existing.sku,
+                    "barcode": existing.barcode,
+                    "category": existing.category,
+                    "acquired_at": (
+                        existing.acquired_at.isoformat() if existing.acquired_at else None
+                    ),
+                    "expiry_date": (
+                        existing.expiry_date.isoformat() if existing.expiry_date else None
+                    ),
+                }
             if price:
                 existing.sale_price_ars = price
             if cost:
@@ -4425,6 +4531,32 @@ async def _insert_multisheet_data(
             _register_product_identity_cache(
                 products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
             )
+            if return_details:
+                product_details.append(
+                    {
+                        "action": "UPDATED",
+                        "product_id": str(existing.id),
+                        "name": name,
+                        "before": before_snap,
+                        "after": {
+                            "sale_price_ars": str(price or existing.sale_price_ars),
+                            "stock_units": stock_val or existing.stock_units,
+                            "sku": existing.sku,
+                            "barcode": existing.barcode,
+                            "category": existing.category,
+                            "acquired_at": (
+                                existing.acquired_at.isoformat()
+                                if existing.acquired_at
+                                else None
+                            ),
+                            "expiry_date": (
+                                existing.expiry_date.isoformat()
+                                if existing.expiry_date
+                                else None
+                            ),
+                        },
+                    }
+                )
 
         def _route_ambiguous_to_otros(
             candidates: list[dict[str, Any]], context_label: str
@@ -4552,6 +4684,32 @@ async def _insert_multisheet_data(
                 balance_index=_balance_index,
                 is_purchase=stock_is_purchase,
             )
+            if return_details:
+                product_details.append(
+                    {
+                        "action": "CREATED",
+                        "product_id": str(_new_id),
+                        "name": name,
+                        "before": None,
+                        "after": {
+                            "sale_price_ars": str(price or Decimal("0")),
+                            "stock_units": stock_val,
+                            "sku": new_product.sku,
+                            "barcode": new_product.barcode,
+                            "category": new_product.category,
+                            "acquired_at": (
+                                new_product.acquired_at.isoformat()
+                                if new_product.acquired_at
+                                else None
+                            ),
+                            "expiry_date": (
+                                new_product.expiry_date.isoformat()
+                                if new_product.expiry_date
+                                else None
+                            ),
+                        },
+                    }
+                )
         counts["productos"] += 1
         return False  # creó/actualizó producto: no es captura
 
@@ -4763,6 +4921,7 @@ async def _insert_multisheet_data(
 
     await session.flush()
     if return_details:
+        await _stamp_updated_at_on_product_details(session, product_details)
         counts["product_details"] = product_details
     return counts
 

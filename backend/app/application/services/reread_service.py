@@ -48,6 +48,15 @@ archivo). Los ``Product`` creados desde el archivo NO se vinculan vía
 ``source_upload_id`` (no existe esa columna en ``products``), así que la relectura
 **no los anula ni recrea**; ``insert_confirmed_data`` igual los re-deriva de forma
 idempotente (upsert por SKU/nombre). Se reporta en ``details_json``.
+
+F9b (Task 6): lo anterior sigue siendo cierto (no hay void+reimport de productos),
+PERO desde acá los productos creados/actualizados por el upsert SÍ quedan
+auditados con before/after — ``insert_confirmed_data(..., return_details=True)``
+devuelve ``product_details`` (antes solo lo consumía la vía in-process, nunca la
+relectura) y este módulo los materializa como ``DataRepairItem`` con
+``action="CREATE_PRODUCT"``/``"UPDATE_PRODUCT"``. Habilita el touched-since check
+del undo de productos (Task 7) sin necesitar el void+reimport que sí tienen
+ventas/gastos.
 """
 
 from __future__ import annotations
@@ -776,7 +785,7 @@ async def _reconcile(
     # Preservar la elección de tratamiento del stock (apertura vs compra) que el usuario
     # hizo en el confirm original: vive en el summary guardado, no en el crudo re-parseado.
     _stored_treatment = (file.parsed_summary_json or {}).get("stock_treatment")
-    await insert_confirmed_data(
+    _reimport_detail = await insert_confirmed_data(
         session,
         tenant_id,
         fresh,
@@ -784,8 +793,30 @@ async def _reconcile(
         source="reread",
         uploaded_file_id=file_id,
         stock_treatment=_stored_treatment,
+        return_details=True,
     )
     await session.flush()
+
+    # F9b (Task 6): auditar productos creados/actualizados por el reimport —
+    # antes ``product_details`` ni se pedía acá (default ``return_details=False``),
+    # así que una relectura nunca dejaba rastro de qué producto tocó. En
+    # ``dry_run`` (preview) NO se escribe (mismo criterio que los voids/inserts de
+    # arriba: es descartable, no hace falta auditarla).
+    if not dry_run:
+        for _pd in _reimport_detail.get("product_details", []):
+            session.add(
+                DataRepairItem(
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    product_id=uuid.UUID(_pd["product_id"]),
+                    action="CREATE_PRODUCT" if _pd["action"] == "CREATED" else "UPDATE_PRODUCT",
+                    before_json=_pd["before"],
+                    after_json=_pd["after"],
+                    confidence="HIGH",
+                )
+            )
+        await session.flush()
 
     # Auditar los movimientos de inventario recién insertados por el reimport
     # (tras el void anterior, cualquier movimiento vivo del archivo es nuevo). Se

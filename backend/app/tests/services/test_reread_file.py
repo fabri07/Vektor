@@ -1417,3 +1417,207 @@ async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
     # El name final refleja la ÚLTIMA fila que la tocó (la segunda, "corregida"),
     # aunque la auditoría la trate como parte del mismo CREATE.
     assert items[0].after_json["name"] == "Juan Perez Corregido"
+
+
+# ── F9b (Task 6): auditoría before/after de productos en la relectura ──────────
+#
+# `_insert_confirmed_data_impl` soportaba `return_details=True` desde antes de F9,
+# pero solo capturaba `sale_price_ars`/`stock_units`, y el reread nunca lo
+# activaba (0 auditoría de productos hasta acá). Dos caminos de import de
+# productos coexisten en el pipeline (ver `test_ingestion_product_identity.py`,
+# "camino A"/"camino B"): el single-sheet in-place (`_insert_confirmed_data_impl`)
+# y el multi-hoja (`_insert_multisheet_data._add_product`). Antes de esta task, el
+# segundo NUNCA poblaba `product_details` (ni siquiera con precio/stock) — se
+# cubren los dos acá.
+
+
+async def _make_stock_file(
+    session: AsyncSession, tenant: Tenant, *, purpose: str = "productos"
+) -> UploadedFile:
+    """Archivo con `confirmed_fields={"productos": True}` — mismo patrón que
+    `_make_master_file`, adaptado a catálogo. El contenido real no importa (el
+    test parchea `parse_uploaded_content` vía `_patch_reread_fresh_summary`)."""
+    f = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="catalogo.csv",
+        s3_key=f"tenants/{tenant.tenant_id}/catalogo.csv",
+        content_type="text/csv",
+        size_bytes=10,
+        purpose=purpose,
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={"confirmed_fields": {"productos": True}},
+    )
+    session.add(f)
+    await session.commit()
+    return f
+
+
+@pytest.mark.asyncio
+async def test_reread_audita_productos_creados_y_actualizados(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Camino B (single-sheet, `_insert_confirmed_data_impl` in-place): una fila
+    actualiza un producto existente (matchea por SKU) y otra crea uno nuevo — cada
+    una debe dejar un `DataRepairItem` con el before/after AMPLIADO (no solo
+    precio/stock)."""
+    existing = Product(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        name="Coca 500ml",
+        sku="COC500",
+        sale_price_ars=Decimal("500"),
+        unit_cost_ars=Decimal("300"),
+        stock_units=5,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    file = await _make_stock_file(db_session, tenant)
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "stock_detectado": [
+            # matchea `existing` por SKU -> actualiza precio/costo/stock/sku.
+            {
+                "producto": "Coca 500ml",
+                "sku": "COC500",
+                "precio": "650",
+                "costo": "400",
+                "stock": "20",
+            },
+            # SKU nuevo -> crea un producto.
+            {
+                "producto": "Sprite 500ml",
+                "sku": "SPR500",
+                "precio": "600",
+                "costo": "380",
+                "stock": "15",
+            },
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    items_res = await db_session.execute(
+        select(DataRepairItem).where(
+            DataRepairItem.run_id == result.run_id,
+            DataRepairItem.action.in_(["CREATE_PRODUCT", "UPDATE_PRODUCT"]),
+        )
+    )
+    items = items_res.scalars().all()
+    assert len(items) == 2
+
+    update_item = next(i for i in items if i.action == "UPDATE_PRODUCT")
+    assert update_item.product_id == existing.id
+    assert update_item.before_json is not None
+    assert update_item.before_json["sale_price_ars"] == "500"
+    assert update_item.before_json["sku"] == "COC500"  # campo ampliado, no solo precio/stock
+    assert update_item.after_json is not None
+    assert update_item.after_json["sale_price_ars"] == "650"
+    assert update_item.after_json["stock_units"] == 20
+    assert update_item.after_json["sku"] == "COC500"
+    # updated_at poblado post-flush (Task 7 lo usa para el touched-since check).
+    assert update_item.after_json["updated_at"] is not None
+    assert "updated_at" not in update_item.before_json  # timing de flush: solo after
+
+    create_item = next(i for i in items if i.action == "CREATE_PRODUCT")
+    assert create_item.before_json is None
+    assert create_item.after_json is not None
+    assert create_item.after_json["sale_price_ars"] == "600"
+    assert create_item.after_json["sku"] == "SPR500"
+    assert create_item.after_json["updated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_reread_multisheet_audita_productos_creados_y_actualizados(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Camino A (multi-hoja, `_insert_multisheet_data._add_product`): MISMA
+    cobertura que el test anterior, pero por la vía `mapping_contexts`/
+    `multi_sheet` — antes de esta task, esta función NUNCA poblaba
+    `product_details` (gap propio, no cubierto por el brief original de esta
+    task: los dos caminos de producto son funciones DISTINTAS con lógica
+    duplicada, no una sola)."""
+    existing = Product(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        name="Coca 500ml",
+        sku="COC500",
+        sale_price_ars=Decimal("500"),
+        unit_cost_ars=Decimal("300"),
+        stock_units=5,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    file = await _make_stock_file(db_session, tenant)
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Productos",
+                "entity_type": "product",
+                "source_kind": "sheet",
+                "headers": ["producto", "sku", "precio", "costo", "stock"],
+                "fields": None,
+                "preview_rows": [],
+                "row_count": 2,
+            }
+        ],
+        "ventas_detectadas": [],
+        "gastos_detectados": [],
+        "stock_detectado": [
+            {
+                "producto": "Coca 500ml",
+                "sku": "COC500",
+                "precio": "650",
+                "costo": "400",
+                "stock": "20",
+                "__context__": "sheet:Productos",
+            },
+            {
+                "producto": "Sprite 500ml",
+                "sku": "SPR500",
+                "precio": "600",
+                "costo": "380",
+                "stock": "15",
+                "__context__": "sheet:Productos",
+            },
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    items_res = await db_session.execute(
+        select(DataRepairItem).where(
+            DataRepairItem.run_id == result.run_id,
+            DataRepairItem.action.in_(["CREATE_PRODUCT", "UPDATE_PRODUCT"]),
+        )
+    )
+    items = items_res.scalars().all()
+    assert len(items) == 2
+
+    update_item = next(i for i in items if i.action == "UPDATE_PRODUCT")
+    assert update_item.product_id == existing.id
+    assert update_item.before_json is not None
+    assert update_item.before_json["sale_price_ars"] == "500"
+    assert update_item.before_json["sku"] == "COC500"
+    assert update_item.after_json is not None
+    assert update_item.after_json["sale_price_ars"] == "650"
+    assert update_item.after_json["sku"] == "COC500"
+    assert update_item.after_json["updated_at"] is not None
+
+    create_item = next(i for i in items if i.action == "CREATE_PRODUCT")
+    assert create_item.before_json is None
+    assert create_item.after_json is not None
+    assert create_item.after_json["sale_price_ars"] == "600"
+    assert create_item.after_json["sku"] == "SPR500"
+    assert create_item.after_json["updated_at"] is not None
