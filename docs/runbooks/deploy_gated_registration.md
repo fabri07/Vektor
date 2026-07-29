@@ -84,6 +84,41 @@ Tres revisiones, cadena lineal con un solo head:
 
 Las tres son reentrantes y las tres tienen `downgrade`.
 
+### 🛑 Gate previo (M-2) — correr ANTES de desplegar
+
+`20260806_0001` es idempotente **por inspección**:
+
+```python
+existing = set(inspector.get_table_names())
+if "access_requests" not in existing:
+    op.create_table(...)   # ← los 6 CHECKs y los 4 índices van ACÁ ADENTRO
+```
+
+Esa guarda protege contra el doble `upgrade head` de un mismo deploy (Railway
+puede correr el `preDeployCommand` más de una vez), pero tiene un modo de falla
+silencioso: si `access_requests` ya existiera por cualquier otro motivo, el
+`create_table` **entero** se saltea —CHECKs, índices normales e índice único
+parcial `uq_access_requests_open_email` incluidos— y la revisión **igual queda
+marcada como aplicada** en `alembic_version`. Quedaría una tabla sin las
+garantías que hacen que `'otros'` sea inescribible como vertical asignado y que
+una solicitud aprobada no pueda quedarse sin vertical.
+
+```bash
+cd backend
+export DATABASE_URL='...'          # Neon, desde tu shell — el script nunca la imprime
+python scripts/preflight_access_requests_tables.py
+```
+
+Es read-only (7 sentencias, todas `SELECT`). Veredictos:
+
+- **`✅ LIBRE`** — ninguna de las dos tablas existe → desplegar.
+- **`🛑 BLOQUEADO`** — hay tabla residual. **No desplegar.** El script vuelca
+  columnas, CHECKs, índices y conteo de filas para decidir a mano: dropear (si
+  está vacía) o agregar los CHECKs faltantes a mano (si tiene datos reales).
+
+Como esta rama nunca se desplegó, lo esperable es `LIBRE` — pero es una corrida
+de una sola oportunidad: si no se pregunta acá, el modo de falla es silencioso.
+
 ### ⚠️ `alembic downgrade base` NO funciona
 
 La reversa completa **rompe a mitad de cadena**. `20260806_0003` corre primero en
