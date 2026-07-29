@@ -49,14 +49,39 @@ herramienta de la casa muestra.** No hay alerta, no hay cola de fallos, no hay
 rastro operativo. La única forma de encontrarlos después es listar a mano las
 solicitudes `unverified` creadas dentro de la ventana.
 
+### ⚠️ Por default Railway NO respeta ningún orden
+
+Railway no tiene dependencias entre servicios. `vektor-api` y `vektor-worker`
+observan el mismo repo y **los dos redespliegan en paralelo** apenas el merge
+toca `main`. Ninguno de los dos `railway.toml` declara `watchPatterns` ni
+prioridad, así que "deployar el worker primero" **no es una acción que exista
+por default**: hay que fabricarla apagando el automático del otro.
+
+Existe una mitigación accidental —`vektor-api` tiene `preDeployCommand` (las
+migraciones) y el worker no, así que la API tarda más en recibir tráfico y el
+worker suele ganar la carrera—, pero **no alcanza como garantía**: los tiempos de
+build varían, y si el build del worker falla, la API queda viva contra un worker
+viejo por tiempo indefinido.
+
 ### Procedimiento
 
-1. Deployar `vektor-worker` y esperar a que esté sano.
-2. Deployar `vektor-api`. El `preDeployCommand` (`sh scripts/migrate.sh` →
+1. **Antes de mergear**, en el servicio **`vektor-api`** de Railway: apagar los
+   deploys automáticos (está en Settings, en la sección del repo conectado; el
+   rótulo cambió entre versiones de la UI — buscar el toggle de deploys
+   automáticos / "Wait for CI"). No tocar nada en `vektor-worker`.
+2. Mergear el PR. Ahora **solo redespliega `vektor-worker`**.
+3. Esperar a que el worker quede **Active** y revisar sus logs: tiene que
+   arrancar sin `ImportError` y registrar las cuatro tareas nuevas. Recién
+   entonces seguir.
+4. En `vektor-api`, disparar el deploy **a mano** (Deploy / Redeploy sobre el
+   último commit). El `preDeployCommand` (`sh scripts/migrate.sh` →
    `alembic upgrade head`) corre en un contenedor one-off **antes** de que la
    versión nueva reciba tráfico; si una migración falla, Railway aborta el deploy
    y la versión vieja sigue sirviendo.
-3. Post-deploy, verificar que no quedaron solicitudes huérfanas en la ventana:
+5. Volver a **prender** los deploys automáticos de `vektor-api`. Si este paso se
+   olvida, el próximo merge no despliega la API y el síntoma es confuso: código
+   nuevo en `main`, worker actualizado, API vieja sirviendo.
+6. Post-deploy, verificar que no quedaron solicitudes huérfanas en la ventana:
 
 ```bash
 python backend/scripts/access_requests.py list --status unverified
