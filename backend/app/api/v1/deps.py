@@ -10,14 +10,15 @@ JWT payload expected keys: sub (user_id), tenant_id, role_code.
 from collections.abc import Callable
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service
 from app.application.services.pin_service import PinService
-from app.observability.logger import bind_request_context
+from app.config.settings import get_settings
+from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
@@ -102,6 +103,125 @@ def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
         return current_user
 
     return _check
+
+
+# ── Endpoints públicos (sin auth) ───────────────────────────────────────────────
+
+#: Código que devuelve `POST /auth/register` cuando el registro abierto está
+#: apagado. Lo lee el frontend para mostrar el copy de "el acceso ahora se pide"
+#: en lugar de un error genérico.
+REGISTRATION_CLOSED_CODE = "registration_closed"
+
+
+#: Header que setea el edge de Railway: UN solo valor, sin la cadena ambigua de
+#: `X-Forwarded-For` (que puede traer varias IPs y cuyo primer valor no se puede
+#: creer sin una política de proxies confiables).
+_HEADER_IP_REAL = "x-real-ip"
+
+#: Key del limiter cuando no se pudo determinar la IP. Vive acá y NO en
+#: `client_ip` a propósito: `client_ip` devuelve `None` para decir "no la sé", y
+#: `hash_ip(None)` es `None`. Si `client_ip` devolviera este centinela, el
+#: `ip_hash` guardado sería el hash de un literal inventado, indistinguible de
+#: una IP real y compartido por todos los clientes sin IP.
+_SIN_IP = "unknown"
+
+#: Se avisa UNA sola vez por proceso: es una condición de configuración del
+#: despliegue, no un evento por request — loguearla en cada uno inundaría.
+_aviso_sin_x_real_ip_emitido = False
+
+
+def _avisar_sin_x_real_ip() -> None:
+    """Denuncia una sola vez que el edge no manda `X-Real-IP` en producción.
+
+    Nunca loguea la IP ni el hash: solo que la suposición del diseño no se
+    cumple, que es lo único que hace falta saber para ir a mirar.
+    """
+    global _aviso_sin_x_real_ip_emitido
+    if _aviso_sin_x_real_ip_emitido:
+        return
+    _aviso_sin_x_real_ip_emitido = True
+    get_logger(__name__).warning(
+        "client_ip.sin_x_real_ip",
+        detalle=(
+            "En producción no llegó X-Real-IP: el rate limit y el ip_hash caen "
+            "a request.client.host, que detrás de un proxy es la IP del edge e "
+            "igual para todos los visitantes."
+        ),
+    )
+
+
+def client_ip(request: Request) -> str | None:
+    """IP del cliente. **Definición única** de "el cliente" en toda la app.
+
+    La comparten el `ip_hash` anti-abuso de los dos formularios públicos
+    anónimos (contacto y solicitud de acceso) y la key del rate limiter global
+    (`rate_limit_key`). Antes eran dos nociones distintas dentro del MISMO
+    handler: el `ip_hash` leía `X-Forwarded-For` y el `@limiter.limit("5/hour")`
+    usaba `get_remote_address`, que lo ignora — detrás del edge de Railway eso
+    podía volver el 5/hour un techo GLOBAL del único embudo de alta.
+
+    La confianza en el header está atada al DESPLIEGUE, no al header: solo se
+    lee `X-Real-IP` en producción, porque cualquiera que alcance uvicorn directo
+    puede inventarlo. Fuera de producción (dev y tests) se usa siempre
+    `request.client.host`.
+
+    Sin header, degrada a `request.client.host`. Para el limiter eso es
+    exactamente lo que hacía `get_remote_address` y no empeora nada; para el
+    `ip_hash` **sí** sería una regresión, porque antes leía `X-Forwarded-For`
+    incondicionalmente: si el edge mandara solo XFF y no `X-Real-IP`, la columna
+    pasaría a guardar un único hash (el del edge) para todos los visitantes, y
+    eso no se nota mirando los datos — un hash de la IP del proxy es
+    indistinguible de uno de cliente.
+
+    Por eso la suposición se autodenuncia: en producción, la primera vez que
+    falte `X-Real-IP` se loguea una advertencia (sin IP ni hash). Si aparece en
+    los logs de prod, hay que revisar qué manda el edge — no queda pendiente de
+    que alguien se acuerde de ir a mirar.
+
+    `None` cuando no hay forma de saberla: no se inventa un valor.
+    """
+    if get_settings().is_production:
+        real = request.headers.get(_HEADER_IP_REAL)
+        if real and real.strip():
+            return real.strip()
+        _avisar_sin_x_real_ip()
+    return request.client.host if request.client else None
+
+
+def rate_limit_key(request: Request) -> str:
+    """Key del rate limiter global — la MISMA IP que hashea el `ip_hash`.
+
+    `slowapi` exige un `str`, así que acá (y solo acá) el "no la sé" se colapsa
+    a un centinela: todos los requests sin IP comparten cubeta, que es el
+    comportamiento conservador y equivale a lo que ya hacía `get_remote_address`.
+    """
+    ip = client_ip(request)
+    return ip if ip is not None else _SIN_IP
+
+
+def require_open_registration() -> None:
+    """Corta con 410 el registro abierto mientras el flag esté OFF.
+
+    El alta de cuentas pasa por `POST /access-requests` (solicitud + aprobación
+    manual). El endpoint viejo NO se borra: conserva la ruta y devuelve un 410 con
+    código estable, así un bundle desactualizado del frontend recibe una señal
+    accionable en vez de un 404. Prender `ENABLE_OPEN_REGISTRATION` restituye el
+    comportamiento histórico completo (rollback de una línea).
+
+    Va como `dependencies=[...]` del endpoint —no como primera línea del cuerpo—
+    para que se resuelva ANTES de validar el body: un payload viejo tiene que ver
+    el 410, no un 422 de esquema.
+
+    ⚠️ **Alcance: solo `POST /auth/register`.** NO gatear `POST /onboarding/submit`:
+    la encuesta se partió en dos y esa mitad —los 6 números financieros— se pide
+    DESPUÉS de aprobar, en el primer login, detrás de JWT y sin crear cuentas. No
+    es parte del registro abierto.
+    """
+    if not get_settings().ENABLE_OPEN_REGISTRATION:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail=REGISTRATION_CLOSED_CODE,
+        )
 
 
 # ── Step-up auth (PIN) ──────────────────────────────────────────────────────────

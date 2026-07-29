@@ -25,7 +25,7 @@ from app.api.v1.products import (
     _duplicate_identity_conflict,
     _find_active_product_by_identity,
     _identity_conflict_from_db,
-    _tenant_business_type,
+    _tenant_vertical,
 )
 from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.product_identity import (
@@ -41,7 +41,6 @@ from app.domain.expense_categories import (
 )
 from app.domain.product_categories import (
     PRODUCT_CATEGORY_LABELS,
-    _resolve_vertical,
     normalize_product_category,
 )
 from app.domain.product_completion import recompute_requires_completion
@@ -172,7 +171,7 @@ async def list_unclassified(
     result = await session.execute(q)
     records = list(result.scalars().all())
 
-    vertical = await _tenant_business_type(session, tenant.tenant_id)
+    vertical = await _tenant_vertical(session, tenant.tenant_id)
     responses: list[UnclassifiedRecordResponse] = []
     for rec in records:
         resp = UnclassifiedRecordResponse.model_validate(rec)
@@ -193,7 +192,7 @@ async def list_unclassified(
             code, custom_label = normalize_product_category(raw_s, vertical)
             resp.suggested_category = code
             resp.suggested_category_label = custom_label or PRODUCT_CATEGORY_LABELS[
-                _resolve_vertical(vertical)
+                vertical
             ].get(code, code)
         responses.append(resp)
     return responses
@@ -370,8 +369,8 @@ async def reclassify_record(
                 )
             # Misma normalización que POST /products (catálogo del vertical).
             if data.get("category"):
-                business_type = await _tenant_business_type(session, tenant.tenant_id)
-                code_p, label_p = normalize_product_category(data["category"], business_type)
+                vertical = await _tenant_vertical(session, tenant.tenant_id)
+                code_p, label_p = normalize_product_category(data["category"], vertical)
                 data["category"] = code_p
                 if label_p:
                     data["custom_fields"] = {

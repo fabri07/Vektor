@@ -13,6 +13,11 @@ const vkColors = {
   "vektor-blue":        "rgb(58 134 255 / <alpha-value>)",
   "vektor-blue-strong": "rgb(37 99 235 / <alpha-value>)",
   "vektor-teal":        "rgb(39 199 184 / <alpha-value>)",
+  // Mismo matiz que `vektor-teal`, al 60 % de brillo. Existe porque el teal de
+  // marca sobre texto blanco da 2,11:1 — falla WCAG AA para cualquier tamaño —,
+  // y el CTA principal del embudo es justamente blanco sobre ese gradiente.
+  // Este da 5,38:1. La identidad no cambia: cambia dónde se puede apoyar texto.
+  "vektor-teal-deep":   "rgb(23 119 110 / <alpha-value>)",
   "vektor-amber":       "rgb(241 182 72 / <alpha-value>)",
   "vektor-red":         "rgb(240 108 121 / <alpha-value>)",
   "vektor-red-deep":    "rgb(61 17 22 / <alpha-value>)",

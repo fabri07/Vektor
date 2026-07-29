@@ -17,6 +17,7 @@ from app.application.services._savepoint import (
 )
 from app.application.services.inventory_movement_origin import ensure_utc
 from app.domain.product import effective_threshold
+from app.domain.verticals import Vertical
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
@@ -604,11 +605,11 @@ async def get_low_stock_products(
 
 async def get_overstock_products(
     tenant_id: uuid.UUID,
-    business_type: str,
+    vertical: Vertical,
     db: AsyncSession,
 ) -> list[Product]:
     """Returns products whose rotation_days exceeds the heuristic overstock threshold."""
-    config = HeuristicEngine.get(business_type)
+    config = HeuristicEngine.get(vertical)
 
     result = await db.execute(
         select(Product, InventoryBalance)

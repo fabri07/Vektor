@@ -40,7 +40,14 @@ const inputErrorClass =
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const justRegistered = searchParams.get("registered") === "1";
+  /*
+   * `registered=1` murió con el registro abierto: nadie redirige más acá desde
+   * un alta, porque el alta ya no existe. El circuito nuevo termina en
+   * `password_set=1` — el último paso de solicitud → verificación → aprobación
+   * → mail → definir contraseña —, y sin banner el usuario acaba de escribir
+   * una contraseña dos veces, ve la pantalla recargarse y no sabe si se guardó.
+   */
+  const justPasswordSet = searchParams.get("password_set") === "1";
   const justReset = searchParams.get("reset") === "1";
   const login = useLogin();
 
@@ -202,10 +209,14 @@ export function LoginForm() {
         </div>
       )}
 
-      {/* Account just created (no email verification required) */}
-      {justRegistered && (
+      {/*
+        Contraseña recién creada desde `/definir-password`. El copy dice
+        "creada", no "actualizada": para esta persona es la primera, y reusar el
+        banner de `reset=1` le afirmaría que cambió algo que nunca tuvo.
+      */}
+      {justPasswordSet && (
         <p role="status" className="rounded-lg border border-vk-success/20 bg-vk-success-bg px-4 py-3 text-sm text-vk-success">
-          ¡Cuenta creada! Ingresá con tu email y contraseña.
+          Contraseña creada. Ingresá con tu email y tu contraseña nueva.
         </p>
       )}
 
@@ -271,10 +282,28 @@ export function LoginForm() {
         {googleLoading ? "Redirigiendo..." : "Continuar con Google"}
       </button>
 
+      {/*
+        La bifurcación se avisa ANTES del redirect, no después. "Continuar con
+        Google" se lee como un login de un click; si ese email todavía no tiene
+        cuenta, el visitante vuelve de Google a un formulario largo sin haber
+        aceptado nunca ese trato. Véktor no crea cuentas por Google: el registro
+        es cerrado y el alta la aprueba el dueño a mano.
+      */}
+      <p className="text-center text-xs text-vk-text-muted">
+        Si ese email todavía no tiene cuenta, te llevamos a pedir acceso: el alta
+        la aprobamos a mano.
+      </p>
+
+      {/*
+        "Creá una gratis" era la promesa exacta que el registro cerrado retira:
+        el visitante no crea nada, manda una solicitud de acceso que el dueño
+        revisa a mano. El link va directo a /solicitar-acceso (no al redirect de
+        /register) para no gastar un salto de más.
+      */}
       <p className="text-center text-sm text-vk-text-secondary">
-        ¿No tenés cuenta?{" "}
-        <a href="/register" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
-          Creá una gratis
+        ¿Todavía no tenés cuenta?{" "}
+        <a href="/solicitar-acceso?src=login" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
+          Pedí acceso
         </a>
       </p>
     </form>

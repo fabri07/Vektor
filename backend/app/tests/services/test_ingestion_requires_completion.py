@@ -18,6 +18,7 @@ import app.application.services.ingestion_import_service as importer
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.tests.conftest import add_business_profile
 
 
 def _stock_summary(rows: list[dict[str, object]]) -> dict[str, object]:
@@ -160,6 +161,8 @@ async def test_purchase_new_product_gets_stock_without_autoflush(
             status="ACTIVE",
         )
         session.add(tenant)
+        await session.flush()
+        await add_business_profile(session, tenant.tenant_id)
         await session.commit()
 
         summary = {

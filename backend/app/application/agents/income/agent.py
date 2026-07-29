@@ -33,6 +33,7 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.domain.business_time import now_ar_naive
+from app.domain.verticals import Vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
@@ -69,11 +70,16 @@ class AgentIncome(BaseAgent):
         db: AsyncSession | None = None,
         redis: Redis | None = None,
         gateway: Any | None = None,
+        default_vertical: Vertical | None = None,
     ) -> None:
+        """`default_vertical` es el vertical a usar cuando el agente corre sin
+        sesión de DB (tests). En producción nunca se inyecta: sin DB y sin
+        default, `_business_vertical` levanta en vez de asumir un rubro."""
         self._client: Any | None = None
         self._db = db
         self._redis = redis
         self._gateway = gateway
+        self._default_vertical = default_vertical
 
     @property
     def client(self) -> Any:
@@ -113,9 +119,9 @@ class AgentIncome(BaseAgent):
             return 1
 
     async def _extract_sale_entities(
-        self, message: str, business_context: dict[str, Any]
+        self, message: str, vertical: Vertical
     ) -> tuple[dict[str, Any], LLMCall]:
-        heuristics = HeuristicEngine.get(business_context.get("type", "kiosco_almacen"))
+        heuristics = HeuristicEngine.get(vertical)
         system = (
             "Extraé del mensaje los datos de una venta y devolvé SOLO JSON con: "
             "amount (número o null si no se menciona en el mensaje), "
@@ -367,9 +373,10 @@ class AgentIncome(BaseAgent):
             entities = pre_entities
             usage = UsageSummary()
         else:
-            business_context = {"name": "el negocio", "type": "kiosco_almacen"}
+            # El vertical sale del BusinessProfile del tenant: las heurísticas
+            # que van al prompt de extracción son las del rubro real.
             entities, sale_call = await self._extract_sale_entities(
-                request.message, business_context
+                request.message, await self._business_vertical(await self._tenant_uuid(request))
             )
             usage = UsageSummary(calls=[sale_call])
 
@@ -605,6 +612,22 @@ class AgentIncome(BaseAgent):
             return uuid.UUID(request.business_id)
         except (ValueError, TypeError):
             return None
+
+    async def _business_vertical(self, tenant_id: uuid.UUID | None) -> Vertical:
+        """Vertical del tenant. Sin DB ni tenant identificado cae al
+        `default_vertical` inyectado (tests); si tampoco lo hay, levanta."""
+        if self._db is not None and tenant_id is not None:
+            from app.application.agents.shared.vertical_lookup import (  # noqa: PLC0415
+                load_tenant_vertical,
+            )
+
+            return await load_tenant_vertical(self._db, tenant_id)
+        if self._default_vertical is not None:
+            return self._default_vertical
+        raise RuntimeError(
+            "AgentIncome requiere sesión de DB con tenant identificado "
+            "o default_vertical explícito"
+        )
 
     async def _load_attachment_summaries(
         self, request: AgentRequest
@@ -1026,6 +1049,7 @@ class AgentIncome(BaseAgent):
                 agent_name=self.agent_name,
                 domain="ventas",
                 tenant_id=tenant_id,
+                vertical=await self._business_vertical(tenant_id),
             )
 
         sale_repo = SaleRepository(self._db)

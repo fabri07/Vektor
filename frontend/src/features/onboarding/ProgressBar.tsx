@@ -1,8 +1,14 @@
+/**
+ * Tres pasos, no cuatro: el rubro ya no se elige acá.
+ *
+ * Desde que el registro es por solicitud aprobada, el vertical lo ASIGNA el
+ * dueño al aprobar (es la corrección que justifica la revisión manual), así que
+ * preguntárselo al usuario sería ofrecerle cambiar una decisión que no es suya.
+ */
 const MILESTONES = [
-  { step: 1, label: "Tipo de negocio" },
-  { step: 2, label: "Datos principales" },
-  { step: 3, label: "Archivos" },
-  { step: 4, label: "Tu score" },
+  { step: 1, label: "Datos principales" },
+  { step: 2, label: "Archivos" },
+  { step: 3, label: "Tu score" },
 ] as const;
 
 interface ProgressBarProps {

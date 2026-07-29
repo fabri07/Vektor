@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from app.domain.verticals import parse_vertical
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
 from app.heuristics.verticals import MarginBenchmark
 from app.heuristics.verticals.loader import load_vertical_heuristics
@@ -37,7 +38,7 @@ def compute_scores(
     benchmark: MarginBenchmark | None = None,
 ) -> ComponentScoresV2:
     """Calcula los 5 subscores y el total v2 a partir del BusinessState."""
-    config = load_vertical_heuristics(state.vertical_code)
+    config = load_vertical_heuristics(parse_vertical(state.vertical_code))
     result: HealthScoreResult = calculate_health_score(state, benchmark=benchmark, config=config)
     return ComponentScoresV2(
         cash_score=result.score_cash,

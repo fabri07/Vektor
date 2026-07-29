@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+from app.domain.verticals import Vertical
 from app.heuristics.base import BaseHeuristicRuleSet, DimensionThresholds, VerticalRules
 
 
@@ -12,12 +13,12 @@ class DecoracionHogarHeuristicRuleSet(BaseHeuristicRuleSet):
     """
 
     @property
-    def vertical(self) -> str:
-        return "decoracion_hogar"
+    def vertical(self) -> Vertical:
+        return Vertical.DECORACION_HOGAR
 
     def get_rules(self) -> VerticalRules:
         return VerticalRules(
-            vertical="decoracion_hogar",
+            vertical=Vertical.DECORACION_HOGAR,
             liquidity_thresholds=DimensionThresholds(
                 critical_below=Decimal("0.8"),
                 warning_below=Decimal("1.2"),

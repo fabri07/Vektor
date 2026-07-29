@@ -138,6 +138,8 @@ class Settings(BaseSettings):
         "ENABLE_AGENT_AUTOMATIONS",
         "ENABLE_WHATSAPP",
         "ENABLE_SOCIAL_SYNC",
+        "ENABLE_OPEN_REGISTRATION",
+        "ACCESS_REQUEST_AUTOVERIFY",
         "DEMO_MODE",
         "USE_LOCAL_FALLBACK",
         mode="before",
@@ -221,6 +223,30 @@ class Settings(BaseSettings):
     TIKTOK_CLIENT_SECRET: str = ""
 
     # ── Feature flags ─────────────────────────────────────────────────────────
+    # Registro abierto (autoservicio). **Default False**: el alta de cuentas pasa
+    # por una solicitud de acceso que el dueño aprueba a mano
+    # (`POST /access-requests`). Con el flag apagado, `POST /auth/register`
+    # responde 410 `registration_closed` — conserva la ruta a propósito, para que
+    # un bundle viejo del frontend reciba una señal clara en vez de un 404 o un
+    # 422 raro. Prenderlo es el rollback de una línea que devuelve el
+    # comportamiento histórico completo.
+    # Alcance: SOLO ese endpoint. `POST /onboarding/submit` no se gatea (está
+    # detrás de JWT, lo usa un usuario ya aprobado y no crea cuentas).
+    ENABLE_OPEN_REGISTRATION: bool = False
+    # Escotilla de DESARROLLO del flujo de solicitudes de acceso. En True, el
+    # worker NO manda el mail de doble opt-in: loguea el link de verificación y
+    # pasa la solicitud a `pending` directo, para no depender de una casilla real
+    # mientras se prueba el flujo local.
+    #
+    # **NO hereda de ENABLE_EMAIL_VERIFICATION** a propósito, aunque suene
+    # parecido: ese flag se fuerza a False bajo DEBUG/DEMO (abajo), y heredarlo
+    # significaría que cualquier entorno con DEMO_MODE saltee el opt-in. Saltear
+    # el opt-in mete en la cola de revisión emails que nadie confirmó, que es
+    # exactamente lo que el doble opt-in existe para evitar.
+    #
+    # Se fuerza a True bajo DEBUG **solo en desarrollo**, y a False en cualquier
+    # otro entorno (producción, staging, demo) aunque alguien la setee.
+    ACCESS_REQUEST_AUTOVERIFY: bool = False
     ENABLE_SCORE_RECALCULATION: bool = True
     ENABLE_EMAIL_NOTIFICATIONS: bool = False
     ENABLE_EMAIL_VERIFICATION: bool = True
@@ -307,6 +333,29 @@ class Settings(BaseSettings):
         if self.DEBUG or self.DEMO_MODE:
             # In debug/demo mode, skip email verification so local testing isn't blocked.
             self.ENABLE_EMAIL_VERIFICATION = False
+
+        # Escotilla de las solicitudes de acceso: se prende sola en desarrollo y
+        # es INDEPENDIENTE de ENABLE_EMAIL_VERIFICATION (ver el campo). DEMO_MODE
+        # no la prende: un demo con dominio público seguiría siendo un lugar
+        # donde saltear el opt-in tiene consecuencias reales.
+        # El corte es `is_development`, NO `not is_production`: un `staging` con
+        # dominio público es exactamente el mismo riesgo que un demo (emails sin
+        # confirmar entrando a la cola de revisión), y ahí `ENVIRONMENT` no dice
+        # "production".
+        if self.DEBUG and self.is_development:
+            self.ACCESS_REQUEST_AUTOVERIFY = True
+        if not self.is_development and self.ACCESS_REQUEST_AUTOVERIFY:
+            # Se apaga en vez de levantar para no dejar la API sin arrancar por
+            # una variable de conveniencia; el log es ruidoso a propósito.
+            import logging as _logging  # noqa: PLC0415
+
+            _logging.getLogger(__name__).error(
+                "config.access_request.autoverify_ignored: "
+                "ACCESS_REQUEST_AUTOVERIFY solo puede estar activa en desarrollo "
+                f"(ENVIRONMENT={self.ENVIRONMENT!r} saltearía el doble opt-in). "
+                "Se fuerza a False."
+            )
+            self.ACCESS_REQUEST_AUTOVERIFY = False
 
         if self.ENVIRONMENT == "production":
             insecure_defaults = {"insecure-change-me", "insecure-jwt-change-me", ""}

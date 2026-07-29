@@ -6,17 +6,24 @@ import {
   FISCAL_PRIVACY_NOTE,
   type FiscalCondition,
 } from "@/lib/fiscalCondition";
+import { CONFIDENTIALITY_NOTICE } from "@/lib/privacyNotices";
+import { MAIN_CONCERN_OPTIONS } from "@/lib/accessRequestOptions";
 
 export type MainConcern = "MARGIN" | "STOCK" | "CASH";
 
 export interface Step2Data {
   weekly_sales_estimate_ars: number;
-  monthly_inventory_cost_ars: number;
-  monthly_fixed_expenses_ars: number;
-  cash_on_hand_ars: number;
+  /** `null` = el usuario dejó el campo en blanco. NO es lo mismo que `0`. */
+  monthly_inventory_cost_ars: number | null;
+  monthly_fixed_expenses_ars: number | null;
+  cash_on_hand_ars: number | null;
   product_count_estimate: number;
   supplier_count_estimate: number;
-  main_concern: MainConcern;
+  /**
+   * `null` = no se preguntó acá porque ya vino de la solicitud de acceso. El
+   * wizard omite el campo del payload y el backend la toma del perfil.
+   */
+  main_concern: MainConcern | null;
   work_days: number[];
   work_open_hour: number;
   work_close_hour: number;
@@ -42,6 +49,12 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => h);
 interface Step2FormProps {
   initialData: Step2Data | null;
   onSubmit: (data: Step2Data) => void;
+  /**
+   * Preocupación principal que el visitante ya declaró al pedir acceso. Si
+   * viene, la pregunta NO se muestra: volver a hacerla y quedarse con la
+   * segunda respuesta borra la primera sin que nadie se entere.
+   */
+  mainConcernDeLaSolicitud?: MainConcern | null;
 }
 
 interface FormErrors {
@@ -52,14 +65,19 @@ interface FormErrors {
   work_schedule?: string;
 }
 
-const CONCERN_OPTIONS: { value: MainConcern; label: string }[] = [
-  { value: "MARGIN", label: "Mis márgenes" },
-  { value: "STOCK", label: "Mi stock" },
-  { value: "CASH", label: "Mi caja" },
-];
+/*
+ * Un solo catálogo para las dos pantallas que preguntan lo mismo.
+ *
+ * Antes había dos listas escritas a mano —"Mis márgenes / Mi stock / Mi caja"
+ * acá, "El margen / El stock / La caja" en la solicitud— sobre los mismos tres
+ * valores. Dos textos para la misma pregunta se desincronizan solos, y el
+ * visitante que ya la contestó en el formulario público no reconoce la
+ * segunda como la misma.
+ */
+const CONCERN_OPTIONS = MAIN_CONCERN_OPTIONS;
 
 function FieldHint({ text }: { text: string }) {
-  return <p className="mt-1.5 text-xs text-gray-400">{text}</p>;
+  return <p className="mt-1.5 text-xs text-vk-text-muted">{text}</p>;
 }
 
 function FieldHelper({ text }: { text: string }) {
@@ -98,7 +116,7 @@ function NumberInput({
       </label>
       <div className="relative mt-2">
         {prefix && (
-          <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 text-base font-medium text-gray-400 select-none">
+          <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 text-base font-medium text-vk-text-muted select-none">
             {prefix}
           </span>
         )}
@@ -127,7 +145,12 @@ function NumberInput({
   );
 }
 
-export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
+export function Step2Form({
+  initialData,
+  onSubmit,
+  mainConcernDeLaSolicitud = null,
+}: Step2FormProps) {
+  const yaLaContesto = mainConcernDeLaSolicitud !== null;
   const [fields, setFields] = useState({
     weekly_sales_estimate_ars: String(
       initialData?.weekly_sales_estimate_ars ?? "",
@@ -169,6 +192,21 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
     return (v: string) => setFields((prev) => ({ ...prev, [key]: v }));
   }
 
+  /**
+   * Monto opcional: `null` si el campo quedó en blanco, el número si hay algo.
+   *
+   * Antes esto era `parseFloat(campo) || 0`, y ahí estaba el bug: un campo sin
+   * contestar entraba como un cero afirmado. "No tengo gastos fijos" y "no sé
+   * cuánto pago" terminaban siendo el mismo dato, y el segundo se persistía
+   * como si el dueño lo hubiera declarado. `NaN` también cae en `null` — texto
+   * basura es ausencia de dato, no un cero.
+   */
+  function montoOpcional(crudo: string): number | null {
+    if (crudo.trim() === "") return null;
+    const valor = parseFloat(crudo);
+    return isNaN(valor) ? null : valor;
+  }
+
   function validate(): Step2Data | null {
     const errs: FormErrors = {};
 
@@ -187,7 +225,8 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
       errs.supplier_count_estimate = "Ingresá un número válido.";
     }
 
-    if (!fields.main_concern) {
+    // Solo es obligatoria si se está preguntando acá.
+    if (!yaLaContesto && !fields.main_concern) {
       errs.main_concern = "Seleccioná una opción.";
     }
 
@@ -202,14 +241,16 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
 
     return {
       weekly_sales_estimate_ars: weeklySales,
-      monthly_inventory_cost_ars:
-        parseFloat(fields.monthly_inventory_cost_ars) || 0,
-      monthly_fixed_expenses_ars:
-        parseFloat(fields.monthly_fixed_expenses_ars) || 0,
-      cash_on_hand_ars: parseFloat(fields.cash_on_hand_ars) || 0,
-      product_count_estimate: productCount ?? 0,
-      supplier_count_estimate: supplierCount ?? 0,
-      main_concern: fields.main_concern as MainConcern,
+      monthly_inventory_cost_ars: montoOpcional(fields.monthly_inventory_cost_ars),
+      monthly_fixed_expenses_ars: montoOpcional(fields.monthly_fixed_expenses_ars),
+      cash_on_hand_ars: montoOpcional(fields.cash_on_hand_ars),
+      // Sin `?? 0`: los dos ya pasaron por `isNaN` unas líneas más arriba, así
+      // que acá nunca pueden ser NaN y el fallback era inalcanzable.
+      product_count_estimate: productCount,
+      supplier_count_estimate: supplierCount,
+      // `null` cuando vino de la solicitud: el wizard lo omite del payload y
+      // el backend lo resuelve desde el perfil.
+      main_concern: yaLaContesto ? null : (fields.main_concern as MainConcern),
       work_days: workDays,
       work_open_hour: openHour,
       work_close_hour: closeHour,
@@ -243,12 +284,18 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           prefix="$"
         />
 
+        {/*
+          Los tres montos son opcionales, y el copy lo dice: dejarlos en blanco
+          NO es lo mismo que poner 0. Antes el formulario convertía el blanco en
+          cero sin avisar, así que el usuario no tenía cómo enterarse de que
+          saltearse la pregunta equivalía a afirmar que no gasta nada.
+        */}
         <NumberInput
           id="inventory-cost"
           label="¿Cuánto gastás en mercadería por mes?"
           value={fields.monthly_inventory_cost_ars}
           onChange={set("monthly_inventory_cost_ars")}
-          hint="Todo lo que comprás para reponer stock en un mes."
+          hint="Todo lo que comprás para reponer stock en un mes. Si no lo sabés, dejalo en blanco: no es lo mismo que poner 0."
           helper="Junto con tus ventas, determina si estás ganando o perdiendo en cada producto."
           prefix="$"
         />
@@ -258,7 +305,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           label="¿Cuánto pagás de gastos fijos por mes?"
           value={fields.monthly_fixed_expenses_ars}
           onChange={set("monthly_fixed_expenses_ars")}
-          hint="Alquiler, luz, internet, teléfono y otros gastos fijos."
+          hint="Alquiler, luz, internet, teléfono y otros gastos fijos. Si no lo sabés, dejalo en blanco: no es lo mismo que poner 0."
           helper="Necesitamos saber tu punto de equilibrio: cuánto tenés que vender para no perder."
           prefix="$"
         />
@@ -268,7 +315,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           label="¿Cuánta plata tenés disponible hoy?"
           value={fields.cash_on_hand_ars}
           onChange={set("cash_on_hand_ars")}
-          hint="Efectivo en caja o en cuenta bancaria, lo que tenés para operar."
+          hint="Efectivo en caja o en cuenta bancaria, lo que tenés para operar. Si preferís no decirlo, dejalo en blanco: no es lo mismo que poner 0."
           helper="Este dato tiene 7 días de vigencia. Podés actualizarlo cuando quieras desde el dashboard."
           prefix="$"
         />
@@ -294,6 +341,13 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           isInteger
         />
 
+        {/*
+          La pregunta solo aparece si NO vino de la solicitud de acceso. Allá
+          ya se contesta ("¿Qué te preocupa más?"), y el backend la sella en el
+          perfil al aprobar. Repetirla y quedarse con la segunda respuesta
+          borraba la primera sin que nadie se enterara.
+        */}
+        {yaLaContesto ? null : (
         <div>
           <p className="mb-3 text-sm font-medium text-gray-800">
             ¿Qué te preocupa más hoy?
@@ -328,6 +382,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           )}
           <FieldHint text="Esto nos ayuda a personalizar los análisis para vos." />
         </div>
+        )}
 
         <div>
           <p className="mb-1 text-sm font-medium text-gray-800">
@@ -383,10 +438,31 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
           {errors.work_schedule && <FieldError text={errors.work_schedule} />}
         </div>
 
+        {/*
+          Aviso de confidencialidad — el MISMO texto que el formulario público
+          de solicitud (`lib/privacyNotices.ts`), reusado, no duplicado. Va acá
+          arriba porque a partir de este punto el onboarding pregunta números y
+          régimen fiscal, que es justo donde un negocio chico argentino se pone
+          a la defensiva. `FISCAL_PRIVACY_NOTE` (abajo, en el selector) es otro
+          aviso y convive con este: explica para qué sirve el dato, no qué
+          hacemos con él.
+        */}
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-gray-800">
+            <span aria-hidden>🔒</span>
+            {CONFIDENTIALITY_NOTICE.title}
+          </p>
+          {CONFIDENTIALITY_NOTICE.paragraphs.map((parrafo) => (
+            <p key={parrafo.slice(0, 24)} className="mt-2 text-xs leading-relaxed text-gray-500">
+              {parrafo}
+            </p>
+          ))}
+        </div>
+
         <div>
           <p className="mb-1 text-sm font-medium text-gray-800">
             ¿Cuál es tu régimen fiscal?{" "}
-            <span className="font-normal text-gray-400">(opcional)</span>
+            <span className="font-normal text-vk-text-muted">(opcional)</span>
           </p>
           <FieldHelper text="Adapta la guía de comprobantes del cierre de caja. Podés saltearlo y configurarlo después en Configuración." />
           <div
@@ -428,7 +504,7 @@ export function Step2Form({ initialData, onSubmit }: Step2FormProps) {
                 "self-start text-xs underline underline-offset-2 transition-colors",
                 fiscalCondition === null
                   ? "text-gray-500"
-                  : "text-gray-400 hover:text-gray-600",
+                  : "text-vk-text-muted hover:text-vk-text-primary",
               ].join(" ")}
             >
               Prefiero no decirlo ahora

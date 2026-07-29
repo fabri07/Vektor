@@ -63,12 +63,6 @@ export interface AuthResponse {
   user: AuthUserResponse;
 }
 
-export interface RegisterResponse {
-  message: string;
-  email: string;
-  requires_verification: boolean;
-}
-
 export interface ForecastPoint {
   date: string;
   income: number;
@@ -281,6 +275,29 @@ export interface OAuthLinkRequiredResponse {
   status: "link_required";
   pending_oauth_session_id: string;
   email: string;
+  provider: "google";
+}
+
+/**
+ * El email de Google no tiene cuenta. Véktor cerró el registro abierto: entrar
+ * con Google NO acuña un tenant, el visitante pasa a pedir acceso con su
+ * identidad prellenada.
+ *
+ * `full_name` puede venir `null`: Google no siempre manda el claim `name` y el
+ * backend no lo deriva del email.
+ */
+export interface OAuthAccessRequestRequiredResponse {
+  status: "access_request_required";
+  prefill_token: string;
+  email: string;
+  full_name: string | null;
+  provider: "google";
+}
+
+/** Lo que `GET /access-requests/prefill/{token}` devuelve del alta por Google. */
+export interface GooglePrefillResponse {
+  email: string;
+  full_name: string | null;
   provider: "google";
 }
 

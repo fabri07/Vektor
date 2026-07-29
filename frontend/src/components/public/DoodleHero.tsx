@@ -31,10 +31,10 @@ export function DoodleHero() {
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             <Link
-              href="/register?src=hero_primary"
+              href="/solicitar-acceso?src=hero_primary"
               className="inline-flex items-center justify-center rounded-full bg-white px-8 py-3.5 text-sm font-semibold text-vektor-night transition hover:-translate-y-0.5 hover:bg-white/90"
             >
-              Empezar gratis
+              Pedir acceso
             </Link>
             <Link
               href="/login?src=hero_secondary"

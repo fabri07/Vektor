@@ -12,12 +12,13 @@ nunca pierde el lead ni le muestra error al visitante.
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import client_ip
 from app.application.services.contact_lead_service import (
     LeadInput,
     create_lead,
     hash_ip,
 )
-from app.domain.contact_lead import CONSENT_VERSION, MIN_SUBMIT_ELAPSED_MS
+from app.domain.contact_lead import CONSENT_VERSION, looks_like_bot
 from app.main import limiter
 from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
@@ -29,19 +30,14 @@ logger = get_logger(__name__)
 _OK = LeadResponse()
 
 
-def _client_ip(request: Request) -> str | None:
-    """IP real detrás del proxy (Railway) o la del cliente directo."""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
-
-
 def _looks_like_bot(body: CreateLeadRequest) -> bool:
-    """Honeypot completado o envío sospechosamente rápido ⇒ bot."""
-    if body.website:  # el honeypot debe venir vacío
-        return True
-    return body.elapsed_ms is not None and body.elapsed_ms < MIN_SUBMIT_ELAPSED_MS
+    """Honeypot completado o envío sospechosamente rápido ⇒ bot.
+
+    La regla se movió a ``app.domain.contact_lead.looks_like_bot`` para que el
+    formulario de solicitud de acceso la reuse tal cual en vez de copiarla. Este
+    wrapper conserva la firma que ya usa el endpoint.
+    """
+    return looks_like_bot(website=body.website, elapsed_ms=body.elapsed_ms)
 
 
 @router.post(
@@ -70,7 +66,7 @@ async def create_contact_lead(
             server_version=CONSENT_VERSION,
         )
 
-    ip_hash = hash_ip(_client_ip(request))
+    ip_hash = hash_ip(client_ip(request))
     lead, created = await create_lead(
         session,
         data=LeadInput(

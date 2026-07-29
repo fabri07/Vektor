@@ -20,20 +20,28 @@ from app.application.agents.health.scorer import (
     compute_supplier_score,
 )
 from app.application.agents.health.sub_calculator import ComponentScoresV2
-from app.application.agents.shared.heuristic_engine import CashHealthConfig, HeuristicConfig
+from app.application.agents.shared.heuristic_engine import (
+    CashHealthConfig,
+    HeuristicConfig,
+    HeuristicEngine,
+)
 from app.application.agents.shared.schemas import AgentRequest
+from app.domain.verticals import Vertical
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _make_config(healthy_days_min: float = 10.0, warning_days_min: float = 7.0) -> HeuristicConfig:
-    return HeuristicConfig(
-        business_type="kiosco_almacen",
-        cash_health=CashHealthConfig(
-            healthy_days_min=healthy_days_min,
-            warning_days_min=warning_days_min,
-            critical_days_below=5.0,
-        ),
+    # Se parte del perfil real de kiosco (los sub-configs ya no tienen defaults)
+    # y solo se sobreescribe la parte de caja que el test necesita variar.
+    return HeuristicEngine.get(Vertical.KIOSCO_ALMACEN).model_copy(
+        update={
+            "cash_health": CashHealthConfig(
+                healthy_days_min=healthy_days_min,
+                warning_days_min=warning_days_min,
+                critical_days_below=5.0,
+            )
+        }
     )
 
 
@@ -307,7 +315,11 @@ async def test_process_low_confidence_returns_clarification():
     agent.client = mock_client
 
     with (
-        patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))),
+        patch.object(
+            agent,
+            "_load_business_meta",
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN.value)),
+        ),
         patch(
             "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
         ),
@@ -331,13 +343,17 @@ async def test_process_high_confidence_returns_success():
     mock_state = MagicMock()
     mock_state.confidence_level = "HIGH"
     mock_state.data_completeness_score = 90.0
-    mock_state.vertical_code = "kiosco"
+    mock_state.vertical_code = Vertical.KIOSCO_ALMACEN.value
 
     high_scores = _make_scores_v2(total=72, confidence_level="HIGH", completeness=90.0)
 
     with (
         patch("app.application.agents.health.agent.EventBus.emit"),
-        patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))),
+        patch.object(
+            agent,
+            "_load_business_meta",
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN.value)),
+        ),
         patch(
             "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
         ),
@@ -364,12 +380,16 @@ async def test_process_emits_event_on_success():
     mock_state = MagicMock()
     mock_state.confidence_level = "HIGH"
     mock_state.data_completeness_score = 90.0
-    mock_state.vertical_code = "kiosco"
+    mock_state.vertical_code = Vertical.KIOSCO_ALMACEN.value
     high_scores = _make_scores_v2(total=72)
 
     with (
         patch("app.application.agents.health.agent.EventBus.emit") as mock_emit,
-        patch.object(agent, "_load_business_meta", new=AsyncMock(return_value=("Test", "kiosco"))),
+        patch.object(
+            agent,
+            "_load_business_meta",
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN.value)),
+        ),
         patch(
             "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
         ),

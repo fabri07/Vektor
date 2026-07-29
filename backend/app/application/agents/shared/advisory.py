@@ -38,6 +38,7 @@ from app.application.agents.shared.schemas import (
 )
 from app.application.security.prompt_defense import wrap_user_input
 from app.application.services.facts_service import BusinessFact, Provenance
+from app.domain.verticals import Vertical
 
 _MODEL = "claude-sonnet-4-6"
 _MAX_TOKENS = 700
@@ -197,6 +198,7 @@ async def handle_advice(
     agent_name: str,
     domain: str,
     tenant_id: Any,
+    vertical: Vertical,
     business_name: str = "tu negocio",
 ) -> AgentResponse:
     """Pipeline único de advisory para todos los agentes: facts → gate → LLM.
@@ -204,6 +206,10 @@ async def handle_advice(
     `domain` llega tal cual del chat (ventas/caja/stock/gastos/proveedores/
     clientes/marketing) y se pasa DIRECTO a `collect_for_advice` — el mapeo a
     los packs de hechos vive únicamente ahí.
+
+    `vertical` es obligatorio: sin él el FactsService queda sin umbrales de
+    severidad y `margen_neto` sale sin `severity`, con lo que el prompt pierde
+    la anotación `alerta: warning|critical` que le da filo al consejo.
     """
     from app.application.services.facts_provider import (  # noqa: PLC0415
         build_facts_service,
@@ -212,7 +218,7 @@ async def handle_advice(
 
     period = Period.last_n_days(30)
     try:
-        facts_service = await build_facts_service(db, tenant_id, period)
+        facts_service = await build_facts_service(db, tenant_id, period, vertical=vertical)
         facts = facts_service.collect_for_advice(str(tenant_id), domain, period)
     except Exception:
         return AgentResponse(

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.application.agents.shared.schemas import ActionType, AgentRequest, RiskLevel
+from app.domain.verticals import Vertical
 
 _TENANT_UUID = "00000000-0000-0000-0000-000000000001"
 _USER_UUID = "00000000-0000-0000-0000-000000000002"
@@ -34,6 +35,34 @@ def _mock_llm_response(entities: dict[str, Any]) -> MagicMock:
     response.content = [content_block]
     response.usage = MagicMock(input_tokens=50, output_tokens=20)
     return response
+
+
+def _vertical_result() -> MagicMock:
+    """Resultado del SELECT de `business_profiles.vertical_code`."""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = Vertical.KIOSCO_ALMACEN.value
+    return result
+
+
+def _db_with_vertical(*results: MagicMock, default: MagicMock | None = None) -> MagicMock:
+    """Sesión mockeada cuyo PRIMER execute resuelve el vertical del tenant.
+
+    El agente ya no asume kiosco: lo lee del BusinessProfile antes de extraer la
+    venta, así que la secuencia de queries arranca por ahí.
+    """
+    pending = iter([_vertical_result(), *results])
+
+    def _next(*_args: Any, **_kwargs: Any) -> MagicMock:
+        try:
+            return next(pending)
+        except StopIteration:
+            if default is None:
+                raise
+            return default
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=_next)
+    return db
 
 
 # ── Tests de AgentIncome (lógica de ingresos) ─────────────────────────────────
@@ -59,7 +88,7 @@ async def test_sale_extraction_with_amount():
 
         from app.application.agents.income.agent import AgentIncome
 
-        agent = AgentIncome()
+        agent = AgentIncome(default_vertical=Vertical.KIOSCO_ALMACEN)
         result = await agent.process(_make_request("vendí 5000 pesos al contado"))
 
     assert result.status == "requires_approval"
@@ -86,7 +115,7 @@ async def test_unknown_payment_returns_clarification():
 
         from app.application.agents.income.agent import AgentIncome
 
-        agent = AgentIncome()
+        agent = AgentIncome(default_vertical=Vertical.KIOSCO_ALMACEN)
         result = await agent.process(_make_request("vendí 5000"))
 
     assert result.status == "requires_clarification"
@@ -113,7 +142,7 @@ async def test_paid_sale_returns_approval():
 
         from app.application.agents.income.agent import AgentIncome
 
-        agent = AgentIncome()
+        agent = AgentIncome(default_vertical=Vertical.KIOSCO_ALMACEN)
         result = await agent.process(_make_request("vendí 5000 al contado"))
 
     assert result.status == "requires_approval"
@@ -142,7 +171,7 @@ async def test_sale_and_inflow_are_separate_actions():
 
         from app.application.agents.income.agent import AgentIncome
 
-        agent = AgentIncome()
+        agent = AgentIncome(default_vertical=Vertical.KIOSCO_ALMACEN)
         result = await agent.process(_make_request("vendí y cobré 5000"))
 
     assert result.result["action_type"] == ActionType.REGISTER_SALE
@@ -176,8 +205,7 @@ async def test_sale_with_quantity_looks_up_product_price():
     found_result.scalar_one_or_none.return_value = mock_product
     found_result.scalars.return_value.all.return_value = [mock_product]
 
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(side_effect=[none_result, none_result, none_result, found_result])
+    mock_db = _db_with_vertical(none_result, none_result, none_result, found_result)
 
     with unittest.mock.patch(
         "app.application.agents.income.agent.anthropic.AsyncAnthropic"
@@ -217,7 +245,7 @@ async def test_sale_with_float_quantity_parsed_safely():
 
         from app.application.agents.income.agent import AgentIncome
 
-        agent = AgentIncome()
+        agent = AgentIncome(default_vertical=Vertical.KIOSCO_ALMACEN)
         result = await agent.process(_make_request("vendí 3 coca colas a $1500"))
 
     assert result.status == "requires_approval"
@@ -242,8 +270,7 @@ async def test_sale_product_not_in_catalog_asks_for_amount():
     mock_result.scalar_one_or_none.return_value = None
     mock_result.scalars.return_value.all.return_value = []
 
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db = _db_with_vertical(default=mock_result)
 
     with unittest.mock.patch(
         "app.application.agents.income.agent.anthropic.AsyncAnthropic"
@@ -273,8 +300,7 @@ async def test_sale_with_explicit_amount_skips_product_lookup():
         "product_description": "coca cola",
         "confidence": "HIGH",
     }
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock()
+    mock_db = _db_with_vertical()
 
     with unittest.mock.patch(
         "app.application.agents.income.agent.anthropic.AsyncAnthropic"
@@ -288,7 +314,8 @@ async def test_sale_with_explicit_amount_skips_product_lookup():
 
     assert result.status == "requires_approval"
     assert str(result.result["structured_data"]["amount"]) == "1500"
-    mock_db.execute.assert_not_called()
+    # El único execute es el del vertical del tenant: NO se consultó el catálogo.
+    assert mock_db.execute.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -318,8 +345,7 @@ async def test_llm_invents_amount_but_message_has_no_monetary_signal_uses_catalo
     found_result = MagicMock()
     found_result.scalars.return_value.all.return_value = [mock_product]
 
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(side_effect=[none_result, none_result, found_result])
+    mock_db = _db_with_vertical(none_result, none_result, found_result)
 
     with unittest.mock.patch(
         "app.application.agents.income.agent.anthropic.AsyncAnthropic"
@@ -363,8 +389,7 @@ async def test_llm_invents_amount_but_message_only_has_year_uses_catalog():
     found_result = MagicMock()
     found_result.scalars.return_value.all.return_value = [mock_product]
 
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(side_effect=[none_result, none_result, found_result])
+    mock_db = _db_with_vertical(none_result, none_result, found_result)
 
     with unittest.mock.patch(
         "app.application.agents.income.agent.anthropic.AsyncAnthropic"
@@ -407,8 +432,7 @@ async def test_product_ambiguous_returns_clarification_with_partial():
     multi_result = MagicMock()
     multi_result.scalars.return_value.all.return_value = [prod_a, prod_b]
 
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(side_effect=[none_result, none_result, multi_result])
+    mock_db = _db_with_vertical(none_result, none_result, multi_result)
 
     with unittest.mock.patch(
         "app.application.agents.income.agent.anthropic.AsyncAnthropic"
@@ -446,7 +470,7 @@ async def test_missing_payment_method_returns_clarification_with_partial():
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(mock_entities))
         mock_cls.return_value = mock_client
 
-        agent = AgentIncome()
+        agent = AgentIncome(default_vertical=Vertical.KIOSCO_ALMACEN)
         result = await agent.process(_make_request("vendí una gaseosa a $500"))
 
     assert result.status == "requires_clarification"
@@ -512,7 +536,7 @@ async def test_cash_shim_dispatches_sale_to_income_agent():
 
         from app.application.agents.cash.agent import AgentCash
 
-        agent = AgentCash()
+        agent = AgentCash(default_vertical=Vertical.KIOSCO_ALMACEN)
         result = await agent.process(_make_request("vendí 5000 al contado"))
 
     assert result.result["action_type"] == "REGISTER_SALE"

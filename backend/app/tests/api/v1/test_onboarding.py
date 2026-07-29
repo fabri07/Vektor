@@ -8,8 +8,30 @@ Required tests:
   - test_onboarding_status_before_and_after
 """
 
+from decimal import Decimal
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config.settings import get_settings
+from app.domain.verticals import Vertical
+from app.persistence.models.business import BusinessProfile, BusinessSnapshot
+
+
+@pytest.fixture(autouse=True)
+def _registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prende `ENABLE_OPEN_REGISTRATION` para todo este módulo.
+
+    Lo necesita `_register_and_token`, que consigue el JWT entrando por
+    `POST /auth/register` — el único endpoint que el apagado alcanza.
+    **`POST /onboarding/submit` NO está gateado** (está detrás de JWT, lo usa un
+    usuario ya aprobado y no crea cuentas); eso lo fija
+    `test_onboarding_submit_no_esta_gateado_por_el_registro` en
+    `app/tests/api/v1/test_access_requests.py`.
+    """
+    monkeypatch.setattr(get_settings(), "ENABLE_OPEN_REGISTRATION", True)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -18,11 +40,10 @@ _REGISTER_PAYLOAD = {
     "password": "Secure123",
     "full_name": "Juan Pérez",
     "business_name": "Kiosco El Rápido",
-    "vertical_code": "kiosco",
+    "vertical_code": Vertical.KIOSCO_ALMACEN.value,
 }
 
 _ONBOARDING_PAYLOAD = {
-    "vertical_code": "kiosco",
     "weekly_sales_estimate_ars": 50000,
     "monthly_inventory_cost_ars": 80000,
     "monthly_fixed_expenses_ars": 30000,
@@ -123,8 +144,332 @@ class TestOnboarding:
         assert resp_after.status_code == 200
         after_data = resp_after.json()
         assert after_data["completed"] is True
-        assert after_data["vertical_code"] == "kiosco"
+        assert after_data["vertical_code"] == Vertical.KIOSCO_ALMACEN.value
         assert after_data["data_completeness_score"] == 100
+
+    async def test_onboarding_vertical_code_en_el_body_es_422(
+        self, client: AsyncClient
+    ) -> None:
+        """Mandar `vertical_code` en /onboarding/submit es 422 (extra="forbid").
+
+        El vertical ya lo fijó el dueño al aprobar la solicitud de acceso; el
+        usuario no puede reescribirlo. Un bundle viejo del frontend que
+        todavía mande `vertical_code` tiene que fallar ruidoso, no ser
+        ignorado en silencio.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json={**_ONBOARDING_PAYLOAD, "vertical_code": Vertical.LIMPIEZA.value},
+            headers=headers,
+        )
+
+        assert response.status_code == 422
+
+    async def test_onboarding_no_reescribe_el_vertical_del_perfil(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """Aunque no se pueda mandar `vertical_code`, confirmamos que el
+        vertical persistido después del submit sigue siendo el que ya tenía
+        el `BusinessProfile` (el que fijó la aprobación), no uno inventado."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        await client.post(
+            "/api/v1/onboarding/submit",
+            json=_ONBOARDING_PAYLOAD,
+            headers=headers,
+        )
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        assert bp.vertical_code == Vertical.KIOSCO_ALMACEN.value
+
+    async def test_onboarding_main_concern_sale_de_custom_fields_si_no_viene(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """Si el body no manda `main_concern`, se lee de
+        `business_profiles.custom_fields["main_concern"]` (lo escribió la
+        aprobación de la solicitud de acceso). Simulamos esa escritura previa
+        a mano porque el registro abierto de este test no pasa por ese flujo."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "STOCK"}
+        await db_session.commit()
+
+        payload_sin_main_concern = {
+            k: v for k, v in _ONBOARDING_PAYLOAD.items() if k != "main_concern"
+        }
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_main_concern,
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["data_completeness_score"] == 100
+
+    async def test_onboarding_sin_main_concern_en_ningun_lado_no_lo_inventa(
+        self, client: AsyncClient
+    ) -> None:
+        """Sin `main_concern` en el body ni en `custom_fields`, el submit igual
+        tiene que completarse (200) — no se inventa un valor por default."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        payload_sin_main_concern = {
+            k: v for k, v in _ONBOARDING_PAYLOAD.items() if k != "main_concern"
+        }
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_main_concern,
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+class TestOnboardingStatusMainConcern:
+    """`GET /onboarding/status` expone la preocupación ya declarada.
+
+    Sin esto el frontend no tenía forma de saber que el dato ya existía, así
+    que la volvía a preguntar y la mandaba siempre — con lo cual el fallback
+    del submit era código muerto y la respuesta del onboarding pisaba la del
+    screening.
+    """
+
+    async def test_status_devuelve_el_main_concern_sellado(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "STOCK"}
+        await db_session.commit()
+
+        resp = await client.get("/api/v1/onboarding/status", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json()["main_concern"] == "STOCK"
+
+    async def test_status_sin_sellar_devuelve_none(self, client: AsyncClient) -> None:
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp = await client.get("/api/v1/onboarding/status", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json()["main_concern"] is None
+
+    async def test_un_valor_corrupto_se_trata_como_ausente(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """`custom_fields` es JSONB sin validación en write time.
+
+        Si un valor basura pasara al frontend, el onboarding se saltearía la
+        pregunta y después el submit lo rechazaría con 422: el usuario quedaría
+        sin forma de completar el alta. Ante la duda se vuelve a preguntar.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "PLATA"}
+        await db_session.commit()
+
+        resp = await client.get("/api/v1/onboarding/status", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json()["main_concern"] is None
+
+    async def test_el_submit_ignora_el_valor_corrupto_igual_que_el_status(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """Status y submit tienen que leer el sellado con el MISMO criterio.
+
+        Si divergieran, el frontend se saltearía la pregunta apoyado en un
+        valor que el submit después descarta.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        bp.custom_fields = {**bp.custom_fields, "main_concern": "PLATA"}
+        await db_session.commit()
+        tenant_id = bp.tenant_id
+
+        payload_sin_main_concern = {
+            k: v for k, v in _ONBOARDING_PAYLOAD.items() if k != "main_concern"
+        }
+        resp = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_main_concern,
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        snapshot = (
+            await db_session.execute(
+                select(BusinessSnapshot).where(BusinessSnapshot.tenant_id == tenant_id)
+            )
+        ).scalar_one()
+        crudos = snapshot.raw_inputs_json
+        assert crudos is not None
+        # No se inventa ni se propaga basura: se omite del snapshot.
+        assert "main_concern" not in crudos
+
+
+@pytest.mark.asyncio
+class TestOnboardingMontosAusentes:
+    """Dejar un monto en blanco NO es lo mismo que contestar cero.
+
+    El formulario mandaba `parseFloat(campo) || 0` porque el schema exigía los
+    tres montos: un campo sin contestar entraba como un cero afirmado, se
+    persistía como estimación del dueño y el score lo usaba para calcular. Peor:
+    el completeness sumaba 20 puntos por caja de forma incondicional, así que un
+    `cash_on_hand_ars` que nunca se tipeó contaba como dato presente.
+
+    Los dos tests de esta clase son un par: uno prueba la ausencia, el otro el
+    cero explícito. Solos no distinguen el fix del bug.
+    """
+
+    async def test_montos_ausentes_no_se_guardan_como_cero(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        payload_sin_montos = {
+            k: v
+            for k, v in _ONBOARDING_PAYLOAD.items()
+            if k
+            not in (
+                "monthly_inventory_cost_ars",
+                "monthly_fixed_expenses_ars",
+                "cash_on_hand_ars",
+            )
+        }
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json=payload_sin_montos,
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        # 100 − 20 (mercadería) − 15 (fijos) − 20 (caja) = 45 → LOW.
+        assert data["data_completeness_score"] == 45
+        assert data["confidence_level"] == "LOW"
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        # NULL en la base, no `Decimal("0")`: el negocio no dijo que no gasta.
+        assert bp.monthly_inventory_spend_estimate_ars is None
+        assert bp.monthly_fixed_expenses_estimate_ars is None
+        assert bp.cash_on_hand_estimate_ars is None
+
+        snapshot = (
+            await db_session.execute(
+                select(BusinessSnapshot).where(BusinessSnapshot.tenant_id == bp.tenant_id)
+            )
+        ).scalar_one()
+        # Y `None` en el snapshot, no el string "None" — es la materia prima
+        # del score y de cualquier auditoría posterior.
+        crudos = snapshot.raw_inputs_json
+        assert crudos is not None
+        assert crudos["monthly_inventory_cost_ars"] is None
+        assert crudos["monthly_fixed_expenses_ars"] is None
+        assert crudos["cash_on_hand_ars"] is None
+
+    async def test_cero_explicito_si_cuenta_como_dato(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """El espejo del test anterior: contestar 0 es contestar.
+
+        Un negocio sin gastos fijos dio un dato tan bueno como el que paga cien
+        mil. Antes puntuaba igual que no contestar (`> 0`), que es la misma
+        confusión al revés.
+        """
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json={
+                **_ONBOARDING_PAYLOAD,
+                "monthly_inventory_cost_ars": 0,
+                "monthly_fixed_expenses_ars": 0,
+                "cash_on_hand_ars": 0,
+            },
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data_completeness_score"] == 100
+
+        bp = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.vertical_code == Vertical.KIOSCO_ALMACEN.value
+                )
+            )
+        ).scalar_one()
+        assert bp.monthly_fixed_expenses_estimate_ars == Decimal("0")
+        assert bp.cash_on_hand_estimate_ars == Decimal("0")
+
+    async def test_monto_negativo_sigue_siendo_422(self, client: AsyncClient) -> None:
+        """Opcional no es "cualquier cosa": el `ge=0` sigue vigente."""
+        token = await _register_and_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/v1/onboarding/submit",
+            json={**_ONBOARDING_PAYLOAD, "cash_on_hand_ars": -1},
+            headers=headers,
+        )
+
+        assert response.status_code == 422
 
 
 class TestOnboardingWorkScheduleValidation:

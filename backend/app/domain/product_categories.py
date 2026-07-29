@@ -3,8 +3,9 @@
 Mismo mecanismo que ``expense_categories`` (reusa ``CategoryNormalizer``), pero
 el catálogo depende del vertical del negocio (``BusinessProfile.business_type``).
 Texto sin match → ``OTHER`` preservando el original como label en
-``custom_fields["category_label"]``. Vertical desconocido → ``kiosco_almacen``
-(mismo fallback que ``HeuristicEngine``).
+``custom_fields["category_label"]``. El vertical llega tipado (``Vertical``): un
+código desconocido lo rechaza ``parse_vertical`` en el borde, nunca se traduce a
+otro rubro.
 
 Una categoría ≠ ``OTHER`` para el vertical es la señal que ``expense_categories.
 classify_expense_with_vertical`` usa para marcar un gasto como mercadería de
@@ -19,13 +20,12 @@ fuerzan acá para no convertir un insumo operativo en COGS por error.
 from __future__ import annotations
 
 from app.domain.expense_categories import CategoryNormalizer
-
-_FALLBACK_VERTICAL = "kiosco_almacen"
+from app.domain.verticals import Vertical
 
 # ── Catálogos por vertical ────────────────────────────────────────────────────
 
-PRODUCT_CATEGORY_LABELS: dict[str, dict[str, str]] = {
-    "kiosco_almacen": {
+PRODUCT_CATEGORY_LABELS: dict[Vertical, dict[str, str]] = {
+    Vertical.KIOSCO_ALMACEN: {
         "BEBIDAS": "Bebidas",
         "GOLOSINAS": "Golosinas",
         "CIGARRILLOS": "Cigarrillos",
@@ -39,7 +39,7 @@ PRODUCT_CATEGORY_LABELS: dict[str, dict[str, str]] = {
         "REGALERIA": "Regalería y varios",
         "OTHER": "Otros",
     },
-    "limpieza": {
+    Vertical.LIMPIEZA: {
         "DETERGENTES": "Detergentes y jabones",
         "QUIMICOS": "Químicos y desinfectantes",
         "PAPEL": "Papel y descartables",
@@ -48,7 +48,7 @@ PRODUCT_CATEGORY_LABELS: dict[str, dict[str, str]] = {
         "BOLSAS": "Bolsas de residuo",
         "OTHER": "Otros",
     },
-    "decoracion_hogar": {
+    Vertical.DECORACION_HOGAR: {
         "TEXTILES": "Textiles",
         "ILUMINACION": "Iluminación",
         "MUEBLES": "Muebles",
@@ -60,8 +60,8 @@ PRODUCT_CATEGORY_LABELS: dict[str, dict[str, str]] = {
     },
 }
 
-_ALIASES: dict[str, dict[str, str]] = {
-    "kiosco_almacen": {
+_ALIASES: dict[Vertical, dict[str, str]] = {
+    Vertical.KIOSCO_ALMACEN: {
         "bebida": "BEBIDAS",
         "gaseosas": "BEBIDAS",
         "gaseosa": "BEBIDAS",
@@ -137,7 +137,7 @@ _ALIASES: dict[str, dict[str, str]] = {
         "lapicera": "REGALERIA",
         "cargador": "REGALERIA",
     },
-    "limpieza": {
+    Vertical.LIMPIEZA: {
         "detergente": "DETERGENTES",
         "jabon": "DETERGENTES",
         "jabones": "DETERGENTES",
@@ -164,7 +164,7 @@ _ALIASES: dict[str, dict[str, str]] = {
         "residuos": "BOLSAS",
         "consorcio": "BOLSAS",
     },
-    "decoracion_hogar": {
+    Vertical.DECORACION_HOGAR: {
         "textil": "TEXTILES",
         "almohadones": "TEXTILES",
         "cortinas": "TEXTILES",
@@ -199,21 +199,10 @@ _ALIASES: dict[str, dict[str, str]] = {
     },
 }
 
-# Alias de verticales (mismo criterio que heuristics/verticals/loader.py).
-_VERTICAL_ALIASES = {"kiosco": "kiosco_almacen"}
-
-_normalizers: dict[str, CategoryNormalizer] = {}
+_normalizers: dict[Vertical, CategoryNormalizer] = {}
 
 
-def _resolve_vertical(business_type: str | None) -> str:
-    if business_type is None:
-        return _FALLBACK_VERTICAL
-    key = business_type.strip().lower()
-    key = _VERTICAL_ALIASES.get(key, key)
-    return key if key in PRODUCT_CATEGORY_LABELS else _FALLBACK_VERTICAL
-
-
-def _get_normalizer(vertical: str) -> CategoryNormalizer:
+def _get_normalizer(vertical: Vertical) -> CategoryNormalizer:
     if vertical not in _normalizers:
         labels = PRODUCT_CATEGORY_LABELS[vertical]
         # Los labels canónicos también son alias ("Bebidas" → BEBIDAS).
@@ -226,21 +215,18 @@ def _get_normalizer(vertical: str) -> CategoryNormalizer:
     return _normalizers[vertical]
 
 
-def product_category_catalog(business_type: str | None) -> list[dict[str, str]]:
+def product_category_catalog(vertical: Vertical) -> list[dict[str, str]]:
     """Catálogo del vertical como lista [{code, label}] (para la API/frontend)."""
-    vertical = _resolve_vertical(business_type)
     return [
         {"code": code, "label": label}
         for code, label in PRODUCT_CATEGORY_LABELS[vertical].items()
     ]
 
 
-def normalize_product_category(
-    raw: str | None, business_type: str | None
-) -> tuple[str, str | None]:
+def normalize_product_category(raw: str | None, vertical: Vertical) -> tuple[str, str | None]:
     """Texto libre → ``(código canónico del vertical, label)``.
 
     ``label`` viene poblado solo cuando no hubo match (código OTHER), para
     preservar el texto original.
     """
-    return _get_normalizer(_resolve_vertical(business_type)).normalize(raw)
+    return _get_normalizer(vertical).normalize(raw)

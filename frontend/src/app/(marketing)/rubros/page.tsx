@@ -114,10 +114,10 @@ export default function RubrosPage() {
           ¿Tu negocio es de otro rubro? Igual te puede servir.
         </p>
         <Link
-          href="/register"
+          href="/solicitar-acceso?src=rubros"
           className="mt-6 inline-flex items-center justify-center rounded-full bg-white px-7 py-3 text-sm font-semibold text-vektor-night transition hover:bg-white/90"
         >
-          Empezar gratis
+          Pedir acceso
         </Link>
       </section>
     </>

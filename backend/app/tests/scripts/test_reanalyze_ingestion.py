@@ -76,6 +76,7 @@ from app.persistence.models.repair import DataRepairRun
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 from app.schemas.ingestion import ColumnRiskDecision
+from app.tests.conftest import add_business_profile
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
 
@@ -161,6 +162,8 @@ async def tenant(db_session: AsyncSession) -> Tenant:
         status="ACTIVE",
     )
     db_session.add(t)
+    await db_session.flush()
+    await add_business_profile(db_session, t.tenant_id)
     await db_session.commit()
     return t
 

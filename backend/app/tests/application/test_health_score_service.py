@@ -15,23 +15,18 @@ from app.persistence.repositories.health_score_repository import HealthScoreRepo
 
 
 @pytest_asyncio.fixture
-async def kiosco_profile(db_session: AsyncSession, sample_tenant: Tenant) -> BusinessProfile:
-    profile = BusinessProfile(
-        tenant_id=sample_tenant.tenant_id,
-        vertical_code="kiosco",
-        data_mode="M0",
-        data_confidence="LOW",
-        monthly_sales_estimate_ars=Decimal("150000.00"),
-        monthly_inventory_spend_estimate_ars=Decimal("90000.00"),
-        monthly_fixed_expenses_estimate_ars=Decimal("20000.00"),
-        cash_on_hand_estimate_ars=Decimal("15000.00"),
-        supplier_count_estimate=2,
-        product_count_estimate=3,
-        onboarding_completed=True,
-        updated_at=datetime.now(UTC),
-        created_at=datetime.now(UTC),
-    )
-    db_session.add(profile)
+async def kiosco_profile(
+    db_session: AsyncSession, sample_business_profile: BusinessProfile
+) -> BusinessProfile:
+    profile = sample_business_profile
+    profile.monthly_sales_estimate_ars = Decimal("150000.00")
+    profile.monthly_inventory_spend_estimate_ars = Decimal("90000.00")
+    profile.monthly_fixed_expenses_estimate_ars = Decimal("20000.00")
+    profile.cash_on_hand_estimate_ars = Decimal("15000.00")
+    profile.supplier_count_estimate = 2
+    profile.product_count_estimate = 3
+    profile.onboarding_completed = True
+    profile.updated_at = datetime.now(UTC)
     await db_session.commit()
     return profile
 

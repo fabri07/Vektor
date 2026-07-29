@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.domain.product import effective_threshold
+from app.domain.verticals import parse_vertical
 from app.heuristics.verticals import MarginBenchmark, VerticalHeuristicConfig
 from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
@@ -318,10 +319,11 @@ def calculate_health_score(
     """Compute HealthScoreResult from a BusinessState.
 
     Si se pasa `benchmark` explícitamente (ej. data-driven desde analytics_events),
-    se usa ese. De lo contrario carga desde el JSON del vertical con fallback a hardcode.
+    se usa ese. De lo contrario carga el JSON del vertical (que levanta si el
+    `vertical_code` del estado no es uno de los canónicos).
     """
     if config is None:
-        config = load_vertical_heuristics(state.vertical_code)
+        config = load_vertical_heuristics(parse_vertical(state.vertical_code))
     if benchmark is None:
         benchmark = config.margin
 

@@ -15,12 +15,23 @@ import { api } from "@/lib/api";
 import { PageHeader } from "@/components/public/PageHeader";
 import { CONSENT_VERSION } from "@/lib/contact";
 import { ctaSourceFromUrl, trackLandingEvent } from "@/lib/landingAnalytics";
+import { VERTICAL_OPTIONS } from "@/lib/verticals";
+
+/**
+ * Los tres rubros reales salen de `lib/verticals.ts`, la misma fuente que usa
+ * el formulario de solicitud de acceso.
+ *
+ * ⚠️ El "Otro" NO se toma de ahí: este formulario postea a `/contact/leads`,
+ * cuyo enum `LeadRubro` usa `"otro"` (singular), mientras que
+ * `RequestedVertical` usa `"otros"`. Son dos endpoints con dos vocabularios
+ * distintos; unificarlos acá del lado del cliente sería un 422 en cada lead que
+ * elija "Otro".
+ */
+const RUBRO_OTRO_LEAD = { value: "otro", label: "Otro" };
 
 const RUBROS = [
-  { value: "kiosco_almacen", label: "Kiosco / Almacén" },
-  { value: "limpieza", label: "Limpieza" },
-  { value: "decoracion_hogar", label: "Decoración del hogar" },
-  { value: "otro", label: "Otro" },
+  ...VERTICAL_OPTIONS.map((o) => ({ value: o.code as string, label: o.name })),
+  RUBRO_OTRO_LEAD,
 ];
 
 const USUARIOS = [
@@ -285,7 +296,7 @@ export default function ContactoPage() {
           <button
             type="submit"
             disabled={status === "sending"}
-            className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue to-vektor-teal px-6 py-3.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-60"
+            className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-6 py-3.5 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-wait"
           >
             {status === "sending" ? "Enviando..." : "Enviar"}
           </button>

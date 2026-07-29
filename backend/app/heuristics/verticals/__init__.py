@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from app.domain.verticals import Vertical
+
 
 @dataclass(frozen=True)
 class MarginBenchmark:
@@ -44,7 +46,7 @@ class SupplierBenchmark:
 
 @dataclass(frozen=True)
 class VerticalHeuristicConfig:
-    business_type: str
+    business_type: Vertical
     cash_health: CashHealthBenchmark
     margin: MarginBenchmark
     inventory: InventoryBenchmark

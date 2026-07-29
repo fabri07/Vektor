@@ -20,6 +20,14 @@ from app.schemas.onboarding import (
 router = APIRouter()
 
 
+# ⚠️ NO gatear este router con `require_open_registration`. La encuesta se partió
+# en dos a propósito: el formulario público es de SCREENING (lo lee el dueño para
+# decidir la admisión) y los 6 números financieros se piden DESPUÉS de aprobar, en
+# el primer login. O sea que `/onboarding/submit` no es una pieza del registro
+# abierto: está detrás de JWT, lo usa un usuario ya aprobado y no crea ninguna
+# cuenta. Con el flag en su default de producción (`False`), gatearlo dejaría a
+# todo tenant aprobado sin poder completar el onboarding y el health score nunca
+# se calcularía. Lo fija `test_onboarding_submit_no_esta_gateado_por_el_registro`.
 @router.post("/submit", response_model=OnboardingSubmitResponse)
 async def submit_onboarding(
     body: OnboardingSubmitRequest,

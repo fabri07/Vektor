@@ -28,6 +28,7 @@ celery_app = Celery(
         "app.jobs.generate_insight",
         "app.jobs.notification_worker",
         "app.jobs.contact_lead_worker",
+        "app.jobs.access_request_worker",
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
         "app.jobs.reread_worker",
@@ -64,6 +65,12 @@ celery_app.conf.update(
         "jobs.update_momentum_profile": {"queue": "scores"},
         "jobs.update_momentum_all_tenants": {"queue": "scores"},
         "jobs.send_notification": {"queue": "notifications"},
+        # Los cuatro emails del flujo de solicitudes de acceso. El nombre de la
+        # última no espeja al de su función (ver access_request_worker).
+        "jobs.notify_access_request_verification": {"queue": "notifications"},
+        "jobs.notify_access_request_owner": {"queue": "notifications"},
+        "jobs.notify_access_request_decision": {"queue": "notifications"},
+        "jobs.notify_account_exists": {"queue": "notifications"},
         "jobs.send_weekly_email_summary": {"queue": "notifications"},
         "jobs.send_weekly_email_all_tenants": {"queue": "notifications"},
         "jobs.generate_report": {"queue": "reports"},

@@ -29,6 +29,7 @@ from app.application.services.facts_provider import (
     load_facts_frames,
 )
 from app.application.services.facts_service import Period, Provenance
+from app.domain.verticals import Vertical
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
@@ -164,7 +165,9 @@ async def test_tenant_guard_falla_explicito(db_session: AsyncSession, sample_ten
 
 
 async def test_tenant_sin_datos_da_empty(db_session: AsyncSession, sample_tenant) -> None:
-    svc = await build_facts_service(db_session, sample_tenant.tenant_id, P90)
+    svc = await build_facts_service(
+        db_session, sample_tenant.tenant_id, P90, vertical=Vertical.KIOSCO_ALMACEN
+    )
     f = svc.ventas_periodo(str(sample_tenant.tenant_id), P90)
     assert f.provenance == Provenance.EMPTY
     assert f.value is None  # nunca $0 falso
@@ -254,7 +257,7 @@ async def _seed_90_days(session: AsyncSession, tenant_id: uuid.UUID) -> None:
 async def test_reconciliacion_90_dias(db_session: AsyncSession, sample_tenant) -> None:
     tid = sample_tenant.tenant_id
     await _seed_90_days(db_session, tid)
-    svc = await build_facts_service(db_session, tid, P90)
+    svc = await build_facts_service(db_session, tid, P90, vertical=Vertical.KIOSCO_ALMACEN)
     snap = svc.dashboard_snapshot(str(tid), P90)
 
     # Ventas: trampas fuera (DEMO/voided/futura), inflows fuera, confidence plena
@@ -302,3 +305,18 @@ async def test_reconciliacion_90_dias(db_session: AsyncSession, sample_tenant) -
     advice = svc.collect_for_advice(str(tid), "flujo_caja", P90)
     caja_chat = next(f for f in advice if f.metric == "caja_liquida")
     assert caja_chat.value == snap["caja_liquida"].value
+
+
+async def test_build_facts_service_exige_vertical_o_thresholds(
+    db_session: AsyncSession, sample_tenant
+) -> None:
+    """Sin vertical NI thresholds no se puede construir el servicio.
+
+    Construirlo así dejaba `margen_neto` sin `severity` y apagaba en silencio
+    las alertas de margen río abajo (regresión detectada en el advisory).
+    """
+    try:
+        await build_facts_service(db_session, sample_tenant.tenant_id, P90)
+        raise AssertionError("debió fallar sin vertical ni thresholds")
+    except ValueError as exc:
+        assert "vertical" in str(exc)

@@ -14,6 +14,8 @@ import unicodedata
 
 from rapidfuzz import fuzz, process
 
+from app.domain.verticals import Vertical
+
 # ── Normalizador genérico (reusado por product_categories) ───────────────────
 
 _FUZZY_CUTOFF = 85
@@ -235,7 +237,7 @@ def normalize_expense_category(raw: str | None) -> tuple[str, str | None]:
 
 def classify_expense_with_vertical(
     raw: str | None,
-    business_type: str | None,
+    vertical: Vertical,
 ) -> tuple[str, str | None, bool]:
     """Texto libre → ``(código, label, es_mercaderia)`` considerando el vertical.
 
@@ -254,7 +256,7 @@ def classify_expense_with_vertical(
         normalize_product_category,
     )
 
-    prod_code, prod_label = normalize_product_category(raw, business_type)
+    prod_code, prod_label = normalize_product_category(raw, vertical)
     if prod_code != "OTHER" and prod_label is None:
         # Match real contra el catálogo del vertical → mercadería.
         return "INVENTORY", str(raw).strip()[:50], True

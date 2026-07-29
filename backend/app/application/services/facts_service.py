@@ -69,24 +69,33 @@ ARS_DECIMALS = 2   # pesos con 2 decimales
 PCT_DECIMALS = 1   # porcentajes con 1 decimal
 
 
+# Umbrales INDEPENDIENTES del vertical: valen igual para kiosco, limpieza y
+# decoración, así que sí tienen default (y se usan también cuando el servicio se
+# construye sin `SeverityThresholds`, que es el caso "no sé el vertical").
+VENTAS_DROP_WARNING = -20.0
+VENTAS_DROP_CRITICAL = -35.0
+SOBRESTOCK_DIAS_WARNING = 90
+
+
 @dataclass(frozen=True)
 class SeverityThresholds:
     """Umbrales por vertical.
 
-    Los defaults replican el benchmark canónico de kiosco_almacen.json
-    (warning_below=0.18, critical_below=0.10) para que el severity del fact y
-    el health score NUNCA se contradigan. Para otros verticales, construir con
-    `facts_provider.thresholds_for_vertical(vertical_code)` — misma fuente JSON.
+    Los umbrales de margen NO tienen default: replicarlos acá era regalar los
+    del benchmark de kiosco a cualquiera que construyera `SeverityThresholds()`.
+    Se construye con `facts_provider.thresholds_for_vertical(vertical)` — misma
+    fuente JSON que el health engine, para que el severity del fact y el health
+    score NUNCA se contradigan.
     """
 
+    # Piso de margen NETO (en %, del benchmark del vertical):
+    margen_neto_floor: float
+    margen_neto_critical: float
     # Caída de ventas vs período anterior (variación %):
-    ventas_drop_warning: float = -20.0
-    ventas_drop_critical: float = -35.0
-    # Piso de margen NETO (= benchmark kiosco_almacen.json, en %):
-    margen_neto_floor: float = 18.0
-    margen_neto_critical: float = 10.0
+    ventas_drop_warning: float = VENTAS_DROP_WARNING
+    ventas_drop_critical: float = VENTAS_DROP_CRITICAL
     # Días de stock sin rotación → sobrestock:
-    sobrestock_dias_warning: int = 90
+    sobrestock_dias_warning: int = SOBRESTOCK_DIAS_WARNING
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,7 +229,10 @@ class FactsService:
     def __init__(self, provider: FactsDataProvider,
                  thresholds: SeverityThresholds | None = None) -> None:
         self.provider = provider
-        self.t = thresholds or SeverityThresholds()
+        # `None` = el caller no sabe el vertical. Los umbrales independientes del
+        # vertical siguen aplicando (constantes de módulo); los de margen NO se
+        # inventan: sin benchmark del rubro, margen_neto sale sin severity.
+        self.t = thresholds
 
     # ---- filtrado de provenance (respeta REAL/DEMO/EMPTY) ------------------
     @staticmethod
@@ -276,11 +288,13 @@ class FactsService:
         confidence = (1.0 if n >= MIN_CONFIDENCE_SAMPLE
                       else round(0.5 + 0.5 * n / MIN_CONFIDENCE_SAMPLE, 2))
 
+        drop_critical = self.t.ventas_drop_critical if self.t else VENTAS_DROP_CRITICAL
+        drop_warning = self.t.ventas_drop_warning if self.t else VENTAS_DROP_WARNING
         severity: Literal["info", "warning", "critical"] | None = None
         if var is not None:
-            if var <= self.t.ventas_drop_critical:
+            if var <= drop_critical:
                 severity = "critical"
-            elif var <= self.t.ventas_drop_warning:
+            elif var <= drop_warning:
                 severity = "warning"
 
         return BusinessFact(
@@ -388,12 +402,16 @@ class FactsService:
         sin_gastos = exp.empty
         confidence = 0.4 if sin_gastos else 1.0
 
-        floor = benchmark_floor if benchmark_floor is not None else self.t.margen_neto_floor
-        severity: Literal["info", "warning", "critical"] = (
-            "critical" if margen < self.t.margen_neto_critical
-            else "warning" if margen < floor
-            else "info"
-        )
+        # Sin umbrales del vertical no hay con qué comparar el margen: el hecho
+        # sale sin severity antes que con la severidad de otro rubro.
+        severity: Literal["info", "warning", "critical"] | None = None
+        if self.t is not None:
+            floor = benchmark_floor if benchmark_floor is not None else self.t.margen_neto_floor
+            severity = (
+                "critical" if margen < self.t.margen_neto_critical
+                else "warning" if margen < floor
+                else "info"
+            )
 
         return BusinessFact(
             fact_id=f"margen_neto_{p.label}", domain="rentabilidad", metric="margen_neto",
@@ -517,7 +535,8 @@ class FactsService:
         if "first_seen_date" in prod.columns:
             ref = ref.fillna(pd.to_datetime(prod["first_seen_date"]))
         dias = ref.apply(lambda d: (today - d.date()).days if pd.notna(d) else -1)
-        frozen = prod[dias > self.t.sobrestock_dias_warning]
+        dias_warning = self.t.sobrestock_dias_warning if self.t else SOBRESTOCK_DIAS_WARNING
+        frozen = prod[dias > dias_warning]
         out: list[BusinessFact] = []
         for _, r in frozen.iterrows():
             capital = float(r["stock_units"] * r["unit_cost_ars"])

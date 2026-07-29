@@ -11,13 +11,22 @@ Formula v2: cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
+import pytest
+
+from app.domain.verticals import Vertical
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
-from app.heuristics.verticals.kiosco import BENCHMARK as KIOSCO_BENCHMARK
+from app.heuristics.verticals import loader
 from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
+
+# Benchmark de kiosco desde la MISMA fuente que el engine (el módulo estático
+# app/heuristics/verticals/kiosco.py se eliminó: era una 4ª copia de los JSON).
+KIOSCO_BENCHMARK = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -33,7 +42,7 @@ def _product(stock: int, threshold: int) -> ProductSummary:
 
 
 def _make_state(
-    vertical_code: str = "kiosco",
+    vertical_code: str = Vertical.KIOSCO_ALMACEN.value,
     monthly_sales_est: Decimal = Decimal("100000"),
     monthly_inventory_cost_est: Decimal = Decimal("60000"),
     monthly_fixed_expenses_est: Decimal = Decimal("17000"),
@@ -244,20 +253,48 @@ def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
 
 
 def test_vertical_json_loader_reads_complete_config() -> None:
-    config = load_vertical_heuristics("kiosco")
+    config = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN)
 
-    assert config.business_type == "kiosco_almacen"
+    assert config.business_type == Vertical.KIOSCO_ALMACEN
     assert config.cash_health.healthy_days_min == 10
     assert config.margin.healthy_min == 0.18
     assert config.inventory.rotation_days_max == 21
     assert config.supplier.stockout_sensitivity == "muy_alta"
 
 
-def test_vertical_json_loader_falls_back_to_kiosco_for_unknown_vertical() -> None:
-    config = load_vertical_heuristics("vertical_inexistente")
+def test_vertical_json_loader_raises_instead_of_serving_another_vertical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sin fallback: si falta el JSON del rubro, el loader propaga en vez de
+    scorear el negocio con los benchmarks de otro.
 
-    assert config.business_type == "kiosco_almacen"
-    assert config.margin.healthy_max == 0.28
+    NO se prueba con `load_vertical_heuristics(parse_vertical("kiosco"))`: ahí
+    la excepción la tira `parse_vertical` al evaluar el argumento y el loader ni
+    se ejecuta — el test quedaría verde aunque se borrara su cuerpo entero. El
+    rechazo del código corto legado se mide en `test_verticals.py`, donde el SUT
+    ES `parse_vertical`.
+
+    El temporal tiene el JSON de kiosco y NO el de limpieza a propósito: con un
+    directorio vacío, un loader que volviera a caer a kiosco levantaría igual
+    (por el archivo destino, que tampoco estaría) y el test pasaría por la razón
+    equivocada.
+
+    El `cache_clear()` de los dos lados es obligatorio: `load_vertical_heuristics`
+    tiene `lru_cache`, así que sin limpiar antes devolvería el config ya cargado
+    (verde por la razón equivocada) y sin limpiar después envenenaría al resto de
+    la suite con el directorio temporal.
+    """
+    shutil.copy(
+        loader._HEURISTICS_DIR / f"{Vertical.KIOSCO_ALMACEN.value}.json",
+        tmp_path / f"{Vertical.KIOSCO_ALMACEN.value}.json",
+    )
+    load_vertical_heuristics.cache_clear()
+    monkeypatch.setattr(loader, "_HEURISTICS_DIR", tmp_path)
+    try:
+        with pytest.raises(FileNotFoundError):
+            load_vertical_heuristics(Vertical.LIMPIEZA)
+    finally:
+        load_vertical_heuristics.cache_clear()
 
 
 # ── Modo cobertura de caja (sin saldo: cash_source="flujo") ───────────────────

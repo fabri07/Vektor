@@ -367,27 +367,30 @@ class TestOAuthExchangeInvalid:
         assert resp2.status_code == 400
 
 
-# ── Nuevo usuario Google ──────────────────────────────────────────────────────
+# ── Email desconocido → solicitud de acceso ───────────────────────────────────
 
 
 @pytest.mark.asyncio
-class TestOAuthNewUser:
-    async def test_new_user_gets_jwt(
-        self, client_with_google: tuple[AsyncClient, AsyncMock], db_session: AsyncSession
-    ) -> None:
-        """Google login con email nuevo crea cuenta y devuelve JWT."""
-        ac, redis = client_with_google
+class TestOAuthEmailDesconocido:
+    """El alta social murió: un email nuevo abre una SOLICITUD, no una cuenta.
 
-        # Poblar state en Redis
-        state = "validstate123"
+    Es el último camino por el que se podía acuñar un tenant sin pasar por la
+    revisión manual del dueño. Si estos tests se aflojan, el registro volvió a
+    estar abierto por la puerta de Google.
+    """
+
+    async def _callback(
+        self,
+        ac: AsyncClient,
+        redis: AsyncMock,
+        *,
+        state: str,
+        claims: dict[str, object],
+    ) -> str:
+        """Corre el callback con esos claims y devuelve el session_id del exchange."""
         await redis.set(
             f"oauth:state:{state}",
-            json.dumps(
-                {
-                    "nonce": "testnonce",
-                    "code_verifier": "testverifier",
-                }
-            ),
+            json.dumps({"nonce": "testnonce", "code_verifier": "testverifier"}),
         )
 
         token_response = MagicMock()
@@ -398,7 +401,7 @@ class TestOAuthNewUser:
             patch(
                 "app.application.services.google_oauth_service._verify_id_token",
                 new_callable=AsyncMock,
-                return_value=_VALID_CLAIMS,
+                return_value=claims,
             ),
             patch(
                 "httpx.AsyncClient.post",
@@ -414,58 +417,92 @@ class TestOAuthNewUser:
         assert resp.status_code == 302
         location = resp.headers["location"]
         assert "session_id=" in location
-        session_id = location.split("session_id=")[1]
+        return location.split("session_id=")[1]
 
-        # Exchange
+    async def test_email_nuevo_devuelve_access_request_required(
+        self, client_with_google: tuple[AsyncClient, AsyncMock]
+    ) -> None:
+        ac, redis = client_with_google
+        session_id = await self._callback(
+            ac, redis, state="validstate123", claims=_VALID_CLAIMS
+        )
+
         exchange_resp = await ac.post(
             "/api/v1/auth/oauth/google/exchange",
             json={"session_id": session_id},
         )
+
         assert exchange_resp.status_code == 200
         data = exchange_resp.json()
-        assert "access_token" in data
-        assert data["user"]["email"] == _GOOGLE_EMAIL
+        assert data["status"] == "access_request_required"
+        assert data["email"] == _GOOGLE_EMAIL
+        assert data["full_name"] == _GOOGLE_NAME
+        assert data["prefill_token"]
+        # El identificador de la identidad NO viaja al browser.
+        assert "provider_subject" not in data
+        assert "access_token" not in data
 
-    async def test_new_user_is_active(
+    async def test_email_nuevo_no_acuna_ninguna_fila_de_cuenta(
         self, client_with_google: tuple[AsyncClient, AsyncMock], db_session: AsyncSession
     ) -> None:
-        """El usuario nuevo creado vía Google debe estar activo."""
+        """LA aserción: pasar por Google no crea Tenant, User ni identidad."""
+        from sqlalchemy import func
         from sqlalchemy import select as sa_select
 
         ac, redis = client_with_google
-
-        state = "stateforactive"
-        await redis.set(
-            f"oauth:state:{state}",
-            json.dumps(
-                {
-                    "nonce": "nonce2",
-                    "code_verifier": "verifier2",
-                }
-            ),
+        await self._callback(
+            ac,
+            redis,
+            state="stateforactive",
+            claims={**_VALID_CLAIMS, "email": "newuser@gmail.com", "sub": "new-sub-999"},
         )
 
-        token_response = MagicMock()
-        token_response.json.return_value = {"id_token": "fake.id.token"}
-        token_response.raise_for_status = MagicMock()
+        for modelo in (Tenant, User, UserAuthIdentity):
+            total = (
+                await db_session.execute(sa_select(func.count()).select_from(modelo))
+            ).scalar_one()
+            assert total == 0, modelo.__name__
 
-        with (
-            patch(
-                "app.application.services.google_oauth_service._verify_id_token",
-                new_callable=AsyncMock,
-                return_value={**_VALID_CLAIMS, "email": "newuser@gmail.com", "sub": "new-sub-999"},
-            ),
-            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=token_response),
-        ):
-            await ac.get(
-                f"/api/v1/auth/oauth/google/callback?code=x&state={state}",
-                follow_redirects=False,
+    async def test_prefill_queda_en_redis_con_el_subject(
+        self, client_with_google: tuple[AsyncClient, AsyncMock]
+    ) -> None:
+        """El subject se guarda del lado del servidor, listo para el canje."""
+        ac, redis = client_with_google
+        session_id = await self._callback(
+            ac, redis, state="stateprefill", claims=_VALID_CLAIMS
+        )
+        data = (
+            await ac.post(
+                "/api/v1/auth/oauth/google/exchange",
+                json={"session_id": session_id},
             )
+        ).json()
 
-        result = await db_session.execute(sa_select(User).where(User.email == "newuser@gmail.com"))
-        user = result.scalar_one_or_none()
-        assert user is not None
-        assert user.is_active is True
+        guardado = json.loads(await redis.get(f"oauth:prefill:{data['prefill_token']}"))
+        assert guardado == {
+            "provider": "google",
+            "provider_subject": _GOOGLE_SUB,
+            "email": _GOOGLE_EMAIL,
+            "full_name": _GOOGLE_NAME,
+        }
+
+    async def test_sin_claim_name_el_nombre_queda_en_none(
+        self, client_with_google: tuple[AsyncClient, AsyncMock]
+    ) -> None:
+        """Google puede no mandar `name`: no se deriva del email (no-invention)."""
+        ac, redis = client_with_google
+        claims = {k: v for k, v in _VALID_CLAIMS.items() if k != "name"}
+        session_id = await self._callback(ac, redis, state="statenoname", claims=claims)
+
+        data = (
+            await ac.post(
+                "/api/v1/auth/oauth/google/exchange",
+                json={"session_id": session_id},
+            )
+        ).json()
+
+        assert data["status"] == "access_request_required"
+        assert data["full_name"] is None
 
 
 # ── Identidad ya vinculada ────────────────────────────────────────────────────

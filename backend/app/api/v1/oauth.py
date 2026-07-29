@@ -3,7 +3,8 @@
 Endpoints:
   POST /auth/oauth/google/start      → devuelve {authorization_url}
   GET  /auth/oauth/google/callback   → procesa redirect de Google → redirige al frontend
-  POST /auth/oauth/google/exchange   → GETDEL resultado del callback → AuthResponse | LinkRequired
+  POST /auth/oauth/google/exchange   → GETDEL resultado del callback →
+                                       AuthResponse | LinkRequired | AccessRequestRequired
   POST /auth/oauth/google/link-pending → completa link_required con password
 
 Guard: ENABLE_GOOGLE_LOGIN=False → 404 en los 4 endpoints.
@@ -21,6 +22,7 @@ from app.persistence.db.redis import get_redis
 from app.persistence.db.session import get_db_session
 from app.schemas.auth import AuthResponse
 from app.schemas.oauth import (
+    OAuthAccessRequestRequiredResponse,
     OAuthExchangeRequest,
     OAuthLinkPendingRequest,
     OAuthLinkRequiredResponse,
@@ -124,10 +126,15 @@ async def oauth_google_exchange(
     body: OAuthExchangeRequest,
     session: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
-) -> AuthResponse | OAuthLinkRequiredResponse:
-    """Intercambia el session_id del callback por un JWT o respuesta link_required.
+) -> AuthResponse | OAuthLinkRequiredResponse | OAuthAccessRequestRequiredResponse:
+    """Intercambia el session_id del callback por un JWT, link_required o
+    access_request_required.
 
     El session_id tiene TTL de 60 segundos y es single-use (GETDEL).
+
+    `access_request_required` es el desenlace de un email que Google verificó
+    pero que no tiene cuenta: **no se acuña nada**, el visitante pasa al
+    formulario de solicitud de acceso con el prefill de su identidad.
     """
     svc = GoogleOAuthService(session, redis)
     return await svc.exchange_session(body.session_id)

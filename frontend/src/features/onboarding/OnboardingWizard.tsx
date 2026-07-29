@@ -1,19 +1,33 @@
 "use client";
 
+/**
+ * Wizard de onboarding post-login — TRES pasos.
+ *
+ * El paso de "elegí tu rubro" se eliminó: desde que el acceso es por solicitud
+ * aprobada, el vertical lo asigna el dueño al aprobar (`assigned_vertical`), y
+ * el payload de `POST /onboarding/submit` **ya no acepta `vertical_code`** — el
+ * schema del backend usa `extra="forbid"`, así que mandarlo es un 422.
+ */
+
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ProgressBar } from "./ProgressBar";
-import { Step1Vertical, type Vertical } from "./Step1Vertical";
-import { Step2Form, type Step2Data } from "./Step2Form";
+import { Step2Form, type MainConcern, type Step2Data } from "./Step2Form";
 import { Step3Upload } from "./Step3Upload";
 import { Step4Loading } from "./Step4Loading";
 import { onboardingService } from "@/services/onboarding.service";
 import { ingestionService } from "@/services/ingestion.service";
 
-type Step = 1 | 2 | 3 | 4;
+/** ¿Es una preocupación del catálogo cerrado? */
+function esMainConcern(valor: string | null | undefined): valor is MainConcern {
+  return valor === "MARGIN" || valor === "STOCK" || valor === "CASH";
+}
+
+/** 1 = datos principales · 2 = archivos · 3 = tu score. */
+type Step = 1 | 2 | 3;
 
 interface WizardState {
   step: Step;
-  vertical: Vertical | null;
   formData: Step2Data | null;
   submitError: string | null;
   isSubmitting: boolean;
@@ -25,7 +39,6 @@ interface WizardState {
 export function OnboardingWizard() {
   const [state, setState] = useState<WizardState>({
     step: 1,
-    vertical: null,
     formData: null,
     submitError: null,
     isSubmitting: false,
@@ -33,35 +46,58 @@ export function OnboardingWizard() {
     pendingFile: null,
   });
 
+  /*
+   * ¿La preocupación principal ya vino de la solicitud de acceso?
+   *
+   * El backend la sella en el perfil al aprobar, y el submit ya la tomaba de
+   * ahí cuando el body no la traía. Pero el formulario la preguntaba igual y
+   * la mandaba siempre, así que ese fallback era código muerto y la respuesta
+   * del onboarding pisaba la del screening. Preguntar dos veces lo mismo y
+   * quedarse con la segunda respuesta es peor que no preguntar: el visitante
+   * ya contestó, y si contesta distinto no hay forma de saber cuál vale.
+   *
+   * `retry: false` y fail-safe: si el status no responde, se pregunta. Nunca
+   * al revés — saltear la pregunta con un valor que no llegó dejaría el alta
+   * sin `main_concern` y sin manera de cargarla.
+   */
+  const status = useQuery({
+    queryKey: ["onboarding", "status"],
+    queryFn: () => onboardingService.getStatus(),
+    retry: false,
+    staleTime: Infinity,
+  });
+  const concernDeLaSolicitud = esMainConcern(status.data?.main_concern)
+    ? status.data.main_concern
+    : null;
+
   function goToStep(step: Step) {
     setState((prev) => ({ ...prev, step, submitError: null }));
   }
 
-  function handleStep1Next() {
-    if (!state.vertical) return;
-    goToStep(2);
+  function handleFormSubmit(data: Step2Data) {
+    setState((prev) => ({ ...prev, formData: data, step: 2, submitError: null }));
   }
 
-  function handleStep2Submit(data: Step2Data) {
-    setState((prev) => ({ ...prev, formData: data, step: 3, submitError: null }));
-  }
-
-  async function handleStep3Next(file: File | null) {
-    if (!state.vertical || !state.formData) return;
+  async function handleUploadNext(file: File | null) {
+    if (!state.formData) return;
 
     setState((prev) => ({ ...prev, isSubmitting: true, submitError: null }));
 
     if (!state.formSubmitted) {
       try {
         await onboardingService.submit({
-          vertical_code: state.vertical,
           weekly_sales_estimate_ars: state.formData.weekly_sales_estimate_ars,
           monthly_inventory_cost_ars: state.formData.monthly_inventory_cost_ars,
           monthly_fixed_expenses_ars: state.formData.monthly_fixed_expenses_ars,
           cash_on_hand_ars: state.formData.cash_on_hand_ars,
           product_count_estimate: state.formData.product_count_estimate,
           supplier_count_estimate: state.formData.supplier_count_estimate,
-          main_concern: state.formData.main_concern,
+          // Solo si el usuario la contestó ACÁ. Si vino de la solicitud, se
+          // omite y el backend la toma del perfil: mandarla de vuelta sería
+          // hacerle un viaje de ida y vuelta a un dato que ya tiene.
+          ...(state.formData.main_concern
+            ? { main_concern: state.formData.main_concern }
+            : {}),
           work_days: state.formData.work_days,
           work_open_hour: state.formData.work_open_hour,
           work_close_hour: state.formData.work_close_hour,
@@ -95,7 +131,7 @@ export function OnboardingWizard() {
       }
     }
 
-    setState((prev) => ({ ...prev, isSubmitting: false, step: 4 }));
+    setState((prev) => ({ ...prev, isSubmitting: false, step: 3 }));
   }
 
   async function handleRetryUpload() {
@@ -103,7 +139,7 @@ export function OnboardingWizard() {
     setState((prev) => ({ ...prev, isSubmitting: true, submitError: null }));
     try {
       await ingestionService.upload(state.pendingFile);
-      setState((prev) => ({ ...prev, isSubmitting: false, pendingFile: null, step: 4 }));
+      setState((prev) => ({ ...prev, isSubmitting: false, pendingFile: null, step: 3 }));
     } catch {
       setState((prev) => ({
         ...prev,
@@ -114,59 +150,37 @@ export function OnboardingWizard() {
     }
   }
 
-  const { step, vertical, formData, submitError, isSubmitting, pendingFile, formSubmitted } = state;
+  const { step, formData, submitError, isSubmitting, pendingFile, formSubmitted } = state;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-vk-bg-light">
       <div className="flex min-h-full items-start justify-center px-4 py-10 sm:items-center sm:py-16">
         <div className="w-full max-w-2xl">
-          {/* Progress bar — visible en todos los pasos, step 4 muestra "Tu score" como actual */}
+          {/* Progress bar — visible en todos los pasos; el 3 es "Tu score" */}
           <ProgressBar currentStep={step} />
 
           {/* Card */}
           <div className="rounded-2xl border border-gray-200 bg-white px-4 py-6 shadow-sm sm:px-8 sm:py-8 md:px-10">
-            {step === 1 && (
-              <>
-                <Step1Vertical
-                  selected={vertical}
-                  onSelect={(v) =>
-                    setState((prev) => ({ ...prev, vertical: v }))
-                  }
+            {/* El formulario es ahora el primer paso: no hay "Anterior". */}
+            {step === 1 &&
+              // Se espera al status antes de pintar el formulario: si se
+              // renderizara ya y la respuesta llegara después, la pregunta de
+              // "¿qué te preocupa más?" aparecería y desaparecería sola.
+              (status.isPending ? (
+                <p className="py-10 text-center text-sm text-vk-text-muted">
+                  Cargando…
+                </p>
+              ) : (
+                <Step2Form
+                  initialData={formData}
+                  onSubmit={handleFormSubmit}
+                  mainConcernDeLaSolicitud={concernDeLaSolicitud}
                 />
-                <div className="mt-8 flex justify-end">
-                  <button
-                    type="button"
-                    disabled={!vertical}
-                    onClick={handleStep1Next}
-                    className="h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Siguiente
-                  </button>
-                </div>
-              </>
-            )}
+              ))}
 
             {step === 2 && (
               <>
-                <Step2Form
-                  initialData={formData}
-                  onSubmit={handleStep2Submit}
-                />
-                <div className="mt-4 flex justify-start">
-                  <button
-                    type="button"
-                    onClick={() => goToStep(1)}
-                    className="text-sm text-gray-400 underline underline-offset-2 hover:text-gray-600 transition-colors"
-                  >
-                    Anterior
-                  </button>
-                </div>
-              </>
-            )}
-
-            {step === 3 && (
-              <>
-                <Step3Upload onNext={handleStep3Next} />
+                <Step3Upload onNext={handleUploadNext} />
 
                 {submitError && (
                   <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
@@ -185,7 +199,7 @@ export function OnboardingWizard() {
                     ) : formSubmitted ? (
                       <button
                         type="button"
-                        onClick={() => goToStep(4)}
+                        onClick={() => goToStep(3)}
                         className="mt-3 rounded-lg border border-red-300 px-4 py-2 text-xs font-semibold text-red-600 transition-colors hover:bg-red-100"
                       >
                         Continuar sin archivo
@@ -204,8 +218,8 @@ export function OnboardingWizard() {
                 <div className="mt-4 flex justify-start">
                   <button
                     type="button"
-                    onClick={() => goToStep(2)}
-                    className="text-sm text-gray-400 underline underline-offset-2 hover:text-gray-600 transition-colors"
+                    onClick={() => goToStep(1)}
+                    className="text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
                   >
                     Anterior
                   </button>
@@ -213,12 +227,12 @@ export function OnboardingWizard() {
               </>
             )}
 
-            {step === 4 && <Step4Loading />}
+            {step === 3 && <Step4Loading />}
           </div>
 
           {/* Footer note */}
-          {step < 4 && (
-            <p className="mt-4 text-center text-xs text-gray-400">
+          {step < 3 && (
+            <p className="mt-4 text-center text-xs text-vk-text-muted">
               Tu información es privada y solo se usa para calcular tu salud financiera.
             </p>
           )}

@@ -9,18 +9,14 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+from app.domain.verticals import Vertical
+
 
 class TenantStatus(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     CANCELLED = "cancelled"
     TRIAL = "trial"
-
-
-class BusinessVertical(StrEnum):
-    KIOSCO = "kiosco"
-    DECORACION_HOGAR = "decoracion_hogar"
-    LIMPIEZA = "limpieza"
 
 
 @dataclass(frozen=True)
@@ -41,7 +37,7 @@ class Tenant:
 
     name: str
     slug: str
-    vertical: BusinessVertical
+    vertical: Vertical
     id: TenantId = field(default_factory=TenantId.generate)
     status: TenantStatus = TenantStatus.TRIAL
     created_at: datetime = field(default_factory=datetime.utcnow)

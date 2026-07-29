@@ -16,10 +16,15 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.verticals import Vertical
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import SaleEntry
-from app.state.business_state_service import compute_business_state
+from app.state.business_state_service import (
+    _cache_key,
+    _hash_key,
+    compute_business_state,
+)
 
 # ── Fake Redis ────────────────────────────────────────────────────────────────
 
@@ -45,25 +50,20 @@ class FakeRedis:
 
 
 @pytest_asyncio.fixture
-async def kiosco_profile(db_session: AsyncSession, sample_tenant) -> BusinessProfile:
-    """BusinessProfile for sample_tenant with onboarding estimates only."""
+async def kiosco_profile(
+    db_session: AsyncSession, sample_business_profile: BusinessProfile
+) -> BusinessProfile:
+    """El perfil de `sample_tenant` con las estimaciones de onboarding cargadas."""
     now = datetime.now(UTC)
-    bp = BusinessProfile(
-        tenant_id=sample_tenant.tenant_id,
-        vertical_code="kiosco",
-        data_mode="M0",
-        data_confidence="LOW",
-        monthly_sales_estimate_ars=Decimal("150000.00"),
-        monthly_inventory_spend_estimate_ars=Decimal("90000.00"),
-        monthly_fixed_expenses_estimate_ars=Decimal("20000.00"),
-        cash_on_hand_estimate_ars=Decimal("15000.00"),
-        supplier_count_estimate=2,
-        product_count_estimate=3,
-        onboarding_completed=True,
-        updated_at=now,
-        created_at=now,
-    )
-    db_session.add(bp)
+    bp = sample_business_profile
+    bp.monthly_sales_estimate_ars = Decimal("150000.00")
+    bp.monthly_inventory_spend_estimate_ars = Decimal("90000.00")
+    bp.monthly_fixed_expenses_estimate_ars = Decimal("20000.00")
+    bp.cash_on_hand_estimate_ars = Decimal("15000.00")
+    bp.supplier_count_estimate = 2
+    bp.product_count_estimate = 3
+    bp.onboarding_completed = True
+    bp.updated_at = now
     await db_session.commit()
     return bp
 
@@ -96,7 +96,7 @@ async def test_compute_business_state_from_onboarding_only(
     )
 
     assert state.tenant_id == sample_tenant.tenant_id
-    assert state.vertical_code == "kiosco"
+    assert state.vertical_code == Vertical.KIOSCO_ALMACEN.value
     assert state.monthly_sales_est == Decimal("150000.00")
     assert state.monthly_inventory_cost_est == Decimal("90000.00")
     assert state.monthly_fixed_expenses_est == Decimal("20000.00")
@@ -111,8 +111,73 @@ async def test_compute_business_state_from_onboarding_only(
 
     # Redis should be populated
     store = redis.snapshot()
-    assert f"business_state:{sample_tenant.tenant_id}" in store
-    assert f"last_inputs_hash:{sample_tenant.tenant_id}" in store
+    # Las keys llevan el prefijo de versión v2 (los rulesets pasaron al código
+    # canónico y los blobs viejos ya no deserializan).
+    assert _cache_key(sample_tenant.tenant_id) in store
+    assert _hash_key(sample_tenant.tenant_id) in store
+    assert "business_state:v2:" in _cache_key(sample_tenant.tenant_id)
+    assert "last_inputs_hash:v2:" in _hash_key(sample_tenant.tenant_id)
+
+
+# ── Montos del onboarding sin contestar ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_montos_sin_contestar_no_se_leen_como_cero(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """Con la caja sin contestar, la fuente no puede ser "onboarding".
+
+    El tiering de caja ya distinguía `is not None` desde antes, así que este
+    test **no protege un fix**: documenta un camino que hasta ahora era
+    inalcanzable. El formulario mandaba `parseFloat(campo) || 0`, de modo que
+    `cash_on_hand_estimate_ars` nunca quedaba NULL después de un onboarding y
+    esta rama no se ejercitaba nunca en la práctica.
+
+    Ahora sí se llega, y lo que hace es lo correcto: sin saldo declarado el
+    score cae al tier siguiente en vez de operar sobre un $0 inventado.
+    """
+    bp = kiosco_profile
+    bp.monthly_inventory_spend_estimate_ars = None
+    bp.monthly_fixed_expenses_estimate_ars = None
+    bp.cash_on_hand_estimate_ars = None
+    await db_session.commit()
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert state.cash_source != "onboarding"
+    assert state.cash_source in ("flujo", "desconocido")
+
+
+@pytest.mark.asyncio
+async def test_cero_declarado_si_es_el_estimado_del_onboarding(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """El espejo: un cero CONTESTADO sí es el saldo del negocio.
+
+    Sin este test, el de arriba pasaría igual con un `or Decimal("0")` que
+    tratara todo cero como ausencia. Los dos juntos fijan la distinción.
+    """
+    bp = kiosco_profile
+    bp.cash_on_hand_estimate_ars = Decimal("0")
+    await db_session.commit()
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert state.cash_source == "onboarding"
+    assert state.cash_on_hand_est == Decimal("0")
 
 
 # ── Test 2: completeness increases with ≥5 active products ───────────────────

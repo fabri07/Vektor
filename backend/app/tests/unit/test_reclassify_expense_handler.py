@@ -19,6 +19,7 @@ from app.application.agents.shared.schemas import (
     AgentTask,
     RiskLevel,
 )
+from app.domain.verticals import Vertical
 
 _TENANT = "00000000-0000-0000-0000-000000000001"
 _USER = "00000000-0000-0000-0000-000000000002"
@@ -26,6 +27,12 @@ _USER = "00000000-0000-0000-0000-000000000002"
 
 def _req(message: str) -> AgentRequest:
     return AgentRequest(user_id=_USER, business_id=_TENANT, message=message)
+
+
+def _agent() -> AgentExpense:
+    """Sin sesión de DB el agente no puede leer el vertical del tenant: el default
+    lo inyecta el test, no el código de producción."""
+    return AgentExpense(default_vertical=Vertical.KIOSCO_ALMACEN)
 
 
 def _task(entities: dict[str, Any] | None = None) -> AgentTask:
@@ -36,13 +43,13 @@ def _task(entities: dict[str, Any] | None = None) -> AgentTask:
     )
 
 
-# ── Asesoría (read-only, sin DB → vertical default kiosco_almacen) ────────────
+# ── Asesoría (read-only, sin DB → vertical inyectado por el test) ─────────────
 
 
 @pytest.mark.asyncio
 async def test_advice_golosinas_is_reventa_in_kiosco():
     """Golosinas en kiosco → reventa (mercadería / INVENTORY)."""
-    agent = AgentExpense()  # _db=None → vertical kiosco_almacen
+    agent = _agent()
     res = await agent.process(
         _req("compré golosinas, ¿esto es mercadería o insumo?"),
         task=_task({"descripcion": "golosinas"}),
@@ -58,7 +65,7 @@ async def test_advice_golosinas_is_reventa_in_kiosco():
 @pytest.mark.asyncio
 async def test_advice_bolsas_is_insumo():
     """Bolsas / artículos de uso interno → insumo (OPEX / SUPPLIES)."""
-    agent = AgentExpense()
+    agent = _agent()
     res = await agent.process(
         _req("compré bolsas para el local"),
         task=_task({"descripcion": "bolsas"}),
@@ -72,7 +79,7 @@ async def test_advice_bolsas_is_insumo():
 @pytest.mark.asyncio
 async def test_advice_alquiler_is_other_category():
     """Alquiler → no es reventa ni insumo: categoría operativa."""
-    agent = AgentExpense()
+    agent = _agent()
     res = await agent.process(
         _req("el alquiler, ¿cómo lo clasifico?"),
         task=_task({"descripcion": "alquiler"}),
@@ -88,7 +95,7 @@ async def test_advice_alquiler_is_other_category():
 
 @pytest.mark.asyncio
 async def test_write_reventa_builds_medium_pending_action():
-    agent = AgentExpense()
+    agent = _agent()
     res = await agent.process(
         _req("marcá ese gasto como reventa"),
         task=_task(
@@ -112,7 +119,7 @@ async def test_write_reventa_builds_medium_pending_action():
 
 @pytest.mark.asyncio
 async def test_write_insumo_builds_medium_pending_action():
-    agent = AgentExpense()
+    agent = _agent()
     res = await agent.process(
         _req("esto es insumo"),
         task=_task(
@@ -132,7 +139,7 @@ async def test_write_insumo_builds_medium_pending_action():
 
 @pytest.mark.asyncio
 async def test_write_categoria_normalizes_code():
-    agent = AgentExpense()
+    agent = _agent()
     res = await agent.process(
         _req("movelo a impuestos"),
         task=_task(
@@ -152,7 +159,7 @@ async def test_write_categoria_normalizes_code():
 @pytest.mark.asyncio
 async def test_no_identification_falls_to_advice():
     """Target sin identificación de gasto → asesoría, no escritura."""
-    agent = AgentExpense()
+    agent = _agent()
     res = await agent.process(
         _req("quiero reclasificar algo a reventa"),
         task=_task({"target": "reventa"}),

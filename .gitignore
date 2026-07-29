@@ -88,3 +88,7 @@ capturas/
 CLAUDE [0-9]*.md
 # Reportes de scripts operativos con datos de producción — nunca commitear
 backend/*.csv
+
+# Artefactos de la skill Impeccable (reviews de diseño). El contenido que vale
+# se registra en memoria; el snapshot es scratch local, igual que .superpowers/.
+.impeccable/

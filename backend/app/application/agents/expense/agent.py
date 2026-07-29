@@ -34,6 +34,7 @@ from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     normalize_expense_category,
 )
+from app.domain.verticals import Vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 
 if TYPE_CHECKING:
@@ -49,11 +50,16 @@ class AgentExpense(BaseAgent):
         db: AsyncSession | None = None,
         redis: Redis | None = None,
         gateway: Any | None = None,
+        default_vertical: Vertical | None = None,
     ) -> None:
+        """`default_vertical` es el vertical a usar cuando el agente corre sin
+        sesión de DB (tests). En producción nunca se inyecta: sin DB y sin
+        default, `_business_vertical` levanta en vez de asumir un rubro."""
         self._client: Any | None = None
         self._db = db
         self._redis = redis
         self._gateway = gateway
+        self._default_vertical = default_vertical
 
     @property
     def client(self) -> Any:
@@ -598,22 +604,24 @@ class AgentExpense(BaseAgent):
 
     # ── Nivel 2: reclasificación de gastos (asesoría + escritura) ──────────────
 
-    async def _business_vertical(self, tenant_id: uuid.UUID) -> str:
-        """Devuelve el vertical_code del tenant o fallback a kiosco_almacen."""
-        if self._db is None:
-            return "kiosco_almacen"
-        from sqlalchemy import select  # noqa: PLC0415
+    async def _business_vertical(self, tenant_id: uuid.UUID | None) -> Vertical:
+        """Vertical del tenant. Sin DB ni tenant identificado cae al
+        `default_vertical` inyectado (tests); si tampoco lo hay, levanta."""
+        if self._db is not None and tenant_id is not None:
+            from app.application.agents.shared.vertical_lookup import (  # noqa: PLC0415
+                load_tenant_vertical,
+            )
 
-        from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
-
-        result = await self._db.execute(
-            select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+            return await load_tenant_vertical(self._db, tenant_id)
+        if self._default_vertical is not None:
+            return self._default_vertical
+        raise RuntimeError(
+            "AgentExpense requiere sesión de DB con tenant identificado "
+            "o default_vertical explícito"
         )
-        code = result.scalar_one_or_none()
-        return code or "kiosco_almacen"
 
     def _advise_reventa_vs_insumo(
-        self, text: str, business_type: str
+        self, text: str, business_type: Vertical
     ) -> tuple[str, str, bool]:
         """Recomienda reventa (COGS/INVENTORY) vs insumo (OPEX/SUPPLIES) vs otra
         categoría según el VERTICAL, de forma determinística (sin LLM).
@@ -909,11 +917,7 @@ class AgentExpense(BaseAgent):
             expense_id or entities.get("monto") or entities.get("amount")
         )
 
-        business_type = (
-            await self._business_vertical(tenant_id)
-            if tenant_id is not None
-            else "kiosco_almacen"
-        )
+        business_type = await self._business_vertical(tenant_id)
 
         # ── C1: identificación CONCRETA SIN target → derivar target y ESCRIBIR ──
         # (no caer a asesoría read-only cuando ya hay una fila concreta señalada)

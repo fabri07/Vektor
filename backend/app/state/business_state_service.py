@@ -10,8 +10,11 @@ reaches score computation directly.
 
 Cache strategy
 --------------
-  Redis key  : business_state:{tenant_id}        — JSON blob, TTL 24 h
-  Redis key  : last_inputs_hash:{tenant_id}      — SHA-256 of input fingerprint, TTL 24 h
+  Redis key  : business_state:v2:{tenant_id}     — JSON blob, TTL 24 h
+  Redis key  : last_inputs_hash:v2:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
+
+  El prefijo de versión (`v2:`) se bumpea cuando cambia el FORMATO del blob, para
+  no leer con el código nuevo lo que escribió el viejo. Ver `_cache_key`.
 
 On every call:
   1. Compute inputs fingerprint (sale_count, expense_count, product_count, profile.updated_at).
@@ -33,6 +36,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.verticals import Vertical, try_parse_vertical
 from app.heuristics.base import VerticalRules
 from app.heuristics.decoracion import DecoracionHogarHeuristicRuleSet
 from app.heuristics.kiosco import KioscoHeuristicRuleSet
@@ -57,10 +61,10 @@ type RuleSetInstance = (
     KioscoHeuristicRuleSet | DecoracionHogarHeuristicRuleSet | LimpiezaHeuristicRuleSet
 )
 
-_RULESET_INSTANCES: dict[str, RuleSetInstance] = {
-    "kiosco": KioscoHeuristicRuleSet(),
-    "decoracion_hogar": DecoracionHogarHeuristicRuleSet(),
-    "limpieza": LimpiezaHeuristicRuleSet(),
+_RULESET_INSTANCES: dict[Vertical, RuleSetInstance] = {
+    Vertical.KIOSCO_ALMACEN: KioscoHeuristicRuleSet(),
+    Vertical.DECORACION_HOGAR: DecoracionHogarHeuristicRuleSet(),
+    Vertical.LIMPIEZA: LimpiezaHeuristicRuleSet(),
 }
 
 CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 h
@@ -114,12 +118,17 @@ class BusinessState:
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 
+# v2: los rulesets pasaron del código corto ("kiosco") al canónico
+# ("kiosco_almacen"). Todo blob escrito por la versión anterior guarda el código
+# viejo en `ruleset`, así que `_deserialize_state` lo rechazaría durante las 24 h
+# de CACHE_TTL_SECONDS posteriores al deploy. El bump de key los deja huérfanos
+# (expiran solos) en vez de romper el score de cada tenant kiosco por un día.
 def _cache_key(tenant_id: UUID) -> str:
-    return f"business_state:{tenant_id}"
+    return f"business_state:v2:{tenant_id}"
 
 
 def _hash_key(tenant_id: UUID) -> str:
-    return f"last_inputs_hash:{tenant_id}"
+    return f"last_inputs_hash:v2:{tenant_id}"
 
 
 def _make_fingerprint(
@@ -169,9 +178,10 @@ def _deserialize_state(raw: str) -> BusinessState:
     """Restore BusinessState from JSON string."""
     d = json.loads(raw)
     vertical_code: str = d["ruleset"]
-    ruleset_instance = _RULESET_INSTANCES.get(vertical_code)
-    if ruleset_instance is None:
+    vertical = try_parse_vertical(vertical_code)
+    if vertical is None:
         raise ValueError(f"Unknown vertical in cached state: {vertical_code!r}")
+    ruleset_instance = _RULESET_INSTANCES[vertical]
     products = [
         ProductSummary(
             product_id=UUID(p["product_id"]),
@@ -240,6 +250,31 @@ def _derive_confidence(score: float) -> str:
     return "LOW"
 
 
+def _estimado_o_cero(real: Decimal, estimado_del_perfil: Decimal | None) -> Decimal:
+    """Costo/gasto mensual: lo real si existe, si no el estimado del onboarding.
+
+    **Hoy esto no cambia ningún número.** Reemplaza a
+    ``estimado_del_perfil or Decimal("0")``, y como las dos ramas devuelven
+    ``Decimal("0")`` el resultado es idéntico. Está escrito así para que la
+    distinción entre "no contestó" y "contestó cero" quede explícita en el punto
+    donde importa, y para que el día que alguien quiera usarla no tenga que
+    descubrir primero que un ``or`` la estaba borrando.
+
+    Y sobre por qué la lectura NO la usa todavía: ``has_inventory_cost`` y
+    ``has_fixed_expenses`` siguen midiendo ``> 0``, así que un cero declarado no
+    suma completeness. Es deliberado. Los ceros ya guardados en la base son
+    ambiguos —el formulario viejo convertía cada campo en blanco en un cero— y
+    no hay forma de distinguir cuáles fueron una respuesta real. Contarlos como
+    dato presente le daría puntos justamente a las filas que fabricó el bug. La
+    ambigüedad se drena sola: desde ahora un campo en blanco se guarda NULL.
+    """
+    if real > 0:
+        return real
+    if estimado_del_perfil is not None:
+        return estimado_del_perfil
+    return Decimal("0")
+
+
 def _derive_main_concern(
     score: float,
     has_sales: bool,
@@ -283,9 +318,10 @@ async def compute_business_state(
     if profile is None:
         raise ValueError(f"No BusinessProfile found for tenant {tenant_id}")
 
-    ruleset_instance = _RULESET_INSTANCES.get(profile.vertical_code)
-    if ruleset_instance is None:
+    vertical = try_parse_vertical(profile.vertical_code)
+    if vertical is None:
         raise ValueError(f"Unknown vertical_code: {profile.vertical_code!r}")
+    ruleset_instance = _RULESET_INSTANCES[vertical]
 
     # ── 2. Aggregate sales (last 30 days) ────────────────────────────────────
     sale_sum_result = await session.execute(
@@ -472,15 +508,17 @@ async def compute_business_state(
             )
     else:
         monthly_sales_est = real_sales
-    monthly_inventory_cost_est = (
-        real_inventory_cost
-        if real_inventory_cost > 0
-        else (profile.monthly_inventory_spend_estimate_ars or Decimal("0"))
+    # `or Decimal("0")` acá volvería a fabricar el cero que el onboarding dejó
+    # de inventar: un `None` (el dueño no contestó) y un `Decimal("0")` (contestó
+    # que no gasta nada) son datos distintos y no pueden colapsar en el mismo
+    # número. Con `is not None` el estimado del perfil solo entra si existe; si
+    # no, el fallback a cero es una decisión propia de esta capa, no un dato del
+    # negocio disfrazado.
+    monthly_inventory_cost_est = _estimado_o_cero(
+        real_inventory_cost, profile.monthly_inventory_spend_estimate_ars
     )
-    monthly_fixed_expenses_est = (
-        real_fixed_expenses
-        if real_fixed_expenses > 0
-        else (profile.monthly_fixed_expenses_estimate_ars or Decimal("0"))
+    monthly_fixed_expenses_est = _estimado_o_cero(
+        real_fixed_expenses, profile.monthly_fixed_expenses_estimate_ars
     )
     # Tiering de la fuente de caja (de más a menos confiable):
     #   1. arqueo       → saldo medido (CashClose.counted_total_ars)

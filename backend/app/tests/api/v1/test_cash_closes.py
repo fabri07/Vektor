@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.business import BusinessProfile
@@ -83,13 +84,14 @@ class TestCashClosePreview:
     ) -> None:
         """El preview normaliza el legacy 'registered' → 'monotributo', igual que
         GET /settings/fiscal-condition (consistencia entre ambos endpoints)."""
-        db_session.add(
-            BusinessProfile(
-                tenant_id=sample_tenant.tenant_id,
-                vertical_code="kiosco_almacen",
-                fiscal_condition="registered",  # valor legacy crudo
+        profile = (
+            await db_session.execute(
+                select(BusinessProfile).where(
+                    BusinessProfile.tenant_id == sample_tenant.tenant_id
+                )
             )
-        )
+        ).scalar_one()
+        profile.fiscal_condition = "registered"  # valor legacy crudo
         await db_session.commit()
 
         resp = await client.get(

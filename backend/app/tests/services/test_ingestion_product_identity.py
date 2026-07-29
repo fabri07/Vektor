@@ -32,6 +32,7 @@ from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
 )
+from app.tests.conftest import add_business_profile
 
 
 def _stock_summary(rows: list[dict[str, object]]) -> dict[str, object]:
@@ -379,6 +380,8 @@ async def test_other_tenant_product_is_not_a_resolution_candidate(
         status="ACTIVE",
     )
     db_session.add(other_tenant)
+    await db_session.flush()
+    await add_business_profile(db_session, other_tenant.tenant_id)
     await db_session.commit()
     other_product = await _create_product(
         db_session, other_tenant.tenant_id, "Agua", sku="A1"
