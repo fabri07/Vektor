@@ -2728,3 +2728,64 @@ class TestOthersHidesRiskRef:
         # Ni siquiera aparece en el JSON crudo de la respuesta (headers/labels).
         raw = response.text
         assert RISK_REF_KEY not in raw
+
+
+class TestRereadApplyEnqueueEndpoint:
+    async def test_reread_apply_enqueue_fallido_marca_run_failed(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F9b Task 2: si ``.delay()`` falla al encolar la relectura en
+        background, el ``DataRepairRun`` que ``start_background_apply`` dejó
+        en RUNNING debe pasar a FAILED — si no, queda un run RUNNING
+        fantasma que bloquea el guard anti-duplicado para siempre."""
+        from app.application.services.reread_service import REPAIR_TYPE_REREAD
+        from app.jobs.reread_worker import reread_apply as reread_apply_task
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with unittest.mock.patch.object(
+            reread_apply_task, "delay", side_effect=RuntimeError("broker caído")
+        ):
+            response = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/apply",
+                headers=auth_headers,
+            )
+        assert response.status_code == 503
+
+        result = await db_session.execute(
+            select(DataRepairRun).where(
+                DataRepairRun.tenant_id == sample_tenant.tenant_id,
+                DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            )
+        )
+        run = result.scalars().one()
+        assert run.status == "FAILED"
+        assert run.completed_at is not None
+        assert (run.details_json or {}).get("phase") == "enqueue_failed"
+
+        # Un segundo intento no debe estar bloqueado por el guard
+        # anti-duplicado: el run FAILED no cuenta como RUNNING.
+        with unittest.mock.patch.object(reread_apply_task, "delay") as mock_delay:
+            response2 = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/apply",
+                headers=auth_headers,
+            )
+        assert response2.status_code == 202
+        mock_delay.assert_called_once()

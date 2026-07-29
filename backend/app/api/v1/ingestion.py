@@ -1745,6 +1745,10 @@ async def reread_apply(
         reread_apply_task.delay(str(run.id), str(file_id), str(tenant.tenant_id))
     except Exception as exc:  # noqa: BLE001
         logger.error("ingestion.reread.enqueue_failed", run_id=str(run.id), error=str(exc))
+        run.status = "FAILED"
+        run.completed_at = datetime.now(UTC)
+        run.details_json = {**(run.details_json or {}), "phase": "enqueue_failed"}
+        await session.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="No se pudo encolar la relectura. Reintentá en unos segundos.",
