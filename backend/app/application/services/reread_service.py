@@ -66,7 +66,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -1830,6 +1830,128 @@ async def get_reread_run(
     return run
 
 
+def _coerce_master_restore_value(field: str, value: Any) -> Any:
+    """Deserializa un valor JSON-safe capturado por ``_snapshot_master``/
+    ``product_details`` de vuelta al tipo Python que el modelo espera.
+
+    Los nombres de campo no colisionan entre kinds con tipos distintos:
+    ``birthday`` (Customer) y ``expiry_date`` (Product) son ``Date``;
+    ``acquired_at`` (Product) es ``DateTime`` — con hora, ``date.fromisoformat``
+    no lo parsea; ``credit_limit`` (Customer) y ``sale_price_ars`` (Product) son
+    ``Decimal``. El resto de los campos (strings) se devuelve tal cual."""
+    if value is None:
+        return None
+    if field in ("birthday", "expiry_date"):
+        return date.fromisoformat(value)
+    if field == "acquired_at":
+        return datetime.fromisoformat(value)
+    if field in ("credit_limit", "sale_price_ars"):
+        return Decimal(value)
+    return value
+
+
+async def _undo_master_and_product_items(
+    session: AsyncSession, tenant_id: uuid.UUID, items: list[DataRepairItem]
+) -> list[dict[str, str]]:
+    """F9b (Task 7): revierte los ``DataRepairItem`` de maestros (clientes/
+    proveedores) y productos de un run de relectura — restaura los que nadie
+    tocó después de la relectura, saltea (y reporta) los editados después.
+    Nunca pisa una edición manual en silencio (política touched-since decidida
+    por el usuario: comparar el ``updated_at`` ACTUAL contra el capturado en
+    ``after_json`` en el momento exacto en que la relectura dejó el registro).
+
+    Para los CREADOS por la relectura y no tocados después: se desactivan
+    (``deactivated_at``, mismo criterio que el borrado protegido existente) en
+    vez de restaurar campos — no había "antes" al que volver. Producto además
+    usa ``deactivation_reason="REREAD_UNDO"`` (Task 4) y ``is_active=False``
+    (mismo patrón que ``product_dedup_service``) — NUNCA hard delete, rompería
+    el ``ON DELETE SET NULL`` de ventas/gastos que ya referencian ese producto.
+
+    ``stock_units``/``unit_cost_ars`` de producto NUNCA se tocan acá — su
+    reversa es EXCLUSIVAMENTE el mecanismo incremental de movimientos de
+    inventario (Paso 4 de ``undo_reread``, ``void_movement``/
+    ``unvoid_movement``), nunca un ``setattr`` desde este snapshot.
+
+    Productos: a diferencia de maestros (Task 5 ya dedupea a lo sumo un item
+    por entidad por run), Task 6 NO dedupea — dos filas del mismo archivo que
+    tocan el mismo producto dejan DOS ``DataRepairItem`` (``CREATE_PRODUCT``/
+    ``UPDATE_PRODUCT``) para el mismo ``product_id``. Acá nos quedamos con el
+    MÁS RECIENTE de cada ``product_id`` (por ``created_at`` — ``items`` llega
+    ordenado por el caller) para el touched-since check y el restore, no con
+    cada item de forma independiente."""
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.product import Product  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    _model_by_kind: dict[str, type[Any]] = {
+        "customer": Customer,
+        "supplier": Supplier,
+        "product": Product,
+    }
+    _restore_fields: dict[str, tuple[str, ...]] = {
+        "customer": _MASTER_SNAPSHOT_FIELDS["customer"],
+        "supplier": _MASTER_SNAPSHOT_FIELDS["supplier"],
+        # Nunca stock_units/unit_cost_ars — ver docstring.
+        "product": ("sale_price_ars", "sku", "barcode", "category", "acquired_at", "expiry_date"),
+    }
+
+    # Maestros: Task 5 ya dedupea (a lo sumo 1 item por entidad por run).
+    to_process: list[tuple[str, uuid.UUID, bool, DataRepairItem]] = []
+    for it in items:
+        if it.action not in ("REREAD_MASTER_UPDATE", "REREAD_MASTER_CREATE"):
+            continue
+        after = it.after_json or {}
+        kind = after.get("kind")
+        raw_id = after.get("id")
+        if kind not in ("customer", "supplier") or not raw_id:
+            continue
+        to_process.append((kind, uuid.UUID(raw_id), it.action == "REREAD_MASTER_CREATE", it))
+
+    # Productos: quedarse solo con el item MÁS RECIENTE por product_id.
+    latest_product_item: dict[uuid.UUID, tuple[bool, DataRepairItem]] = {}
+    for it in items:
+        if it.action not in ("CREATE_PRODUCT", "UPDATE_PRODUCT") or it.product_id is None:
+            continue
+        latest_product_item[it.product_id] = (it.action == "CREATE_PRODUCT", it)
+    to_process.extend(
+        ("product", product_id, is_create, it)
+        for product_id, (is_create, it) in latest_product_item.items()
+    )
+
+    not_reverted: list[dict[str, str]] = []
+    for kind, entity_id, is_create, it in to_process:
+        entity = await session.get(_model_by_kind[kind], entity_id)
+        if entity is None or entity.tenant_id != tenant_id:
+            continue
+
+        # ``updated_at`` tiene ``onupdate=func.now()`` server-side — puede quedar
+        # expirado tras flushes previos de esta misma transacción (mismo patrón
+        # MissingGreenlet que Task 5/6, ver ``_reread_master_entities._audit`` /
+        # ``_stamp_updated_at_on_product_details``). Refrescar antes de leerlo.
+        await session.refresh(entity)
+        captured_updated_at = (it.after_json or {}).get("updated_at")
+        current_updated_at = entity.updated_at.isoformat() if entity.updated_at else None
+        if captured_updated_at != current_updated_at:
+            not_reverted.append(
+                {"kind": kind, "id": str(entity_id), "reason": "edited_after_reread"}
+            )
+            continue
+
+        if is_create:
+            entity.deactivated_at = datetime.now(UTC)
+            if kind == "product":
+                entity.is_active = False
+                entity.deactivation_reason = "REREAD_UNDO"
+        else:
+            before = it.before_json or {}
+            for f in _restore_fields[kind]:
+                if f not in before:
+                    continue
+                setattr(entity, f, _coerce_master_restore_value(f, before[f]))
+
+    return not_reverted
+
+
 async def undo_reread(
     session: AsyncSession,
     run_id: uuid.UUID,
@@ -1845,8 +1967,13 @@ async def undo_reread(
     if run.status == "REVERTED":
         raise ValueError("Este run ya fue revertido.")
 
+    # Orden determinístico por ``created_at``: ``_undo_master_and_product_items``
+    # asume que, para un mismo ``product_id`` con varios ``DataRepairItem`` (Task
+    # 6 no dedupea productos), el ÚLTIMO de la lista es el más reciente.
     items_res = await session.execute(
-        select(DataRepairItem).where(DataRepairItem.run_id == run_id)
+        select(DataRepairItem)
+        .where(DataRepairItem.run_id == run_id)
+        .order_by(DataRepairItem.created_at)
     )
     items = list(items_res.scalars().all())
 
@@ -1971,6 +2098,10 @@ async def undo_reread(
             undone_file.reread_status = REREAD_STATUS_NEEDS_REVIEW
             undone_file.reread_at = datetime.now(UTC)
 
+    # 5. Maestros (clientes/proveedores) + productos: restaurar los no tocados
+    # después de la relectura, saltear (y reportar) los editados después.
+    not_reverted_entities = await _undo_master_and_product_items(session, tenant_id, items)
+
     run.status = "REVERTED"
     run.completed_at = datetime.now(UTC)
     await session.flush()
@@ -1981,6 +2112,7 @@ async def undo_reread(
         "restored": restored,
         "removed": removed,
         "status": "REVERTED",
+        "not_reverted_entities": not_reverted_entities,
     }
 
 

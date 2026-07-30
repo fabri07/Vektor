@@ -1835,4 +1835,5 @@ async def reread_undo(
         restored=result["restored"],
         removed=result["removed"],
         status=result["status"],
+        not_reverted_entities=result.get("not_reverted_entities", []),
     )

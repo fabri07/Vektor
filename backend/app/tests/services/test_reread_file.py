@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -1621,3 +1621,280 @@ async def test_reread_multisheet_audita_productos_creados_y_actualizados(
     assert create_item.after_json["sale_price_ars"] == "600"
     assert create_item.after_json["sku"] == "SPR500"
     assert create_item.after_json["updated_at"] is not None
+
+
+# ── Task 7: undo_reread restaura maestros/productos con política touched-since ─
+
+
+@pytest.mark.asyncio
+async def test_undo_reread_restaura_master_no_tocado_y_saltea_editado(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 7: el undo de una relectura que tocó clientes distingue 3 casos —
+    restaura el que la relectura actualizó y nadie tocó después (cliente_c),
+    saltea (y reporta) el que alguien editó DESPUÉS de la relectura (cliente_a,
+    política touched-since: nunca pisar una edición manual en silencio), y
+    desactiva el que la relectura CREÓ y nadie tocó (cliente_b — no había
+    "antes" al que volver)."""
+    cliente_a = Customer(tenant_id=tenant.tenant_id, name="Viejo A", dni="11111111")
+    cliente_c = Customer(tenant_id=tenant.tenant_id, name="Viejo C", dni="33333333")
+    db_session.add_all([cliente_a, cliente_c])
+    await db_session.commit()
+
+    file = await _make_master_file(
+        db_session, tenant, {"flat": {"nombre": "name", "documento": "dni"}, "context": {}}
+    )
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "clientes",
+        "mapping_contexts": [
+            {
+                "context_id": "table",
+                "entity_type": "customer",
+                "headers": ["nombre", "documento"],
+            }
+        ],
+        "clientes_detectados": [
+            {"nombre": "Actualizado A", "documento": "11111111"},
+            {"nombre": "Actualizado C", "documento": "33333333"},
+            {"nombre": "Nuevo B", "documento": "22222222"},
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    cliente_b = (
+        await db_session.execute(select(Customer).where(Customer.dni == "22222222"))
+    ).scalar_one()
+
+    # Alguien edita cliente_a A MANO después de la relectura (simula un PATCH).
+    # El bump explícito de `updated_at` evita flakiness: en SQLite `func.now()`
+    # (onupdate) tiene resolución de 1 segundo, y la relectura + esta "edición"
+    # ocurren en el mismo segundo de wall-clock del test.
+    await db_session.refresh(cliente_a)
+    cliente_a.name = "Editado Manualmente"
+    cliente_a.updated_at = datetime.now(UTC) + timedelta(hours=1)
+    await db_session.commit()
+
+    undo = await reread_service.undo_reread(db_session, result.run_id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert undo["status"] == "REVERTED"
+
+    await db_session.refresh(cliente_a)
+    assert cliente_a.name == "Editado Manualmente"  # NO se pisó
+    assert {
+        "kind": "customer",
+        "id": str(cliente_a.id),
+        "reason": "edited_after_reread",
+    } in undo["not_reverted_entities"]
+
+    await db_session.refresh(cliente_c)
+    assert cliente_c.name == "Viejo C"  # restaurado al estado pre-relectura
+    assert cliente_c.deactivated_at is None
+
+    await db_session.refresh(cliente_b)
+    assert cliente_b.deactivated_at is not None  # creado por la relectura -> desactivado
+
+
+@pytest.mark.asyncio
+async def test_undo_reread_restaura_producto_no_tocado_y_saltea_editado(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 7: mismo criterio que maestros, para productos. Las 3 filas del
+    archivo llevan ``stock="0"`` (no-op — ``_apply_catalog_stock`` retorna
+    temprano con ``delta == 0``) A PROPÓSITO: así ningún ``InventoryMovement``
+    se crea y el Paso 4 preexistente del undo (reversa incremental de stock)
+    no interfiere con las aserciones — aislando la aserción central: Task 7
+    NUNCA restaura ``stock_units`` por ``setattr``, sea cual sea la rama."""
+    producto_a = Product(
+        tenant_id=tenant.tenant_id,
+        name="Coca 500ml",
+        sku="COC500",
+        sale_price_ars=Decimal("500"),
+        unit_cost_ars=Decimal("300"),
+        stock_units=5,
+    )
+    producto_c = Product(
+        tenant_id=tenant.tenant_id,
+        name="Fanta 500ml",
+        sku="FAN500",
+        sale_price_ars=Decimal("400"),
+        unit_cost_ars=Decimal("250"),
+        stock_units=8,
+    )
+    db_session.add_all([producto_a, producto_c])
+    await db_session.commit()
+
+    file = await _make_stock_file(db_session, tenant)
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "stock_detectado": [
+            {
+                "producto": "Coca 500ml",
+                "sku": "COC500",
+                "precio": "650",
+                "costo": "400",
+                "stock": "0",
+            },
+            {
+                "producto": "Fanta 500ml",
+                "sku": "FAN500",
+                "precio": "450",
+                "costo": "270",
+                "stock": "0",
+            },
+            {
+                "producto": "Sprite 500ml",
+                "sku": "SPR500",
+                "precio": "600",
+                "costo": "380",
+                "stock": "0",
+            },
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    producto_b = (
+        await db_session.execute(select(Product).where(Product.sku == "SPR500"))
+    ).scalar_one()
+
+    # Alguien edita producto_a a mano después de la relectura (mismo motivo del
+    # bump explícito que en el test de maestros).
+    await db_session.refresh(producto_a)
+    producto_a.sale_price_ars = Decimal("999")
+    producto_a.updated_at = datetime.now(UTC) + timedelta(hours=1)
+    await db_session.commit()
+
+    undo = await reread_service.undo_reread(db_session, result.run_id, tenant.tenant_id)
+    await db_session.commit()
+
+    await db_session.refresh(producto_a)
+    assert producto_a.sale_price_ars == Decimal("999")  # NO se pisó
+    assert producto_a.stock_units == 5  # nunca tocado (ni por esto, ni por el Paso 4)
+    assert {
+        "kind": "product",
+        "id": str(producto_a.id),
+        "reason": "edited_after_reread",
+    } in undo["not_reverted_entities"]
+
+    await db_session.refresh(producto_c)
+    assert producto_c.sale_price_ars == Decimal("400")  # restaurado al pre-relectura
+    assert producto_c.sku == "FAN500"
+    assert producto_c.stock_units == 8  # nunca tocado
+    assert producto_c.deactivated_at is None
+
+    await db_session.refresh(producto_b)
+    assert producto_b.deactivated_at is not None  # creado por la relectura -> desactivado
+    assert producto_b.deactivation_reason == "REREAD_UNDO"
+    assert producto_b.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_undo_master_and_product_items_producto_tocado_dos_veces_usa_item_mas_reciente(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """Task 7: Task 6 NO dedupea productos — dos filas del MISMO archivo que
+    tocan el mismo producto dejan DOS ``DataRepairItem`` ``UPDATE_PRODUCT``
+    para el mismo ``product_id`` dentro del mismo run (a diferencia de
+    maestros, que Task 5 ya dedupea). ``_undo_master_and_product_items`` debe
+    usar el MÁS RECIENTE (el segundo, cronológicamente — el caller lo entrega
+    ordenado por ``created_at``) para el touched-since check y el restore:
+    nunca dejar que el item más viejo pise el resultado del más nuevo.
+
+    Test directo sobre el helper (no pasa por ``apply_reread``/``undo_reread``
+    completos) — mismo patrón que otros tests de este archivo que llaman
+    funciones internas directamente (``_load_import_fingerprints`` etc.):
+    aísla la lógica de dedup-por-más-reciente sin pelear con el timing/
+    resolución de reloj de SQLite ni con el mecanismo de stock incremental."""
+    producto = Product(
+        tenant_id=tenant.tenant_id,
+        name="Producto X",
+        sku="FINAL",
+        sale_price_ars=Decimal("999"),
+        unit_cost_ars=Decimal("700"),
+        stock_units=10,
+    )
+    db_session.add(producto)
+    await db_session.commit()
+    await db_session.refresh(producto)
+    # El producto no fue tocado después del run -> su `updated_at` vivo debe
+    # coincidir con el "after" del item MÁS RECIENTE para pasar el
+    # touched-since check (y no con el del item viejo).
+    current_updated_at = producto.updated_at.isoformat()
+
+    shared_run_id = uuid.uuid4()
+    item_old = DataRepairItem(
+        run_id=shared_run_id,
+        tenant_id=tenant.tenant_id,
+        product_id=producto.id,
+        action="UPDATE_PRODUCT",
+        before_json={
+            "sale_price_ars": "100",
+            "stock_units": 3,
+            "sku": "OLD",
+            "barcode": None,
+            "category": None,
+            "acquired_at": None,
+            "expiry_date": None,
+        },
+        after_json={
+            "sale_price_ars": "500",
+            "stock_units": 3,
+            "sku": "MID",
+            "barcode": None,
+            "category": None,
+            "acquired_at": None,
+            "expiry_date": None,
+            "updated_at": "2026-01-01T00:00:00+00:00",  # viejo, distinto al vivo
+        },
+        confidence="HIGH",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    item_new = DataRepairItem(
+        run_id=shared_run_id,
+        tenant_id=tenant.tenant_id,
+        product_id=producto.id,
+        action="UPDATE_PRODUCT",
+        before_json={
+            "sale_price_ars": "500",
+            "stock_units": 3,
+            "sku": "MID",
+            "barcode": None,
+            "category": None,
+            "acquired_at": None,
+            "expiry_date": None,
+        },
+        after_json={
+            "sale_price_ars": "999",
+            "stock_units": 10,
+            "sku": "FINAL",
+            "barcode": None,
+            "category": None,
+            "acquired_at": None,
+            "expiry_date": None,
+            "updated_at": current_updated_at,
+        },
+        confidence="HIGH",
+        created_at=datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
+    )
+
+    # Orden [old, new] -- mismo orden (ascendente por created_at) que
+    # `undo_reread` le pasa al helper.
+    not_reverted = await reread_service._undo_master_and_product_items(
+        db_session, tenant.tenant_id, [item_old, item_new]
+    )
+    await db_session.commit()
+
+    assert not_reverted == []  # no está "tocado" respecto al item más reciente
+
+    await db_session.refresh(producto)
+    assert producto.sale_price_ars == Decimal("500")  # before del MÁS RECIENTE, no "100"
+    assert producto.sku == "MID"  # before del más reciente, no "OLD"
+    assert producto.stock_units == 10  # NUNCA se toca por setattr, sea el item que sea

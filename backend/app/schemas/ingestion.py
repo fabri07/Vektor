@@ -312,3 +312,7 @@ class RereadUndoResponse(BaseModel):
     restored: int
     removed: int
     status: str
+    # F9b (Task 7): clientes/proveedores/productos que la relectura tocó pero el
+    # undo NO restauró porque alguien los editó después de la relectura (política
+    # touched-since — nunca pisar una edición manual en silencio).
+    not_reverted_entities: list[dict[str, str]] = Field(default_factory=list)
