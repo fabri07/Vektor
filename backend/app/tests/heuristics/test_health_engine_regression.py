@@ -12,10 +12,7 @@ from typing import Any
 
 from app.domain.verticals import Vertical
 from app.heuristics.health_engine import calculate_health_score
-from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
-
-KIOSCO_BENCHMARK = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -47,7 +44,6 @@ def _state(
         vertical_code=Vertical.KIOSCO_ALMACEN.value,
         data_completeness_score=completeness,
         confidence_level=confidence,
-        ruleset=KIOSCO_BENCHMARK,  # type: ignore[arg-type]  # test double / fixture
         monthly_sales_est=monthly_sales_est,
         monthly_inventory_cost_est=monthly_inventory_cost_est,
         monthly_fixed_expenses_est=monthly_fixed_expenses_est,
@@ -143,7 +139,10 @@ class TestFormulaV2Regression:
 class TestMarginBenchmarkOverride:
     def test_custom_benchmark_affects_margin_score(self) -> None:
         """Pasar un MarginBenchmark custom cambia el score de margen."""
-        from app.heuristics.verticals import MarginBenchmark  # noqa: PLC0415
+        from app.heuristics.verticals import (  # noqa: PLC0415
+            BenchmarkProvenance,
+            MarginBenchmark,
+        )
 
         state = _state(
             monthly_sales_est=Decimal("100000"),
@@ -158,6 +157,7 @@ class TestMarginBenchmarkOverride:
             warning_below=0.10,
             healthy_min=0.10,
             healthy_max=0.40,
+            provenance=BenchmarkProvenance.TENANT_OVERRIDE,
         )
         # Benchmark relajado: target = 15% → margen 20% queda en zona healthy/excellent
         relaxed_benchmark = MarginBenchmark(
@@ -165,6 +165,7 @@ class TestMarginBenchmarkOverride:
             warning_below=0.08,
             healthy_min=0.08,
             healthy_max=0.15,
+            provenance=BenchmarkProvenance.TENANT_OVERRIDE,
         )
 
         strict_result = calculate_health_score(state, benchmark=strict_benchmark)

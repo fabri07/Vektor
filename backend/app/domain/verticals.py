@@ -5,7 +5,7 @@ vertical_code` guarda el código corto `"kiosco"` mientras que los archivos de
 datos (heurísticas, campos de vertical, categorías de producto) usan el código
 largo `"kiosco_almacen"`. Este módulo se queda con el código LARGO como único
 valor canónico persistible (`Vertical`) y **no aliasea nada**: `parse_vertical`
-falla ruidosamente ante cualquier código que no sea exactamente uno de los tres
+falla ruidosamente ante cualquier código que no sea exactamente uno de los
 valores canónicos, incluido el código corto legado. Una migración de datos
 posterior (fuera de este módulo) reescribe los registros viejos.
 
@@ -21,23 +21,36 @@ from typing import Final
 class Vertical(StrEnum):
     """Verticales operativos: los únicos valores válidos para un negocio ya dado
     de alta. Cualquier consumidor que calcule heurísticas, categorías de
-    producto o benchmarks de margen recibe uno de estos tres valores."""
+    producto o benchmarks de margen recibe uno de estos valores.
+
+    Todos son de REVENTA: el negocio compra un producto y lo vende. Los rubros
+    que transforman materia prima —carnicería (desposte de media res), pollería
+    (despiece + elaborados), panadería, rotisería— NO entran acá: el motor asume
+    `compra → producto → venta` y no tiene concepto de rendimiento ni de receta.
+    Un kilo de media res no es un producto: son doce cortes con precios
+    distintos."""
 
     KIOSCO_ALMACEN = "kiosco_almacen"
     DECORACION_HOGAR = "decoracion_hogar"
     LIMPIEZA = "limpieza"
+    LIBRERIA_PAPELERIA = "libreria_papeleria"
+    INDUMENTARIA = "indumentaria"
+    VERDULERIA_FRUTERIA = "verduleria_fruteria"
 
 
 class RequestedVertical(StrEnum):
     """Verticales que se pueden elegir en el formulario de solicitud de acceso.
 
     Superconjunto de `Vertical`: agrega `OTROS` para el negocio que no encaja
-    en ninguno de los tres rubros soportados hoy. `OTROS` NUNCA es un
-    `Vertical` operativo — no tiene heurísticas ni categorías propias."""
+    en ninguno de los rubros soportados hoy. `OTROS` NUNCA es un `Vertical`
+    operativo — no tiene heurísticas ni categorías propias."""
 
     KIOSCO_ALMACEN = "kiosco_almacen"
     DECORACION_HOGAR = "decoracion_hogar"
     LIMPIEZA = "limpieza"
+    LIBRERIA_PAPELERIA = "libreria_papeleria"
+    INDUMENTARIA = "indumentaria"
+    VERDULERIA_FRUTERIA = "verduleria_fruteria"
     OTROS = "otros"
 
 
@@ -55,6 +68,9 @@ VERTICAL_LABELS: Final[dict[Vertical, str]] = {
     Vertical.KIOSCO_ALMACEN: "Kiosco / Almacén",
     Vertical.DECORACION_HOGAR: "Decoración del hogar",
     Vertical.LIMPIEZA: "Limpieza",
+    Vertical.LIBRERIA_PAPELERIA: "Librería y papelería",
+    Vertical.INDUMENTARIA: "Indumentaria",
+    Vertical.VERDULERIA_FRUTERIA: "Verdulería y frutería",
 }
 
 
@@ -70,7 +86,7 @@ def parse_vertical(raw: str | None) -> Vertical:
 
     No aliasea nada: ni el código corto legado (`"kiosco"`), ni `"otros"`, ni
     variantes de mayúsculas/minúsculas o con espacios. Solo el valor exacto en
-    minúsculas de uno de los tres verticales operativos es válido. Levanta
+    minúsculas de un vertical operativo es válido. Levanta
     `UnknownVerticalError` para cualquier otro caso, incluido `None`.
     """
     if raw is not None:

@@ -3,24 +3,37 @@
   "cash_health": {
     "healthy_days_min": 30,
     "warning_days_min": 15,
-    "critical_days_below": 10
+    "critical_days_below": 10,
+    "source": null
   },
   "margin": {
-    "net_expected_min": 0.25,
-    "net_expected_max": 0.45,
-    "critical_below": 0.15,
-    "warning_below": 0.30,
-    "healthy_min": 0.30,
-    "healthy_max": 0.45
+    "net_expected_min": 0.12,
+    "net_expected_max": 0.22,
+    "critical_below": 0.06,
+    "warning_below": 0.12,
+    "healthy_min": 0.12,
+    "healthy_max": 0.22,
+    "source": {
+      "institucion": "CAC / INDEC / CACE",
+      "referencia": "IPC capitulo Equipamiento y mantenimiento del hogar; informes de la Camara Argentina de Comercio y estudio anual de comercio electronico CACE. Margen bruto ponderado 55-70% (markup 2.2x a 3.3x); margen neto final 12-22%, donde el alto margen compensa la baja rotacion.",
+      "revisado_en": "2026-07"
+    }
   },
   "inventory": {
     "rotation_days_min": 60,
-    "rotation_days_max": 180,
-    "overstock_tolerance": "media"
+    "rotation_days_max": 120,
+    "overstock_tolerance": "media",
+    "source": {
+      "institucion": "CAC / INDEC / CACE",
+      "referencia": "Dias de inventario (DOH) de 60 a 120 dias por stock inmovilizado alto; GMROI de referencia 1.80 a 2.80 por peso mantenido en stock.",
+      "revisado_en": "2026-07"
+    }
   },
   "supplier": {
     "reorder_frequency": "mensual",
-    "stockout_sensitivity": "media"
+    "stockout_sensitivity": "media",
+    "min_healthy_suppliers": 3,
+    "source": null
   },
   "seasonality": "alta"
 }

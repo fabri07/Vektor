@@ -214,13 +214,20 @@ class HealthScoreService:
             tenant_id, self._session, cast("Redis", redis)
         )
 
-        # ── 2a. Tenant override de margen (tiene prioridad sobre data-driven) ──
-        tenant_benchmark = await get_margin_benchmark(tenant_id, self._session)
+        # Se instancia SIEMPRE: el paso 5 lo usa para registrar el evento pase lo
+        # que pase con el benchmark. Cuando vivía dentro de un `if`, un tenant con
+        # override de margen llegaba al paso 5 con la variable sin asignar
+        # (`UnboundLocalError`) y se quedaba sin recálculo.
+        analytics_svc = AnalyticsService(self._session)
 
-        # ── 2b. Benchmark data-driven (fallback si no hay override) ──────────
-        if tenant_benchmark is None:
-            analytics_svc = AnalyticsService(self._session)
-            tenant_benchmark = await analytics_svc.get_data_driven_benchmark(state.vertical_code)
+        # ── 2. Benchmark de margen ────────────────────────────────────────────
+        # Solo el override del tenant puede desplazar al benchmark del vertical.
+        # El camino data-driven quedó desconectado del scoring: su muestra contaba
+        # eventos de recálculo en vez de negocios distintos, así que un solo
+        # negocio recalculado cinco veces reemplazaba el benchmark normativo de
+        # todo el rubro por la mediana de sí mismo. `None` acá = usar el JSON del
+        # vertical (lo resuelve `calculate_health_score`).
+        tenant_benchmark = await get_margin_benchmark(tenant_id, self._session)
 
         # ── 3. Heuristic Engine ───────────────────────────────────────────────
         result = calculate_health_score(state, benchmark=tenant_benchmark)
@@ -244,13 +251,18 @@ class HealthScoreService:
             heuristic_version=HEURISTIC_VERSION,
             primary_risk_code=result.primary_risk_code,
             confidence_level=result.confidence_level,
+            benchmark_provenance=result.benchmark_provenance.value,
+            benchmark_confidence=result.benchmark_confidence,
             data_completeness_score=Decimal(str(result.data_completeness_score)),
             score_inputs_json=_state_to_dict(state),
         )
         await self._score_repo.save(snapshot)
 
         # ── 5. Analytics event anonimizado (data moat) ───────────────────────
-        margin_ratio = 0.0
+        # `None`, no 0.0, cuando el ratio no se puede calcular: un negocio sin
+        # ventas no tiene margen 0%, no tiene margen. El cero era una observación
+        # fabricada que entraba a los percentiles del rubro como si fuera real.
+        margin_ratio: float | None = None
         if state.monthly_sales_est > 0:
             margin_ratio = float(
                 (
@@ -260,7 +272,7 @@ class HealthScoreService:
                 )
                 / state.monthly_sales_est
             )
-        cash_ratio = 0.0
+        cash_ratio: float | None = None
         if state.monthly_fixed_expenses_est > 0:
             cash_ratio = float(state.cash_on_hand_est / state.monthly_fixed_expenses_est)
         low_stock_pct = 0.0

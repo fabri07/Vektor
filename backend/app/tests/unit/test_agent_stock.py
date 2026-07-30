@@ -40,31 +40,33 @@ async def test_stockout_detected():
 
 
 @pytest.mark.asyncio
-async def test_overstock_kiosco():
-    """rotation_days=50 > threshold 42 (kiosco max=21 × 2) → overstock."""
+@pytest.mark.parametrize("vertical", [Vertical.KIOSCO_ALMACEN, Vertical.DECORACION_HOGAR])
+async def test_overstock_usa_el_umbral_del_rubro(vertical: Vertical) -> None:
+    """Sobrestock = más del doble del techo de rotación del rubro.
+
+    El umbral se deriva del JSON en vez de fijarse en el test. Con días
+    escritos a mano, recalibrar la rotación de un rubro contra su fuente
+    sectorial rompía este test aunque la regla —el doble del techo— siguiera
+    intacta. Y el rubro sigue importando: los dos casos se calculan contra SU
+    propio umbral, así que un agente que ignorara el vertical fallaría igual.
+    """
+    from app.heuristics.verticals.loader import load_vertical_heuristics
+
+    umbral = load_vertical_heuristics(vertical).inventory.rotation_days_max * 2
+
     with unittest.mock.patch("app.application.agents.stock.agent.anthropic.AsyncAnthropic"):
         from app.application.agents.stock.agent import AgentStock
 
         agent = AgentStock()
-        result = await agent.detect_overstock(
-            "prod-1", rotation_days=50, business_type=Vertical.KIOSCO_ALMACEN.value
+        arriba = await agent.detect_overstock(
+            "prod-1", rotation_days=int(umbral + 10), business_type=vertical.value
+        )
+        abajo = await agent.detect_overstock(
+            "prod-1", rotation_days=int(umbral - 10), business_type=vertical.value
         )
 
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_overstock_decoracion():
-    """rotation_days=350 < threshold 360 (decoracion max=180 × 2) → NOT overstock."""
-    with unittest.mock.patch("app.application.agents.stock.agent.anthropic.AsyncAnthropic"):
-        from app.application.agents.stock.agent import AgentStock
-
-        agent = AgentStock()
-        result = await agent.detect_overstock(
-            "prod-1", rotation_days=350, business_type=Vertical.DECORACION_HOGAR.value
-        )
-
-    assert result is False
+    assert arriba is True
+    assert abajo is False
 
 
 def _mock_intent_response(intent: str) -> MagicMock:

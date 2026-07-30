@@ -27,7 +27,12 @@ from decimal import Decimal
 
 from app.domain.product import effective_threshold
 from app.domain.verticals import parse_vertical
-from app.heuristics.verticals import MarginBenchmark, VerticalHeuristicConfig
+from app.heuristics.verticals import (
+    BenchmarkProvenance,
+    MarginBenchmark,
+    VerticalHeuristicConfig,
+    weakest_confidence,
+)
 from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
 
@@ -66,8 +71,18 @@ class HealthScoreResult:
     score_growth: int  # Stage 5a — crecimiento de ventas 0-100
     primary_risk_code: str
     risk_description: str
+    #: Confianza EFECTIVA = la más baja entre `data_confidence` y
+    #: `benchmark_confidence`. Es el valor que gatea la regla de no-invención, y
+    #: se lo hace más estricto a propósito: antes copiaba solo la completitud de
+    #: los datos del tenant, así que un negocio con datos impecables medido
+    #: contra un umbral que nadie fundamentó salía `HIGH`.
     confidence_level: str
     data_completeness_score: float
+    #: Confianza por completitud de los datos del negocio (la de siempre).
+    data_confidence: str
+    #: Confianza por procedencia de la vara contra la que se lo mide.
+    benchmark_confidence: str
+    benchmark_provenance: BenchmarkProvenance
     # Fuente de la caja: "arqueo" (medido) | "onboarding" (estimado) |
     # "flujo" (cobertura líquida, sin saldo) | "desconocido" (sin dato → excluida del total).
     cash_source: str = "desconocido"
@@ -244,8 +259,11 @@ def _stock_is_critical(products: list[ProductSummary]) -> bool:
 
 
 def _supplier_bands(config: VerticalHeuristicConfig) -> list[_Band]:
-    sensitivity = config.supplier.stockout_sensitivity.lower()
-    healthy_min = 4 if sensitivity in {"alta", "muy_alta"} else 3
+    # El mínimo sano lo declara el rubro. Antes se deducía de
+    # `stockout_sensitivity` (alta/muy_alta → 4), que mezcla cuánto duele un
+    # quiebre con en cuántas manos está la reposición: son cosas distintas y hay
+    # rubros donde van en direcciones opuestas.
+    healthy_min = config.supplier.min_healthy_suppliers
     warning_min = max(2, healthy_min - 1)
     return [
         (1, 2, 15, 44),
@@ -374,6 +392,7 @@ def calculate_health_score(
     weakest_dim = _primary_risk(risk_scores)
     risk_code = _DIMENSION_RISK_CODE[weakest_dim]
 
+    benchmark_confidence = benchmark.confidence
     return HealthScoreResult(
         score_total=total,
         score_cash=s_cash,
@@ -383,7 +402,10 @@ def calculate_health_score(
         score_growth=s_growth,
         primary_risk_code=risk_code,
         risk_description=_RISK_DESCRIPTIONS[risk_code],
-        confidence_level=state.confidence_level,
+        confidence_level=weakest_confidence(state.confidence_level, benchmark_confidence),
         data_completeness_score=state.data_completeness_score,
+        data_confidence=state.confidence_level,
+        benchmark_confidence=benchmark_confidence,
+        benchmark_provenance=benchmark.provenance,
         cash_source=cash_source,
     )

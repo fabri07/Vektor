@@ -58,6 +58,52 @@ const DECO: PathList = [
   "M30 150L36 140L40 150M40 120L48 124L40 128",
 ];
 
+// ── Rubros sumados en la ampliación a 6 ──────────────────────────────────────
+// Mismo origen que los tres de arriba: diseñados y materializados en Figma, con
+// los `d` copiados de `public/doodles/{libreria,indumentaria,verduleria}.svg`.
+// Si se regeneran esos assets, actualizar estas tres listas.
+
+const LIBRERIA: PathList = [
+  "M38 158H150V192H38V158Z",
+  "M46 124H158V158H46V124Z",
+  "M38 90H150V124H38V90Z",
+  "M58 158V192M66 124V158M58 90V124",
+  "M176 48H208V146H176V48Z",
+  "M176 146L192 178L208 146",
+  "M188 164L192 172L196 164",
+  "M176 66H208M176 82H208",
+  "M24 56L30 44L34 56M34 40L46 44L34 48",
+  "M212 200L218 190L222 200M222 186L232 190L222 194",
+];
+
+const INDUMENTARIA: PathList = [
+  "M80 56L58 68L48 94L66 104L74 92V182C74 184.209 75.791 186 78 186H130C132.209 186 134 184.209 134 182V92L142 104L160 94L150 68L128 56",
+  "M80 56C80 56 88 70 104 70C120 70 128 56 128 56",
+  "M70 46L104 24L138 46H70Z",
+  "M104 24V16C104 11.582 100.418 8 96 8",
+  "M190 108H222C224.209 108 226 109.791 226 112V172C226 174.209 224.209 176 222 176H190L172 142L190 108Z",
+  "M196 148C199.314 148 202 145.314 202 142C202 138.686 199.314 136 196 136C192.686 136 190 138.686 190 142C190 145.314 192.686 148 196 148Z",
+  "M206 128H218M206 142H218M206 156H214",
+  "M26 52L32 40L36 52M36 36L48 40L36 44",
+  "M190 200L196 190L200 200M200 186L210 190L200 194",
+];
+
+const VERDULERIA: PathList = [
+  "M44 124H196L182 194H58L44 124Z",
+  "M36 108H204V124H36V108Z",
+  "M80 124V194M120 124V194M160 124V194",
+  "M52 158H188",
+  "M88 108C99.046 108 108 99.046 108 88C108 76.954 99.046 68 88 68C76.954 68 68 76.954 68 88C68 99.046 76.954 108 88 108Z",
+  "M88 68V58M88 62C93 56 101 58 103 64C97 68 90 66 88 62Z",
+  "M134 108C143.389 108 151 100.389 151 91C151 81.611 143.389 74 134 74C124.611 74 117 81.611 117 91C117 100.389 124.611 108 134 108Z",
+  "M134 74V66",
+  "M198 62L212 76L172 108L198 62Z",
+  "M210 52L198 62L192 48M198 62L202 46",
+  "M194 76L202 82M186 86L194 92",
+  "M22 76L28 64L32 76M32 60L44 64L32 68",
+  "M206 174L212 164L216 174M216 160L226 164L216 168",
+];
+
 const PERSONA_LAPTOP: PathList = [
   "M74 86C82.8366 86 90 78.8366 90 70C90 61.1634 82.8366 54 74 54C65.1634 54 58 61.1634 58 70C58 78.8366 65.1634 86 74 86Z",
   "M66 62C70 56 78 56 82 62",
@@ -138,6 +184,11 @@ function Doodle({ paths, drawDelay = 0 }: { paths: PathList; drawDelay?: number 
 export const DoodleKiosco = (p: { drawDelay?: number }) => <Doodle paths={KIOSCO} {...p} />;
 export const DoodleLimpieza = (p: { drawDelay?: number }) => <Doodle paths={LIMPIEZA} {...p} />;
 export const DoodleDeco = (p: { drawDelay?: number }) => <Doodle paths={DECO} {...p} />;
+export const DoodleLibreria = (p: { drawDelay?: number }) => <Doodle paths={LIBRERIA} {...p} />;
+export const DoodleIndumentaria = (p: { drawDelay?: number }) => (
+  <Doodle paths={INDUMENTARIA} {...p} />
+);
+export const DoodleVerduleria = (p: { drawDelay?: number }) => <Doodle paths={VERDULERIA} {...p} />;
 export const DoodlePersonaLaptop = (p: { drawDelay?: number }) => (
   <Doodle paths={PERSONA_LAPTOP} {...p} />
 );

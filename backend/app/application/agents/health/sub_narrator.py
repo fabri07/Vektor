@@ -42,7 +42,10 @@ def _build_prompt(scores: ComponentScoresV2, business_name: str) -> str:
         f"- Márgenes: {scores.margin_score}/100\n"
         f"- Crecimiento de ventas: {growth_label}\n"
         f"Riesgo principal: {scores.primary_risk_code}\n"
-        f"Confianza en los datos: {scores.confidence_level}"
+        # `confidence_level` dejó de ser solo la completitud de los datos: ahora
+        # es la confianza EFECTIVA (datos ∧ procedencia del benchmark). El rótulo
+        # viejo, "Confianza en los datos", le mentía al narrador sobre qué mide.
+        f"Confianza del diagnóstico: {scores.confidence_level}"
     )
 
 

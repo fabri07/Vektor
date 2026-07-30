@@ -59,7 +59,14 @@ class HealthScoreSnapshot(UUIDPrimaryKeyMixin, Base):
     )
     heuristic_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     primary_risk_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    #: Confianza EFECTIVA: el mínimo entre la de los datos del negocio y la del
+    #: benchmark contra el que se lo midió (columnas de abajo).
     confidence_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # ── Procedencia del benchmark (mig 20260808_0001) ─────────────────────────
+    # NULL en snapshots anteriores a la migración: se calcularon sin registrar la
+    # procedencia y no se les puede inferir sin reescribir historia.
+    benchmark_provenance: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    benchmark_confidence: Mapped[str | None] = mapped_column(String(8), nullable=True)
     data_completeness_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     score_inputs_json: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
 

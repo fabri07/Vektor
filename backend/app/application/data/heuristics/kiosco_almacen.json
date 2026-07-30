@@ -3,24 +3,37 @@
   "cash_health": {
     "healthy_days_min": 10,
     "warning_days_min": 7,
-    "critical_days_below": 5
+    "critical_days_below": 5,
+    "source": null
   },
   "margin": {
-    "net_expected_min": 0.12,
-    "net_expected_max": 0.18,
-    "critical_below": 0.10,
-    "warning_below": 0.18,
-    "healthy_min": 0.18,
-    "healthy_max": 0.28
+    "net_expected_min": 0.08,
+    "net_expected_max": 0.14,
+    "critical_below": 0.04,
+    "warning_below": 0.08,
+    "healthy_min": 0.08,
+    "healthy_max": 0.14,
+    "source": {
+      "institucion": "INDEC / CAME",
+      "referencia": "IPC subgrupos Alimentos y bebidas no alcoholicas y Tabaco; Indice de Ventas Minoristas Pyme (CAME). Margen bruto ponderado 25-35% kiosco / 22-30% almacen; margen neto final 8-14% sobre ventas netas.",
+      "revisado_en": "2026-07"
+    }
   },
   "inventory": {
-    "rotation_days_min": 7,
-    "rotation_days_max": 21,
-    "overstock_tolerance": "baja"
+    "rotation_days_min": 4,
+    "rotation_days_max": 8,
+    "overstock_tolerance": "baja",
+    "source": {
+      "institucion": "INDEC / CAME",
+      "referencia": "Dias de inventario (DOH) de 4 a 8 dias: rotacion extrema propia del consumo masivo de proximidad.",
+      "revisado_en": "2026-07"
+    }
   },
   "supplier": {
     "reorder_frequency": "semanal",
-    "stockout_sensitivity": "muy_alta"
+    "stockout_sensitivity": "muy_alta",
+    "min_healthy_suppliers": 4,
+    "source": null
   },
   "seasonality": "baja"
 }

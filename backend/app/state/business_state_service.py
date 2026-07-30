@@ -10,10 +10,10 @@ reaches score computation directly.
 
 Cache strategy
 --------------
-  Redis key  : business_state:v2:{tenant_id}     — JSON blob, TTL 24 h
-  Redis key  : last_inputs_hash:v2:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
+  Redis key  : business_state:v3:{tenant_id}     — JSON blob, TTL 24 h
+  Redis key  : last_inputs_hash:v3:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
 
-  El prefijo de versión (`v2:`) se bumpea cuando cambia el FORMATO del blob, para
+  El prefijo de versión (`v3:`) se bumpea cuando cambia el FORMATO del blob, para
   no leer con el código nuevo lo que escribió el viejo. Ver `_cache_key`.
 
 On every call:
@@ -36,11 +36,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.verticals import Vertical, try_parse_vertical
-from app.heuristics.base import VerticalRules
-from app.heuristics.decoracion import DecoracionHogarHeuristicRuleSet
-from app.heuristics.kiosco import KioscoHeuristicRuleSet
-from app.heuristics.limpieza import LimpiezaHeuristicRuleSet
+from app.domain.verticals import try_parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessSnapshot
 from app.persistence.models.cash_close import CashClose
@@ -54,18 +50,6 @@ logger = get_logger(__name__)
 # cuenta corriente, no realizado), 'credit_card' (acreditación diferida ~30d) y
 # 'other' (desconocido). Definición de caja para el health score.
 _LIQUID_METHODS = ("cash", "transfer", "qr", "debit_card")
-
-# ── Heuristic registry ─────────────────────────────────────────────────────────
-
-type RuleSetInstance = (
-    KioscoHeuristicRuleSet | DecoracionHogarHeuristicRuleSet | LimpiezaHeuristicRuleSet
-)
-
-_RULESET_INSTANCES: dict[Vertical, RuleSetInstance] = {
-    Vertical.KIOSCO_ALMACEN: KioscoHeuristicRuleSet(),
-    Vertical.DECORACION_HOGAR: DecoracionHogarHeuristicRuleSet(),
-    Vertical.LIMPIEZA: LimpiezaHeuristicRuleSet(),
-}
 
 CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 h
 
@@ -96,7 +80,6 @@ class BusinessState:
     vertical_code: str
     data_completeness_score: float
     confidence_level: str  # HIGH | MEDIUM | LOW
-    ruleset: VerticalRules
     monthly_sales_est: Decimal
     monthly_inventory_cost_est: Decimal
     monthly_fixed_expenses_est: Decimal
@@ -118,17 +101,20 @@ class BusinessState:
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 
-# v2: los rulesets pasaron del código corto ("kiosco") al canónico
-# ("kiosco_almacen"). Todo blob escrito por la versión anterior guarda el código
-# viejo en `ruleset`, así que `_deserialize_state` lo rechazaría durante las 24 h
-# de CACHE_TTL_SECONDS posteriores al deploy. El bump de key los deja huérfanos
-# (expiran solos) en vez de romper el score de cada tenant kiosco por un día.
+# v3: se eliminó el campo `ruleset` del estado, y con él la clave `"ruleset"`
+# del blob donde vivía escondido el vertical. Un blob v2 leído con este código
+# moriría con KeyError en `_deserialize_state`. El bump deja huérfanos los blobs
+# viejos (expiran solos con su TTL) en vez de romper el score de todos los
+# tenants durante las 24 h de CACHE_TTL_SECONDS posteriores al deploy.
+#
+# (v2 fue el bump anterior: los rulesets pasaron del código corto "kiosco" al
+# canónico "kiosco_almacen".)
 def _cache_key(tenant_id: UUID) -> str:
-    return f"business_state:v2:{tenant_id}"
+    return f"business_state:v3:{tenant_id}"
 
 
 def _hash_key(tenant_id: UUID) -> str:
-    return f"last_inputs_hash:v2:{tenant_id}"
+    return f"last_inputs_hash:v3:{tenant_id}"
 
 
 def _make_fingerprint(
@@ -158,8 +144,10 @@ def _serialize_state(state: BusinessState) -> str:
     d["prev_monthly_sales_est"] = str(state.prev_monthly_sales_est)
     d["liquid_inflow_est"] = str(state.liquid_inflow_est)
     d["liquid_outflow_est"] = str(state.liquid_outflow_est)
-    # ruleset is not JSON-serializable; store vertical_code only (re-loaded on deserialize)
-    d["ruleset"] = state.ruleset.vertical
+    # `vertical_code` NO necesita línea propia: es un campo del dataclass y
+    # `asdict()` ya lo trae. La asignación explícita que había acá era herencia
+    # del patrón viejo, donde el vertical viajaba dentro de `ruleset` porque el
+    # ruleset no era serializable.
     d["products"] = [
         {
             "product_id": str(p.product_id),
@@ -177,11 +165,9 @@ def _serialize_state(state: BusinessState) -> str:
 def _deserialize_state(raw: str) -> BusinessState:
     """Restore BusinessState from JSON string."""
     d = json.loads(raw)
-    vertical_code: str = d["ruleset"]
-    vertical = try_parse_vertical(vertical_code)
-    if vertical is None:
+    vertical_code: str = d["vertical_code"]
+    if try_parse_vertical(vertical_code) is None:
         raise ValueError(f"Unknown vertical in cached state: {vertical_code!r}")
-    ruleset_instance = _RULESET_INSTANCES[vertical]
     products = [
         ProductSummary(
             product_id=UUID(p["product_id"]),
@@ -199,7 +185,6 @@ def _deserialize_state(raw: str) -> BusinessState:
         vertical_code=d["vertical_code"],
         data_completeness_score=float(d["data_completeness_score"]),
         confidence_level=d["confidence_level"],
-        ruleset=ruleset_instance.get_rules(),
         monthly_sales_est=Decimal(d["monthly_sales_est"]),
         monthly_inventory_cost_est=Decimal(d["monthly_inventory_cost_est"]),
         monthly_fixed_expenses_est=Decimal(d["monthly_fixed_expenses_est"]),
@@ -318,10 +303,8 @@ async def compute_business_state(
     if profile is None:
         raise ValueError(f"No BusinessProfile found for tenant {tenant_id}")
 
-    vertical = try_parse_vertical(profile.vertical_code)
-    if vertical is None:
+    if try_parse_vertical(profile.vertical_code) is None:
         raise ValueError(f"Unknown vertical_code: {profile.vertical_code!r}")
-    ruleset_instance = _RULESET_INSTANCES[vertical]
 
     # ── 2. Aggregate sales (last 30 days) ────────────────────────────────────
     sale_sum_result = await session.execute(
@@ -611,7 +594,6 @@ async def compute_business_state(
         vertical_code=profile.vertical_code,
         data_completeness_score=completeness,
         confidence_level=confidence,
-        ruleset=ruleset_instance.get_rules(),
         monthly_sales_est=monthly_sales_est,
         monthly_inventory_cost_est=monthly_inventory_cost_est,
         monthly_fixed_expenses_est=monthly_fixed_expenses_est,

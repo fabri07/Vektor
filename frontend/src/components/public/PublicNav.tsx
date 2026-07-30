@@ -17,12 +17,16 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, Menu, X } from "lucide-react";
 import { VektorLogo } from "@/components/ui/VektorLogo";
+import { VERTICAL_OPTIONS } from "@/lib/verticals";
 
-const RUBROS = [
-  { label: "Kiosco / Almacén", href: "/rubros#kiosco" },
-  { label: "Limpieza", href: "/rubros#limpieza" },
-  { label: "Decoración del hogar", href: "/rubros#deco" },
-];
+// Derivado, no escrito a mano: esta lista y las secciones de /rubros son la
+// misma lista. Cuando estaban duplicadas, sumar un rubro exigía acordarse de
+// los dos lugares, y el que se olvidaba no rompía nada — simplemente dejaba un
+// rubro sin entrada en el menú, invisible hasta que alguien lo notara.
+const RUBROS = VERTICAL_OPTIONS.map(({ name, anchor }) => ({
+  label: name,
+  href: `/rubros#${anchor}`,
+}));
 
 const NAV_LINKS = [
   { label: "Quiénes somos", href: "/quienes-somos" },

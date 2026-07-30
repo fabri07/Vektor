@@ -22,8 +22,13 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data" / "heuristics"
 
 # Los sub-configs NO tienen defaults a propósito: los valores que había acá eran
 # los de kiosco, así que a un JSON con una clave faltante se le inyectaban los
-# umbrales de kiosco en silencio. Los tres JSON traen las 16 claves-hoja; si
+# umbrales de kiosco en silencio. Cada JSON de rubro trae las 16 claves-hoja; si
 # alguna falta, pydantic levanta y el bug de datos se ve.
+#
+# `margin.net_expected_{min,max}` DUPLICA a `margin.healthy_{min,max}`, que es lo
+# que usa el health engine: son la misma decisión escrita dos veces, y nada en el
+# runtime las compara. Las mantiene sincronizadas un test
+# (`test_benchmark_provenance.py`), no la estructura.
 
 
 class CashHealthConfig(BaseModel):

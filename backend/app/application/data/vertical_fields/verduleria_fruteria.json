@@ -1,0 +1,49 @@
+[
+  {
+    "entity_type": "product",
+    "field_key": "unidad_venta",
+    "label": "Unidad de venta",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "kg", "label": "Por kilo"},
+      {"value": "atado", "label": "Por atado"},
+      {"value": "unidad", "label": "Por unidad"},
+      {"value": "cajon", "label": "Por cajón"}
+    ],
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.7
+  },
+  {
+    "entity_type": "product",
+    "field_key": "calidad_comercial",
+    "label": "Calidad comercial",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "especial", "label": "Especial / elegido"},
+      {"value": "primera", "label": "Primera"},
+      {"value": "segunda", "label": "Segunda"}
+    ],
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.5
+  },
+  {
+    "entity_type": "expense",
+    "field_key": "mercado_origen",
+    "label": "Mercado de compra",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.4
+  },
+  {
+    "entity_type": "expense",
+    "field_key": "costo_flete",
+    "label": "Costo de flete",
+    "data_type": "number",
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.4
+  }
+]

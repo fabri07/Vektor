@@ -167,16 +167,22 @@ async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedi
 # SCENARIO 3 — Decoración hogar: margen bajo
 #
 # ventas:    2 000 000 ARS/mes
-# mercadería: 1 400 000 ARS/mes
+# mercadería: 1 590 000 ARS/mes
 # gastos fijos: 250 000 ARS/mes
 # caja:        300 000 ARS
 # proveedores: 3
 #
-# margin = (2M - 1.4M - 250k) / 2M = 350k/2M = 17.5%
-# deco_benchmark: critical_below=0.15, warning_below=0.30
-#   → band [0.15, 0.30) → score_margin = int(15 + 0.1667*24) = 19
-# cash_ratio = 300k/250k = 1.2 → band boundary → score_cash = 70
-# primary_risk = min(70, 19, 50, 70) = margin(19) → MARGIN_LOW ✓
+# margin = (2M - 1.59M - 250k) / 2M = 160k/2M = 8%
+# deco_benchmark (CAC/INDEC/CACE): critical_below=0.06, warning_below=0.12
+#   → band [0.06, 0.12) → score_margin = int(15 + 0.333*24) = 23 (zona warning)
+# primary_risk = el mínimo de las dimensiones = margin → MARGIN_LOW ✓
+#
+# El escenario tenía 17.5% de margen y esperaba que fuera "bajo", porque el
+# benchmark viejo —sin fuente— exigía 30% neto a una casa de decoración. Contra
+# la fuente sectorial (neto 12-22%), 17.5% está DENTRO del rango sano: el caso
+# no probaba una alerta legítima sino la falsa alarma que la recalibración
+# elimina. Para seguir midiendo lo que dice medir, el negocio tiene que tener un
+# margen realmente bajo PARA SU RUBRO.
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -189,7 +195,7 @@ async def test_s3_deco_hogar_margen_bajo(session: AsyncSession, fake_redis: Fake
         tenant.tenant_id,
         "decoracion_hogar",
         monthly_sales=Decimal("2000000"),
-        monthly_inventory=Decimal("1400000"),
+        monthly_inventory=Decimal("1590000"),
         monthly_fixed=Decimal("250000"),
         cash_on_hand=Decimal("300000"),
         supplier_count=3,

@@ -46,6 +46,9 @@ class LeadRubro(StrEnum):
     KIOSCO_ALMACEN = "kiosco_almacen"
     LIMPIEZA = "limpieza"
     DECORACION_HOGAR = "decoracion_hogar"
+    LIBRERIA_PAPELERIA = "libreria_papeleria"
+    INDUMENTARIA = "indumentaria"
+    VERDULERIA_FRUTERIA = "verduleria_fruteria"
     OTRO = "otro"
 
 

@@ -27,6 +27,7 @@ from app.schemas.admin import (
     DataRepairRunResponse,
     InventoryIntegrityCheckResponse,
     JobStats,
+    ObservedMarginDistributionOut,
     RepairRequest,
     VerticalBenchmarkItem,
 )
@@ -143,13 +144,16 @@ async def get_analytics_benchmarks(
     session: AsyncSession = Depends(get_db_session),
 ) -> AnalyticsBenchmarksResponse:
     """
-    Devuelve los benchmarks de margen vigentes por vertical.
+    Devuelve el benchmark de margen vigente por vertical, más la distribución observada.
 
-    - Si hay >= 5 muestras en analytics_events (últimos 90 días): benchmark data-driven
-      calculado con percentiles p10/p25/p50/p75 del margin_ratio real.
-    - Si no hay suficientes datos: benchmark estático del JSON del vertical.
+    El benchmark que puntúa es SIEMPRE el estático del JSON del vertical (o el
+    override del tenant, que es por-tenant y no aparece en esta vista).
 
-    Permite a Véktor monitorear cuándo los benchmarks estáticos quedan desactualizados.
+    `observed_distribution` es observación, no benchmark: sirve para detectar
+    cuándo un benchmark estático quedó desactualizado, pero no lo reemplaza.
+    Su `event_count` cuenta eventos de recálculo, NO negocios distintos —
+    `analytics_events` no guarda identificador de negocio, así que un mismo
+    negocio recalculado cinco veces cuenta cinco.
     """
     svc = AnalyticsService(session)
     overview = await svc.get_benchmarks_overview()
@@ -157,7 +161,7 @@ async def get_analytics_benchmarks(
     items = [
         VerticalBenchmarkItem(
             vertical_code=item["vertical_code"],
-            sample_count=item["sample_count"],
+            event_count=item["event_count"],
             avg_score=item.get("avg_score"),
             avg_margin_ratio=item.get("avg_margin_ratio"),
             p50_margin_ratio=item.get("p50_margin_ratio"),
@@ -169,6 +173,11 @@ async def get_analytics_benchmarks(
                 healthy_min=item["benchmark"]["healthy_min"],  # type: ignore[index]
                 healthy_max=item["benchmark"]["healthy_max"],  # type: ignore[index]
                 source=item["benchmark_source"],
+            ),
+            observed_distribution=(
+                ObservedMarginDistributionOut(**item["observed_distribution"])  # type: ignore[arg-type]
+                if item.get("observed_distribution") is not None
+                else None
             ),
         )
         for item in overview
