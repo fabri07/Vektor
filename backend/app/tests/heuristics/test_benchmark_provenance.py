@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -182,3 +183,44 @@ def test_la_fuente_es_por_bloque_y_no_se_contagia(vertical: Vertical) -> None:
         else:
             assert benchmark.source is not None
             assert benchmark.source.institucion == declarada["institucion"]
+
+
+# ── min_healthy_suppliers ─────────────────────────────────────────────────────
+
+
+#: Rubros que YA existían cuando `min_healthy_suppliers` se hizo explícito. El
+#: test de abajo se limita a estos a propósito: los rubros nuevos declaran su
+#: mínimo real, que en algunos casos contradice la vieja deducción (una
+#: verdulería es muy sensible al quiebre Y compra en dos puestos). Parametrizar
+#: sobre `Vertical` entero convertiría este test de no-regresión en un candado
+#: contra la corrección que motivó todo el cambio.
+_RUBROS_PREVIOS_AL_CAMPO = (
+    Vertical.KIOSCO_ALMACEN,
+    Vertical.LIMPIEZA,
+    Vertical.DECORACION_HOGAR,
+)
+
+
+@pytest.mark.parametrize("vertical", _RUBROS_PREVIOS_AL_CAMPO)
+@pytest.mark.parametrize("cantidad", range(1, 11))
+def test_el_minimo_de_proveedores_no_cambia_el_score_de_los_rubros_existentes(
+    vertical: Vertical, cantidad: int
+) -> None:
+    """`min_healthy_suppliers` reproduce EXACTO lo que se deducía antes.
+
+    El mínimo sano salía de `stockout_sensitivity` (alta/muy_alta → 4, resto →
+    3). Hacerlo explícito es un refactor, no una recalibración: los valores que
+    llevan los tres rubros existentes son los que esa deducción daba, así que
+    ningún tenant se mueve un punto. Si alguien toca uno de esos tres JSON
+    creyendo que es cosmético, este test lo frena.
+    """
+    from app.heuristics.health_engine import _score_supplier
+
+    config = load_vertical_heuristics(vertical)
+    deducido = 4 if config.supplier.stockout_sensitivity.lower() in {"alta", "muy_alta"} else 3
+    esperado = _score_supplier(
+        cantidad,
+        replace(config, supplier=replace(config.supplier, min_healthy_suppliers=deducido)),
+    )
+
+    assert _score_supplier(cantidad, config) == esperado

@@ -1,0 +1,43 @@
+[
+  {
+    "entity_type": "product",
+    "field_key": "temporada",
+    "label": "Temporada",
+    "data_type": "enum",
+    "enum_options": [
+      {"value": "zafra", "label": "Zafra escolar"},
+      {"value": "permanente", "label": "Permanente / atemporal"},
+      {"value": "fecha_especial", "label": "Fecha especial"}
+    ],
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.7
+  },
+  {
+    "entity_type": "product",
+    "field_key": "licencia",
+    "label": "Licencia o personaje",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 2,
+    "context_weight": 0.5
+  },
+  {
+    "entity_type": "product",
+    "field_key": "talle",
+    "label": "Talle",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 3,
+    "context_weight": 0.3
+  },
+  {
+    "entity_type": "sale",
+    "field_key": "lista_escolar",
+    "label": "Lista escolar / colegio",
+    "data_type": "text",
+    "is_required": false,
+    "display_order": 1,
+    "context_weight": 0.4
+  }
+]

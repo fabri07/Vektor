@@ -259,8 +259,11 @@ def _stock_is_critical(products: list[ProductSummary]) -> bool:
 
 
 def _supplier_bands(config: VerticalHeuristicConfig) -> list[_Band]:
-    sensitivity = config.supplier.stockout_sensitivity.lower()
-    healthy_min = 4 if sensitivity in {"alta", "muy_alta"} else 3
+    # El mínimo sano lo declara el rubro. Antes se deducía de
+    # `stockout_sensitivity` (alta/muy_alta → 4), que mezcla cuánto duele un
+    # quiebre con en cuántas manos está la reposición: son cosas distintas y hay
+    # rubros donde van en direcciones opuestas.
+    healthy_min = config.supplier.min_healthy_suppliers
     warning_min = max(2, healthy_min - 1)
     return [
         (1, 2, 15, 44),

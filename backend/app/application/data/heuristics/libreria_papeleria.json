@@ -1,0 +1,35 @@
+{
+  "business_type": "libreria_papeleria",
+  "cash_health": {
+    "healthy_days_min": 30,
+    "warning_days_min": 15,
+    "critical_days_below": 10,
+    "source": null
+  },
+  "margin": {
+    "net_expected_min": 0.12,
+    "net_expected_max": 0.2,
+    "critical_below": 0.06,
+    "warning_below": 0.12,
+    "healthy_min": 0.12,
+    "healthy_max": 0.2,
+    "source": {
+      "institucion": "CAPLA / CAL / CAME",
+      "referencia": "Camara Argentina de Papelerias, Librerias y Afines; Camara Argentina del Libro; informes de ventas minoristas de CAME. Margen bruto ponderado 42-52% integrado entre libros y papeleria/marroquineria; margen neto final 12-20%, muy influido por el resultado de la zafra escolar.",
+      "revisado_en": "2026-07"
+    }
+  },
+  "inventory": {
+    "rotation_days_min": 90,
+    "rotation_days_max": 180,
+    "overstock_tolerance": "media",
+    "source": null
+  },
+  "supplier": {
+    "reorder_frequency": "mensual",
+    "stockout_sensitivity": "alta",
+    "min_healthy_suppliers": 4,
+    "source": null
+  },
+  "seasonality": "muy_alta"
+}

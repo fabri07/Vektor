@@ -1,0 +1,39 @@
+{
+  "business_type": "verduleria_fruteria",
+  "cash_health": {
+    "healthy_days_min": 12,
+    "warning_days_min": 6,
+    "critical_days_below": 4,
+    "source": null
+  },
+  "margin": {
+    "net_expected_min": 0.08,
+    "net_expected_max": 0.14,
+    "critical_below": 0.04,
+    "warning_below": 0.08,
+    "healthy_min": 0.08,
+    "healthy_max": 0.14,
+    "source": {
+      "institucion": "Mercado Central de Buenos Aires / CAME (IPOD)",
+      "referencia": "Boletines de precios mayoristas del MCBA e Indice de Precios en Origen y Destino de CAME. Margen bruto real objetivo 35-45% ya descontada la merma; margen neto final 8-14% tras alquiler, salarios y energia de camaras.",
+      "revisado_en": "2026-07"
+    }
+  },
+  "inventory": {
+    "rotation_days_min": 2,
+    "rotation_days_max": 3,
+    "overstock_tolerance": "muy_baja",
+    "source": {
+      "institucion": "Mercado Central de Buenos Aires / CAME (IPOD)",
+      "referencia": "Dias de stock (DOH) de 1.5 a 3.0: producto perecedero que exige rotacion alta. Merma aceptable 5-8% con camara de frio, critica por encima de 12%.",
+      "revisado_en": "2026-07"
+    }
+  },
+  "supplier": {
+    "reorder_frequency": "diaria",
+    "stockout_sensitivity": "muy_alta",
+    "min_healthy_suppliers": 2,
+    "source": null
+  },
+  "seasonality": "alta"
+}

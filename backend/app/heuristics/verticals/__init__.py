@@ -125,6 +125,14 @@ class InventoryBenchmark:
 class SupplierBenchmark:
     reorder_frequency: str
     stockout_sensitivity: str
+    #: Cuántos proveedores necesita el rubro para no estar concentrado.
+    #:
+    #: Antes se DEDUCÍA de `stockout_sensitivity` (alta/muy_alta → 4, resto → 3),
+    #: que confunde dos cosas distintas: cuánto duele un quiebre y en cuántas
+    #: manos está la reposición. Una verdulería sufre muchísimo un quiebre Y
+    #: compra en uno o dos puestos del mercado concentrador — con la regla vieja
+    #: arrancaba con la dimensión proveedores hundida sin estar mal.
+    min_healthy_suppliers: int = 3
     source: BenchmarkSource | None = None
 
 

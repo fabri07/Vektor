@@ -32,6 +32,7 @@
   "supplier": {
     "reorder_frequency": "mensual",
     "stockout_sensitivity": "media",
+    "min_healthy_suppliers": 3,
     "source": null
   },
   "seasonality": "alta"

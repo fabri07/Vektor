@@ -86,6 +86,7 @@ def _config_from_json(data: dict[str, Any]) -> VerticalHeuristicConfig:
         supplier=SupplierBenchmark(
             reorder_frequency=str(supplier["reorder_frequency"]),
             stockout_sensitivity=str(supplier["stockout_sensitivity"]),
+            min_healthy_suppliers=int(supplier["min_healthy_suppliers"]),
             source=_source_from_json(supplier),
         ),
         seasonality=str(data["seasonality"]),

@@ -1,0 +1,39 @@
+{
+  "business_type": "indumentaria",
+  "cash_health": {
+    "healthy_days_min": 30,
+    "warning_days_min": 15,
+    "critical_days_below": 10,
+    "source": null
+  },
+  "margin": {
+    "net_expected_min": 0.1,
+    "net_expected_max": 0.18,
+    "critical_below": 0.05,
+    "warning_below": 0.1,
+    "healthy_min": 0.1,
+    "healthy_max": 0.18,
+    "source": {
+      "institucion": "CACE / CIAI / CAME",
+      "referencia": "Camara Argentina de Comercio Electronico; Camara Industrial Argentina de la Indumentaria; Indice de Ventas Minoristas Pyme de CAME. Margen bruto 55-70% a precio pleno; margen neto final 10-18% tras alquiler, impuestos y pauta.",
+      "revisado_en": "2026-07"
+    }
+  },
+  "inventory": {
+    "rotation_days_min": 60,
+    "rotation_days_max": 120,
+    "overstock_tolerance": "baja",
+    "source": {
+      "institucion": "CACE / CIAI / CAME",
+      "referencia": "Ciclo de caja y stock estacional de 60 a 120 dias; rotacion de 3.0 a 4.5 vueltas anuales (~2 por temporada). El riesgo dominante del rubro es el stock clavo, no el quiebre.",
+      "revisado_en": "2026-07"
+    }
+  },
+  "supplier": {
+    "reorder_frequency": "quincenal",
+    "stockout_sensitivity": "media",
+    "min_healthy_suppliers": 3,
+    "source": null
+  },
+  "seasonality": "alta"
+}

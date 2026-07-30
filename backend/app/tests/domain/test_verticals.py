@@ -35,12 +35,12 @@ _VERTICAL_FIELDS_DIR = (
 
 # Cantidad de claves-hoja de CONFIGURACIÓN NUMÉRICA que debe tener cada JSON de
 # heurísticas: business_type (1) + cash_health (3) + margin (6) + inventory (3) +
-# supplier (2) + seasonality (1) = 16. Un JSON al que le falte una clave-hoja
+# supplier (3) + seasonality (1) = 17. Un JSON al que le falte una clave-hoja
 # pasaba desapercibido antes de este test.
 #
 # Las `source` de cada bloque se cuentan aparte (ver el test siguiente): son
 # metadato de procedencia y su valor legítimo puede ser `null`.
-_HEURISTICS_LEAF_KEYS = 16
+_HEURISTICS_LEAF_KEYS = 17
 _SOURCE_KEY = "source"
 _SOURCE_FIELDS = frozenset({"institucion", "referencia", "revisado_en"})
 #: Bloques del JSON que declaran procedencia propia.
@@ -59,7 +59,7 @@ class TestCatalogoCompleto:
     """Cada vertical de `Vertical` tiene toda su infraestructura de datos."""
 
     @pytest.mark.parametrize("vertical", list(Vertical))
-    def test_tiene_heuristicas_con_las_16_claves_hoja(
+    def test_tiene_heuristicas_con_todas_sus_claves_hoja(
         self, vertical: Vertical
     ) -> None:
         path = _HEURISTICS_DIR / f"{vertical.value}.json"
@@ -155,7 +155,7 @@ class TestCatalogoCompleto:
 
 class TestParseVertical:
     """`parse_vertical` no aliasea nada: falla ruidosamente ante cualquier
-    código que no sea exactamente uno de los tres valores canónicos."""
+    código que no sea exactamente uno de los valores canónicos."""
 
     @pytest.mark.parametrize("vertical", list(Vertical))
     def test_valores_canonicos_parsean(self, vertical: Vertical) -> None:
