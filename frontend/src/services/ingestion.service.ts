@@ -222,11 +222,24 @@ export interface RereadRunStatusResponse {
   error: string | null;
 }
 
+// F9b (Task 7 backend / Task 8 frontend): clientes/proveedores/productos que
+// la relectura tocó pero el undo NO restauró porque alguien los editó después
+// (política touched-since — nunca se pisa una edición manual en silencio).
+// `kind` es "customer" | "supplier" | "product"; `reason` siempre
+// "edited_after_reread" por ahora, pero se deja como string abierto por si el
+// backend agrega motivos nuevos sin romper el frontend.
+export interface RereadNotRevertedEntity {
+  kind: string;
+  id: string;
+  reason: string;
+}
+
 export interface RereadUndoResponse {
   run_id: string;
   restored: number;
   removed: number;
   status: string;
+  not_reverted_entities: RereadNotRevertedEntity[];
 }
 
 export const ingestionService = {

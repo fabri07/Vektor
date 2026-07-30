@@ -8,6 +8,7 @@ import {
   type UploadedFileItem,
   type RereadPreviewResponse,
   type RereadApplyResponse,
+  type RereadNotRevertedEntity,
 } from "@/services/ingestion.service";
 import { useToastStore } from "@/stores/toastStore";
 import { Modal } from "@/components/ui/Modal";
@@ -17,6 +18,22 @@ import { ColumnMapperPanel } from "./ColumnMapperPanel";
 import { RereadDiff } from "./RereadDiff";
 import { RereadProgress } from "./RereadProgress";
 import { IndeterminateBar } from "./IndeterminateBar";
+
+// F9b: rótulo legible por `kind` para el aviso de "no revertido". Sin fallback
+// silencioso a un texto genérico engañoso — si el backend agrega un `kind`
+// nuevo, se muestra tal cual (ver uso: `ENTITY_KIND_LABEL[entity.kind] ?? entity.kind`).
+const ENTITY_KIND_LABEL: Record<string, string> = {
+  customer: "el cliente",
+  supplier: "el proveedor",
+  product: "el producto",
+};
+
+// F9b: solo cliente/proveedor tienen ficha propia navegable (`/customers/[id]`,
+// `/suppliers/[id]`); productos no la tienen todavía → sin link para ese kind.
+const ENTITY_DETAIL_PATH: Record<string, string> = {
+  customer: "/customers",
+  supplier: "/suppliers",
+};
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "Pendiente",
@@ -93,6 +110,20 @@ export function FileListSection() {
   const [rereadResults, setRereadResults] = useState<
     Record<string, RereadApplyResponse>
   >({});
+  // F9b: confirmación previa a DESHACER una relectura ya aplicada (distinta de
+  // `rereadConfirm`, que confirma el ARRANQUE de la relectura). Bool simple:
+  // mientras está en true, oculta el modal de resultado y muestra este en su
+  // lugar (mismo patrón secuencial que `rereadConfirm` → `reread`, nunca dos
+  // modales apilados a la vez).
+  const [undoConfirmOpen, setUndoConfirmOpen] = useState(false);
+  // F9b: aviso persistente (no un toast que desaparece a los 4s) con los
+  // clientes/proveedores/productos que el último undo NO pudo revertir porque
+  // alguien los editó después de la relectura. Sobrevive al cierre del modal
+  // de resultado (el undo lo cierra) — el usuario lo descarta a mano.
+  const [notRevertedNotice, setNotRevertedNotice] = useState<{
+    filename: string;
+    entities: RereadNotRevertedEntity[];
+  } | null>(null);
 
   const { data: files = [], isLoading } = useQuery<UploadedFileItem[]>({
     queryKey: ["ingestion-files"],
@@ -273,7 +304,9 @@ export function FileListSection() {
 
   const rereadUndoMutation = useMutation({
     mutationFn: (fileId: string) => ingestionService.rereadUndo(fileId),
-    onSuccess: (_res, fileId) => {
+    onSuccess: (res, fileId) => {
+      const filename =
+        reread && reread.fileId === fileId ? reread.filename : fileId;
       setRereadResults((prev) => {
         const next = { ...prev };
         delete next[fileId];
@@ -282,6 +315,13 @@ export function FileListSection() {
       setReread(null);
       invalidateDataQueries();
       addToast("Relectura deshecha.", "success");
+      // F9b: si el backend no pudo revertir algún cliente/proveedor/producto
+      // (porque alguien lo editó después de la relectura), avisarlo aparte —
+      // no alcanza con el toast de éxito, que ya desapareció para cuando el
+      // usuario necesita leerlo con calma.
+      if (res.not_reverted_entities.length > 0) {
+        setNotRevertedNotice({ filename, entities: res.not_reverted_entities });
+      }
     },
     onError: () => {
       addToast("No se pudo deshacer la relectura.", "error");
@@ -305,6 +345,52 @@ export function FileListSection() {
       <h2 className="mb-4 text-sm font-semibold text-vk-text-primary">
         Archivos cargados
       </h2>
+
+      {/* F9b: aviso de entidades que el último "deshacer" NO pudo revertir
+          (editadas a mano después de la relectura). Persiste hasta que el
+          usuario lo cierra — no es un toast que se pierde solo. */}
+      {notRevertedNotice && (
+        <div
+          role="status"
+          className="mb-4 rounded-lg border border-vk-warning/40 bg-vk-warning-bg px-4 py-3 text-xs text-vk-warning"
+        >
+          <div className="mb-1.5 flex items-start justify-between gap-2">
+            <p className="font-semibold">
+              Se deshizo la relectura de &quot;{notRevertedNotice.filename}&quot;,
+              pero algunos registros no se pudieron revertir:
+            </p>
+            <button
+              type="button"
+              onClick={() => setNotRevertedNotice(null)}
+              className="flex-shrink-0 rounded p-0.5 text-vk-warning/70 hover:text-vk-warning"
+              aria-label="Cerrar aviso"
+            >
+              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <ul className="list-disc space-y-1 pl-4">
+            {notRevertedNotice.entities.map((entity) => (
+              <li key={`${entity.kind}-${entity.id}`}>
+                No se revirtió {ENTITY_KIND_LABEL[entity.kind] ?? entity.kind} —
+                fue editado manualmente después de la relectura.
+                {ENTITY_DETAIL_PATH[entity.kind] && (
+                  <>
+                    {" "}
+                    <a
+                      href={`${ENTITY_DETAIL_PATH[entity.kind]}/${entity.id}`}
+                      className="underline hover:no-underline"
+                    >
+                      Ver ficha
+                    </a>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {isLoading && (
         <div className="flex items-center gap-2 text-sm text-vk-text-muted">
@@ -542,7 +628,7 @@ export function FileListSection() {
       </Modal>
 
       <Modal
-        isOpen={reread !== null}
+        isOpen={reread !== null && !undoConfirmOpen}
         onClose={() => setReread(null)}
         title="Relectura de archivo"
         size="2xl"
@@ -710,7 +796,7 @@ export function FileListSection() {
                 <div className="flex items-center justify-between gap-2 border-t border-vk-border-w pt-3">
                   <button
                     type="button"
-                    onClick={() => rereadUndoMutation.mutate(reread.fileId)}
+                    onClick={() => setUndoConfirmOpen(true)}
                     disabled={rereadUndoMutation.isPending}
                     className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-vk-danger hover:bg-vk-danger/10 transition-colors disabled:opacity-50"
                   >
@@ -729,6 +815,55 @@ export function FileListSection() {
                 </div>
               </>
             )}
+          </div>
+        )}
+      </Modal>
+
+      {/* F9b: confirmación previa a deshacer una relectura ya aplicada.
+          Mismo patrón secuencial que el Modal `rereadConfirm` de arriba (nunca
+          dos modales abiertos a la vez): mientras este está abierto, el modal
+          de resultado de arriba se oculta (ver `isOpen={reread !== null &&
+          !undoConfirmOpen}`) y reaparece si el usuario cancela. */}
+      <Modal
+        isOpen={undoConfirmOpen}
+        onClose={() => setUndoConfirmOpen(false)}
+        title="Deshacer relectura"
+        size="md"
+      >
+        {reread && (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-vektor-body">
+              ¿Deshacer la relectura de{" "}
+              <span className="font-medium text-vektor-white">
+                {reread.filename}
+              </span>
+              ? Se revierten las ventas, gastos y stock que trajo — y los
+              clientes o proveedores que tocó y nadie editó después. Esto
+              deshace{" "}
+              <span className="font-semibold text-vk-warning">
+                solo la última relectura
+              </span>{" "}
+              de este archivo, no relecturas anteriores.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setUndoConfirmOpen(false)}
+                className="rounded-lg px-3 py-1.5 text-sm font-medium text-vektor-body hover:bg-vektor-surface transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  rereadUndoMutation.mutate(reread.fileId);
+                  setUndoConfirmOpen(false);
+                }}
+                className="rounded-lg bg-vk-danger px-3 py-1.5 text-sm font-medium text-white hover:brightness-110 transition-colors"
+              >
+                Sí, deshacer
+              </button>
+            </div>
           </div>
         )}
       </Modal>
