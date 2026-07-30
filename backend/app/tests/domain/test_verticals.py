@@ -27,7 +27,6 @@ from app.domain.verticals import (
     try_parse_vertical,
 )
 from app.heuristics.insight_templates import _MARGIN_RANGES
-from app.state.business_state_service import _RULESET_INSTANCES
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 _HEURISTICS_DIR = _BACKEND_ROOT / "app" / "application" / "data" / "heuristics"
@@ -86,27 +85,6 @@ class TestCatalogoCompleto:
     ) -> None:
         assert vertical in PRODUCT_CATEGORY_LABELS
         assert PRODUCT_CATEGORY_LABELS[vertical]
-
-    @pytest.mark.parametrize("vertical", list(Vertical))
-    def test_tiene_ruleset_y_es_el_suyo(self, vertical: Vertical) -> None:
-        """`_RULESET_INSTANCES` se accede INDEXADO en los dos caminos de
-        `business_state_service` (`compute` y `_deserialize_state`): un vertical
-        sin entrada revienta con `KeyError` adentro de `compute()`, o sea
-        dashboard + health score + chat + el job de Celery a la vez, para el
-        primer tenant del rubro nuevo. `mypy` no lo agarra: a un dict literal al
-        que le falta una clave no le falta un tipo.
-
-        El segundo assert es el que vale: sin él, pegar `KioscoHeuristicRuleSet()`
-        bajo la clave nueva (el copy-paste natural) pasaría igual, y el rubro
-        nuevo se scorearía con los benchmarks de kiosco — exactamente el bug que
-        esta rama vino a matar."""
-        assert vertical in _RULESET_INSTANCES, (
-            f"{vertical.value}: falta su ruleset en "
-            "`app/state/business_state_service._RULESET_INSTANCES`"
-        )
-        ruleset = _RULESET_INSTANCES[vertical]
-        assert ruleset.vertical is vertical
-        assert ruleset.get_rules().vertical is vertical
 
     @pytest.mark.parametrize("vertical", list(Vertical))
     def test_tiene_aliases_de_categoria(self, vertical: Vertical) -> None:

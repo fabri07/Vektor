@@ -9,6 +9,8 @@ Uses:
 
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -21,8 +23,12 @@ from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import SaleEntry
 from app.state.business_state_service import (
+    BusinessState,
+    ProductSummary,
     _cache_key,
+    _deserialize_state,
     _hash_key,
+    _serialize_state,
     compute_business_state,
 )
 
@@ -111,12 +117,13 @@ async def test_compute_business_state_from_onboarding_only(
 
     # Redis should be populated
     store = redis.snapshot()
-    # Las keys llevan el prefijo de versión v2 (los rulesets pasaron al código
-    # canónico y los blobs viejos ya no deserializan).
+    # Las keys llevan el prefijo de versión v3 (se eliminó el campo `ruleset`, y
+    # con él la clave del blob donde vivía escondido el vertical: un blob v2 leído
+    # con este código moriría con KeyError).
     assert _cache_key(sample_tenant.tenant_id) in store
     assert _hash_key(sample_tenant.tenant_id) in store
-    assert "business_state:v2:" in _cache_key(sample_tenant.tenant_id)
-    assert "last_inputs_hash:v2:" in _hash_key(sample_tenant.tenant_id)
+    assert "business_state:v3:" in _cache_key(sample_tenant.tenant_id)
+    assert "last_inputs_hash:v3:" in _hash_key(sample_tenant.tenant_id)
 
 
 # ── Montos del onboarding sin contestar ──────────────────────────────────────
@@ -389,3 +396,67 @@ async def test_product_summaries_include_30_day_rotation_units(
 
     assert len(state.products) == 1
     assert state.products[0].units_sold_30d == 2
+
+
+# ── Serialización del blob de caché ──────────────────────────────────────────
+
+
+def _estado_de_ejemplo(vertical_code: str = Vertical.LIMPIEZA.value) -> BusinessState:
+    return BusinessState(
+        snapshot_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        vertical_code=vertical_code,
+        data_completeness_score=70.0,
+        confidence_level="MEDIUM",
+        monthly_sales_est=Decimal("100000.00"),
+        monthly_inventory_cost_est=Decimal("60000.00"),
+        monthly_fixed_expenses_est=Decimal("20000.00"),
+        cash_on_hand_est=Decimal("30000.00"),
+        product_count=4,
+        supplier_count=2,
+        products=[
+            ProductSummary(
+                product_id=uuid.uuid4(),
+                name="Detergente",
+                stock_units=10,
+                low_stock_threshold_units=3,
+                sale_price_ars=Decimal("1500.00"),
+                units_sold_30d=7,
+            )
+        ],
+        main_concern=None,
+    )
+
+
+def test_el_blob_conserva_el_vertical_en_su_propia_clave() -> None:
+    """El vertical viaja en `vertical_code`, no escondido dentro del ruleset.
+
+    Antes el vertical se guardaba en `d["ruleset"]` (el ruleset no era
+    serializable, así que se lo reemplazaba por su código) y `_deserialize_state`
+    lo leía de ahí. Al eliminar el campo muerto había que darle su propia clave o
+    el estado volvía de la caché sin saber de qué rubro era.
+    """
+    estado = _estado_de_ejemplo()
+    blob = json.loads(_serialize_state(estado))
+
+    assert blob["vertical_code"] == Vertical.LIMPIEZA.value
+    assert "ruleset" not in blob
+
+
+def test_round_trip_de_serializacion() -> None:
+    estado = _estado_de_ejemplo()
+    vuelta = _deserialize_state(_serialize_state(estado))
+
+    assert vuelta.vertical_code == estado.vertical_code
+    assert vuelta.tenant_id == estado.tenant_id
+    assert vuelta.monthly_sales_est == estado.monthly_sales_est
+    assert vuelta.cash_on_hand_est == estado.cash_on_hand_est
+    assert len(vuelta.products) == 1
+    assert vuelta.products[0].units_sold_30d == 7
+
+
+def test_un_vertical_desconocido_en_la_cache_no_pasa_silencioso() -> None:
+    """Un blob con un rubro fuera del catálogo levanta en vez de scorearse con otro."""
+    blob = _serialize_state(_estado_de_ejemplo(vertical_code="rubro_inexistente"))
+    with pytest.raises(ValueError, match="rubro_inexistente"):
+        _deserialize_state(blob)

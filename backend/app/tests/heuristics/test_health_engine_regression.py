@@ -12,10 +12,7 @@ from typing import Any
 
 from app.domain.verticals import Vertical
 from app.heuristics.health_engine import calculate_health_score
-from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
-
-KIOSCO_BENCHMARK = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -47,7 +44,6 @@ def _state(
         vertical_code=Vertical.KIOSCO_ALMACEN.value,
         data_completeness_score=completeness,
         confidence_level=confidence,
-        ruleset=KIOSCO_BENCHMARK,  # type: ignore[arg-type]  # test double / fixture
         monthly_sales_est=monthly_sales_est,
         monthly_inventory_cost_est=monthly_inventory_cost_est,
         monthly_fixed_expenses_est=monthly_fixed_expenses_est,

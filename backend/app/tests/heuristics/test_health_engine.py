@@ -26,7 +26,6 @@ from app.state.business_state_service import BusinessState, ProductSummary
 
 # Benchmark de kiosco desde la MISMA fuente que el engine (el módulo estático
 # app/heuristics/verticals/kiosco.py se eliminó: era una 4ª copia de los JSON).
-KIOSCO_BENCHMARK = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -64,8 +63,6 @@ def _make_state(
         vertical_code=vertical_code,
         data_completeness_score=data_completeness_score,
         confidence_level=confidence_level,
-        # ruleset no lo lee el engine (usa vertical_code); benchmark como test double
-        ruleset=KIOSCO_BENCHMARK,  # type: ignore[arg-type]
         monthly_sales_est=monthly_sales_est,
         monthly_inventory_cost_est=monthly_inventory_cost_est,
         monthly_fixed_expenses_est=monthly_fixed_expenses_est,
