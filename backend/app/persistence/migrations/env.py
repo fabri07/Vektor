@@ -1,6 +1,5 @@
 """Alembic environment — supports both online (sync) and offline modes."""
 
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -8,31 +7,19 @@ from sqlalchemy import engine_from_config, pool
 # Load all models so Alembic can detect schema changes
 import app.persistence.models  # noqa: F401
 from alembic import context
+from app.persistence.db.alembic_url import resolve_sync_url
 from app.persistence.db.base import Base
 
 # Alembic Config object (access to alembic.ini values)
 config = context.config
 
-
 # Resolve sync DB URL: prefer DATABASE_URL_SYNC, fall back to DATABASE_URL (converted),
-# then alembic.ini default.
-def _resolve_sync_url() -> str:
-    if url := os.environ.get("DATABASE_URL_SYNC"):
-        return url
-    if raw := os.environ.get("DATABASE_URL"):
-        # Convert postgresql:// → postgresql+psycopg2://, strip channel_binding
-        import re  # noqa: PLC0415
-
-        url = raw.replace("postgresql://", "postgresql+psycopg2://", 1)
-        url = url.replace("postgres://", "postgresql+psycopg2://", 1)
-        url = re.sub(r"[?&]channel_binding=[^&]*", "", url)
-        url = re.sub(r"\?$", "", url)
-        url = re.sub(r"\?&", "?", url)
-        return url
-    return config.get_main_option("sqlalchemy.url") or ""
-
-
-config.set_main_option("sqlalchemy.url", _resolve_sync_url())
+# then alembic.ini default. La resolución vive en `app.persistence.db.alembic_url`
+# porque `scripts/migrate_preflight.py` tiene que resolver EXACTAMENTE lo mismo.
+config.set_main_option(
+    "sqlalchemy.url",
+    resolve_sync_url(config.get_main_option("sqlalchemy.url")).url,
+)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

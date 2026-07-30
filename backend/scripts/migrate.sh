@@ -14,6 +14,10 @@
 # Railway aborta el deploy: la versión vieja sigue sirviendo (fail-safe).
 set -eu
 
+# Antes de migrar, dejar asentado en el log contra qué base se migra. No corta el
+# deploy nunca (sale 0 aunque falle): la autoridad sigue siendo alembic.
+python scripts/migrate_preflight.py
+
 echo "[migrate] alembic upgrade head"
 alembic upgrade head
 echo "[migrate] OK"
