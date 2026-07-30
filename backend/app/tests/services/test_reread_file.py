@@ -1898,3 +1898,71 @@ async def test_undo_master_and_product_items_producto_tocado_dos_veces_usa_item_
     assert producto.sale_price_ars == Decimal("500")  # before del MÁS RECIENTE, no "100"
     assert producto.sku == "MID"  # before del más reciente, no "OLD"
     assert producto.stock_units == 10  # NUNCA se toca por setattr, sea el item que sea
+
+
+@pytest.mark.asyncio
+async def test_undo_reread_producto_creado_y_actualizado_en_mismo_run_se_desactiva(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix post-review (hallazgo Important): dos filas del MISMO archivo que
+    resuelven al MISMO producto — la primera lo CREA (``CREATE_PRODUCT``), la
+    segunda lo ACTUALIZA (``UPDATE_PRODUCT``, vía ``_merge_catalog_into_existing``
+    contra la caché de identidad intra-corrida) — dejan DOS ``DataRepairItem``
+    para el mismo ``product_id`` dentro del mismo run (Task 6 NO dedupea
+    productos, a diferencia de maestros). El undo debe DESACTIVAR el producto
+    (no existía antes de esta relectura), sin importar que el item MÁS
+    RECIENTE del grupo sea el ``UPDATE_PRODUCT`` — "fue creado en este run"
+    tiene que salir de CUALQUIER item ``CREATE_PRODUCT`` del grupo, nunca del
+    más reciente (bug real: antes del fix, el ``is_create`` salía SOLO del
+    item más reciente, y este producto quedaba ACTIVO tras el undo con los
+    campos a mitad de camino)."""
+    file = await _make_stock_file(db_session, tenant)
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "stock_detectado": [
+            {
+                "producto": "Producto Nuevo",
+                "sku": "NEW1",
+                "precio": "100",
+                "costo": "60",
+                "stock": "0",
+            },
+            {
+                "producto": "Producto Nuevo Corregido",
+                "sku": "NEW1",
+                "precio": "120",
+                "costo": "70",
+                "stock": "0",
+            },
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    productos = (
+        await db_session.execute(select(Product).where(Product.sku == "NEW1"))
+    ).scalars().all()
+    assert len(productos) == 1  # una sola entidad física, no dos
+    producto = productos[0]
+
+    items_res = await db_session.execute(
+        select(DataRepairItem).where(
+            DataRepairItem.run_id == result.run_id,
+            DataRepairItem.product_id == producto.id,
+        )
+    )
+    items = items_res.scalars().all()
+    # Las DOS, NO dedupeadas (a diferencia de maestros) — precondición del test.
+    assert {i.action for i in items} == {"CREATE_PRODUCT", "UPDATE_PRODUCT"}
+
+    undo = await reread_service.undo_reread(db_session, result.run_id, tenant.tenant_id)
+    await db_session.commit()
+
+    await db_session.refresh(producto)
+    assert producto.deactivated_at is not None  # desactivado, NUNCA dejado activo
+    assert producto.deactivation_reason == "REREAD_UNDO"
+    assert producto.is_active is False
+    assert undo["not_reverted_entities"] == []  # no estaba "tocado" -> no aparece ahí

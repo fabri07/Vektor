@@ -1875,10 +1875,18 @@ async def _undo_master_and_product_items(
     Productos: a diferencia de maestros (Task 5 ya dedupea a lo sumo un item
     por entidad por run), Task 6 NO dedupea — dos filas del mismo archivo que
     tocan el mismo producto dejan DOS ``DataRepairItem`` (``CREATE_PRODUCT``/
-    ``UPDATE_PRODUCT``) para el mismo ``product_id``. Acá nos quedamos con el
-    MÁS RECIENTE de cada ``product_id`` (por ``created_at`` — ``items`` llega
-    ordenado por el caller) para el touched-since check y el restore, no con
-    cada item de forma independiente."""
+    ``UPDATE_PRODUCT``) para el mismo ``product_id``. Acá se separan DOS
+    preguntas distintas para cada ``product_id``: (1) ¿cuáles son los valores
+    de before/after a usar? — el item MÁS RECIENTE (por ``created_at`` —
+    ``items`` llega ordenado por el caller); (2) ¿el producto fue CREADO por
+    ESTE run? — ``True`` si CUALQUIER item de ese ``product_id`` en este run
+    es ``CREATE_PRODUCT``, sin importar cuál sea el más reciente. Un catálogo
+    con dos filas del mismo producto (fila 1 lo crea, fila 2 lo actualiza —
+    mecanismo intencional de Task 6) deja ``[CREATE_PRODUCT, UPDATE_PRODUCT]``
+    para el mismo id: si (2) dependiera del item más reciente (el UPDATE),
+    un producto genuinamente nuevo de este run iría por la rama de restore de
+    campos en vez de desactivarse — quedaría ACTIVO tras el undo, cuando no
+    existía antes de la relectura."""
     from app.persistence.models.customer import Customer  # noqa: PLC0415
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.supplier import Supplier  # noqa: PLC0415
@@ -1907,16 +1915,18 @@ async def _undo_master_and_product_items(
             continue
         to_process.append((kind, uuid.UUID(raw_id), it.action == "REREAD_MASTER_CREATE", it))
 
-    # Productos: quedarse solo con el item MÁS RECIENTE por product_id.
-    latest_product_item: dict[uuid.UUID, tuple[bool, DataRepairItem]] = {}
+    # Productos: agrupar TODOS los items por product_id — "más reciente" (para
+    # before/after) y "fue creado en este run" (para elegir la rama) son
+    # preguntas independientes, ver docstring.
+    product_items_by_id: dict[uuid.UUID, list[DataRepairItem]] = {}
     for it in items:
         if it.action not in ("CREATE_PRODUCT", "UPDATE_PRODUCT") or it.product_id is None:
             continue
-        latest_product_item[it.product_id] = (it.action == "CREATE_PRODUCT", it)
-    to_process.extend(
-        ("product", product_id, is_create, it)
-        for product_id, (is_create, it) in latest_product_item.items()
-    )
+        product_items_by_id.setdefault(it.product_id, []).append(it)
+    for product_id, pitems in product_items_by_id.items():
+        latest = pitems[-1]  # items ya ordenados por created_at por el caller
+        was_created_this_run = any(i.action == "CREATE_PRODUCT" for i in pitems)
+        to_process.append(("product", product_id, was_created_this_run, latest))
 
     not_reverted: list[dict[str, str]] = []
     for kind, entity_id, is_create, it in to_process:
@@ -1969,11 +1979,17 @@ async def undo_reread(
 
     # Orden determinístico por ``created_at``: ``_undo_master_and_product_items``
     # asume que, para un mismo ``product_id`` con varios ``DataRepairItem`` (Task
-    # 6 no dedupea productos), el ÚLTIMO de la lista es el más reciente.
+    # 6 no dedupea productos), el ÚLTIMO de la lista es el más reciente. Los items
+    # de un mismo producto se crean en un loop sin ``await`` entre medio antes de
+    # un solo flush — pueden empatar en microsegundos (SQLite/CI, no descartado en
+    # Postgres). ``DataRepairItem.id`` como desempate secundario NO vuelve el
+    # orden "semánticamente correcto" ante un empate exacto (es un UUID
+    # arbitrario), pero sí lo vuelve DETERMINÍSTICO — misma respuesta en cada
+    # corrida, sin agregar una columna nueva (eso sería scope creep de esta task).
     items_res = await session.execute(
         select(DataRepairItem)
         .where(DataRepairItem.run_id == run_id)
-        .order_by(DataRepairItem.created_at)
+        .order_by(DataRepairItem.created_at, DataRepairItem.id)
     )
     items = list(items_res.scalars().all())
 
