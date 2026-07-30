@@ -210,6 +210,17 @@
     opacity: 0;
     animation: doodle-fade 0.6s ease forwards, doodle-float 7s ease-in-out infinite;
   }
+  /* Variante para páginas largas: el trazo espera a que el doodle entre en
+     pantalla en vez de dibujarse al cargar. Sin esto, en /rubros los seis se
+     dibujan de una arriba de todo y el visitante llega a cada uno cuando la
+     animación ya pasó. `is-visible` lo pone un IntersectionObserver. */
+  .doodle-hold .doodle-path {
+    animation: none;
+  }
+  .doodle-hold.is-visible .doodle-path {
+    animation: doodle-draw 1.2s ease forwards;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .doodle-path {
       stroke-dashoffset: 0;
@@ -217,6 +228,13 @@
     }
     .doodle-anim {
       opacity: 1;
+      animation: none;
+    }
+    /* El doodle retenido también queda dibujado, visible o no: sin animación,
+       `stroke-dashoffset: 1` lo dejaría invisible para siempre. */
+    .doodle-hold .doodle-path,
+    .doodle-hold.is-visible .doodle-path {
+      stroke-dashoffset: 0;
       animation: none;
     }
   }
