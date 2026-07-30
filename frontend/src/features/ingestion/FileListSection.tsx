@@ -318,9 +318,14 @@ export function FileListSection() {
       // F9b: si el backend no pudo revertir algún cliente/proveedor/producto
       // (porque alguien lo editó después de la relectura), avisarlo aparte —
       // no alcanza con el toast de éxito, que ya desapareció para cuando el
-      // usuario necesita leerlo con calma.
+      // usuario necesita leerlo con calma. Si este undo SÍ se revirtió limpio,
+      // limpiar cualquier aviso viejo de un undo anterior — si no, un banner
+      // de un archivo/entidad distinto queda pegado en pantalla mal atribuido
+      // a esta acción recién hecha.
       if (res.not_reverted_entities.length > 0) {
         setNotRevertedNotice({ filename, entities: res.not_reverted_entities });
+      } else {
+        setNotRevertedNotice(null);
       }
     },
     onError: () => {

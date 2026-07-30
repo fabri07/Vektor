@@ -135,20 +135,22 @@ function appliedRunStatus(): RereadApplyResponse & {
   };
 }
 
-/**
- * Lleva el modal de relectura hasta la fase "result" (botón "Deshacer
- * relectura" visible): Volver a leer → confirmar arranque → preview →
- * aplicar → polling hasta APPLIED. Mismo camino que recorre un usuario real;
- * no hay atajo para inyectar `rereadResults` desde afuera del componente.
- */
-async function driveToResultPhase(user: ReturnType<typeof userEvent.setup>) {
+function setupRereadMocks() {
   mockListFiles.mockResolvedValue([fileWith("DONE")]);
   mockRereadPreview.mockResolvedValue(PREVIEW_RESPONSE);
   mockRereadApply.mockResolvedValue(APPLY_START_RESPONSE);
   mockRereadRunStatus.mockResolvedValue(appliedRunStatus());
+}
 
-  renderList();
-
+/**
+ * Recorre el modal de relectura hasta la fase "result" (botón "Deshacer
+ * relectura" visible): Volver a leer → confirmar arranque → preview →
+ * aplicar → polling hasta APPLIED. Mismo camino que recorre un usuario real;
+ * no hay atajo para inyectar `rereadResults` desde afuera del componente.
+ * No renderiza — se puede llamar más de una vez sobre el mismo componente ya
+ * montado, para simular una SEGUNDA relectura+undo del mismo archivo.
+ */
+async function rereadFlowToResultPhase(user: ReturnType<typeof userEvent.setup>) {
   await waitFor(() =>
     expect(screen.getByTitle("Volver a leer este archivo")).toBeInTheDocument(),
   );
@@ -169,6 +171,24 @@ async function driveToResultPhase(user: ReturnType<typeof userEvent.setup>) {
       screen.getByRole("button", { name: /^deshacer relectura$/i }),
     ).toBeInTheDocument(),
   );
+}
+
+/** Setea los mocks, renderiza y recorre el flujo una vez. */
+async function driveToResultPhase(user: ReturnType<typeof userEvent.setup>) {
+  setupRereadMocks();
+  renderList();
+  await rereadFlowToResultPhase(user);
+}
+
+/** Click en "Deshacer relectura" → confirmar → esperar a que el backend responda. */
+async function confirmUndo(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /^deshacer relectura$/i }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("heading", { name: "Deshacer relectura" }),
+    ).toBeInTheDocument(),
+  );
+  await user.click(screen.getByRole("button", { name: /sí, deshacer/i }));
 }
 
 describe("FileListSection — deshacer relectura (F9b)", () => {
@@ -263,5 +283,47 @@ describe("FileListSection — deshacer relectura (F9b)", () => {
     const links = within(notice).getAllByRole("link", { name: /ver ficha/i });
     expect(links).toHaveLength(1);
     expect(links[0]).toHaveAttribute("href", "/customers/cust-1");
+  });
+
+  // Hallazgo Important del revisor: un undo posterior que sí se revierte
+  // limpio debe limpiar el aviso de un undo anterior con entidades no
+  // revertidas — si no, el banner queda pegado en pantalla mal atribuido a
+  // la acción recién hecha.
+  test("un undo posterior limpio limpia el aviso de un undo anterior con entidades no revertidas", async () => {
+    const user = userEvent.setup();
+    mockRereadUndo
+      .mockResolvedValueOnce({
+        run_id: "run-1",
+        restored: 1,
+        removed: 1,
+        status: "REVERTED",
+        not_reverted_entities: [
+          { kind: "customer", id: "cust-1", reason: "edited_after_reread" },
+        ],
+      } satisfies RereadUndoResponse)
+      .mockResolvedValueOnce({
+        run_id: "run-2",
+        restored: 2,
+        removed: 0,
+        status: "REVERTED",
+        not_reverted_entities: [],
+      } satisfies RereadUndoResponse);
+
+    // Primera relectura + undo: queda not_reverted_entities → aparece el aviso.
+    await driveToResultPhase(user);
+    await confirmUndo(user);
+    await waitFor(() => expect(mockRereadUndo).toHaveBeenCalledTimes(1));
+    const staleNotice = await screen.findByRole("status");
+    expect(
+      within(staleNotice).getByText(/no se revirtió el cliente/i),
+    ).toBeInTheDocument();
+
+    // Segunda relectura + undo del MISMO archivo, ya limpia (sin entidades
+    // no revertidas) — el aviso viejo no debe seguir en pantalla.
+    await rereadFlowToResultPhase(user);
+    await confirmUndo(user);
+    await waitFor(() => expect(mockRereadUndo).toHaveBeenCalledTimes(2));
+
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
   });
 });
