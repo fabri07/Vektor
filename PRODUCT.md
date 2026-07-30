@@ -94,14 +94,22 @@ propósito: el motor asume `compra → producto → venta` y no tiene concepto d
 ni de receta. Un kilo de media res no es un producto, son doce cortes con precios
 distintos.
 
-**Decisión abierta — qué rubros se aceptan.** La intención declarada es que Véktor sirva
-a cualquier PYME y que los seis sean los que tienen heurística calibrada. Hoy el código
-no permite eso: un rubro fuera de los seis puede *pedir* acceso (existe `otros` en el
-formulario) pero **no se le puede asignar un vertical para operar**, porque
-`ck_access_requests_assigned_vertical_code` solo admite los seis. La contradicción es
-visible al público: el carrusel de la landing muestra peluquería, gimnasio y taller
-mecánico, y `/rubros` dice que son seis. Resolverlo es decidir si existe un rubro
-genérico operable o si lo público se alinea con los seis.
+**Un rubro sin calibrar no se rechaza: se encola.** Es el diseño, no una limitación.
+Cualquier PYME puede pedir acceso; el formulario tiene `otros`, y cuando lo elige
+**`vertical_other_text` es obligatorio** (CHECK `ck_access_requests_vertical_other_text`),
+así que el rubro real queda escrito. Esa solicitud queda en `PENDING` o pasa a
+**`WAITLIST`**, que es un estado deliberadamente **no terminal**: se puede aprobar más
+adelante. Cuando ese rubro se calibra —o cuando el dueño ve que encaja en uno existente—
+se aprueba asignándole el vertical, y `otros` siempre termina corregido en ese paso.
+
+La consecuencia para el producto es que **la cola de solicitudes es la fuente de demanda
+que decide qué rubro se calibra próximo**, y por eso el texto libre del rubro es dato de
+producto, no un campo de formulario más.
+
+Por eso el carrusel de la landing muestra rubros fuera de los seis (peluquería, gimnasio,
+taller mecánico): invita a pedir acceso a cualquier PYME, que es lo correcto. Lo que no
+se puede prometer es heurística calibrada para un rubro que no la tiene — de ahí que
+`/rubros` hable de los seis que Véktor "entiende hoy".
 
 **La merma no está implementada.** Es lo primero que pide una verdulería y necesita un
 motor de rendimiento que no existe. No se promete.
