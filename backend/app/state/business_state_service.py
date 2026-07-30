@@ -144,7 +144,10 @@ def _serialize_state(state: BusinessState) -> str:
     d["prev_monthly_sales_est"] = str(state.prev_monthly_sales_est)
     d["liquid_inflow_est"] = str(state.liquid_inflow_est)
     d["liquid_outflow_est"] = str(state.liquid_outflow_est)
-    d["vertical_code"] = state.vertical_code
+    # `vertical_code` NO necesita línea propia: es un campo del dataclass y
+    # `asdict()` ya lo trae. La asignación explícita que había acá era herencia
+    # del patrón viejo, donde el vertical viajaba dentro de `ruleset` porque el
+    # ruleset no era serializable.
     d["products"] = [
         {
             "product_id": str(p.product_id),

@@ -318,7 +318,7 @@ async def test_process_low_confidence_returns_clarification():
         patch.object(
             agent,
             "_load_business_meta",
-            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN.value)),
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN)),
         ),
         patch(
             "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
@@ -352,7 +352,7 @@ async def test_process_high_confidence_returns_success():
         patch.object(
             agent,
             "_load_business_meta",
-            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN.value)),
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN)),
         ),
         patch(
             "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
@@ -388,7 +388,7 @@ async def test_process_emits_event_on_success():
         patch.object(
             agent,
             "_load_business_meta",
-            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN.value)),
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN)),
         ),
         patch(
             "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)

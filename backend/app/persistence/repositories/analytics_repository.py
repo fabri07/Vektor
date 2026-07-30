@@ -18,8 +18,14 @@ _LOOKBACK_DAYS = 90
 #: para todo negocio sin ventas, y esos ceros fabricados entraban a los
 #: percentiles como si fueran observaciones reales. No hay forma de distinguir un
 #: cero fabricado de uno genuino en las filas viejas, así que se descartan enteras.
-#: Es la fecha en que se desplegó el fix — el log es insert-only y no se reescribe.
-_TRUSTED_EVENTS_SINCE = datetime(2026, 7, 30, tzinfo=UTC)
+#:
+#: **Tiene que ser >= la fecha real del deploy.** Los eventos escritos entre el
+#: commit del fix y su llegada a producción siguen saliendo del código viejo: un
+#: corte anterior al deploy los deja pasar como confiables. Por eso se elige un
+#: borde holgado hacia adelante en vez de la fecha del commit — que el corte
+#: descarte de más es inofensivo (se pierde observación), que descarte de menos
+#: reintroduce en silencio el problema que este corte existe para tapar.
+_TRUSTED_EVENTS_SINCE = datetime(2026, 9, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -155,8 +161,18 @@ class AnalyticsRepository:
         }
 
     async def get_distinct_verticals(self, lookback_days: int = _LOOKBACK_DAYS) -> list[str]:
-        """Vertical codes con datos dentro del lookback window."""
-        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+        """Vertical codes con datos dentro de la ventana.
+
+        Mismo corte de confianza que los otros dos métodos: si no lo aplicara,
+        la vista de administración listaría verticales cuyos únicos eventos son
+        anteriores al fix, con `event_count: 0` y sin distribución — una fila que
+        parece un rubro sin actividad cuando en realidad es un rubro cuya
+        actividad se descartó.
+        """
+        cutoff = max(
+            datetime.now(UTC) - timedelta(days=lookback_days),
+            _TRUSTED_EVENTS_SINCE,
+        )
         q = (
             select(AnalyticsEvent.vertical_code)
             .distinct()

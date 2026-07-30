@@ -38,6 +38,8 @@ from app.application.agents.shared.schemas import (
 from app.application.agents.shared.vertical_lookup import load_tenant_vertical
 from app.application.services.health_config_service import get_margin_benchmark
 from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
+from app.heuristics.verticals import weakest_confidence
+from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
@@ -140,7 +142,7 @@ class AgentHealth(BaseAgent):
         # el tenant no tiene perfil: mismo empty state honesto que `collect`, en
         # vez de informar la salud del negocio con las heurísticas de otro rubro.
         try:
-            business_name, _vertical = await self._load_business_meta(request.business_id)
+            business_name, vertical = await self._load_business_meta(request.business_id)
             state = await collect(
                 request.business_id, self._db, cast("Redis", self._redis)
             )
@@ -159,7 +161,20 @@ class AgentHealth(BaseAgent):
             )
 
         # ── 2. ValidationGate — datos insuficientes → empty state ────────────
-        if state.confidence_level == "LOW" or state.data_completeness_score < 50:
+        # Se gatea con la confianza EFECTIVA, no solo con la de los datos: medir
+        # un negocio contra una vara sin fundamento tampoco es un diagnóstico
+        # confiable. Hoy ninguna procedencia alcanzable llega a LOW, así que este
+        # gate no cambia de comportamiento — pero si el data-driven vuelve, vuelve
+        # ya cubierto en vez de dejar el agujero abierto para que lo encuentre un
+        # usuario.
+        # `vertical` ya viene parseado de `_load_business_meta`: re-parsear
+        # `state.vertical_code` sería hacer dos veces el mismo trabajo y agregar
+        # un segundo punto donde el rubro puede fallar de forma distinta.
+        confianza_efectiva = weakest_confidence(
+            state.confidence_level,
+            load_vertical_heuristics(vertical).margin.confidence,
+        )
+        if confianza_efectiva == "LOW" or state.data_completeness_score < 50:
             return AgentResponse(
                 request_id=request.request_id,
                 agent_name=self.agent_name,
