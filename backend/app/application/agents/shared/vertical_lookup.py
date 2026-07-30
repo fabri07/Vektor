@@ -2,7 +2,7 @@
 
 Único lugar donde la capa de agentes traduce `business_profiles.vertical_code`
 al enum canónico. **Sin fallback**: si el tenant no tiene perfil —o el código
-guardado no es uno de los tres canónicos— levanta `UnknownVerticalError` en vez
+guardado no es uno de los canónicos— levanta `UnknownVerticalError` en vez
 de asumir kiosco. Un negocio sin rubro configurado es un estado roto, y
 scorearlo con las heurísticas de otro rubro lo esconde.
 """

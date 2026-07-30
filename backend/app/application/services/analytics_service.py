@@ -56,6 +56,11 @@ class AnalyticsService:
         calcular, y NO 0.0: un negocio sin ventas no tiene margen 0%, no tiene
         margen. Escribir el cero convertía cada negocio vacío en una observación
         válida que arrastraba los percentiles del rubro hacia abajo.
+
+        Esa distinción es exactamente lo que marca ``schema_version``: la fila
+        sale con ``EVENT_SCHEMA_VERSION`` por el default del ORM, y los lectores
+        descartan las versiones anteriores. No se pasa acá a mano — el valor vive
+        en el modelo, junto a la columna cuyo significado versiona.
         """
         try:
             async with self._session.begin_nested():

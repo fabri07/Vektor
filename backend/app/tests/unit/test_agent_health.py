@@ -7,6 +7,7 @@ Stage 5a: AgentHealth refactorizado a thin coordinator.
   - agent.py → thin coordinator (tests de process())
 """
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -45,10 +46,19 @@ def _make_config(healthy_days_min: float = 10.0, warning_days_min: float = 7.0) 
     )
 
 
-def _make_request(message: str = "generar informe de salud") -> AgentRequest:
+def _make_request(
+    message: str = "generar informe de salud", business_id: str = "tenant-456"
+) -> AgentRequest:
+    """`business_id` es parametrizable porque el agente lo convierte a UUID.
+
+    El default no lo es, y no se toca: los tests viejos dependen de que ese
+    `uuid.UUID(...)` falle y el agente caiga al benchmark del rubro. Los tests que
+    ejercitan el override del tenant necesitan que la conversión funcione para
+    llegar a `get_margin_benchmark`, así que pasan un UUID de verdad.
+    """
     return AgentRequest(
         user_id="user-123",
-        business_id="tenant-456",
+        business_id=business_id,
         message=message,
     )
 
@@ -329,6 +339,151 @@ async def test_process_low_confidence_returns_clarification():
     assert result.status == "requires_clarification"
     assert result.confidence == "LOW"
     mock_client.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_el_gate_mira_el_benchmark_que_realmente_puntua():
+    """Datos impecables medidos contra una vara sin fundamento → empty state.
+
+    El agente resolvía la confianza de la vara leyendo el JSON del RUBRO, pero
+    después puntuaba con el override del tenant. Mientras las dos procedencias
+    dieran HIGH la diferencia no se veía; acá el override es lo único con
+    confianza baja, así que mirar el rubro devolvería HIGH y dejaría pasar un
+    diagnóstico que se calcula contra un umbral que nadie fundamentó.
+    """
+    from app.application.agents.health.agent import AgentHealth
+    from app.heuristics.verticals import BenchmarkProvenance, MarginBenchmark
+
+    vara_sin_fundamento = MarginBenchmark(
+        critical_below=0.04,
+        warning_below=0.08,
+        healthy_min=0.08,
+        healthy_max=0.14,
+        provenance=BenchmarkProvenance.DATA_DRIVEN,
+    )
+    assert vara_sin_fundamento.confidence == "LOW", "premisa del test"
+
+    agent = AgentHealth(db=MagicMock())
+    mock_client = _mock_anthropic_client()
+    agent.client = mock_client
+
+    mock_state = MagicMock()
+    mock_state.confidence_level = "HIGH"  # los DATOS del negocio están completos
+    mock_state.data_completeness_score = 90.0
+    mock_state.vertical_code = Vertical.KIOSCO_ALMACEN.value
+
+    with (
+        patch.object(
+            agent,
+            "_load_business_meta",
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN)),
+        ),
+        patch(
+            "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
+        ),
+        patch(
+            "app.application.agents.health.agent.get_margin_benchmark",
+            new=AsyncMock(return_value=vara_sin_fundamento),
+        ),
+    ):
+        result = await agent.process(_make_request(business_id=str(uuid.uuid4())))
+
+    assert result.status == "requires_clarification"
+    mock_client.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_el_benchmark_del_gate_es_el_mismo_que_recibe_el_calculo():
+    """Una sola resolución del benchmark, compartida por el gate y el score.
+
+    Si `compute_scores` recibiera `None`, volvería a caer al JSON del rubro por su
+    cuenta: serían dos resoluciones del mismo concepto, libres de divergir sin que
+    nada las compare.
+    """
+    from app.application.agents.health.agent import AgentHealth
+    from app.heuristics.verticals import BenchmarkProvenance, MarginBenchmark
+
+    override_del_tenant = MarginBenchmark(
+        critical_below=0.10,
+        warning_below=0.20,
+        healthy_min=0.20,
+        healthy_max=0.35,
+        provenance=BenchmarkProvenance.TENANT_OVERRIDE,
+    )
+
+    agent = AgentHealth(db=MagicMock())
+    agent.client = _mock_anthropic_client()
+
+    mock_state = MagicMock()
+    mock_state.confidence_level = "HIGH"
+    mock_state.data_completeness_score = 90.0
+    mock_state.vertical_code = Vertical.KIOSCO_ALMACEN.value
+
+    with (
+        patch("app.application.agents.health.agent.EventBus.emit"),
+        patch.object(
+            agent,
+            "_load_business_meta",
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN)),
+        ),
+        patch(
+            "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
+        ),
+        patch(
+            "app.application.agents.health.agent.get_margin_benchmark",
+            new=AsyncMock(return_value=override_del_tenant),
+        ),
+        patch(
+            "app.application.agents.health.agent.compute_scores",
+            return_value=_make_scores_v2(total=72, confidence_level="HIGH", completeness=90.0),
+        ) as mock_compute,
+    ):
+        await agent.process(_make_request(business_id=str(uuid.uuid4())))
+
+    assert mock_compute.call_args.kwargs["benchmark"] is override_del_tenant
+
+
+@pytest.mark.asyncio
+async def test_sin_override_el_calculo_recibe_el_benchmark_del_rubro():
+    """Contrapeso: sin override, la vara resuelta es la del JSON del rubro.
+
+    Nunca `None`. Pasar `None` volvería a delegar la resolución río abajo, que es
+    justamente la duplicación que los dos tests de arriba existen para cerrar.
+    """
+    from app.application.agents.health.agent import AgentHealth
+    from app.heuristics.verticals.loader import load_vertical_heuristics
+
+    agent = AgentHealth(db=MagicMock())
+    agent.client = _mock_anthropic_client()
+
+    mock_state = MagicMock()
+    mock_state.confidence_level = "HIGH"
+    mock_state.data_completeness_score = 90.0
+    mock_state.vertical_code = Vertical.KIOSCO_ALMACEN.value
+
+    with (
+        patch("app.application.agents.health.agent.EventBus.emit"),
+        patch.object(
+            agent,
+            "_load_business_meta",
+            new=AsyncMock(return_value=("Test", Vertical.KIOSCO_ALMACEN)),
+        ),
+        patch(
+            "app.application.agents.health.agent.collect", new=AsyncMock(return_value=mock_state)
+        ),
+        patch(
+            "app.application.agents.health.agent.get_margin_benchmark",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.application.agents.health.agent.compute_scores",
+            return_value=_make_scores_v2(total=72, confidence_level="HIGH", completeness=90.0),
+        ) as mock_compute,
+    ):
+        await agent.process(_make_request(business_id=str(uuid.uuid4())))
+
+    esperado = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
+    assert mock_compute.call_args.kwargs["benchmark"] == esperado
 
 
 @pytest.mark.asyncio

@@ -160,20 +160,32 @@ class AgentHealth(BaseAgent):
                 ),
             )
 
-        # ── 2. ValidationGate — datos insuficientes → empty state ────────────
+        # ── 2. Benchmark efectivo ────────────────────────────────────────────
+        # Se resuelve ANTES del gate y se reusa en el paso 3. El gate mide la
+        # confianza de la vara, así que tiene que mirar la MISMA vara que después
+        # puntúa: si el tenant declaró su objetivo de margen en /settings, esa es
+        # la vara, y no la del JSON del rubro. Calcularlo dos veces —una para
+        # gatear, otra para puntuar— las deja libres de divergir, y divergirían
+        # justo en el caso que este mecanismo existe para cubrir: un rubro sin
+        # fuente sectorial (`STATIC_PROVISIONAL`) en un tenant CON override.
+        #
+        # `vertical` ya viene parseado de `_load_business_meta`: re-parsear
+        # `state.vertical_code` sería hacer dos veces el mismo trabajo y agregar
+        # un segundo punto donde el rubro puede fallar de forma distinta.
+        try:
+            tenant_benchmark = await get_margin_benchmark(uuid.UUID(request.business_id), self._db)
+        except Exception:
+            tenant_benchmark = None  # fallback a benchmark por vertical
+        benchmark = tenant_benchmark or load_vertical_heuristics(vertical).margin
+
+        # ── 2b. ValidationGate — datos insuficientes → empty state ───────────
         # Se gatea con la confianza EFECTIVA, no solo con la de los datos: medir
         # un negocio contra una vara sin fundamento tampoco es un diagnóstico
         # confiable. Hoy ninguna procedencia alcanzable llega a LOW, así que este
         # gate no cambia de comportamiento — pero si el data-driven vuelve, vuelve
         # ya cubierto en vez de dejar el agujero abierto para que lo encuentre un
         # usuario.
-        # `vertical` ya viene parseado de `_load_business_meta`: re-parsear
-        # `state.vertical_code` sería hacer dos veces el mismo trabajo y agregar
-        # un segundo punto donde el rubro puede fallar de forma distinta.
-        confianza_efectiva = weakest_confidence(
-            state.confidence_level,
-            load_vertical_heuristics(vertical).margin.confidence,
-        )
+        confianza_efectiva = weakest_confidence(state.confidence_level, benchmark.confidence)
         if confianza_efectiva == "LOW" or state.data_completeness_score < 50:
             return AgentResponse(
                 request_id=request.request_id,
@@ -192,11 +204,10 @@ class AgentHealth(BaseAgent):
             )
 
         # ── 3. Calcular scores v2 (determinístico, sin LLM) ──────────────────
-        try:
-            tenant_benchmark = await get_margin_benchmark(uuid.UUID(request.business_id), self._db)
-        except (ValueError, Exception):
-            tenant_benchmark = None  # fallback a benchmark por vertical
-        scores: ComponentScoresV2 = compute_scores(state, benchmark=tenant_benchmark)
+        # Se pasa el benchmark ya resuelto en el paso 2, no `None`: dejar que
+        # `calculate_health_score` vuelva a caer al JSON del vertical sería la
+        # segunda resolución que el paso 2 existe para evitar.
+        scores: ComponentScoresV2 = compute_scores(state, benchmark=benchmark)
 
         # ── 4. Generar narrativa con LLM ─────────────────────────────────────
         narrative, narrator_call = await generate(scores, business_name, self.client)

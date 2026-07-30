@@ -97,7 +97,8 @@ def _config_from_json(data: dict[str, Any]) -> VerticalHeuristicConfig:
 def load_vertical_heuristics(vertical: Vertical) -> VerticalHeuristicConfig:
     """Configuración completa del vertical desde su JSON canónico.
 
-    Los tres archivos son inmutables en runtime, por eso se cachean. Un JSON
+    Los archivos son inmutables en runtime, por eso se cachean (uno por rubro).
+    Un JSON
     faltante (``FileNotFoundError``), inválido (``json.JSONDecodeError``) o
     incompleto (``KeyError``) propaga: es un bug de deploy, no un caso a tapar.
     """

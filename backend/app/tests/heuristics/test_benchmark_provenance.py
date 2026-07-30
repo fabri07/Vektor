@@ -224,3 +224,29 @@ def test_el_minimo_de_proveedores_no_cambia_el_score_de_los_rubros_existentes(
     )
 
     assert _score_supplier(cantidad, config) == esperado
+
+
+@pytest.mark.parametrize("vertical", list(Vertical))
+def test_el_rango_sano_del_rubro_esta_escrito_una_sola_vez(vertical: Vertical) -> None:
+    """`margin.net_expected_*` y `margin.healthy_*` dicen lo mismo, en cada rubro.
+
+    Son la MISMA decisión de negocio escrita dos veces en el mismo JSON, y las lee
+    gente distinta: `healthy_min`/`healthy_max` alimentan al health engine, y
+    `net_expected_min`/`net_expected_max` van al system prompt de los agentes vía
+    `HeuristicEngine`. Nada en runtime las compara, así que recalibrar un rubro y
+    tocar solo el par que uno tiene en la cabeza deja a los agentes afirmando un
+    rango que el score ya no usa — exactamente el bug que tenía la tabla
+    `_MARGIN_RANGES` de `insight_templates`, que se eliminó por esto.
+
+    El arreglo estructural es unificar las claves; mientras tanto, esto lo frena.
+    """
+    margin = json.loads((_HEURISTICS_DIR / f"{vertical.value}.json").read_text())["margin"]
+
+    assert (margin["net_expected_min"], margin["net_expected_max"]) == (
+        margin["healthy_min"],
+        margin["healthy_max"],
+    ), (
+        f"{vertical.value}: el rango que ven los agentes "
+        f"({margin['net_expected_min']}–{margin['net_expected_max']}) no es el que usa "
+        f"el score ({margin['healthy_min']}–{margin['healthy_max']})"
+    )

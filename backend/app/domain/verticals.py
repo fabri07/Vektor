@@ -5,7 +5,7 @@ vertical_code` guarda el código corto `"kiosco"` mientras que los archivos de
 datos (heurísticas, campos de vertical, categorías de producto) usan el código
 largo `"kiosco_almacen"`. Este módulo se queda con el código LARGO como único
 valor canónico persistible (`Vertical`) y **no aliasea nada**: `parse_vertical`
-falla ruidosamente ante cualquier código que no sea exactamente uno de los tres
+falla ruidosamente ante cualquier código que no sea exactamente uno de los
 valores canónicos, incluido el código corto legado. Una migración de datos
 posterior (fuera de este módulo) reescribe los registros viejos.
 
@@ -86,7 +86,7 @@ def parse_vertical(raw: str | None) -> Vertical:
 
     No aliasea nada: ni el código corto legado (`"kiosco"`), ni `"otros"`, ni
     variantes de mayúsculas/minúsculas o con espacios. Solo el valor exacto en
-    minúsculas de uno de los tres verticales operativos es válido. Levanta
+    minúsculas de un vertical operativo es válido. Levanta
     `UnknownVerticalError` para cualquier otro caso, incluido `None`.
     """
     if raw is not None:

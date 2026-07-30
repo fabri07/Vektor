@@ -10,8 +10,8 @@ decisiones de producto que un bug de aplicación no debe poder violar.
 
 1. **``otros`` es inescribible como vertical operativo.** El solicitante puede
    declarar ``requested_vertical='otros'`` (obligado a explicar en
-   ``vertical_other_text``), pero ``assigned_vertical_code`` solo acepta los tres
-   verticales reales, y una solicitud aprobada no puede quedarse sin él.
+   ``vertical_other_text``), pero ``assigned_vertical_code`` solo acepta los
+   verticales operativos reales, y una solicitud aprobada no puede quedarse sin él.
 2. **``requested_plan`` es intención, no suscripción.** Se conserva para ordenar
    la cola de revisión y medir demanda; la suscripción creada al aprobar es
    siempre ``FREE``.

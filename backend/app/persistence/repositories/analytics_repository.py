@@ -13,19 +13,17 @@ from app.persistence.models.analytics_event import AnalyticsEvent
 _MIN_EVENTS = 5
 _LOOKBACK_DAYS = 90
 
-#: Fecha desde la que los eventos son estadísticamente usables. Antes de este
-#: corte, ``record_score_event`` escribía ``margin_ratio = 0.0`` (en vez de NULL)
-#: para todo negocio sin ventas, y esos ceros fabricados entraban a los
-#: percentiles como si fueran observaciones reales. No hay forma de distinguir un
-#: cero fabricado de uno genuino en las filas viejas, así que se descartan enteras.
+#: Versión mínima del contrato de escritura para que un evento sea
+#: estadísticamente usable. Las filas v1 guardan ``margin_ratio = 0.0`` para todo
+#: negocio sin ventas, y ese cero fabricado es indistinguible de un cero genuino
+#: una vez en la tabla: se descartan enteras.
 #:
-#: **Tiene que ser >= la fecha real del deploy.** Los eventos escritos entre el
-#: commit del fix y su llegada a producción siguen saliendo del código viejo: un
-#: corte anterior al deploy los deja pasar como confiables. Por eso se elige un
-#: borde holgado hacia adelante en vez de la fecha del commit — que el corte
-#: descarte de más es inofensivo (se pierde observación), que descarte de menos
-#: reintroduce en silencio el problema que este corte existe para tapar.
-_TRUSTED_EVENTS_SINCE = datetime(2026, 9, 1, tzinfo=UTC)
+#: Es una constante SEPARADA de ``EVENT_SCHEMA_VERSION`` aunque hoy valgan lo
+#: mismo. Lo que se escribe y lo que se considera confiable son dos preguntas
+#: distintas: un v3 futuro que agregue un campo no invalida a los v2, y atarlas a
+#: la misma constante haría que ese bump descartara en silencio dos años de
+#: observación válida.
+_MIN_TRUSTED_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -68,10 +66,7 @@ class AnalyticsRepository:
         scoring hasta que se pueda contar negocios distintos — ver el docstring de
         ``ObservedMarginDistribution``.
         """
-        cutoff = max(
-            datetime.now(UTC) - timedelta(days=lookback_days),
-            _TRUSTED_EVENTS_SINCE,
-        )
+        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
 
         count_q = (
             select(func.count())
@@ -79,6 +74,7 @@ class AnalyticsRepository:
             .where(
                 AnalyticsEvent.vertical_code == vertical_code,
                 AnalyticsEvent.created_at >= cutoff,
+                AnalyticsEvent.schema_version >= _MIN_TRUSTED_SCHEMA_VERSION,
                 AnalyticsEvent.margin_ratio.is_not(None),
             )
         )
@@ -94,6 +90,7 @@ class AnalyticsRepository:
         ).where(
             AnalyticsEvent.vertical_code == vertical_code,
             AnalyticsEvent.created_at >= cutoff,
+            AnalyticsEvent.schema_version >= _MIN_TRUSTED_SCHEMA_VERSION,
             AnalyticsEvent.margin_ratio.is_not(None),
         )
         row = (await self._session.execute(q)).one_or_none()
@@ -118,10 +115,7 @@ class AnalyticsRepository:
         ``observed_margin_distribution`` para que la vista no mezcle eventos
         pre-fix (con ceros fabricados) con los posteriores.
         """
-        cutoff = max(
-            datetime.now(UTC) - timedelta(days=lookback_days),
-            _TRUSTED_EVENTS_SINCE,
-        )
+        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
 
         count_q = (
             select(func.count())
@@ -129,6 +123,7 @@ class AnalyticsRepository:
             .where(
                 AnalyticsEvent.vertical_code == vertical_code,
                 AnalyticsEvent.created_at >= cutoff,
+                AnalyticsEvent.schema_version >= _MIN_TRUSTED_SCHEMA_VERSION,
             )
         )
         count = (await self._session.scalar(count_q)) or 0
@@ -145,6 +140,7 @@ class AnalyticsRepository:
         ).where(
             AnalyticsEvent.vertical_code == vertical_code,
             AnalyticsEvent.created_at >= cutoff,
+            AnalyticsEvent.schema_version >= _MIN_TRUSTED_SCHEMA_VERSION,
         )
         row = (await self._session.execute(q)).one_or_none()
         if row is None:
@@ -169,14 +165,14 @@ class AnalyticsRepository:
         parece un rubro sin actividad cuando en realidad es un rubro cuya
         actividad se descartó.
         """
-        cutoff = max(
-            datetime.now(UTC) - timedelta(days=lookback_days),
-            _TRUSTED_EVENTS_SINCE,
-        )
+        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
         q = (
             select(AnalyticsEvent.vertical_code)
             .distinct()
-            .where(AnalyticsEvent.created_at >= cutoff)
+            .where(
+                AnalyticsEvent.created_at >= cutoff,
+                AnalyticsEvent.schema_version >= _MIN_TRUSTED_SCHEMA_VERSION,
+            )
         )
         rows = (await self._session.execute(q)).scalars().all()
         return sorted(rows)
