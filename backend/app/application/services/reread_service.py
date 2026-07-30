@@ -793,7 +793,13 @@ async def _reconcile(
         source="reread",
         uploaded_file_id=file_id,
         stock_treatment=_stored_treatment,
-        return_details=True,
+        # Revisión final F9b (Hallazgo 2): en preview (dry_run=True) el detalle
+        # nunca se consume (ver el bloque `if not dry_run` de abajo) — pedirlo
+        # igual dispara N `session.get`/`refresh` en
+        # `_stamp_updated_at_on_product_details` por cada producto tocado, solo
+        # para descartar el resultado. Pedirlo condicionado a `not dry_run`
+        # evita ese costo en el path síncrono de preview.
+        return_details=not dry_run,
     )
     await session.flush()
 
@@ -1837,15 +1843,16 @@ def _coerce_master_restore_value(field: str, value: Any) -> Any:
     Los nombres de campo no colisionan entre kinds con tipos distintos:
     ``birthday`` (Customer) y ``expiry_date`` (Product) son ``Date``;
     ``acquired_at`` (Product) es ``DateTime`` — con hora, ``date.fromisoformat``
-    no lo parsea; ``credit_limit`` (Customer) y ``sale_price_ars`` (Product) son
-    ``Decimal``. El resto de los campos (strings) se devuelve tal cual."""
+    no lo parsea; ``credit_limit``, ``sale_price_ars`` y ``unit_cost_ars``
+    (Product) son ``Decimal``. El resto de los campos (strings) se devuelve tal
+    cual."""
     if value is None:
         return None
     if field in ("birthday", "expiry_date"):
         return date.fromisoformat(value)
     if field == "acquired_at":
         return datetime.fromisoformat(value)
-    if field in ("credit_limit", "sale_price_ars"):
+    if field in ("credit_limit", "sale_price_ars", "unit_cost_ars"):
         return Decimal(value)
     return value
 
@@ -1867,10 +1874,15 @@ async def _undo_master_and_product_items(
     (mismo patrón que ``product_dedup_service``) — NUNCA hard delete, rompería
     el ``ON DELETE SET NULL`` de ventas/gastos que ya referencian ese producto.
 
-    ``stock_units``/``unit_cost_ars`` de producto NUNCA se tocan acá — su
-    reversa es EXCLUSIVAMENTE el mecanismo incremental de movimientos de
-    inventario (Paso 4 de ``undo_reread``, ``void_movement``/
-    ``unvoid_movement``), nunca un ``setattr`` desde este snapshot.
+    ``stock_units`` de producto NUNCA se toca acá — su reversa es
+    EXCLUSIVAMENTE el mecanismo incremental de movimientos de inventario (Paso
+    4 de ``undo_reread``, ``void_movement``/``unvoid_movement``), nunca un
+    ``setattr`` desde este snapshot. ``unit_cost_ars`` es la excepción: a
+    diferencia de ``stock_units``, el mecanismo de movimientos NUNCA lo ajusta
+    (``void_movement``/``unvoid_movement`` solo tocan stock/``current_qty``),
+    así que SÍ se restaura acá por ``setattr`` como cualquier otro campo
+    mutable no-stock (revisión final F9b, Hallazgo 1) — si no, el undo dejaría
+    el costo unitario permanentemente en lo que dijo el archivo releído.
 
     Productos: a diferencia de maestros (Task 5 ya dedupea a lo sumo un item
     por entidad por run), Task 6 NO dedupea — dos filas del mismo archivo que
@@ -1899,8 +1911,17 @@ async def _undo_master_and_product_items(
     _restore_fields: dict[str, tuple[str, ...]] = {
         "customer": _MASTER_SNAPSHOT_FIELDS["customer"],
         "supplier": _MASTER_SNAPSHOT_FIELDS["supplier"],
-        # Nunca stock_units/unit_cost_ars — ver docstring.
-        "product": ("sale_price_ars", "sku", "barcode", "category", "acquired_at", "expiry_date"),
+        # Nunca stock_units (ver docstring) — unit_cost_ars SÍ se restaura acá
+        # (revisión final F9b, Hallazgo 1): el mecanismo de movimientos no lo cubre.
+        "product": (
+            "sale_price_ars",
+            "unit_cost_ars",
+            "sku",
+            "barcode",
+            "category",
+            "acquired_at",
+            "expiry_date",
+        ),
     }
 
     # Maestros: Task 5 ya dedupea (a lo sumo 1 item por entidad por run).

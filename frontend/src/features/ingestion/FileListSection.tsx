@@ -322,8 +322,14 @@ export function FileListSection() {
       // limpiar cualquier aviso viejo de un undo anterior — si no, un banner
       // de un archivo/entidad distinto queda pegado en pantalla mal atribuido
       // a esta acción recién hecha.
-      if (res.not_reverted_entities.length > 0) {
-        setNotRevertedNotice({ filename, entities: res.not_reverted_entities });
+      // Revisión final F9b (Hallazgo 3): Railway/Vercel despliegan
+      // independiente — si el frontend nuevo llega antes que el backend
+      // nuevo, la respuesta puede no traer este campo todavía. `?? []`
+      // evita un TypeError que rompería el toast de éxito y la
+      // invalidación de queries aunque el backend sí revirtió bien.
+      const notRevertedEntities = res.not_reverted_entities ?? [];
+      if (notRevertedEntities.length > 0) {
+        setNotRevertedNotice({ filename, entities: notRevertedEntities });
       } else {
         setNotRevertedNotice(null);
       }

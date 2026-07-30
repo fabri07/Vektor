@@ -3498,6 +3498,16 @@ async def _insert_confirmed_data_impl(
                         # refresh post-flush más abajo en esta función).
                         before_snap = {
                             "sale_price_ars": str(existing.sale_price_ars),
+                            # Revisión final F9b (Hallazgo 1): `unit_cost_ars` NO está
+                            # cubierto por el mecanismo incremental de movimientos
+                            # (ese solo ajusta stock_units/current_qty) — a diferencia
+                            # de stock_units, si no se snapshotea acá el undo lo deja
+                            # permanentemente en lo que decía el archivo releído.
+                            "unit_cost_ars": (
+                                str(existing.unit_cost_ars)
+                                if existing.unit_cost_ars is not None
+                                else None
+                            ),
                             "stock_units": existing.stock_units,
                             "sku": existing.sku,
                             "barcode": existing.barcode,
@@ -3569,6 +3579,11 @@ async def _insert_confirmed_data_impl(
                                 "before": before_snap,
                                 "after": {
                                     "sale_price_ars": str(price or existing.sale_price_ars),
+                                    "unit_cost_ars": (
+                                        str(cost or existing.unit_cost_ars)
+                                        if (cost or existing.unit_cost_ars) is not None
+                                        else None
+                                    ),
                                     "stock_units": stock_val or existing.stock_units,
                                     "sku": existing.sku,
                                     "barcode": existing.barcode,
@@ -3748,6 +3763,11 @@ async def _insert_confirmed_data_impl(
                                 "before": None,
                                 "after": {
                                     "sale_price_ars": str(price or Decimal("0")),
+                                    "unit_cost_ars": (
+                                        str(new_product.unit_cost_ars)
+                                        if new_product.unit_cost_ars is not None
+                                        else None
+                                    ),
                                     "stock_units": stock_val,
                                     "sku": new_product.sku,
                                     "barcode": new_product.barcode,
@@ -4476,6 +4496,15 @@ async def _insert_multisheet_data(
                 # siquiera con precio/stock; camino "mixed"/multi-hoja, F8+).
                 before_snap = {
                     "sale_price_ars": str(existing.sale_price_ars),
+                    # Revisión final F9b (Hallazgo 1): ver el comentario análogo en
+                    # ``_insert_confirmed_data_impl`` — el mecanismo incremental de
+                    # movimientos NUNCA cubre `unit_cost_ars` (solo stock_units), así
+                    # que necesita snapshot propio para que el undo lo pueda restaurar.
+                    "unit_cost_ars": (
+                        str(existing.unit_cost_ars)
+                        if existing.unit_cost_ars is not None
+                        else None
+                    ),
                     "stock_units": existing.stock_units,
                     "sku": existing.sku,
                     "barcode": existing.barcode,
@@ -4540,6 +4569,11 @@ async def _insert_multisheet_data(
                         "before": before_snap,
                         "after": {
                             "sale_price_ars": str(price or existing.sale_price_ars),
+                            "unit_cost_ars": (
+                                str(cost or existing.unit_cost_ars)
+                                if (cost or existing.unit_cost_ars) is not None
+                                else None
+                            ),
                             "stock_units": stock_val or existing.stock_units,
                             "sku": existing.sku,
                             "barcode": existing.barcode,
@@ -4693,6 +4727,11 @@ async def _insert_multisheet_data(
                         "before": None,
                         "after": {
                             "sale_price_ars": str(price or Decimal("0")),
+                            "unit_cost_ars": (
+                                str(new_product.unit_cost_ars)
+                                if new_product.unit_cost_ars is not None
+                                else None
+                            ),
                             "stock_units": stock_val,
                             "sku": new_product.sku,
                             "barcode": new_product.barcode,

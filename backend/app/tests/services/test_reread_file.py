@@ -1786,7 +1786,13 @@ async def test_undo_reread_restaura_producto_no_tocado_y_saltea_editado(
     temprano con ``delta == 0``) A PROPÓSITO: así ningún ``InventoryMovement``
     se crea y el Paso 4 preexistente del undo (reversa incremental de stock)
     no interfiere con las aserciones — aislando la aserción central: Task 7
-    NUNCA restaura ``stock_units`` por ``setattr``, sea cual sea la rama."""
+    NUNCA restaura ``stock_units`` por ``setattr``, sea cual sea la rama.
+
+    Revisión final F9b (Hallazgo 1): a diferencia de ``stock_units``,
+    ``unit_cost_ars`` SÍ debe restaurarse por ``setattr`` — el mecanismo
+    incremental de movimientos (``void_movement``/``unvoid_movement``) nunca
+    lo toca, así que si no se restaura acá el undo lo deja permanentemente en
+    lo que dijo el archivo releído."""
     producto_a = Product(
         tenant_id=tenant.tenant_id,
         name="Coca 500ml",
@@ -1843,6 +1849,12 @@ async def test_undo_reread_restaura_producto_no_tocado_y_saltea_editado(
         await db_session.execute(select(Product).where(Product.sku == "SPR500"))
     ).scalar_one()
 
+    # La relectura SÍ pisó unit_cost_ars (270, la fila "costo" del fresh) —
+    # confirma que hay algo real que restaurar más abajo, no una aserción
+    # trivial sobre un valor que nunca cambió.
+    await db_session.refresh(producto_c)
+    assert producto_c.unit_cost_ars == Decimal("270")
+
     # Alguien edita producto_a a mano después de la relectura (mismo motivo del
     # bump explícito que en el test de maestros).
     await db_session.refresh(producto_a)
@@ -1864,6 +1876,9 @@ async def test_undo_reread_restaura_producto_no_tocado_y_saltea_editado(
 
     await db_session.refresh(producto_c)
     assert producto_c.sale_price_ars == Decimal("400")  # restaurado al pre-relectura
+    # Hallazgo 1: unit_cost_ars SÍ se restaura (a diferencia de stock_units) —
+    # la relectura lo había pisado a 270 (fila "costo": "270" del fresh).
+    assert producto_c.unit_cost_ars == Decimal("250")  # restaurado al pre-relectura
     assert producto_c.sku == "FAN500"
     assert producto_c.stock_units == 8  # nunca tocado
     assert producto_c.deactivated_at is None
