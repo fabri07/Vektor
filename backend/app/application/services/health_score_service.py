@@ -251,6 +251,8 @@ class HealthScoreService:
             heuristic_version=HEURISTIC_VERSION,
             primary_risk_code=result.primary_risk_code,
             confidence_level=result.confidence_level,
+            benchmark_provenance=result.benchmark_provenance.value,
+            benchmark_confidence=result.benchmark_confidence,
             data_completeness_score=Decimal(str(result.data_completeness_score)),
             score_inputs_json=_state_to_dict(state),
         )

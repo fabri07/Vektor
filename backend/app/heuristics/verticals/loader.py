@@ -16,6 +16,8 @@ from typing import Any
 
 from app.domain.verticals import Vertical, parse_vertical
 from app.heuristics.verticals import (
+    BenchmarkProvenance,
+    BenchmarkSource,
     CashHealthBenchmark,
     InventoryBenchmark,
     MarginBenchmark,
@@ -28,13 +30,36 @@ _HEURISTICS_DIR = (
 )
 
 
+def _source_from_json(raw: dict[str, Any] | None) -> BenchmarkSource | None:
+    """`benchmark_source` del JSON, o None si el vertical no la declara.
+
+    La clave es OBLIGATORIA (con valor `null` si no hay fuente): así agregar un
+    rubro obliga a pronunciarse sobre su procedencia en vez de omitirla sin
+    querer y quedar marcado como sourced por descuido.
+    """
+    if raw is None:
+        return None
+    return BenchmarkSource(
+        institucion=str(raw["institucion"]),
+        referencia=str(raw["referencia"]),
+        revisado_en=str(raw["revisado_en"]),
+    )
+
+
 def _config_from_json(data: dict[str, Any]) -> VerticalHeuristicConfig:
     margin = data["margin"]
     cash = data["cash_health"]
     inventory = data["inventory"]
     supplier = data["supplier"]
+    source = _source_from_json(data["benchmark_source"])
+    provenance = (
+        BenchmarkProvenance.STATIC_SOURCED
+        if source is not None
+        else BenchmarkProvenance.STATIC_PROVISIONAL
+    )
     return VerticalHeuristicConfig(
         business_type=parse_vertical(data["business_type"]),
+        benchmark_source=source,
         cash_health=CashHealthBenchmark(
             healthy_days_min=float(cash["healthy_days_min"]),
             warning_days_min=float(cash["warning_days_min"]),
@@ -45,6 +70,7 @@ def _config_from_json(data: dict[str, Any]) -> VerticalHeuristicConfig:
             warning_below=float(margin["warning_below"]),
             healthy_min=float(margin["healthy_min"]),
             healthy_max=float(margin["healthy_max"]),
+            provenance=provenance,
         ),
         inventory=InventoryBenchmark(
             rotation_days_min=float(inventory["rotation_days_min"]),

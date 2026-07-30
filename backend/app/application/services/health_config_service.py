@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.heuristics.verticals import MarginBenchmark
+from app.heuristics.verticals import BenchmarkProvenance, MarginBenchmark
 from app.observability.logger import get_logger
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 
@@ -53,7 +53,12 @@ class HealthConfigResponse(BaseModel):
 
 
 def _benchmark_from_pcts(target_pct: float, warning_pct: float) -> MarginBenchmark:
-    """Convierte porcentajes de tenant (ej. 35.0) a la escala decimal del motor (0.35)."""
+    """Convierte porcentajes de tenant (ej. 35.0) a la escala decimal del motor (0.35).
+
+    Procedencia `TENANT_OVERRIDE`: el número lo puso el dueño del negocio, así
+    que es el objetivo que él declara y no una estimación nuestra. Por eso aporta
+    confianza alta aunque no tenga respaldo sectorial.
+    """
     warning = warning_pct / 100.0
     target = target_pct / 100.0
     return MarginBenchmark(
@@ -61,6 +66,7 @@ def _benchmark_from_pcts(target_pct: float, warning_pct: float) -> MarginBenchma
         warning_below=warning,
         healthy_min=warning,  # diseño canónico: warning_below == healthy_min
         healthy_max=target,
+        provenance=BenchmarkProvenance.TENANT_OVERRIDE,
     )
 
 

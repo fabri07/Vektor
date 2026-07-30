@@ -34,11 +34,16 @@ _VERTICAL_FIELDS_DIR = (
     _BACKEND_ROOT / "app" / "application" / "data" / "vertical_fields"
 )
 
-# Cantidad de claves-hoja que debe tener cada JSON de heurísticas: business_type
-# (1) + cash_health (3) + margin (6) + inventory (3) + supplier (2) +
-# seasonality (1) = 16. Un JSON al que le falte una clave-hoja pasaba
-# desapercibido antes de este test.
+# Cantidad de claves-hoja de CONFIGURACIÓN NUMÉRICA que debe tener cada JSON de
+# heurísticas: business_type (1) + cash_health (3) + margin (6) + inventory (3) +
+# supplier (2) + seasonality (1) = 16. Un JSON al que le falte una clave-hoja
+# pasaba desapercibido antes de este test.
+#
+# `benchmark_source` se cuenta aparte porque es metadato de procedencia y su
+# valor legítimo puede ser `null` (rubro sin fuente sectorial documentada).
 _HEURISTICS_LEAF_KEYS = 16
+_SOURCE_KEY = "benchmark_source"
+_SOURCE_FIELDS = frozenset({"institucion", "referencia", "revisado_en"})
 
 
 def _count_leaves(data: object) -> int:
@@ -57,11 +62,37 @@ class TestCatalogoCompleto:
         path = _HEURISTICS_DIR / f"{vertical.value}.json"
         assert path.exists(), f"Falta el archivo de heurísticas: {path}"
         data = json.loads(path.read_text(encoding="utf-8"))
-        leaves = _count_leaves(data)
+        config = {k: v for k, v in data.items() if k != _SOURCE_KEY}
+        leaves = _count_leaves(config)
         assert leaves == _HEURISTICS_LEAF_KEYS, (
             f"{vertical.value}: se esperaban {_HEURISTICS_LEAF_KEYS} "
             f"claves-hoja en {path.name}, se encontraron {leaves}"
         )
+
+    @pytest.mark.parametrize("vertical", list(Vertical))
+    def test_declara_la_procedencia_de_sus_umbrales(self, vertical: Vertical) -> None:
+        """`benchmark_source` es obligatoria, aunque su valor sea `null`.
+
+        Que la clave sea obligatoria es el punto: agregar un rubro obliga a
+        pronunciarse sobre de dónde salieron sus números. Si fuera opcional, el
+        olvido se leería igual que "sin fuente" y nadie lo notaría — salvo que el
+        `.get()` implícito lo tratara como sourced, que es peor.
+        """
+        path = _HEURISTICS_DIR / f"{vertical.value}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert _SOURCE_KEY in data, (
+            f"{vertical.value}: falta la clave `{_SOURCE_KEY}` en {path.name} "
+            "(usá `null` si el rubro todavía no tiene fuente sectorial)"
+        )
+        source = data[_SOURCE_KEY]
+        if source is not None:
+            assert set(source) == _SOURCE_FIELDS, (
+                f"{vertical.value}: `{_SOURCE_KEY}` debe tener exactamente "
+                f"{sorted(_SOURCE_FIELDS)}, tiene {sorted(source)}"
+            )
+            assert all(str(v).strip() for v in source.values()), (
+                f"{vertical.value}: `{_SOURCE_KEY}` con campos vacíos no es una fuente"
+            )
 
     @pytest.mark.parametrize("vertical", list(Vertical))
     def test_tiene_definiciones_de_campos_de_vertical(

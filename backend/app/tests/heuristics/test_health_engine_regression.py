@@ -139,7 +139,10 @@ class TestFormulaV2Regression:
 class TestMarginBenchmarkOverride:
     def test_custom_benchmark_affects_margin_score(self) -> None:
         """Pasar un MarginBenchmark custom cambia el score de margen."""
-        from app.heuristics.verticals import MarginBenchmark  # noqa: PLC0415
+        from app.heuristics.verticals import (  # noqa: PLC0415
+            BenchmarkProvenance,
+            MarginBenchmark,
+        )
 
         state = _state(
             monthly_sales_est=Decimal("100000"),
@@ -154,6 +157,7 @@ class TestMarginBenchmarkOverride:
             warning_below=0.10,
             healthy_min=0.10,
             healthy_max=0.40,
+            provenance=BenchmarkProvenance.TENANT_OVERRIDE,
         )
         # Benchmark relajado: target = 15% → margen 20% queda en zona healthy/excellent
         relaxed_benchmark = MarginBenchmark(
@@ -161,6 +165,7 @@ class TestMarginBenchmarkOverride:
             warning_below=0.08,
             healthy_min=0.08,
             healthy_max=0.15,
+            provenance=BenchmarkProvenance.TENANT_OVERRIDE,
         )
 
         strict_result = calculate_health_score(state, benchmark=strict_benchmark)
