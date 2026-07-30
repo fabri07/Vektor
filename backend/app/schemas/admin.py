@@ -29,18 +29,34 @@ class BenchmarkThresholds(BaseModel):
     warning_below: float
     healthy_min: float
     healthy_max: float
-    source: str  # "data_driven" | "static"
+    source: str  # "static" — el data-driven ya no puntúa
+
+
+class ObservedMarginDistributionOut(BaseModel):
+    """Distribución observada del margen. **Observación, no benchmark.**
+
+    `event_count` son eventos de recálculo, NO negocios distintos:
+    `analytics_events` no guarda identificador de negocio.
+    """
+
+    p10: float
+    p25: float
+    p50: float
+    p75: float
+    event_count: int
 
 
 class VerticalBenchmarkItem(BaseModel):
     vertical_code: str
-    sample_count: int
+    #: Eventos de recálculo en la ventana, NO negocios distintos.
+    event_count: int
     avg_score: float | None
     avg_margin_ratio: float | None
     p50_margin_ratio: float | None
     avg_data_completeness: float | None
     benchmark_source: str
     benchmark: BenchmarkThresholds
+    observed_distribution: ObservedMarginDistributionOut | None = None
 
 
 class AnalyticsBenchmarksResponse(BaseModel):

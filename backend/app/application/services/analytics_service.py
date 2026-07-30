@@ -1,9 +1,14 @@
-"""AnalyticsService — registro de eventos y cómputo de benchmarks cross-tenant.
+"""AnalyticsService — registro de eventos y observación cross-tenant.
 
 Capa de orquestación sobre AnalyticsRepository. Expone:
 - record_score_event(): inserta evento anonimizado tras cada recálculo de health score
-- get_data_driven_benchmark(): devuelve MarginBenchmark estadístico si hay suficientes datos
-- get_benchmarks_overview(): vista completa para la API interna de Véktor
+- get_benchmarks_overview(): vista de administración (benchmark vigente + observación)
+
+**El camino data-driven ya no puntúa.** La distribución observada del margen se
+calcula y se muestra, pero no reemplaza al benchmark del vertical: la muestra
+cuenta eventos y no negocios, así que un solo negocio recalculado cinco veces
+alcanzaba el mínimo y desplazaba el benchmark de todo el rubro. Vuelve a ser
+fuente de scoring cuando se pueda contar negocios distintos.
 """
 
 from __future__ import annotations
@@ -13,7 +18,6 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.verticals import try_parse_vertical
-from app.heuristics.verticals import MarginBenchmark
 from app.heuristics.verticals.loader import load_margin_benchmark
 from app.observability.logger import get_logger
 from app.persistence.models.analytics_event import AnalyticsEvent
@@ -36,8 +40,8 @@ class AnalyticsService:
         score_margin: int,
         score_stock: int,
         score_supplier: int,
-        margin_ratio: float,
-        cash_ratio: float,
+        margin_ratio: float | None,
+        cash_ratio: float | None,
         supplier_count: int,
         product_count: int,
         low_stock_pct: float,
@@ -47,6 +51,11 @@ class AnalyticsService:
 
         Usa begin_nested() (SAVEPOINT) para que un fallo aquí no contamine
         la transacción principal del health score.
+
+        ``margin_ratio`` y ``cash_ratio`` son ``None`` cuando no se pueden
+        calcular, y NO 0.0: un negocio sin ventas no tiene margen 0%, no tiene
+        margen. Escribir el cero convertía cada negocio vacío en una observación
+        válida que arrastraba los percentiles del rubro hacia abajo.
         """
         try:
             async with self._session.begin_nested():
@@ -69,14 +78,13 @@ class AnalyticsService:
         except Exception:
             logger.warning("analytics.record_event_failed", exc_info=True)
 
-    async def get_data_driven_benchmark(self, vertical_code: str) -> MarginBenchmark | None:
-        """Devuelve benchmark estadístico si hay >= 5 muestras. None = usar estático."""
-        return await self._repo.compute_margin_benchmark(vertical_code)
-
     async def get_benchmarks_overview(self) -> list[dict[str, object]]:
-        """Resumen de benchmarks para todos los verticales con datos.
+        """Resumen por vertical para ``GET /admin/analytics/benchmarks``.
 
-        Usado por GET /admin/analytics/benchmarks.
+        El benchmark **vigente** es siempre el estático del vertical (o el override
+        del tenant, que es por-tenant y no aparece acá). La distribución observada
+        se muestra al lado, como observación, y NO reemplaza a nada: ver
+        ``ObservedMarginDistribution``.
         """
         vertical_codes = await self._repo.get_distinct_verticals()
         result: list[dict[str, object]] = []
@@ -89,26 +97,38 @@ class AnalyticsService:
                 # otro rubro — se omite de la vista y queda registrado.
                 logger.warning("analytics.benchmarks.unknown_vertical", vertical_code=code)
                 continue
-            data_bm = await self._repo.compute_margin_benchmark(code)
             static_bm = load_margin_benchmark(vertical)
+            observed = await self._repo.observed_margin_distribution(code)
             stats = await self._repo.get_vertical_stats(code)
-            active_bm = data_bm if data_bm is not None else static_bm
 
             result.append(
                 {
                     "vertical_code": code,
-                    "sample_count": stats.get("sample_count", 0),
+                    # EVENTOS de recálculo, no negocios distintos: la tabla no
+                    # guarda identificador de negocio (ver ObservedMarginDistribution).
+                    "event_count": stats.get("event_count", 0),
                     "avg_score": stats.get("avg_score"),
                     "avg_margin_ratio": stats.get("avg_margin"),
                     "p50_margin_ratio": stats.get("p50_margin"),
                     "avg_data_completeness": stats.get("avg_completeness"),
-                    "benchmark_source": "data_driven" if data_bm is not None else "static",
+                    "benchmark_source": "static",
                     "benchmark": {
-                        "critical_below": active_bm.critical_below,
-                        "warning_below": active_bm.warning_below,
-                        "healthy_min": active_bm.healthy_min,
-                        "healthy_max": active_bm.healthy_max,
+                        "critical_below": static_bm.critical_below,
+                        "warning_below": static_bm.warning_below,
+                        "healthy_min": static_bm.healthy_min,
+                        "healthy_max": static_bm.healthy_max,
                     },
+                    "observed_distribution": (
+                        {
+                            "p10": observed.p10,
+                            "p25": observed.p25,
+                            "p50": observed.p50,
+                            "p75": observed.p75,
+                            "event_count": observed.event_count,
+                        }
+                        if observed is not None
+                        else None
+                    ),
                 }
             )
 
