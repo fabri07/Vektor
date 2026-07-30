@@ -44,6 +44,7 @@ from app.persistence.models.file import (
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem
+from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
@@ -1697,6 +1698,83 @@ async def test_undo_reread_restaura_master_no_tocado_y_saltea_editado(
 
     await db_session.refresh(cliente_b)
     assert cliente_b.deactivated_at is not None  # creado por la relectura -> desactivado
+
+
+@pytest.mark.asyncio
+async def test_undo_reread_restaura_supplier_no_tocado_y_saltea_editado(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 9: mismo criterio (y mismo helper compartido,
+    ``_undo_master_and_product_items``) que el test de clientes de arriba, para
+    PROVEEDORES — Task 5/6/7 dejaron cobertura end-to-end explícita solo de
+    Customer; Supplier comparte el código pero nunca se ejercitó end-to-end
+    (gap real de cobertura, confirmado por grep antes de escribir este test).
+    CUILs válidos (dígito verificador módulo 11) tomados de
+    ``test_supplier_import.py``/computados a mano — el validador de
+    ``supplier_import_service`` rechaza (invalid, sin importar) un CUIL con
+    formato o dígito verificador incorrecto."""
+    proveedor_a = Supplier(tenant_id=tenant.tenant_id, name="Viejo A", cuil="20-12345678-6")
+    proveedor_c = Supplier(tenant_id=tenant.tenant_id, name="Viejo C", cuil="27-23456789-1")
+    db_session.add_all([proveedor_a, proveedor_c])
+    await db_session.commit()
+
+    file = await _make_master_file(
+        db_session, tenant, {"flat": {"nombre": "name", "cuil": "cuil"}, "context": {}}
+    )
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "proveedores",
+        "mapping_contexts": [
+            {
+                "context_id": "table",
+                "entity_type": "supplier",
+                "headers": ["nombre", "cuil"],
+            }
+        ],
+        "proveedores_detectados": [
+            {"nombre": "Actualizado A", "cuil": "20-12345678-6"},
+            {"nombre": "Actualizado C", "cuil": "27-23456789-1"},
+            {"nombre": "Nuevo B", "cuil": "20-33333333-4"},
+        ],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.proveedores == 3
+
+    proveedor_b = (
+        await db_session.execute(select(Supplier).where(Supplier.cuil == "20-33333333-4"))
+    ).scalar_one()
+
+    # Alguien edita proveedor_a A MANO después de la relectura (simula un PATCH).
+    # Bump explícito de `updated_at` — mismo motivo que en el test de clientes
+    # (resolución de 1s de `func.now()` en SQLite).
+    await db_session.refresh(proveedor_a)
+    proveedor_a.name = "Editado Manualmente"
+    proveedor_a.updated_at = datetime.now(UTC) + timedelta(hours=1)
+    await db_session.commit()
+
+    undo = await reread_service.undo_reread(db_session, result.run_id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert undo["status"] == "REVERTED"
+
+    await db_session.refresh(proveedor_a)
+    assert proveedor_a.name == "Editado Manualmente"  # NO se pisó
+    assert {
+        "kind": "supplier",
+        "id": str(proveedor_a.id),
+        "reason": "edited_after_reread",
+    } in undo["not_reverted_entities"]
+
+    await db_session.refresh(proveedor_c)
+    assert proveedor_c.name == "Viejo C"  # restaurado al estado pre-relectura
+    assert proveedor_c.deactivated_at is None
+
+    await db_session.refresh(proveedor_b)
+    assert proveedor_b.deactivated_at is not None  # creado por la relectura -> desactivado
 
 
 @pytest.mark.asyncio
