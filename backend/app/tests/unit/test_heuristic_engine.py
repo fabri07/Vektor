@@ -26,6 +26,10 @@ from app.persistence.models.tenant import Tenant
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
+_HEURISTICS_DIR = (
+    Path(__file__).resolve().parents[2] / "application" / "data" / "heuristics"
+)
+
 
 # ── Fixtures SQLite in-memory ─────────────────────────────────────────────────
 
@@ -51,28 +55,27 @@ async def sqlite_session(sqlite_engine):
 # ── Tests síncronos (sin BD) ──────────────────────────────────────────────────
 
 
-def test_default_kiosco_loads():
-    config = HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
-    assert config.margin.net_expected_min == 0.12
-    assert config.margin.net_expected_max == 0.18
-    assert config.cash_health.critical_days_below == 5
-    assert config.inventory.rotation_days_min == 7
+@pytest.mark.parametrize("vertical", list(Vertical))
+def test_default_carga_el_json_del_rubro(vertical: Vertical) -> None:
+    """El engine de los agentes lee el MISMO archivo que el health engine.
 
+    Se compara contra el JSON, no contra números escritos acá: con valores
+    congelados, recalibrar un rubro contra su fuente sectorial rompía este test
+    aunque el engine siguiera leyendo perfecto. Lo que importa es que las dos
+    lecturas del mismo archivo no diverjan — si divergen, los agentes narran un
+    rango y el score usa otro.
+    """
+    data = json.loads(
+        (_HEURISTICS_DIR / f"{vertical.value}.json").read_text(encoding="utf-8")
+    )
+    config = HeuristicEngine.get(vertical)
 
-def test_default_limpieza_loads():
-    config = HeuristicEngine.get(Vertical.LIMPIEZA)
-    assert config.margin.net_expected_min == 0.18
-    assert config.margin.net_expected_max == 0.28
-    assert config.cash_health.healthy_days_min == 20
-    assert config.inventory.rotation_days_max == 45
-
-
-def test_default_decoracion_loads():
-    config = HeuristicEngine.get(Vertical.DECORACION_HOGAR)
-    assert config.margin.net_expected_min == 0.25
-    assert config.margin.net_expected_max == 0.45
-    assert config.cash_health.healthy_days_min == 30
-    assert config.inventory.rotation_days_max == 180
+    assert config.margin.net_expected_min == data["margin"]["net_expected_min"]
+    assert config.margin.net_expected_max == data["margin"]["net_expected_max"]
+    assert config.cash_health.critical_days_below == data["cash_health"]["critical_days_below"]
+    assert config.cash_health.healthy_days_min == data["cash_health"]["healthy_days_min"]
+    assert config.inventory.rotation_days_min == data["inventory"]["rotation_days_min"]
+    assert config.inventory.rotation_days_max == data["inventory"]["rotation_days_max"]
 
 
 def test_prompt_fragment_contains_numbers():
@@ -101,14 +104,17 @@ def test_prompt_fragment_has_all_params():
 
 
 def test_overstock_detection():
-    """
-    decoracion_hogar: rotation_days_max=180, threshold=180*2=360.
-    400 > 360 → overstock. 250 < 360 → no overstock.
+    """Sobrestock = más del doble del techo de rotación del rubro.
+
+    El umbral se deriva de `rotation_days_max` en vez de fijarse: la regla es
+    "el doble del techo", y esa regla no cambia cuando el rubro se recalibra.
     """
     config = HeuristicEngine.get(Vertical.DECORACION_HOGAR)
-    assert config.is_overstock(400) is True
-    assert config.is_overstock(250) is False
-    assert config.is_overstock(360) is False  # exactamente en el límite, no supera
+    umbral = config.inventory.rotation_days_max * 2
+
+    assert config.is_overstock(umbral + 40) is True
+    assert config.is_overstock(umbral - 110) is False
+    assert config.is_overstock(umbral) is False  # exactamente en el límite, no supera
 
 
 def test_cash_critical():
@@ -200,7 +206,8 @@ async def test_async_override_applies(sqlite_session: AsyncSession) -> None:
         Vertical.KIOSCO_ALMACEN, str(tenant_id), sqlite_session
     )
 
+    default = HeuristicEngine.get(Vertical.KIOSCO_ALMACEN)
     assert config.margin.net_expected_min == 0.30
-    # El resto de los valores deben seguir siendo los defaults
-    assert config.margin.net_expected_max == 0.18
-    assert config.cash_health.critical_days_below == 5
+    # El resto de los valores deben seguir siendo los defaults del rubro
+    assert config.margin.net_expected_max == default.margin.net_expected_max
+    assert config.cash_health.critical_days_below == default.cash_health.critical_days_below

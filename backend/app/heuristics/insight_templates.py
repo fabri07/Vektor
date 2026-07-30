@@ -15,6 +15,7 @@ from typing import Any
 
 from app.domain.product import effective_threshold
 from app.domain.verticals import VERTICAL_LABELS, Vertical, parse_vertical
+from app.heuristics.verticals.loader import load_margin_benchmark
 
 
 @dataclass(frozen=True)
@@ -28,13 +29,22 @@ class InsightTemplate:
 # Sin default: un vertical fuera del catálogo levanta en parse_vertical antes de
 # llegar acá. El nombre visible sale de VERTICAL_LABELS (app/domain/verticals.py).
 
-_MARGIN_RANGES: dict[Vertical, tuple[int, int]] = {
-    Vertical.KIOSCO_ALMACEN: (18, 28),
-    Vertical.DECORACION_HOGAR: (30, 45),
-    Vertical.LIMPIEZA: (20, 35),
-}
+
+def margin_range_pct(vertical: Vertical) -> tuple[int, int]:
+    """Rango sano de margen del rubro, en puntos porcentuales, para la narrativa.
+
+    Se LEE del JSON del vertical en vez de mantener una tabla paralela. La tabla
+    que había acá repetía `healthy_min`/`healthy_max` con otros valores escritos
+    a mano: recalibrar un rubro dejaba al texto del insight afirmando un rango
+    que el score ya no usaba, y nada lo detectaba porque las dos fuentes nunca se
+    comparaban entre sí.
+    """
+    benchmark = load_margin_benchmark(vertical)
+    return round(benchmark.healthy_min * 100), round(benchmark.healthy_max * 100)
+
 
 # ── Templates ─────────────────────────────────────────────────────────────────
+
 
 TEMPLATES: dict[str, InsightTemplate] = {
     "CASH_LOW": InsightTemplate(
@@ -140,7 +150,7 @@ def render_insight(
         else:
             margin_raw = 0.0
         margin_pct = round(margin_raw * 100, 1)
-        min_pct, max_pct = _MARGIN_RANGES[vertical]
+        min_pct, max_pct = margin_range_pct(vertical)
         # impact: 5% price increase on monthly sales
         impacto = state.monthly_sales_est * Decimal("0.05")
         vars_ = {

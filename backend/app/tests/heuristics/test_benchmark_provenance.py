@@ -148,10 +148,37 @@ def test_la_procedencia_del_json_coincide_con_su_fuente_declarada(
     )
     config = load_vertical_heuristics(vertical)
 
-    if data["benchmark_source"] is None:
-        assert config.benchmark_source is None
+    if data["margin"]["source"] is None:
+        assert config.margin.source is None
         assert config.margin.provenance is BenchmarkProvenance.STATIC_PROVISIONAL
     else:
-        assert config.benchmark_source is not None
-        assert config.benchmark_source.institucion == data["benchmark_source"]["institucion"]
+        assert config.margin.source is not None
+        assert config.margin.source.institucion == data["margin"]["source"]["institucion"]
         assert config.margin.provenance is BenchmarkProvenance.STATIC_SOURCED
+
+
+@pytest.mark.parametrize("vertical", list(Vertical))
+def test_la_fuente_es_por_bloque_y_no_se_contagia(vertical: Vertical) -> None:
+    """Cada bloque afirma solo lo suyo.
+
+    El caso que motivó separarlo: los informes sectoriales documentan márgenes y
+    rotación pero no días de cobertura de caja. Con una sola fuente por rubro, el
+    sistema afirmaría que la caja está respaldada solo porque el margen lo está.
+    """
+    config = load_vertical_heuristics(vertical)
+    data = json.loads(
+        (_HEURISTICS_DIR / f"{vertical.value}.json").read_text(encoding="utf-8")
+    )
+
+    for bloque, benchmark in (
+        ("cash_health", config.cash_health),
+        ("margin", config.margin),
+        ("inventory", config.inventory),
+        ("supplier", config.supplier),
+    ):
+        declarada = data[bloque]["source"]
+        if declarada is None:
+            assert benchmark.source is None, f"{vertical.value}/{bloque} inventó una fuente"
+        else:
+            assert benchmark.source is not None
+            assert benchmark.source.institucion == declarada["institucion"]

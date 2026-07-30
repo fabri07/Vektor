@@ -20,7 +20,7 @@ import pytest
 
 from app.domain.verticals import Vertical
 from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
-from app.heuristics.verticals import loader
+from app.heuristics.verticals import BenchmarkProvenance, MarginBenchmark, loader
 from app.heuristics.verticals.loader import load_vertical_heuristics
 from app.state.business_state_service import BusinessState, ProductSummary
 
@@ -82,24 +82,31 @@ def _make_state(
 
 
 def test_kiosco_healthy_margin_scores_high() -> None:
-    """
-    Margin = (100000 - 60000 - 17000) / 100000 = 23000 / 100000 = 0.23
+    """Un margen dentro del rango sano del rubro cae en la banda [70, 89].
 
-    Kiosco benchmark: healthy_min=0.18, healthy_max=0.28 → band [70, 89].
-    pos = (0.23 - 0.18) / (0.28 - 0.18) = 0.05 / 0.10 = 0.5
-    score_margin = int(70 + 0.5 * (89 - 70)) = int(79.5) = 79
+    El margen objetivo se DERIVA del benchmark vigente en vez de fijarse a mano:
+    con números escritos en el test, recalibrar el rubro dejaba este caso fuera
+    de la banda sana y el test fallaba sin que hubiera ninguna regresión — es lo
+    que pasó al corregir los umbrales de kiosco contra la fuente de INDEC/CAME.
     """
+    benchmark = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN).margin
+    objetivo = (benchmark.healthy_min + benchmark.healthy_max) / 2  # centro del rango sano
+
+    # margen = (ventas - mercadería - gastos) / ventas  →  se fija mercadería
+    # para que el margen resultante sea exactamente `objetivo`.
+    ventas = Decimal("100000")
+    gastos = Decimal("17000")
+    mercaderia = ventas - gastos - (ventas * Decimal(str(objetivo)))
     state = _make_state(
-        monthly_sales_est=Decimal("100000"),
-        monthly_inventory_cost_est=Decimal("60000"),
-        monthly_fixed_expenses_est=Decimal("17000"),
+        monthly_sales_est=ventas,
+        monthly_inventory_cost_est=mercaderia,
+        monthly_fixed_expenses_est=gastos,
     )
     result: HealthScoreResult = calculate_health_score(state)
 
     assert (
         70 <= result.score_margin <= 89
     ), f"Expected score_margin in [70, 89], got {result.score_margin}"
-    assert result.score_margin == 79
 
 
 # ── Test 2: critical cash scores low ─────────────────────────────────────────
@@ -162,8 +169,12 @@ def test_score_total_formula_correct() -> None:
     cash_days = 6666.67 / (20000 / 30) ~= 10 → healthy boundary → score_cash = 70
 
     margin = (100000 - 55000 - 20000) / 100000 = 25000/100000 = 0.25
-        kiosco band [0.18, 0.28) → pos=(0.25-0.18)/(0.28-0.18)=0.7
+        banda [0.18, 0.28) del benchmark INYECTADO abajo → pos=0.7
         score_margin = int(70 + 0.7*19) = int(83.3) = 83
+
+    El benchmark va explícito y NO sale del JSON de kiosco: este test mide la
+    fórmula ponderada, no la calibración del rubro. Cuando dependía del JSON, una
+    recalibración de kiosco lo hacía fallar sin que la fórmula hubiera cambiado.
 
     products: 4 products all healthy → score_stock = 100
 
@@ -185,7 +196,16 @@ def test_score_total_formula_correct() -> None:
         supplier_count=4,
         products=products,
     )
-    result: HealthScoreResult = calculate_health_score(state)
+    result: HealthScoreResult = calculate_health_score(
+        state,
+        benchmark=MarginBenchmark(
+            critical_below=0.10,
+            warning_below=0.18,
+            healthy_min=0.18,
+            healthy_max=0.28,
+            provenance=BenchmarkProvenance.TENANT_OVERRIDE,
+        ),
+    )
 
     assert result.score_cash == 70
     assert result.score_margin == 83
@@ -227,12 +247,17 @@ def test_health_engine_margin_no_sales_neutral() -> None:
 def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
     """
     cash_days = 3000 / (20000 / 30) = 4.5 → critical cash.
-    margin = (100000 - 70000 - 20000) / 100000 = 0.10 → margin warning floor.
+    margin = (100000 - 70000 - 20000) / 100000 = 0.10
 
     stock and supplier are high (score_stock=50 neutral, score_supplier=70)
     so the tie is strictly between cash and margin.
 
     Tie-break: CASH > MARGIN → primary_risk_code == 'CASH_LOW'
+
+    Lo que se afirma es la RELACIÓN entre las dos dimensiones, no el valor
+    absoluto del margen: cuál es el riesgo principal no depende de la
+    calibración del rubro, y fijar el subscore exacto acá ataba este test a los
+    umbrales de kiosco sin agregar nada a lo que mide.
     """
     state = _make_state(
         cash_on_hand_est=Decimal("3000"),
@@ -245,18 +270,37 @@ def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
     result: HealthScoreResult = calculate_health_score(state)
 
     assert result.score_cash < result.score_margin
-    assert result.score_margin == 15, f"score_margin={result.score_margin}"
     assert result.primary_risk_code == "CASH_LOW"
 
 
 def test_vertical_json_loader_reads_complete_config() -> None:
+    """El loader traslada el JSON tal cual, sin perder ni transformar bloques.
+
+    Se compara contra el ARCHIVO, no contra números escritos en el test. Con
+    valores congelados acá, este test dejaba de medir al loader y pasaba a medir
+    la calibración: recalibrar un rubro contra su fuente sectorial lo rompía
+    aunque el loader siguiera funcionando perfecto.
+    """
+    import json  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    ruta = (
+        Path(__file__).resolve().parents[2]
+        / "application"
+        / "data"
+        / "heuristics"
+        / f"{Vertical.KIOSCO_ALMACEN.value}.json"
+    )
+    data = json.loads(ruta.read_text(encoding="utf-8"))
     config = load_vertical_heuristics(Vertical.KIOSCO_ALMACEN)
 
     assert config.business_type == Vertical.KIOSCO_ALMACEN
-    assert config.cash_health.healthy_days_min == 10
-    assert config.margin.healthy_min == 0.18
-    assert config.inventory.rotation_days_max == 21
-    assert config.supplier.stockout_sensitivity == "muy_alta"
+    assert config.cash_health.healthy_days_min == data["cash_health"]["healthy_days_min"]
+    assert config.margin.healthy_min == data["margin"]["healthy_min"]
+    assert config.margin.healthy_max == data["margin"]["healthy_max"]
+    assert config.inventory.rotation_days_max == data["inventory"]["rotation_days_max"]
+    assert config.supplier.stockout_sensitivity == data["supplier"]["stockout_sensitivity"]
+    assert config.seasonality == data["seasonality"]
 
 
 def test_vertical_json_loader_raises_instead_of_serving_another_vertical(

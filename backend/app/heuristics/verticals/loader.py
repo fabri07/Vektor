@@ -30,13 +30,14 @@ _HEURISTICS_DIR = (
 )
 
 
-def _source_from_json(raw: dict[str, Any] | None) -> BenchmarkSource | None:
-    """`benchmark_source` del JSON, o None si el vertical no la declara.
+def _source_from_json(bloque: dict[str, Any]) -> BenchmarkSource | None:
+    """La `source` de UN bloque del JSON, o None si ese bloque no la declara.
 
-    La clave es OBLIGATORIA (con valor `null` si no hay fuente): así agregar un
-    rubro obliga a pronunciarse sobre su procedencia en vez de omitirla sin
-    querer y quedar marcado como sourced por descuido.
+    La clave es OBLIGATORIA en cada bloque (con valor `null` si no hay fuente):
+    así agregar un rubro obliga a pronunciarse bloque por bloque en vez de
+    omitirla sin querer y quedar marcado como respaldado por descuido.
     """
+    raw = bloque["source"]
     if raw is None:
         return None
     return BenchmarkSource(
@@ -51,35 +52,41 @@ def _config_from_json(data: dict[str, Any]) -> VerticalHeuristicConfig:
     cash = data["cash_health"]
     inventory = data["inventory"]
     supplier = data["supplier"]
-    source = _source_from_json(data["benchmark_source"])
-    provenance = (
-        BenchmarkProvenance.STATIC_SOURCED
-        if source is not None
-        else BenchmarkProvenance.STATIC_PROVISIONAL
-    )
+    margin_source = _source_from_json(margin)
     return VerticalHeuristicConfig(
         business_type=parse_vertical(data["business_type"]),
-        benchmark_source=source,
         cash_health=CashHealthBenchmark(
             healthy_days_min=float(cash["healthy_days_min"]),
             warning_days_min=float(cash["warning_days_min"]),
             critical_days_below=float(cash["critical_days_below"]),
+            source=_source_from_json(cash),
         ),
         margin=MarginBenchmark(
             critical_below=float(margin["critical_below"]),
             warning_below=float(margin["warning_below"]),
             healthy_min=float(margin["healthy_min"]),
             healthy_max=float(margin["healthy_max"]),
-            provenance=provenance,
+            # Solo la procedencia del MARGEN alimenta la confianza del score, que
+            # es la única dimensión con benchmark parametrizable hoy. Las otras
+            # tres guardan su fuente para poder auditarlas y para el día que se
+            # recalibren por dimensión.
+            provenance=(
+                BenchmarkProvenance.STATIC_SOURCED
+                if margin_source is not None
+                else BenchmarkProvenance.STATIC_PROVISIONAL
+            ),
+            source=margin_source,
         ),
         inventory=InventoryBenchmark(
             rotation_days_min=float(inventory["rotation_days_min"]),
             rotation_days_max=float(inventory["rotation_days_max"]),
             overstock_tolerance=str(inventory["overstock_tolerance"]),
+            source=_source_from_json(inventory),
         ),
         supplier=SupplierBenchmark(
             reorder_frequency=str(supplier["reorder_frequency"]),
             stockout_sensitivity=str(supplier["stockout_sensitivity"]),
+            source=_source_from_json(supplier),
         ),
         seasonality=str(data["seasonality"]),
     )

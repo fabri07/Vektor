@@ -59,6 +59,13 @@ class BenchmarkSource:
 
     Su ausencia (`None` en el JSON) no es un detalle de documentación: es lo que
     marca al benchmark como provisional y le baja la confianza al score.
+
+    Se declara **por bloque** (`margin`, `cash_health`, `inventory`, `supplier`) y
+    no por rubro: un informe sectorial típico documenta márgenes y rotación pero
+    no días de cobertura de caja. Con una sola declaración por rubro, el sistema
+    afirmaría que la caja está respaldada solo porque el margen lo está — la
+    misma clase de afirmación sin fundamento que este mecanismo existe para
+    evitar, ahora cometida por el mecanismo mismo.
     """
 
     institucion: str
@@ -87,6 +94,8 @@ class MarginBenchmark:
     healthy_min: float  # margin at or above this → healthy
     healthy_max: float  # margin at or above this → excellent
     provenance: BenchmarkProvenance
+    #: Referencia sectorial de ESTOS umbrales, o None si no la tienen.
+    source: BenchmarkSource | None = None
 
     @property
     def confidence(self) -> str:
@@ -99,6 +108,9 @@ class CashHealthBenchmark:
     healthy_days_min: float
     warning_days_min: float
     critical_days_below: float
+    #: Los informes sectoriales rara vez documentan días de cobertura de caja;
+    #: este campo suele quedar en None mientras `margin.source` sí está poblado.
+    source: BenchmarkSource | None = None
 
 
 @dataclass(frozen=True)
@@ -106,19 +118,19 @@ class InventoryBenchmark:
     rotation_days_min: float
     rotation_days_max: float
     overstock_tolerance: str
+    source: BenchmarkSource | None = None
 
 
 @dataclass(frozen=True)
 class SupplierBenchmark:
     reorder_frequency: str
     stockout_sensitivity: str
+    source: BenchmarkSource | None = None
 
 
 @dataclass(frozen=True)
 class VerticalHeuristicConfig:
     business_type: Vertical
-    #: Referencia sectorial de los umbrales, o None si el rubro no la declara.
-    benchmark_source: BenchmarkSource | None
     cash_health: CashHealthBenchmark
     margin: MarginBenchmark
     inventory: InventoryBenchmark

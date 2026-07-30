@@ -1,11 +1,9 @@
 """Test compuerta de `app/domain/verticals.py`.
 
 Parametrizado sobre `Vertical`: para cada vertical operativo, asegura que
-existen sus heurísticas, sus campos de vertical, su label, su rango de margen,
-su catálogo de categorías de producto, su tabla de aliases y su ruleset (y que
-el ruleset sea el SUYO, no el de otro vertical). Este test vuelve imposible
-agregar un 4º vertical a medias — y protege todo lo que Task 2 y Task 3
-construyen encima del enum.
+existen sus heurísticas completas, la procedencia declarada de cada bloque, sus
+campos de vertical, su label, su catálogo de categorías de producto y su tabla
+de aliases. Vuelve imposible agregar un rubro a medias.
 """
 
 from __future__ import annotations
@@ -26,7 +24,8 @@ from app.domain.verticals import (
     parse_vertical,
     try_parse_vertical,
 )
-from app.heuristics.insight_templates import _MARGIN_RANGES
+from app.heuristics.insight_templates import margin_range_pct
+from app.heuristics.verticals.loader import load_margin_benchmark
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 _HEURISTICS_DIR = _BACKEND_ROOT / "app" / "application" / "data" / "heuristics"
@@ -39,16 +38,20 @@ _VERTICAL_FIELDS_DIR = (
 # supplier (2) + seasonality (1) = 16. Un JSON al que le falte una clave-hoja
 # pasaba desapercibido antes de este test.
 #
-# `benchmark_source` se cuenta aparte porque es metadato de procedencia y su
-# valor legítimo puede ser `null` (rubro sin fuente sectorial documentada).
+# Las `source` de cada bloque se cuentan aparte (ver el test siguiente): son
+# metadato de procedencia y su valor legítimo puede ser `null`.
 _HEURISTICS_LEAF_KEYS = 16
-_SOURCE_KEY = "benchmark_source"
+_SOURCE_KEY = "source"
 _SOURCE_FIELDS = frozenset({"institucion", "referencia", "revisado_en"})
+#: Bloques del JSON que declaran procedencia propia.
+_BLOQUES_CON_FUENTE = ("cash_health", "margin", "inventory", "supplier")
 
 
 def _count_leaves(data: object) -> int:
     if isinstance(data, dict):
-        return sum(_count_leaves(value) for value in data.values())
+        return sum(
+            _count_leaves(value) for key, value in data.items() if key != _SOURCE_KEY
+        )
     return 1
 
 
@@ -62,36 +65,45 @@ class TestCatalogoCompleto:
         path = _HEURISTICS_DIR / f"{vertical.value}.json"
         assert path.exists(), f"Falta el archivo de heurísticas: {path}"
         data = json.loads(path.read_text(encoding="utf-8"))
-        config = {k: v for k, v in data.items() if k != _SOURCE_KEY}
-        leaves = _count_leaves(config)
+        leaves = _count_leaves(data)
         assert leaves == _HEURISTICS_LEAF_KEYS, (
             f"{vertical.value}: se esperaban {_HEURISTICS_LEAF_KEYS} "
             f"claves-hoja en {path.name}, se encontraron {leaves}"
         )
 
     @pytest.mark.parametrize("vertical", list(Vertical))
-    def test_declara_la_procedencia_de_sus_umbrales(self, vertical: Vertical) -> None:
-        """`benchmark_source` es obligatoria, aunque su valor sea `null`.
+    def test_cada_bloque_declara_su_procedencia(self, vertical: Vertical) -> None:
+        """Los cuatro bloques llevan `source`, aunque el valor sea `null`.
 
         Que la clave sea obligatoria es el punto: agregar un rubro obliga a
-        pronunciarse sobre de dónde salieron sus números. Si fuera opcional, el
-        olvido se leería igual que "sin fuente" y nadie lo notaría — salvo que el
-        `.get()` implícito lo tratara como sourced, que es peor.
+        pronunciarse bloque por bloque sobre de dónde salieron los números. Si
+        fuera opcional, el olvido se leería igual que "sin fuente" y nadie lo
+        notaría — salvo que el `.get()` implícito lo tratara como respaldado,
+        que es peor.
+
+        Y es POR BLOQUE porque un informe sectorial típico documenta márgenes y
+        rotación pero no días de cobertura de caja: una sola declaración por
+        rubro haría que el sistema afirme que la caja está respaldada solo
+        porque el margen lo está.
         """
         path = _HEURISTICS_DIR / f"{vertical.value}.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert _SOURCE_KEY in data, (
-            f"{vertical.value}: falta la clave `{_SOURCE_KEY}` en {path.name} "
-            "(usá `null` si el rubro todavía no tiene fuente sectorial)"
-        )
-        source = data[_SOURCE_KEY]
-        if source is not None:
+
+        for bloque in _BLOQUES_CON_FUENTE:
+            assert _SOURCE_KEY in data[bloque], (
+                f"{vertical.value}: falta `{bloque}.{_SOURCE_KEY}` en {path.name} "
+                "(usá `null` si ese bloque todavía no tiene fuente sectorial)"
+            )
+            source = data[bloque][_SOURCE_KEY]
+            if source is None:
+                continue
             assert set(source) == _SOURCE_FIELDS, (
-                f"{vertical.value}: `{_SOURCE_KEY}` debe tener exactamente "
+                f"{vertical.value}/{bloque}: `{_SOURCE_KEY}` debe tener exactamente "
                 f"{sorted(_SOURCE_FIELDS)}, tiene {sorted(source)}"
             )
             assert all(str(v).strip() for v in source.values()), (
-                f"{vertical.value}: `{_SOURCE_KEY}` con campos vacíos no es una fuente"
+                f"{vertical.value}/{bloque}: `{_SOURCE_KEY}` con campos vacíos "
+                "no es una fuente"
             )
 
     @pytest.mark.parametrize("vertical", list(Vertical))
@@ -107,8 +119,18 @@ class TestCatalogoCompleto:
         assert VERTICAL_LABELS[vertical].strip()
 
     @pytest.mark.parametrize("vertical", list(Vertical))
-    def test_tiene_rango_de_margen(self, vertical: Vertical) -> None:
-        assert vertical in _MARGIN_RANGES
+    def test_el_rango_narrado_es_el_que_usa_el_score(self, vertical: Vertical) -> None:
+        """El texto del insight y el umbral que puntúa salen del MISMO lugar.
+
+        Antes `insight_templates` mantenía una tabla paralela escrita a mano:
+        recalibrar un rubro dejaba al insight afirmando un rango que el score ya
+        no usaba, y nada lo detectaba porque las dos fuentes nunca se comparaban.
+        """
+        benchmark = load_margin_benchmark(vertical)
+        assert margin_range_pct(vertical) == (
+            round(benchmark.healthy_min * 100),
+            round(benchmark.healthy_max * 100),
+        )
 
     @pytest.mark.parametrize("vertical", list(Vertical))
     def test_tiene_catalogo_de_categorias_de_producto(
