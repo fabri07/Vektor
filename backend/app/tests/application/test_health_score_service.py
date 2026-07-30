@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.health_score_service import HealthScoreService
 from app.persistence.models.business import BusinessProfile
+from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.repositories.health_score_repository import HealthScoreRepository
@@ -95,3 +96,38 @@ class TestHealthScoreService:
         )
         await db_session.commit()
         assert float(snapshot_with_sales.total_score) > 0
+
+    async def test_recalculate_con_override_de_margen_no_rompe(
+        self,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        kiosco_profile: BusinessProfile,
+    ) -> None:
+        """Un tenant que configuró su margen objetivo debe poder recalcular.
+
+        Regresión: `analytics_svc` se instanciaba DENTRO del `if tenant_benchmark
+        is None` y se usaba incondicionalmente después para registrar el evento,
+        así que la rama con override moría con `UnboundLocalError`. El camino se
+        dispara con cualquier `PATCH /settings/health-config`, y como ni
+        `score_trigger_service` ni `score_worker` lo atrapan, se llevaba puesto el
+        recálculo del tenant (y el rebuild semanal de los que venían después).
+        """
+        for key, value in (("target_margin_pct", 35.0), ("warning_margin_pct", 20.0)):
+            db_session.add(
+                BusinessHeuristicOverride(
+                    tenant_id=sample_tenant.tenant_id,
+                    param_key=key,
+                    param_value={"value": value},
+                )
+            )
+        await db_session.flush()
+
+        svc = HealthScoreService(db_session)
+        snapshot = await svc.recalculate_for_tenant(
+            tenant_id=sample_tenant.tenant_id,
+            triggered_by="test_override",
+        )
+        await db_session.commit()
+
+        assert snapshot.tenant_id == sample_tenant.tenant_id
+        assert snapshot.triggered_by == "test_override"

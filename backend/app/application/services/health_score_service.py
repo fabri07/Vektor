@@ -214,12 +214,17 @@ class HealthScoreService:
             tenant_id, self._session, cast("Redis", redis)
         )
 
+        # Se instancia SIEMPRE: el paso 5 lo usa para registrar el evento pase lo
+        # que pase con el benchmark. Cuando vivía dentro del `if` de abajo, un
+        # tenant con override de margen llegaba al paso 5 con la variable sin
+        # asignar (`UnboundLocalError`) y se quedaba sin recálculo.
+        analytics_svc = AnalyticsService(self._session)
+
         # ── 2a. Tenant override de margen (tiene prioridad sobre data-driven) ──
         tenant_benchmark = await get_margin_benchmark(tenant_id, self._session)
 
         # ── 2b. Benchmark data-driven (fallback si no hay override) ──────────
         if tenant_benchmark is None:
-            analytics_svc = AnalyticsService(self._session)
             tenant_benchmark = await analytics_svc.get_data_driven_benchmark(state.vertical_code)
 
         # ── 3. Heuristic Engine ───────────────────────────────────────────────

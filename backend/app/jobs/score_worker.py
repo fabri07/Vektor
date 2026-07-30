@@ -2,12 +2,58 @@
 Celery worker: health score recalculation tasks.
 """
 
+from __future__ import annotations
+
 import asyncio
+import uuid
+from typing import TYPE_CHECKING, Any
 
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger, log_job
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = get_logger(__name__)
+
+
+async def rebuild_all_tenants(factory: Any, tenant_ids: Sequence[uuid.UUID]) -> int:
+    """Recalcula el score de cada tenant y devuelve cuántos fallaron.
+
+    Vive a nivel de módulo —y no adentro de ``_run``— para que el aislamiento por
+    tenant sea testeable de verdad: un test que reimplementa el cuerpo del job no
+    puede detectar que al loop real le falta el ``try/except``.
+
+    El aislamiento es el punto: el recálculo de un tenant NO puede llevarse puesto
+    el de los que vienen después. Antes el loop no atrapaba nada, así que un solo
+    tenant con datos o configuración rotos dejaba a toda la cola sin score semanal,
+    y el fallo se veía como un retry de Celery sin decir de qué tenant era.
+    """
+    from app.application.services.health_score_service import (
+        HealthScoreService,  # noqa: PLC0415
+    )
+
+    fallidos = 0
+    for tid in tenant_ids:
+        try:
+            async with factory() as session:
+                svc = HealthScoreService(session)
+                await svc.recalculate_for_tenant(
+                    tenant_id=tid,
+                    triggered_by="scheduled_rebuild",
+                )
+                await session.commit()
+        except Exception:
+            fallidos += 1
+            logger.exception("score_worker.rebuild_weekly.tenant_failed", tenant_id=str(tid))
+
+    if fallidos:
+        logger.warning(
+            "score_worker.rebuild_weekly.partial",
+            failed=fallidos,
+            total=len(tenant_ids),
+        )
+    return fallidos
 
 
 @celery_app.task(  # type: ignore[misc]
@@ -47,18 +93,7 @@ def rebuild_weekly_history() -> None:
 
         logger.info("score_worker.rebuild_weekly", tenant_count=len(tenant_ids))
 
-        for tid in tenant_ids:
-            async with factory() as session:
-                from app.application.services.health_score_service import (
-                    HealthScoreService,  # noqa: PLC0415
-                )
-
-                svc = HealthScoreService(session)
-                await svc.recalculate_for_tenant(
-                    tenant_id=tid,
-                    triggered_by="scheduled_rebuild",
-                )
-                await session.commit()
+        await rebuild_all_tenants(factory, tenant_ids)
 
         await engine.dispose()
 
