@@ -148,20 +148,23 @@ def _mapeo_confirmado_manda_costo_a_precio(detail: dict[str, Any]) -> list[str]:
 
 
 async def _tenants(session: AsyncSession, args: argparse.Namespace) -> list[dict[str, Any]]:
+    # `tenants` no tiene business_name/business_type/is_active: son
+    # `display_name`/`legal_name` + `status`, y el rubro vive en
+    # `business_profiles.vertical_code`. Mismo criterio de "activo" que
+    # detect_misvoided_purchases.py: status IN ('ACTIVE','TRIAL').
+    _select = (
+        "SELECT t.tenant_id, t.display_name, bp.vertical_code "
+        "FROM tenants t "
+        "LEFT JOIN business_profiles bp ON bp.tenant_id = t.tenant_id "
+    )
     if args.tenant:
         rows = await session.execute(
-            text(
-                "SELECT tenant_id, business_name, business_type "
-                "FROM tenants WHERE tenant_id = CAST(:tid AS uuid)"
-            ),
+            text(_select + "WHERE t.tenant_id = CAST(:tid AS uuid)"),
             {"tid": args.tenant},
         )
     else:
         rows = await session.execute(
-            text(
-                "SELECT tenant_id, business_name, business_type FROM tenants "
-                "WHERE is_active IS TRUE ORDER BY created_at"
-            )
+            text(_select + "WHERE t.status IN ('ACTIVE', 'TRIAL') ORDER BY t.created_at")
         )
     return [dict(r) for r in rows.mappings().all()]
 
@@ -292,7 +295,7 @@ async def _analizar_tenant(
         hallazgos.append(
             {
                 "tenant_id": tid,
-                "tenant": tenant.get("business_name") or "",
+                "tenant": tenant.get("display_name") or "",
                 "producto": prod["name"],
                 "product_id": str(prod["id"]),
                 "sale_price_ars": str(prod["sale_price_ars"]),
@@ -338,14 +341,14 @@ async def main() -> int:
                 hallazgos, cobertura = await _analizar_tenant(session, tenant)
             except Exception as exc:  # noqa: BLE001 — un tenant roto no corta el barrido
                 salteados += 1
-                print(f"  ! {tenant.get('business_name')}: no se pudo analizar ({exc})")
+                print(f"  ! {tenant.get('display_name')}: no se pudo analizar ({exc})")
                 continue
             todos.extend(hallazgos)
             for k in total:
                 total[k] += cobertura[k]
             if hallazgos:
                 print(
-                    f"  {tenant.get('business_name')}: {len(hallazgos)} sospechoso(s) "
+                    f"  {tenant.get('display_name')}: {len(hallazgos)} sospechoso(s) "
                     f"de {cobertura['revisados']} revisado(s)"
                 )
             if args.audit and hallazgos:
