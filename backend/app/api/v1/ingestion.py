@@ -1119,6 +1119,75 @@ async def confirm_file(
     _flat_mappings = [m for m in body.column_mappings if m.context_id is None]
     _ctx_mappings = [m for m in body.column_mappings if m.context_id is not None]
 
+    # Etiqueta legible de una hoja para los mensajes de error. `context_id` es un
+    # identificador interno ("sheet:precios y stock ") — mostrárselo al usuario,
+    # con su espacio final incluido, no lo ayuda a encontrar la hoja.
+    _ctx_label: dict[str, str] = {
+        ctx["context_id"]: str(ctx.get("label") or ctx["context_id"]).strip()
+        for ctx in _summary_for_ctx.get("mapping_contexts", [])
+        if ctx.get("context_id")
+    }
+
+    def _hoja(context_id: str) -> str:
+        return _ctx_label.get(context_id, context_id).strip()
+
+    # Mapeos agrupados por hoja — los usan la validación por contexto y el
+    # snapshot que se traza al confirmar.
+    _mappings_por_contexto: dict[str, list[ColumnMapping]] = defaultdict(list)
+    for _m in _ctx_mappings:
+        _mappings_por_contexto[_m.context_id or ""].append(_m)
+
+    def _campo(entity_type: str, field: str) -> str:
+        """Etiqueta en castellano del campo, no su nombre técnico."""
+        return CANONICAL_FIELDS.get(entity_type, {}).get(field, field)
+
+    # El trace_id se resuelve ACÁ, antes del primer guard: los rechazos de
+    # validación ocurren ANTES del lease (a propósito — una request que va a
+    # rebotar nunca lo toma) y hasta ahora no dejaban NI UNA fila en
+    # pipeline_events. Diagnosticar los tres 422 de ASTERIA exigió reconstruir el
+    # caso a mano porque no había traza de ninguno.
+    _trace_id = record.trace_id or record.id
+    bind_request_context(trace_id=_trace_id)
+
+    async def _emit_validation_reject(motivo: str, detalle: dict[str, Any]) -> None:
+        """Traza un rechazo PREVIO al lease.
+
+        Es seguro emitir acá y no contradice la nota de ``_emit_confirm_failure``:
+        esa advertencia ("primero compensar el lease, después trazar") existe
+        porque ``emit_event`` abre un ``begin_nested()`` que flushea
+        incondicionalmente, y sobre una sesión que viene de un import reventado
+        ese flush la deja abortada. En este camino la sesión está limpia y no hay
+        lease que compensar.
+
+        Best-effort de punta a punta: la traza nunca puede tapar el 422.
+        Sin PII: motivo, campos y nombres de columna — nunca valores de fila.
+        """
+        try:
+            await pipeline_event_service.emit_event(
+                session,
+                trace_id=_trace_id,
+                tenant_id=tenant.tenant_id,
+                stage=STAGE_REJECT,
+                file_id=file_id,
+                detail={
+                    "stage_failed": "confirm",
+                    "phase": "validation",
+                    "http_status": status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "motivo": motivo,
+                    "confirmed_fields": body.confirmed_fields,
+                    **detalle,
+                },
+            )
+            # Commit propio: el 422 sigue viaje y haría rollback del request,
+            # llevándose el evento.
+            await session.commit()
+        except Exception:  # noqa: BLE001 — la traza nunca tapa el rechazo
+            logger.warning(
+                "ingestion.confirm.validation_trace_failed",
+                file_id=str(file_id),
+                motivo=motivo,
+            )
+
     # Override del usuario para reasignar la entidad de un contexto completo
     # (ej. una hoja "general"/producto pasada a venta/gasto). Fuente única con
     # el gate F6-A1 (más abajo) y con `_insert_multisheet_data`, que también lo
@@ -1239,6 +1308,9 @@ async def confirm_file(
             if _context_included(_cid, _ent_efectiva):
                 _sin_entidad.append(str(_ctx.get("label") or _cid))
         if _sin_entidad:
+            await _emit_validation_reject(
+                "hoja_sin_seccion", {"hojas": _sin_entidad}
+            )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(
@@ -1261,11 +1333,24 @@ async def confirm_file(
         if confirmed_entity:
             missing = _missing_required(_entity_type, _flat_mappings)
             if missing:
+                await _emit_validation_reject(
+                    "requeridos_sin_mapear",
+                    {"entity_type": _entity_type, "faltantes": sorted(missing)},
+                )
+                _etiquetas = ", ".join(_campo(_entity_type, f) for f in sorted(missing))
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Campos requeridos sin mapear: {', '.join(sorted(missing))}",
+                    detail=(
+                        f"Falta un dato obligatorio: {_etiquetas}. Elegí ese campo "
+                        "en la columna que lo contiene. Un campo personalizado "
+                        "guarda el dato pero no reemplaza al obligatorio."
+                    ),
                 )
             if _colisiones := _colliding_scalars(_entity_type, _flat_mappings):
+                await _emit_validation_reject(
+                    "colision_campo_escalar",
+                    {"entity_type": _entity_type, "colisiones": _colisiones},
+                )
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=_collision_detail(_entity_type, _colisiones),
@@ -1273,25 +1358,44 @@ async def confirm_file(
 
     # Validación de requeridos — por contexto (multi-hoja), solo contextos incluidos
     if _ctx_mappings:
-        _ctx_groups: dict[str, list[ColumnMapping]] = defaultdict(list)
-        for m in _ctx_mappings:
-            _ctx_groups[m.context_id or ""].append(m)
-        for _cid, _ms in _ctx_groups.items():
+        for _cid, _ms in _mappings_por_contexto.items():
             _ent = _entity_for(_ms[0])
             if _context_included(_cid, _ent):
                 missing = _missing_required(_ent, _ms)
                 if missing:
+                    await _emit_validation_reject(
+                        "requeridos_sin_mapear",
+                        {
+                            "context_id": _cid,
+                            "entity_type": _ent,
+                            "faltantes": sorted(missing),
+                        },
+                    )
+                    _etiquetas = ", ".join(_campo(_ent, f) for f in sorted(missing))
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail=(
-                            f"[{_cid}] Campos requeridos sin mapear: "
-                            f"{', '.join(sorted(missing))}"
+                            f"En la hoja «{_hoja(_cid)}» falta un dato obligatorio: "
+                            f"{_etiquetas}. Elegí ese campo en la columna que lo "
+                            "contiene. Un campo personalizado guarda el dato pero no "
+                            "reemplaza al obligatorio."
                         ),
                     )
                 if _colisiones := _colliding_scalars(_ent, _ms):
+                    await _emit_validation_reject(
+                        "colision_campo_escalar",
+                        {
+                            "context_id": _cid,
+                            "entity_type": _ent,
+                            "colisiones": _colisiones,
+                        },
+                    )
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"[{_cid}] {_collision_detail(_ent, _colisiones)}",
+                        detail=(
+                            f"En la hoja «{_hoja(_cid)}»: "
+                            f"{_collision_detail(_ent, _colisiones)}"
+                        ),
                     )
 
     # ── F6-A1: bloqueo por fecha faltante, ANTES del lease ──────────────────────
@@ -1436,13 +1540,10 @@ async def confirm_file(
             detail="El archivo ya se está importando o ya se importó.",
         )
 
-    # El trace_id se resuelve ACÁ, antes del savepoint: la traza del FALLO lo
-    # necesita y el import puede reventar mucho antes de la línea donde se usaba
-    # (dentro del try, después de aplicar las decisiones de riesgo). Definirlo
-    # tarde dejaba el nombre sin asignar en el `except` → UnboundLocalError
-    # tapando el error real.
-    _trace_id = record.trace_id or record.id
-    bind_request_context(trace_id=_trace_id)
+    # `_trace_id` ya quedó resuelto arriba, antes del PRIMER guard de validación:
+    # la traza del fallo lo necesita y el import puede reventar mucho antes de la
+    # línea donde se usaba. Definirlo tarde dejaba el nombre sin asignar en el
+    # `except` → UnboundLocalError tapando el error real.
 
     async def _emit_confirm_failure(exc: BaseException, phase: str) -> None:
         """Deja traza de un confirm que NO terminó bien.
@@ -1814,6 +1915,20 @@ async def confirm_file(
             detail={
                 "imported_counts": counts,
                 "confirmed_fields": body.confirmed_fields,
+                # Con qué mapeo se importó de verdad. Sin esto, saber si un
+                # producto quedó con el costo cargado como precio de venta exigía
+                # INFERIRLO de los alias aprendidos del tenant, que pudieron
+                # cambiar después o haberse aprendido en otro archivo. De acá en
+                # adelante cada import queda auto-explicado.
+                # Solo pares columna → campo: nunca valores de fila (sin PII).
+                "mappings": {
+                    "flat": {m.source_column: m.target_field for m in _flat_mappings},
+                    "context": {
+                        cid: {m.source_column: m.target_field for m in ms}
+                        for cid, ms in _mappings_por_contexto.items()
+                    },
+                },
+                "stock_treatment": body.stock_treatment,
                 "column_risk": {
                     "contextos_afectados": len(_column_risk_contexts),
                     "filas_riesgo_a_otros": counts.get("filas_riesgo_a_otros", 0),

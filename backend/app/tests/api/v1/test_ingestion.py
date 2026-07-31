@@ -894,7 +894,11 @@ class TestConfirmEndpoint:
             },
         )
         assert response.status_code == 422
-        assert "amount" in response.json()["detail"]
+        # El mensaje nombra la hoja y el campo en castellano, no `amount`: un
+        # identificador técnico no le dice al usuario qué columna tocar.
+        _detail = response.json()["detail"]
+        assert "Monto de venta" in _detail
+        assert "hoja" in _detail.lower()
 
         refreshed = (
             await db_session.execute(
