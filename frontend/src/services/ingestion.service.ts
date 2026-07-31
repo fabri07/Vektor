@@ -154,6 +154,22 @@ export interface MappingContext {
   row_count: number;
 }
 
+/** Qué se lleva puesto el borrado de un archivo (espejo de FileDeletionPreviewResponse). */
+export interface FileDeletionPreview {
+  file_id: string;
+  ventas: number;
+  gastos: number;
+  productos: number;
+  movimientos_stock: number;
+  otros: number;
+  /** Filas de "Otros" que el usuario ya clasificó: NO se borran. */
+  otros_ya_clasificados: number;
+  /** Hay registros de este archivo editados a mano — el borrado los revierte igual. */
+  has_user_edits: boolean;
+  /** Archivo importado antes del ledger: sus productos no se pueden rastrear. */
+  productos_no_rastreables: boolean;
+}
+
 export interface TenantColumnMapping {
   id: string;
   entity_type: string;
@@ -373,8 +389,25 @@ export const ingestionService = {
     return res.data;
   },
 
-  async deleteFile(fileId: string): Promise<void> {
-    await api.delete(`/ingestion/files/${fileId}`);
+  /**
+   * Qué datos se borran si se elimina este archivo. Read-only: alimenta la
+   * advertencia previa. El borrado revierte TAMBIÉN lo editado a mano, así que
+   * el usuario tiene que poder verlo antes de aceptar.
+   */
+  async getDeletionPreview(fileId: string): Promise<FileDeletionPreview> {
+    const res = await api.get<FileDeletionPreview>(
+      `/ingestion/files/${fileId}/deletion-preview`,
+    );
+    return res.data;
+  },
+
+  /**
+   * Borra el archivo Y revierte lo que importó (ventas, gastos, stock, "Otros"
+   * y los productos que creó). `confirm` es obligatorio: sin él el backend
+   * responde 409 con el preview y no toca nada.
+   */
+  async deleteFile(fileId: string, confirm = false): Promise<void> {
+    await api.delete(`/ingestion/files/${fileId}?confirm=${confirm}`);
   },
 
   async reprocessFile(fileId: string): Promise<void> {

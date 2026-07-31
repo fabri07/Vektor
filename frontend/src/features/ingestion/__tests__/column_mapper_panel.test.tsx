@@ -3,7 +3,7 @@ import React from "react";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import { ColumnMapperPanel } from "../ColumnMapperPanel";
+import { ColumnMapperPanel, splitWarningsByContext } from "../ColumnMapperPanel";
 import {
   ingestionService,
   type ColumnMapping,
@@ -593,5 +593,159 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     expect(
       screen.queryByTestId("column-risk-decisions-panel"),
     ).not.toBeInTheDocument();
+  });
+});
+
+// ── Hojas que Véktor no pudo clasificar ───────────────────────────────────────
+//
+// El parser deja `entity_type: null` cuando no sabe qué es una hoja. Antes el
+// panel las mostraba TILDADAS y con la sección puesta en "Ventas" por un
+// `?? "sale"`, así que una hoja de resúmenes derivados del Libro Diario entraba
+// como miles de ventas sin que nadie lo decidiera.
+
+function previewConHojaSinClasificar(warnings: string[] = []) {
+  return {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: {
+      inferred_type: "mixed",
+      warnings,
+      mapping_contexts: [
+        {
+          context_id: "sheet:LD:ventas",
+          label: "LD ventas",
+          source_kind: "table",
+          entity_type: "sale",
+          headers: ["fecha"],
+          fields: null,
+          preview_rows: [{ fecha: "2024-01-15" }],
+          row_count: 3,
+        },
+        {
+          context_id: "sheet:Ganancias",
+          label: "Ganancias",
+          source_kind: "table",
+          entity_type: null, // el parser no supo qué es
+          headers: ["concepto"],
+          fields: null,
+          preview_rows: [{ concepto: "x" }],
+          row_count: 1840,
+        },
+      ],
+    },
+    columns_at_risk: [],
+    contextual_column_risk: [],
+  };
+}
+
+describe("ColumnMapperPanel — hojas sin clasificar", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetColumnMappings.mockResolvedValue([]);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+  });
+
+  test("no arranca en Ventas: pide elegir la sección", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaSinClasificar());
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText("Ganancias")).toBeInTheDocument();
+    });
+
+    // El selector arranca en el placeholder, NO en "Ventas".
+    const selector = screen.getByDisplayValue("Elegí qué es esta hoja…");
+    expect(selector).toBeInTheDocument();
+    // Y ofrece Productos, que antes ni siquiera era una opción.
+    expect(
+      screen.getByRole("option", { name: "Productos" }),
+    ).toBeInTheDocument();
+  });
+
+  test("arranca destildada y no bloquea el confirm de las demás", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaSinClasificar());
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText("Ganancias")).toBeInTheDocument();
+    });
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    // Hoja clasificada tildada, hoja sin clasificar destildada.
+    expect(checkboxes[0]).toBeChecked();
+    expect(checkboxes[1]).not.toBeChecked();
+
+    // Con la hoja ambigua afuera, se puede confirmar.
+    expect(
+      screen.getByRole("button", { name: /Confirmar importación/ }),
+    ).toBeEnabled();
+  });
+
+  test("tildarla sin elegir sección bloquea el confirm con el motivo", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaSinClasificar());
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText("Ganancias")).toBeInTheDocument();
+    });
+
+    const [, hojaAmbigua] = screen.getAllByRole("checkbox");
+    fireEvent.click(hojaAmbigua!);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Confirmar importación/ }),
+      ).toBeDisabled();
+    });
+    // Hay dos mensajes que empiezan igual: el de adentro de la hoja y el del
+    // pie, que es el que nombra la hoja que bloquea. "destildá" es del pie.
+    const bloqueo = screen.getAllByText(/o destildá/);
+    expect(bloqueo[bloqueo.length - 1]).toHaveTextContent("«Ganancias»");
+  });
+
+  test("el aviso del parser se muestra en la hoja que lo generó", async () => {
+    const aviso =
+      "La hoja 'Ganancias' parece derivada del Libro Diario (resumen): no se " +
+      "importa automáticamente para no duplicar movimientos.";
+    mockGetPreview.mockResolvedValue(previewConHojaSinClasificar([aviso]));
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(aviso)).toBeInTheDocument();
+    });
+  });
+});
+
+describe("splitWarningsByContext", () => {
+  const contexts = [
+    { context_id: "c1", label: "Ganancias" },
+    { context_id: "c2", label: "precios y stock " }, // label con espacio al final
+  ] as Parameters<typeof splitWarningsByContext>[1];
+
+  test("atribuye cada aviso a la hoja que lo menciona", () => {
+    const { byContext, general } = splitWarningsByContext(
+      ["La hoja 'Ganancias' parece derivada del Libro Diario."],
+      contexts,
+    );
+    expect(byContext.c1).toHaveLength(1);
+    expect(byContext.c2).toBeUndefined();
+    expect(general).toHaveLength(0);
+  });
+
+  test("matchea labels con espacios al final", () => {
+    const { byContext } = splitWarningsByContext(
+      ["Columnas vacías en 'precios y stock'."],
+      contexts,
+    );
+    expect(byContext.c2).toHaveLength(1);
+  });
+
+  test("un aviso que no menciona ninguna hoja NO se pierde", () => {
+    const { byContext, general } = splitWarningsByContext(
+      ["4 movimiento(s) de 'LD 2026' son ambiguos."],
+      contexts,
+    );
+    expect(Object.keys(byContext)).toHaveLength(0);
+    expect(general).toEqual(["4 movimiento(s) de 'LD 2026' son ambiguos."]);
   });
 });

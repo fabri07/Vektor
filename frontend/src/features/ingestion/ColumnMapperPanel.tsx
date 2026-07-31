@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle, AlertCircle, XCircle, ArrowRight } from "lucide-react";
+import {
+  CheckCircle,
+  AlertCircle,
+  AlertTriangle,
+  XCircle,
+  ArrowRight,
+} from "lucide-react";
 import {
   ingestionService,
   type ColumnMapping,
@@ -107,6 +113,34 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   customer: "Clientes",
   supplier: "Proveedores",
 };
+
+// Secciones a las que se puede mandar una hoja que Véktor NO pudo clasificar.
+//
+// Clientes y Proveedores quedan AFUERA a propósito: el importador resuelve los
+// maestros en un paso previo (`_import_master_entities`) que lee el
+// `entity_type` del summary y NO consulta el override del usuario, y además
+// busca las filas en `clientes_detectados`/`proveedores_detectados` — donde una
+// hoja sin clasificar no las tiene (están en `otros_detectados`). Ofrecerlas
+// acá haría que el usuario elija una sección, confirme sin error, y no se
+// importe nada. Mejor no ofrecer la opción que ofrecer uuna que no funciona.
+// Habilitarlas es una tarea propia: pasar el override a `_import_master_entities`
+// y resolver sus filas desde `otros_detectados`.
+const ENTITY_OPTIONS = ["sale", "expense", "product"] as const;
+
+// Las hojas que el parser SÍ clasificó como maestro siguen mostrando su sección
+// (el camino de maestros funciona cuando la entidad viene del summary).
+const ENTITY_OPTIONS_TEXTO = [
+  "sale",
+  "expense",
+  "customer",
+  "supplier",
+] as const;
+
+// Valor de "todavía no elegí". NO es "sale": el default silencioso a ventas es
+// justo lo que hacía que una hoja que Véktor no supo clasificar (p. ej. un
+// resumen derivado del Libro Diario) entrara como 1840 ventas sin que nadie lo
+// decidiera.
+const ENTITY_UNSET = "";
 
 const SOURCE_LABELS: Record<string, string> = {
   tenant_history: "Historial",
@@ -308,6 +342,37 @@ function UnmappedModal({
   );
 }
 
+/**
+ * Reparte los avisos del parser entre las hojas que los originaron.
+ *
+ * Un aviso "pertenece" a una hoja si menciona su nombre — el parser los redacta
+ * así ("La hoja 'Ganancias' parece derivada del Libro Diario…"). El que no
+ * matchea con ninguna hoja NO se descarta: vuelve como `general` y se muestra a
+ * nivel archivo. Perder un aviso sería peor que mostrarlo en el lugar genérico.
+ */
+export function splitWarningsByContext(
+  warnings: string[],
+  contexts: MappingContext[],
+): { byContext: Record<string, string[]>; general: string[] } {
+  const byContext: Record<string, string[]> = {};
+  const general: string[] = [];
+  for (const w of warnings) {
+    const texto = w.toLowerCase();
+    const hojas = contexts.filter((c) => {
+      // trim: hay labels con espacio al final ("precios y stock ").
+      const label = (c.label ?? "").trim().toLowerCase();
+      // >= 3 evita que un label cortísimo matchee cualquier cosa.
+      return label.length >= 3 && texto.includes(label);
+    });
+    if (hojas.length === 0) {
+      general.push(w);
+      continue;
+    }
+    for (const c of hojas) (byContext[c.context_id] ??= []).push(w);
+  }
+  return { byContext, general };
+}
+
 // Status efectivo de una columna: si hay target local → mapped; "ignore" → unmapped;
 // si no hay target → status del backend (captura required_missing).
 function effectiveStatus(
@@ -326,6 +391,7 @@ function SheetMapperSection({
   context,
   included,
   entity,
+  warnings,
   onIncludeChange,
   onMappingsChange,
   onEntityChange,
@@ -335,6 +401,8 @@ function SheetMapperSection({
   context: MappingContext;
   included: boolean;
   entity: string;
+  // Avisos que el parser generó para ESTA hoja (ver `warningsForContext`).
+  warnings: string[];
   onIncludeChange: (ctxId: string, included: boolean) => void;
   onMappingsChange: (ctxId: string, mappings: Record<string, string>) => void;
   onEntityChange: (ctxId: string, entity: string) => void;
@@ -343,8 +411,15 @@ function SheetMapperSection({
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
+  // El backend no pudo clasificar la hoja: la decide el usuario, no un default.
+  const entityUnknown = context.entity_type == null;
+  // El selector aparece si el clasificador puede equivocarse (texto/imagen) o si
+  // directamente no supo (entity_type null).
+  const canChooseEntity = isText || entityUnknown;
+  const entityChosen = entity !== ENTITY_UNSET;
   const [mappings, setMappings] = useState<Record<string, string>>({});
-  const [initialized, setInitialized] = useState(false);
+  // Sección para la que ya se inicializó el mapeo (null = todavía ninguna).
+  const [initializedFor, setInitializedFor] = useState<string | null>(null);
   // Columna que está creando un custom field + su key en edición.
   const [customFor, setCustomFor] = useState<string | null>(null);
   const [customKey, setCustomKey] = useState("");
@@ -372,23 +447,28 @@ function SheetMapperSection({
   }
 
   const { data: suggestions = [], isLoading } = useQuery({
-    queryKey: ["column-mappings", fileId, context.context_id],
+    queryKey: ["column-mappings", fileId, context.context_id, entity],
     queryFn: () =>
       ingestionService.getColumnMappings(fileId, entity, context.context_id),
-    enabled: included && !isText,
+    // Sin sección elegida no hay contra qué mapear: pedir sugerencias mandaría
+    // `entity_type=""` y el backend lo rebota con 422.
+    enabled: included && !isText && entityChosen,
   });
 
-  // Inicializar mapeos desde sugerencias (una vez).
+  // Inicializar mapeos desde sugerencias, una vez POR SECCIÓN: si el usuario
+  // reasigna la hoja (p. ej. de Ventas a Productos), las sugerencias vienen de
+  // otro schema y el mapeo viejo ya no aplica. Un flag booleano dejaba pegado el
+  // mapeo del schema anterior.
   useEffect(() => {
-    if (suggestions.length > 0 && !initialized) {
+    if (suggestions.length > 0 && initializedFor !== entity) {
       const initial: Record<string, string> = {};
       for (const s of suggestions) {
         if (s.target_field) initial[s.source_column] = s.target_field;
       }
       setMappings(initial);
-      setInitialized(true);
+      setInitializedFor(entity);
     }
-  }, [suggestions, initialized]);
+  }, [suggestions, initializedFor, entity]);
 
   // Reportar mapeos al padre cuando cambian (vacío en texto/imagen).
   useEffect(() => {
@@ -399,6 +479,11 @@ function SheetMapperSection({
   const reqMissing = suggestions.some(
     (s) => effectiveStatus(s, mappings[s.source_column] ?? "") === "required_missing",
   );
+  // Columnas que no se mapearon ni se ignoraron a propósito: son las que se
+  // perderían sin que nadie lo note. "ignore" NO cuenta — es una decisión.
+  const unassigned = suggestions
+    .filter((s) => !(mappings[s.source_column] ?? ""))
+    .map((s) => s.source_column);
   const previewLines = context.preview_rows
     .map((r) => String(r.linea ?? Object.values(r)[0] ?? ""))
     .filter(Boolean)
@@ -420,17 +505,24 @@ function SheetMapperSection({
           />
           <span className="text-sm font-semibold text-vk-text-primary">{context.label}</span>
         </label>
-        {isText ? (
-          // Reasignable: el clasificador de texto puede equivocarse.
+        {canChooseEntity ? (
+          // Reasignable: o el clasificador puede equivocarse (texto/imagen), o
+          // directamente no supo qué es la hoja. En los dos casos decide el usuario.
           <select
             value={entity}
             onChange={(e) => onEntityChange(context.context_id, e.target.value)}
-            className="rounded border border-vk-border-w bg-vk-bg-light px-2 py-0.5 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"
+            className={`rounded border bg-vk-bg-light px-2 py-0.5 text-xs focus:border-vk-blue focus:outline-none ${
+              entityChosen
+                ? "border-vk-border-w text-vk-text-primary"
+                : "border-vk-warning/50 text-vk-warning"
+            }`}
           >
-            <option value="sale">Ventas</option>
-            <option value="expense">Gastos</option>
-            <option value="customer">Clientes</option>
-            <option value="supplier">Proveedores</option>
+            <option value={ENTITY_UNSET}>Elegí qué es esta hoja…</option>
+            {(isText ? ENTITY_OPTIONS_TEXTO : ENTITY_OPTIONS).map((value) => (
+              <option key={value} value={value}>
+                {ENTITY_TYPE_LABELS[value]}
+              </option>
+            ))}
           </select>
         ) : (
           <span className="rounded-full bg-vk-info-bg px-2 py-0.5 text-[10px] font-medium text-vk-blue">
@@ -440,7 +532,30 @@ function SheetMapperSection({
         )}
       </div>
 
+      {/* Lo que el parser detectó sobre ESTA hoja. Antes vivía en un bloque
+          general del archivo, lejos de la hoja que lo generó: el aviso de que
+          una hoja es un resumen derivado del Libro Diario no llegaba a la
+          decisión de incluirla o no. */}
+      {warnings.length > 0 && (
+        <div className="border-b border-vk-warning/20 bg-vk-warning-bg/40 px-3 py-2">
+          {warnings.map((w) => (
+            <p key={w} className="flex gap-1.5 text-[11px] leading-snug text-vk-warning">
+              <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+              <span>{w}</span>
+            </p>
+          ))}
+        </div>
+      )}
+
+      {included && !entityChosen && (
+        <div className="px-3 py-3 text-xs text-vk-text-muted">
+          Véktor no pudo determinar qué contiene esta hoja. Elegí a qué sección va
+          para poder mapear sus columnas.
+        </div>
+      )}
+
       {included &&
+        entityChosen &&
         (isText ? (
           <div className="p-2">
             <p className="mb-1 px-1 text-[10px] uppercase tracking-wide text-vk-text-muted">
@@ -467,6 +582,26 @@ function SheetMapperSection({
               <div className="mb-2 flex items-center gap-2 rounded border border-vk-danger/30 bg-vk-danger-bg px-2 py-1 text-[11px] text-vk-danger">
                 <XCircle className="h-3 w-3 shrink-0" />
                 Campos obligatorios sin mapear (en rojo).
+              </div>
+            )}
+            {/* Las columnas sin mapear se descartaban en silencio al confirmar
+                (el confirm saltea los targets vacíos), así que el usuario no se
+                enteraba de qué datos de su archivo NO entraban. Ahora se
+                nombran: se les puede dar un nombre propio o ignorarlas a
+                propósito, pero la decisión es visible. */}
+            {unassigned.length > 0 && (
+              <div className="mb-2 rounded border border-vk-warning/30 bg-vk-warning-bg/50 px-2 py-1.5 text-[11px] text-vk-warning">
+                <p className="flex gap-1.5">
+                  <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+                  <span>
+                    {unassigned.length} columna{unassigned.length !== 1 ? "s" : ""} sin
+                    asignar — no se {unassigned.length !== 1 ? "van" : "va"} a importar.
+                    Ponele un nombre con «+ Campo personalizado» o marcala «Ignorar».
+                  </span>
+                </p>
+                <p className="mt-1 truncate pl-4.5 font-mono text-[10px] opacity-80">
+                  {unassigned.join(", ")}
+                </p>
               </div>
             )}
             {suggestions.map((s) => {
@@ -552,22 +687,31 @@ function MultiContextMapper({
   contexts,
   contextualRisk,
   masterPreviews,
+  parserWarnings,
   onDone,
 }: {
   fileId: string;
   contexts: MappingContext[];
+  parserWarnings: string[];
   contextualRisk: ContextualColumnRisk[];
   masterPreviews: MasterPreviewSummary[];
   onDone: () => void;
 }) {
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
+  // Una hoja arranca tildada SOLO si Véktor supo qué es. Las que no pudo
+  // clasificar arrancan afuera: antes entraban todas tildadas y, sin entidad,
+  // caían a "sale" — así una hoja de resúmenes derivados del Libro Diario se
+  // importaba como 1840 ventas sin que nadie lo decidiera.
   const [included, setIncluded] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(contexts.map((c) => [c.context_id, true])),
+    Object.fromEntries(contexts.map((c) => [c.context_id, c.entity_type != null])),
   );
-  // entity_type efectivo por contexto (reasignable en texto/imagen).
+  // entity_type efectivo por contexto (reasignable en texto/imagen y en las
+  // hojas que el backend no pudo clasificar). Sin default a "sale".
   const [entityByCtx, setEntityByCtx] = useState<Record<string, string>>(() =>
-    Object.fromEntries(contexts.map((c) => [c.context_id, c.entity_type ?? "sale"])),
+    Object.fromEntries(
+      contexts.map((c) => [c.context_id, c.entity_type ?? ENTITY_UNSET]),
+    ),
   );
   // A: tratamiento del stock si alguna hoja incluida es de productos.
   const [stockTreatment, setStockTreatment] =
@@ -603,11 +747,29 @@ function MultiContextMapper({
     setMappingsVersion((v) => v + 1);
   }, []);
 
+  const { byContext: warningsByCtx, general: generalWarnings } = useMemo(
+    () => splitWarningsByContext(parserWarnings, contexts),
+    [parserWarnings, contexts],
+  );
+
+  // Sección efectiva de una hoja: la que eligió el usuario, si no la que trajo
+  // el backend, si no NINGUNA. Fuente única — antes cada lugar repetía el
+  // `?? "sale"` y ese default silencioso es el bug que estamos cerrando.
+  const entityFor = useCallback(
+    (ctx: MappingContext): string =>
+      entityByCtx[ctx.context_id] ?? ctx.entity_type ?? ENTITY_UNSET,
+    [entityByCtx],
+  );
+
+  // Hojas tildadas a las que todavía nadie les asignó sección: bloquean el
+  // confirm (el backend también las rechaza, ver el guard del endpoint).
+  const sinSeccion = contexts.filter(
+    (c) => included[c.context_id] && entityFor(c) === ENTITY_UNSET,
+  );
+
   // A: alguna hoja incluida es de productos → preguntar cómo tratar el stock.
   const hasStock = contexts.some(
-    (c) =>
-      included[c.context_id] &&
-      (entityByCtx[c.context_id] ?? c.entity_type) === "product",
+    (c) => included[c.context_id] && entityFor(c) === "product",
   );
 
   // F8c: input del recompute de riesgo — recorre las hojas incluidas leyendo el
@@ -619,8 +781,9 @@ function MultiContextMapper({
     const contextEntity: Record<string, string> = {};
     for (const ctx of contexts) {
       if (!included[ctx.context_id]) continue;
-      const ent = entityByCtx[ctx.context_id] ?? ctx.entity_type ?? "sale";
-      if (ctx.headers == null) contextEntity[ctx.context_id] = ent;
+      const ent = entityFor(ctx);
+      if (!ent) continue;
+      contextEntity[ctx.context_id] = ent;
       const m = mappingsRef.current[ctx.context_id] ?? {};
       for (const [src, target] of Object.entries(m)) {
         if (!target) continue;
@@ -642,7 +805,7 @@ function MultiContextMapper({
     // mappingsVersion es un trigger deliberado: el memo lee mappingsRef.current
     // (no rastreable por React), así que dependemos del contador para rearmarlo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contexts, included, entityByCtx, mappingsVersion]);
+  }, [contexts, included, entityFor, mappingsVersion]);
 
   const riskRecomputeKey = useMemo(
     () => JSON.stringify(riskRecomputeInput),
@@ -661,9 +824,15 @@ function MultiContextMapper({
       const contextEntity: Record<string, string> = {};
       for (const ctx of contexts) {
         if (!included[ctx.context_id]) continue;
-        const ent = entityByCtx[ctx.context_id] ?? ctx.entity_type ?? "sale";
-        // Override de tipo solo para texto/imagen (sin headers).
-        if (ctx.headers == null) contextEntity[ctx.context_id] = ent;
+        const ent = entityFor(ctx);
+        // Sin sección elegida la hoja no viaja. El botón ya lo impide; esto es
+        // la red por si el estado cambia entre el render y el click.
+        if (!ent) continue;
+        // Se manda SIEMPRE, no solo en texto/imagen: es la sección que el
+        // usuario vio en pantalla, y el backend la toma como override
+        // autoritativo. Mandarla solo a veces dejaba que lo importado
+        // divergiera de lo que el panel mostraba.
+        contextEntity[ctx.context_id] = ent;
         const m = mappingsRef.current[ctx.context_id] ?? {};
         for (const [src, target] of Object.entries(m)) {
           if (!target) continue;
@@ -725,6 +894,18 @@ function MultiContextMapper({
         </p>
       </div>
 
+      {/* Avisos del parser que no se pudieron atribuir a una hoja concreta. */}
+      {generalWarnings.length > 0 && (
+        <div className="mb-3 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 px-3 py-2">
+          {generalWarnings.map((w) => (
+            <p key={w} className="flex gap-1.5 text-[11px] leading-snug text-vk-warning">
+              <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+              <span>{w}</span>
+            </p>
+          ))}
+        </div>
+      )}
+
       {/* F7e: preview de maestros (clientes/proveedores) detectados en el archivo. */}
       <MasterPreviewPanel previews={masterPreviews} />
 
@@ -749,7 +930,8 @@ function MultiContextMapper({
             fileId={fileId}
             context={ctx}
             included={included[ctx.context_id] ?? false}
-            entity={entityByCtx[ctx.context_id] ?? ctx.entity_type ?? "sale"}
+            entity={entityFor(ctx)}
+            warnings={warningsByCtx[ctx.context_id] ?? []}
             onIncludeChange={handleIncludeChange}
             onMappingsChange={handleMappingsChange}
             onEntityChange={handleEntityChange}
@@ -774,11 +956,25 @@ function MultiContextMapper({
           </p>
         )}
 
+      {sinSeccion.length > 0 && (
+        <p className="mt-3 flex gap-1.5 text-xs text-vk-warning">
+          <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />
+          <span>
+            Elegí a qué sección {sinSeccion.length !== 1 ? "van" : "va"}{" "}
+            {sinSeccion.map((c) => `«${c.label}»`).join(", ")}, o destildá
+            {sinSeccion.length !== 1 ? "las" : "la"} para no importar
+            {sinSeccion.length !== 1 ? "las" : "la"}.
+          </span>
+        </p>
+      )}
+
       <div className="mt-4 flex items-center gap-2">
         <button
           type="button"
           onClick={() => confirmMutation.mutate()}
-          disabled={confirmMutation.isPending || !anyIncluded}
+          disabled={
+            confirmMutation.isPending || !anyIncluded || sinSeccion.length > 0
+          }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"
         >
           <CheckCircle className="h-3.5 w-3.5" />
@@ -855,6 +1051,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const entityType = INFERRED_TO_ENTITY[effectiveInferred] ?? "sale";
   // F8c: riesgo contextual por columna (reemplaza el legacy columns_at_risk).
   const contextualRisk = preview?.contextual_column_risk ?? [];
+  // Lo que el parser detectó sobre el archivo (hojas derivadas, movimientos
+  // ambiguos). Se muestra junto a la hoja que lo generó, no en un bloque suelto.
+  const parserWarnings = Array.isArray(summary?.warnings)
+    ? (summary.warnings as unknown[]).filter(
+        (w): w is string => typeof w === "string",
+      )
+    : [];
   // A: el archivo trae stock si el schema efectivo es de productos, si se tildó
   // "productos", o si el summary detectó stock/productos.
   const hasStock =
@@ -1083,6 +1286,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         contexts={contexts}
         contextualRisk={contextualRisk}
         masterPreviews={preview?.master_previews ?? []}
+        parserWarnings={parserWarnings}
         onDone={onDone}
       />
     );

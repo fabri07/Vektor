@@ -361,6 +361,43 @@ async def get_pipeline_stats(
 
 
 @router.get(
+    "/pipeline/trace/by-file/{file_id}",
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Traza del pipeline a partir del id del archivo (SUPERADMIN)",
+)
+async def get_pipeline_trace_by_file(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    """Mismo contenido que ``/pipeline/trace/{trace_id}``, entrando por el archivo.
+
+    Diagnosticar una ingesta arranca SIEMPRE con el ``file_id`` (es lo que se ve
+    en la UI y en el log); el ``trace_id`` hay que ir a buscarlo a la base. Este
+    atajo evita ese paso. ``UploadedFile.trace_id`` puede ser NULL en uploads
+    viejos: ahí el pipeline usa el propio id del archivo como traza (mismo
+    fallback que ``confirm_file``), así que se consulta por los dos.
+    """
+    from app.application.services import pipeline_event_service  # noqa: PLC0415
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+    record = (
+        await db.execute(select(UploadedFile).where(UploadedFile.id == file_id))
+    ).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado.")
+
+    trace_id = record.trace_id or record.id
+    events = await pipeline_event_service.get_trace(db, trace_id)
+    return {
+        "file_id": str(file_id),
+        "trace_id": str(trace_id),
+        "original_filename": record.original_filename,
+        "processing_status": record.processing_status,
+        "events": events,
+    }
+
+
+@router.get(
     "/pipeline/trace/{trace_id}",
     dependencies=[Depends(require_role("SUPERADMIN"))],
     summary="Ciclo completo (upload→parse→validate→confirm) de un upload (SUPERADMIN)",

@@ -744,10 +744,31 @@ async def execute_pending_action(
                 confirmed_fields=confirmed_fields,
                 source="chat",
                 uploaded_file_id=uploaded_file.id,
+                # Ledger de reversa: este camino sella `ingestion_version` igual
+                # que el confirm HTTP, y `file_deletion_service` usa esa versión
+                # para afirmar que los productos del archivo son rastreables. Sin
+                # escribir el ledger acá, borrar un archivo importado por chat
+                # decía "todo rastreable" y dejaba vivos TODOS sus productos.
+                return_details=True,
             )
             # Import vacío con datos presentes → falla visible (la pending action
             # queda FAILED y el archivo NO se marca DONE).
             check_nonempty_import(counts, summary, confirmed_fields)
+
+            # `product_details` sale de `counts` antes de compactar el summary:
+            # más abajo se serializa y engordaría el JSONB.
+            _product_details = counts.pop("product_details", []) or []
+            from app.application.services.file_deletion_service import (  # noqa: PLC0415
+                record_import_ledger,
+            )
+
+            await record_import_ledger(
+                db,
+                tenant_id=action.tenant_id,
+                file_id=uploaded_file.id,
+                product_details=_product_details,
+            )
+
             uploaded_file.processing_status = PROCESSING_STATUS_DONE
             # F9a (hallazgo post-review): este es el confirm vía CHAT — un path
             # de escritura directa separado del confirm HTTP normal, que NO pasa

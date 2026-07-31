@@ -84,6 +84,30 @@ class MasterPreviewSummary(BaseModel):
     samples: list[MasterPreviewSample] = Field(default_factory=list)
 
 
+class FileDeletionPreviewResponse(BaseModel):
+    """Qué datos se lleva puestos el borrado de un archivo.
+
+    Alimenta la advertencia que el usuario acepta o cancela. El borrado revierte
+    también lo editado a mano, así que ``has_user_edits`` no bloquea: informa.
+    """
+
+    file_id: UUID
+    ventas: int
+    gastos: int
+    productos: int
+    movimientos_stock: int
+    otros: int
+    # Filas de "Otros" que el usuario YA clasificó: NO se borran. El registro que
+    # generaron (venta/gasto/producto) no lleva `source_upload_id`, así que la
+    # reversa no lo alcanza y borrar la fila destruiría su único rastro.
+    otros_ya_clasificados: int
+    # Hay registros de este archivo que alguien editó a mano después de importar.
+    has_user_edits: bool
+    # El archivo se importó antes del ledger de reversa: no se puede saber qué
+    # productos creó, así que quedan vivos y hay que revisarlos a mano.
+    productos_no_rastreables: bool
+
+
 class FilePreviewResponse(BaseModel):
     model_config = {"from_attributes": True}
 

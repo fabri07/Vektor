@@ -33,6 +33,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     UploadedFile,
 )
+from app.persistence.models.pipeline_event import STAGE_REJECT, PipelineEvent
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -903,6 +904,161 @@ class TestConfirmEndpoint:
         assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
         assert refreshed.import_attempt_id is None
 
+    async def test_hoja_sin_seccion_no_entra_como_venta(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Una hoja que el parser no supo clasificar NO puede importarse sola.
+
+        Reproduce el caso real: el parser marca la hoja "Ganancias" como derivada
+        del Libro Diario y la deja con ``entity_type: null``. Antes,
+        ``_entity_for`` caía al default ``"sale"`` y esas 1840 filas de resúmenes
+        entraban como ventas, encima de las ventas reales del mismo archivo.
+
+        El gate vive en el backend a propósito: arreglarlo solo en el panel
+        dejaría el default silencioso disponible para cualquier otro cliente.
+        Y rebota con 422 ANTES del lease — el archivo sigue re-confirmable.
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="libro.xlsx",
+            s3_key="uploads/test/uuid/libro.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="general",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "row_count": 2,
+                "mapping_contexts": [
+                    {
+                        "context_id": "sheet:Ganancias",
+                        "label": "Ganancias",
+                        "entity_type": None,  # el parser no supo qué es
+                        "headers": ["concepto", "total"],
+                        "row_count": 2,
+                        "preview_rows": [],
+                    }
+                ],
+                "otros_detectados": [
+                    {"__context__": "sheet:Ganancias", "concepto": "x", "total": "1"},
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"sheet:Ganancias": True},
+                "column_mappings": [
+                    {
+                        "source_column": "total",
+                        "target_field": "amount",
+                        "context_id": "sheet:Ganancias",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 422
+        detalle = response.json()["detail"]
+        assert "Ganancias" in detalle
+        assert "sección" in detalle
+
+        # 422 ANTES del lease: el archivo queda re-confirmable, sin lease colgado.
+        refreshed = (
+            await db_session.execute(select(UploadedFile).where(UploadedFile.id == record.id))
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
+    async def test_hoja_sin_seccion_reasignada_por_el_usuario_importa(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """La contracara: con la sección elegida por el usuario, la hoja SÍ entra.
+
+        El guard bloquea la ausencia de decisión, no la hoja. Sin este test, el
+        fix podría estar rompiendo el caso legítimo de reasignar una hoja.
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="libro.xlsx",
+            s3_key="uploads/test/uuid/libro2.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="general",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "row_count": 1,
+                "mapping_contexts": [
+                    {
+                        "context_id": "sheet:Hoja1",
+                        "label": "Hoja1",
+                        "entity_type": None,
+                        "headers": ["fecha", "monto"],
+                        "row_count": 1,
+                        "preview_rows": [],
+                    }
+                ],
+                # Las filas de una hoja sin clasificar viven en `otros_detectados`;
+                # al reasignarla, el importador las levanta de ahí
+                # (`bucket_key = entity_bucket.get(base_entity or "", "otros_detectados")`).
+                "otros_detectados": [
+                    {"__context__": "sheet:Hoja1", "fecha": "2024-01-15", "monto": "50000"},
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"sheet:Hoja1": True},
+                # El usuario dijo qué es la hoja: eso desbloquea el import.
+                "context_entity": {"sheet:Hoja1": "sale"},
+                "column_mappings": [
+                    {
+                        "source_column": "fecha",
+                        "target_field": "transaction_date",
+                        "context_id": "sheet:Hoja1",
+                        "entity_type": "sale",
+                    },
+                    {
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "context_id": "sheet:Hoja1",
+                        "entity_type": "sale",
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.text
+
     async def test_confirm_drop_requerido_sin_reemplazo_devuelve_422_antes_del_lease(
         self,
         client: AsyncClient,
@@ -1530,6 +1686,119 @@ class TestConfirmLeaseF4:
         assert refreshed.import_started_at is None
         assert refreshed.import_phase is None
 
+    async def test_confirm_failure_deja_traza_en_pipeline_events(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """Un confirm que falla tiene que dejar un evento ``reject`` persistido.
+
+        Sin esto el import falla en silencio: ``pipeline_events`` solo se escribía
+        en el camino feliz (después de ``finalize_import_lease``), así que un
+        archivo que nunca importa no deja UNA sola fila de traza y diagnosticarlo
+        exige acceso a la base y adivinar.
+
+        El evento se emite DESPUÉS de compensar el lease: el flush de su
+        ``begin_nested`` sobre una sesión que viene de un import reventado
+        abortaría la transacción y dejaría el archivo en IMPORTING (ver
+        ``test_failure_after_f5_savepoints_still_compensates_lease``).
+        """
+        with (
+            unittest.mock.patch(
+                "app.api.v1.ingestion.insert_confirmed_data",
+                new_callable=unittest.mock.AsyncMock,
+                side_effect=RuntimeError("boom en el import"),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await client.post(
+                f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+                headers=auth_headers,
+                json={"confirmed_fields": {"ventas": True, "gastos": False}},
+            )
+
+        eventos = (
+            (
+                await db_session.execute(
+                    select(PipelineEvent).where(
+                        PipelineEvent.file_id == confirmed_file.id,
+                        PipelineEvent.stage == STAGE_REJECT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(eventos) == 1, "el fallo del confirm no dejó traza"
+
+        detail = eventos[0].detail or {}
+        assert detail.get("stage_failed") == "confirm"
+        assert detail.get("error_type") == "RuntimeError"
+        # Sin PII: la traza lleva tipo de error y etapa, nunca valores de fila.
+        assert "raw_row" not in detail
+
+    async def test_traza_de_integrityerror_no_filtra_valores_de_fila(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """La traza guarda el nombre de la constraint, nunca los valores.
+
+        Un ``IntegrityError`` es el caso donde más fácil se filtra PII: su ``str()``
+        trae el statement, los ``[parameters: ...]`` y el ``DETAIL: Key (...)=(...)``
+        de Postgres con los datos de la fila. ``pipeline_events`` es append-only y
+        se lee desde un endpoint admin, así que ahí no puede quedar nada de eso.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        # Forma real del error: asyncpg deja el DETAIL con los valores en la 2ª línea.
+        orig = Exception(
+            'duplicate key value violates unique constraint "uq_products_tenant_sku_norm"\n'
+            "DETAIL:  Key (tenant_id, sku_normalized)=(abc-123, JARRON-AZUL-40CM) "
+            "already exists."
+        )
+        boom = IntegrityError(
+            "INSERT INTO products (name, sku) VALUES (%(name)s, %(sku)s)",
+            {"name": "Jarrón azul 40cm", "sku": "JARRON-AZUL-40CM"},
+            orig,
+        )
+
+        with (
+            unittest.mock.patch(
+                "app.api.v1.ingestion.insert_confirmed_data",
+                new_callable=unittest.mock.AsyncMock,
+                side_effect=boom,
+            ),
+            pytest.raises(IntegrityError),
+        ):
+            await client.post(
+                f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+                headers=auth_headers,
+                json={"confirmed_fields": {"ventas": True, "gastos": False}},
+            )
+
+        evento = (
+            await db_session.execute(
+                select(PipelineEvent).where(
+                    PipelineEvent.file_id == confirmed_file.id,
+                    PipelineEvent.stage == STAGE_REJECT,
+                )
+            )
+        ).scalar_one()
+
+        traza = str(evento.detail)
+        # Lo que SÍ tiene que estar: qué constraint se violó.
+        assert "uq_products_tenant_sku_norm" in traza
+        # Lo que NO: valores de la fila, el DETAIL de Postgres y el statement.
+        assert "JARRON-AZUL-40CM" not in traza
+        assert "Jarrón azul 40cm" not in traza
+        assert "DETAIL" not in traza
+        assert "INSERT INTO" not in traza
+
     async def test_failure_after_f5_savepoints_still_compensates_lease(
         self,
         client: AsyncClient,
@@ -1641,6 +1910,89 @@ class TestConfirmLeaseF4:
         assert response.status_code == 409
         assert "importa" in response.json()["detail"].lower()
 
+    async def test_delete_sin_confirmar_devuelve_el_preview_y_no_borra(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """Sin `confirm=true` no se toca nada: se devuelve qué se borraría.
+
+        El borrado pasó a destruir datos de negocio (y también los editados a
+        mano), así que la confirmación es explícita, no un default.
+        """
+        response = await client.delete(
+            f"/api/v1/ingestion/files/{confirmed_file.id}",
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 409
+        detalle = response.json()["detail"]
+        assert detalle["code"] == "CONFIRM_REQUIRED"
+        # El preview trae los conteos para la advertencia.
+        for clave in ("ventas", "gastos", "productos", "movimientos_stock", "otros"):
+            assert clave in detalle
+        assert "has_user_edits" in detalle
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == confirmed_file.id)
+            )
+        ).scalar_one()
+        assert refreshed.deleted_at is None, "un 409 no puede haber borrado el archivo"
+
+    async def test_delete_confirmado_revierte_las_ventas_del_archivo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """El circuito completo: importar, borrar el archivo, y que las ventas
+        desaparezcan de la interfaz (que es lo que reportó el usuario)."""
+        confirm = await client.post(
+            f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True, "gastos": False}},
+        )
+        assert confirm.status_code == 200
+
+        vivas = (
+            (
+                await db_session.execute(
+                    select(SaleEntry).where(
+                        SaleEntry.source_upload_id == confirmed_file.id,
+                        SaleEntry.voided_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(vivas) > 0, "el import no dejó ventas: el test no probaría nada"
+
+        borrado = await client.delete(
+            f"/api/v1/ingestion/files/{confirmed_file.id}?confirm=true",
+            headers=auth_headers,
+        )
+        assert borrado.status_code == 204
+
+        despues = (
+            (
+                await db_session.execute(
+                    select(SaleEntry).where(
+                        SaleEntry.source_upload_id == confirmed_file.id,
+                        SaleEntry.voided_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert despues == [], "borrar el archivo tiene que sacar sus ventas de la interfaz"
+
     async def test_delete_non_importing_soft_deletes(
         self,
         client: AsyncClient,
@@ -1650,7 +2002,7 @@ class TestConfirmLeaseF4:
     ) -> None:
         """El CAS de borrado sigue soft-deleteando un archivo normal (204)."""
         response = await client.delete(
-            f"/api/v1/ingestion/files/{confirmed_file.id}",
+            f"/api/v1/ingestion/files/{confirmed_file.id}?confirm=true",
             headers=auth_headers,
         )
         assert response.status_code == 204

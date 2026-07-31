@@ -331,6 +331,12 @@ class TestIngestionVersionUpdateEvidence:
 class TestIngestionVersionConstant:
     """Verifica que la constante INGESTION_VERSION sea correcta."""
 
-    def test_current_version_is_two(self) -> None:
-        """La versión actual debe ser 2 (F8+)."""
-        assert INGESTION_VERSION == 2
+    def test_current_version_is_three(self) -> None:
+        """La versión actual debe ser 3 (ledger de reversa de productos).
+
+        Subirla no es cosmético: un archivo con versión < 3 se importó SIN el
+        registro de qué productos creó, y el borrado lo trata distinto (avisa en
+        vez de adivinar). Si alguien la cambia, este test lo obliga a leer el
+        historial de `ingestion_version.py` y decidir a conciencia.
+        """
+        assert INGESTION_VERSION == 3

@@ -46,6 +46,11 @@ from app.application.services.column_risk import (
     derive_context_mapping_entries,
     validate_column_risk_decisions,
 )
+from app.application.services.file_deletion_service import (
+    preview_file_deletion,
+    record_import_ledger,
+    revert_file_data,
+)
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
 )
@@ -98,6 +103,7 @@ from app.persistence.models.file import (
 from app.persistence.models.pipeline_event import (
     STAGE_CONFIRM,
     STAGE_PARSE,
+    STAGE_REJECT,
     STAGE_UPLOAD,
     STAGE_VALIDATE,
 )
@@ -115,6 +121,7 @@ from app.schemas.ingestion import (
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     ContextualColumnRisk,
+    FileDeletionPreviewResponse,
     FilePreviewResponse,
     FileStatusItem,
     MasterPreviewSample,
@@ -678,20 +685,89 @@ async def cancel_file_confirmation(
     return {"file_id": str(file_id), "status": PROCESSING_STATUS_NEEDS_COMPLETION}
 
 
-@router.delete(
-    "/files/{file_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete an uploaded file",
+@router.get(
+    "/files/{file_id}/deletion-preview",
+    response_model=FileDeletionPreviewResponse,
+    summary="Qué datos se borran si se elimina este archivo",
 )
-async def delete_file(
+async def get_deletion_preview(
     file_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> None:
+) -> FileDeletionPreviewResponse:
+    """Read-only: alimenta la advertencia previa al borrado.
+
+    El borrado revierte TAMBIÉN lo editado a mano, así que el usuario tiene que
+    poder ver qué se lleva puesto antes de aceptar.
+    """
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    resumen = await preview_file_deletion(session, file_id, tenant.tenant_id)
+    return FileDeletionPreviewResponse(file_id=file_id, **resumen)
+
+
+@router.delete(
+    "/files/{file_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Elimina un archivo y revierte los datos que importó",
+    dependencies=[Depends(require_modify_access)],
+)
+async def delete_file(
+    file_id: uuid.UUID,
+    confirm: bool = Query(
+        default=False,
+        description=(
+            "Confirmación explícita de que se van a borrar los datos importados "
+            "por el archivo. Sin esto, 409 con el detalle de qué se borraría."
+        ),
+    ),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Borra el archivo Y revierte lo que importó.
+
+    Antes esto solo hacía ``deleted_at = now()``: el archivo desaparecía de la
+    lista y sus ventas/gastos/productos seguían en el dashboard. Peor, volver a
+    subirlo corregido duplicaba todo, porque las huellas anti-duplicado incluyen
+    el ``uploaded_file_id`` y un archivo nuevo no reconoce lo del anterior.
+
+    Gateado con ``require_modify_access`` (PIN): pasó de ocultar un archivo a
+    destruir datos de negocio, el mismo riesgo que el DELETE de ventas y gastos.
+
+    ``confirm=true`` es obligatorio — la reversa alcanza también a los registros
+    editados a mano, y esa decisión la toma el usuario, no el endpoint.
+    """
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    # Un import en curso rebota por ESO, antes que por falta de confirmación:
+    # pedirle al usuario que confirme un borrado que igual va a fallar sería un
+    # mensaje equivocado. El CAS de abajo sigue siendo el guard real de la carrera.
+    if record.processing_status == PROCESSING_STATUS_IMPORTING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede eliminar un archivo mientras se importa.",
+        )
+
+    if not confirm:
+        resumen = await preview_file_deletion(session, file_id, tenant.tenant_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CONFIRM_REQUIRED",
+                "message": (
+                    "Borrar este archivo también borra los datos que importó. "
+                    "Confirmá para continuar."
+                ),
+                **resumen,
+            },
+        )
 
     # F4: soft-delete ATÓMICO (CAS) — cierra la carrera delete↔confirm. Un check en
     # Python (leer estado → borrar) deja un TOCTOU: el confirm podría tomar el lease
@@ -721,6 +797,13 @@ async def delete_file(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="No se puede eliminar un archivo mientras se importa.",
             )
+    else:
+        # La reversa va SOLO si el CAS ganó. Si perdió la carrera, el archivo es
+        # de otro (un confirm en curso, u otro delete que ya revirtió): revertir
+        # igual borraría datos que este request no marcó como suyos.
+        await revert_file_data(
+            session, file_id, tenant.tenant_id, actor_user_id=user.user_id
+        )
     await session.commit()
 
 
@@ -908,6 +991,33 @@ async def delete_column_mapping(
     await session.commit()
 
 
+def _sanitize_error_message(exc: BaseException) -> str:
+    """Mensaje de error apto para persistir en la traza: sin valores de fila.
+
+    ``str()`` de un error de SQLAlchemy trae el SQL completo más
+    ``[parameters: (...)]``, y el de un ``UniqueViolationError`` de Postgres
+    agrega ``DETAIL: Key (tenant_id, sku_normalized)=(<uuid>, ABC-123) already
+    exists``. Los dos filtran datos del negocio a una tabla append-only que
+    después se lee desde un endpoint admin — exactamente lo que el invariante de
+    no-PII prohíbe.
+
+    Lo que se conserva es lo único que sirve para diagnosticar: la PRIMERA línea
+    del error del driver, que en Postgres es la violación y el NOMBRE de la
+    constraint (``duplicate key value violates unique constraint
+    "uq_products_tenant_sku_norm"``). El ``DETAIL`` con los valores se descarta.
+    """
+    from sqlalchemy.exc import DBAPIError, SQLAlchemyError  # noqa: PLC0415
+
+    if isinstance(exc, DBAPIError) and exc.orig is not None:
+        # `exc.orig` es la excepción del driver: su primera línea es el mensaje
+        # de Postgres sin el DETAIL. `str(exc)` sí incluiría statement y params.
+        return str(exc.orig).split("\n")[0].strip()[:500]
+    if isinstance(exc, SQLAlchemyError):
+        # Otros errores del ORM: nunca el str completo (puede traer el statement).
+        return type(exc).__name__
+    return str(exc)[:500]
+
+
 @router.post(
     "/files/{file_id}/confirm",
     response_model=ConfirmIngestionResponse,
@@ -987,7 +1097,10 @@ async def confirm_file(
             )
         return mapping.entity_type or _entity_type
 
-    def _context_included(context_id: str, entity_type: str) -> bool:
+    # `entity_type` opcional: una hoja que el parser no pudo clasificar llega sin
+    # entidad y el guard de más abajo igual necesita saber si el usuario la
+    # incluyó. Misma firma que `context_is_included`, que ya la acepta nullable.
+    def _context_included(context_id: str, entity_type: str | None) -> bool:
         # Fuente única compartida con F8 (`/column-risk`) para no divergir.
         return context_is_included(
             context_id, entity_type, body.confirmed_fields, body.context_confirmed
@@ -1000,6 +1113,48 @@ async def confirm_file(
             if m.target_field != "ignore" and not m.target_field.startswith("custom_field:")
         }
         return set(REQUIRED_FIELDS.get(entity_type, [])) - mapped
+
+    # ── Ninguna hoja se importa sin que alguien haya dicho QUÉ es ───────────────
+    # El parser deja `entity_type: null` cuando no pudo clasificar una hoja.
+    #
+    # ALCANCE REAL de este guard (no sobreestimarlo): el importador ya rutea a
+    # "Otros" un contexto cuya entidad no resuelve (`_insert_multisheet_data`,
+    # `if entity not in entity_bucket`), así que el default "sale" de
+    # `_entity_for` NO era lo que convertía esas filas en ventas — gobierna la
+    # validación de requeridos y el aprendizaje de mapeos. Lo que las convertía
+    # en ventas era el FRONTEND, que mandaba `context_entity` con "sale" por su
+    # propio default. Ese es el fix principal y vive en el panel.
+    #
+    # Esto es defensa en profundidad para la otra forma del problema: un cliente
+    # que incluye una hoja SIN declarar su sección. Corta con 422 en vez de
+    # dejarla caer silenciosamente a "Otros". NO protege contra un cliente que
+    # manda una sección explícita equivocada.
+    #
+    # Va antes del lease: una request que va a rebotar nunca lo toma.
+    if _mapping_contexts_raw := (_summary_for_ctx.get("mapping_contexts") or []):
+        _sin_entidad: list[str] = []
+        for _ctx in _mapping_contexts_raw:
+            _cid = _ctx.get("context_id")
+            if not _cid:
+                continue
+            # MISMA prioridad que `_entity_for`: override del usuario primero,
+            # después la entidad original del summary. Si ninguna resuelve, la
+            # hoja no tiene sección y no puede importarse.
+            _ent_efectiva = _override.get(_cid) or _context_entity.get(_cid)
+            if _ent_efectiva:
+                continue
+            if _context_included(_cid, _ent_efectiva):
+                _sin_entidad.append(str(_ctx.get("label") or _cid))
+        if _sin_entidad:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Estas hojas no tienen sección asignada y no se pueden "
+                    f"importar: {', '.join(_sin_entidad)}. Elegí a qué sección va "
+                    "cada una (ventas, gastos o productos) o destildala para "
+                    "dejarla afuera."
+                ),
+            )
 
     # Validación de requeridos — plano (legacy)
     if _flat_mappings:
@@ -1178,6 +1333,72 @@ async def confirm_file(
             detail="El archivo ya se está importando o ya se importó.",
         )
 
+    # El trace_id se resuelve ACÁ, antes del savepoint: la traza del FALLO lo
+    # necesita y el import puede reventar mucho antes de la línea donde se usaba
+    # (dentro del try, después de aplicar las decisiones de riesgo). Definirlo
+    # tarde dejaba el nombre sin asignar en el `except` → UnboundLocalError
+    # tapando el error real.
+    _trace_id = record.trace_id or record.id
+    bind_request_context(trace_id=_trace_id)
+
+    async def _emit_confirm_failure(exc: BaseException, phase: str) -> None:
+        """Deja traza de un confirm que NO terminó bien.
+
+        Sin esto el confirm solo escribía en ``pipeline_events`` en el camino
+        feliz (después de ``finalize_import_lease``), así que un archivo que
+        nunca llega a importar no deja UNA sola fila: diagnosticarlo exigía
+        acceso a la base y adivinar cuál de los desenlaces fue.
+
+        **Cuándo llamarla: SIEMPRE DESPUÉS de liberar/compensar el lease**, con
+        su commit ya hecho. Emitir antes lo rompe: ``emit_event`` abre un
+        ``begin_nested()``, que flushea INCONDICIONALMENTE, y sobre una sesión
+        que viene de un import reventado ese flush deja la transacción en estado
+        abortado → el UPDATE de ``release_import_lease`` (best-effort, se traga
+        su error) no llega a correr y el archivo queda clavado en IMPORTING. Lo
+        detectó ``test_failure_after_f5_savepoints_still_compensates_lease``:
+        primero se compensa, después se traza.
+
+        Best-effort de punta a punta: la traza NUNCA puede tapar la excepción
+        original ni romper la compensación.
+
+        Sin PII: tipo de error, mensaje, etapa y qué contextos se intentaron —
+        nunca valores de fila.
+        """
+        # El caller suele envolver la causa real en un HTTPException
+        # (`raise HTTPException(...) from exc`); el tipo útil para diagnosticar
+        # es el de la causa, no el del envoltorio.
+        origen = exc.__cause__ if exc.__cause__ is not None else exc
+        detail: dict[str, Any] = {
+            "stage_failed": "confirm",
+            "phase": phase,
+            "error_type": type(origen).__name__,
+            "error": _sanitize_error_message(origen),
+            "confirmed_fields": body.confirmed_fields,
+            "contexts_included": sorted(
+                cid for cid, incluido in (body.context_confirmed or {}).items() if incluido
+            ),
+        }
+        if isinstance(exc, HTTPException):
+            detail["http_status"] = exc.status_code
+        try:
+            await pipeline_event_service.emit_event(
+                session,
+                trace_id=_trace_id,
+                tenant_id=tenant.tenant_id,
+                stage=STAGE_REJECT,
+                file_id=file_id,
+                detail=detail,
+            )
+            # Commit propio: la excepción original sigue viaje y haría rollback
+            # del request, llevándose el evento.
+            await session.commit()
+        except Exception:  # noqa: BLE001 — la traza nunca tapa el error original
+            logger.warning(
+                "ingestion.confirm.failure_trace_failed",
+                file_id=str(file_id),
+                phase=phase,
+            )
+
     # Savepoint que aísla TODO el import: ante cualquier fallo se revierte solo
     # (async-aware, sin `session.rollback()` manual — que rompería el re-arme del
     # savepoint del request), dejando la sesión viva para el UPDATE de
@@ -1290,8 +1511,6 @@ async def confirm_file(
                 d.model_dump() for d in _effective_risk_decisions
             ]
 
-        _trace_id = record.trace_id or record.id
-        bind_request_context(trace_id=_trace_id)
         _t0 = time.monotonic()
         counts = await insert_confirmed_data(
             session,
@@ -1305,8 +1524,27 @@ async def confirm_file(
             source="ingestion",
             uploaded_file_id=file_id,
             stock_treatment=body.stock_treatment,
+            # Ledger de reversa: `products` no tiene columna de origen, así que
+            # sin este detalle no hay forma de saber qué productos creó este
+            # archivo — y borrarlo no podría deshacerlos.
+            return_details=True,
         )
         _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
+
+        # `product_details` sale de `counts` ANTES de cualquier otra cosa: más
+        # abajo `counts` se serializa entero en `compact_summary`, y meter ahí el
+        # detalle por producto engordaría el JSONB (justo lo que ese bloque
+        # existe para evitar) y lo devolvería en la respuesta del endpoint.
+        _product_details = counts.pop("product_details", []) or []
+
+        # Se escribe DENTRO del savepoint del import: si el import se revierte,
+        # el ledger se va con él (nunca un ledger de un import que no ocurrió).
+        await record_import_ledger(
+            session,
+            tenant_id=tenant.tenant_id,
+            file_id=file_id,
+            product_details=_product_details,
+        )
 
         # ── F8b (Task 4) + F8c (Minor 1): capturar en "Otros" las filas
         # ruteadas por columna riesgosa + counters + auditoría AGREGADA, todo
@@ -1481,21 +1719,31 @@ async def confirm_file(
         # Import OK: liberar el savepoint (los cambios quedan en la transacción del
         # request, que los commitea al final).
         await _import_sp.commit()
-    except ImportLeaseLostError:
+    except ImportLeaseLostError as exc:
         # Un takeover ya tomó el lease con otro token. Descartar nuestro import
         # parcial (rollback del savepoint) y NO compensar (el estado es del nuevo dueño).
         await _import_sp.rollback()
+        # Acá sí se traza antes de tocar el lease, y es seguro: este camino NO
+        # compensa (el lease es del nuevo dueño), así que no hay UPDATE posterior
+        # que un flush fallido pueda dejar sin correr.
+        await _emit_confirm_failure(exc, phase="lease_lost")
         logger.warning("ingestion.confirm.lease_lost", file_id=str(file_id))
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="El import fue retomado por otro proceso. Volvé a intentar.",
         ) from None
-    except Exception:
-        # Cualquier fallo post-lease (incl. el 422 de import vacío): revertir el
-        # savepoint del import PRIMERO (descarta lo parcial sin tocar la sesión del
-        # request) y RECIÉN compensar el lease → NEEDS_CONFIRMATION.
+    except BaseException as exc:
+        # `BaseException`, no `Exception`: si el cliente corta la conexión, Starlette
+        # cancela la task y `CancelledError` (BaseException desde 3.8) esquivaba este
+        # bloque → el lease nunca se compensaba y el archivo quedaba clavado en
+        # IMPORTING hasta que venciera el TTL. Cubre también el 422 de import vacío.
+        # Orden obligatorio: revertir el savepoint (descarta lo parcial sin tocar la
+        # sesión del request) → compensar el lease → RECIÉN trazar. La traza va
+        # última porque su flush sobre una sesión reventada abortaría la
+        # transacción y dejaría al archivo en IMPORTING (ver `_emit_confirm_failure`).
         await _import_sp.rollback()
         await release_import_lease(session, tenant.tenant_id, file_id, _import_token)
+        await _emit_confirm_failure(exc, phase="import")
         raise
 
     logger.info(

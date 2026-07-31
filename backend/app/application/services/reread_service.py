@@ -800,6 +800,8 @@ async def _reconcile(
         # para descartar el resultado. Pedirlo condicionado a `not dry_run`
         # evita ese costo en el path síncrono de preview.
         return_details=not dry_run,
+        # El undo compara este `updated_at` contra el vivo del producto.
+        stamp_product_updated_at=not dry_run,
     )
     await session.flush()
 
