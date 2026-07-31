@@ -27,11 +27,14 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "notes": "Notas",
         # F7a: campos de referencia al cliente (aditivo — el mapeo/vinculación real
         # a un Customer existente queda para 7c; acá solo se abre el contrato).
-        "customer_dni": "DNI del cliente",
-        "customer_cuit": "CUIT del cliente",
-        "customer_email": "Email del cliente",
-        "customer_phone": "Teléfono del cliente",
-        "customer_name": "Nombre del cliente",
+        # Prefijo "Cliente — " a propósito: en un select largo agrupa visualmente
+        # los campos de referencia. Es el label que ya estaba en la UI antes de
+        # que el catálogo pasara a servirse desde acá.
+        "customer_dni": "Cliente — DNI",
+        "customer_cuit": "Cliente — CUIT",
+        "customer_email": "Cliente — Email",
+        "customer_phone": "Cliente — Teléfono",
+        "customer_name": "Cliente — Nombre",
     },
     "expense": {
         "amount": "Monto del gasto",
@@ -42,9 +45,10 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "supplier_name": "Proveedor",
         "notes": "Notas",
         # F7a: campos de referencia al proveedor (aditivo, ver nota de sale arriba).
-        "supplier_cuil": "CUIL del proveedor",
-        "supplier_email": "Email del proveedor",
-        "supplier_phone": "Teléfono del proveedor",
+        # Ver la nota de los campos de cliente: mismo criterio de agrupación.
+        "supplier_cuil": "Proveedor — CUIL",
+        "supplier_email": "Proveedor — Email",
+        "supplier_phone": "Proveedor — Teléfono",
     },
     # F7a: maestro de CLIENTES — campos que persiste el modelo Customer.
     "customer": {

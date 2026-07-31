@@ -23,6 +23,11 @@ import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
+import {
+  missingRequiredFields,
+  scalarCollisions,
+  type SheetIssues,
+} from "./mappingRules";
 
 // F8c: identidad estable de una columna riesgosa dentro del archivo: (contexto,
 // columna). Se serializa la tupla con JSON.stringify (sin separador propenso a
@@ -31,80 +36,29 @@ import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 const riskKey = (contextId: string, sourceColumn: string): string =>
   JSON.stringify([contextId, sourceColumn]);
 
-// Campos canónicos por entity_type (para los selects del panel derecho)
-const CANONICAL_FIELDS: Record<string, Array<{ value: string; label: string }>> = {
-  sale: [
-    { value: "amount", label: "Monto de venta" },
-    { value: "transaction_date", label: "Fecha de venta" },
-    { value: "quantity", label: "Cantidad" },
-    { value: "payment_method", label: "Método de pago" },
-    { value: "product_name", label: "Nombre del producto" },
-    { value: "notes", label: "Notas" },
-    // F7e: espeja CANONICAL_FIELDS["sale"] del backend (mantener en sync).
-    // Referencia al cliente — vincula la venta con un Customer existente
-    // (matching por documento/email/teléfono en el motor de identidad de 7b).
-    { value: "customer_dni", label: "Cliente — DNI" },
-    { value: "customer_cuit", label: "Cliente — CUIT" },
-    { value: "customer_email", label: "Cliente — Email" },
-    { value: "customer_phone", label: "Cliente — Teléfono" },
-    { value: "customer_name", label: "Cliente — Nombre" },
-  ],
-  expense: [
-    { value: "amount", label: "Monto del gasto" },
-    { value: "expense_date", label: "Fecha del gasto" },
-    { value: "category", label: "Categoría" },
-    { value: "supplier_name", label: "Proveedor" },
-    { value: "notes", label: "Notas" },
-    // F7e: espeja CANONICAL_FIELDS["expense"] del backend (mantener en sync).
-    // Referencia al proveedor — vincula el gasto con un Supplier existente.
-    { value: "supplier_cuil", label: "Proveedor — CUIL" },
-    { value: "supplier_email", label: "Proveedor — Email" },
-    { value: "supplier_phone", label: "Proveedor — Teléfono" },
-  ],
-  product: [
-    { value: "sku", label: "Código (SKU)" },
-    { value: "barcode", label: "Código de barras (EAN/UPC)" },
-    { value: "name", label: "Nombre" },
-    { value: "sale_price_ars", label: "Precio de venta" },
-    { value: "unit_cost_ars", label: "Costo unitario" },
-    { value: "stock_units", label: "Stock (unidades)" },
-    { value: "category", label: "Categoría" },
-    { value: "description", label: "Descripción" },
-    // F6-B1: espeja CANONICAL_FIELDS["product"] del backend (mantener en sync).
-    { value: "acquired_at", label: "Fecha de alta/adquisición" },
-    { value: "expiry_date", label: "Fecha de vencimiento" },
-  ],
-  // F7a: espeja CANONICAL_FIELDS["customer"] del backend (mantener en sync).
-  // Aditivo — el import/vinculación real queda para 7b/7c.
-  customer: [
-    { value: "customer_type", label: "Tipo (persona/empresa)" },
-    { value: "name", label: "Nombre" },
-    { value: "last_name", label: "Apellido" },
-    { value: "doc_type", label: "Tipo de documento" },
-    { value: "dni", label: "DNI" },
-    { value: "cuit", label: "CUIT" },
-    { value: "iva_condition", label: "Condición de IVA" },
-    { value: "email", label: "Email" },
-    { value: "phone", label: "Teléfono" },
-    { value: "address", label: "Dirección" },
-    { value: "locality", label: "Localidad" },
-    { value: "province", label: "Provincia" },
-    { value: "postal_code", label: "Código postal" },
-    { value: "birthday", label: "Cumpleaños" },
-    { value: "notes", label: "Notas" },
-  ],
-  // F7a: espeja CANONICAL_FIELDS["supplier"] del backend — ACOTADO a lo que
-  // persiste el modelo Supplier hoy (sin domicilio/condición IVA).
-  supplier: [
-    { value: "name", label: "Nombre" },
-    { value: "last_name", label: "Apellido" },
-    { value: "cuil", label: "CUIL" },
-    { value: "payment_method", label: "Método de pago" },
-    { value: "email", label: "Email" },
-    { value: "phone", label: "Teléfono" },
-    { value: "notes", label: "Notas" },
-  ],
-};
+// El catálogo de campos NO vive acá: lo sirve el backend
+// (`GET /ingestion/field-catalog`), derivado de las MISMAS estructuras que usan
+// la validación del confirm y el importador.
+//
+// Antes había una copia manual comentada "mantener en sync" y divergió: a
+// `expense` le faltaban `payment_method` e `is_recurring`. Como el `<select>`
+// solo renderiza opciones de esa copia, cuando el backend sugería
+// `payment_method` ninguna `<option>` matcheaba, el DOM caía a la primera y la
+// pantalla mostraba "Sin mapear" mientras el estado enviaba `payment_method`
+// (incidente ASTERIA, 2026-07-31). Dos listas que deben coincidir a mano son
+// dos listas que tarde o temprano no coinciden.
+
+/**
+ * Catálogo de campos del backend. Estático por deploy, así que una sola query
+ * compartida por todas las secciones (react-query dedupea por `queryKey`).
+ */
+function useFieldCatalog() {
+  return useQuery({
+    queryKey: ["ingestion-field-catalog"],
+    queryFn: () => ingestionService.getFieldCatalog(),
+    staleTime: Infinity,
+  });
+}
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
   sale: "Ventas",
@@ -231,7 +185,8 @@ function UnmappedModal({
   const [customKey, setCustomKey] = useState("");
   const [mode, setMode] = useState<"field" | "custom" | "ignore">("field");
 
-  const fields = CANONICAL_FIELDS[entityType] ?? [];
+  const { data: catalog } = useFieldCatalog();
+  const fields = catalog?.[entityType]?.fields ?? [];
 
   function handleConfirm() {
     if (mode === "field" && selected) {
@@ -396,6 +351,7 @@ function SheetMapperSection({
   onMappingsChange,
   onEntityChange,
   onColumnTouched,
+  onIssuesChange,
 }: {
   fileId: string;
   context: MappingContext;
@@ -408,6 +364,10 @@ function SheetMapperSection({
   onEntityChange: (ctxId: string, entity: string) => void;
   // F8c: se llama SOLO en cambios manuales de mapeo (marca user_selected).
   onColumnTouched?: (ctxId: string, col: string) => void;
+  // Problemas que impiden importar ESTA hoja. El padre los junta para decidir si
+  // habilita Confirmar — así el bloqueo usa las mismas reglas que el confirm del
+  // backend en vez de descubrirse recién con un 422.
+  onIssuesChange?: (ctxId: string, issues: SheetIssues) => void;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -475,10 +435,34 @@ function SheetMapperSection({
     onMappingsChange(context.context_id, mappings);
   }, [mappings, context.context_id, onMappingsChange]);
 
-  const fields = CANONICAL_FIELDS[entity] ?? [];
-  const reqMissing = suggestions.some(
-    (s) => effectiveStatus(s, mappings[s.source_column] ?? "") === "required_missing",
+  const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
+  const fields = catalog?.[entity]?.fields ?? [];
+  // Requeridos REALES de la entidad: un requerido está cubierto solo si alguna
+  // columna lo mapea a su campo canónico. Antes esto miraba el `status` que
+  // mandó el backend por columna, así que mover la columna del nombre a un
+  // campo personalizado dejaba el requerido descubierto sin que la UI se
+  // enterara — daba el OK y el confirm respondía 422 (incidente ASTERIA).
+  const faltanRequeridos = missingRequiredFields(
+    catalog?.[entity]?.required ?? [],
+    mappings,
   );
+  const colisiones = scalarCollisions(fields, mappings);
+  const reqMissing = faltanRequeridos.length > 0;
+
+  // `faltanRequeridos`/`colisiones` se recomputan en cada render (arrays nuevos),
+  // así que el efecto se dispara por su CONTENIDO y no por su identidad — si no,
+  // reportaría en loop.
+  const issuesKey = JSON.stringify([faltanRequeridos, colisiones]);
+
+  // Reportar los problemas de ESTA hoja al padre (bloqueo de Confirmar).
+  useEffect(() => {
+    if (loadingCatalog) return; // sin catálogo no se puede afirmar que falte algo
+    onIssuesChange?.(context.context_id, {
+      missingRequired: faltanRequeridos,
+      collisions: colisiones,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [context.context_id, loadingCatalog, issuesKey, onIssuesChange]);
   // Columnas que no se mapearon ni se ignoraron a propósito: son las que se
   // perderían sin que nadie lo note. "ignore" NO cuenta — es una decisión.
   const unassigned = suggestions
@@ -604,10 +588,56 @@ function SheetMapperSection({
                 </p>
               </div>
             )}
+            {/* Requerido descubierto: la salida concreta, nombrando el campo.
+                Antes esto solo se sabía al confirmar, con un 422 que decía
+                «Campos requeridos sin mapear: name» y nada más. */}
+            {faltanRequeridos.length > 0 && (
+              <div className="mb-2 rounded border border-vk-danger/40 bg-vk-danger/5 px-2 py-1.5 text-[11px] text-vk-danger">
+                <p className="flex gap-1.5">
+                  <XCircle className="mt-px h-3 w-3 shrink-0" />
+                  <span>
+                    Falta un dato obligatorio de esta hoja:{" "}
+                    <strong>
+                      {faltanRequeridos
+                        .map((r) => fields.find((f) => f.value === r)?.label ?? r)
+                        .join(", ")}
+                    </strong>
+                    . Elegí ese campo en la columna que lo contiene. Un campo
+                    personalizado guarda el dato pero no reemplaza al obligatorio.
+                  </span>
+                </p>
+              </div>
+            )}
+            {/* Colisión en un campo escalar: sin esto el importador se quedaba
+                con la primera columna del orden del archivo y descartaba el
+                resto en silencio. */}
+            {colisiones.length > 0 && (
+              <div className="mb-2 rounded border border-vk-danger/40 bg-vk-danger/5 px-2 py-1.5 text-[11px] text-vk-danger">
+                {colisiones.map((c) => (
+                  <p key={c.target} className="flex gap-1.5">
+                    <XCircle className="mt-px h-3 w-3 shrink-0" />
+                    <span>
+                      {c.columns.length} columnas apuntan a <strong>«{c.label}»</strong>{" "}
+                      ({c.columns.join(", ")}) y solo se puede guardar una. Elegí
+                      cuál corresponde y mandá las demás a otro campo o a «Ignorar».
+                    </span>
+                  </p>
+                ))}
+              </div>
+            )}
             {suggestions.map((s) => {
               const target = mappings[s.source_column] ?? "";
               const eff = effectiveStatus(s, target);
               const isCustom = target.startsWith("custom_field:");
+              // El target del estado no existe entre las opciones: sin una
+              // `<option>` propia el DOM caería a la primera («Sin mapear») y la
+              // pantalla mostraría algo distinto de lo que se va a enviar.
+              const isUnknown =
+                !!target &&
+                target !== "ignore" &&
+                !isCustom &&
+                fields.length > 0 &&
+                !fields.some((f) => f.value === target);
               return (
                 <div
                   key={s.source_column}
@@ -628,7 +658,11 @@ function SheetMapperSection({
                     <select
                       value={customFor === s.source_column ? "__custom__" : target}
                       onChange={(e) => selectTarget(s.source_column, e.target.value)}
-                      className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"
+                      // Deshabilitado —no vacío— mientras carga el catálogo: un
+                      // select sin opciones es justamente el fallo que se está
+                      // corrigiendo (mostraría "Sin mapear" sobre un target real).
+                      disabled={loadingCatalog}
+                      className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
                     >
                       <option value="">Sin mapear</option>
                       <option value="ignore">— Ignorar —</option>
@@ -638,6 +672,9 @@ function SheetMapperSection({
                         </option>
                       ))}
                       {isCustom && <option value={target}>{target}</option>}
+                      {isUnknown && (
+                        <option value={target}>{target} (campo desconocido)</option>
+                      )}
                       <option value="__custom__">+ Campo personalizado…</option>
                     </select>
                     {customFor === s.source_column && (
@@ -740,6 +777,20 @@ function MultiContextMapper({
     [],
   );
 
+  // Problemas por hoja (requerido descubierto / colisión escalar). Los reporta
+  // cada sección con las MISMAS reglas que valida el confirm del backend, así el
+  // bloqueo se ve acá y no aparece recién como un 422.
+  const [issuesByCtx, setIssuesByCtx] = useState<Record<string, SheetIssues>>({});
+  const handleIssuesChange = useCallback((ctxId: string, issues: SheetIssues) => {
+    setIssuesByCtx((prev) => {
+      const anterior = prev[ctxId];
+      const igual =
+        anterior !== undefined &&
+        JSON.stringify(anterior) === JSON.stringify(issues);
+      return igual ? prev : { ...prev, [ctxId]: issues };
+    });
+  }, []);
+
   // F8c: cambio MANUAL de un mapeo en cualquier hoja → marca la columna como
   // tocada por el usuario y dispara el recompute (via mappingsVersion).
   const handleColumnTouched = useCallback((ctxId: string, col: string) => {
@@ -771,6 +822,17 @@ function MultiContextMapper({
   const hasStock = contexts.some(
     (c) => included[c.context_id] && entityFor(c) === "product",
   );
+
+  // Solo cuentan las hojas INCLUIDAS: una destildada no se importa, así que sus
+  // problemas no pueden bloquear nada.
+  const hojasConProblemas = contexts
+    .filter((c) => included[c.context_id])
+    .map((c) => ({ label: c.label ?? c.context_id, issues: issuesByCtx[c.context_id] }))
+    .filter(
+      (h): h is { label: string; issues: SheetIssues } =>
+        !!h.issues &&
+        (h.issues.missingRequired.length > 0 || h.issues.collisions.length > 0),
+    );
 
   // F8c: input del recompute de riesgo — recorre las hojas incluidas leyendo el
   // mapeo vivo de mappingsRef (observable via mappingsVersion) y el touched-set.
@@ -936,6 +998,7 @@ function MultiContextMapper({
             onMappingsChange={handleMappingsChange}
             onEntityChange={handleEntityChange}
             onColumnTouched={handleColumnTouched}
+            onIssuesChange={handleIssuesChange}
           />
         ))}
       </div>
@@ -968,12 +1031,35 @@ function MultiContextMapper({
         </p>
       )}
 
+      {/* Bloqueo por hoja, con las mismas reglas que valida el confirm: sin esto
+          el usuario descubría el problema recién con un 422 que no decía cómo
+          salir (incidente ASTERIA: tres confirms rechazados seguidos). */}
+      {hojasConProblemas.length > 0 && (
+        <div className="mt-3 space-y-1">
+          {hojasConProblemas.map(({ label, issues }) => (
+            <p key={label} className="flex gap-1.5 text-xs text-vk-danger">
+              <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+              <span>
+                <strong>«{label}»</strong>:{" "}
+                {issues.missingRequired.length > 0
+                  ? "falta un dato obligatorio"
+                  : "hay dos columnas para el mismo campo"}
+                . Revisá la hoja más arriba.
+              </span>
+            </p>
+          ))}
+        </div>
+      )}
+
       <div className="mt-4 flex items-center gap-2">
         <button
           type="button"
           onClick={() => confirmMutation.mutate()}
           disabled={
-            confirmMutation.isPending || !anyIncluded || sinSeccion.length > 0
+            confirmMutation.isPending ||
+            !anyIncluded ||
+            sinSeccion.length > 0 ||
+            hojasConProblemas.length > 0
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"
         >
@@ -1126,6 +1212,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     contexts.length > 1 ||
     (contexts.length === 1 && contexts[0]?.source_kind !== "table");
 
+  const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
+
   const { data: suggestions = [], isLoading: loadingSuggestions } = useQuery({
     queryKey: ["column-mappings", fileId, entityType],
     queryFn: () => ingestionService.getColumnMappings(fileId, entityType),
@@ -1208,9 +1296,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       .map((s) => s.source_column);
   }
 
-  const hasRequiredMissing = suggestions.some(
-    (s) => computeEffectiveStatus(s, getMappingForColumn(s.source_column)) === "required_missing",
-  );
+  // Se calcula abajo, contra `catalog[entityType].required`: un `custom_field:`
+  // NO cubre un requerido, aunque el select lo muestre como mapeado.
 
   // A3: columnas que merecen revisión antes de confirmar — requeridas sin mapear,
   // sin mapear, o mapeadas con baja confianza (<50%). Las ignoradas a propósito no.
@@ -1267,7 +1354,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     typeof summary?.rows_processed === "number" ? summary.rows_processed : null;
   const colCount = suggestions.length;
   const unmappedCount = getUnmappedColumns().length;
-  const fields = CANONICAL_FIELDS[entityType] ?? [];
+  const fields = catalog?.[entityType]?.fields ?? [];
+  // Mismas dos reglas que en multi-hoja y que en el confirm del backend.
+  const faltanRequeridos = missingRequiredFields(
+    catalog?.[entityType]?.required ?? [],
+    mappings,
+  );
+  const colisiones = scalarCollisions(fields, mappings);
 
   // Preview rows para la tabla secundaria
   const previewRows = (
@@ -1408,7 +1501,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                       <select
                         value={target}
                         onChange={(e) => setMappingForColumn(s.source_column, e.target.value)}
-                        className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none"
+                        disabled={loadingCatalog}
+                        className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
                       >
                         <option value="">Sin mapear</option>
                         <option value="ignore">— Ignorar —</option>
@@ -1417,6 +1511,18 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                             {f.label}
                           </option>
                         ))}
+                        {/* Sin esta opción el DOM cae a la primera y la pantalla
+                            muestra "Sin mapear" sobre un target real. */}
+                        {target &&
+                          target !== "ignore" &&
+                          fields.length > 0 &&
+                          !fields.some((f) => f.value === target) && (
+                            <option value={target}>
+                              {target.startsWith("custom_field:")
+                                ? target
+                                : `${target} (campo desconocido)`}
+                            </option>
+                          )}
                       </select>
                     </div>
                   );
@@ -1560,11 +1666,37 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         </>
       )}
 
-      {/* Banner de campos requeridos faltantes */}
-      {hasRequiredMissing && (
-        <div className="mb-2 flex items-center gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
-          <XCircle className="h-3.5 w-3.5 shrink-0" />
-          Hay campos obligatorios sin mapear (indicados en rojo). Asignales un campo antes de confirmar.
+      {/* Requerido descubierto: se nombra el campo y la salida concreta. */}
+      {faltanRequeridos.length > 0 && (
+        <div className="mb-2 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
+          <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+          <span>
+            Falta un dato obligatorio:{" "}
+            <strong>
+              {faltanRequeridos
+                .map((r) => fields.find((f) => f.value === r)?.label ?? r)
+                .join(", ")}
+            </strong>
+            . Elegí ese campo en la columna que lo contiene. Un campo personalizado
+            guarda el dato pero no reemplaza al obligatorio.
+          </span>
+        </div>
+      )}
+
+      {/* Colisión en un campo escalar: el importador se quedaba con la primera
+          columna del orden del archivo y descartaba el resto en silencio. */}
+      {colisiones.length > 0 && (
+        <div className="mb-2 space-y-1 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
+          {colisiones.map((c) => (
+            <p key={c.target} className="flex gap-2">
+              <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+              <span>
+                {c.columns.length} columnas apuntan a <strong>«{c.label}»</strong> (
+                {c.columns.join(", ")}) y solo se puede guardar una. Elegí cuál
+                corresponde y mandá las demás a otro campo o a «Ignorar».
+              </span>
+            </p>
+          ))}
         </div>
       )}
 
@@ -1593,7 +1725,8 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           disabled={
             confirmMutation.isPending ||
             !Object.values(confirmedFields).some(Boolean) ||
-            hasRequiredMissing ||
+            faltanRequeridos.length > 0 ||
+            colisiones.length > 0 ||
             needsPurpose
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"

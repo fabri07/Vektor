@@ -119,6 +119,31 @@ export interface UploadResult {
   warning?: string | null;
 }
 
+/**
+ * Un campo canónico al que se puede mapear una columna. Llega del backend: el
+ * frontend NO mantiene su propia lista.
+ *
+ * Antes había una copia manual de `CANONICAL_FIELDS` comentada "mantener en
+ * sync", y divergió — a `expense` le faltaban `payment_method` e `is_recurring`.
+ * Como el `<select>` solo renderiza opciones de esa copia, un target sugerido
+ * que no estuviera en ella hacía que el DOM cayera a la primera opción: la
+ * pantalla decía "Sin mapear" mientras el estado mandaba `payment_method`.
+ */
+export interface FieldCatalogEntry {
+  value: string;
+  label: string;
+  /** Solo UNA columna puede apuntarle: dos no se pueden desempatar sin inventar. */
+  single_value: boolean;
+}
+
+export interface EntityFieldCatalog {
+  /** Un `custom_field:` NO cubre un requerido (misma regla que el confirm). */
+  required: string[];
+  fields: FieldCatalogEntry[];
+}
+
+export type FieldCatalog = Record<string, EntityFieldCatalog>;
+
 export interface ColumnMappingSuggestion {
   source_column: string;
   normalized_column: string;
@@ -307,6 +332,15 @@ export const ingestionService = {
       if (axiosErr.response?.status === 409) return null;
       throw err;
     }
+  },
+
+  /**
+   * Campos canónicos, requeridos y escalares por entidad. Estático por deploy:
+   * el panel lo pide una vez con `staleTime: Infinity`.
+   */
+  async getFieldCatalog(): Promise<FieldCatalog> {
+    const res = await api.get<FieldCatalog>("/ingestion/field-catalog");
+    return res.data;
   },
 
   async getColumnMappings(

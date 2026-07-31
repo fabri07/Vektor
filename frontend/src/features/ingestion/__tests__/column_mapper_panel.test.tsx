@@ -21,6 +21,7 @@ jest.mock("@/services/ingestion.service", () => ({
   ingestionService: {
     getPreview: jest.fn(),
     getColumnMappings: jest.fn(),
+    getFieldCatalog: jest.fn(),
     confirmFile: jest.fn(),
     cancelFile: jest.fn(),
     recomputeColumnRisk: jest.fn(),
@@ -29,8 +30,73 @@ jest.mock("@/services/ingestion.service", () => ({
 
 const mockGetPreview = ingestionService.getPreview as jest.Mock;
 const mockGetColumnMappings = ingestionService.getColumnMappings as jest.Mock;
+const mockGetFieldCatalog = ingestionService.getFieldCatalog as jest.Mock;
 const mockConfirmFile = ingestionService.confirmFile as jest.Mock;
 const mockRecomputeColumnRisk = ingestionService.recomputeColumnRisk as jest.Mock;
+
+// Los selects se arman con lo que devuelve el backend: el frontend dejó de tener
+// su propia copia (divergió y hacía que la UI mostrara "Sin mapear" sobre un
+// target real). Espeja CANONICAL_FIELDS + REQUIRED_FIELDS + SINGLE_VALUE_FIELDS.
+const FIELD_CATALOG = {
+  sale: {
+    required: ["amount", "transaction_date"],
+    fields: [
+      { value: "amount", label: "Monto de venta", single_value: true },
+      { value: "transaction_date", label: "Fecha de venta", single_value: true },
+      { value: "quantity", label: "Cantidad", single_value: true },
+      { value: "unit_price", label: "Precio unitario vendido", single_value: true },
+      { value: "payment_method", label: "Método de pago", single_value: false },
+      { value: "product_name", label: "Nombre del producto", single_value: false },
+      { value: "notes", label: "Notas", single_value: false },
+      { value: "customer_dni", label: "Cliente — DNI", single_value: false },
+      { value: "customer_cuit", label: "Cliente — CUIT", single_value: false },
+      { value: "customer_email", label: "Cliente — Email", single_value: false },
+      { value: "customer_phone", label: "Cliente — Teléfono", single_value: false },
+      { value: "customer_name", label: "Cliente — Nombre", single_value: false },
+    ],
+  },
+  expense: {
+    required: ["amount", "expense_date"],
+    fields: [
+      { value: "amount", label: "Monto del gasto", single_value: true },
+      { value: "expense_date", label: "Fecha del gasto", single_value: true },
+      { value: "category", label: "Categoría", single_value: false },
+      { value: "payment_method", label: "Método de pago", single_value: false },
+      { value: "is_recurring", label: "Recurrente", single_value: false },
+      { value: "supplier_name", label: "Proveedor", single_value: false },
+      { value: "notes", label: "Notas", single_value: false },
+      { value: "supplier_cuil", label: "Proveedor — CUIL", single_value: false },
+      { value: "supplier_email", label: "Proveedor — Email", single_value: false },
+      { value: "supplier_phone", label: "Proveedor — Teléfono", single_value: false },
+    ],
+  },
+  product: {
+    required: ["name"],
+    fields: [
+      { value: "sku", label: "Código (SKU)", single_value: false },
+      { value: "barcode", label: "Código de barras (EAN/UPC)", single_value: false },
+      { value: "name", label: "Nombre", single_value: false },
+      { value: "sale_price_ars", label: "Precio de venta", single_value: true },
+      {
+        value: "list_price_ars",
+        label: "Precio de lista (sugerido)",
+        single_value: true,
+      },
+      { value: "unit_cost_ars", label: "Costo unitario", single_value: true },
+      { value: "stock_units", label: "Stock (unidades)", single_value: true },
+      { value: "category", label: "Categoría", single_value: false },
+      { value: "description", label: "Descripción", single_value: false },
+    ],
+  },
+  customer: {
+    required: ["name"],
+    fields: [{ value: "name", label: "Nombre", single_value: false }],
+  },
+  supplier: {
+    required: ["name"],
+    fields: [{ value: "name", label: "Nombre", single_value: false }],
+  },
+};
 
 // Helper: arma un ContextualColumnRisk completo (los tests solo pisan lo que importa).
 function makeContextualRisk(
@@ -67,6 +133,7 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
     // Default: el recompute no cambia el set (evita vaciar el panel si el
     // debounce llega a dispararse durante un test).
     mockRecomputeColumnRisk.mockResolvedValue([]);
@@ -146,13 +213,38 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
-      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      // Fecha + Monto cubren los requeridos de `sale`; ColX es la columna
+      // opcional sobre la que se prueba `user_selected`. Sin los requeridos
+      // cubiertos el panel bloquea el confirm — igual que el backend, que
+      // devuelve 422 (`Campos requeridos sin mapear`).
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["ColX", "Fecha", "Monto"],
+      },
       columns_at_risk: [],
     });
     mockGetColumnMappings.mockResolvedValue([
       {
         source_column: "ColX",
         normalized_column: "colx",
+        sample_values: ["algo"],
+        target_field: "notes",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["01/02/2026"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
         sample_values: ["1500"],
         target_field: "amount",
         confidence: 0.9,
@@ -186,13 +278,38 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
-      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      // Fecha + Monto cubren los requeridos de `sale`; ColX es la columna
+      // opcional sobre la que se prueba `user_selected`. Sin los requeridos
+      // cubiertos el panel bloquea el confirm — igual que el backend, que
+      // devuelve 422 (`Campos requeridos sin mapear`).
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["ColX", "Fecha", "Monto"],
+      },
       columns_at_risk: [],
     });
     mockGetColumnMappings.mockResolvedValue([
       {
         source_column: "ColX",
         normalized_column: "colx",
+        sample_values: ["algo"],
+        target_field: "notes",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["01/02/2026"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
         sample_values: ["1500"],
         target_field: "amount",
         confidence: 0.9,
@@ -409,13 +526,38 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
-      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      // Fecha + Monto cubren los requeridos de `sale`; ColX es la columna
+      // opcional sobre la que se prueba `user_selected`. Sin los requeridos
+      // cubiertos el panel bloquea el confirm — igual que el backend, que
+      // devuelve 422 (`Campos requeridos sin mapear`).
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["ColX", "Fecha", "Monto"],
+      },
       columns_at_risk: [],
     });
     mockGetColumnMappings.mockResolvedValue([
       {
         source_column: "ColX",
         normalized_column: "colx",
+        sample_values: ["algo"],
+        target_field: "notes",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["01/02/2026"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
         sample_values: ["1500"],
         target_field: "amount",
         confidence: 0.9,
@@ -464,17 +606,40 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
-      parsed_summary_json: { inferred_type: "ventas", headers: ["obs"] },
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["obs", "Fecha", "Monto"],
+      },
       columns_at_risk: [],
       contextual_column_risk: [risk],
     });
     mockRecomputeColumnRisk.mockResolvedValue([risk]);
+    // Fecha + Monto cubren los requeridos de `sale`: sin eso el panel bloquea
+    // el confirm, igual que el 422 del backend.
     mockGetColumnMappings.mockResolvedValue([
       {
         source_column: "obs",
         normalized_column: "obs",
         sample_values: ["x"],
         target_field: "notes",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["01/02/2026"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["1500"],
+        target_field: "amount",
         confidence: 0.9,
         source: "heuristic",
         status: "mapped",
@@ -514,13 +679,38 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
-      parsed_summary_json: { inferred_type: "ventas", headers: ["ColX"] },
+      // Fecha + Monto cubren los requeridos de `sale`; ColX es la columna
+      // opcional sobre la que se prueba `user_selected`. Sin los requeridos
+      // cubiertos el panel bloquea el confirm — igual que el backend, que
+      // devuelve 422 (`Campos requeridos sin mapear`).
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["ColX", "Fecha", "Monto"],
+      },
       columns_at_risk: [],
     });
     mockGetColumnMappings.mockResolvedValue([
       {
         source_column: "ColX",
         normalized_column: "colx",
+        sample_values: ["algo"],
+        target_field: "notes",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["01/02/2026"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
         sample_values: ["1500"],
         target_field: "amount",
         confidence: 0.9,
@@ -543,10 +733,10 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     // (re-deriva desde la sugerencia original) — debe limpiar el touched-set.
     fireEvent.click(screen.getByRole("checkbox", { name: "gastos" }));
 
-    // El mapeo vuelve a "amount" (la sugerencia original), no "quantity".
+    // El mapeo vuelve a "notes" (la sugerencia original de ColX), no "quantity".
     await waitFor(() => {
       const select = screen.getAllByRole("combobox")[0] as HTMLSelectElement;
-      expect(select.value).toBe("amount");
+      expect(select.value).toBe("notes");
     });
 
     fireEvent.click(
@@ -642,6 +832,7 @@ describe("ColumnMapperPanel — hojas sin clasificar", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
     mockRecomputeColumnRisk.mockResolvedValue([]);
   });
 
