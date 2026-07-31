@@ -294,7 +294,9 @@ class TestConfirmWithColumnMappings:
             },
         )
         assert response.status_code == 422
-        assert "amount" in response.json()["detail"]
+        # El mensaje nombra el campo por su etiqueta, no por `amount`: un
+        # identificador técnico no le dice al usuario qué columna tocar.
+        assert "Monto de venta" in response.json()["detail"]
 
     async def test_custom_field_mapping_creates_definition(
         self,
