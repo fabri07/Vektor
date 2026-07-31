@@ -91,6 +91,20 @@ export function DeleteFileModal({
           </>
         )}
 
+        {Boolean(preview?.otros_ya_clasificados) && (
+          <p className="flex gap-2 rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-2 text-xs text-vk-text-muted">
+            <AlertTriangle className="mt-px h-4 w-4 shrink-0" />
+            <span>
+              {preview!.otros_ya_clasificados} fila
+              {preview!.otros_ya_clasificados !== 1 ? "s" : ""} de «Otros» que ya
+              clasificaste se conserva
+              {preview!.otros_ya_clasificados !== 1 ? "n" : ""}: el registro que
+              generaron no se puede rastrear hasta este archivo, así que se dejan
+              como están.
+            </span>
+          </p>
+        )}
+
         {preview?.has_user_edits && (
           <p className="flex gap-2 rounded-lg border border-vk-warning/30 bg-vk-warning-bg/50 px-3 py-2 text-xs text-vk-warning">
             <AlertTriangle className="mt-px h-4 w-4 shrink-0" />

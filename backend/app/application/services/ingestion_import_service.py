@@ -2457,6 +2457,12 @@ async def insert_confirmed_data(
     summary: dict[str, Any],
     confirmed_fields: dict[str, bool] | None = None,
     return_details: bool = False,
+    # `after["updated_at"]` de cada producto tocado. Cuesta un `session.get` +
+    # `refresh` POR PRODUCTO, así que solo lo pide quien lo usa: el touched-since
+    # check del undo de relectura. El ledger de reversa del borrado solo necesita
+    # `product_id` + `action`, y en un catálogo de 1258 filas esto eran ~2500
+    # round-trips extra colgados del confirm, que ya corre inline y síncrono.
+    stamp_product_updated_at: bool = False,
     column_mappings: dict[str, str] | None = None,
     context_mappings: dict[str, dict[str, str]] | None = None,
     context_confirmed: dict[str, bool] | None = None,
@@ -2487,6 +2493,7 @@ async def insert_confirmed_data(
         summary,
         confirmed_fields=confirmed_fields,
         return_details=return_details,
+        stamp_product_updated_at=stamp_product_updated_at,
         column_mappings=column_mappings,
         context_mappings=context_mappings,
         context_confirmed=context_confirmed,
@@ -2545,6 +2552,12 @@ async def _insert_confirmed_data_impl(
     summary: dict[str, Any],
     confirmed_fields: dict[str, bool] | None = None,
     return_details: bool = False,
+    # `after["updated_at"]` de cada producto tocado. Cuesta un `session.get` +
+    # `refresh` POR PRODUCTO, así que solo lo pide quien lo usa: el touched-since
+    # check del undo de relectura. El ledger de reversa del borrado solo necesita
+    # `product_id` + `action`, y en un catálogo de 1258 filas esto eran ~2500
+    # round-trips extra colgados del confirm, que ya corre inline y síncrono.
+    stamp_product_updated_at: bool = False,
     column_mappings: dict[str, str] | None = None,
     context_mappings: dict[str, dict[str, str]] | None = None,
     context_confirmed: dict[str, bool] | None = None,
@@ -2663,6 +2676,7 @@ async def _insert_confirmed_data_impl(
                 confirmed_fields=confirmed_fields,
                 today=today,
                 return_details=return_details,
+                stamp_product_updated_at=stamp_product_updated_at,
                 product_details=product_details,
                 counts=counts,
                 column_mappings=column_mappings,
@@ -3901,7 +3915,8 @@ async def _insert_confirmed_data_impl(
     if seen_fp is not None and _preloaded_fp is not None:
         await _persist_import_fingerprints(session, tenant_id, seen_fp - _preloaded_fp)
     if return_details:
-        await _stamp_updated_at_on_product_details(session, product_details)
+        if stamp_product_updated_at:
+            await _stamp_updated_at_on_product_details(session, product_details)
         counts["product_details"] = product_details
     return counts
 
@@ -3950,6 +3965,7 @@ async def _insert_multisheet_data(
     confirmed_fields: dict[str, bool] | None,
     today: datetime,
     return_details: bool,
+    stamp_product_updated_at: bool = False,
     product_details: list[dict[str, Any]],
     counts: dict[str, Any],
     column_mappings: dict[str, str] | None,
@@ -4960,7 +4976,8 @@ async def _insert_multisheet_data(
 
     await session.flush()
     if return_details:
-        await _stamp_updated_at_on_product_details(session, product_details)
+        if stamp_product_updated_at:
+            await _stamp_updated_at_on_product_details(session, product_details)
         counts["product_details"] = product_details
     return counts
 

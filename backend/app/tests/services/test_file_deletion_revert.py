@@ -26,6 +26,7 @@ from app.domain.ingestion_version import INGESTION_VERSION
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
+from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
@@ -277,6 +278,85 @@ class TestReversaDeArchivo:
         assert segunda["movimientos_stock"] == 0
         await db_session.refresh(producto)
         assert producto.stock_units == 6
+
+
+    async def test_no_borra_las_filas_de_otros_que_el_usuario_ya_clasifico(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Una fila resuelta desde /otros generó una venta/gasto REAL.
+
+        Ese registro no lleva `source_upload_id` (lo crea `others.py`, no el
+        importador), así que la reversa no lo alcanza. Borrar la fila de staging
+        destruiría el único rastro que queda hacia el archivo y dejaría el dato
+        derivado vivo y huérfano.
+        """
+        archivo = await _archivo(db_session, sample_tenant)
+        db_session.add(
+            UnclassifiedRecord(
+                tenant_id=sample_tenant.tenant_id,
+                uploaded_file_id=archivo.id,
+                source="ingestion",
+                row_data={"pendiente": "sí"},
+                status="PENDING",
+            )
+        )
+        db_session.add(
+            UnclassifiedRecord(
+                tenant_id=sample_tenant.tenant_id,
+                uploaded_file_id=archivo.id,
+                source="ingestion",
+                row_data={"ya": "clasificada"},
+                status="IMPORTED",
+            )
+        )
+        await db_session.flush()
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        assert contadores["otros"] == 1, "solo se borra la PENDING"
+        sobreviven = (
+            (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+        )
+        assert len(sobreviven) == 1
+        assert sobreviven[0].status == "IMPORTED"
+
+    async def test_desactiva_los_productos_creados_por_una_relectura(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Una relectura re-crea productos del archivo con su propio repair_type.
+
+        Filtrar solo por el run de import dejaba vivos los productos de todo
+        archivo releído — el mismo huérfano que este servicio existe para evitar.
+        """
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Creado en la relectura")
+
+        run = DataRepairRun(
+            tenant_id=sample_tenant.tenant_id,
+            repair_type="REREAD_FILE",
+            status="APPLIED",
+            dry_run=False,
+        )
+        db_session.add(run)
+        await db_session.flush()
+        db_session.add(
+            DataRepairItem(
+                run_id=run.id,
+                tenant_id=sample_tenant.tenant_id,
+                source_file_id=archivo.id,
+                product_id=producto.id,
+                action="CREATE_PRODUCT",
+                confidence="HIGH",
+            )
+        )
+        await db_session.flush()
+
+        await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(producto)
+        assert producto.is_active is False
 
 
 class TestPreviewDeBorrado:

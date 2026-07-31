@@ -162,6 +162,8 @@ export interface FileDeletionPreview {
   productos: number;
   movimientos_stock: number;
   otros: number;
+  /** Filas de "Otros" que el usuario ya clasificó: NO se borran. */
+  otros_ya_clasificados: number;
   /** Hay registros de este archivo editados a mano — el borrado los revierte igual. */
   has_user_edits: boolean;
   /** Archivo importado antes del ledger: sus productos no se pueden rastrear. */

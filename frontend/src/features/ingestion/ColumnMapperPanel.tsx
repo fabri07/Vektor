@@ -114,10 +114,27 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   supplier: "Proveedores",
 };
 
-// Las 5 secciones a las que puede ir una hoja. Incluye Productos, que faltaba:
-// sin esa opción, una hoja de stock mal clasificada no se podía volver a poner
-// en su lugar desde el panel.
-const ENTITY_OPTIONS = ["sale", "expense", "product", "customer", "supplier"] as const;
+// Secciones a las que se puede mandar una hoja que Véktor NO pudo clasificar.
+//
+// Clientes y Proveedores quedan AFUERA a propósito: el importador resuelve los
+// maestros en un paso previo (`_import_master_entities`) que lee el
+// `entity_type` del summary y NO consulta el override del usuario, y además
+// busca las filas en `clientes_detectados`/`proveedores_detectados` — donde una
+// hoja sin clasificar no las tiene (están en `otros_detectados`). Ofrecerlas
+// acá haría que el usuario elija una sección, confirme sin error, y no se
+// importe nada. Mejor no ofrecer la opción que ofrecer uuna que no funciona.
+// Habilitarlas es una tarea propia: pasar el override a `_import_master_entities`
+// y resolver sus filas desde `otros_detectados`.
+const ENTITY_OPTIONS = ["sale", "expense", "product"] as const;
+
+// Las hojas que el parser SÍ clasificó como maestro siguen mostrando su sección
+// (el camino de maestros funciona cuando la entidad viene del summary).
+const ENTITY_OPTIONS_TEXTO = [
+  "sale",
+  "expense",
+  "customer",
+  "supplier",
+] as const;
 
 // Valor de "todavía no elegí". NO es "sale": el default silencioso a ventas es
 // justo lo que hacía que una hoja que Véktor no supo clasificar (p. ej. un
@@ -501,7 +518,7 @@ function SheetMapperSection({
             }`}
           >
             <option value={ENTITY_UNSET}>Elegí qué es esta hoja…</option>
-            {ENTITY_OPTIONS.map((value) => (
+            {(isText ? ENTITY_OPTIONS_TEXTO : ENTITY_OPTIONS).map((value) => (
               <option key={value} value={value}>
                 {ENTITY_TYPE_LABELS[value]}
               </option>

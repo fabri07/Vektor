@@ -40,7 +40,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.stock_service import void_movement
@@ -53,13 +53,21 @@ from app.persistence.models.memory import OperationFingerprint
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
-from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_STATUS_PENDING,
+    UnclassifiedRecord,
+)
 
 logger = get_logger(__name__)
 
 # Tipo de run del ledger de import. Comparte tabla con las reparaciones y con la
 # relectura (`REREAD`), que ya reusan `DataRepairRun`/`DataRepairItem`.
 REPAIR_TYPE_IMPORT = "INGESTION_IMPORT"
+
+# Runs que registran creación de productos ATADA A UN ARCHIVO. La relectura entra
+# porque re-crea productos del mismo archivo con su propio repair_type; ignorarla
+# dejaba vivos los productos de todo archivo releído.
+_LEDGER_REPAIR_TYPES = (REPAIR_TYPE_IMPORT, "REREAD_FILE")
 
 # Valor del set cerrado de `void_reason` (ver ck_sales_entries_void_reason). El
 # usuario canceló el archivo entero; no es un duplicado ni una reparación.
@@ -136,18 +144,57 @@ async def _product_ids_created_by_file(
     Solo ``CREATE_PRODUCT``: un ``UPDATE_PRODUCT`` significa que el producto ya
     existía y el archivo apenas lo tocó — desactivarlo sería destruir un dato que
     el archivo no trajo.
+
+    Incluye los runs de RELECTURA además de los de import: una relectura aplicada
+    re-crea productos para el mismo archivo y los audita con su propio
+    ``repair_type``. Filtrar solo por el de import dejaba vivos los productos de
+    todo archivo releído — el mismo huérfano que este servicio existe para evitar.
     """
     res = await session.execute(
         select(DataRepairItem.product_id)
         .join(DataRepairRun, DataRepairRun.id == DataRepairItem.run_id)
         .where(
-            DataRepairRun.repair_type == REPAIR_TYPE_IMPORT,
+            DataRepairRun.repair_type.in_(_LEDGER_REPAIR_TYPES),
             DataRepairItem.tenant_id == tenant_id,
             DataRepairItem.source_file_id == file_id,
             DataRepairItem.action == ACTION_CREATE_PRODUCT,
             DataRepairItem.product_id.is_not(None),
         )
     )
+    return {pid for pid in res.scalars().all() if pid is not None}
+
+
+async def _products_with_live_external_sales(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_ids: set[uuid.UUID],
+    *,
+    excluir_archivo: uuid.UUID | None = None,
+) -> set[uuid.UUID]:
+    """Productos con ventas vivas de OTRA fuente: quedan protegidos del borrado.
+
+    Una venta viva sobre un producto lo vuelve un dato del usuario, no del
+    archivo.
+
+    ``excluir_archivo`` existe por el orden de los dos llamadores: la reversa lo
+    invoca DESPUÉS de anular las ventas del archivo (lo que quede vivo ya es
+    externo, no hace falta excluir nada), pero el preview corre ANTES — sin
+    excluirlas, las propias ventas del archivo protegerían a sus productos y el
+    preview informaría 0 cuando la reversa va a desactivar varios.
+    """
+    if not product_ids:
+        return set()
+    stmt = select(SaleEntry.product_id).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.product_id.in_(product_ids),
+        SaleEntry.voided_at.is_(None),
+    )
+    if excluir_archivo is not None:
+        stmt = stmt.where(
+            (SaleEntry.source_upload_id.is_(None))
+            | (SaleEntry.source_upload_id != excluir_archivo)
+        )
+    res = await session.execute(stmt)
     return {pid for pid in res.scalars().all() if pid is not None}
 
 
@@ -188,38 +235,66 @@ async def preview_file_deletion(
     from app.application.services.reread_service import file_has_user_edits
 
     async def _contar(modelo: Any, columna: Any) -> int:
+        # `func.count()`, no `len(scalars().all())`: esto es un preview read-only
+        # y traerse miles de UUIDs a Python para contarlos es gratis de evitar.
         res = await session.execute(
-            select(modelo.id).where(
+            select(func.count())
+            .select_from(modelo)
+            .where(
                 modelo.tenant_id == tenant_id,
                 columna == file_id,
                 modelo.voided_at.is_(None),
             )
         )
-        return len(res.scalars().all())
+        return int(res.scalar_one())
 
     ventas = await _contar(SaleEntry, SaleEntry.source_upload_id)
     gastos = await _contar(ExpenseEntry, ExpenseEntry.source_upload_id)
     movimientos = await _contar(InventoryMovement, InventoryMovement.source_upload_id)
 
-    otros_res = await session.execute(
-        select(UnclassifiedRecord.id).where(
-            UnclassifiedRecord.tenant_id == tenant_id,
-            UnclassifiedRecord.uploaded_file_id == file_id,
+    otros = (
+        await session.execute(
+            select(func.count())
+            .select_from(UnclassifiedRecord)
+            .where(
+                UnclassifiedRecord.tenant_id == tenant_id,
+                UnclassifiedRecord.uploaded_file_id == file_id,
+                UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+            )
         )
-    )
-    otros = len(otros_res.scalars().all())
+    ).scalar_one()
+    # Filas de "Otros" que el usuario YA resolvió: no se borran (ver el paso 4 de
+    # `revert_file_data`). Se informan para que la advertencia no las prometa.
+    otros_ya_clasificados = (
+        await session.execute(
+            select(func.count())
+            .select_from(UnclassifiedRecord)
+            .where(
+                UnclassifiedRecord.tenant_id == tenant_id,
+                UnclassifiedRecord.uploaded_file_id == file_id,
+                UnclassifiedRecord.status != UNCLASSIFIED_STATUS_PENDING,
+            )
+        )
+    ).scalar_one()
 
+    # Mismos protegidos que aplica la reversa: sin esto el preview prometía
+    # desactivar productos que después sobreviven.
     creados = await _product_ids_created_by_file(session, file_id, tenant_id)
     productos_activos = 0
     if creados:
+        protegidos = await _products_with_live_external_sales(
+            session, tenant_id, creados, excluir_archivo=file_id
+        )
         res = await session.execute(
-            select(Product.id).where(
+            select(func.count())
+            .select_from(Product)
+            .where(
                 Product.tenant_id == tenant_id,
-                Product.id.in_(creados),
+                Product.id.in_(creados - protegidos),
                 Product.is_active.is_(True),
             )
         )
-        productos_activos = len(res.scalars().all())
+        productos_activos = res.scalar_one()
 
     con_ledger = await _has_import_ledger(session, file_id, tenant_id)
 
@@ -229,6 +304,7 @@ async def preview_file_deletion(
         "productos": productos_activos,
         "movimientos_stock": movimientos,
         "otros": otros,
+        "otros_ya_clasificados": otros_ya_clasificados,
         "has_user_edits": await file_has_user_edits(session, file_id, tenant_id),
         # Sin ledger no se puede saber qué productos creó este archivo: se avisa
         # en vez de adivinar (los productos quedan y hay que revisarlos a mano).
@@ -297,14 +373,7 @@ async def revert_file_data(
     #    del archivo).
     creados = await _product_ids_created_by_file(session, file_id, tenant_id)
     if creados:
-        con_ventas_vivas_res = await session.execute(
-            select(SaleEntry.product_id).where(
-                SaleEntry.tenant_id == tenant_id,
-                SaleEntry.product_id.in_(creados),
-                SaleEntry.voided_at.is_(None),
-            )
-        )
-        protegidos = {pid for pid in con_ventas_vivas_res.scalars().all() if pid is not None}
+        protegidos = await _products_with_live_external_sales(session, tenant_id, creados)
         productos_res = await session.execute(
             select(Product).where(
                 Product.tenant_id == tenant_id,
@@ -316,12 +385,20 @@ async def revert_file_data(
             producto.is_active = False
             contadores["productos"] += 1
 
-    # 4. Filas que habían quedado en "Otros" esperando clasificación manual: se
-    #    borran (nunca fueron dato de negocio, son staging del archivo).
+    # 4. Filas que quedaron en "Otros" esperando clasificación manual: se borran
+    #    (nunca fueron dato de negocio, son staging del archivo).
+    #
+    #    SOLO las PENDING. Una fila que el usuario ya resolvió (IMPORTED) generó
+    #    una venta/gasto/producto real, y ese registro NO lleva
+    #    `source_upload_id` (lo crea `others.py`, no el importador), así que la
+    #    reversa de arriba no lo alcanza. Borrar la fila de staging destruiría el
+    #    único rastro que queda hacia el archivo, dejando el dato derivado vivo y
+    #    huérfano. Se conservan y se informan aparte.
     otros_res = await session.execute(
         select(UnclassifiedRecord.id).where(
             UnclassifiedRecord.tenant_id == tenant_id,
             UnclassifiedRecord.uploaded_file_id == file_id,
+            UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
         )
     )
     otros_ids = list(otros_res.scalars().all())

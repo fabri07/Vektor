@@ -1115,12 +1115,20 @@ async def confirm_file(
         return set(REQUIRED_FIELDS.get(entity_type, [])) - mapped
 
     # ── Ninguna hoja se importa sin que alguien haya dicho QUÉ es ───────────────
-    # El parser deja `entity_type: null` cuando no pudo clasificar una hoja. Hasta
-    # acá eso no bloqueaba nada: el panel la mostraba tildada y `_entity_for` caía
-    # al default "sale", así que hojas como un resumen derivado del Libro Diario
-    # entraban como miles de ventas sin que nadie lo decidiera. El default vive en
-    # el BACKEND, así que arreglarlo solo en la UI dejaría el agujero abierto para
-    # cualquier otro cliente del endpoint.
+    # El parser deja `entity_type: null` cuando no pudo clasificar una hoja.
+    #
+    # ALCANCE REAL de este guard (no sobreestimarlo): el importador ya rutea a
+    # "Otros" un contexto cuya entidad no resuelve (`_insert_multisheet_data`,
+    # `if entity not in entity_bucket`), así que el default "sale" de
+    # `_entity_for` NO era lo que convertía esas filas en ventas — gobierna la
+    # validación de requeridos y el aprendizaje de mapeos. Lo que las convertía
+    # en ventas era el FRONTEND, que mandaba `context_entity` con "sale" por su
+    # propio default. Ese es el fix principal y vive en el panel.
+    #
+    # Esto es defensa en profundidad para la otra forma del problema: un cliente
+    # que incluye una hoja SIN declarar su sección. Corta con 422 en vez de
+    # dejarla caer silenciosamente a "Otros". NO protege contra un cliente que
+    # manda una sección explícita equivocada.
     #
     # Va antes del lease: una request que va a rebotar nunca lo toma.
     if _mapping_contexts_raw := (_summary_for_ctx.get("mapping_contexts") or []):
@@ -1143,8 +1151,8 @@ async def confirm_file(
                 detail=(
                     "Estas hojas no tienen sección asignada y no se pueden "
                     f"importar: {', '.join(_sin_entidad)}. Elegí a qué sección va "
-                    "cada una (ventas, gastos, productos, clientes o proveedores) "
-                    "o destildala para dejarla afuera."
+                    "cada una (ventas, gastos o productos) o destildala para "
+                    "dejarla afuera."
                 ),
             )
 

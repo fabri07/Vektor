@@ -97,6 +97,10 @@ class FileDeletionPreviewResponse(BaseModel):
     productos: int
     movimientos_stock: int
     otros: int
+    # Filas de "Otros" que el usuario YA clasificó: NO se borran. El registro que
+    # generaron (venta/gasto/producto) no lleva `source_upload_id`, así que la
+    # reversa no lo alcanza y borrar la fila destruiría su único rastro.
+    otros_ya_clasificados: int
     # Hay registros de este archivo que alguien editó a mano después de importar.
     has_user_edits: bool
     # El archivo se importó antes del ledger de reversa: no se puede saber qué
