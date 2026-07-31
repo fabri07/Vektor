@@ -98,6 +98,7 @@ from app.persistence.models.file import (
 from app.persistence.models.pipeline_event import (
     STAGE_CONFIRM,
     STAGE_PARSE,
+    STAGE_REJECT,
     STAGE_UPLOAD,
     STAGE_VALIDATE,
 )
@@ -908,6 +909,33 @@ async def delete_column_mapping(
     await session.commit()
 
 
+def _sanitize_error_message(exc: BaseException) -> str:
+    """Mensaje de error apto para persistir en la traza: sin valores de fila.
+
+    ``str()`` de un error de SQLAlchemy trae el SQL completo más
+    ``[parameters: (...)]``, y el de un ``UniqueViolationError`` de Postgres
+    agrega ``DETAIL: Key (tenant_id, sku_normalized)=(<uuid>, ABC-123) already
+    exists``. Los dos filtran datos del negocio a una tabla append-only que
+    después se lee desde un endpoint admin — exactamente lo que el invariante de
+    no-PII prohíbe.
+
+    Lo que se conserva es lo único que sirve para diagnosticar: la PRIMERA línea
+    del error del driver, que en Postgres es la violación y el NOMBRE de la
+    constraint (``duplicate key value violates unique constraint
+    "uq_products_tenant_sku_norm"``). El ``DETAIL`` con los valores se descarta.
+    """
+    from sqlalchemy.exc import DBAPIError, SQLAlchemyError  # noqa: PLC0415
+
+    if isinstance(exc, DBAPIError) and exc.orig is not None:
+        # `exc.orig` es la excepción del driver: su primera línea es el mensaje
+        # de Postgres sin el DETAIL. `str(exc)` sí incluiría statement y params.
+        return str(exc.orig).split("\n")[0].strip()[:500]
+    if isinstance(exc, SQLAlchemyError):
+        # Otros errores del ORM: nunca el str completo (puede traer el statement).
+        return type(exc).__name__
+    return str(exc)[:500]
+
+
 @router.post(
     "/files/{file_id}/confirm",
     response_model=ConfirmIngestionResponse,
@@ -1178,6 +1206,72 @@ async def confirm_file(
             detail="El archivo ya se está importando o ya se importó.",
         )
 
+    # El trace_id se resuelve ACÁ, antes del savepoint: la traza del FALLO lo
+    # necesita y el import puede reventar mucho antes de la línea donde se usaba
+    # (dentro del try, después de aplicar las decisiones de riesgo). Definirlo
+    # tarde dejaba el nombre sin asignar en el `except` → UnboundLocalError
+    # tapando el error real.
+    _trace_id = record.trace_id or record.id
+    bind_request_context(trace_id=_trace_id)
+
+    async def _emit_confirm_failure(exc: BaseException, phase: str) -> None:
+        """Deja traza de un confirm que NO terminó bien.
+
+        Sin esto el confirm solo escribía en ``pipeline_events`` en el camino
+        feliz (después de ``finalize_import_lease``), así que un archivo que
+        nunca llega a importar no deja UNA sola fila: diagnosticarlo exigía
+        acceso a la base y adivinar cuál de los desenlaces fue.
+
+        **Cuándo llamarla: SIEMPRE DESPUÉS de liberar/compensar el lease**, con
+        su commit ya hecho. Emitir antes lo rompe: ``emit_event`` abre un
+        ``begin_nested()``, que flushea INCONDICIONALMENTE, y sobre una sesión
+        que viene de un import reventado ese flush deja la transacción en estado
+        abortado → el UPDATE de ``release_import_lease`` (best-effort, se traga
+        su error) no llega a correr y el archivo queda clavado en IMPORTING. Lo
+        detectó ``test_failure_after_f5_savepoints_still_compensates_lease``:
+        primero se compensa, después se traza.
+
+        Best-effort de punta a punta: la traza NUNCA puede tapar la excepción
+        original ni romper la compensación.
+
+        Sin PII: tipo de error, mensaje, etapa y qué contextos se intentaron —
+        nunca valores de fila.
+        """
+        # El caller suele envolver la causa real en un HTTPException
+        # (`raise HTTPException(...) from exc`); el tipo útil para diagnosticar
+        # es el de la causa, no el del envoltorio.
+        origen = exc.__cause__ if exc.__cause__ is not None else exc
+        detail: dict[str, Any] = {
+            "stage_failed": "confirm",
+            "phase": phase,
+            "error_type": type(origen).__name__,
+            "error": _sanitize_error_message(origen),
+            "confirmed_fields": body.confirmed_fields,
+            "contexts_included": sorted(
+                cid for cid, incluido in (body.context_confirmed or {}).items() if incluido
+            ),
+        }
+        if isinstance(exc, HTTPException):
+            detail["http_status"] = exc.status_code
+        try:
+            await pipeline_event_service.emit_event(
+                session,
+                trace_id=_trace_id,
+                tenant_id=tenant.tenant_id,
+                stage=STAGE_REJECT,
+                file_id=file_id,
+                detail=detail,
+            )
+            # Commit propio: la excepción original sigue viaje y haría rollback
+            # del request, llevándose el evento.
+            await session.commit()
+        except Exception:  # noqa: BLE001 — la traza nunca tapa el error original
+            logger.warning(
+                "ingestion.confirm.failure_trace_failed",
+                file_id=str(file_id),
+                phase=phase,
+            )
+
     # Savepoint que aísla TODO el import: ante cualquier fallo se revierte solo
     # (async-aware, sin `session.rollback()` manual — que rompería el re-arme del
     # savepoint del request), dejando la sesión viva para el UPDATE de
@@ -1290,8 +1384,6 @@ async def confirm_file(
                 d.model_dump() for d in _effective_risk_decisions
             ]
 
-        _trace_id = record.trace_id or record.id
-        bind_request_context(trace_id=_trace_id)
         _t0 = time.monotonic()
         counts = await insert_confirmed_data(
             session,
@@ -1481,21 +1573,31 @@ async def confirm_file(
         # Import OK: liberar el savepoint (los cambios quedan en la transacción del
         # request, que los commitea al final).
         await _import_sp.commit()
-    except ImportLeaseLostError:
+    except ImportLeaseLostError as exc:
         # Un takeover ya tomó el lease con otro token. Descartar nuestro import
         # parcial (rollback del savepoint) y NO compensar (el estado es del nuevo dueño).
         await _import_sp.rollback()
+        # Acá sí se traza antes de tocar el lease, y es seguro: este camino NO
+        # compensa (el lease es del nuevo dueño), así que no hay UPDATE posterior
+        # que un flush fallido pueda dejar sin correr.
+        await _emit_confirm_failure(exc, phase="lease_lost")
         logger.warning("ingestion.confirm.lease_lost", file_id=str(file_id))
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="El import fue retomado por otro proceso. Volvé a intentar.",
         ) from None
-    except Exception:
-        # Cualquier fallo post-lease (incl. el 422 de import vacío): revertir el
-        # savepoint del import PRIMERO (descarta lo parcial sin tocar la sesión del
-        # request) y RECIÉN compensar el lease → NEEDS_CONFIRMATION.
+    except BaseException as exc:
+        # `BaseException`, no `Exception`: si el cliente corta la conexión, Starlette
+        # cancela la task y `CancelledError` (BaseException desde 3.8) esquivaba este
+        # bloque → el lease nunca se compensaba y el archivo quedaba clavado en
+        # IMPORTING hasta que venciera el TTL. Cubre también el 422 de import vacío.
+        # Orden obligatorio: revertir el savepoint (descarta lo parcial sin tocar la
+        # sesión del request) → compensar el lease → RECIÉN trazar. La traza va
+        # última porque su flush sobre una sesión reventada abortaría la
+        # transacción y dejaría al archivo en IMPORTING (ver `_emit_confirm_failure`).
         await _import_sp.rollback()
         await release_import_lease(session, tenant.tenant_id, file_id, _import_token)
+        await _emit_confirm_failure(exc, phase="import")
         raise
 
     logger.info(

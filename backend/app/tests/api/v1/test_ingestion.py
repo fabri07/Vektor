@@ -33,6 +33,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     UploadedFile,
 )
+from app.persistence.models.pipeline_event import STAGE_REJECT, PipelineEvent
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -1529,6 +1530,119 @@ class TestConfirmLeaseF4:
         assert refreshed.import_attempt_id is None
         assert refreshed.import_started_at is None
         assert refreshed.import_phase is None
+
+    async def test_confirm_failure_deja_traza_en_pipeline_events(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """Un confirm que falla tiene que dejar un evento ``reject`` persistido.
+
+        Sin esto el import falla en silencio: ``pipeline_events`` solo se escribía
+        en el camino feliz (después de ``finalize_import_lease``), así que un
+        archivo que nunca importa no deja UNA sola fila de traza y diagnosticarlo
+        exige acceso a la base y adivinar.
+
+        El evento se emite DESPUÉS de compensar el lease: el flush de su
+        ``begin_nested`` sobre una sesión que viene de un import reventado
+        abortaría la transacción y dejaría el archivo en IMPORTING (ver
+        ``test_failure_after_f5_savepoints_still_compensates_lease``).
+        """
+        with (
+            unittest.mock.patch(
+                "app.api.v1.ingestion.insert_confirmed_data",
+                new_callable=unittest.mock.AsyncMock,
+                side_effect=RuntimeError("boom en el import"),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await client.post(
+                f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+                headers=auth_headers,
+                json={"confirmed_fields": {"ventas": True, "gastos": False}},
+            )
+
+        eventos = (
+            (
+                await db_session.execute(
+                    select(PipelineEvent).where(
+                        PipelineEvent.file_id == confirmed_file.id,
+                        PipelineEvent.stage == STAGE_REJECT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(eventos) == 1, "el fallo del confirm no dejó traza"
+
+        detail = eventos[0].detail or {}
+        assert detail.get("stage_failed") == "confirm"
+        assert detail.get("error_type") == "RuntimeError"
+        # Sin PII: la traza lleva tipo de error y etapa, nunca valores de fila.
+        assert "raw_row" not in detail
+
+    async def test_traza_de_integrityerror_no_filtra_valores_de_fila(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """La traza guarda el nombre de la constraint, nunca los valores.
+
+        Un ``IntegrityError`` es el caso donde más fácil se filtra PII: su ``str()``
+        trae el statement, los ``[parameters: ...]`` y el ``DETAIL: Key (...)=(...)``
+        de Postgres con los datos de la fila. ``pipeline_events`` es append-only y
+        se lee desde un endpoint admin, así que ahí no puede quedar nada de eso.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        # Forma real del error: asyncpg deja el DETAIL con los valores en la 2ª línea.
+        orig = Exception(
+            'duplicate key value violates unique constraint "uq_products_tenant_sku_norm"\n'
+            "DETAIL:  Key (tenant_id, sku_normalized)=(abc-123, JARRON-AZUL-40CM) "
+            "already exists."
+        )
+        boom = IntegrityError(
+            "INSERT INTO products (name, sku) VALUES (%(name)s, %(sku)s)",
+            {"name": "Jarrón azul 40cm", "sku": "JARRON-AZUL-40CM"},
+            orig,
+        )
+
+        with (
+            unittest.mock.patch(
+                "app.api.v1.ingestion.insert_confirmed_data",
+                new_callable=unittest.mock.AsyncMock,
+                side_effect=boom,
+            ),
+            pytest.raises(IntegrityError),
+        ):
+            await client.post(
+                f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+                headers=auth_headers,
+                json={"confirmed_fields": {"ventas": True, "gastos": False}},
+            )
+
+        evento = (
+            await db_session.execute(
+                select(PipelineEvent).where(
+                    PipelineEvent.file_id == confirmed_file.id,
+                    PipelineEvent.stage == STAGE_REJECT,
+                )
+            )
+        ).scalar_one()
+
+        traza = str(evento.detail)
+        # Lo que SÍ tiene que estar: qué constraint se violó.
+        assert "uq_products_tenant_sku_norm" in traza
+        # Lo que NO: valores de la fila, el DETAIL de Postgres y el statement.
+        assert "JARRON-AZUL-40CM" not in traza
+        assert "Jarrón azul 40cm" not in traza
+        assert "DETAIL" not in traza
+        assert "INSERT INTO" not in traza
 
     async def test_failure_after_f5_savepoints_still_compensates_lease(
         self,
