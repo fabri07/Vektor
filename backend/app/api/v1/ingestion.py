@@ -1015,7 +1015,10 @@ async def confirm_file(
             )
         return mapping.entity_type or _entity_type
 
-    def _context_included(context_id: str, entity_type: str) -> bool:
+    # `entity_type` opcional: una hoja que el parser no pudo clasificar llega sin
+    # entidad y el guard de más abajo igual necesita saber si el usuario la
+    # incluyó. Misma firma que `context_is_included`, que ya la acepta nullable.
+    def _context_included(context_id: str, entity_type: str | None) -> bool:
         # Fuente única compartida con F8 (`/column-risk`) para no divergir.
         return context_is_included(
             context_id, entity_type, body.confirmed_fields, body.context_confirmed
@@ -1028,6 +1031,40 @@ async def confirm_file(
             if m.target_field != "ignore" and not m.target_field.startswith("custom_field:")
         }
         return set(REQUIRED_FIELDS.get(entity_type, [])) - mapped
+
+    # ── Ninguna hoja se importa sin que alguien haya dicho QUÉ es ───────────────
+    # El parser deja `entity_type: null` cuando no pudo clasificar una hoja. Hasta
+    # acá eso no bloqueaba nada: el panel la mostraba tildada y `_entity_for` caía
+    # al default "sale", así que hojas como un resumen derivado del Libro Diario
+    # entraban como miles de ventas sin que nadie lo decidiera. El default vive en
+    # el BACKEND, así que arreglarlo solo en la UI dejaría el agujero abierto para
+    # cualquier otro cliente del endpoint.
+    #
+    # Va antes del lease: una request que va a rebotar nunca lo toma.
+    if _mapping_contexts_raw := (_summary_for_ctx.get("mapping_contexts") or []):
+        _sin_entidad: list[str] = []
+        for _ctx in _mapping_contexts_raw:
+            _cid = _ctx.get("context_id")
+            if not _cid:
+                continue
+            # MISMA prioridad que `_entity_for`: override del usuario primero,
+            # después la entidad original del summary. Si ninguna resuelve, la
+            # hoja no tiene sección y no puede importarse.
+            _ent_efectiva = _override.get(_cid) or _context_entity.get(_cid)
+            if _ent_efectiva:
+                continue
+            if _context_included(_cid, _ent_efectiva):
+                _sin_entidad.append(str(_ctx.get("label") or _cid))
+        if _sin_entidad:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Estas hojas no tienen sección asignada y no se pueden "
+                    f"importar: {', '.join(_sin_entidad)}. Elegí a qué sección va "
+                    "cada una (ventas, gastos, productos, clientes o proveedores) "
+                    "o destildala para dejarla afuera."
+                ),
+            )
 
     # Validación de requeridos — plano (legacy)
     if _flat_mappings:

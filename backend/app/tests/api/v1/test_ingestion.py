@@ -904,6 +904,161 @@ class TestConfirmEndpoint:
         assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
         assert refreshed.import_attempt_id is None
 
+    async def test_hoja_sin_seccion_no_entra_como_venta(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Una hoja que el parser no supo clasificar NO puede importarse sola.
+
+        Reproduce el caso real: el parser marca la hoja "Ganancias" como derivada
+        del Libro Diario y la deja con ``entity_type: null``. Antes,
+        ``_entity_for`` caía al default ``"sale"`` y esas 1840 filas de resúmenes
+        entraban como ventas, encima de las ventas reales del mismo archivo.
+
+        El gate vive en el backend a propósito: arreglarlo solo en el panel
+        dejaría el default silencioso disponible para cualquier otro cliente.
+        Y rebota con 422 ANTES del lease — el archivo sigue re-confirmable.
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="libro.xlsx",
+            s3_key="uploads/test/uuid/libro.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="general",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "row_count": 2,
+                "mapping_contexts": [
+                    {
+                        "context_id": "sheet:Ganancias",
+                        "label": "Ganancias",
+                        "entity_type": None,  # el parser no supo qué es
+                        "headers": ["concepto", "total"],
+                        "row_count": 2,
+                        "preview_rows": [],
+                    }
+                ],
+                "otros_detectados": [
+                    {"__context__": "sheet:Ganancias", "concepto": "x", "total": "1"},
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"sheet:Ganancias": True},
+                "column_mappings": [
+                    {
+                        "source_column": "total",
+                        "target_field": "amount",
+                        "context_id": "sheet:Ganancias",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 422
+        detalle = response.json()["detail"]
+        assert "Ganancias" in detalle
+        assert "sección" in detalle
+
+        # 422 ANTES del lease: el archivo queda re-confirmable, sin lease colgado.
+        refreshed = (
+            await db_session.execute(select(UploadedFile).where(UploadedFile.id == record.id))
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
+    async def test_hoja_sin_seccion_reasignada_por_el_usuario_importa(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """La contracara: con la sección elegida por el usuario, la hoja SÍ entra.
+
+        El guard bloquea la ausencia de decisión, no la hoja. Sin este test, el
+        fix podría estar rompiendo el caso legítimo de reasignar una hoja.
+        """
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="libro.xlsx",
+            s3_key="uploads/test/uuid/libro2.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="general",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "row_count": 1,
+                "mapping_contexts": [
+                    {
+                        "context_id": "sheet:Hoja1",
+                        "label": "Hoja1",
+                        "entity_type": None,
+                        "headers": ["fecha", "monto"],
+                        "row_count": 1,
+                        "preview_rows": [],
+                    }
+                ],
+                # Las filas de una hoja sin clasificar viven en `otros_detectados`;
+                # al reasignarla, el importador las levanta de ahí
+                # (`bucket_key = entity_bucket.get(base_entity or "", "otros_detectados")`).
+                "otros_detectados": [
+                    {"__context__": "sheet:Hoja1", "fecha": "2024-01-15", "monto": "50000"},
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {},
+                "context_confirmed": {"sheet:Hoja1": True},
+                # El usuario dijo qué es la hoja: eso desbloquea el import.
+                "context_entity": {"sheet:Hoja1": "sale"},
+                "column_mappings": [
+                    {
+                        "source_column": "fecha",
+                        "target_field": "transaction_date",
+                        "context_id": "sheet:Hoja1",
+                        "entity_type": "sale",
+                    },
+                    {
+                        "source_column": "monto",
+                        "target_field": "amount",
+                        "context_id": "sheet:Hoja1",
+                        "entity_type": "sale",
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.text
+
     async def test_confirm_drop_requerido_sin_reemplazo_devuelve_422_antes_del_lease(
         self,
         client: AsyncClient,
