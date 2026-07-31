@@ -371,8 +371,9 @@ export const ingestionService = {
     columnMappings?: ColumnMapping[],
     contextConfirmed?: Record<string, boolean>,
     contextEntity?: Record<string, string>,
-    // Solo relevante cuando el archivo trae stock/productos: cómo tratar ese stock.
-    stockTreatment?: StockTreatment,
+    // Origen del stock de cada hoja de productos: `{context_id: tratamiento}`.
+    // Un string plano sigue valiendo para todas las hojas (compatibilidad).
+    stockTreatment?: StockTreatment | Record<string, StockTreatment>,
     // F8c: decisiones del usuario sobre columnas riesgosas (drop / enrutar a Otros).
     columnRiskDecisions?: ColumnRiskDecision[],
   ): Promise<ConfirmIngestionResult> {

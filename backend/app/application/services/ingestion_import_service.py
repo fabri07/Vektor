@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -2451,6 +2452,28 @@ def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[
     return target_to_col, custom_field_cols
 
 
+def _resolve_stock_treatment(
+    stock_treatment: str | dict[str, str] | None,
+    summary: dict[str, Any],
+) -> tuple[bool, dict[str, bool]]:
+    """Resuelve ``stock_treatment`` a (default global, por contexto).
+
+    Acepta las dos formas del contrato: un string (todas las hojas de producto) o
+    un dict ``{context_id: tratamiento}`` (por hoja). El string sigue soportado
+    para no romper confirms en vuelo ni la elección guardada en el summary por
+    una relectura anterior.
+
+    Default en ambos casos: saldo de apertura — es el que NO toca caja, así que
+    equivocarse ahí no inventa un gasto.
+    """
+    raw = stock_treatment if stock_treatment is not None else summary.get("stock_treatment")
+    if isinstance(raw, dict):
+        return False, {
+            cid: valor == STOCK_TREATMENT_PURCHASE for cid, valor in raw.items()
+        }
+    return (raw or STOCK_TREATMENT_OPENING_BALANCE) == STOCK_TREATMENT_PURCHASE, {}
+
+
 async def insert_confirmed_data(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -2469,7 +2492,7 @@ async def insert_confirmed_data(
     context_entity: dict[str, str] | None = None,
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
-    stock_treatment: str | None = None,
+    stock_treatment: str | dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
 
@@ -2564,7 +2587,7 @@ async def _insert_confirmed_data_impl(
     context_entity: dict[str, str] | None = None,
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
-    stock_treatment: str | None = None,
+    stock_treatment: str | dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -2582,12 +2605,18 @@ async def _insert_confirmed_data_impl(
     # Tratamiento del stock del catálogo (apertura vs compra). Prioridad: parámetro
     # explícito (confirm) → lo guardado en el summary (relectura preserva la elección)
     # → default apertura (no distorsiona caja). Ver STOCK_TREATMENT_*.
-    _treatment = (
-        stock_treatment
-        or summary.get("stock_treatment")
-        or STOCK_TREATMENT_OPENING_BALANCE
+    stock_is_purchase, _purchase_by_ctx = _resolve_stock_treatment(
+        stock_treatment, summary
     )
-    stock_is_purchase = _treatment == STOCK_TREATMENT_PURCHASE
+
+    def stock_is_purchase_for(context_id: str | None) -> bool:
+        """Tratamiento de ESTA hoja, con fallback al global.
+
+        Un archivo puede traer un catálogo de mercadería que el negocio ya tenía
+        y, en otra hoja, sus compras del mes. Un único valor para todo el archivo
+        obliga a mentir en una de las dos.
+        """
+        return _purchase_by_ctx.get(context_id or "", stock_is_purchase)
     # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
     today = now_ar_naive()
     counts: dict[str, Any] = {
@@ -2687,7 +2716,7 @@ async def _insert_confirmed_data_impl(
                 uploaded_file_id=uploaded_file_id,
                 seen_fp=seen_fp,
                 product_cache=_product_cache,
-                stock_is_purchase=stock_is_purchase,
+                stock_is_purchase_for=stock_is_purchase_for,
             )
             if seen_fp is not None and _preloaded_fp is not None:
                 await _persist_import_fingerprints(
@@ -4015,7 +4044,8 @@ async def _insert_multisheet_data(
     uploaded_file_id: uuid.UUID | None = None,
     seen_fp: set[str] | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
-    stock_is_purchase: bool = False,
+    # Resuelve el tratamiento POR HOJA (ver `stock_is_purchase_for` en el caller).
+    stock_is_purchase_for: Callable[[str | None], bool] = lambda _ctx: False,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -4143,14 +4173,14 @@ async def _insert_multisheet_data(
         # "mercadopago") y filtros/arqueo quedaban inconsistentes.
         pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
         pay = normalize_payment_method(pay_raw) if pay_raw else "cash"
+        # Precio realmente vendido: solo por mapeo explícito, nunca derivado de
+        # amount/quantity (ver models/transaction.py).
+        _up_col = cols.get("unit_price")
         entry = SaleEntry(
             tenant_id=tenant_id,
             amount=amount,
             quantity=qty,
-            # Solo por mapeo explícito; nunca derivado de amount/quantity.
-            unit_price=(
-                _parse_amount(row.get(_up_col)) if (_up_col := cols.get("unit_price")) else None
-            ),
+            unit_price=_parse_amount(row.get(_up_col)) if _up_col else None,
             transaction_date=tx_date,
             payment_method=pay,
             notes=notes or "Importado desde archivo",
@@ -4430,11 +4460,16 @@ async def _insert_multisheet_data(
         cols: dict[str, str],
         cf_cols: dict[str, str],
         row_ref: str | None = None,
+        context_id: str | None = None,
     ) -> bool:
         """Devuelve ``True`` si la fila se CAPTURÓ a /otros (identidad ambigua o fecha
         de producto ilegible en columna mapeada a mano) — el caller registra la huella
         de esa captura. ``False`` si creó/actualizó el producto o si no había nombre
-        (la creación normal dedupea por identidad, no por huella)."""
+        (la creación normal dedupea por identidad, no por huella).
+
+        ``context_id`` decide si el stock de ESTA hoja entra como compra (COGS +
+        baja de caja) o como saldo de apertura."""
+        stock_is_purchase = stock_is_purchase_for(context_id)
         _name_col = cols.get("name") or cols.get("product_name")
         name = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 299)
         if not name:
@@ -4933,7 +4968,9 @@ async def _insert_multisheet_data(
                         session, tenant_id, _prod_cap_anchor, seen_fp
                     ):
                         continue
-                    _prod_captured = await _add_product(row, cols, cf_cols, _row_ref)
+                    _prod_captured = await _add_product(
+                        row, cols, cf_cols, _row_ref, context_id=ctx_id
+                    )
                     if _prod_captured and _prod_cap_anchor is not None:
                         await _register_import_row_fingerprint(
                             session, tenant_id, _prod_cap_anchor, seen_fp

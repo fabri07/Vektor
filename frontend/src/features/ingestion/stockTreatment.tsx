@@ -41,19 +41,27 @@ export function summaryHasStock(
 const OPTIONS: Array<{ value: StockTreatment; title: string; desc: string }> = [
   {
     value: "opening_balance",
-    title: "Ya lo tenía (saldo de apertura)",
-    desc: "Solo carga el inventario. No genera gasto ni salida de caja.",
+    title: "Ya la tenía en el negocio",
+    desc: "Carga el inventario y nada más. No descuenta plata ni suma un gasto.",
   },
   {
     value: "purchase",
-    title: "Lo compré",
-    desc: "Registra el gasto de mercadería (COGS) y la baja de caja.",
+    title: "La compré ahora",
+    desc: "Además del inventario, registra el gasto de mercadería y la salida de caja.",
   },
 ];
 
 /**
- * Selector "¿Este stock ya lo tenías o lo compraste?" para el confirm de un
- * archivo que trae stock/productos. Default recomendado: "opening_balance".
+ * Origen del stock de UNA hoja de productos.
+ *
+ * Se pregunta por hoja, no por archivo: un mismo Excel puede traer el catálogo
+ * de lo que el negocio ya tenía y, aparte, las compras del mes. Con un único
+ * valor global había que mentir en una de las dos, y elegir "compra" generaba un
+ * gasto por cada producto del catálogo aunque esos costos ya estuvieran cargados
+ * como egresos en el libro diario.
+ *
+ * Default: "ya la tenía" — es el que NO toca caja, así que equivocarse ahí no
+ * inventa un gasto.
  */
 export function StockTreatmentChoice({
   value,
@@ -66,8 +74,11 @@ export function StockTreatmentChoice({
 }) {
   return (
     <div className={className}>
-      <p className="mb-2 text-xs font-semibold text-vk-text-primary">
-        ¿Este stock ya lo tenías o lo compraste?
+      <p className="text-xs font-semibold text-vk-text-primary">
+        Esta mercadería, ¿ya la tenías o la compraste?
+      </p>
+      <p className="mb-2 text-[11px] text-vk-text-muted">
+        Define si además del stock hay que registrar el gasto y la salida de caja.
       </p>
       <div className="flex flex-col gap-2 sm:flex-row">
         {OPTIONS.map((opt) => {

@@ -251,13 +251,23 @@ class ConfirmIngestionRequest(BaseModel):
             ),
         )
     )
-    stock_treatment: Literal["opening_balance", "purchase"] | None = Field(
+    stock_treatment: (
+        Literal["opening_balance", "purchase"]
+        | dict[str, Literal["opening_balance", "purchase"]]
+        | None
+    ) = Field(
         default=None,
         description=(
-            "Cómo tratar el stock de un archivo de catálogo/lista: 'opening_balance' "
+            "Cómo tratar el stock de una hoja de catálogo/lista: 'opening_balance' "
             "(saldo de apertura — mercadería que ya tenías, entra al inventario sin "
             "gasto ni salida de caja) o 'purchase' (compra — genera gasto de mercadería "
-            "COGS + baja de caja). Si se omite, se asume saldo de apertura."
+            "COGS + baja de caja). Si se omite, se asume saldo de apertura.\n\n"
+            "Acepta un dict {context_id: tratamiento} para decidir POR HOJA. Un "
+            "archivo puede traer un catálogo que el negocio ya tenía y otra hoja de "
+            "compras del mes: un único valor global obliga a mentir en una de las dos "
+            "y, si se elige 'purchase', genera COGS por productos que ya figuran como "
+            "egresos en el libro diario (doble conteo). Un string plano sigue "
+            "significando 'para todas las hojas de producto' (compatibilidad)."
         ),
     )
     column_risk_decisions: list[ColumnRiskDecision] = Field(

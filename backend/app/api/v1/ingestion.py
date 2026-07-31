@@ -1626,7 +1626,10 @@ async def confirm_file(
             context_entity=cast("dict[str, str]", body.context_entity) or None,
             source="ingestion",
             uploaded_file_id=file_id,
-            stock_treatment=body.stock_treatment,
+            # El schema lo tipa con Literals (valida la entrada); el importador
+            # acepta el tipo ancho porque también lee el valor guardado en el
+            # summary por una relectura anterior, que llega como str/dict plano.
+            stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
             # Ledger de reversa: `products` no tiene columna de origen, así que
             # sin este detalle no hay forma de saber qué productos creó este
             # archivo — y borrarlo no podría deshacerlos.

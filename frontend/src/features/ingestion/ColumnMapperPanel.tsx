@@ -352,6 +352,8 @@ function SheetMapperSection({
   onEntityChange,
   onColumnTouched,
   onIssuesChange,
+  stockTreatment,
+  onStockTreatmentChange,
 }: {
   fileId: string;
   context: MappingContext;
@@ -368,6 +370,9 @@ function SheetMapperSection({
   // habilita Confirmar — así el bloqueo usa las mismas reglas que el confirm del
   // backend en vez de descubrirse recién con un 422.
   onIssuesChange?: (ctxId: string, issues: SheetIssues) => void;
+  // Origen del stock de ESTA hoja (solo se pregunta si es de productos).
+  stockTreatment: StockTreatment;
+  onStockTreatmentChange: (ctxId: string, value: StockTreatment) => void;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -715,6 +720,17 @@ function SheetMapperSection({
             })}
           </div>
         ))}
+
+      {/* Origen del stock de ESTA hoja. Antes era una única pregunta al pie del
+          formulario, sin decir a qué hoja aplicaba — imposible de responder bien
+          en un archivo con un catálogo y dos libros diarios. */}
+      {included && entity === "product" && (
+        <StockTreatmentChoice
+          value={stockTreatment}
+          onChange={(v) => onStockTreatmentChange(context.context_id, v)}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
     </div>
   );
 }
@@ -750,9 +766,18 @@ function MultiContextMapper({
       contexts.map((c) => [c.context_id, c.entity_type ?? ENTITY_UNSET]),
     ),
   );
-  // A: tratamiento del stock si alguna hoja incluida es de productos.
-  const [stockTreatment, setStockTreatment] =
-    useState<StockTreatment>("opening_balance");
+  // Origen del stock POR HOJA. Un único valor para todo el archivo obligaba a
+  // mentir cuando venían juntos un catálogo que el negocio ya tenía y una hoja
+  // de compras: elegir «Lo compré» generaba COGS por productos que ya figuran
+  // como egresos del libro diario (doble conteo).
+  const [stockTreatmentByCtx, setStockTreatmentByCtx] = useState<
+    Record<string, StockTreatment>
+  >({});
+  const handleStockTreatmentChange = useCallback(
+    (ctxId: string, value: StockTreatment) =>
+      setStockTreatmentByCtx((prev) => ({ ...prev, [ctxId]: value })),
+    [],
+  );
   const mappingsRef = useRef<Record<string, Record<string, string>>>({});
   // F8c: decisiones de columnas riesgosas + touched-set (user_selected).
   const [riskDecisions, setRiskDecisions] = useState<ColumnRiskDecision[]>([]);
@@ -818,10 +843,30 @@ function MultiContextMapper({
     (c) => included[c.context_id] && entityFor(c) === ENTITY_UNSET,
   );
 
-  // A: alguna hoja incluida es de productos → preguntar cómo tratar el stock.
-  const hasStock = contexts.some(
+  // Hojas de producto incluidas: cada una declara su propio origen de stock.
+  const hojasDeProducto = contexts.filter(
     (c) => included[c.context_id] && entityFor(c) === "product",
   );
+  const stockTreatmentPayload = hojasDeProducto.length
+    ? Object.fromEntries(
+        hojasDeProducto.map((c) => [
+          c.context_id,
+          stockTreatmentByCtx[c.context_id] ?? "opening_balance",
+        ]),
+      )
+    : undefined;
+
+  // Doble conteo: una hoja marcada como compra genera un COGS por producto. Si
+  // el mismo archivo trae gastos, es probable que esos costos ya estén ahí.
+  // Avisa, no bloquea — puede ser legítimo (compras que no pasaron por el libro).
+  const hojasDeGasto = contexts.filter(
+    (c) => included[c.context_id] && entityFor(c) === "expense",
+  );
+  const hojasMarcadasCompra = hojasDeProducto.filter(
+    (c) => (stockTreatmentByCtx[c.context_id] ?? "opening_balance") === "purchase",
+  );
+  const riesgoDobleConteo =
+    hojasDeGasto.length > 0 && hojasMarcadasCompra.length > 0;
 
   // Solo cuentan las hojas INCLUIDAS: una destildada no se importa, así que sus
   // problemas no pueden bloquear nada.
@@ -913,7 +958,9 @@ function MultiContextMapper({
         columnMappings,
         included,
         contextEntity,
-        hasStock ? stockTreatment : undefined,
+        // Dict {context_id: tratamiento} solo con las hojas de producto
+        // INCLUIDAS; `undefined` si no hay ninguna (el backend asume apertura).
+        stockTreatmentPayload,
         riskDecisions,
       );
     },
@@ -999,17 +1046,24 @@ function MultiContextMapper({
             onEntityChange={handleEntityChange}
             onColumnTouched={handleColumnTouched}
             onIssuesChange={handleIssuesChange}
+            stockTreatment={stockTreatmentByCtx[ctx.context_id] ?? "opening_balance"}
+            onStockTreatmentChange={handleStockTreatmentChange}
           />
         ))}
       </div>
 
-      {/* A: tratamiento del stock cuando alguna hoja incluida es de productos. */}
-      {hasStock && (
-        <StockTreatmentChoice
-          value={stockTreatment}
-          onChange={setStockTreatment}
-          className="mt-4 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
-        />
+      {/* Doble conteo: el COGS de una hoja marcada como compra puede ya estar
+          cargado como egreso en las hojas de gastos del mismo archivo. */}
+      {riesgoDobleConteo && (
+        <p className="mt-3 flex gap-1.5 text-xs text-vk-warning">
+          <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />
+          <span>
+            {hojasMarcadasCompra.map((c) => `«${c.label ?? c.context_id}»`).join(", ")}{" "}
+            {hojasMarcadasCompra.length !== 1 ? "están marcadas" : "está marcada"} como
+            compra, y este archivo también trae gastos. Si esas compras ya figuran
+            ahí, el costo de la mercadería se va a contar dos veces.
+          </span>
+        </p>
       )}
 
       {confirmMutation.isError &&
