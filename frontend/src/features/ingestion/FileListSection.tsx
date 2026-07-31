@@ -15,6 +15,7 @@ import { Modal } from "@/components/ui/Modal";
 import { TableSearch } from "@/components/ui/TableSearch";
 import { matchesRow } from "@/lib/search";
 import { ColumnMapperPanel } from "./ColumnMapperPanel";
+import { DeleteFileModal } from "./DeleteFileModal";
 import { RereadDiff } from "./RereadDiff";
 import { RereadProgress } from "./RereadProgress";
 import { IndeterminateBar } from "./IndeterminateBar";
@@ -96,6 +97,10 @@ export function FileListSection() {
   const queryClient = useQueryClient();
   const addToast = useToastStore((s) => s.add);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Archivo pendiente de confirmar borrado. El borrado revierte datos de
+  // negocio, así que va detrás de una advertencia con los conteos reales — un
+  // `confirm()` del navegador no podía mostrarlos.
+  const [fileToDelete, setFileToDelete] = useState<UploadedFileItem | null>(null);
   const [search, setSearch] = useState("");
 
   // Estado del modal de relectura (en memoria de sesión).
@@ -190,9 +195,21 @@ export function FileListSection() {
   }
 
   const deleteMutation = useMutation({
-    mutationFn: (fileId: string) => ingestionService.deleteFile(fileId),
+    // confirm=true: el usuario ya aceptó la advertencia del modal, que le mostró
+    // cuántas ventas/gastos/productos se van a revertir. Sin el flag el backend
+    // responde 409 con el preview y no toca nada.
+    mutationFn: (fileId: string) => ingestionService.deleteFile(fileId, true),
     onSuccess: () => {
+      setFileToDelete(null);
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
+      // El borrado revierte datos de negocio: hay que refrescar todo lo que los
+      // muestra, no solo la lista de archivos.
+      invalidateDataQueries();
+      addToast("Archivo eliminado y datos revertidos.", "success");
+    },
+    onError: () => {
+      setFileToDelete(null);
+      addToast("No se pudo eliminar el archivo.", "error");
     },
   });
 
@@ -546,11 +563,7 @@ export function FileListSection() {
                             el backend además rechaza el DELETE con 409. */}
                         {file.processing_status !== "IMPORTING" && (
                           <button
-                            onClick={() => {
-                              if (confirm(`¿Eliminar "${file.original_filename}"?`)) {
-                                deleteMutation.mutate(file.id);
-                              }
-                            }}
+                            onClick={() => setFileToDelete(file)}
                             disabled={deleteMutation.isPending}
                             className="rounded p-1 text-vk-text-muted hover:text-vk-danger hover:bg-vk-danger/10 transition-colors disabled:opacity-50"
                             title="Eliminar archivo"
@@ -594,6 +607,18 @@ export function FileListSection() {
           </table>
         </div>
         ))}
+
+      {/* Borrar un archivo revierte lo que importó: la advertencia muestra los
+          conteos reales antes de que el usuario acepte. */}
+      <DeleteFileModal
+        fileId={fileToDelete?.id ?? null}
+        filename={fileToDelete?.original_filename ?? ""}
+        isDeleting={deleteMutation.isPending}
+        onConfirm={() => {
+          if (fileToDelete) deleteMutation.mutate(fileToDelete.id);
+        }}
+        onCancel={() => setFileToDelete(null)}
+      />
 
       {/* B: confirmación antes de arrancar la relectura. */}
       <Modal

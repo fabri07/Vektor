@@ -1910,6 +1910,89 @@ class TestConfirmLeaseF4:
         assert response.status_code == 409
         assert "importa" in response.json()["detail"].lower()
 
+    async def test_delete_sin_confirmar_devuelve_el_preview_y_no_borra(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """Sin `confirm=true` no se toca nada: se devuelve qué se borraría.
+
+        El borrado pasó a destruir datos de negocio (y también los editados a
+        mano), así que la confirmación es explícita, no un default.
+        """
+        response = await client.delete(
+            f"/api/v1/ingestion/files/{confirmed_file.id}",
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 409
+        detalle = response.json()["detail"]
+        assert detalle["code"] == "CONFIRM_REQUIRED"
+        # El preview trae los conteos para la advertencia.
+        for clave in ("ventas", "gastos", "productos", "movimientos_stock", "otros"):
+            assert clave in detalle
+        assert "has_user_edits" in detalle
+
+        refreshed = (
+            await db_session.execute(
+                select(UploadedFile).where(UploadedFile.id == confirmed_file.id)
+            )
+        ).scalar_one()
+        assert refreshed.deleted_at is None, "un 409 no puede haber borrado el archivo"
+
+    async def test_delete_confirmado_revierte_las_ventas_del_archivo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """El circuito completo: importar, borrar el archivo, y que las ventas
+        desaparezcan de la interfaz (que es lo que reportó el usuario)."""
+        confirm = await client.post(
+            f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
+            headers=auth_headers,
+            json={"confirmed_fields": {"ventas": True, "gastos": False}},
+        )
+        assert confirm.status_code == 200
+
+        vivas = (
+            (
+                await db_session.execute(
+                    select(SaleEntry).where(
+                        SaleEntry.source_upload_id == confirmed_file.id,
+                        SaleEntry.voided_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(vivas) > 0, "el import no dejó ventas: el test no probaría nada"
+
+        borrado = await client.delete(
+            f"/api/v1/ingestion/files/{confirmed_file.id}?confirm=true",
+            headers=auth_headers,
+        )
+        assert borrado.status_code == 204
+
+        despues = (
+            (
+                await db_session.execute(
+                    select(SaleEntry).where(
+                        SaleEntry.source_upload_id == confirmed_file.id,
+                        SaleEntry.voided_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert despues == [], "borrar el archivo tiene que sacar sus ventas de la interfaz"
+
     async def test_delete_non_importing_soft_deletes(
         self,
         client: AsyncClient,
@@ -1919,7 +2002,7 @@ class TestConfirmLeaseF4:
     ) -> None:
         """El CAS de borrado sigue soft-deleteando un archivo normal (204)."""
         response = await client.delete(
-            f"/api/v1/ingestion/files/{confirmed_file.id}",
+            f"/api/v1/ingestion/files/{confirmed_file.id}?confirm=true",
             headers=auth_headers,
         )
         assert response.status_code == 204

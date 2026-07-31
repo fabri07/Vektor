@@ -218,8 +218,11 @@ class TestSoftDeletePreservesRaw:
             "app.integrations.s3.S3Client.delete",
             new_callable=unittest.mock.AsyncMock,
         ) as mock_s3_delete:
+            # confirm=true: el borrado ahora también revierte los datos que el
+            # archivo importó, así que exige confirmación explícita. Lo que este
+            # test fija sigue siendo lo mismo — el CRUDO en R2 no se toca.
             response = await client.delete(
-                f"/api/v1/ingestion/files/{file_id}",
+                f"/api/v1/ingestion/files/{file_id}?confirm=true",
                 headers=auth_headers,
             )
         assert response.status_code == 204

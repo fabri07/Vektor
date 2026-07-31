@@ -46,6 +46,11 @@ from app.application.services.column_risk import (
     derive_context_mapping_entries,
     validate_column_risk_decisions,
 )
+from app.application.services.file_deletion_service import (
+    preview_file_deletion,
+    record_import_ledger,
+    revert_file_data,
+)
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
 )
@@ -116,6 +121,7 @@ from app.schemas.ingestion import (
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     ContextualColumnRisk,
+    FileDeletionPreviewResponse,
     FilePreviewResponse,
     FileStatusItem,
     MasterPreviewSample,
@@ -679,20 +685,89 @@ async def cancel_file_confirmation(
     return {"file_id": str(file_id), "status": PROCESSING_STATUS_NEEDS_COMPLETION}
 
 
-@router.delete(
-    "/files/{file_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete an uploaded file",
+@router.get(
+    "/files/{file_id}/deletion-preview",
+    response_model=FileDeletionPreviewResponse,
+    summary="Qué datos se borran si se elimina este archivo",
 )
-async def delete_file(
+async def get_deletion_preview(
     file_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> None:
+) -> FileDeletionPreviewResponse:
+    """Read-only: alimenta la advertencia previa al borrado.
+
+    El borrado revierte TAMBIÉN lo editado a mano, así que el usuario tiene que
+    poder ver qué se lleva puesto antes de aceptar.
+    """
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    resumen = await preview_file_deletion(session, file_id, tenant.tenant_id)
+    return FileDeletionPreviewResponse(file_id=file_id, **resumen)
+
+
+@router.delete(
+    "/files/{file_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Elimina un archivo y revierte los datos que importó",
+    dependencies=[Depends(require_modify_access)],
+)
+async def delete_file(
+    file_id: uuid.UUID,
+    confirm: bool = Query(
+        default=False,
+        description=(
+            "Confirmación explícita de que se van a borrar los datos importados "
+            "por el archivo. Sin esto, 409 con el detalle de qué se borraría."
+        ),
+    ),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Borra el archivo Y revierte lo que importó.
+
+    Antes esto solo hacía ``deleted_at = now()``: el archivo desaparecía de la
+    lista y sus ventas/gastos/productos seguían en el dashboard. Peor, volver a
+    subirlo corregido duplicaba todo, porque las huellas anti-duplicado incluyen
+    el ``uploaded_file_id`` y un archivo nuevo no reconoce lo del anterior.
+
+    Gateado con ``require_modify_access`` (PIN): pasó de ocultar un archivo a
+    destruir datos de negocio, el mismo riesgo que el DELETE de ventas y gastos.
+
+    ``confirm=true`` es obligatorio — la reversa alcanza también a los registros
+    editados a mano, y esa decisión la toma el usuario, no el endpoint.
+    """
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    # Un import en curso rebota por ESO, antes que por falta de confirmación:
+    # pedirle al usuario que confirme un borrado que igual va a fallar sería un
+    # mensaje equivocado. El CAS de abajo sigue siendo el guard real de la carrera.
+    if record.processing_status == PROCESSING_STATUS_IMPORTING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede eliminar un archivo mientras se importa.",
+        )
+
+    if not confirm:
+        resumen = await preview_file_deletion(session, file_id, tenant.tenant_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CONFIRM_REQUIRED",
+                "message": (
+                    "Borrar este archivo también borra los datos que importó. "
+                    "Confirmá para continuar."
+                ),
+                **resumen,
+            },
+        )
 
     # F4: soft-delete ATÓMICO (CAS) — cierra la carrera delete↔confirm. Un check en
     # Python (leer estado → borrar) deja un TOCTOU: el confirm podría tomar el lease
@@ -722,6 +797,13 @@ async def delete_file(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="No se puede eliminar un archivo mientras se importa.",
             )
+    else:
+        # La reversa va SOLO si el CAS ganó. Si perdió la carrera, el archivo es
+        # de otro (un confirm en curso, u otro delete que ya revirtió): revertir
+        # igual borraría datos que este request no marcó como suyos.
+        await revert_file_data(
+            session, file_id, tenant.tenant_id, actor_user_id=user.user_id
+        )
     await session.commit()
 
 
@@ -1434,8 +1516,27 @@ async def confirm_file(
             source="ingestion",
             uploaded_file_id=file_id,
             stock_treatment=body.stock_treatment,
+            # Ledger de reversa: `products` no tiene columna de origen, así que
+            # sin este detalle no hay forma de saber qué productos creó este
+            # archivo — y borrarlo no podría deshacerlos.
+            return_details=True,
         )
         _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
+
+        # `product_details` sale de `counts` ANTES de cualquier otra cosa: más
+        # abajo `counts` se serializa entero en `compact_summary`, y meter ahí el
+        # detalle por producto engordaría el JSONB (justo lo que ese bloque
+        # existe para evitar) y lo devolvería en la respuesta del endpoint.
+        _product_details = counts.pop("product_details", []) or []
+
+        # Se escribe DENTRO del savepoint del import: si el import se revierte,
+        # el ledger se va con él (nunca un ledger de un import que no ocurrió).
+        await record_import_ledger(
+            session,
+            tenant_id=tenant.tenant_id,
+            file_id=file_id,
+            product_details=_product_details,
+        )
 
         # ── F8b (Task 4) + F8c (Minor 1): capturar en "Otros" las filas
         # ruteadas por columna riesgosa + counters + auditoría AGREGADA, todo
