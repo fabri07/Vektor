@@ -40,11 +40,19 @@ class SaleEntryResponse(BaseModel):
     customer_id: UUID | None = None
     amount: Decimal
     quantity: int
+    # Precio realmente vendido en esta transacción (NULL = no informado). Nunca se
+    # deriva de amount/quantity — ver nota en models/transaction.py.
+    unit_price: Decimal | None = None
     transaction_date: datetime
     payment_method: str
     notes: str | None
     custom_fields: dict[str, Any] = {}
     created_at: datetime
+
+    @field_serializer("unit_price")
+    def _serialize_unit_price(self, v: Decimal | None) -> float | None:
+        # Mismo motivo que `amount`: el frontend lo tipa como número.
+        return None if v is None else float(v)
 
     @field_serializer("amount")
     def _serialize_amount(self, v: Decimal) -> float:
@@ -57,6 +65,7 @@ class SaleEntryResponse(BaseModel):
 class CreateSaleRequest(BaseModel):
     amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     quantity: int = Field(ge=1, default=1)
+    unit_price: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     transaction_date: datetime
     payment_method: str = Field(
         pattern=PAYMENT_METHOD_PATTERN, default="cash"
@@ -83,6 +92,7 @@ class CreateSaleRequest(BaseModel):
 class UpdateSaleRequest(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     quantity: int | None = Field(default=None, ge=1)
+    unit_price: Decimal | None = Field(default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2)
     transaction_date: datetime | None = None
     payment_method: str | None = Field(
         default=None,

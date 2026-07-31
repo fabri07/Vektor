@@ -139,6 +139,26 @@ class ColumnMappingSuggestion(BaseModel):
     context_id: str | None = None
 
 
+class FieldCatalogEntry(BaseModel):
+    """Un campo canónico al que se puede mapear una columna."""
+
+    value: str
+    label: str
+    # True = solo UNA columna puede apuntarle. Dos columnas a un campo escalar no
+    # se pueden desempatar sin inventar, así que el confirm las rechaza y la UI
+    # bloquea. Ver SINGLE_VALUE_FIELDS en column_mapping_service.
+    single_value: bool = False
+
+
+class EntityFieldCatalog(BaseModel):
+    """Campos disponibles y requeridos para una entidad."""
+
+    # Un requerido se cubre SOLO con un campo canónico: un `custom_field:` guarda
+    # el dato pero no satisface el requerido (misma regla que `_missing_required`).
+    required: list[str]
+    fields: list[FieldCatalogEntry]
+
+
 class ColumnMapping(BaseModel):
     source_column: str
     target_field: str  # campo canónico, "ignore", o "custom_field:{key}"

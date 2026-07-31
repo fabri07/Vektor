@@ -19,6 +19,9 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "amount": "Monto de venta",
         "transaction_date": "Fecha de venta",
         "quantity": "Cantidad",
+        # Precio realmente vendido en esta transacción. NO se deriva de
+        # amount/quantity (ver models/transaction.py).
+        "unit_price": "Precio unitario vendido",
         "payment_method": "Método de pago",
         "product_name": "Nombre del producto",
         "notes": "Notas",
@@ -77,7 +80,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "sku": "Código (SKU)",
         "barcode": "Código de barras (EAN/UPC)",
         "name": "Nombre",
+        # Los tres precios son conceptos distintos y coexisten — ver la nota en
+        # models/product.py. El precio REALMENTE vendido no es ninguno de estos:
+        # va en sale.unit_price.
         "sale_price_ars": "Precio de venta",
+        "list_price_ars": "Precio de lista (sugerido)",
         "unit_cost_ars": "Costo unitario",
         "stock_units": "Stock (unidades)",
         "category": "Categoría",
@@ -114,6 +121,15 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
         },
         "transaction_date": {"fecha", "date", "dia", "mes", "periodo"},
         "quantity": {"cantidad", "qty", "unidades", "cant", "items", "unidad"},
+        # Precio REALMENTE vendido en esta fila (≠ `amount`, que es el total de la
+        # venta, y ≠ `Product.sale_price_ars`, que es el vigente configurado).
+        "unit_price": {
+            "precio_unitario",
+            "p_unitario",
+            "precio_vendido",
+            "precio_unidad",
+            "unitario",
+        },
         "payment_method": {"metodo", "medio", "pago", "forma_pago", "payment"},
         "product_name": {
             "producto",
@@ -230,8 +246,44 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "concepto",
             "detalle",
         },
-        "sale_price_ars": {"precio_venta", "precio", "price", "p_venta", "venta"},
-        "unit_cost_ars": {"costo", "cost", "precio_costo", "p_costo", "costo_unitario"},
+        # Los tres precios de un catálogo son campos DISTINTOS. Los keywords
+        # largos y específicos ("precio_compra", "precio_lista",
+        # "precio_venta_final") le ganan al genérico "precio" gracias a
+        # `_match_key`, que colapsa las preposiciones antes de comparar.
+        "sale_price_ars": {
+            "precio_venta",
+            "precio",
+            "price",
+            "p_venta",
+            "venta",
+            "precio_venta_final",
+            "venta_final",
+            "precio_final",
+        },
+        "list_price_ars": {
+            "lista",
+            "precio_lista",
+            "sugerido",
+            "precio_sugerido",
+            "precio_venta_sugerido",
+            "pvp",
+        },
+        # "precio unitario" en un CATÁLOGO es el costo al que se compra la unidad
+        # (no el precio al que se vende: ese es `sale_price_ars`). En una hoja de
+        # VENTAS el mismo header significa lo vendido y va a `sale.unit_price`.
+        "unit_cost_ars": {
+            "costo",
+            "cost",
+            "precio_costo",
+            "p_costo",
+            "costo_unitario",
+            "compra",
+            "precio_compra",
+            "costo_compra",
+            "precio_unitario",
+            "p_unitario",
+            "unitario",
+        },
         "stock_units": {
             "stock",
             "cantidad",
@@ -258,8 +310,73 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
 
 
 def _normalize_col(col: str) -> str:
-    """Normalizar header para matching: lowercase + underscore."""
+    """Normalizar header para matching: lowercase + underscore.
+
+    NO tocar sin migrar datos: este es el valor que se persiste en
+    ``tenant_column_mappings.source_column`` (el historial de alias aprendidos por
+    cada tenant). Cambiar la forma normalizada dejaría huérfano todo lo aprendido.
+    Para ajustar el matching heurístico está ``_match_key``, que deriva de acá y
+    NO se persiste.
+    """
     return col.lower().strip().replace(" ", "_").replace("-", "_")
+
+
+# Preposiciones y artículos que no aportan al matching. "Precio de compra" y
+# "Precio compra" son el mismo header para una heurística; escribir las dos
+# variantes en cada set de keywords sería inmantenible.
+_STOPWORDS: frozenset[str] = frozenset({"de", "del", "la", "el", "los", "las", "por"})
+
+
+def _match_key(normalized: str) -> str:
+    """Clave de matching heurístico: el header normalizado sin preposiciones.
+
+    Existe por un empate real. ``_heuristic_match`` gana con el keyword MÁS LARGO
+    y solo reemplaza si es estrictamente mayor, así que sobre ``precio_de_compra``
+    los keywords ``precio`` (6, ``sale_price_ars``) y ``compra`` (6,
+    ``unit_cost_ars``) empataban y ganaba el primero que se iterara — el costo de
+    compra entraba como precio de venta (incidente ASTERIA). Con la clave
+    ``precio_compra`` el keyword ``precio_compra`` (13) le gana a ``precio`` (6) y
+    el desempate deja de depender del orden de un dict.
+
+    Deliberadamente NO se toca ``_normalize_col``: esa alimenta el historial
+    persistido por tenant.
+    """
+    parts = [p for p in normalized.split("_") if p and p not in _STOPWORDS]
+    # Un header que sea SOLO stopwords ("de") dejaría la clave vacía; se devuelve
+    # el original antes que una cadena vacía.
+    return "_".join(parts) or normalized
+
+
+# Los mismos keywords ya pasados por `_match_key`, precomputados al importar: el
+# matching compara clave contra clave, así un keyword escrito "forma_de_pago"
+# sigue matcheando un header "forma pago" sin tener que declarar las dos formas.
+_HEURISTIC_KEYS: dict[str, dict[str, frozenset[str]]] = {
+    entity: {
+        target: frozenset(_match_key(k) for k in keywords) for target, keywords in targets.items()
+    }
+    for entity, targets in _HEURISTICS.items()
+}
+
+
+# ── Campos de valor único ────────────────────────────────────────────────────
+# Un campo escalar solo puede venir de UNA columna. Si dos apuntan al mismo, el
+# importador se quedaba con la primera del orden del archivo y descartaba el
+# resto en silencio (`_resolve_target_cols`): elegir un dato de negocio por un
+# detalle de implementación es inventarlo. El confirm ahora lo rechaza y la UI lo
+# bloquea, las dos leyendo de acá.
+#
+# Alcance deliberado: montos, cantidades, fechas y los tres precios — donde una
+# colisión corrompe plata. `name`/`notes`/`category` quedan afuera (varias
+# columnas pueden ser legítimas) y se cubren con un aviso no bloqueante.
+SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
+    "sale": frozenset({"amount", "quantity", "transaction_date", "unit_price"}),
+    "expense": frozenset({"amount", "expense_date"}),
+    "product": frozenset(
+        {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}
+    ),
+    "customer": frozenset(),
+    "supplier": frozenset(),
+}
 
 
 # Targets canónicos que representan la fecha de negocio de una fila.
@@ -323,21 +440,29 @@ def validate_required_date_mapping(
 def _heuristic_match(normalized: str, entity_type: str) -> str | None:
     """Busca el target_field para un header normalizado.
 
-    1. Match exacto contra cualquier keyword (gana siempre).
-    2. Substring: gana el keyword MÁS LARGO entre todos los campos — evita que
-       un keyword corto y genérico de otro campo capture un header específico
-       (ej: `forma_pago` debe ir a payment_method por "forma_pago", no a amount
-       por el substring "pago").
+    1. Match exacto (gana siempre), contra el header crudo y contra su
+       ``_match_key`` — así "Precio de compra" y "Precio compra" resuelven igual
+       sin duplicar cada keyword.
+    2. Substring sobre la clave: gana el keyword MÁS LARGO entre todos los campos
+       — evita que un keyword corto y genérico de otro campo capture un header
+       específico (ej: `forma_pago` debe ir a payment_method por "forma_pago", no
+       a amount por el substring "pago").
+
+    Ante un empate de longitud gana el primero declarado en ``_HEURISTICS``. Eso
+    ya no puede corromper un campo escalar en silencio: la colisión se valida
+    aguas arriba (``SINGLE_VALUE_FIELDS``) y el confirm la rechaza.
     """
     heuristics = _HEURISTICS.get(entity_type, {})
+    keyed = _HEURISTIC_KEYS.get(entity_type, {})
+    key = _match_key(normalized)
     for target_field, keywords in heuristics.items():
-        if normalized in keywords:
+        if normalized in keywords or key in keyed.get(target_field, frozenset()):
             return target_field
     best_len = 0
     best_target: str | None = None
-    for target_field, keywords in heuristics.items():
-        for k in keywords:
-            if len(k) > best_len and k in normalized:
+    for target_field, keywords_k in keyed.items():
+        for k in keywords_k:
+            if len(k) > best_len and k in key:
                 best_len = len(k)
                 best_target = target_field
     return best_target

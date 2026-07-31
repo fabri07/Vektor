@@ -26,6 +26,9 @@ class ProductResponse(BaseModel):
     description: str | None
     category: str | None
     sale_price_ars: Decimal
+    # Sugerido por proveedor/lista. Informativo: NO entra al margen, que sigue
+    # calculándose con sale_price_ars (vigente) − unit_cost_ars (costo).
+    list_price_ars: Decimal | None = None
     unit_cost_ars: Decimal | None
     stock_units: int
     # NULL = no configurado (usa DEFAULT_LOW_STOCK_THRESHOLD_UNITS); 0 = umbral explícito
@@ -97,6 +100,7 @@ class CreateProductRequest(BaseModel):
     category: str | None = Field(default=None, max_length=100)
     unit_cost_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     sale_price_ars: Decimal = Field(gt=0, decimal_places=2)
+    list_price_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     stock_units: int = Field(default=0, ge=0)
     # None = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS; 0 = explícito, solo sin-stock aplica
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
@@ -122,6 +126,7 @@ class UpdateProductRequest(BaseModel):
     category: str | None = Field(default=None, max_length=100)
     unit_cost_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     sale_price_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
+    list_price_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     stock_units: int | None = Field(default=None, ge=0)
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)

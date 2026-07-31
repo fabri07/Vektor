@@ -2752,6 +2752,9 @@ async def _insert_confirmed_data_impl(
         # genérico "precio" EXCLUYENDO compra/costo (y la columna de costo ya
         # resuelta). Antes el genérico "precio" tomaba "Precio de compra".
         precio_col = _resolve_sale_price_col(headers, costo_col)
+        # Sin heurística: el precio de lista solo existe si el usuario lo mapeó
+        # explícitamente (se resuelve más abajo, con el resto del mapeo).
+        lista_col: str | None = None
         stock_col = _find_col(headers, _STOCK_COLS)
         # F2-T5: barcode ANTES que sku para poder desambiguar la colisión ("código
         # de barras" matchea también "codigo" de _SKU_COLS). Si el único header
@@ -2770,6 +2773,7 @@ async def _insert_confirmed_data_impl(
 
         # Columnas extra (solo disponibles con column_mappings explícitos)
         qty_col: str | None = None
+        unit_price_col: str | None = None
         notes_col: str | None = None
         payment_col: str | None = None
         category_col: str | None = None
@@ -2810,6 +2814,12 @@ async def _insert_confirmed_data_impl(
             precio_col = target_to_col.get("sale_price_ars") or precio_col
             costo_col = target_to_col.get("unit_cost_ars") or costo_col
             stock_col = target_to_col.get("stock_units") or stock_col
+            # Precio de lista (sugerido): SOLO por mapeo explícito. A diferencia de
+            # `precio_col`/`costo_col` no tiene fallback heurístico a propósito —
+            # si nadie declaró que una columna es el sugerido, el dato no existe y
+            # queda NULL. Inventarlo desde un header parecido sería justamente lo
+            # que rompió el import de ASTERIA.
+            lista_col = target_to_col.get("list_price_ars")
             sku_col = target_to_col.get("sku") or sku_col
             barcode_col = target_to_col.get("barcode") or barcode_col
             if sku_col is not None and sku_col == barcode_col:
@@ -2818,6 +2828,10 @@ async def _insert_confirmed_data_impl(
 
             # Campos extra solo disponibles con mapeo explícito
             qty_col = target_to_col.get("quantity")
+            # Precio realmente vendido de ESTA fila. Solo por mapeo explícito y
+            # sin fallback: nunca se deriva de amount/quantity (ver la nota en
+            # models/transaction.py).
+            unit_price_col = target_to_col.get("unit_price")
             notes_col = target_to_col.get("notes")
             payment_col = target_to_col.get("payment_method")
             category_col = target_to_col.get("category")
@@ -3008,6 +3022,9 @@ async def _insert_confirmed_data_impl(
                         tenant_id=tenant_id,
                         amount=amount,
                         quantity=qty,
+                        unit_price=(
+                            _parse_amount(row.get(unit_price_col)) if unit_price_col else None
+                        ),
                         transaction_date=tx_date,
                         payment_method=pay_str,
                         notes=notes_str,
@@ -3431,6 +3448,7 @@ async def _insert_confirmed_data_impl(
                 )
                 price = _parse_amount(row.get(precio_col)) if precio_col else None
                 cost = _parse_amount(row.get(costo_col)) if costo_col else None
+                list_price = _parse_amount(row.get(lista_col)) if lista_col else None
                 try:
                     stock_raw = row.get(stock_col) if stock_col else None
                     stock_val = (
@@ -3477,6 +3495,7 @@ async def _insert_confirmed_data_impl(
                     barcode: str | None = barcode,
                     price: Decimal | None = price,
                     cost: Decimal | None = cost,
+                    list_price: Decimal | None = list_price,
                     stock_val: int = stock_val,
                     prod_cat: str | None = prod_cat,
                     store_name: str | None = store_name,
@@ -3522,6 +3541,13 @@ async def _insert_confirmed_data_impl(
                                 if existing.unit_cost_ars is not None
                                 else None
                             ),
+                            # Mismo motivo que unit_cost_ars: lo pisa esta función y
+                            # no lo cubre ningún mecanismo incremental.
+                            "list_price_ars": (
+                                str(existing.list_price_ars)
+                                if existing.list_price_ars is not None
+                                else None
+                            ),
                             "stock_units": existing.stock_units,
                             "sku": existing.sku,
                             "barcode": existing.barcode,
@@ -3541,6 +3567,8 @@ async def _insert_confirmed_data_impl(
                         existing.sale_price_ars = price
                     if cost:
                         existing.unit_cost_ars = cost
+                    if list_price:
+                        existing.list_price_ars = list_price
                     if stock_val > 0:
                         _delta = stock_val - existing.stock_units
                         existing.stock_units = stock_val
@@ -3593,6 +3621,11 @@ async def _insert_confirmed_data_impl(
                                 "before": before_snap,
                                 "after": {
                                     "sale_price_ars": str(price or existing.sale_price_ars),
+                                    "list_price_ars": (
+                                        str(list_price or existing.list_price_ars)
+                                        if (list_price or existing.list_price_ars) is not None
+                                        else None
+                                    ),
                                     "unit_cost_ars": (
                                         str(cost or existing.unit_cost_ars)
                                         if (cost or existing.unit_cost_ars) is not None
@@ -3689,6 +3722,7 @@ async def _insert_confirmed_data_impl(
                         name=name,
                         # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                         sale_price_ars=price or Decimal("0"),
+                        list_price_ars=list_price,
                         sku=sku,
                         barcode=barcode,  # F2-T5
                         unit_cost_ars=cost,
@@ -3777,6 +3811,11 @@ async def _insert_confirmed_data_impl(
                                 "before": None,
                                 "after": {
                                     "sale_price_ars": str(price or Decimal("0")),
+                                    "list_price_ars": (
+                                        str(new_product.list_price_ars)
+                                        if new_product.list_price_ars is not None
+                                        else None
+                                    ),
                                     "unit_cost_ars": (
                                         str(new_product.unit_cost_ars)
                                         if new_product.unit_cost_ars is not None
@@ -4108,6 +4147,10 @@ async def _insert_multisheet_data(
             tenant_id=tenant_id,
             amount=amount,
             quantity=qty,
+            # Solo por mapeo explícito; nunca derivado de amount/quantity.
+            unit_price=(
+                _parse_amount(row.get(_up_col)) if (_up_col := cols.get("unit_price")) else None
+            ),
             transaction_date=tx_date,
             payment_method=pay,
             notes=notes or "Importado desde archivo",
@@ -4435,6 +4478,11 @@ async def _insert_multisheet_data(
         else:
             _price_col = _resolve_sale_price_col(list(row.keys()), _uc_col)
             price = _parse_amount(row.get(_price_col)) if _price_col else None
+        # Precio de lista (sugerido): SOLO por mapeo explícito, sin fallback
+        # heurístico — si nadie declaró qué columna es el sugerido, el dato no
+        # existe y queda NULL en vez de adivinarse desde un header parecido.
+        _list_mapped = cols.get("list_price_ars")
+        list_price = _parse_amount(row.get(_list_mapped)) if _list_mapped else None
         try:
             stock_raw = _val(row, cols.get("stock_units"), _STOCK_COLS)
             stock_val = (
@@ -4521,6 +4569,13 @@ async def _insert_multisheet_data(
                         if existing.unit_cost_ars is not None
                         else None
                     ),
+                    # Mismo caso que unit_cost_ars: sin snapshot propio el undo no
+                    # lo puede restaurar.
+                    "list_price_ars": (
+                        str(existing.list_price_ars)
+                        if existing.list_price_ars is not None
+                        else None
+                    ),
                     "stock_units": existing.stock_units,
                     "sku": existing.sku,
                     "barcode": existing.barcode,
@@ -4536,6 +4591,8 @@ async def _insert_multisheet_data(
                 existing.sale_price_ars = price
             if cost:
                 existing.unit_cost_ars = cost
+            if list_price:
+                existing.list_price_ars = list_price
             if stock_val > 0:
                 _delta = stock_val - existing.stock_units
                 existing.stock_units = stock_val
@@ -4585,6 +4642,11 @@ async def _insert_multisheet_data(
                         "before": before_snap,
                         "after": {
                             "sale_price_ars": str(price or existing.sale_price_ars),
+                            "list_price_ars": (
+                                str(list_price or existing.list_price_ars)
+                                if (list_price or existing.list_price_ars) is not None
+                                else None
+                            ),
                             "unit_cost_ars": (
                                 str(cost or existing.unit_cost_ars)
                                 if (cost or existing.unit_cost_ars) is not None
@@ -4672,6 +4734,7 @@ async def _insert_multisheet_data(
                 barcode=barcode,  # F2-T5
                 # FASE 3 (B2): precio default 0 explícito para auto-creados incompletos.
                 sale_price_ars=price or Decimal("0"),
+                list_price_ars=list_price,
                 unit_cost_ars=cost,
                 stock_units=stock_val,
                 category=cat,
@@ -4743,6 +4806,11 @@ async def _insert_multisheet_data(
                         "before": None,
                         "after": {
                             "sale_price_ars": str(price or Decimal("0")),
+                            "list_price_ars": (
+                                str(new_product.list_price_ars)
+                                if new_product.list_price_ars is not None
+                                else None
+                            ),
                             "unit_cost_ars": (
                                 str(new_product.unit_cost_ars)
                                 if new_product.unit_cost_ars is not None

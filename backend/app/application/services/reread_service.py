@@ -1854,7 +1854,7 @@ def _coerce_master_restore_value(field: str, value: Any) -> Any:
         return date.fromisoformat(value)
     if field == "acquired_at":
         return datetime.fromisoformat(value)
-    if field in ("credit_limit", "sale_price_ars", "unit_cost_ars"):
+    if field in ("credit_limit", "sale_price_ars", "list_price_ars", "unit_cost_ars"):
         return Decimal(value)
     return value
 
@@ -1917,6 +1917,10 @@ async def _undo_master_and_product_items(
         # (revisión final F9b, Hallazgo 1): el mecanismo de movimientos no lo cubre.
         "product": (
             "sale_price_ars",
+            # Mismo caso que unit_cost_ars: el mecanismo incremental de
+            # movimientos no lo toca, así que si no se restaura acá el undo lo
+            # deja permanentemente en lo que dijo el archivo releído.
+            "list_price_ars",
             "unit_cost_ars",
             "sku",
             "barcode",

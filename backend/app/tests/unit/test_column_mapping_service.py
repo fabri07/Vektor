@@ -12,8 +12,10 @@ import pytest
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
     REQUIRED_FIELDS,
+    SINGLE_VALUE_FIELDS,
     ColumnMappingService,
     _heuristic_match,
+    _match_key,
     _normalize_col,
     resolve_transaction_date_column,
     validate_required_date_mapping,
@@ -455,3 +457,92 @@ async def test_delete_mapping_returns_true_when_found() -> None:
     result = await svc.delete_mapping(uuid.uuid4(), uuid.uuid4())
     assert result is True
     db.delete.assert_awaited_once_with(existing)
+
+
+# ── Los tres precios de un catálogo resuelven a campos DISTINTOS ───────────────
+#
+# Incidente ASTERIA (2026-07-31): "Precio de compra", "Precio de lista" y
+# "Precio de venta final" caían los tres en `sale_price_ars`. El costo entraba
+# como precio de venta y dos columnas se perdían en silencio.
+
+
+def test_precio_de_compra_es_costo_no_precio_de_venta() -> None:
+    """El caso que rompió: `precio` (6) y `compra` (6) empataban en longitud y
+    ganaba el orden de declaración del dict."""
+    assert _heuristic_match(_normalize_col("Precio de compra"), "product") == "unit_cost_ars"
+    assert _heuristic_match(_normalize_col("Precio compra"), "product") == "unit_cost_ars"
+    assert _heuristic_match(_normalize_col("precio unitario"), "product") == "unit_cost_ars"
+
+
+def test_precio_de_lista_es_sugerido_no_precio_de_venta() -> None:
+    assert _heuristic_match(_normalize_col("Precio de lista"), "product") == "list_price_ars"
+    assert _heuristic_match(_normalize_col("Precio sugerido"), "product") == "list_price_ars"
+
+
+def test_precio_de_venta_final_es_precio_de_venta() -> None:
+    assert _heuristic_match(_normalize_col("Precio de venta final"), "product") == "sale_price_ars"
+    assert _heuristic_match(_normalize_col("Precio de venta"), "product") == "sale_price_ars"
+
+
+def test_las_tres_columnas_de_asteria_no_colisionan() -> None:
+    """Las tres juntas, como venían en la hoja real: tres targets distintos."""
+    headers = ["Productos", "Precio de compra", "Precio de lista", "Precio de venta final"]
+    targets = [_heuristic_match(_normalize_col(h), "product") for h in headers]
+    assert targets == ["name", "unit_cost_ars", "list_price_ars", "sale_price_ars"]
+    assert len(set(targets)) == 4  # ninguno pisa a otro
+
+
+def test_precio_unitario_en_ventas_es_el_precio_vendido() -> None:
+    """El MISMO header significa otra cosa según la entidad: en un catálogo es el
+    costo de compra, en una hoja de ventas es lo que se cobró."""
+    assert _heuristic_match(_normalize_col("Precio unitario"), "sale") == "unit_price"
+    assert _heuristic_match(_normalize_col("Precio unitario"), "product") == "unit_cost_ars"
+
+
+def test_match_key_colapsa_preposiciones_sin_tocar_normalize_col() -> None:
+    """`_normalize_col` NO puede cambiar: es lo que se persiste en
+    `tenant_column_mappings.source_column`. Un alias ya aprendido por un tenant
+    sigue matcheando con la misma forma normalizada de siempre."""
+    assert _normalize_col("Precio de compra") == "precio_de_compra"
+    assert _match_key("precio_de_compra") == "precio_compra"
+    # Header que es solo stopwords: nunca clave vacía (matchearía cualquier cosa).
+    assert _match_key("de") == "de"
+
+
+def test_heuristicas_previas_no_regresionan() -> None:
+    """Los headers comunes siguen resolviendo igual que antes del cambio."""
+    assert _heuristic_match(_normalize_col("forma de pago"), "expense") == "payment_method"
+    assert _heuristic_match(_normalize_col("forma_pago"), "expense") == "payment_method"
+    assert _heuristic_match(_normalize_col("fecha"), "sale") == "transaction_date"
+    assert _heuristic_match(_normalize_col("monto"), "sale") == "amount"
+    assert _heuristic_match(_normalize_col("cantidad"), "sale") == "quantity"
+    assert _heuristic_match(_normalize_col("Stock"), "product") == "stock_units"
+    assert _heuristic_match(_normalize_col("Proveedor"), "expense") == "supplier_name"
+
+
+# ── Campos de valor único: la colisión no se puede desempatar sola ─────────────
+
+
+def test_single_value_fields_cubre_dinero_cantidad_y_fecha() -> None:
+    assert "amount" in SINGLE_VALUE_FIELDS["sale"]
+    assert "quantity" in SINGLE_VALUE_FIELDS["sale"]
+    assert "transaction_date" in SINGLE_VALUE_FIELDS["sale"]
+    assert "unit_price" in SINGLE_VALUE_FIELDS["sale"]
+    assert "expense_date" in SINGLE_VALUE_FIELDS["expense"]
+    assert SINGLE_VALUE_FIELDS["product"] == {
+        "sale_price_ars",
+        "list_price_ars",
+        "unit_cost_ars",
+        "stock_units",
+    }
+    # Campos donde varias columnas pueden ser legítimas: fuera del bloqueo.
+    assert "notes" not in SINGLE_VALUE_FIELDS["sale"]
+    assert "category" not in SINGLE_VALUE_FIELDS["expense"]
+
+
+def test_todo_campo_escalar_existe_en_el_catalogo_canonico() -> None:
+    """Un typo en SINGLE_VALUE_FIELDS bloquearía por un campo inexistente o, peor,
+    dejaría de bloquear el que sí importa."""
+    for entity, fields in SINGLE_VALUE_FIELDS.items():
+        for f in fields:
+            assert f in CANONICAL_FIELDS[entity], f"{entity}.{f} no está en CANONICAL_FIELDS"

@@ -35,6 +35,7 @@ from app.application.services import ingestion_import_service as _iis
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
     REQUIRED_FIELDS,
+    SINGLE_VALUE_FIELDS,
     ColumnMappingService,
     validate_required_date_mapping,
 )
@@ -121,6 +122,8 @@ from app.schemas.ingestion import (
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     ContextualColumnRisk,
+    EntityFieldCatalog,
+    FieldCatalogEntry,
     FileDeletionPreviewResponse,
     FilePreviewResponse,
     FileStatusItem,
@@ -863,6 +866,47 @@ async def reprocess_file(
 
 
 @router.get(
+    "/field-catalog",
+    response_model=dict[str, EntityFieldCatalog],
+    summary="Campos canónicos, requeridos y escalares por entidad",
+)
+async def get_field_catalog(
+    tenant: Tenant = Depends(get_current_tenant),
+) -> dict[str, EntityFieldCatalog]:
+    """Fuente ÚNICA de qué campos existen, cuáles son obligatorios y cuáles
+    admiten una sola columna.
+
+    Existe porque el frontend mantenía una copia manual de ``CANONICAL_FIELDS``
+    ("mantener en sync") y divergió: a ``expense`` le faltaban ``payment_method``
+    e ``is_recurring``. Como el ``<select>`` del panel solo renderiza opciones de
+    esa copia, cuando el backend sugería ``payment_method`` ninguna ``<option>``
+    matcheaba, el DOM caía a la primera y la pantalla mostraba "Sin mapear"
+    mientras el estado enviaba ``payment_method``. La UI mostraba una cosa y
+    mandaba otra.
+
+    Derivado en vivo de las mismas estructuras que usan la validación del confirm
+    y el importador — no hay una segunda lista que pueda quedar desfasada.
+
+    Estático por deploy (no depende del tenant ni del archivo); el auth se pide
+    igual porque el catálogo describe la forma de los datos de negocio.
+    """
+    return {
+        entity: EntityFieldCatalog(
+            required=list(REQUIRED_FIELDS.get(entity, [])),
+            fields=[
+                FieldCatalogEntry(
+                    value=value,
+                    label=label,
+                    single_value=value in SINGLE_VALUE_FIELDS.get(entity, frozenset()),
+                )
+                for value, label in fields.items()
+            ],
+        )
+        for entity, fields in CANONICAL_FIELDS.items()
+    }
+
+
+@router.get(
     "/files/{file_id}/column-mappings",
     response_model=list[ColumnMappingSuggestion],
     summary="Get column mapping suggestions for a file",
@@ -1114,6 +1158,55 @@ async def confirm_file(
         }
         return set(REQUIRED_FIELDS.get(entity_type, [])) - mapped
 
+    # Columnas que las decisiones de riesgo (F8) van a ELIMINAR del mapeo
+    # efectivo. La colisión se evalúa sobre lo que va a quedar, no sobre lo que
+    # se mandó: dos columnas al mismo target donde una se dropea NO es una
+    # colisión (caso legítimo `fecha` + `fecha_alt`). Misma convención de clave
+    # que `_dropped_pairs`, que se computa más abajo dentro del import.
+    _dropped_by_risk: set[tuple[str, str]] = {
+        (d.context_id, d.source_column)
+        for d in (body.column_risk_decisions or [])
+        if d.action == "drop_column"
+    }
+
+    def _colliding_scalars(
+        entity_type: str, mappings: list[ColumnMapping]
+    ) -> dict[str, list[str]]:
+        """Campos de valor único con MÁS DE UNA columna apuntándoles.
+
+        Sin este chequeo, ``_resolve_target_cols`` del importador se quedaba con
+        la primera columna del orden del archivo y descartaba el resto en
+        silencio: el valor que terminaba guardado dependía de cómo estaban
+        ordenadas las columnas del Excel. Elegir un dato de negocio por un
+        detalle de implementación es inventarlo (incidente ASTERIA: "Precio de
+        compra", "Precio de lista" y "Precio de venta final" caían las tres en
+        ``sale_price_ars``).
+
+        Solo aplica a los campos donde una colisión corrompe plata
+        (``SINGLE_VALUE_FIELDS``); los demás admiten varias columnas.
+        """
+        scalars = SINGLE_VALUE_FIELDS.get(entity_type, frozenset())
+        by_target: dict[str, list[str]] = defaultdict(list)
+        for m in mappings:
+            if m.target_field not in scalars:
+                continue
+            if (m.context_id or "table", m.source_column) in _dropped_by_risk:
+                continue  # el usuario ya decidió sacarla: no compite por el campo
+            by_target[m.target_field].append(m.source_column)
+        return {t: cols for t, cols in by_target.items() if len(cols) > 1}
+
+    def _collision_detail(entity_type: str, colisiones: dict[str, list[str]]) -> str:
+        etiquetas = CANONICAL_FIELDS.get(entity_type, {})
+        partes = [
+            f"«{etiquetas.get(target, target)}» ← {', '.join(cols)}"
+            for target, cols in sorted(colisiones.items())
+        ]
+        return (
+            "Hay más de una columna apuntando al mismo campo, y solo se puede "
+            f"guardar una: {'; '.join(partes)}. Elegí cuál corresponde y mandá "
+            "las demás a otro campo o a «Ignorar»."
+        )
+
     # ── Ninguna hoja se importa sin que alguien haya dicho QUÉ es ───────────────
     # El parser deja `entity_type: null` cuando no pudo clasificar una hoja.
     #
@@ -1172,6 +1265,11 @@ async def confirm_file(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"Campos requeridos sin mapear: {', '.join(sorted(missing))}",
                 )
+            if _colisiones := _colliding_scalars(_entity_type, _flat_mappings):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=_collision_detail(_entity_type, _colisiones),
+                )
 
     # Validación de requeridos — por contexto (multi-hoja), solo contextos incluidos
     if _ctx_mappings:
@@ -1189,6 +1287,11 @@ async def confirm_file(
                             f"[{_cid}] Campos requeridos sin mapear: "
                             f"{', '.join(sorted(missing))}"
                         ),
+                    )
+                if _colisiones := _colliding_scalars(_ent, _ms):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"[{_cid}] {_collision_detail(_ent, _colisiones)}",
                     )
 
     # ── F6-A1: bloqueo por fecha faltante, ANTES del lease ──────────────────────

@@ -54,6 +54,13 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Precio REALMENTE vendido en esta transacción (NULL = no informado). No es
+    # `Product.sale_price_ars`, que es el precio vigente configurado: el precio
+    # histórico cambia por descuento, fecha, canal o cliente y por eso vive en la
+    # transacción. NUNCA se deriva de `amount / quantity` — en las filas
+    # históricas no se sabe si el amount es unitario o total, y esa división daría
+    # un número plausible pero inventado.
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="cash")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)

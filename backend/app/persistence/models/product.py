@@ -55,7 +55,14 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     brand_normalized: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Vencimiento informativo (se USA recién en F6; acá solo la columna).
     expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Los tres precios de un producto son conceptos DISTINTOS y coexisten:
+    # `sale_price_ars` = precio de venta vigente que configuró el negocio (el único
+    # que entra al margen); `list_price_ars` = sugerido por proveedor/lista
+    # (informativo); `unit_cost_ars` = costo unitario vigente o de referencia.
+    # El precio realmente vendido NO vive acá — va en `SaleEntry.unit_price`,
+    # porque cambia por descuento, fecha, canal o cliente.
     sale_price_ars: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    list_price_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     unit_cost_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     stock_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
