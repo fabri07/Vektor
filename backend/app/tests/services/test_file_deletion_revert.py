@@ -416,3 +416,125 @@ class TestPreviewDeBorrado:
 
         assert resumen["productos_no_rastreables"] is False
         assert resumen["productos"] == 1
+
+
+class TestRestauraLoQueElArchivoModifico:
+    """El ledger guarda el `before` de cada `UPDATE_PRODUCT` desde siempre, y el
+    borrado no lo leía: un archivo que pisaba el precio de un producto del
+    usuario lo dejaba pisado para siempre."""
+
+    async def test_devuelve_el_precio_anterior_al_borrar_el_archivo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Vela aromática")
+
+        # El archivo pisó precio y costo del producto que YA existía.
+        producto.sale_price_ars = Decimal("999")
+        producto.unit_cost_ars = Decimal("500")
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"sale_price_ars": "100", "unit_cost_ars": "60"},
+                    "after": {
+                        "sale_price_ars": "999",
+                        "unit_cost_ars": "500",
+                        "updated_at": producto.updated_at.isoformat(),
+                    },
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(producto)
+        assert producto.sale_price_ars == Decimal("100")
+        assert producto.unit_cost_ars == Decimal("60")
+        assert contadores["productos_restaurados"] == 1
+        # Modificar no es crear: el producto sigue vivo.
+        assert producto.is_active is True
+
+    async def test_no_pisa_una_edicion_posterior_del_usuario(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Si alguien tocó el producto DESPUÉS del import, su valor gana."""
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Sahumerio")
+
+        producto.sale_price_ars = Decimal("999")
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"sale_price_ars": "100"},
+                    # `updated_at` capturado ANTES de la edición de abajo: el
+                    # guard lo va a ver distinto del actual.
+                    "after": {
+                        "sale_price_ars": "999",
+                        "updated_at": "2020-01-01T00:00:00+00:00",
+                    },
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(producto)
+        # Se conserva lo que había, NO se restaura el `before`.
+        assert producto.sale_price_ars == Decimal("999")
+        assert contadores["productos_restaurados"] == 0
+        assert contadores["productos_conservados"] == 1
+
+    async def test_el_stock_nunca_se_restaura_por_snapshot(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """`stock_units` no es Σ(movimientos): tiene base de alta manual/chat/
+        catálogo. Asignarlo desde el snapshot destruiría esa base — su reversa es
+        exclusivamente el mecanismo incremental de movimientos."""
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Portarretrato", stock=7)
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"stock_units": 999, "sale_price_ars": "100"},
+                    "after": {
+                        "stock_units": 7,
+                        "updated_at": producto.updated_at.isoformat(),
+                    },
+                }
+            ],
+        )
+
+        await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(producto)
+        assert producto.stock_units == 7  # NO 999

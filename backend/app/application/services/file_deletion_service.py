@@ -43,6 +43,10 @@ from typing import Any
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services._ledger_restore import (
+    entity_changed_since_ledger,
+    restore_from_before,
+)
 from app.application.services.stock_service import void_movement
 from app.domain.ingestion_version import INGESTION_VERSION_WITH_LEDGER
 from app.observability.logger import get_logger
@@ -162,6 +166,37 @@ async def _product_ids_created_by_file(
         )
     )
     return {pid for pid in res.scalars().all() if pid is not None}
+
+
+async def _product_items_updated_by_file(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> list[DataRepairItem]:
+    """Items ``UPDATE_PRODUCT`` de este archivo, en orden cronológico.
+
+    Son los productos que YA existían y el archivo modificó. El ledger guardó su
+    ``before_json``, y hasta acá nadie lo leía: el borrado desactivaba lo creado y
+    dejaba lo modificado pisado para siempre. Si un archivo cambió el precio de un
+    producto del usuario, borrarlo tiene que devolver ese precio.
+
+    Orden por ``created_at`` porque un mismo producto puede tener VARIOS items del
+    mismo archivo (dos filas de la planilla que lo tocan). Para restaurar hay que
+    usar el ``before`` del PRIMERO —el estado anterior a que este archivo lo
+    tocara por primera vez—, no el del último, que ya refleja un cambio del propio
+    archivo.
+    """
+    res = await session.execute(
+        select(DataRepairItem)
+        .join(DataRepairRun, DataRepairRun.id == DataRepairItem.run_id)
+        .where(
+            DataRepairRun.repair_type.in_(_LEDGER_REPAIR_TYPES),
+            DataRepairItem.tenant_id == tenant_id,
+            DataRepairItem.source_file_id == file_id,
+            DataRepairItem.action == ACTION_UPDATE_PRODUCT,
+            DataRepairItem.product_id.is_not(None),
+        )
+        .order_by(DataRepairItem.created_at)
+    )
+    return list(res.scalars().all())
 
 
 async def _products_with_live_external_sales(
@@ -325,7 +360,17 @@ async def revert_file_data(
     la acepta explícitamente en la advertencia previa.
     """
     ahora = datetime.now(UTC)
-    contadores = {"ventas": 0, "gastos": 0, "productos": 0, "movimientos_stock": 0, "otros": 0}
+    contadores = {
+        "ventas": 0,
+        "gastos": 0,
+        "productos": 0,
+        "movimientos_stock": 0,
+        "otros": 0,
+        # Productos que el archivo MODIFICÓ: se les devolvió su valor anterior, o
+        # se conservaron porque alguien los editó después del import.
+        "productos_restaurados": 0,
+        "productos_conservados": 0,
+    }
 
     # 1. Ventas y gastos → soft delete auditado (el dashboard ya filtra por
     #    `voided_at IS NULL`, así que desaparecen de la interfaz).
@@ -384,6 +429,39 @@ async def revert_file_data(
         for producto in productos_res.scalars().all():
             producto.is_active = False
             contadores["productos"] += 1
+
+    # 3-bis. Productos que el archivo MODIFICÓ (no creó) → restaurar su `before`.
+    #    El ledger lo venía guardando y nadie lo leía: un archivo que pisaba el
+    #    precio de un producto del usuario lo dejaba pisado para siempre.
+    #
+    #    Se restaura el `before` del PRIMER item de cada producto (el estado
+    #    anterior a que este archivo lo tocara), no el del último — el último ya
+    #    refleja un cambio del propio archivo.
+    #
+    #    Guard: si alguien editó el producto DESPUÉS del import, no se pisa esa
+    #    edición. Se informa y se sigue (la Fase 6 lo afinará a nivel de campo).
+    _items_update = await _product_items_updated_by_file(session, file_id, tenant_id)
+    _primer_item: dict[uuid.UUID, DataRepairItem] = {}
+    _ultimo_item: dict[uuid.UUID, DataRepairItem] = {}
+    for _it in _items_update:
+        if _it.product_id is None:
+            continue
+        _primer_item.setdefault(_it.product_id, _it)
+        _ultimo_item[_it.product_id] = _it
+    for _pid, _item in _primer_item.items():
+        _prod = await session.get(Product, _pid)
+        if _prod is None or _prod.tenant_id != tenant_id:
+            continue
+        # `updated_at` tiene `onupdate` server-side y puede estar expirado tras
+        # los flushes de los pasos anteriores de esta misma transacción.
+        await session.refresh(_prod)
+        # Se compara contra el `after` del ÚLTIMO item: es el estado en que este
+        # archivo dejó el producto.
+        if entity_changed_since_ledger(_prod, _ultimo_item[_pid].after_json):
+            contadores["productos_conservados"] += 1
+            continue
+        if restore_from_before(_prod, "product", _item.before_json or {}):
+            contadores["productos_restaurados"] += 1
 
     # 4. Filas que quedaron en "Otros" esperando clasificación manual: se borran
     #    (nunca fueron dato de negocio, son staging del archivo).

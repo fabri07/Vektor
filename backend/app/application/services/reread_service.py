@@ -66,7 +66,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -75,6 +75,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import ingestion_import_service as _iis
 from app.application.services import maintenance_lock_service
+from app.application.services._ledger_restore import (
+    MASTER_SNAPSHOT_FIELDS,
+    entity_changed_since_ledger,
+    restore_from_before,
+)
 from app.application.services.column_risk import (
     AppliedColumnRisk,
     apply_column_risk_decisions,
@@ -280,14 +285,9 @@ def _snapshot_expense(e: ExpenseEntry) -> dict[str, Any]:
     }
 
 
-_MASTER_SNAPSHOT_FIELDS = {
-    "customer": (
-        "customer_type", "name", "last_name", "doc_type", "dni", "cuit",
-        "iva_condition", "email", "phone", "address", "locality", "province",
-        "postal_code", "birthday", "notes", "credit_limit",
-    ),
-    "supplier": ("name", "last_name", "cuil", "payment_method", "email", "phone", "notes"),
-}
+# Definidos en `_ledger_restore`: los comparte el borrado de archivo, que revierte
+# con las MISMAS reglas. Alias local para no tocar los usos de este módulo.
+_MASTER_SNAPSHOT_FIELDS = MASTER_SNAPSHOT_FIELDS
 
 
 def _snapshot_master(entity: Any, kind: Literal["customer", "supplier"]) -> dict[str, Any]:
@@ -1838,27 +1838,6 @@ async def get_reread_run(
     return run
 
 
-def _coerce_master_restore_value(field: str, value: Any) -> Any:
-    """Deserializa un valor JSON-safe capturado por ``_snapshot_master``/
-    ``product_details`` de vuelta al tipo Python que el modelo espera.
-
-    Los nombres de campo no colisionan entre kinds con tipos distintos:
-    ``birthday`` (Customer) y ``expiry_date`` (Product) son ``Date``;
-    ``acquired_at`` (Product) es ``DateTime`` — con hora, ``date.fromisoformat``
-    no lo parsea; ``credit_limit``, ``sale_price_ars`` y ``unit_cost_ars``
-    (Product) son ``Decimal``. El resto de los campos (strings) se devuelve tal
-    cual."""
-    if value is None:
-        return None
-    if field in ("birthday", "expiry_date"):
-        return date.fromisoformat(value)
-    if field == "acquired_at":
-        return datetime.fromisoformat(value)
-    if field in ("credit_limit", "sale_price_ars", "list_price_ars", "unit_cost_ars"):
-        return Decimal(value)
-    return value
-
-
 async def _undo_master_and_product_items(
     session: AsyncSession, tenant_id: uuid.UUID, items: list[DataRepairItem]
 ) -> list[dict[str, str]]:
@@ -1910,25 +1889,8 @@ async def _undo_master_and_product_items(
         "supplier": Supplier,
         "product": Product,
     }
-    _restore_fields: dict[str, tuple[str, ...]] = {
-        "customer": _MASTER_SNAPSHOT_FIELDS["customer"],
-        "supplier": _MASTER_SNAPSHOT_FIELDS["supplier"],
-        # Nunca stock_units (ver docstring) — unit_cost_ars SÍ se restaura acá
-        # (revisión final F9b, Hallazgo 1): el mecanismo de movimientos no lo cubre.
-        "product": (
-            "sale_price_ars",
-            # Mismo caso que unit_cost_ars: el mecanismo incremental de
-            # movimientos no lo toca, así que si no se restaura acá el undo lo
-            # deja permanentemente en lo que dijo el archivo releído.
-            "list_price_ars",
-            "unit_cost_ars",
-            "sku",
-            "barcode",
-            "category",
-            "acquired_at",
-            "expiry_date",
-        ),
-    }
+    # Allowlist compartida con el borrado de archivo (`_ledger_restore`): nunca
+    # stock_units, sí los tres precios — ver el docstring de ese módulo.
 
     # Maestros: Task 5 ya dedupea (a lo sumo 1 item por entidad por run).
     to_process: list[tuple[str, uuid.UUID, bool, DataRepairItem]] = []
@@ -1966,9 +1928,7 @@ async def _undo_master_and_product_items(
         # MissingGreenlet que Task 5/6, ver ``_reread_master_entities._audit`` /
         # ``_stamp_updated_at_on_product_details``). Refrescar antes de leerlo.
         await session.refresh(entity)
-        captured_updated_at = (it.after_json or {}).get("updated_at")
-        current_updated_at = entity.updated_at.isoformat() if entity.updated_at else None
-        if captured_updated_at != current_updated_at:
+        if entity_changed_since_ledger(entity, it.after_json):
             not_reverted.append(
                 {"kind": kind, "id": str(entity_id), "reason": "edited_after_reread"}
             )
@@ -1980,11 +1940,7 @@ async def _undo_master_and_product_items(
                 entity.is_active = False
                 entity.deactivation_reason = "REREAD_UNDO"
         else:
-            before = it.before_json or {}
-            for f in _restore_fields[kind]:
-                if f not in before:
-                    continue
-                setattr(entity, f, _coerce_master_restore_value(f, before[f]))
+            restore_from_before(entity, kind, it.before_json or {})
 
     return not_reverted
 
