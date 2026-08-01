@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services._ledger_restore import snapshot_master
 from app.application.services.file_deletion_service import (
     preview_file_deletion,
     record_import_ledger,
@@ -665,3 +666,307 @@ class TestPreviewYReversaComparten:
         assert [c["name"] for c in resultado["conservados"]] == ["Cuadro grande"]
         await db_session.refresh(creado)
         assert creado.is_active is True  # sobrevive: tiene ventas del usuario
+
+
+async def _cliente(session: AsyncSession, tenant: Tenant, nombre: str) -> Any:
+    from app.persistence.models.customer import Customer
+
+    c = Customer(tenant_id=tenant.tenant_id, name=nombre)
+    session.add(c)
+    await session.flush()
+    return c
+
+
+class TestReversaDeMaestros:
+    """Clientes y proveedores que trajo el archivo.
+
+    Antes no se revertían: un archivo que creaba 50 clientes los dejaba vivos y
+    sin manera de saber de dónde salieron.
+    """
+
+    async def test_desactiva_el_cliente_que_creo_el_archivo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Carla Gómez")
+        await db_session.refresh(cliente)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            master_details=[
+                {
+                    "action": "CREATE_CUSTOMER",
+                    "kind": "customer",
+                    "id": str(cliente.id),
+                    "name": cliente.name,
+                    "before": None,
+                    "after": snapshot_master(cliente, "customer"),
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(cliente)
+        assert cliente.deactivated_at is not None
+        assert contadores["maestros_desactivados"] == 1
+
+    async def test_un_cliente_con_ventas_vivas_se_conserva_y_se_informa(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Desactivarlo dejaría esas ventas apuntando a una ficha inactiva."""
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Cliente con historia")
+        await db_session.refresh(cliente)
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                customer_id=cliente.id,
+                amount=Decimal("300"),
+                quantity=1,
+                transaction_date=datetime.now(UTC),
+                payment_method="cash",
+                provenance="REAL",
+            )
+        )
+        await db_session.flush()
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            master_details=[
+                {
+                    "action": "CREATE_CUSTOMER",
+                    "kind": "customer",
+                    "id": str(cliente.id),
+                    "name": cliente.name,
+                    "before": None,
+                    "after": snapshot_master(cliente, "customer"),
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(cliente)
+        assert cliente.deactivated_at is None
+        assert contadores["maestros_desactivados"] == 0
+        assert contadores["conservados"][0]["name"] == "Cliente con historia"
+        assert contadores["conservados"][0]["reasons"] == ["venta_manual_posterior"]
+
+    async def test_restaura_el_cliente_que_el_archivo_modifico(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Nombre viejo")
+        await db_session.refresh(cliente)
+        antes = snapshot_master(cliente, "customer")
+
+        cliente.name = "Nombre que puso el archivo"
+        await db_session.flush()
+        await db_session.refresh(cliente)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            master_details=[
+                {
+                    "action": "UPDATE_CUSTOMER",
+                    "kind": "customer",
+                    "id": str(cliente.id),
+                    "name": cliente.name,
+                    "before": antes,
+                    "after": snapshot_master(cliente, "customer"),
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(cliente)
+        assert cliente.name == "Nombre viejo"
+        assert cliente.deactivated_at is None  # modificar no es crear
+        assert contadores["maestros_restaurados"] == 1
+
+    async def test_el_centinela_nunca_se_desactiva(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Desactivar "Local" dejaría todas las ventas sin cliente al que apuntar."""
+        from app.persistence.models._sentinel import SENTINEL_FLAG_KEY
+
+        archivo = await _archivo(db_session, sample_tenant)
+        centinela = await _cliente(db_session, sample_tenant, "Local")
+        centinela.custom_fields = {SENTINEL_FLAG_KEY: "true"}
+        await db_session.flush()
+        await db_session.refresh(centinela)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            master_details=[
+                {
+                    "action": "CREATE_CUSTOMER",
+                    "kind": "customer",
+                    "id": str(centinela.id),
+                    "name": centinela.name,
+                    "before": None,
+                    "after": snapshot_master(centinela, "customer"),
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(centinela)
+        assert centinela.deactivated_at is None
+        assert contadores["maestros_desactivados"] == 0
+
+
+class TestOtraFuenteDemostrable:
+    """"Otra fuente" exige evidencia real, nunca coincidencia de nombre.
+
+    Antes esto sólo miraba ventas vivas: un producto con compras posteriores, con
+    movimientos de otro origen, o traído también por otro archivo, se desactivaba
+    igual y su motivo real nunca se informaba.
+    """
+
+    async def test_una_compra_posterior_lo_conserva_con_su_motivo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo = await _archivo(db_session, sample_tenant)
+        creado = await _producto(db_session, sample_tenant, "Difusor")
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[_detalle_producto(creado, "CREATED")],
+        )
+        db_session.add(
+            ExpenseEntry(
+                tenant_id=sample_tenant.tenant_id,
+                product_id=creado.id,
+                amount=Decimal("200"),
+                category="INVENTORY",
+                description="Reposición",
+                transaction_date=datetime.now(UTC),
+                provenance="REAL",
+            )
+        )
+        await db_session.flush()
+
+        resultado = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(creado)
+        assert creado.is_active is True
+        assert resultado["conservados"][0]["reasons"] == ["compra_posterior"]
+        # Sobrevive, pero su archivo ya no respalda los valores: hay que completar.
+        assert creado.requires_completion is True
+
+    async def test_el_propio_archivo_no_es_evidencia_de_si_mismo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Regresión: el criterio "otro archivo activo" contaba al archivo que se
+        está borrando, así que no desactivaba ninguno de sus productos."""
+        archivo = await _archivo(db_session, sample_tenant)
+        creado = await _producto(db_session, sample_tenant, "Solo de este archivo")
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[_detalle_producto(creado, "CREATED")],
+        )
+
+        resultado = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(creado)
+        assert creado.is_active is False
+        assert resultado["conservados"] == []
+
+    async def test_otro_archivo_vivo_que_tambien_lo_creo_lo_conserva(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo_a = await _archivo(db_session, sample_tenant)
+        archivo_b = await _archivo(db_session, sample_tenant)
+        compartido = await _producto(db_session, sample_tenant, "En los dos archivos")
+
+        for arch in (archivo_a, archivo_b):
+            await record_import_ledger(
+                db_session,
+                tenant_id=sample_tenant.tenant_id,
+                file_id=arch.id,
+                product_details=[_detalle_producto(compartido, "CREATED")],
+            )
+
+        resultado = await revert_file_data(
+            db_session, archivo_a.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(compartido)
+        assert compartido.is_active is True
+        assert resultado["conservados"][0]["reasons"] == ["otro_archivo_activo"]
+
+
+class TestPreviewAnticipaMaestros:
+    async def test_el_preview_no_muta_pero_anticipa_los_maestros(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El preview corre la MISMA función que la reversa, en modo lectura.
+
+        Una implementación aparte para "anticipar" habría divergido de la que
+        decide, y el preview terminaría prometiendo algo distinto de lo que pasa.
+        """
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Traído por el archivo")
+        await db_session.refresh(cliente)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            master_details=[
+                {
+                    "action": "CREATE_CUSTOMER",
+                    "kind": "customer",
+                    "id": str(cliente.id),
+                    "name": cliente.name,
+                    "before": None,
+                    "after": snapshot_master(cliente, "customer"),
+                }
+            ],
+        )
+
+        await preview_file_deletion(db_session, archivo.id, sample_tenant.tenant_id)
+        await db_session.refresh(cliente)
+        # READ-ONLY: mirar el preview no puede desactivar a nadie.
+        assert cliente.deactivated_at is None
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+        await db_session.refresh(cliente)
+        assert cliente.deactivated_at is not None
+        assert contadores["maestros_desactivados"] == 1

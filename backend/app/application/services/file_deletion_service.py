@@ -37,6 +37,7 @@ movimientos (alta manual, chat, seed, catálogo con stock absoluto).
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -46,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services._ledger_restore import (
     entity_changed_since_ledger,
     restore_from_before,
+    snapshot_master,
 )
 from app.application.services.stock_service import void_movement
 from app.domain.file_deletion_reasons import PreservationReason
@@ -83,6 +85,124 @@ VOID_REASON_FILE_DELETED = "USER_CANCELLED"
 ACTION_CREATE_PRODUCT = "CREATE_PRODUCT"
 ACTION_UPDATE_PRODUCT = "UPDATE_PRODUCT"
 
+# Maestros creados/modificados por un import. Nombres paralelos a los de producto
+# a propósito: `REREAD_MASTER_CREATE`/`UPDATE` son de la RELECTURA y siguen
+# existiendo (tienen datos vivos), pero mezclar las dos convenciones en el mismo
+# CHECK haría que revisar el ledger sea adivinar cuál mira cada consulta.
+ACTION_CREATE_CUSTOMER = "CREATE_CUSTOMER"
+ACTION_UPDATE_CUSTOMER = "UPDATE_CUSTOMER"
+ACTION_CREATE_SUPPLIER = "CREATE_SUPPLIER"
+ACTION_UPDATE_SUPPLIER = "UPDATE_SUPPLIER"
+
+_MASTER_ACTIONS: dict[tuple[str, bool], str] = {
+    ("customer", True): ACTION_CREATE_CUSTOMER,
+    ("customer", False): ACTION_UPDATE_CUSTOMER,
+    ("supplier", True): ACTION_CREATE_SUPPLIER,
+    ("supplier", False): ACTION_UPDATE_SUPPLIER,
+}
+_CREATE_MASTER_ACTIONS = (ACTION_CREATE_CUSTOMER, ACTION_CREATE_SUPPLIER)
+_UPDATE_MASTER_ACTIONS = (ACTION_UPDATE_CUSTOMER, ACTION_UPDATE_SUPPLIER)
+
+
+async def snapshot_masters_before_import(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[dict[uuid.UUID, dict[str, Any]], dict[uuid.UUID, dict[str, Any]]]:
+    """Estado de los maestros ANTES de importar. Solo llamar si el archivo trae.
+
+    No se sabe a cuáles va a tocar el motor de identidad hasta que corre, así que
+    hay que fotografiar todo. Es el mismo enfoque que ya usa la relectura.
+
+    El caller decide cuándo pagarlo: un import que no trae clientes ni proveedores
+    NO debe llamar a esto — serían dos SELECT completos por confirm, para nada.
+    """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    clientes = (
+        await session.execute(select(Customer).where(Customer.tenant_id == tenant_id))
+    ).scalars().all()
+    proveedores = (
+        await session.execute(select(Supplier).where(Supplier.tenant_id == tenant_id))
+    ).scalars().all()
+    return (
+        {c.id: snapshot_master(c, "customer") for c in clientes if not c.is_sentinel},
+        {s.id: snapshot_master(s, "supplier") for s in proveedores if not s.is_sentinel},
+    )
+
+
+async def build_master_details(
+    session: AsyncSession,
+    counts: dict[str, Any],
+    before_customers: dict[uuid.UUID, dict[str, Any]],
+    before_suppliers: dict[uuid.UUID, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Arma los items de maestros para el ledger, desde los ids del import.
+
+    ``insert_confirmed_data`` ya devuelve ``clientes_creados_ids`` y compañía; acá
+    solo se les adjunta el ``before`` (None si la entidad no existía) y el
+    ``after`` de cómo quedó.
+
+    Dedup igual que en la relectura: si dos filas del MISMO archivo matchean la
+    misma identidad, el id cae en creados Y en actualizados. El "antes" real de
+    esa entidad relativo a TODO este import es "no existía", así que se audita una
+    sola vez como CREATE — un UPDATE con ``before=None`` estaría mal etiquetado.
+
+    **Los centinelas ("Local" / "No identificado") nunca entran**: son
+    infraestructura del tenant, no algo que el archivo haya traído, y desactivar
+    el centinela dejaría ventas sin cliente al que apuntar.
+    """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    detalles: list[dict[str, Any]] = []
+
+    async def _agregar(
+        ids: list[str],
+        kind: str,
+        model: type[Any],
+        before_map: dict[uuid.UUID, Any],
+        *,
+        creado: bool,
+    ) -> None:
+        if not ids:
+            return
+        entity_ids = [uuid.UUID(str(i)) for i in ids]
+        # UNA query, no un `session.get` + `refresh` por entidad: esto corre en el
+        # camino caliente del confirm, y un archivo con 500 clientes serían ~1000
+        # round-trips colgados de la request. El SELECT fresco además ya trae el
+        # `updated_at` que el flush del import acaba de escribir (es server-side,
+        # y leerlo de un objeto expirado dispararía un lazy-load síncrono que
+        # revienta bajo AsyncSession con MissingGreenlet).
+        res = await session.execute(select(model).where(model.id.in_(entity_ids)))
+        for entity in res.scalars().all():
+            if getattr(entity, "is_sentinel", False):
+                continue
+            detalles.append(
+                {
+                    "action": _MASTER_ACTIONS[(kind, creado)],
+                    "kind": kind,
+                    "id": str(entity.id),
+                    "name": getattr(entity, "name", "") or "",
+                    "before": None if creado else before_map.get(entity.id),
+                    "after": snapshot_master(entity, kind),
+                }
+            )
+
+    _creados_c = {str(i) for i in counts.get("clientes_creados_ids", [])}
+    _creados_s = {str(i) for i in counts.get("proveedores_creados_ids", [])}
+    _actualizados_c = [
+        i for i in map(str, counts.get("clientes_actualizados_ids", [])) if i not in _creados_c
+    ]
+    _actualizados_s = [
+        i for i in map(str, counts.get("proveedores_actualizados_ids", [])) if i not in _creados_s
+    ]
+
+    await _agregar(sorted(_creados_c), "customer", Customer, before_customers, creado=True)
+    await _agregar(_actualizados_c, "customer", Customer, before_customers, creado=False)
+    await _agregar(sorted(_creados_s), "supplier", Supplier, before_suppliers, creado=True)
+    await _agregar(_actualizados_s, "supplier", Supplier, before_suppliers, creado=False)
+    return detalles
+
 
 async def record_import_ledger(
     session: AsyncSession,
@@ -90,18 +210,21 @@ async def record_import_ledger(
     tenant_id: uuid.UUID,
     file_id: uuid.UUID,
     product_details: list[dict[str, Any]],
+    master_details: list[dict[str, Any]] | None = None,
 ) -> uuid.UUID | None:
-    """Registra qué productos creó/actualizó un import, para poder revertirlo.
+    """Registra qué creó/actualizó un import, para poder revertirlo.
 
     Se llama DENTRO del savepoint del confirm: si el import se revierte, el
     ledger se va con él (no puede quedar un ledger de un import que no ocurrió).
 
-    Devuelve el ``run_id``, o ``None`` si el import no tocó ningún producto (no
-    tiene sentido un run vacío). ``product_details`` es lo que ya devuelve
-    ``insert_confirmed_data(..., return_details=True)``: mismo formato que
-    consume la relectura.
+    Devuelve el ``run_id``, o ``None`` si el import no tocó nada (no tiene sentido
+    un run vacío). ``product_details`` es lo que ya devuelve
+    ``insert_confirmed_data(..., return_details=True)``; ``master_details`` lo
+    arma ``build_master_details`` desde los ids de clientes/proveedores que ese
+    mismo import devuelve.
     """
-    if not product_details:
+    master_details = master_details or []
+    if not product_details and not master_details:
         return None
 
     run = DataRepairRun(
@@ -132,6 +255,22 @@ async def record_import_ledger(
                     if detalle.get("action") == "CREATED"
                     else ACTION_UPDATE_PRODUCT
                 ),
+                before_json=detalle.get("before"),
+                after_json=detalle.get("after"),
+                confidence="HIGH",
+            )
+        )
+
+    # Maestros: mismo run, misma transacción. `product_id` queda NULL — la
+    # identidad de la entidad viaja en el `after_json` (`id` + `kind`), que es de
+    # donde la lee la reversa.
+    for detalle in master_details:
+        session.add(
+            DataRepairItem(
+                run_id=run.id,
+                tenant_id=tenant_id,
+                source_file_id=file_id,
+                action=detalle["action"],
                 before_json=detalle.get("before"),
                 after_json=detalle.get("after"),
                 confidence="HIGH",
@@ -200,38 +339,265 @@ async def _product_items_updated_by_file(
     return list(res.scalars().all())
 
 
-async def _products_with_live_external_sales(
+async def _master_items_by_file(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> list[DataRepairItem]:
+    """Items de clientes/proveedores que este archivo creó o modificó."""
+    res = await session.execute(
+        select(DataRepairItem)
+        .join(DataRepairRun, DataRepairRun.id == DataRepairItem.run_id)
+        .where(
+            DataRepairRun.repair_type.in_(_LEDGER_REPAIR_TYPES),
+            DataRepairItem.tenant_id == tenant_id,
+            DataRepairItem.source_file_id == file_id,
+            DataRepairItem.action.in_(_CREATE_MASTER_ACTIONS + _UPDATE_MASTER_ACTIONS),
+        )
+        .order_by(DataRepairItem.created_at)
+    )
+    return list(res.scalars().all())
+
+
+async def _master_tiene_dependencias(
+    session: AsyncSession, entity_id: uuid.UUID, kind: str, tenant_id: uuid.UUID
+) -> PreservationReason | None:
+    """¿Este maestro tiene operaciones vivas que lo referencian?
+
+    Desactivar un cliente con ventas dejaría esas ventas apuntando a una ficha
+    inactiva. La entidad se conserva y se informa el motivo.
+    """
+    if kind == "customer":
+        res = await session.execute(
+            select(func.count())
+            .select_from(SaleEntry)
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.customer_id == entity_id,
+                SaleEntry.voided_at.is_(None),
+            )
+        )
+        if res.scalar_one():
+            return PreservationReason.VENTA_MANUAL_POSTERIOR
+        return None
+
+    res = await session.execute(
+        select(func.count())
+        .select_from(ExpenseEntry)
+        .where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.supplier_id == entity_id,
+            ExpenseEntry.voided_at.is_(None),
+        )
+    )
+    if res.scalar_one():
+        return PreservationReason.COMPRA_POSTERIOR
+    res = await session.execute(
+        select(func.count())
+        .select_from(InventoryMovement)
+        .where(
+            InventoryMovement.tenant_id == tenant_id,
+            InventoryMovement.supplier_id == entity_id,
+            InventoryMovement.voided_at.is_(None),
+        )
+    )
+    if res.scalar_one():
+        return PreservationReason.MOVIMIENTO_POSTERIOR
+    return None
+
+
+async def _revert_master_items(
+    session: AsyncSession,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    *,
+    dry_run: bool = False,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Revierte los maestros del archivo. (desactivados, restaurados, conservados).
+
+    Creados por el archivo → se desactivan, salvo que tengan operaciones vivas.
+    Modificados por el archivo → vuelven a su ``before``, salvo edición posterior.
+
+    ``dry_run=True`` recorre exactamente el mismo camino sin escribir: es lo que
+    usa el preview. Una función separada para "anticipar" habría divergido de la
+    que decide — el preview terminaría prometiendo algo distinto de lo que pasa.
+
+    Los centinelas nunca llegan acá (``build_master_details`` no los registra),
+    pero se filtran igual: una fila vieja del ledger no puede desactivar el
+    cliente "Local" y dejar sus ventas sin a quién apuntar.
+    """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    _modelo: dict[str, type[Any]] = {"customer": Customer, "supplier": Supplier}
+    items = await _master_items_by_file(session, file_id, tenant_id)
+
+    # Un mismo maestro puede tener varios items del archivo: para restaurar vale
+    # el `before` del PRIMERO; para el guard, el `after` del ÚLTIMO.
+    primero: dict[tuple[str, uuid.UUID], DataRepairItem] = {}
+    ultimo: dict[tuple[str, uuid.UUID], DataRepairItem] = {}
+    fue_creado: set[tuple[str, uuid.UUID]] = set()
+    for it in items:
+        after = it.after_json or {}
+        kind = str(after.get("kind") or "")
+        raw_id = after.get("id")
+        if kind not in _modelo or not raw_id:
+            continue
+        clave = (kind, uuid.UUID(str(raw_id)))
+        primero.setdefault(clave, it)
+        ultimo[clave] = it
+        if it.action in _CREATE_MASTER_ACTIONS:
+            fue_creado.add(clave)
+
+    desactivados = restaurados = 0
+    conservados: list[dict[str, Any]] = []
+    for (kind, entity_id), item in primero.items():
+        entity = await session.get(_modelo[kind], entity_id)
+        if entity is None or entity.tenant_id != tenant_id:
+            continue
+        if getattr(entity, "is_sentinel", False):
+            continue
+        await session.refresh(entity)
+        nombre = getattr(entity, "name", "") or ""
+
+        motivo = await _master_tiene_dependencias(session, entity_id, kind, tenant_id)
+        if motivo is not None:
+            conservados.append(
+                {
+                    "entity_type": kind,
+                    "id": str(entity_id),
+                    "name": nombre,
+                    "reasons": [motivo.value],
+                    "fields": [],
+                }
+            )
+            continue
+
+        if (kind, entity_id) in fue_creado:
+            # Lo creó el archivo y nadie lo usa: se desactiva (nunca hard delete —
+            # rompería el ON DELETE SET NULL de lo que llegue a referenciarlo).
+            if not dry_run:
+                entity.deactivated_at = datetime.now(UTC)
+            desactivados += 1
+            continue
+
+        if entity_changed_since_ledger(entity, ultimo[(kind, entity_id)].after_json):
+            conservados.append(
+                {
+                    "entity_type": kind,
+                    "id": str(entity_id),
+                    "name": nombre,
+                    "reasons": [PreservationReason.EDICION_MANUAL_POSTERIOR.value],
+                    "fields": [],
+                }
+            )
+            continue
+        if dry_run:
+            # Se cuenta lo que se restauraría, sin tocar la entidad.
+            if item.before_json:
+                restaurados += 1
+        elif restore_from_before(entity, kind, item.before_json or {}):
+            restaurados += 1
+
+    return desactivados, restaurados, conservados
+
+
+async def _productos_con_otra_fuente(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     product_ids: set[uuid.UUID],
     *,
-    excluir_archivo: uuid.UUID | None = None,
-) -> set[uuid.UUID]:
-    """Productos con ventas vivas de OTRA fuente: quedan protegidos del borrado.
+    file_id: uuid.UUID,
+    excluir_filas_del_archivo: bool = False,
+) -> dict[uuid.UUID, list[PreservationReason]]:
+    """Productos con evidencia DEMOSTRABLE de otra fuente viva, con su motivo.
 
-    Una venta viva sobre un producto lo vuelve un dato del usuario, no del
-    archivo.
+    "Demostrable" es literal: ledger, ``source_upload_id`` o una referencia real
+    en la base. NUNCA coincidencia de nombre — dos productos que se llaman igual
+    no son el mismo producto, y usar el nombre como evidencia haría que borrar un
+    archivo conserve cosas que sí debía revertir (o al revés).
 
-    ``excluir_archivo`` existe por el orden de los dos llamadores: la reversa lo
-    invoca DESPUÉS de anular las ventas del archivo (lo que quede vivo ya es
-    externo, no hace falta excluir nada), pero el preview corre ANTES — sin
-    excluirlas, las propias ventas del archivo protegerían a sus productos y el
-    preview informaría 0 cuando la reversa va a desactivar varios.
+    Antes esto solo miraba ventas vivas; un producto con compras posteriores, con
+    movimientos de stock de otro origen, o traído también por otro archivo activo,
+    se desactivaba igual.
+
+    ``excluir_filas_del_archivo`` es para el PREVIEW, que corre antes de anular las
+    filas del archivo: sin excluirlas, las propias ventas del archivo protegerían
+    a sus productos y el preview informaría 0 conservados donde la reversa
+    desactiva varios. La reversa no lo necesita (a esa altura lo suyo ya está
+    anulado y los filtros ``voided_at IS NULL`` lo dejan afuera solo).
+
+    ``file_id`` es SIEMPRE obligatorio y siempre se excluye del criterio "otro
+    archivo activo": el archivo que se está borrando no puede ser evidencia de sí
+    mismo. Sin eso se protegía a sus propios productos y no desactivaba ninguno —
+    el endpoint lo tapaba porque marca ``deleted_at`` antes de llamar, pero
+    depender de ese orden es exactamente el tipo de acoplamiento que rompe cuando
+    alguien invoca la reversa desde otro lado.
     """
     if not product_ids:
-        return set()
-    stmt = select(SaleEntry.product_id).where(
+        return {}
+    motivos: dict[uuid.UUID, list[PreservationReason]] = defaultdict(list)
+
+    async def _marcar(stmt: Any, motivo: PreservationReason) -> None:
+        res = await session.execute(stmt)
+        for pid in {p for p in res.scalars().all() if p is not None}:
+            if motivo not in motivos[pid]:
+                motivos[pid].append(motivo)
+
+    # 1. Ventas vivas de otro origen.
+    _ventas = select(SaleEntry.product_id).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.product_id.in_(product_ids),
         SaleEntry.voided_at.is_(None),
     )
-    if excluir_archivo is not None:
-        stmt = stmt.where(
+    if excluir_filas_del_archivo:
+        _ventas = _ventas.where(
             (SaleEntry.source_upload_id.is_(None))
-            | (SaleEntry.source_upload_id != excluir_archivo)
+            | (SaleEntry.source_upload_id != file_id)
         )
-    res = await session.execute(stmt)
-    return {pid for pid in res.scalars().all() if pid is not None}
+    await _marcar(_ventas, PreservationReason.VENTA_MANUAL_POSTERIOR)
+
+    # 2. Compras/gastos vivos que lo referencian.
+    _gastos = select(ExpenseEntry.product_id).where(
+        ExpenseEntry.tenant_id == tenant_id,
+        ExpenseEntry.product_id.in_(product_ids),
+        ExpenseEntry.voided_at.is_(None),
+    )
+    if excluir_filas_del_archivo:
+        _gastos = _gastos.where(
+            (ExpenseEntry.source_upload_id.is_(None))
+            | (ExpenseEntry.source_upload_id != file_id)
+        )
+    await _marcar(_gastos, PreservationReason.COMPRA_POSTERIOR)
+
+    # 3. Movimientos de stock de OTRO archivo o sin archivo (alta manual/chat).
+    _movs = select(InventoryMovement.product_id).where(
+        InventoryMovement.tenant_id == tenant_id,
+        InventoryMovement.product_id.in_(product_ids),
+        InventoryMovement.voided_at.is_(None),
+    )
+    if excluir_filas_del_archivo:
+        _movs = _movs.where(
+            (InventoryMovement.source_upload_id.is_(None))
+            | (InventoryMovement.source_upload_id != file_id)
+        )
+    await _marcar(_movs, PreservationReason.MOVIMIENTO_POSTERIOR)
+
+    # 4. Otro archivo VIVO que el ledger dice que también lo creó/tocó.
+    _otro_archivo = (
+        select(DataRepairItem.product_id)
+        .join(DataRepairRun, DataRepairRun.id == DataRepairItem.run_id)
+        .join(UploadedFile, UploadedFile.id == DataRepairItem.source_file_id)
+        .where(
+            DataRepairRun.repair_type.in_(_LEDGER_REPAIR_TYPES),
+            DataRepairItem.tenant_id == tenant_id,
+            DataRepairItem.product_id.in_(product_ids),
+            UploadedFile.deleted_at.is_(None),
+            # SIEMPRE: "otro archivo" excluye por definición al que se borra.
+            DataRepairItem.source_file_id != file_id,
+        )
+    )
+    await _marcar(_otro_archivo, PreservationReason.OTRO_ARCHIVO_ACTIVO)
+
+    return dict(motivos)
 
 
 async def _has_import_ledger(
@@ -319,9 +685,14 @@ async def preview_file_deletion(
     productos_activos = 0
     conservados: list[dict[str, Any]] = []
     if creados:
-        protegidos = await _products_with_live_external_sales(
-            session, tenant_id, creados, excluir_archivo=file_id
+        # MISMO criterio que la reversa (`_productos_con_otra_fuente`), pero
+        # excluyendo las filas de este archivo: el preview corre ANTES de
+        # anularlas, y sin excluirlas las propias ventas del archivo protegerían
+        # a sus productos e informarían 0 donde la reversa desactiva varios.
+        motivos_por_producto = await _productos_con_otra_fuente(
+            session, tenant_id, creados, file_id=file_id, excluir_filas_del_archivo=True
         )
+        protegidos = set(motivos_por_producto)
         res = await session.execute(
             select(func.count())
             .select_from(Product)
@@ -334,13 +705,11 @@ async def preview_file_deletion(
         productos_activos = res.scalar_one()
         # Los protegidos se calculaban SOLO para restarlos del conteo y se
         # descartaban: el usuario veía "5 productos" sin saber que otros 3 iban a
-        # sobrevivir. Ahora salen con nombre y motivo.
+        # sobrevivir. Ahora salen con nombre y motivo. READ-ONLY: el preview no
+        # marca `requires_completion` (eso lo hace la reversa, si se ejecuta).
         conservados.extend(
-            await _describir_conservados(
-                session,
-                tenant_id,
-                protegidos,
-                [PreservationReason.VENTA_MANUAL_POSTERIOR],
+            await _describir_conservados_con_motivos(
+                session, tenant_id, motivos_por_producto
             )
         )
 
@@ -350,6 +719,14 @@ async def preview_file_deletion(
         session, file_id, tenant_id
     )
     conservados.extend(conservados_por_edicion)
+
+    # Maestros: MISMA función que la reversa, en modo lectura. Anticiparlos con
+    # una implementación aparte los habría hecho divergir.
+    _m_desact, _m_rest, _m_conservados = await _revert_master_items(
+        session, file_id, tenant_id, dry_run=True
+    )
+    a_restaurar += _m_rest
+    conservados.extend(_m_conservados)
 
     con_ledger = await _has_import_ledger(session, file_id, tenant_id)
     if not con_ledger:
@@ -391,34 +768,42 @@ async def preview_file_deletion(
     }
 
 
-async def _describir_conservados(
+async def _describir_conservados_con_motivos(
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    product_ids: set[uuid.UUID],
-    reasons: list[PreservationReason],
+    motivos_por_producto: dict[uuid.UUID, list[PreservationReason]],
+    *,
+    marcar_para_completar: bool = False,
 ) -> list[dict[str, Any]]:
-    """Convierte ids en filas con nombre y motivo, para mostrar al usuario.
+    """Filas legibles para el usuario, con el motivo REAL de cada producto.
 
-    Un id suelto no le dice nada a nadie: el punto de informar lo conservado es
-    que se pueda ir a revisarlo.
+    ``marcar_para_completar`` pone ``requires_completion=True``: el producto
+    sobrevive por sus dependencias, pero el archivo que respaldaba sus valores ya
+    no está. Dejarlo como si nada implicaría que esos precios siguen teniendo
+    fuente. NO se ponen precios en NULL — ``sale_price_ars`` es NOT NULL y la UI
+    no maneja el vacío; el usuario los completa.
     """
-    if not product_ids:
+    if not motivos_por_producto:
         return []
     res = await session.execute(
-        select(Product.id, Product.name).where(
-            Product.tenant_id == tenant_id, Product.id.in_(product_ids)
+        select(Product).where(
+            Product.tenant_id == tenant_id, Product.id.in_(set(motivos_por_producto))
         )
     )
-    return [
-        {
-            "entity_type": "product",
-            "id": str(pid),
-            "name": nombre,
-            "reasons": [r.value for r in reasons],
-            "fields": [],
-        }
-        for pid, nombre in res.all()
-    ]
+    filas: list[dict[str, Any]] = []
+    for producto in res.scalars().all():
+        if marcar_para_completar:
+            producto.requires_completion = True
+        filas.append(
+            {
+                "entity_type": "product",
+                "id": str(producto.id),
+                "name": producto.name,
+                "reasons": [r.value for r in motivos_por_producto[producto.id]],
+                "fields": [],
+            }
+        )
+    return filas
 
 
 async def _clasificar_productos_modificados(
@@ -536,7 +921,10 @@ async def revert_file_data(
     #    del archivo).
     creados = await _product_ids_created_by_file(session, file_id, tenant_id)
     if creados:
-        protegidos = await _products_with_live_external_sales(session, tenant_id, creados)
+        motivos_por_producto = await _productos_con_otra_fuente(
+            session, tenant_id, creados, file_id=file_id
+        )
+        protegidos = set(motivos_por_producto)
         productos_res = await session.execute(
             select(Product).where(
                 Product.tenant_id == tenant_id,
@@ -548,13 +936,11 @@ async def revert_file_data(
             producto.is_active = False
             contadores["productos"] += 1
         # Los protegidos sobreviven: el usuario tiene que saber CUÁLES y por qué,
-        # o el borrado le miente diciendo que limpió todo.
+        # o el borrado le miente diciendo que limpió todo. Además, se los marca
+        # para completar: el archivo que los trajo ya no respalda sus valores.
         conservados.extend(
-            await _describir_conservados(
-                session,
-                tenant_id,
-                protegidos,
-                [PreservationReason.VENTA_MANUAL_POSTERIOR],
+            await _describir_conservados_con_motivos(
+                session, tenant_id, motivos_por_producto, marcar_para_completar=True
             )
         )
 
@@ -599,6 +985,16 @@ async def revert_file_data(
             continue
         if restore_from_before(_prod, "product", _item.before_json or {}):
             contadores["productos_restaurados"] += 1
+
+    # 3-ter. Clientes y proveedores que el archivo trajo. Hasta acá NO se
+    #    revertían: un archivo que creaba 50 clientes los dejaba vivos y sin
+    #    manera de saber de dónde salieron.
+    _mc, _mr, _conservados_maestros = await _revert_master_items(
+        session, file_id, tenant_id
+    )
+    contadores["maestros_desactivados"] = _mc
+    contadores["maestros_restaurados"] = _mr
+    conservados.extend(_conservados_maestros)
 
     # 4. Filas que quedaron en "Otros" esperando clasificación manual: se borran
     #    (nunca fueron dato de negocio, son staging del archivo).

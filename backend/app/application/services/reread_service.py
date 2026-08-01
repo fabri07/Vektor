@@ -67,7 +67,6 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any, Literal
 
 from sqlalchemy import delete, select, text
@@ -79,6 +78,7 @@ from app.application.services._ledger_restore import (
     MASTER_SNAPSHOT_FIELDS,
     entity_changed_since_ledger,
     restore_from_before,
+    snapshot_master,
 )
 from app.application.services.column_risk import (
     AppliedColumnRisk,
@@ -290,19 +290,9 @@ def _snapshot_expense(e: ExpenseEntry) -> dict[str, Any]:
 _MASTER_SNAPSHOT_FIELDS = MASTER_SNAPSHOT_FIELDS
 
 
-def _snapshot_master(entity: Any, kind: Literal["customer", "supplier"]) -> dict[str, Any]:
-    """Serializa los campos editables + ``updated_at`` (para el touched-since
-    check del undo) de un Customer/Supplier a un dict JSON-safe."""
-    snap: dict[str, Any] = {"id": str(entity.id), "kind": kind}
-    for f in _MASTER_SNAPSHOT_FIELDS[kind]:
-        value = getattr(entity, f)
-        if isinstance(value, Decimal):
-            value = str(value)
-        elif hasattr(value, "isoformat"):
-            value = value.isoformat()
-        snap[f] = value
-    snap["updated_at"] = entity.updated_at.isoformat() if entity.updated_at else None
-    return snap
+# Definido en `_ledger_restore`: el confirm inicial captura el MISMO snapshot, y
+# el borrado de archivo restaura desde él. Alias local para no tocar los usos.
+_snapshot_master = snapshot_master
 
 
 # ── carga de estado ────────────────────────────────────────────────────────────

@@ -61,6 +61,25 @@ RESTORE_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def snapshot_master(entity: Any, kind: str) -> dict[str, Any]:
+    """Serializa un ``Customer``/``Supplier`` a un dict JSON-safe para el ledger.
+
+    Incluye ``updated_at`` porque el guard de "¿lo editaron después?" lo compara.
+    Lo usan la relectura y el confirm inicial: el mismo snapshot tiene que servir
+    para revertir cualquiera de los dos caminos.
+    """
+    snap: dict[str, Any] = {"id": str(entity.id), "kind": kind}
+    for f in MASTER_SNAPSHOT_FIELDS[kind]:
+        value = getattr(entity, f)
+        if isinstance(value, Decimal):
+            value = str(value)
+        elif hasattr(value, "isoformat"):
+            value = value.isoformat()
+        snap[f] = value
+    snap["updated_at"] = entity.updated_at.isoformat() if entity.updated_at else None
+    return snap
+
+
 def coerce_restore_value(field: str, value: Any) -> Any:
     """Deserializa un valor JSON-safe del snapshot al tipo que espera el modelo.
 

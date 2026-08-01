@@ -3,7 +3,47 @@ Score trigger service — thin shim that dispatches Celery tasks.
 Imported by API endpoints to schedule async recalculations.
 """
 
+from typing import Any
+
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.jobs.celery_app import celery_app
+
+
+def trigger_score_recalculation_after_commit(
+    db: AsyncSession, tenant_id: str, triggered_by: str
+) -> None:
+    """Dispara el recálculo SOLO después de que la transacción commitee.
+
+    El worker abre su PROPIA sesión y lee la base: si el task sale mientras la
+    transacción del request sigue abierta, calcula contra un estado que todavía
+    no existe —o que un rollback va a descartar— y persiste un score que nunca
+    correspondió. Con un borrado de archivo el error es visible: el score se
+    recalcularía con los datos que se están revirtiendo.
+
+    Mismo mecanismo que ``EventBus.emit_after_commit`` (``stock_service``,
+    ``pending_action_service``): el listener ``after_commit`` de SQLAlchemy. Si la
+    transacción hace rollback, el task nunca se encola.
+    """
+    sync_session = db.sync_session
+
+    @event.listens_for(sync_session, "after_commit", once=True)
+    def _disparar(_session: Any) -> None:
+        # Fail-safe OBLIGATORIO: acá la transacción YA commiteó. Si el broker está
+        # caído, dejar propagar la excepción le devolvería un 500 al usuario por
+        # una operación que sí se completó — y encima lo invitaría a repetirla.
+        # El score se recalcula igual en el próximo evento o por el job periódico.
+        try:
+            trigger_score_recalculation.delay(tenant_id, triggered_by)
+        except Exception:  # noqa: BLE001 — el recálculo nunca rompe la respuesta
+            from app.observability.logger import get_logger  # noqa: PLC0415
+
+            get_logger(__name__).warning(
+                "score.recalculation_enqueue_failed",
+                tenant_id=tenant_id,
+                triggered_by=triggered_by,
+            )
 
 
 @celery_app.task(name="jobs.trigger_score_recalculation", queue="scores")  # type: ignore[misc]

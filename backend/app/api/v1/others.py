@@ -28,11 +28,21 @@ from app.api.v1.products import (
     _tenant_vertical,
 )
 from app.application.services import maintenance_lock_service, stock_service
+from app.application.services._ledger_restore import snapshot_master
+from app.application.services.file_deletion_service import (
+    ACTION_CREATE_CUSTOMER,
+    ACTION_CREATE_PRODUCT,
+    ACTION_CREATE_SUPPLIER,
+    ACTION_UPDATE_PRODUCT,
+    REPAIR_TYPE_IMPORT,
+)
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
 )
-from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     classify_expense_with_vertical,
@@ -47,6 +57,7 @@ from app.domain.product_completion import recompute_requires_completion
 from app.persistence.db.session import get_db_session
 from app.persistence.models.customer import Customer
 from app.persistence.models.product import Product
+from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -212,6 +223,128 @@ async def count_unclassified(
     return {"pending": int(result.scalar_one() or 0)}
 
 
+def _snapshot_producto(producto: Product) -> dict[str, Any]:
+    """Estado restaurable de un producto, en el formato del ledger.
+
+    Mismas claves que produce el importador, para que la reversa lea un único
+    formato venga del confirm o de una clasificación manual.
+    """
+    return {
+        "sale_price_ars": str(producto.sale_price_ars),
+        "list_price_ars": (
+            str(producto.list_price_ars) if producto.list_price_ars is not None else None
+        ),
+        "unit_cost_ars": (
+            str(producto.unit_cost_ars) if producto.unit_cost_ars is not None else None
+        ),
+        "sku": producto.sku,
+        "barcode": producto.barcode,
+        "category": producto.category,
+        "updated_at": producto.updated_at.isoformat() if producto.updated_at else None,
+    }
+
+
+async def _ledger_desde_otros(
+    session: AsyncSession,
+    tenant_id: UUID,
+    upload_id: UUID | None,
+    *,
+    action: str,
+    product_id: UUID | None,
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+) -> None:
+    """Registra en el ledger lo que produjo clasificar una fila de "Otros".
+
+    ``Product``/``Customer``/``Supplier`` no tienen columna de origen: el vínculo
+    con el archivo SOLO puede vivir acá. Sin esto, clasificar a mano una fila
+    generaba una entidad huérfana que sobrevivía al borrado del archivo.
+
+    Sin ``upload_id`` no se escribe nada: una fila sin archivo de origen (carga
+    manual) no tiene procedencia que registrar.
+    """
+    if upload_id is None:
+        return
+    run = DataRepairRun(
+        tenant_id=tenant_id,
+        repair_type=REPAIR_TYPE_IMPORT,
+        status="APPLIED",
+        dry_run=False,
+        details_json={"file_id": str(upload_id), "origen": "otros:reclassify"},
+        completed_at=datetime.now(UTC),
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        DataRepairItem(
+            run_id=run.id,
+            tenant_id=tenant_id,
+            source_file_id=upload_id,
+            product_id=product_id,
+            action=action,
+            before_json=before,
+            after_json=after,
+            confidence="HIGH",
+        )
+    )
+    await session.flush()
+
+
+async def _ledger_maestro_creado(
+    session: AsyncSession, tenant_id: UUID, upload_id: UUID | None, entity: Any, kind: str
+) -> None:
+    if upload_id is None:
+        return
+    await session.flush()
+    await session.refresh(entity)
+    await _ledger_desde_otros(
+        session,
+        tenant_id,
+        upload_id,
+        action=(ACTION_CREATE_CUSTOMER if kind == "customer" else ACTION_CREATE_SUPPLIER),
+        product_id=None,
+        before=None,
+        after=snapshot_master(entity, kind),
+    )
+
+
+async def _ledger_producto_creado(
+    session: AsyncSession, tenant_id: UUID, upload_id: UUID | None, producto: Product
+) -> None:
+    if upload_id is None:
+        return
+    await session.refresh(producto)
+    await _ledger_desde_otros(
+        session,
+        tenant_id,
+        upload_id,
+        action=ACTION_CREATE_PRODUCT,
+        product_id=producto.id,
+        before=None,
+        after=_snapshot_producto(producto),
+    )
+
+
+async def _ledger_producto_actualizado(
+    session: AsyncSession,
+    tenant_id: UUID,
+    upload_id: UUID | None,
+    producto: Product,
+    before: dict[str, Any],
+) -> None:
+    if upload_id is None:
+        return
+    await _ledger_desde_otros(
+        session,
+        tenant_id,
+        upload_id,
+        action=ACTION_UPDATE_PRODUCT,
+        product_id=producto.id,
+        before=before,
+        after=_snapshot_producto(producto),
+    )
+
+
 async def _get_pending_record(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -257,6 +390,15 @@ async def reclassify_record(
 ) -> MessageResponse:
     record = await _get_pending_record(session, tenant.tenant_id, record_id)
 
+    # Procedencia de la fila: sin esto, el registro que nace de clasificar a mano
+    # una fila de "Otros" queda HUÉRFANO de su archivo — borrar el archivo no lo
+    # alcanza y sobrevive sin rastro de dónde vino.
+    #
+    # `source_row_ref` se deriva del id del UnclassifiedRecord, no de sus valores:
+    # es estable aunque el usuario corrija un campo antes de clasificar.
+    _upload_id = record.uploaded_file_id
+    _row_ref = f"unclassified:{record.id}" if _upload_id else None
+
     try:
         if body.entity_type == "sale":
             sale_req = CreateSaleRequest(**body.fields)
@@ -271,6 +413,8 @@ async def reclassify_record(
                     notes=sale_req.notes,
                     custom_fields=sale_req.custom_fields,
                     provenance="REAL",
+                    source_upload_id=_upload_id,
+                    source_row_ref=_row_ref,
                 )
             )
             label = "venta"
@@ -303,16 +447,28 @@ async def reclassify_record(
                     notes=exp_req.notes,
                     custom_fields=custom_fields,
                     provenance="REAL",
+                    source_upload_id=_upload_id,
+                    source_row_ref=_row_ref,
                 )
             )
             label = "gasto"
         elif body.entity_type == "customer":
             cust_req = CreateCustomerRequest(**body.fields)
-            session.add(Customer(tenant_id=tenant.tenant_id, **cust_req.model_dump()))
+            _nuevo_cliente = Customer(tenant_id=tenant.tenant_id, **cust_req.model_dump())
+            session.add(_nuevo_cliente)
+            # `Customer` no tiene columna de origen: su procedencia sólo puede
+            # vivir en el ledger, igual que la de los productos.
+            await _ledger_maestro_creado(
+                session, tenant.tenant_id, _upload_id, _nuevo_cliente, "customer"
+            )
             label = "cliente"
         elif body.entity_type == "supplier":
             sup_req = CreateSupplierRequest(**body.fields)
-            session.add(Supplier(tenant_id=tenant.tenant_id, **sup_req.model_dump()))
+            _nuevo_prov = Supplier(tenant_id=tenant.tenant_id, **sup_req.model_dump())
+            session.add(_nuevo_prov)
+            await _ledger_maestro_creado(
+                session, tenant.tenant_id, _upload_id, _nuevo_prov, "supplier"
+            )
             label = "proveedor"
         elif body.target_product_id is not None:  # "product", vincular a existente
             # Re-validación (seguridad, crítico): NUNCA confiar en el id que manda
@@ -343,14 +499,23 @@ async def reclassify_record(
                     if k in {"sale_price_ars", "unit_cost_ars"}
                 }
             ).model_dump(exclude_unset=True)
+            # `before` ANTES de mutar: esta rama pisa precio/costo de un producto
+            # PREEXISTENTE y hasta acá no dejaba ningún rastro, así que borrar el
+            # archivo no podía devolverle su valor.
+            _before_target = _snapshot_producto(target)
             for field_name, value in link_updates.items():
                 setattr(target, field_name, value)
             recompute_requires_completion(target)
+            await session.flush()
+            await session.refresh(target)
+            await _ledger_producto_actualizado(
+                session, tenant.tenant_id, _upload_id, target, _before_target
+            )
             record.status = UNCLASSIFIED_STATUS_IMPORTED
             record.resolved_at = datetime.now(UTC)
             await session.flush()
-            trigger_score_recalculation.delay(
-                str(tenant.tenant_id), "unclassified_reclassified"
+            trigger_score_recalculation_after_commit(
+                session, str(tenant.tenant_id), "unclassified_reclassified"
             )
             return MessageResponse(message="Registro vinculado al producto existente.")
         else:  # "product", crear nuevo
@@ -387,7 +552,8 @@ async def reclassify_record(
                     barcode=data.get("barcode"),
                     sku=data.get("sku"),
                 ):
-                    session.add(Product(tenant_id=tenant.tenant_id, **data))
+                    _nuevo_producto = Product(tenant_id=tenant.tenant_id, **data)
+                    session.add(_nuevo_producto)
             except ProductIdentityConflictError as conflict:
                 # ``_identity_conflict_from_db`` y no ``_duplicate_identity_conflict``:
                 # cuando barcode y sku pertenecen a productos DISTINTOS hay que
@@ -397,6 +563,10 @@ async def reclassify_record(
                 raise _identity_conflict_from_db(
                     conflict, barcode=data.get("barcode"), sku=data.get("sku")
                 ) from conflict
+            await session.flush()
+            await _ledger_producto_creado(
+                session, tenant.tenant_id, _upload_id, _nuevo_producto
+            )
             label = "producto"
     except ValidationError as exc:
         raise HTTPException(
@@ -407,7 +577,9 @@ async def reclassify_record(
     record.status = UNCLASSIFIED_STATUS_IMPORTED
     record.resolved_at = datetime.now(UTC)
     await session.flush()
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "unclassified_reclassified")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "unclassified_reclassified"
+    )
     return MessageResponse(message=f"Registro importado como {label}.")
 
 
@@ -533,7 +705,9 @@ async def bulk_import_records(
 
     counts = await bulk_import_unclassified(session, tenant.tenant_id, body.entity_type)
     if counts["imported_sales"] or counts["imported_expenses"]:
-        trigger_score_recalculation.delay(str(tenant.tenant_id), "unclassified_bulk_import")
+        trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "unclassified_bulk_import"
+    )
     return BulkImportResponse(**counts)
 
 

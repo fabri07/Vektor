@@ -199,13 +199,25 @@ export function FileListSection() {
     // cuántas ventas/gastos/productos se van a revertir. Sin el flag el backend
     // responde 409 con el preview y no toca nada.
     mutationFn: (fileId: string) => ingestionService.deleteFile(fileId, true),
-    onSuccess: () => {
+    onSuccess: (resultado) => {
       setFileToDelete(null);
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
       // El borrado revierte datos de negocio: hay que refrescar todo lo que los
       // muestra, no solo la lista de archivos.
       invalidateDataQueries();
-      addToast("Archivo eliminado y datos revertidos.", "success");
+      // Dos desenlaces distinguibles. Decir "datos revertidos" cuando quedaron
+      // entidades vivas sería exactamente la promesa que este trabajo elimina.
+      const conservados = resultado?.conservados?.length ?? 0;
+      if (!resultado || resultado.fully_reverted) {
+        addToast("Archivo eliminado y datos revertidos.", "success");
+      } else {
+        addToast(
+          `Archivo eliminado. Se conservaron ${conservados} ${
+            conservados === 1 ? "registro" : "registros"
+          } con actividad posterior — revisalos.`,
+          "info",
+        );
+      }
     },
     onError: () => {
       setFileToDelete(null);

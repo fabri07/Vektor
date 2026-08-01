@@ -82,7 +82,10 @@ class DataRepairItem(UUIDPrimaryKeyMixin, Base):
             "action IN ('VOID_SALE','CREATE_PRODUCT','UPDATE_PRODUCT','UPDATE_SALE',"
             "'REVIEW_SALE','VOID_DUPLICATE','RECLASSIFY_EXPENSE','REREAD_VOID','REREAD_INSERT',"
             "'MERGE_PRODUCT','DEACTIVATE_DUPLICATE','REPOINT_FK','CONSOLIDATE_BALANCE',"
-            "'DELETE_BALANCE','REREAD_MASTER_CREATE','REREAD_MASTER_UPDATE')",
+            "'DELETE_BALANCE','REREAD_MASTER_CREATE','REREAD_MASTER_UPDATE',"
+            # Maestros creados/modificados por un IMPORT (mig 20260810_0001). Los
+            # `REREAD_MASTER_*` de arriba son el camino de la relectura y quedan.
+            "'CREATE_CUSTOMER','UPDATE_CUSTOMER','CREATE_SUPPLIER','UPDATE_SUPPLIER')",
             name="ck_repair_items_action",
         ),
     )

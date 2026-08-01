@@ -48,9 +48,11 @@ from app.application.services.column_risk import (
     validate_column_risk_decisions,
 )
 from app.application.services.file_deletion_service import (
+    build_master_details,
     preview_file_deletion,
     record_import_ledger,
     revert_file_data,
+    snapshot_masters_before_import,
 )
 from app.application.services.file_parsing import (
     IMAGE_MIMES as _IMAGE_MIMES,
@@ -80,6 +82,9 @@ from app.application.services.ingestion_lease_service import (
     release_import_lease,
 )
 from app.application.services.llm_file_type_detector import maybe_detect_file_type
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.config.settings import get_settings
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
@@ -811,6 +816,13 @@ async def delete_file(
         _revertido = await revert_file_data(
             session, file_id, tenant.tenant_id, actor_user_id=user.user_id
         )
+        # Los scores quedaban calculados sobre datos que este borrado acaba de
+        # revertir. Se dispara DESPUÉS del commit: el worker abre su propia
+        # sesión, así que encolarlo antes lo haría leer un estado que todavía no
+        # existe — o que un rollback va a descartar.
+        trigger_score_recalculation_after_commit(
+            session, str(tenant.tenant_id), "file_deleted"
+        )
     await session.commit()
 
     # Respuesta explícita, nunca un 204 mudo: la UI necesita distinguir "se
@@ -828,8 +840,12 @@ async def delete_file(
             "products": int(_revertido.get("productos", 0)),
             "stock_movements": int(_revertido.get("movimientos_stock", 0)),
             "others": int(_revertido.get("otros", 0)),
+            "masters": int(_revertido.get("maestros_desactivados", 0)),
         },
-        restored={"products": int(_revertido.get("productos_restaurados", 0))},
+        restored={
+            "products": int(_revertido.get("productos_restaurados", 0)),
+            "masters": int(_revertido.get("maestros_restaurados", 0)),
+        },
         conservados=_conservados,
     )
 
@@ -1739,6 +1755,18 @@ async def confirm_file(
                 d.model_dump() for d in _effective_risk_decisions
             ]
 
+        # Estado de los maestros ANTES de importar: es el `before_json` del
+        # ledger, y después del import ya no se puede reconstruir. Solo se paga si
+        # el archivo TRAE clientes/proveedores — en un import común serían dos
+        # SELECT completos para nada.
+        _before_customers: dict[uuid.UUID, dict[str, Any]] = {}
+        _before_suppliers: dict[uuid.UUID, dict[str, Any]] = {}
+        _trae_maestros = bool(_master_context_mappings or _master_flat_mapping)
+        if _trae_maestros:
+            _before_customers, _before_suppliers = await snapshot_masters_before_import(
+                session, tenant.tenant_id
+            )
+
         _t0 = time.monotonic()
         counts = await insert_confirmed_data(
             session,
@@ -1768,6 +1796,17 @@ async def confirm_file(
         # existe para evitar) y lo devolvería en la respuesta del endpoint.
         _product_details = counts.pop("product_details", []) or []
 
+        # Maestros creados/modificados por este import. Sin esto, borrar el
+        # archivo dejaba vivos sus clientes y proveedores, sin manera de saber de
+        # dónde salieron.
+        _master_details = (
+            await build_master_details(
+                session, counts, _before_customers, _before_suppliers
+            )
+            if _trae_maestros
+            else []
+        )
+
         # Se escribe DENTRO del savepoint del import: si el import se revierte,
         # el ledger se va con él (nunca un ledger de un import que no ocurrió).
         await record_import_ledger(
@@ -1775,6 +1814,7 @@ async def confirm_file(
             tenant_id=tenant.tenant_id,
             file_id=file_id,
             product_details=_product_details,
+            master_details=_master_details,
         )
 
         # ── F8b (Task 4) + F8c (Minor 1): capturar en "Otros" las filas
