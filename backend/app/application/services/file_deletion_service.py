@@ -600,6 +600,47 @@ async def _productos_con_otra_fuente(
     return dict(motivos)
 
 
+async def _otros_clasificados_revertidos(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> set[uuid.UUID]:
+    """Filas de "Otros" ya clasificadas cuyo registro derivado SÍ se pudo revertir.
+
+    Desde F11, clasificar una fila a mano estampa
+    ``source_row_ref='unclassified:{record_id}'`` en la venta/gasto que genera.
+    Ese ref es la prueba de que el derivado está atado a esta fila y que la
+    reversa lo alcanzó.
+
+    Las clasificadas ANTES no lo tienen: su derivado nació sin
+    ``source_upload_id``, sobrevive al borrado, y su fila de staging es el único
+    rastro que queda hacia el archivo — por eso se conserva.
+
+    Se mira sin filtrar ``voided_at``: en la reversa este helper corre DESPUÉS de
+    anular las ventas y gastos del archivo, así que exigir "vivo" no devolvería
+    ninguna. Lo que importa es la existencia del vínculo, no su estado.
+    """
+    prefijo = "unclassified:"
+    refs: set[str] = set()
+    for modelo in (SaleEntry, ExpenseEntry):
+        res = await session.execute(
+            select(modelo.source_row_ref).where(
+                modelo.tenant_id == tenant_id,
+                modelo.source_upload_id == file_id,
+                modelo.source_row_ref.like(f"{prefijo}%"),
+            )
+        )
+        refs.update(r for r in res.scalars().all() if r)
+
+    ids: set[uuid.UUID] = set()
+    for ref in refs:
+        try:
+            ids.add(uuid.UUID(ref.removeprefix(prefijo)))
+        except ValueError:
+            # Un ref con ese prefijo pero sin un uuid válido no se interpreta:
+            # ante la duda, la fila se conserva.
+            continue
+    return ids
+
+
 async def _has_import_ledger(
     session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
 ) -> bool:
@@ -732,19 +773,27 @@ async def preview_file_deletion(
     if not con_ledger:
         conservados.append(
             {
-                "entity_type": "product",
+                "entity_type": "file",
                 "id": str(file_id),
-                "name": "(productos de este archivo)",
+                "name": "Productos de este archivo",
                 "reasons": [PreservationReason.SIN_LEDGER.value],
                 "fields": [],
             }
         )
-    if otros_ya_clasificados:
+    # De las ya clasificadas, sólo se conservan las que NO dejaron procedencia:
+    # las clasificadas desde F11 llevan su ref y su derivado se revierte con el
+    # resto. Reportarlas todas como "sin procedencia" sería avisar de un problema
+    # que ya no existe.
+    _con_procedencia = await _otros_clasificados_revertidos(session, file_id, tenant_id)
+    _clasificadas_huerfanas = max(0, otros_ya_clasificados - len(_con_procedencia))
+    if _clasificadas_huerfanas:
         conservados.append(
             {
-                "entity_type": "product",
+                "entity_type": "unclassified",
                 "id": str(file_id),
-                "name": f"({otros_ya_clasificados} filas ya clasificadas desde «Otros»)",
+                "name": (
+                    f"{_clasificadas_huerfanas} filas ya clasificadas desde «Otros»"
+                ),
                 "reasons": [
                     PreservationReason.OTRO_CLASIFICADO_HISTORICO_SIN_PROCEDENCIA.value
                 ],
@@ -996,20 +1045,29 @@ async def revert_file_data(
     contadores["maestros_restaurados"] = _mr
     conservados.extend(_conservados_maestros)
 
-    # 4. Filas que quedaron en "Otros" esperando clasificación manual: se borran
-    #    (nunca fueron dato de negocio, son staging del archivo).
+    # 4. Filas de "Otros" del archivo.
     #
-    #    SOLO las PENDING. Una fila que el usuario ya resolvió (IMPORTED) generó
-    #    una venta/gasto/producto real, y ese registro NO lleva
-    #    `source_upload_id` (lo crea `others.py`, no el importador), así que la
-    #    reversa de arriba no lo alcanza. Borrar la fila de staging destruiría el
-    #    único rastro que queda hacia el archivo, dejando el dato derivado vivo y
-    #    huérfano. Se conservan y se informan aparte.
+    #    Las PENDING se borran siempre: nunca fueron dato de negocio, son staging.
+    #
+    #    Las IMPORTED (el usuario ya las clasificó) dependen de si su registro
+    #    derivado se pudo revertir:
+    #      - Clasificadas DESDE F11: el derivado lleva
+    #        `source_row_ref='unclassified:{id}'`, así que los pasos de arriba ya
+    #        lo anularon. La fila de staging se borra también — dejarla viva
+    #        apuntando a un archivo que ya no existe no le sirve a nadie.
+    #      - Clasificadas ANTES: el derivado nació sin `source_upload_id` y la
+    #        reversa no lo alcanza. Borrar la fila destruiría el ÚNICO rastro que
+    #        queda hacia el archivo, dejando el dato huérfano y sin explicación.
+    #        Se conservan y se informan aparte.
+    _ids_con_procedencia = await _otros_clasificados_revertidos(
+        session, file_id, tenant_id
+    )
     otros_res = await session.execute(
         select(UnclassifiedRecord.id).where(
             UnclassifiedRecord.tenant_id == tenant_id,
             UnclassifiedRecord.uploaded_file_id == file_id,
-            UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+            (UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING)
+            | (UnclassifiedRecord.id.in_(_ids_con_procedencia)),
         )
     )
     otros_ids = list(otros_res.scalars().all())
@@ -1029,9 +1087,9 @@ async def revert_file_data(
     if not await _has_import_ledger(session, file_id, tenant_id):
         conservados.append(
             {
-                "entity_type": "product",
+                "entity_type": "file",
                 "id": str(file_id),
-                "name": "(productos de este archivo)",
+                "name": "Productos de este archivo",
                 "reasons": [PreservationReason.SIN_LEDGER.value],
                 "fields": [],
             }

@@ -372,6 +372,24 @@ _HEURISTIC_KEYS: dict[str, dict[str, frozenset[str]]] = {
 # Alcance deliberado: montos, cantidades, fechas y los tres precios — donde una
 # colisión corrompe plata. `name`/`notes`/`category` quedan afuera (varias
 # columnas pueden ser legítimas) y se cubren con un aviso no bloqueante.
+# Campos de una venta/gasto que REFERENCIAN a un cliente o proveedor. Mapear
+# alguno hace que el import cree o toque ese maestro como efecto lateral, aunque
+# el archivo no traiga una hoja de maestros. El borrado necesita saberlo para
+# poder revertirlos (ver `_trae_maestros` en el confirm).
+MASTER_REFERENCE_TARGETS: frozenset[str] = frozenset(
+    {
+        "customer_name",
+        "customer_dni",
+        "customer_cuit",
+        "customer_email",
+        "customer_phone",
+        "supplier_name",
+        "supplier_cuil",
+        "supplier_email",
+        "supplier_phone",
+    }
+)
+
 SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
     "sale": frozenset({"amount", "quantity", "transaction_date", "unit_price"}),
     "expense": frozenset({"amount", "expense_date"}),

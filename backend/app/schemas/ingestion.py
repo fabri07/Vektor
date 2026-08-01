@@ -90,9 +90,18 @@ class PreservedEntity(BaseModel):
     ``fields`` se completa SOLO cuando la decisión es por campo
     (``campo_modificado_posteriormente``): dice cuáles no se restauran, mientras
     el resto de la entidad sí vuelve a su valor anterior.
+
+    ``unclassified`` y ``file`` no son entidades concretas sino AGREGADOS del
+    archivo ("N filas de Otros que no se pueden rastrear", "este archivo no dejó
+    ledger"). Existen como tipos propios porque reportarlos como ``product`` con
+    el id del ARCHIVO —que es lo que se hacía— es un dato falso: la UI no puede
+    linkearlo y quien lea el audit log meses después no tiene forma de saber que
+    ese uuid no era un producto.
     """
 
-    entity_type: Literal["product", "customer", "supplier", "sale", "expense"]
+    entity_type: Literal[
+        "product", "customer", "supplier", "sale", "expense", "unclassified", "file"
+    ]
     id: UUID
     name: str
     reasons: list[str]

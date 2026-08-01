@@ -209,6 +209,7 @@ async def _resolve_or_create_supplier(
     tenant_id: uuid.UUID,
     raw_name: Any,
     supplier_index: dict[str, uuid.UUID],
+    created_ids: list[str] | None = None,
 ) -> tuple[uuid.UUID | None, str | None]:
     """Resuelve (o crea) el proveedor de una fila importada, devolviendo
     ``(supplier_id, supplier_name)``.
@@ -236,6 +237,12 @@ async def _resolve_or_create_supplier(
         return hit, clean
     new_id = uuid.uuid4()
     session.add(Supplier(id=new_id, tenant_id=tenant_id, name=clean))
+    # El id se reporta al caller para que entre al LEDGER de reversa. Sin esto,
+    # un proveedor creado desde la columna de un gasto quedaba fuera del ledger:
+    # borrar el archivo lo dejaba vivo y el DELETE respondía `fully_reverted:
+    # true` igual — la mentira exacta que ese contrato existe para evitar.
+    if created_ids is not None:
+        created_ids.append(str(new_id))
     # NO se hace flush: el id es explícito (``new_id``), así que no hace falta
     # materializar para vincular el gasto. Un flush por proveedor nuevo en un
     # import masivo era O(N) round-trips (flushea todo lo pendiente cada vez) —
@@ -3197,6 +3204,7 @@ async def _insert_confirmed_data_impl(
                             tenant_id,
                             row.get(supplier_col),
                             _supplier_index,
+                            counts.setdefault("proveedores_creados_ids", []),
                         )
                         if expense.supplier_name:
                             _real_suppliers.add(expense.supplier_name)
@@ -4321,7 +4329,11 @@ async def _insert_multisheet_data(
                 expense.supplier_id,
                 expense.supplier_name,
             ) = await _resolve_or_create_supplier(
-                session, tenant_id, _supplier_name_raw, _supplier_index
+                session,
+                tenant_id,
+                _supplier_name_raw,
+                _supplier_index,
+                counts.setdefault("proveedores_creados_ids", []),
             )
             if expense.supplier_name:
                 _real_suppliers.add(expense.supplier_name)

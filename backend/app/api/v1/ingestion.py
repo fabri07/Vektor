@@ -34,6 +34,7 @@ from app.application.services import (
 from app.application.services import ingestion_import_service as _iis
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
+    MASTER_REFERENCE_TARGETS,
     REQUIRED_FIELDS,
     SINGLE_VALUE_FIELDS,
     ColumnMappingService,
@@ -1761,7 +1762,15 @@ async def confirm_file(
         # SELECT completos para nada.
         _before_customers: dict[uuid.UUID, dict[str, Any]] = {}
         _before_suppliers: dict[uuid.UUID, dict[str, Any]] = {}
-        _trae_maestros = bool(_master_context_mappings or _master_flat_mapping)
+        # No alcanza con mirar las hojas DE maestros: el importador también crea
+        # clientes y proveedores como efecto lateral de una hoja de ventas o
+        # gastos, desde sus columnas de referencia (`supplier_name`,
+        # `customer_name`, documento, email…). Sin contemplarlas, un archivo de
+        # gastos creaba proveedores que después el borrado no podía revertir — y
+        # peor, respondía `fully_reverted: true` igual.
+        _trae_maestros = bool(_master_context_mappings or _master_flat_mapping) or any(
+            m.target_field in MASTER_REFERENCE_TARGETS for m in body.column_mappings
+        )
         if _trae_maestros:
             _before_customers, _before_suppliers = await snapshot_masters_before_import(
                 session, tenant.tenant_id
@@ -1799,12 +1808,13 @@ async def confirm_file(
         # Maestros creados/modificados por este import. Sin esto, borrar el
         # archivo dejaba vivos sus clientes y proveedores, sin manera de saber de
         # dónde salieron.
-        _master_details = (
-            await build_master_details(
-                session, counts, _before_customers, _before_suppliers
-            )
-            if _trae_maestros
-            else []
+        # Se llama SIEMPRE que el import haya devuelto ids de maestros, no solo
+        # cuando se anticipó el snapshot: un CREADO no necesita `before` (no
+        # existía), así que registrarlo sin snapshot es correcto y es lo que
+        # permite desactivarlo al borrar. Solo los ACTUALIZADOS quedan sin
+        # `before` si no se anticipó — y sin `before` no hay nada que restaurar.
+        _master_details = await build_master_details(
+            session, counts, _before_customers, _before_suppliers
         )
 
         # Se escribe DENTRO del savepoint del import: si el import se revierte,

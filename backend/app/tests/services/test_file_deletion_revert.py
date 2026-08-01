@@ -970,3 +970,92 @@ class TestPreviewAnticipaMaestros:
         await db_session.refresh(cliente)
         assert cliente.deactivated_at is not None
         assert contadores["maestros_desactivados"] == 1
+
+
+class TestOtrosYaClasificados:
+    """Una fila de "Otros" que el usuario mandó a Ventas: ¿se borra con el archivo?
+
+    Depende de si dejó procedencia. Desde F11 la venta derivada lleva
+    `source_row_ref='unclassified:{id}'` y se revierte con el resto; las
+    clasificadas antes nacieron huérfanas y sobreviven.
+    """
+
+    async def test_clasificada_con_procedencia_se_revierte_y_la_fila_se_borra(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo = await _archivo(db_session, sample_tenant)
+        fila = UnclassifiedRecord(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_file_id=archivo.id,
+            source="ingestion",
+            row_data={"detalle": "algo"},
+            status="IMPORTED",
+        )
+        db_session.add(fila)
+        await db_session.flush()
+        # La venta que generó la clasificación, como la crea `others.py` desde F11.
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                amount=Decimal("500"),
+                transaction_date=datetime.now(UTC),
+                source_upload_id=archivo.id,
+                source_row_ref=f"unclassified:{fila.id}",
+            )
+        )
+        await db_session.flush()
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        venta = (await db_session.execute(select(SaleEntry))).scalar_one()
+        assert venta.voided_at is not None  # el derivado se revirtió
+        # Y la fila de staging se fue con él: dejarla apuntando a un archivo que
+        # ya no existe no le sirve a nadie.
+        assert (await db_session.execute(select(UnclassifiedRecord))).scalars().all() == []
+        assert contadores["otros"] == 1
+        assert not any(
+            "otro_clasificado_historico" in r
+            for c in contadores["conservados"]
+            for r in c["reasons"]
+        )
+
+    async def test_clasificada_antes_de_f11_sobrevive_y_se_informa(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Su derivado nació sin `source_upload_id`: la reversa no lo alcanza, y
+        la fila es el único rastro que queda hacia el archivo."""
+        archivo = await _archivo(db_session, sample_tenant)
+        fila = UnclassifiedRecord(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_file_id=archivo.id,
+            source="ingestion",
+            row_data={"detalle": "histórico"},
+            status="IMPORTED",
+        )
+        db_session.add(fila)
+        # Venta derivada SIN procedencia (como las creaba `others.py` antes).
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                amount=Decimal("300"),
+                transaction_date=datetime.now(UTC),
+            )
+        )
+        await db_session.flush()
+
+        previo = await preview_file_deletion(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+        assert any(
+            "otro_clasificado_historico_sin_procedencia" in c["reasons"]
+            for c in previo["conservados"]
+        )
+
+        await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        # La venta huérfana sobrevive, y su fila también: es el único rastro.
+        venta = (await db_session.execute(select(SaleEntry))).scalar_one()
+        assert venta.voided_at is None
+        assert len((await db_session.execute(select(UnclassifiedRecord))).scalars().all()) == 1
