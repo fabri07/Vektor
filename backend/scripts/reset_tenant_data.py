@@ -69,12 +69,28 @@ _PRESERVAR: frozenset[str] = frozenset(
         "users",  # los usuarios y sus credenciales
         "user_auth_identities",  # login federado (Google)
         "business_profiles",  # rubro y configuración del negocio
+        # El PLAN de la cuenta, no un dato de negocio. La crea
+        # `tenant_provisioning` al dar de alta el tenant y `/auth/me` la lee en
+        # cada sesión. Borrarla deja la cuenta sin plan: no rompe el login
+        # (el endpoint tolera None) pero es un dato administrativo que un reset
+        # de DATOS no tiene por qué tocar. Se aprendió borrándola de más en el
+        # reset de Asteria (2026-07-31).
+        "subscriptions",
         # La auditoría es insert-only por invariante del proyecto: borrar el
         # registro de decisiones para "limpiar" sería exactamente lo contrario a
         # lo que esa tabla existe para garantizar.
         "decision_audit_log",
     }
 )
+
+# Tablas que SÍ se borran pero tienen un costo visible para el usuario: no son
+# dato de negocio, pero perderlas obliga a rehacer algo a mano. Se avisan aparte
+# para que el reset no las borre "en silencio".
+_AVISAR_SI_SE_BORRAN: dict[str, str] = {
+    "google_mcp_connections": "hay que volver a conectar Google desde /apps",
+    "google_oauth_tokens": "hay que volver a conectar Google desde /apps",
+    "tenant_column_mappings": "se pierden los alias de columnas aprendidos (a propósito)",
+}
 
 
 def _titulo(texto: str) -> None:
@@ -185,6 +201,12 @@ async def main() -> int:
         for tabla, n in sorted(con_datos.items(), key=lambda kv: -kv[1]):
             print(f"  {tabla:<34} {n:>8}")
         print(f"\n  TOTAL de filas: {sum(con_datos.values())}")
+
+        _avisos = {t: m for t, m in _AVISAR_SI_SE_BORRAN.items() if con_datos.get(t)}
+        if _avisos:
+            _titulo("SE BORRA, Y TIENE COSTO PARA EL USUARIO")
+            for tabla, mensaje in sorted(_avisos.items()):
+                print(f"  {tabla:<28} → {mensaje}")
 
         _titulo("SE CONSERVA")
         for tabla in sorted(_PRESERVAR):
