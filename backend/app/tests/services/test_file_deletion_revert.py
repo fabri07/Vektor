@@ -538,3 +538,130 @@ class TestRestauraLoQueElArchivoModifico:
 
         await db_session.refresh(producto)
         assert producto.stock_units == 7  # NO 999
+
+
+class TestPreviewYReversaComparten:
+    """El preview anticipa; el DELETE decide.
+
+    Comparten contrato y criterio, pero el preview es read-only y ocurre ANTES:
+    entre las dos llamadas alguien puede registrar una venta o editar un producto.
+    Por eso se prueba que coincidan CON ESTADO SIN CAMBIOS, y que ante un cambio
+    en el medio gane el resultado del DELETE.
+    """
+
+    async def test_coinciden_cuando_nada_cambia_en_el_medio(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Maceta")
+        producto.sale_price_ars = Decimal("777")
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"sale_price_ars": "100"},
+                    "after": {
+                        "sale_price_ars": "777",
+                        "updated_at": producto.updated_at.isoformat(),
+                    },
+                }
+            ],
+        )
+
+        previo = await preview_file_deletion(db_session, archivo.id, sample_tenant.tenant_id)
+        assert previo["productos_a_restaurar"] == 1
+        assert previo["conservados"] == []
+
+        resultado = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+        assert resultado["productos_restaurados"] == 1
+        assert resultado["conservados"] == []
+
+    async def test_si_cambia_entre_medio_manda_el_delete(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El preview dijo "restaurable"; alguien editó el producto; el DELETE
+        recalcula y lo conserva. El resultado autoritativo es el del DELETE."""
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Espejo")
+        producto.sale_price_ars = Decimal("777")
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"sale_price_ars": "100"},
+                    "after": {
+                        "sale_price_ars": "777",
+                        "updated_at": producto.updated_at.isoformat(),
+                    },
+                }
+            ],
+        )
+
+        previo = await preview_file_deletion(db_session, archivo.id, sample_tenant.tenant_id)
+        assert previo["productos_a_restaurar"] == 1
+
+        # …y ACÁ el usuario lo edita, entre el preview y el borrado.
+        producto.sale_price_ars = Decimal("555")
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        resultado = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        assert resultado["productos_restaurados"] == 0
+        assert resultado["productos_conservados"] == 1
+        assert resultado["conservados"][0]["reasons"] == ["edicion_manual_posterior"]
+        assert resultado["conservados"][0]["name"] == "Espejo"
+        await db_session.refresh(producto)
+        assert producto.sale_price_ars == Decimal("555")  # su edición gana
+
+    async def test_los_protegidos_salen_con_nombre_y_motivo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El backend ya calculaba los protegidos y los descartaba en silencio."""
+        archivo = await _archivo(db_session, sample_tenant)
+        creado = await _producto(db_session, sample_tenant, "Cuadro grande")
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[_detalle_producto(creado, "CREATED")],
+        )
+        # Venta MANUAL posterior sobre ese producto (sin source_upload_id).
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                product_id=creado.id,
+                amount=Decimal("500"),
+                quantity=1,
+                transaction_date=datetime.now(UTC),
+                payment_method="cash",
+                provenance="REAL",
+            )
+        )
+        await db_session.flush()
+
+        previo = await preview_file_deletion(db_session, archivo.id, sample_tenant.tenant_id)
+        assert [c["name"] for c in previo["conservados"]] == ["Cuadro grande"]
+        assert previo["conservados"][0]["reasons"] == ["venta_manual_posterior"]
+
+        resultado = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+        assert [c["name"] for c in resultado["conservados"]] == ["Cuadro grande"]
+        await db_session.refresh(creado)
+        assert creado.is_active is True  # sobrevive: tiene ventas del usuario

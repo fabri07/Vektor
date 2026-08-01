@@ -48,6 +48,7 @@ from app.application.services._ledger_restore import (
     restore_from_before,
 )
 from app.application.services.stock_service import void_movement
+from app.domain.file_deletion_reasons import PreservationReason
 from app.domain.ingestion_version import INGESTION_VERSION_WITH_LEDGER
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -316,6 +317,7 @@ async def preview_file_deletion(
     # desactivar productos que después sobreviven.
     creados = await _product_ids_created_by_file(session, file_id, tenant_id)
     productos_activos = 0
+    conservados: list[dict[str, Any]] = []
     if creados:
         protegidos = await _products_with_live_external_sales(
             session, tenant_id, creados, excluir_archivo=file_id
@@ -330,8 +332,48 @@ async def preview_file_deletion(
             )
         )
         productos_activos = res.scalar_one()
+        # Los protegidos se calculaban SOLO para restarlos del conteo y se
+        # descartaban: el usuario veía "5 productos" sin saber que otros 3 iban a
+        # sobrevivir. Ahora salen con nombre y motivo.
+        conservados.extend(
+            await _describir_conservados(
+                session,
+                tenant_id,
+                protegidos,
+                [PreservationReason.VENTA_MANUAL_POSTERIOR],
+            )
+        )
+
+    # Productos que el archivo MODIFICÓ: se les devuelve su valor anterior, salvo
+    # que alguien los haya editado después (ahí se conservan y se informan).
+    a_restaurar, conservados_por_edicion = await _clasificar_productos_modificados(
+        session, file_id, tenant_id
+    )
+    conservados.extend(conservados_por_edicion)
 
     con_ledger = await _has_import_ledger(session, file_id, tenant_id)
+    if not con_ledger:
+        conservados.append(
+            {
+                "entity_type": "product",
+                "id": str(file_id),
+                "name": "(productos de este archivo)",
+                "reasons": [PreservationReason.SIN_LEDGER.value],
+                "fields": [],
+            }
+        )
+    if otros_ya_clasificados:
+        conservados.append(
+            {
+                "entity_type": "product",
+                "id": str(file_id),
+                "name": f"({otros_ya_clasificados} filas ya clasificadas desde «Otros»)",
+                "reasons": [
+                    PreservationReason.OTRO_CLASIFICADO_HISTORICO_SIN_PROCEDENCIA.value
+                ],
+                "fields": [],
+            }
+        )
 
     return {
         "ventas": ventas,
@@ -344,7 +386,79 @@ async def preview_file_deletion(
         # Sin ledger no se puede saber qué productos creó este archivo: se avisa
         # en vez de adivinar (los productos quedan y hay que revisarlos a mano).
         "productos_no_rastreables": not con_ledger,
+        "productos_a_restaurar": a_restaurar,
+        "conservados": conservados,
     }
+
+
+async def _describir_conservados(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_ids: set[uuid.UUID],
+    reasons: list[PreservationReason],
+) -> list[dict[str, Any]]:
+    """Convierte ids en filas con nombre y motivo, para mostrar al usuario.
+
+    Un id suelto no le dice nada a nadie: el punto de informar lo conservado es
+    que se pueda ir a revisarlo.
+    """
+    if not product_ids:
+        return []
+    res = await session.execute(
+        select(Product.id, Product.name).where(
+            Product.tenant_id == tenant_id, Product.id.in_(product_ids)
+        )
+    )
+    return [
+        {
+            "entity_type": "product",
+            "id": str(pid),
+            "name": nombre,
+            "reasons": [r.value for r in reasons],
+            "fields": [],
+        }
+        for pid, nombre in res.all()
+    ]
+
+
+async def _clasificar_productos_modificados(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> tuple[int, list[dict[str, Any]]]:
+    """(cuántos se pueden restaurar, cuáles se conservan) — READ-ONLY.
+
+    Comparte criterio con la reversa: se restaura el ``before`` del PRIMER item y
+    se compara el ``after`` del ÚLTIMO contra el estado actual. Acá NO se muta —
+    el preview es una estimación; la decisión autoritativa la toma el DELETE
+    dentro de su transacción.
+    """
+    items = await _product_items_updated_by_file(session, file_id, tenant_id)
+    primero: dict[uuid.UUID, DataRepairItem] = {}
+    ultimo: dict[uuid.UUID, DataRepairItem] = {}
+    for it in items:
+        if it.product_id is None:
+            continue
+        primero.setdefault(it.product_id, it)
+        ultimo[it.product_id] = it
+
+    restaurables = 0
+    conservados: list[dict[str, Any]] = []
+    for pid, item in primero.items():
+        prod = await session.get(Product, pid)
+        if prod is None or prod.tenant_id != tenant_id:
+            continue
+        if entity_changed_since_ledger(prod, ultimo[pid].after_json):
+            conservados.append(
+                {
+                    "entity_type": "product",
+                    "id": str(pid),
+                    "name": prod.name,
+                    "reasons": [PreservationReason.EDICION_MANUAL_POSTERIOR.value],
+                    "fields": [],
+                }
+            )
+        elif item.before_json:
+            restaurables += 1
+    return restaurables, conservados
 
 
 async def revert_file_data(
@@ -353,7 +467,7 @@ async def revert_file_data(
     tenant_id: uuid.UUID,
     *,
     actor_user_id: uuid.UUID | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Revierte todo lo que este archivo importó. NO commitea (lo hace el caller).
 
     Revierte también lo editado a mano: es la decisión de producto, y el usuario
@@ -371,6 +485,10 @@ async def revert_file_data(
         "productos_restaurados": 0,
         "productos_conservados": 0,
     }
+    # Lo que sobrevive al borrado, con nombre y motivo. Se devuelve al caller para
+    # que el DELETE lo informe: un borrado que no puede revertir todo tiene que
+    # decirlo, no responder 204 como si hubiera limpiado.
+    conservados: list[dict[str, Any]] = []
 
     # 1. Ventas y gastos → soft delete auditado (el dashboard ya filtra por
     #    `voided_at IS NULL`, así que desaparecen de la interfaz).
@@ -429,6 +547,16 @@ async def revert_file_data(
         for producto in productos_res.scalars().all():
             producto.is_active = False
             contadores["productos"] += 1
+        # Los protegidos sobreviven: el usuario tiene que saber CUÁLES y por qué,
+        # o el borrado le miente diciendo que limpió todo.
+        conservados.extend(
+            await _describir_conservados(
+                session,
+                tenant_id,
+                protegidos,
+                [PreservationReason.VENTA_MANUAL_POSTERIOR],
+            )
+        )
 
     # 3-bis. Productos que el archivo MODIFICÓ (no creó) → restaurar su `before`.
     #    El ledger lo venía guardando y nadie lo leía: un archivo que pisaba el
@@ -459,6 +587,15 @@ async def revert_file_data(
         # archivo dejó el producto.
         if entity_changed_since_ledger(_prod, _ultimo_item[_pid].after_json):
             contadores["productos_conservados"] += 1
+            conservados.append(
+                {
+                    "entity_type": "product",
+                    "id": str(_pid),
+                    "name": _prod.name,
+                    "reasons": [PreservationReason.EDICION_MANUAL_POSTERIOR.value],
+                    "fields": [],
+                }
+            )
             continue
         if restore_from_before(_prod, "product", _item.before_json or {}):
             contadores["productos_restaurados"] += 1
@@ -491,11 +628,31 @@ async def revert_file_data(
     #    pero quedan huellas colgadas de datos que ya no existen.
     await _delete_import_fingerprints(session, tenant_id, file_id)
 
+    # Sin ledger no se puede afirmar qué productos creó el archivo: se informa
+    # como conservado en vez de adivinar.
+    if not await _has_import_ledger(session, file_id, tenant_id):
+        conservados.append(
+            {
+                "entity_type": "product",
+                "id": str(file_id),
+                "name": "(productos de este archivo)",
+                "reasons": [PreservationReason.SIN_LEDGER.value],
+                "fields": [],
+            }
+        )
+
     session.add(
         DecisionAuditLog(
             tenant_id=tenant_id,
             decision_type="INGESTION_FILE_DELETED_WITH_DATA",
-            decision_data={"file_id": str(file_id), **contadores},
+            decision_data={
+                "file_id": str(file_id),
+                **contadores,
+                # La auditoría guarda TAMBIÉN lo que no se pudo revertir: sin eso,
+                # un borrado parcial es indistinguible de uno completo al leer el
+                # log meses después.
+                "conservados": conservados,
+            },
             triggered_by="ingestion:delete_file",
             actor_user_id=actor_user_id,
             context={"source": "file_deletion_service.revert_file_data"},
@@ -505,9 +662,12 @@ async def revert_file_data(
     logger.info(
         "ingestion.delete.reverted",
         file_id=str(file_id),
+        conservados=len(conservados),
         **contadores,
     )
-    return contadores
+    contadores_out: dict[str, Any] = dict(contadores)
+    contadores_out["conservados"] = conservados
+    return contadores_out
 
 
 async def _delete_import_fingerprints(

@@ -125,10 +125,12 @@ from app.schemas.ingestion import (
     EntityFieldCatalog,
     FieldCatalogEntry,
     FileDeletionPreviewResponse,
+    FileDeletionResult,
     FilePreviewResponse,
     FileStatusItem,
     MasterPreviewSample,
     MasterPreviewSummary,
+    PreservedEntity,
     RereadApplyStartResponse,
     RereadCounts,
     RereadItem,
@@ -714,7 +716,7 @@ async def get_deletion_preview(
 
 @router.delete(
     "/files/{file_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=FileDeletionResult,
     summary="Elimina un archivo y revierte los datos que importó",
     dependencies=[Depends(require_modify_access)],
 )
@@ -730,7 +732,7 @@ async def delete_file(
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
-) -> None:
+) -> FileDeletionResult:
     """Borra el archivo Y revierte lo que importó.
 
     Antes esto solo hacía ``deleted_at = now()``: el archivo desaparecía de la
@@ -800,14 +802,36 @@ async def delete_file(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="No se puede eliminar un archivo mientras se importa.",
             )
+        # El CAS perdió: el archivo es de otro request (un confirm en curso o un
+        # delete que ya revirtió). No se revierte nada — hacerlo borraría datos
+        # que este request no marcó como suyos.
+        _revertido: dict[str, Any] = {}
     else:
-        # La reversa va SOLO si el CAS ganó. Si perdió la carrera, el archivo es
-        # de otro (un confirm en curso, u otro delete que ya revirtió): revertir
-        # igual borraría datos que este request no marcó como suyos.
-        await revert_file_data(
+        # La reversa va SOLO si el CAS ganó.
+        _revertido = await revert_file_data(
             session, file_id, tenant.tenant_id, actor_user_id=user.user_id
         )
     await session.commit()
+
+    # Respuesta explícita, nunca un 204 mudo: la UI necesita distinguir "se
+    # eliminó todo" de "se eliminó, pero N cosas quedaron y hay que revisarlas".
+    # Estos números salen de la reversa YA ejecutada dentro de la transacción —
+    # el preview era una estimación previa, esto es lo que efectivamente pasó.
+    _conservados = [
+        PreservedEntity(**c) for c in cast("list[Any]", _revertido.get("conservados", []))
+    ]
+    return FileDeletionResult(
+        fully_reverted=not _conservados,
+        deleted={
+            "sales": int(_revertido.get("ventas", 0)),
+            "expenses": int(_revertido.get("gastos", 0)),
+            "products": int(_revertido.get("productos", 0)),
+            "stock_movements": int(_revertido.get("movimientos_stock", 0)),
+            "others": int(_revertido.get("otros", 0)),
+        },
+        restored={"products": int(_revertido.get("productos_restaurados", 0))},
+        conservados=_conservados,
+    )
 
 
 @router.post(

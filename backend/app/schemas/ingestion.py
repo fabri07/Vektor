@@ -84,6 +84,21 @@ class MasterPreviewSummary(BaseModel):
     samples: list[MasterPreviewSample] = Field(default_factory=list)
 
 
+class PreservedEntity(BaseModel):
+    """Una entidad que sobrevive al borrado, y por qué.
+
+    ``fields`` se completa SOLO cuando la decisión es por campo
+    (``campo_modificado_posteriormente``): dice cuáles no se restauran, mientras
+    el resto de la entidad sí vuelve a su valor anterior.
+    """
+
+    entity_type: Literal["product", "customer", "supplier", "sale", "expense"]
+    id: UUID
+    name: str
+    reasons: list[str]
+    fields: list[str] = []
+
+
 class FileDeletionPreviewResponse(BaseModel):
     """Qué datos se lleva puestos el borrado de un archivo.
 
@@ -106,6 +121,30 @@ class FileDeletionPreviewResponse(BaseModel):
     # El archivo se importó antes del ledger de reversa: no se puede saber qué
     # productos creó, así que quedan vivos y hay que revisarlos a mano.
     productos_no_rastreables: bool
+    # Productos que el archivo MODIFICÓ y a los que se les va a devolver su valor
+    # anterior (no se borran: ya existían).
+    productos_a_restaurar: int = 0
+    # Lo que NO se va a poder revertir, con nombre y motivo. El backend ya sabía
+    # calcularlo y lo descartaba en silencio; sin esto el borrado prometía una
+    # limpieza que no cumplía.
+    conservados: list[PreservedEntity] = []
+
+
+class FileDeletionResult(BaseModel):
+    """Resultado del borrado. Siempre 200, nunca un 204 mudo.
+
+    ``fully_reverted`` es la afirmación que la UI necesita para elegir entre
+    "se eliminó todo" y "se eliminó, pero quedaron N cosas". Su valor lo decide el
+    DELETE dentro de su transacción — el preview es una estimación previa, no una
+    promesa: entre las dos llamadas alguien pudo registrar una venta o editar un
+    producto.
+    """
+
+    status: Literal["deleted"] = "deleted"
+    fully_reverted: bool
+    deleted: dict[str, int]
+    restored: dict[str, int]
+    conservados: list[PreservedEntity] = []
 
 
 class FilePreviewResponse(BaseModel):

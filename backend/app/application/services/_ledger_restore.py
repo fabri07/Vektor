@@ -101,15 +101,58 @@ def captured_updated_at(after: dict[str, Any] | None) -> str | None:
     return (after or {}).get("updated_at")
 
 
+# Claves del snapshot que no son campos del modelo (metadatos del ledger) o cuya
+# reversa no pasa por `setattr` (`stock_units`, ver docstring del módulo).
+_NO_COMPARABLES: frozenset[str] = frozenset({"updated_at", "id", "kind", "stock_units"})
+
+
+def fields_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> list[str]:
+    """Campos cuyo valor de HOY ya no es el que dejó el import.
+
+    Compara valor contra valor, no timestamps. ``updated_at`` no demuestra QUIÉN
+    produjo un cambio ni CUÁL: puede moverlo un proceso automático, otra
+    importación, o no moverse en absoluto si dos escrituras caen en el mismo
+    tick del reloj del motor. Ese último caso no es teórico — lo expuso un test.
+
+    El valor del ledger se convierte al tipo del modelo antes de comparar
+    (``Decimal("777") == Decimal("777.00")`` es ``True``; ``"777" == Decimal(...)``
+    no lo sería).
+    """
+    cambiados: list[str] = []
+    for campo, valor_ledger in (after or {}).items():
+        if campo in _NO_COMPARABLES:
+            continue
+        if not hasattr(entity, campo):
+            continue
+        try:
+            esperado = coerce_restore_value(campo, valor_ledger)
+        except (ValueError, TypeError, ArithmeticError):
+            # Un valor del snapshot que ya no parsea con el tipo actual: se trata
+            # como "cambió" para no restaurar sobre una suposición.
+            cambiados.append(campo)
+            continue
+        if getattr(entity, campo) != esperado:
+            cambiados.append(campo)
+    return cambiados
+
+
 def entity_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> bool:
     """¿Alguien tocó la entidad DESPUÉS de que el import/relectura la dejó así?
 
-    Compara el ``updated_at`` actual contra el capturado en el ``after``. Es una
-    protección de grano grueso: dice que hubo UN cambio, no cuál ni quién.
+    Dos señales, y alcanza con una:
+
+    1. Algún campo capturado ya no vale lo que el ledger dejó — evidencia directa,
+       independiente del reloj.
+    2. El ``updated_at`` se movió — cubre los campos que el snapshot NO capturó.
+
+    Ninguna de las dos sola alcanza: la primera no ve cambios en campos fuera del
+    snapshot, y la segunda no ve nada si las dos escrituras caen en el mismo tick.
 
     **El caller debe refrescar la entidad antes de llamar**: ``updated_at`` tiene
     ``onupdate`` server-side y puede quedar expirado tras flushes previos de la
     misma transacción (mismo patrón MissingGreenlet del resto del servicio).
     """
+    if fields_changed_since_ledger(entity, after):
+        return True
     actual = entity.updated_at.isoformat() if entity.updated_at else None
     return captured_updated_at(after) != actual

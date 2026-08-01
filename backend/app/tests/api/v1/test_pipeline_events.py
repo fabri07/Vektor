@@ -225,7 +225,7 @@ class TestSoftDeletePreservesRaw:
                 f"/api/v1/ingestion/files/{file_id}?confirm=true",
                 headers=auth_headers,
             )
-        assert response.status_code == 204
+        assert response.status_code == 200
         # El crudo NO se borra de R2.
         mock_s3_delete.assert_not_called()
 

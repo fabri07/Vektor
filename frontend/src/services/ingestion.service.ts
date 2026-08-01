@@ -193,6 +193,34 @@ export interface FileDeletionPreview {
   has_user_edits: boolean;
   /** Archivo importado antes del ledger: sus productos no se pueden rastrear. */
   productos_no_rastreables: boolean;
+  /** Productos que el archivo MODIFICÓ y vuelven a su valor anterior. */
+  productos_a_restaurar: number;
+  /** Lo que NO se va a poder revertir, con nombre y motivo. */
+  conservados: PreservedEntity[];
+}
+
+/**
+ * Una entidad que sobrevive al borrado, y por qué. `fields` sólo viene cuando la
+ * decisión es por campo: dice cuáles no se restauran mientras el resto sí.
+ */
+export interface PreservedEntity {
+  entity_type: "product" | "customer" | "supplier" | "sale" | "expense";
+  id: string;
+  name: string;
+  reasons: string[];
+  fields: string[];
+}
+
+/**
+ * Resultado del borrado. El endpoint dejó de responder 204 mudo: la UI necesita
+ * distinguir "se eliminó todo" de "se eliminó, pero quedaron N cosas".
+ */
+export interface FileDeletionResult {
+  status: "deleted";
+  fully_reverted: boolean;
+  deleted: Record<string, number>;
+  restored: Record<string, number>;
+  conservados: PreservedEntity[];
 }
 
 export interface TenantColumnMapping {
@@ -441,8 +469,11 @@ export const ingestionService = {
    * y los productos que creó). `confirm` es obligatorio: sin él el backend
    * responde 409 con el preview y no toca nada.
    */
-  async deleteFile(fileId: string, confirm = false): Promise<void> {
-    await api.delete(`/ingestion/files/${fileId}?confirm=${confirm}`);
+  async deleteFile(fileId: string, confirm = false): Promise<FileDeletionResult> {
+    const res = await api.delete<FileDeletionResult>(
+      `/ingestion/files/${fileId}?confirm=${confirm}`,
+    );
+    return res.data;
   },
 
   async reprocessFile(fileId: string): Promise<void> {

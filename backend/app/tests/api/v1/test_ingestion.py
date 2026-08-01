@@ -1981,7 +1981,14 @@ class TestConfirmLeaseF4:
             f"/api/v1/ingestion/files/{confirmed_file.id}?confirm=true",
             headers=auth_headers,
         )
-        assert borrado.status_code == 204
+        assert borrado.status_code == 200
+        # Respuesta explícita, no un 204 mudo: la UI tiene que poder distinguir
+        # "se borró todo" de "se borró, pero quedaron cosas".
+        _cuerpo = borrado.json()
+        assert _cuerpo["status"] == "deleted"
+        assert isinstance(_cuerpo["fully_reverted"], bool)
+        assert _cuerpo["deleted"]["sales"] == len(vivas)
+        assert "conservados" in _cuerpo
 
         despues = (
             (
@@ -2009,7 +2016,7 @@ class TestConfirmLeaseF4:
             f"/api/v1/ingestion/files/{confirmed_file.id}?confirm=true",
             headers=auth_headers,
         )
-        assert response.status_code == 204
+        assert response.status_code == 200
 
         refreshed = (
             await db_session.execute(
