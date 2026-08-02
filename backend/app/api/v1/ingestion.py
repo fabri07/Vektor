@@ -453,6 +453,34 @@ async def list_files(
     )
 
 
+@router.get(
+    "/files/{file_id}",
+    response_model=FileStatusItem,
+    summary="Get a single ingested file by id",
+)
+async def get_file(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> UploadedFile:
+    """Estado de UN archivo, sin depender de la paginación del listado.
+
+    `GET /files` pagina de a 50 ordenando por fecha descendente, así que quien
+    abre un link a un archivo viejo no tiene garantía de encontrarlo ahí. Sin
+    esta ruta, el front no podía distinguir "no existe" de "no entró en la
+    página" y terminaba avisando que el archivo se había eliminado sobre uno
+    que estaba vivo.
+
+    El 404 es lo que le da derecho a esa afirmación: solo se devuelve cuando el
+    archivo no existe para este tenant o fue borrado.
+    """
+    repo = FileRepository(session)
+    archivo = await repo.get_by_id(file_id, tenant.tenant_id)
+    if archivo is None:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return archivo
+
+
 async def _build_master_previews(
     session: AsyncSession,
     tenant_id: uuid.UUID,

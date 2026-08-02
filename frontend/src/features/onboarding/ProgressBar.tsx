@@ -8,7 +8,9 @@
 const MILESTONES = [
   { step: 1, label: "Datos principales" },
   { step: 2, label: "Archivos" },
-  { step: 3, label: "Tu score" },
+  // No es "Tu score": el puntaje no sale del alta. Sale de datos importados,
+  // y para importar hay que revisar antes cómo se interpreta cada columna.
+  { step: 3, label: "Siguiente paso" },
 ] as const;
 
 interface ProgressBarProps {

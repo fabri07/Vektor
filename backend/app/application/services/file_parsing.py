@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
 
 from app.domain.expense_categories import strip_accents
+from app.domain.header_keys import match_key
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -94,6 +95,14 @@ NOMBRE_COLS = {"producto", "nombre"}
 PRODUCTO_COLS = CATALOGO_COLS | NOMBRE_COLS | {"stock", "descripcion"}
 FECHA_COLS = {"fecha", "date", "dia", "mes", "periodo"}
 
+# Fechas que NO son de una operación: son un atributo de la persona. Se restan de
+# la señal de fecha TRANSACCIONAL (`has_fecha_transaccional`), que es la que usa
+# la regla de maestros para descartar un documento con movimientos. Sin esto, un
+# maestro de clientes con "Fecha de nacimiento" activaba `has_fecha` (match por
+# substring de "fecha") y no podía clasificar como clientes — aunque
+# `fecha_nacimiento` esté listada como señal de cliente más abajo.
+FECHA_NO_TRANSACCIONAL_COLS = {"nacimiento", "cumpleanos", "cumpleaños", "cumple"}
+
 # FASE 3: señales de compra de mercadería/insumos para reventa (→ inventario, no gasto).
 # Conservador: solo se rerutea a stock si HAY mercadería Y una columna de cantidad.
 MERCADERIA_COLS = {"mercaderia", "mercadería", "insumo", "insumos", "reposicion", "reposición"}
@@ -105,11 +114,16 @@ CANTIDAD_COLS = {"cantidad", "unidades", "unidad", "qty", "cant"}
 # FUERTES de contexto (scoring), y ante empate/ausencia → "general" (el usuario confirma).
 MONEY_COLS = {"monto", "importe", "total", "precio", "valor", "monto_total", "importe_total"}
 # Señales fuertes de venta (cliente, ticket, factura emitida, cobro, caja, medio de pago).
+# La FORMA DE PAGO queda deliberadamente afuera: un libro de compras también trae
+# "forma_pago"/"medio_pago", así que no discrimina venta de gasto — solo dice que
+# hay una operación. Cuando estaba acá le empataba el score a una compra real
+# (proveedor=1 vs forma_pago=1) y la regla -1 no disparaba: el libro de compras
+# se importaba como catálogo y se perdían el COGS y la salida de caja. La señal
+# vive en FORMA_PAGO_COLS/`has_forma_pago`, que es lo que usa esa regla.
 VENTA_SIGNAL_COLS = {
     "venta", "ventas", "vendido", "vendida", "ingreso", "ingresos", "facturacion",
     "facturación", "factura_emitida", "ticket", "cliente", "consumidor", "cobro",
-    "cobrado", "caja", "medio_pago", "metodo_pago", "método_pago", "forma_pago",
-    "fecha_venta",
+    "cobrado", "caja", "fecha_venta",
 }
 # Señales fuertes de gasto/egreso (proveedor, categoría, concepto, servicio, etc.).
 # Nota: "pago" suelto NO se incluye — colisiona con "metodo/medio_pago" (señal de venta).
@@ -129,10 +143,18 @@ GASTO_SIGNAL_COLS = {
 # "valor" quedan FUERA a propósito: en un catálogo "precio" es precio de lista, no un
 # monto de operación.
 TRANSACCION_MONTO_COLS = {"total", "monto", "importe", "monto_total", "importe_total"}
-# Columna de método/forma de pago (efectivo, transferencia, tarjeta…).
-FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago", "método_pago", "forma_de_pago"}
+# Columna de método/forma de pago (efectivo, transferencia, tarjeta…). Se matchea
+# contra la CLAVE del header (`match_key`), que colapsa preposiciones, así que
+# alcanza con la forma canónica: "medio_de_pago" entra por "medio_pago". La
+# variante con tilde sí hay que declararla — la clave no normaliza acentos.
+FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago", "método_pago"}
 # Columna de proveedor (contraparte de una compra).
 PROVEEDOR_COLS = {"proveedor", "proveedores"}
+
+# Columnas que nombran un PRECIO. Aparecen en el catálogo tanto como en una
+# transacción, así que una señal de venta/gasto que salga de una de ellas
+# ("precio_venta" matchea "venta") no cuenta como contexto de operación.
+PRECIO_COL_KEYS = {"precio", "costo", "valor"}
 
 # F7a: señales de identidad fiscal/contacto para maestros de CLIENTES/PROVEEDORES
 # (aditivo — no implementa import todavía, solo detección/mapeo). Discriminadores
@@ -141,8 +163,13 @@ PROVEEDOR_COLS = {"proveedor", "proveedores"}
 # "dni"/"cliente"; uno de proveedores trae "cuil"/"proveedor". "cuit" queda fuera
 # de ambos sets discriminadores porque lo usan tanto empresas-cliente como
 # proveedores — no desempata por sí solo.
+# "documento" entra acá porque es como identifica a la persona buena parte de los
+# maestros reales (columna "Documento" + columna "Tipo"), no "DNI". Riesgo asumido:
+# un maestro de PROVEEDORES que use "Documento" en vez de "CUIL" va a caer en
+# clientes — corregible desde el selector de sección de la hoja, y mejor que el
+# "stock" que daba antes.
 CLIENTE_SIGNAL_COLS = {
-    "cliente", "clientes", "consumidor", "dni", "cumpleanos", "cumpleaños",
+    "cliente", "clientes", "consumidor", "dni", "documento", "cumpleanos", "cumpleaños",
     "fecha_nacimiento",
 }
 PROVEEDOR_MASTER_COLS = {"proveedor", "proveedores", "cuil", "contacto"}
@@ -378,11 +405,34 @@ def infer_source_format(filename: str, mime: str) -> str:
 def analyze_headers(headers: list[str]) -> dict[str, Any]:
     """Classify headers and infer spreadsheet type."""
     normalized = [h.lower().strip().replace(" ", "_") for h in headers]
+    # Clave heurística (sin preposiciones) para las señales que matchean EXACTO:
+    # "medio_de_pago" y "medio_pago" son el mismo header. Se usa solo donde hace
+    # falta — el resto de las señales sigue matcheando contra `normalized`.
+    collapsed = [match_key(col) for col in normalized]
 
     has_fecha = any(any(k in col for k in FECHA_COLS) for col in normalized)
+    # Fecha de OPERACIÓN: la de nacimiento/cumpleaños es un atributo de la persona
+    # y no evidencia de que el documento tenga movimientos. Señal separada a
+    # propósito: `has_fecha` conserva su significado para el resto del sistema.
+    has_fecha_transaccional = any(
+        any(k in col for k in FECHA_COLS)
+        and not any(k in col for k in FECHA_NO_TRANSACCIONAL_COLS)
+        for col in normalized
+    )
     # FASE 3: venta/gasto por señales FUERTES de contexto (no por columna de dinero).
     venta_score = sum(any(k in col for k in VENTA_SIGNAL_COLS) for col in normalized)
     gasto_score = sum(any(k in col for k in GASTO_SIGNAL_COLS) for col in normalized)
+    # Contexto de OPERACIÓN: una señal de venta/gasto que NO venga de una columna de
+    # precio. "precio_venta" matchea "venta" por substring, pero es cómo se llama un
+    # campo del catálogo — no evidencia de que haya una venta registrada. Sin este
+    # filtro, una lista de precios con fecha de alta y una columna "Total" (valuación
+    # del stock) tendría las tres señales de operación y se importaría como ventas,
+    # inventando facturación.
+    has_contexto_operacion = any(
+        (any(k in col for k in VENTA_SIGNAL_COLS) or any(k in col for k in GASTO_SIGNAL_COLS))
+        and not any(p in col for p in PRECIO_COL_KEYS)
+        for col in normalized
+    )
     has_venta = venta_score > 0
     has_gasto = gasto_score > 0
     has_producto = any(any(k in col for k in PRODUCTO_COLS) for col in normalized)
@@ -401,7 +451,7 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     # operación + método de pago + proveedor. Se exige coincidencia exacta de columna
     # para no disparar con sufijos espurios.
     has_monto_transaccion = any(col in TRANSACCION_MONTO_COLS for col in normalized)
-    has_forma_pago = any(col in FORMA_PAGO_COLS for col in normalized)
+    has_forma_pago = any(key in FORMA_PAGO_COLS for key in collapsed)
     has_proveedor = any(col in PROVEEDOR_COLS for col in normalized)
 
     # F7a: señales de maestro de clientes/proveedores (identidad fiscal/contacto).
@@ -415,6 +465,8 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
 
     inferred_type = infer_spreadsheet_type(
         has_fecha=has_fecha,
+        has_fecha_transaccional=has_fecha_transaccional,
+        has_contexto_operacion=has_contexto_operacion,
         has_venta=has_venta,
         has_gasto=has_gasto,
         has_producto=has_producto,
@@ -465,6 +517,8 @@ def infer_spreadsheet_type(
     cliente_score: int = 0,
     proveedor_master_score: int = 0,
     has_identidad_contacto: bool = False,
+    has_fecha_transaccional: bool | None = None,
+    has_contexto_operacion: bool | None = None,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
@@ -475,8 +529,9 @@ def infer_spreadsheet_type(
         gasto (COGS) y salida de caja; el catálogo no la captura. CONSERVADOR: solo se
         dispara cuando, sin esta regla, el archivo caería en "stock" por error.
     -0.5 (F7a). MAESTRO DE CLIENTES/PROVEEDORES: señal de identidad fiscal/contacto
-        (dni/cliente para clientes; cuil/proveedor para proveedores) SIN ninguna señal
-        transaccional (monto de operación, cantidad, fecha) NI de catálogo fuerte
+        (dni/documento/cliente para clientes; cuil/proveedor para proveedores) SIN
+        ninguna señal transaccional (monto de operación, cantidad, fecha de
+        OPERACIÓN — una fecha de nacimiento no cuenta) NI de catálogo fuerte
         (sku/codigo/inventario/articulo/item — regla 1) → clientes/proveedores.
         Disjunta con la regla -1 (esa exige monto+fecha; esta los excluye), así el
         orden entre ambas no importa. El guard de catálogo evita que un CATÁLOGO de
@@ -489,9 +544,19 @@ def infer_spreadsheet_type(
     2. Señal de nombre/producto sin venta explícita → stock.
     3. Señal de nombre/producto sin fecha → stock (lista de precios, catálogo).
     4. Señal de nombre/producto + precio ambiguo (no venta transaccional) → stock.
-    5. Sin señales de catálogo: fecha + venta → ventas; fecha + gasto → gastos.
-    6. Fallbacks por señales sueltas.
+    5. Señal de nombre/producto CON evidencia transaccional completa (fecha + monto
+       de la operación + contexto de venta/gasto) → sigue al scoring, no a stock.
+       Sin la evidencia completa → stock.
+    6. Sin señales de catálogo: fecha + venta → ventas; fecha + gasto → gastos.
+    7. Fallbacks por señales sueltas.
     """
+    # Los callers que no distinguen la fecha de operación de la de nacimiento, ni el
+    # contexto fuerte del que sale de una columna de precio, mantienen el
+    # comportamiento previo.
+    if has_fecha_transaccional is None:
+        has_fecha_transaccional = has_fecha
+    if has_contexto_operacion is None:
+        has_contexto_operacion = has_venta or has_gasto
     # Regla -1 (CONSERVADORA): un LIBRO DE COMPRAS de mercadería tiene a la vez columnas
     # de catálogo (sku/producto/cantidad) Y de operación (monto de transacción + fecha +
     # forma de pago/proveedor). Sin esta regla, las señales de catálogo lo clasificarían
@@ -536,7 +601,7 @@ def infer_spreadsheet_type(
         has_maestro_signal
         and not has_monto_transaccion
         and not has_cantidad
-        and not has_fecha
+        and not has_fecha_transaccional
         and not has_catalogo_fuerte
     ):
         if proveedor_master_score > cliente_score:
@@ -566,10 +631,22 @@ def infer_spreadsheet_type(
     if has_nombre and has_precio_ambiguo and not has_venta:
         return "stock"
 
-    # Nombre/producto + fecha + venta transaccional → ambiguo; preferimos stock en Véktor
-    # porque las listas de precios con precio_venta son más comunes que las exportaciones
-    # de ventas con columna "nombre" en el contexto de negocios argentinos.
-    if has_nombre:
+    # Nombre/producto con las tres señales de OPERACIÓN juntas (fecha + monto de la
+    # transacción + contexto de venta/gasto que no salga de una columna de precio) no
+    # es ambiguo: es un libro de ventas o de gastos con columna de producto, y sigue al
+    # scoring de abajo. Sin alguna de las tres, la señal de nombre gana y es catálogo.
+    #
+    # Este era el desempate "ante la duda, stock". Pero las tres reglas de arriba ya
+    # filtran todo lo demás, así que este return solo era alcanzable con
+    # nombre+venta+fecha — o sea que no desempataba un caso dudoso: pisaba exactamente
+    # las exportaciones de ventas.
+    #
+    # El contexto tiene que ser fuerte: un catálogo con "precio_venta" ya activa
+    # `has_venta` por substring, y si además trae fecha de alta y una columna "Total"
+    # (valuación del stock) tendría las tres señales sin ser una transacción.
+    if has_nombre and not (
+        has_fecha and has_monto_transaccion and has_contexto_operacion
+    ):
         return "stock"
 
     # FASE 3: discriminación venta vs gasto por CONTEXTO (scoring de señales fuertes).

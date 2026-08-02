@@ -159,7 +159,32 @@ export interface CalculatingResponse {
   status: "CALCULATING";
 }
 
-export type LatestScoreResponse = HealthScoreV2Response | CalculatingResponse;
+/**
+ * El tenant es real y todavía no cargó ningún dato: no hay score ni lo va a
+ * haber hasta que importe algo. Es una respuesta distinta de `CALCULATING` —
+ * ahí no hay nada esperando, hay que pedirle datos.
+ *
+ * Faltaba en esta unión, así que el compilador dejaba pasar consumidores que
+ * sólo contemplaban las otras dos y leían `score_total` de un payload que no
+ * lo tiene (`NaN` en pantalla).
+ *
+ * Declarar los tres miembros no alcanza por sí solo: un `as
+ * HealthScoreV2Response` en el consumidor anula el chequeo igual. Quien lea
+ * esta unión tiene que estrecharla con el type predicate `esScoreReal`
+ * (`dashboard.service`), nunca castear.
+ */
+export interface NoDataResponse {
+  status: "NO_DATA";
+  score: null;
+  score_level: string;
+  is_demo_data: boolean;
+  mensaje: string;
+}
+
+export type LatestScoreResponse =
+  | HealthScoreV2Response
+  | CalculatingResponse
+  | NoDataResponse;
 
 export interface InsightResponse {
   id: string;

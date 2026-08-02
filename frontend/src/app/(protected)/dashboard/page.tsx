@@ -4,7 +4,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef } from "react";
 import { customersService } from "@/services/customers.service";
-import { fetchCurrentInsight, fetchLatestScore } from "@/services/dashboard.service";
+import {
+  esScoreReal,
+  fetchCurrentInsight,
+  fetchLatestScore,
+} from "@/services/dashboard.service";
+import { clasificarLatestScore } from "@/services/health_score.service";
 import { expensesService } from "@/services/expenses.service";
 import { fetchMomentumProfile } from "@/services/momentum.service";
 import { productsService } from "@/services/products.service";
@@ -16,15 +21,17 @@ import { EmptyState } from "@/features/dashboard/EmptyState";
 import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
 import { DashboardSummaryCards } from "@/features/dashboard/DashboardSummaryCards";
 import { HealthAlertBanner } from "@/components/dashboard/HealthAlertBanner";
-import type { HealthScoreV2Response } from "@/types/api";
 
+// Sólo "¿hay que seguir esperando?". El resto de los estados se resuelven con
+// `esScoreReal`. Esta función tenía antes una copia propia de la clasificación
+// que sólo reconocía "CALCULATING", y por eso un `NO_DATA` se colaba entero
+// hasta el cast y el dashboard se armaba alrededor de un objeto sin
+// `score_total`.
+//
+// El `data != null` importa: `refetchInterval` corre antes del primer fetch,
+// con `data` en `undefined`, y ahí no hay nada que clasificar todavía.
 function isCalculating(data: unknown): boolean {
-  return (
-    typeof data === "object" &&
-    data !== null &&
-    "status" in data &&
-    (data as { status: string }).status === "CALCULATING"
-  );
+  return data != null && clasificarLatestScore(data) === "calculating";
 }
 
 function formatDateParam(date: Date): string {
@@ -72,11 +79,14 @@ export default function DashboardPage() {
     retry: 1,
   });
 
+  // Sin cast: `esScoreReal` es un type predicate, así que adentro del `&&` el
+  // compilador ya sabe que `scoreData` es un HealthScoreV2Response. Con el
+  // `as` puesto, agregar un cuarto estado en el backend no habría dado ni un
+  // error de compilación.
   const scoreHasData =
-    scoreData != null &&
-    !isCalculating(scoreData) &&
-    (scoreData as HealthScoreV2Response).confidence_level !== "LOW" &&
-    (scoreData as HealthScoreV2Response).data_completeness_score >= 50;
+    esScoreReal(scoreData) &&
+    scoreData.confidence_level !== "LOW" &&
+    scoreData.data_completeness_score >= 50;
 
   const { data: insightData, isLoading: insightLoading } = useQuery({
     queryKey: ["insights", "current"],
@@ -142,9 +152,11 @@ export default function DashboardPage() {
     );
   }
 
-  const noScore = scoreError || scoreData == null || calculatingTimeout;
-
-  if (noScore) {
+  // `!esScoreReal` cubre `NO_DATA` y el `CALCULATING` que agotó los reintentos:
+  // cualquier payload que no sea un score termina en el empty state. Antes
+  // `NO_DATA` seguía de largo y el dashboard se armaba alrededor de un objeto
+  // sin `score_total`.
+  if (scoreError || calculatingTimeout || !esScoreReal(scoreData)) {
     return (
       <div className="space-y-5">
         <DashboardLaunchpadNav active="dashboard" />
@@ -153,7 +165,8 @@ export default function DashboardPage() {
     );
   }
 
-  const score = scoreData as HealthScoreV2Response;
+  // Ya estrechado por el `esScoreReal` del early return: sin cast.
+  const score = scoreData;
   const lastWeek = momentumData?.weekly_history?.at(-1);
   const delta = lastWeek?.delta ?? null;
   const isBestScore =

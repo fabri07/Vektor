@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { clasificarLatestScore } from "@/services/health_score.service";
 import type {
   LatestScoreResponse,
   CurrentInsightResponse,
@@ -10,6 +11,22 @@ import type {
 export async function fetchLatestScore(): Promise<LatestScoreResponse> {
   const { data } = await api.get<LatestScoreResponse>("/health-scores/latest");
   return data;
+}
+
+/**
+ * Type predicate sobre la unión de tres estados de `/health-scores/latest`.
+ *
+ * Existe para que el dashboard no necesite `as HealthScoreV2Response`: con el
+ * cast puesto, el compilador no obligaba a cubrir `CALCULATING` ni `NO_DATA`
+ * —la seguridad dependía por completo de acordarse de chequear en runtime— y
+ * agregar un cuarto estado en el backend no habría dado ni un error de
+ * compilación. La clasificación NO se reimplementa acá: delega en
+ * `clasificarLatestScore`, que es la única definición.
+ */
+export function esScoreReal(
+  data: LatestScoreResponse | undefined,
+): data is HealthScoreV2Response {
+  return clasificarLatestScore(data) === "score";
 }
 
 export async function fetchCurrentInsight(): Promise<CurrentInsightResponse> {

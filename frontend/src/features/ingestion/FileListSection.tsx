@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, CheckCircle, History } from "lucide-react";
 import {
@@ -96,7 +97,20 @@ interface RereadState {
 export function FileListSection() {
   const queryClient = useQueryClient();
   const addToast = useToastStore((s) => s.add);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // `?file=<id>` abre ese archivo ya expandido: es como llega el usuario desde
+  // el final del onboarding, donde le dijimos que le falta revisarlo. Aterrizar
+  // en una tabla y tener que buscar cuál era sería mandarlo a adivinar.
+  const searchParams = useSearchParams();
+  const fileIdApuntado = searchParams.get("file");
+  const [expandedId, setExpandedId] = useState<string | null>(fileIdApuntado);
+
+  // El inicializador de `useState` sólo corre al montar. Next mantiene el
+  // componente montado ante un cambio de query dentro de la misma ruta, así
+  // que sin este efecto navegar a `?file=` estando ya en /ingestion no abría
+  // nada, en silencio.
+  useEffect(() => {
+    if (fileIdApuntado) setExpandedId(fileIdApuntado);
+  }, [fileIdApuntado]);
   // Archivo pendiente de confirmar borrado. El borrado revierte datos de
   // negocio, así que va detrás de una advertencia con los conteos reales — un
   // `confirm()` del navegador no podía mostrarlos.
@@ -130,7 +144,17 @@ export function FileListSection() {
     entities: RereadNotRevertedEntity[];
   } | null>(null);
 
-  const { data: files = [], isLoading } = useQuery<UploadedFileItem[]>({
+  // `isError` NO es opcional acá: sin él, el `= []` del default convierte
+  // cualquier fallo (500, timeout de 15s del cliente contra Neon frío, red
+  // caída) en "no hay archivos cargados todavía". El usuario lee que su
+  // archivo no existe cuando en realidad no se pudo preguntar.
+  const {
+    data: files = [],
+    isLoading,
+    isError,
+    refetch,
+    isRefetching,
+  } = useQuery<UploadedFileItem[]>({
     queryKey: ["ingestion-files"],
     queryFn: ingestionService.listFiles,
     refetchInterval: (query) => {
@@ -138,6 +162,66 @@ export function FileListSection() {
       return data && hasActiveFiles(data) ? 3_000 : 30_000;
     },
   });
+
+  /*
+   * El panel de mapeo sólo se monta con NEEDS_CONFIRMATION, pero el archivo se
+   * parsea de forma asíncrona: quien llega desde "Revisar mi archivo" puede
+   * caer con el parseo todavía corriendo, fallado, o incompleto. Sin este
+   * aviso ve una tabla donde no se abre nada y no tiene forma de saber por qué
+   * — le prometimos una revisión y le mostramos silencio.
+   */
+  /*
+   * El listado pagina de a 50 ordenando por fecha descendente, así que que el
+   * archivo apuntado no esté ahí NO prueba que no exista: puede ser viejo y
+   * haber quedado fuera de la página. Se pregunta por él puntualmente, y sólo
+   * un 404 (`getFile` → null) habilita a decir que se eliminó.
+   */
+  const faltaEnLaPagina = Boolean(
+    fileIdApuntado &&
+      !isLoading &&
+      !isError &&
+      !files.some((f) => f.id === fileIdApuntado),
+  );
+  const { data: apuntadoSuelto, isLoading: cargandoApuntado } = useQuery<
+    UploadedFileItem | null
+  >({
+    queryKey: ["ingestion-file", fileIdApuntado],
+    queryFn: () => ingestionService.getFile(fileIdApuntado as string),
+    enabled: faltaEnLaPagina,
+  });
+
+  const avisoDeepLink = useMemo(() => {
+    if (!fileIdApuntado || isLoading || isError) return null;
+    const apuntado =
+      files.find((f) => f.id === fileIdApuntado) ?? apuntadoSuelto ?? null;
+    if (!apuntado) {
+      // Todavía preguntando, o la consulta falló: en ninguno de los dos casos
+      // sabemos que no existe, así que no se afirma nada.
+      if (cargandoApuntado || apuntadoSuelto === undefined) return null;
+      return "No encontramos el archivo que venías a revisar. Puede que se haya eliminado.";
+    }
+    const nombre = apuntado.original_filename;
+    switch (apuntado.processing_status) {
+      case "PENDING":
+      case "PROCESSING":
+        return `Estamos leyendo «${nombre}». En cuanto termine vas a poder revisar cómo interpretamos cada columna.`;
+      case "FAILED":
+        return `No pudimos leer «${nombre}». Probá volver a procesarlo desde la fila, o subilo de nuevo.`;
+      case "NEEDS_COMPLETION":
+        return `«${nombre}» necesita que completes algunos datos antes de poder importarlo.`;
+      default:
+        // NEEDS_CONFIRMATION abre el panel; IMPORTING y DONE ya se explican
+        // en su propia fila.
+        return null;
+    }
+  }, [
+    fileIdApuntado,
+    files,
+    isLoading,
+    isError,
+    apuntadoSuelto,
+    cargandoApuntado,
+  ]);
 
   // Filtra por los mismos valores que muestran las celdas de la tabla:
   // nombre, tipo, etiqueta de estado (en español) y fecha formateada.
@@ -439,7 +523,36 @@ export function FileListSection() {
         </div>
       )}
 
-      {!isLoading && files.length === 0 && (
+      {avisoDeepLink && (
+        <div
+          role="status"
+          className="rounded-lg border border-vk-info/30 bg-vk-info-bg/40 px-4 py-3 text-sm text-vk-text-primary"
+        >
+          {avisoDeepLink}
+        </div>
+      )}
+
+      {!isLoading && isError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-vk-danger/30 bg-vk-danger/5 px-4 py-3"
+        >
+          <p className="text-sm text-vk-text-primary">
+            No pudimos cargar tus archivos. Es un problema de conexión con el
+            servidor, no quiere decir que no tengas archivos subidos.
+          </p>
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            disabled={isRefetching}
+            className="flex-shrink-0 rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-1.5 text-xs font-semibold text-vk-text-primary transition-colors hover:bg-vk-bg-light disabled:opacity-50"
+          >
+            {isRefetching ? "Reintentando…" : "Reintentar"}
+          </button>
+        </div>
+      )}
+
+      {!isLoading && !isError && files.length === 0 && (
         <p className="text-sm text-vk-text-muted">No hay archivos cargados todavía.</p>
       )}
 

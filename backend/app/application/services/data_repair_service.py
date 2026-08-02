@@ -347,7 +347,19 @@ def _re_evaluate_summary(summary: dict[str, Any]) -> str | None:
             for col in [h.lower().strip().replace(" ", "_") for h in summary.get("columns", [])]
         )
     )
-    from app.application.services.file_parsing import CATALOGO_COLS, NOMBRE_COLS  # noqa: PLC0415
+    from app.application.services.file_parsing import (  # noqa: PLC0415
+        CATALOGO_COLS,
+        FECHA_COLS,
+        FECHA_NO_TRANSACCIONAL_COLS,
+        FORMA_PAGO_COLS,
+        GASTO_SIGNAL_COLS,
+        NOMBRE_COLS,
+        PRECIO_COL_KEYS,
+        PROVEEDOR_COLS,
+        TRANSACCION_MONTO_COLS,
+        VENTA_SIGNAL_COLS,
+    )
+    from app.domain.header_keys import match_key  # noqa: PLC0415
 
     # Derivar headers de la lista "columns" guardada, o de las claves de las primeras filas
     # cuando "columns" es null (formato viejo que no lo almacenaba).
@@ -361,21 +373,63 @@ def _re_evaluate_summary(summary: dict[str, Any]) -> str | None:
                 break
 
     headers_norm = [h.lower().strip().replace(" ", "_") for h in stored_columns]
+    collapsed = [match_key(col) for col in headers_norm]
     has_catalogo_fuerte = any(any(k in col for k in CATALOGO_COLS) for col in headers_norm)
     has_nombre = any(any(k in col for k in NOMBRE_COLS) for col in headers_norm)
 
+    # Señales de OPERACIÓN, derivadas de los headers guardados con las mismas reglas
+    # que `analyze_headers`. Sin ellas, esta re-evaluación se quedaba con la lógica
+    # vieja y devolvía "stock" para un archivo de ventas legítimo con columna de
+    # producto — es decir, lo proponía para que le anularan las ventas.
+    #
+    # has_fecha/has_venta/has_gasto/has_producto siguen viniendo del summary
+    # guardado a propósito: los summaries viejos se calcularon con sets de keywords
+    # anteriores, y recalcularlos desde los headers cambiaría el tipo de archivos
+    # legacy que este detector justamente tiene que reconocer.
+    has_monto_transaccion = any(col in TRANSACCION_MONTO_COLS for col in headers_norm)
+    has_forma_pago = any(key in FORMA_PAGO_COLS for key in collapsed)
+    has_proveedor = any(col in PROVEEDOR_COLS for col in headers_norm)
+    venta_score = sum(any(k in col for k in VENTA_SIGNAL_COLS) for col in headers_norm)
+    gasto_score = sum(any(k in col for k in GASTO_SIGNAL_COLS) for col in headers_norm)
+    has_contexto_operacion = any(
+        (any(k in col for k in VENTA_SIGNAL_COLS) or any(k in col for k in GASTO_SIGNAL_COLS))
+        and not any(p in col for p in PRECIO_COL_KEYS)
+        for col in headers_norm
+    )
+    has_fecha_transaccional = any(
+        any(k in col for k in FECHA_COLS)
+        and not any(k in col for k in FECHA_NO_TRANSACCIONAL_COLS)
+        for col in headers_norm
+    )
+
     current_type = infer_spreadsheet_type(
         has_fecha=has_fecha,
+        has_fecha_transaccional=has_fecha_transaccional if headers_norm else None,
+        has_contexto_operacion=has_contexto_operacion if headers_norm else None,
         has_venta=has_venta,
         has_gasto=has_gasto,
         has_producto=has_producto,
         has_precio_ambiguo=has_precio_ambiguo,
         has_catalogo_fuerte=has_catalogo_fuerte,
         has_nombre=has_nombre,
+        has_monto_transaccion=has_monto_transaccion,
+        has_forma_pago=has_forma_pago,
+        has_proveedor=has_proveedor,
+        venta_score=venta_score,
+        gasto_score=gasto_score,
     )
 
     if current_type == "stock":
         return "stock"
+
+    # El fallback de abajo compensa el sesgo del clasificador VIEJO, que dejaba
+    # ganar has_venta+has_fecha sobre has_producto. No aplica cuando la
+    # re-evaluación actual vio la evidencia de operación completa (fecha de
+    # operación + monto de la transacción): ahí "ventas"/"gastos" es un libro real
+    # con columna de producto, no un catálogo mal guardado, y mandarlo al fallback
+    # lo propondría para que le anulen los movimientos.
+    if has_monto_transaccion and has_fecha_transaccional and current_type in ("ventas", "gastos"):
+        return current_type
 
     # Fallback para el bug original (has_venta+has_fecha ganaba sobre has_producto).
     # Solo aplica cuando el summary guardado tenía inferred_type="ventas" Y has_producto=True.

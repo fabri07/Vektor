@@ -346,6 +346,25 @@ export const ingestionService = {
   },
 
   /**
+   * Un archivo puntual por id. `null` cuando el backend responde 404, que es la
+   * única evidencia de que no existe o fue eliminado.
+   *
+   * `listFiles` pagina de a 50 ordenando por fecha descendente, así que no
+   * alcanza para resolver un link a un archivo viejo: no aparecer en esa
+   * página no prueba nada sobre el archivo.
+   */
+  async getFile(fileId: string): Promise<UploadedFileItem | null> {
+    try {
+      const res = await api.get<UploadedFileItem>(`/ingestion/files/${fileId}`);
+      return res.data;
+    } catch (err) {
+      const axiosErr = err as AxiosError;
+      if (axiosErr.response?.status === 404) return null;
+      throw err; // 500/red: no se pudo preguntar ≠ no existe
+    }
+  },
+
+  /**
    * Returns null when the file is still PENDING/PROCESSING (backend returns 409).
    * Throws on other errors (404, 500, etc.).
    */

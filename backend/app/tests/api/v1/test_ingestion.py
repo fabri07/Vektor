@@ -506,6 +506,89 @@ class TestListFilesEndpoint:
         assert data[0]["processing_status"] == PROCESSING_STATUS_NEEDS_CONFIRMATION
 
 
+# ── Get single file tests ─────────────────────────────────────────────────────
+
+
+def _archivo(tenant_id: Any, nombre: str, *, status: str = "PENDING") -> UploadedFile:
+    return UploadedFile(
+        tenant_id=tenant_id,
+        uploaded_by=None,
+        original_filename=nombre,
+        s3_key=f"uploads/test/{nombre}",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=500,
+        purpose="ventas",
+        status="uploaded",
+        processing_status=status,
+    )
+
+
+@pytest.mark.asyncio
+class TestGetFileEndpoint:
+    async def test_encuentra_un_archivo_fuera_de_la_primera_pagina(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """El listado pagina de a 50 por defecto y ordena por fecha descendente.
+
+        Quien abre un link a un archivo viejo no puede depender de que entre en
+        esa ventana: el front no tenía forma de preguntar por uno puntual y
+        terminaba diciendo "puede que se haya eliminado" sobre un archivo vivo.
+        """
+        viejo = _archivo(sample_tenant.tenant_id, "el_viejo.xlsx")
+        db_session.add(viejo)
+        await db_session.flush()
+        for i in range(55):
+            db_session.add(_archivo(sample_tenant.tenant_id, f"nuevo_{i}.xlsx"))
+        await db_session.commit()
+
+        listado = await client.get("/api/v1/ingestion/files", headers=auth_headers)
+        assert viejo.id not in {f["id"] for f in listado.json()}  # cae fuera de la página
+
+        resp = await client.get(
+            f"/api/v1/ingestion/files/{viejo.id}", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        assert resp.json()["original_filename"] == "el_viejo.xlsx"
+
+    async def test_archivo_de_otro_tenant_da_404(
+        self,
+        client: AsyncClient,
+        second_auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        ajeno = _archivo(sample_tenant.tenant_id, "ajeno.xlsx")
+        db_session.add(ajeno)
+        await db_session.commit()
+
+        resp = await client.get(
+            f"/api/v1/ingestion/files/{ajeno.id}", headers=second_auth_headers
+        )
+        assert resp.status_code == 404
+
+    async def test_archivo_borrado_da_404(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """El 404 es lo que le da derecho al front a decir "se eliminó"."""
+        borrado = _archivo(sample_tenant.tenant_id, "borrado.xlsx")
+        borrado.deleted_at = datetime.now(UTC)
+        db_session.add(borrado)
+        await db_session.commit()
+
+        resp = await client.get(
+            f"/api/v1/ingestion/files/{borrado.id}", headers=auth_headers
+        )
+        assert resp.status_code == 404
+
+
 # ── Preview tests ─────────────────────────────────────────────────────────────
 
 
@@ -1531,12 +1614,23 @@ class TestIngestionWorkers:
     async def test_analyze_headers_high_confidence(self) -> None:
         from app.jobs.ingestion_worker import _analyze_headers
 
-        # Sin señal de catálogo (sin "producto"/"sku"/etc.) → HIGH
-        headers = ["fecha", "monto", "descripcion", "metodo_pago"]
+        # Fecha + señal fuerte de venta y sin señal de catálogo → HIGH
+        headers = ["fecha", "monto", "descripcion", "cliente"]
         result = _analyze_headers(headers)
         assert result["confidence"] == "HIGH"
         assert result["has_fecha"] is True
         assert result["has_venta"] is True
+
+    async def test_analyze_headers_metodo_pago_solo_no_es_venta(self) -> None:
+        """Un método de pago no prueba que sea una venta: un libro de gastos trae
+        la misma columna. Antes estos headers daban has_venta=True y confidence
+        HIGH — se importaban como facturación sin que nadie lo confirmara."""
+        from app.jobs.ingestion_worker import _analyze_headers
+
+        result = _analyze_headers(["fecha", "monto", "descripcion", "metodo_pago"])
+        assert result["has_venta"] is False
+        assert result["confidence"] == "MEDIUM"
+        assert result["inferred_type"] == "general"  # ambiguo → lo confirma el usuario
 
     async def test_analyze_headers_medium_confidence(self) -> None:
         from app.jobs.ingestion_worker import _analyze_headers

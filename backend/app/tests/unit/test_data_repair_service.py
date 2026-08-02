@@ -68,6 +68,37 @@ def test_re_evaluate_empty_summary_returns_none():
     assert _re_evaluate_summary({}) is None
 
 
+def test_re_evaluate_no_marca_una_venta_legitima_como_stock():
+    """Un archivo de ventas con columna de producto NO es un import mal clasificado.
+
+    El detector re-evalúa con `infer_spreadsheet_type`, pero no le pasaba
+    `has_monto_transaccion`, así que se quedaba con la lógica vieja: devolvía
+    "stock" y el archivo entraba como candidato de
+    `/admin/repairs/misclassified-product-imports` — o sea, candidato a que le
+    anulen las ventas. Con la evidencia transaccional completa (fecha + total +
+    cliente) la respuesta tiene que ser la misma que la del clasificador vivo.
+    """
+    summary = {
+        "has_fecha": True,
+        "has_venta": True,
+        "has_gasto": False,
+        "has_producto": True,
+        "columns": [
+            "fecha",
+            "hora",
+            "n°_comprobante",
+            "cliente_(tal_cual_se_anotó)",
+            "producto_(tal_cual_se_anotó)",
+            "cantidad",
+            "precio_unitario",
+            "total",
+            "medio_de_pago",
+        ],
+        "inferred_type": "ventas",
+    }
+    assert _re_evaluate_summary(summary) != "stock"
+
+
 # ── _extract_product_rows ─────────────────────────────────────────────────────
 
 

@@ -10,11 +10,13 @@ reaches score computation directly.
 
 Cache strategy
 --------------
-  Redis key  : business_state:v3:{tenant_id}     — JSON blob, TTL 24 h
-  Redis key  : last_inputs_hash:v3:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
+  Redis key  : business_state:v4:{tenant_id}     — JSON blob, TTL 24 h
+  Redis key  : last_inputs_hash:v4:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
 
-  El prefijo de versión (`v3:`) se bumpea cuando cambia el FORMATO del blob, para
-  no leer con el código nuevo lo que escribió el viejo. Ver `_cache_key`.
+  El prefijo de versión (`v4:`) se bumpea cuando cambia el FORMATO del blob **o el
+  SIGNIFICADO de alguno de sus campos**, para no leer con el código nuevo lo que
+  escribió el viejo. El segundo caso es el más traicionero: el blob deserializa
+  sin error y sirve números calculados con otras reglas. Ver `_cache_key`.
 
 On every call:
   1. Compute inputs fingerprint (sale_count, expense_count, product_count, profile.updated_at).
@@ -33,7 +35,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.verticals import try_parse_vertical
@@ -101,20 +103,24 @@ class BusinessState:
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 
-# v3: se eliminó el campo `ruleset` del estado, y con él la clave `"ruleset"`
-# del blob donde vivía escondido el vertical. Un blob v2 leído con este código
-# moriría con KeyError en `_deserialize_state`. El bump deja huérfanos los blobs
-# viejos (expiran solos con su TTL) en vez de romper el score de todos los
-# tenants durante las 24 h de CACHE_TTL_SECONDS posteriores al deploy.
+# v4: `data_completeness_score` cambió de SIGNIFICADO — ahora pondera por
+# procedencia (observado vs declarado). El blob v3 se deserializa sin error, que
+# es lo que lo hace peor que un cambio de formato: el fingerprint no depende del
+# código, así que un tenant sin movimientos nuevos seguiría sirviendo su
+# completeness vieja —y su confianza vieja— durante las 24 h de
+# CACHE_TTL_SECONDS posteriores al deploy, sin ninguna señal de que está
+# mostrando un número calculado con otras reglas.
 #
-# (v2 fue el bump anterior: los rulesets pasaron del código corto "kiosco" al
+# (v3: se eliminó el campo `ruleset` del estado, y con él la clave `"ruleset"`
+# del blob donde vivía escondido el vertical; un blob v2 moría con KeyError en
+# `_deserialize_state`. v2: los rulesets pasaron del código corto "kiosco" al
 # canónico "kiosco_almacen".)
 def _cache_key(tenant_id: UUID) -> str:
-    return f"business_state:v3:{tenant_id}"
+    return f"business_state:v4:{tenant_id}"
 
 
 def _hash_key(tenant_id: UUID) -> str:
-    return f"last_inputs_hash:v3:{tenant_id}"
+    return f"last_inputs_hash:v4:{tenant_id}"
 
 
 def _make_fingerprint(
@@ -203,6 +209,18 @@ def _deserialize_state(raw: str) -> BusinessState:
 # ── Completeness scoring ───────────────────────────────────────────────────────
 
 
+# Cuánto vale un input que sólo está DECLARADO (el dueño lo contestó en el
+# onboarding) frente al mismo input OBSERVADO (respaldado por transacciones,
+# arqueos o maestros cargados).
+#
+# El 0.4 no es arbitrario: con los seis inputs declarados y ninguno observado
+# el techo es 40 — por debajo de los 50 que la no-invention rule exige para
+# mostrar análisis. Es la propiedad que hace falta y está cubierta por un test.
+# Contestar un formulario no puede, por sí solo, habilitar conclusiones sobre
+# un negocio del que no se registró ni un movimiento.
+PESO_DECLARADO = 0.4
+
+
 def _compute_completeness(
     has_sales: bool,
     has_inventory_cost: bool,
@@ -210,21 +228,35 @@ def _compute_completeness(
     has_cash_on_hand: bool,
     product_count: int,
     supplier_count: int,
+    *,
+    sales_observado: bool = False,
+    inventory_cost_observado: bool = False,
+    fixed_expenses_observado: bool = False,
+    cash_observado: bool = False,
+    products_observado: bool = False,
+    suppliers_observado: bool = False,
 ) -> float:
-    score = 0.0
-    if has_sales:
-        score += 25.0
-    if has_inventory_cost:
-        score += 20.0
-    if has_fixed_expenses:
-        score += 15.0
-    if has_cash_on_hand:
-        score += 20.0
-    if product_count >= 5:
-        score += 10.0
-    if supplier_count >= 1:
-        score += 10.0
-    return score
+    """Completeness ponderada por PROCEDENCIA del dato, no sólo por presencia.
+
+    Antes contaba `has_*`, que se calculan sobre los `*_est` — y esos caen a
+    las estimaciones del onboarding cuando no hay datos reales. El resultado
+    era que la métrica medía "¿contestó la encuesta?" en vez de "¿tengo
+    datos?", y era justo la métrica que la no-invention rule usa de compuerta.
+    """
+
+    def _puntos(presente: bool, observado: bool, peso: float) -> float:
+        if not presente:
+            return 0.0
+        return peso if observado else peso * PESO_DECLARADO
+
+    return (
+        _puntos(has_sales, sales_observado, 25.0)
+        + _puntos(has_inventory_cost, inventory_cost_observado, 20.0)
+        + _puntos(has_fixed_expenses, fixed_expenses_observado, 15.0)
+        + _puntos(has_cash_on_hand, cash_observado, 20.0)
+        + _puntos(product_count >= 5, products_observado, 10.0)
+        + _puntos(supplier_count >= 1, suppliers_observado, 10.0)
+    )
 
 
 def _derive_confidence(score: float) -> str:
@@ -340,14 +372,31 @@ async def compute_business_state(
     prev_real_sales: Decimal = Decimal(str(prev_sale_result.scalar_one() or 0))
 
     # ── 3. Aggregate expenses (last 30 days) ─────────────────────────────────
-    # mercaderia cost = expenses categorized as 'mercaderia'
+    # Costo de mercadería = la frontera canónica COGS/OPEX (`expense_type`), la
+    # misma que usa FactsService. Antes filtraba `category == "mercaderia"`, que
+    # es un ALIAS: el catálogo canónico lo normaliza a `INVENTORY`
+    # (`expense_categories.py`) y ningún writer persiste esa forma, así que el
+    # predicado no podía ser verdadero nunca — la dimensión quedaba clavada en su
+    # peso declarado por más compras reales que hubiera.
+    #
+    # Las otras dos ramas cubren datos que `expense_type` solo no alcanza:
+    #   - `INVENTORY`: la migración 20260710_0001 agregó `expense_type` con
+    #     server_default 'OPEX' y SIN backfill, así que toda compra anterior
+    #     quedó marcada OPEX. Es el mismo criterio que usa
+    #     `scripts/backfill_expense_categories.py` para setear COGS.
+    #   - `"mercaderia"`: la forma legacy previa al catálogo canónico, en tenants
+    #     donde ese backfill todavía no corrió. Ningún writer actual la escribe,
+    #     así que no puede dar falsos positivos.
     inv_sum_result = await session.execute(
         select(func.sum(ExpenseEntry.amount), func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
             func.date(ExpenseEntry.transaction_date) <= window_end,
-            ExpenseEntry.category == "mercaderia",
+            or_(
+                ExpenseEntry.expense_type == "COGS",
+                ExpenseEntry.category.in_(("INVENTORY", "mercaderia")),
+            ),
         )
     )
     inv_row = inv_sum_result.one()
@@ -536,6 +585,11 @@ async def compute_business_state(
     # Caja "presente" si hay cualquier fuente real (arqueo, estimado o flujo líquido).
     has_cash_on_hand = cash_source != "desconocido"
 
+    # Procedencia de cada input: ¿lo respalda un dato del negocio, o sólo la
+    # respuesta del dueño en el alta? Es la distinción que `_compute_completeness`
+    # necesita para no confundir "contestó la encuesta" con "tengo datos".
+    # La caja es el único caso con tres fuentes: "arqueo" es un saldo medido y
+    # "flujo" sale de movimientos reales; "onboarding" es puramente declarado.
     completeness = _compute_completeness(
         has_sales=has_sales,
         has_inventory_cost=has_inventory_cost,
@@ -543,6 +597,24 @@ async def compute_business_state(
         has_cash_on_hand=has_cash_on_hand,
         product_count=product_count,
         supplier_count=supplier_count,
+        # Ventas es el ÚNICO input mezclado: con `sale_count < 10`,
+        # `monthly_sales_est` sigue siendo 70% la estimación declarada (ver el
+        # blend más arriba). Contar una sola venta real como "observado" le
+        # daría los 25 puntos completos a un revenue mayormente declarado —
+        # justo lo que este cambio existe para evitar. Se usa el mismo corte
+        # que el blend: recién en 10 el dato real pasa a dominar.
+        sales_observado=sale_count >= 10,
+        inventory_cost_observado=real_inventory_cost > 0,
+        fixed_expenses_observado=real_fixed_expenses > 0,
+        # A propósito NO se mira `cash_source`: su tiering prefiere el estimado
+        # del onboarding por sobre el flujo durante los 7 días del alta, así que
+        # atarse a él haría que la caja de un tenant con movimientos reales
+        # valiera 8 el día 1 y 20 el día 8 sin que cambie un solo dato. Acá la
+        # pregunta es otra: ¿hay evidencia real de caja, sin importar qué fuente
+        # ganó el desempate?
+        cash_observado=latest_counted_cash is not None or has_liquid_movements,
+        products_observado=real_product_count > 0,
+        suppliers_observado=real_supplier_count > 0,
     )
     confidence = _derive_confidence(completeness)
     main_concern = _derive_main_concern(
