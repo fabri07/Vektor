@@ -27,6 +27,29 @@ export interface HealthScoreLatest {
   created_at: string;
 }
 
+/** ¿El payload es uno de los estados sin score (trae `status`)? */
+function esPayloadDeEstado(data: unknown): data is { status: string } {
+  return typeof data === "object" && data !== null && "status" in data;
+}
+
+/**
+ * Clasifica cualquier respuesta de `/health-scores/latest`, que tiene TRES
+ * formas (backend `app/api/v1/health_scores.py`): el score,
+ * `{status: "CALCULATING"}` y `{status: "NO_DATA", score: null, …}`.
+ *
+ * Es la ÚNICA definición de "esto es un score / esto no lo es". El dashboard
+ * tenía su propia copia que sólo reconocía `CALCULATING`, y por eso un
+ * `NO_DATA` le pasaba de largo hasta el cast `as HealthScoreV2Response` y se
+ * renderizaba alrededor de un objeto sin `score_total`.
+ */
+export function clasificarLatestScore(
+  data: unknown,
+): "score" | "calculating" | "no_data" {
+  if (data == null) return "calculating";
+  if (!esPayloadDeEstado(data)) return "score";
+  return data.status === "NO_DATA" ? "no_data" : "calculating";
+}
+
 export const healthScoreService = {
   async getCurrent(): Promise<HealthScoreCurrent | null> {
     try {
@@ -35,20 +58,6 @@ export const healthScoreService = {
     } catch (err) {
       const axiosErr = err as AxiosError;
       if (axiosErr.response?.status === 404) return null;
-      return null;
-    }
-  },
-
-  async getLatest(): Promise<HealthScoreLatest | null> {
-    try {
-      const res = await api.get<HealthScoreLatest | { status: string }>(
-        "/health-scores/latest",
-      );
-      if ("status" in res.data && res.data.status === "CALCULATING") {
-        return null;
-      }
-      return res.data as HealthScoreLatest;
-    } catch {
       return null;
     }
   },
