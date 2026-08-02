@@ -34,6 +34,7 @@ jest.mock("@/stores/toastStore", () => ({
 jest.mock("@/services/ingestion.service", () => ({
   ingestionService: {
     listFiles: jest.fn(),
+    getFile: jest.fn(),
     deleteFile: jest.fn(),
     reprocessFile: jest.fn(),
     rereadPreview: jest.fn(),
@@ -44,6 +45,7 @@ jest.mock("@/services/ingestion.service", () => ({
 }));
 
 const mockListFiles = ingestionService.listFiles as jest.Mock;
+const mockGetFile = ingestionService.getFile as jest.Mock;
 const mockRereadPreview = ingestionService.rereadPreview as jest.Mock;
 const mockRereadApply = ingestionService.rereadApply as jest.Mock;
 const mockRereadRunStatus = ingestionService.rereadRunStatus as jest.Mock;
@@ -453,6 +455,56 @@ describe("FileListSection — deep link que no puede abrir el panel", () => {
   test("archivo ya importado no genera aviso", async () => {
     mockSearchParams.set("file", "file-1");
     mockListFiles.mockResolvedValue([fileWith("DONE")]);
+
+    renderList();
+
+    await screen.findByText("ventas.csv");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});
+
+describe("FileListSection — archivo apuntado fuera de la página del listado", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSearchParams.delete("file");
+  });
+
+  test("un archivo viejo que existe NO se reporta como eliminado", async () => {
+    // El listado devuelve de a 50 ordenados por fecha: un archivo viejo puede
+    // no estar ahí y seguir existiendo. Antes eso se leía como "se eliminó".
+    mockSearchParams.set("file", "file-viejo");
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+    mockGetFile.mockResolvedValue({
+      ...fileWith("PROCESSING"),
+      id: "file-viejo",
+      original_filename: "marzo.xlsx",
+    });
+
+    renderList();
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /estamos leyendo .*marzo\.xlsx/i,
+    );
+    expect(mockGetFile).toHaveBeenCalledWith("file-viejo");
+  });
+
+  test("recién con un 404 se afirma que se eliminó", async () => {
+    mockSearchParams.set("file", "file-fantasma");
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+    mockGetFile.mockResolvedValue(null); // 404 del backend
+
+    renderList();
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /puede que se haya eliminado/i,
+    );
+  });
+
+  test("si la consulta falla no se afirma nada", async () => {
+    // No poder preguntar no es evidencia de que el archivo no exista.
+    mockSearchParams.set("file", "file-viejo");
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+    mockGetFile.mockRejectedValue(new Error("500"));
 
     renderList();
 

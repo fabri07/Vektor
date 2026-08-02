@@ -170,10 +170,34 @@ export function FileListSection() {
    * aviso ve una tabla donde no se abre nada y no tiene forma de saber por qué
    * — le prometimos una revisión y le mostramos silencio.
    */
+  /*
+   * El listado pagina de a 50 ordenando por fecha descendente, así que que el
+   * archivo apuntado no esté ahí NO prueba que no exista: puede ser viejo y
+   * haber quedado fuera de la página. Se pregunta por él puntualmente, y sólo
+   * un 404 (`getFile` → null) habilita a decir que se eliminó.
+   */
+  const faltaEnLaPagina = Boolean(
+    fileIdApuntado &&
+      !isLoading &&
+      !isError &&
+      !files.some((f) => f.id === fileIdApuntado),
+  );
+  const { data: apuntadoSuelto, isLoading: cargandoApuntado } = useQuery<
+    UploadedFileItem | null
+  >({
+    queryKey: ["ingestion-file", fileIdApuntado],
+    queryFn: () => ingestionService.getFile(fileIdApuntado as string),
+    enabled: faltaEnLaPagina,
+  });
+
   const avisoDeepLink = useMemo(() => {
     if (!fileIdApuntado || isLoading || isError) return null;
-    const apuntado = files.find((f) => f.id === fileIdApuntado);
+    const apuntado =
+      files.find((f) => f.id === fileIdApuntado) ?? apuntadoSuelto ?? null;
     if (!apuntado) {
+      // Todavía preguntando, o la consulta falló: en ninguno de los dos casos
+      // sabemos que no existe, así que no se afirma nada.
+      if (cargandoApuntado || apuntadoSuelto === undefined) return null;
       return "No encontramos el archivo que venías a revisar. Puede que se haya eliminado.";
     }
     const nombre = apuntado.original_filename;
@@ -190,7 +214,14 @@ export function FileListSection() {
         // en su propia fila.
         return null;
     }
-  }, [fileIdApuntado, files, isLoading, isError]);
+  }, [
+    fileIdApuntado,
+    files,
+    isLoading,
+    isError,
+    apuntadoSuelto,
+    cargandoApuntado,
+  ]);
 
   // Filtra por los mismos valores que muestran las celdas de la tabla:
   // nombre, tipo, etiqueta de estado (en español) y fecha formateada.
