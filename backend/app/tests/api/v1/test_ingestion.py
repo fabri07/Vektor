@@ -1531,12 +1531,23 @@ class TestIngestionWorkers:
     async def test_analyze_headers_high_confidence(self) -> None:
         from app.jobs.ingestion_worker import _analyze_headers
 
-        # Sin señal de catálogo (sin "producto"/"sku"/etc.) → HIGH
-        headers = ["fecha", "monto", "descripcion", "metodo_pago"]
+        # Fecha + señal fuerte de venta y sin señal de catálogo → HIGH
+        headers = ["fecha", "monto", "descripcion", "cliente"]
         result = _analyze_headers(headers)
         assert result["confidence"] == "HIGH"
         assert result["has_fecha"] is True
         assert result["has_venta"] is True
+
+    async def test_analyze_headers_metodo_pago_solo_no_es_venta(self) -> None:
+        """Un método de pago no prueba que sea una venta: un libro de gastos trae
+        la misma columna. Antes estos headers daban has_venta=True y confidence
+        HIGH — se importaban como facturación sin que nadie lo confirmara."""
+        from app.jobs.ingestion_worker import _analyze_headers
+
+        result = _analyze_headers(["fecha", "monto", "descripcion", "metodo_pago"])
+        assert result["has_venta"] is False
+        assert result["confidence"] == "MEDIUM"
+        assert result["inferred_type"] == "general"  # ambiguo → lo confirma el usuario
 
     async def test_analyze_headers_medium_confidence(self) -> None:
         from app.jobs.ingestion_worker import _analyze_headers

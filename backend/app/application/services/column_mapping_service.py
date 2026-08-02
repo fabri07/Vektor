@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.header_keys import match_key
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -325,12 +326,6 @@ def _normalize_col(col: str) -> str:
     return col.lower().strip().replace(" ", "_").replace("-", "_")
 
 
-# Preposiciones y artículos que no aportan al matching. "Precio de compra" y
-# "Precio compra" son el mismo header para una heurística; escribir las dos
-# variantes en cada set de keywords sería inmantenible.
-_STOPWORDS: frozenset[str] = frozenset({"de", "del", "la", "el", "los", "las", "por"})
-
-
 def _match_key(normalized: str) -> str:
     """Clave de matching heurístico: el header normalizado sin preposiciones.
 
@@ -344,11 +339,12 @@ def _match_key(normalized: str) -> str:
 
     Deliberadamente NO se toca ``_normalize_col``: esa alimenta el historial
     persistido por tenant.
+
+    La implementación vive en ``app.domain.header_keys`` porque el clasificador de
+    hojas la necesita para lo mismo; acá queda el alias para no tocar los call
+    sites ni el razonamiento de arriba.
     """
-    parts = [p for p in normalized.split("_") if p and p not in _STOPWORDS]
-    # Un header que sea SOLO stopwords ("de") dejaría la clave vacía; se devuelve
-    # el original antes que una cadena vacía.
-    return "_".join(parts) or normalized
+    return match_key(normalized)
 
 
 # Los mismos keywords ya pasados por `_match_key`, precomputados al importar: el
