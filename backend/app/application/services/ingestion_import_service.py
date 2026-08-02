@@ -478,6 +478,27 @@ def _bump_reference_counts(counts: dict[str, Any], prefix: str, outcome: str) ->
     counts[key] = counts.get(key, 0) + 1
 
 
+# Bucket del summary donde el PARSER dejó las filas de cada tipo de hoja.
+#
+# La clave es que se indexa por el tipo ORIGINAL (el que adivinó el parser), no
+# por el efectivo: si el usuario reasigna una hoja, las filas siguen estando
+# donde el parser las dejó. Una hoja de clientes que el parser mandó a productos
+# tiene sus filas en `stock_detectado`, y reasignarla a Clientes tiene que ir a
+# buscarlas ahí.
+#
+# Vive a nivel de módulo para que el dispatch transaccional y el import de
+# maestros usen LA MISMA tabla: mientras el de maestros asumía
+# `clientes_detectados`, el override a Clientes confirmaba sin error y no
+# importaba nada.
+ENTITY_BUCKET = {
+    "sale": "ventas_detectadas",
+    "expense": "gastos_detectados",
+    "product": "stock_detectado",
+    "customer": "clientes_detectados",
+    "supplier": "proveedores_detectados",
+}
+
+
 def _rows_for_context(bucket: list[dict[str, Any]], ctx_id: str) -> list[dict[str, Any]]:
     """Filtra un bucket de filas por ``__context__`` (multi-hoja). Si las filas no
     llevan el marcador (archivo de un solo contexto, ej. un CSV de clientes
@@ -566,6 +587,7 @@ async def _import_master_entities(
     context_confirmed: dict[str, bool] | None,
     column_mappings: dict[str, str] | None,
     counts: dict[str, Any],
+    context_entity: dict[str, str] | None = None,
 ) -> None:
     """Paso 1/2 del orden maestro→transacción: importa clientes y proveedores
     ANTES de cualquier venta/gasto, reusando los import services de F7b
@@ -574,9 +596,18 @@ async def _import_master_entities(
     commit intermedio, así que si algo posterior falla, el rollback integral
     también deshace estas altas/actualizaciones.
 
-    Recorre los contextos ``entity_type in ("customer", "supplier")`` de
-    ``mapping_contexts`` (siempre presente — ``file_parsing`` arma al menos el
-    contexto "table" para un archivo de una sola hoja). Sin mapeo explícito
+    Recorre los contextos cuya entidad EFECTIVA es ``customer``/``supplier``:
+    la que eligió el usuario (``context_entity``) o, si no la tocó, la que
+    adivinó el parser. Antes leía sólo el ``entity_type`` del summary, así que
+    corregir a mano una hoja mal clasificada no llegaba hasta acá — el usuario
+    elegía "Clientes", confirmaba sin error y no se importaba nada.
+
+    Las filas se buscan en el bucket del tipo ORIGINAL (``ENTITY_BUCKET``), que
+    es donde el parser las dejó: una hoja de clientes clasificada como productos
+    las tiene en ``stock_detectado``, no en ``clientes_detectados``.
+
+    ``mapping_contexts`` siempre está presente — ``file_parsing`` arma al menos
+    el contexto "table" para un archivo de una sola hoja. Sin mapeo explícito
     (``context_mappings``/``column_mappings``) para esa hoja, no se importa esta
     corrida: no hay forma de saber qué columna es el DNI/CUIT/email de cada
     fila sin adivinar el shape de los datos.
@@ -594,16 +625,18 @@ async def _import_master_entities(
     )
 
     for ctx in summary.get("mapping_contexts") or []:
-        entity = ctx.get("entity_type")
+        base_entity = ctx.get("entity_type")
         ctx_id = str(ctx.get("context_id") or "")
+        # Entidad EFECTIVA: la corrección del usuario le gana a la del parser.
+        entity = (context_entity or {}).get(ctx_id) or base_entity
         if entity == "customer":
             confirm_key = "clientes"
-            bucket_key = "clientes_detectados"
         elif entity == "supplier":
             confirm_key = "proveedores"
-            bucket_key = "proveedores_detectados"
         else:
             continue
+        # Las filas están donde las dejó el parser, no donde el usuario las mandó.
+        bucket_key = ENTITY_BUCKET.get(base_entity or "", "otros_detectados")
 
         # Inclusión: por contexto si vino context_confirmed; si no, por tipo
         # (legacy) — mismo criterio que el dispatch de ventas/gastos/productos.
@@ -2681,6 +2714,7 @@ async def _insert_confirmed_data_impl(
         context_confirmed,
         column_mappings,
         counts,
+        context_entity=context_entity,
     )
 
     # Batch anti-N+1: precargar las huellas de import del tenant una sola vez
@@ -4883,10 +4917,12 @@ async def _insert_multisheet_data(
         counts["productos"] += 1
         return False  # creó/actualizó producto: no es captura
 
+    # Tipos que este dispatch importa. Los maestros ya pasaron por
+    # `_import_master_entities` (orden maestro→transacción) y se saltean abajo.
     entity_bucket = {
-        "sale": "ventas_detectadas",
-        "expense": "gastos_detectados",
-        "product": "stock_detectado",
+        "sale": ENTITY_BUCKET["sale"],
+        "expense": ENTITY_BUCKET["expense"],
+        "product": ENTITY_BUCKET["product"],
     }
     entity_confirm_key = {"sale": "ventas", "expense": "gastos", "product": "productos"}
 
@@ -4928,8 +4964,12 @@ async def _insert_multisheet_data(
             elif not confirmed_fields.get(entity_confirm_key[entity]):
                 continue
             # Las filas viven en el bucket del tipo ORIGINAL de la hoja (o en
-            # otros_detectados si era no clasificada y fue reasignada).
-            bucket_key = entity_bucket.get(base_entity or "", "otros_detectados")
+            # otros_detectados si era no clasificada y fue reasignada). Se usa
+            # ENTITY_BUCKET —el mapa completo, con maestros— y no `entity_bucket`:
+            # una hoja que el parser mandó a Clientes y el usuario reasignó a
+            # Ventas tiene sus filas en `clientes_detectados`, y con el mapa
+            # recortado caía a `otros_detectados` y no se importaba nada.
+            bucket_key = ENTITY_BUCKET.get(base_entity or "", "otros_detectados")
             bucket = summary.get(bucket_key, [])
             rows = [r for r in bucket if r.get("__context__") == ctx_id]
             if not rows:
