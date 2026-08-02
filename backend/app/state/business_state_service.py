@@ -35,7 +35,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.verticals import try_parse_vertical
@@ -372,14 +372,31 @@ async def compute_business_state(
     prev_real_sales: Decimal = Decimal(str(prev_sale_result.scalar_one() or 0))
 
     # ── 3. Aggregate expenses (last 30 days) ─────────────────────────────────
-    # mercaderia cost = expenses categorized as 'mercaderia'
+    # Costo de mercadería = la frontera canónica COGS/OPEX (`expense_type`), la
+    # misma que usa FactsService. Antes filtraba `category == "mercaderia"`, que
+    # es un ALIAS: el catálogo canónico lo normaliza a `INVENTORY`
+    # (`expense_categories.py`) y ningún writer persiste esa forma, así que el
+    # predicado no podía ser verdadero nunca — la dimensión quedaba clavada en su
+    # peso declarado por más compras reales que hubiera.
+    #
+    # Las otras dos ramas cubren datos que `expense_type` solo no alcanza:
+    #   - `INVENTORY`: la migración 20260710_0001 agregó `expense_type` con
+    #     server_default 'OPEX' y SIN backfill, así que toda compra anterior
+    #     quedó marcada OPEX. Es el mismo criterio que usa
+    #     `scripts/backfill_expense_categories.py` para setear COGS.
+    #   - `"mercaderia"`: la forma legacy previa al catálogo canónico, en tenants
+    #     donde ese backfill todavía no corrió. Ningún writer actual la escribe,
+    #     así que no puede dar falsos positivos.
     inv_sum_result = await session.execute(
         select(func.sum(ExpenseEntry.amount), func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
             ExpenseEntry.transaction_date >= window_start,
             func.date(ExpenseEntry.transaction_date) <= window_end,
-            ExpenseEntry.category == "mercaderia",
+            or_(
+                ExpenseEntry.expense_type == "COGS",
+                ExpenseEntry.category.in_(("INVENTORY", "mercaderia")),
+            ),
         )
     )
     inv_row = inv_sum_result.one()

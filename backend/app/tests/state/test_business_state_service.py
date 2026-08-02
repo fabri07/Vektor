@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.verticals import Vertical
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
-from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.state.business_state_service import (
     BusinessState,
     ProductSummary,
@@ -567,6 +567,107 @@ async def test_una_venta_suelta_no_abre_la_compuerta(
 
     assert state.confidence_level == "LOW"
     assert state.data_completeness_score < 50.0
+
+
+async def _cargar_compra_de_mercaderia(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    category: str,
+    expense_type: str,
+    amount: str = "30000.00",
+) -> None:
+    db_session.add(
+        ExpenseEntry(
+            tenant_id=tenant_id,
+            amount=Decimal(amount),
+            description="Compra a proveedor",
+            category=category,
+            expense_type=expense_type,
+            transaction_date=datetime.now(UTC).date() - timedelta(days=3),
+            # A cuenta corriente a propósito: un método líquido movería además la
+            # dimensión de CAJA (`cash_observado` mira los movimientos líquidos) y
+            # el test dejaría de aislar la de mercadería.
+            payment_method="account",
+        )
+    )
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_la_compra_de_mercaderia_real_le_gana_a_la_estimacion(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """Una compra de mercadería registrada tiene que contar como dato OBSERVADO.
+
+    El filtro buscaba `category == "mercaderia"`, que es un ALIAS: el catálogo
+    canónico lo normaliza a `INVENTORY` (`expense_categories.py`) y ningún writer
+    persiste esa forma. El predicado no podía ser verdadero nunca, así que la
+    dimensión quedaba clavada en 20 × 0.4 = 8 por más compras reales que hubiera
+    — 12 puntos inalcanzables contra una compuerta que corta en 50.
+    """
+    await _cargar_compra_de_mercaderia(
+        db_session, sample_tenant.tenant_id, category="INVENTORY", expense_type="COGS"
+    )
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    # El monto real le gana a los $90.000 declarados en el onboarding.
+    assert state.monthly_inventory_cost_est == Decimal("30000.00")
+    # Y la dimensión pasa a valer su peso completo: 36 − 8 + 20 = 48.
+    assert state.data_completeness_score == pytest.approx(48.0)
+
+
+@pytest.mark.asyncio
+async def test_compra_de_mercaderia_legacy_sin_backfill_tambien_cuenta(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """La migración `20260710_0001` agregó `expense_type` con server_default
+    'OPEX' y SIN backfill: toda compra de mercadería anterior quedó marcada OPEX
+    aunque su categoría sea INVENTORY. Mirar solo `expense_type` dejaría afuera
+    justo el historial que le da sustento al score.
+    """
+    await _cargar_compra_de_mercaderia(
+        db_session, sample_tenant.tenant_id, category="INVENTORY", expense_type="OPEX"
+    )
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert state.monthly_inventory_cost_est == Decimal("30000.00")
+
+
+@pytest.mark.asyncio
+async def test_un_gasto_operativo_no_cuenta_como_mercaderia(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """No-regresión: el alquiler no es costo de mercadería. Sin este límite, el
+    fix se comería cualquier gasto y la dimensión se acreditaría sola."""
+    await _cargar_compra_de_mercaderia(
+        db_session, sample_tenant.tenant_id, category="RENT", expense_type="OPEX"
+    )
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    # Sigue en la estimación declarada y en 20 × 0.4.
+    assert state.monthly_inventory_cost_est == Decimal("90000.00")
 
 
 @pytest.mark.asyncio
