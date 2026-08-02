@@ -68,18 +68,16 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   supplier: "Proveedores",
 };
 
-// Secciones a las que se puede mandar una hoja que Véktor NO pudo clasificar.
+// Secciones a las que se puede mandar una hoja de planilla.
 //
-// Clientes y Proveedores quedan AFUERA a propósito: el importador resuelve los
-// maestros en un paso previo (`_import_master_entities`) que lee el
-// `entity_type` del summary y NO consulta el override del usuario, y además
-// busca las filas en `clientes_detectados`/`proveedores_detectados` — donde una
-// hoja sin clasificar no las tiene (están en `otros_detectados`). Ofrecerlas
-// acá haría que el usuario elija una sección, confirme sin error, y no se
-// importe nada. Mejor no ofrecer la opción que ofrecer uuna que no funciona.
-// Habilitarlas es una tarea propia: pasar el override a `_import_master_entities`
-// y resolver sus filas desde `otros_detectados`.
-const ENTITY_OPTIONS = ["sale", "expense", "product"] as const;
+// Clientes y Proveedores estuvieron AFUERA un tiempo porque
+// `_import_master_entities` leía el `entity_type` del summary sin consultar el
+// override, y buscaba las filas en `clientes_detectados`/`proveedores_detectados`
+// — donde una hoja mal clasificada no las tiene. Elegir la sección confirmaba
+// sin error y no importaba nada, así que era mejor no ofrecer la opción.
+// Ahora el importador honra el override y resuelve las filas desde el bucket
+// del tipo original, así que las cinco secciones son destinos reales.
+const ENTITY_OPTIONS = ["sale", "expense", "product", "customer", "supplier"] as const;
 
 // Las hojas que el parser SÍ clasificó como maestro siguen mostrando su sección
 // (el camino de maestros funciona cuando la entidad viene del summary).
@@ -376,11 +374,6 @@ function SheetMapperSection({
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
-  // El backend no pudo clasificar la hoja: la decide el usuario, no un default.
-  const entityUnknown = context.entity_type == null;
-  // El selector aparece si el clasificador puede equivocarse (texto/imagen) o si
-  // directamente no supo (entity_type null).
-  const canChooseEntity = isText || entityUnknown;
   const entityChosen = entity !== ENTITY_UNSET;
   const [mappings, setMappings] = useState<Record<string, string>>({});
   // Sección para la que ya se inicializó el mapeo (null = todavía ninguna).
@@ -494,10 +487,17 @@ function SheetMapperSection({
           />
           <span className="text-sm font-semibold text-vk-text-primary">{context.label}</span>
         </label>
-        {canChooseEntity ? (
-          // Reasignable: o el clasificador puede equivocarse (texto/imagen), o
-          // directamente no supo qué es la hoja. En los dos casos decide el usuario.
+        {/*
+          La sección SIEMPRE se elige acá, aunque el parser haya clasificado la
+          hoja. El reconocimiento automático sigue vigente —llega precargado como
+          sugerencia—, pero es una sugerencia: en un archivo real mandó a
+          "Productos" una hoja llamada Ventas de 1187 filas y otra llamada
+          Clientes. Mientras esto era una chapita de sólo lectura, esa
+          equivocación no tenía arreglo desde la UI.
+        */}
+        <div className="flex items-center gap-2">
           <select
+            aria-label={`Sección de la hoja ${context.label}`}
             value={entity}
             onChange={(e) => onEntityChange(context.context_id, e.target.value)}
             className={`rounded border bg-vk-bg-light px-2 py-0.5 text-xs focus:border-vk-blue focus:outline-none ${
@@ -513,12 +513,10 @@ function SheetMapperSection({
               </option>
             ))}
           </select>
-        ) : (
-          <span className="rounded-full bg-vk-info-bg px-2 py-0.5 text-[10px] font-medium text-vk-blue">
-            {ENTITY_TYPE_LABELS[entity] ?? entity} · {context.row_count} fila
-            {context.row_count !== 1 ? "s" : ""}
+          <span className="text-[10px] font-medium text-vk-text-muted">
+            {context.row_count} fila{context.row_count !== 1 ? "s" : ""}
           </span>
-        )}
+        </div>
       </div>
 
       {/* Lo que el parser detectó sobre ESTA hoja. Antes vivía en un bloque

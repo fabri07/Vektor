@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom";
 import React from "react";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ColumnMapperPanel, splitWarningsByContext } from "../ColumnMapperPanel";
@@ -845,11 +845,11 @@ describe("ColumnMapperPanel — hojas sin clasificar", () => {
     });
 
     // El selector arranca en el placeholder, NO en "Ventas".
-    const selector = screen.getByDisplayValue("Elegí qué es esta hoja…");
-    expect(selector).toBeInTheDocument();
+    const selector = screen.getByLabelText("Sección de la hoja Ganancias");
+    expect(selector).toHaveValue("");
     // Y ofrece Productos, que antes ni siquiera era una opción.
     expect(
-      screen.getByRole("option", { name: "Productos" }),
+      within(selector).getByRole("option", { name: "Productos" }),
     ).toBeInTheDocument();
   });
 
@@ -938,5 +938,100 @@ describe("splitWarningsByContext", () => {
     );
     expect(Object.keys(byContext)).toHaveLength(0);
     expect(general).toEqual(["4 movimiento(s) de 'LD 2026' son ambiguos."]);
+  });
+});
+
+// El clasificador se equivoca: en un archivo real mandó a "Productos" una hoja
+// llamada Ventas (1187 filas) y otra llamada Clientes (9 filas). El selector de
+// sección sólo aparecía cuando el parser NO había sabido clasificar
+// (`canChooseEntity = isText || entityUnknown`), así que una hoja mal
+// clasificada mostraba una chapita de sólo lectura y no había forma de
+// corregirla. El reconocimiento automático sigue vigente como sugerencia — lo
+// que cambia es que la persona siempre puede acomodarlo.
+
+function previewConHojaMalClasificada() {
+  return {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: {
+      inferred_type: "mixed",
+      warnings: [],
+      mapping_contexts: [
+        {
+          context_id: "sheet:Ventas",
+          label: "Ventas",
+          source_kind: "sheet",
+          entity_type: "product", // el parser se equivocó
+          headers: ["Fecha", "Total"],
+          fields: null,
+          preview_rows: [{ Fecha: "2026-05-01", Total: "1910" }],
+          row_count: 1187,
+        },
+      ],
+    },
+    columns_at_risk: [],
+    contextual_column_risk: [],
+  };
+}
+
+describe("ColumnMapperPanel — corregir una hoja mal clasificada", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetColumnMappings.mockResolvedValue([]);
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+  });
+
+  test("la sección es un desplegable, no una chapita de sólo lectura", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaMalClasificada());
+    renderPanel();
+
+    const selector = await screen.findByLabelText("Sección de la hoja Ventas");
+    expect(selector.tagName).toBe("SELECT");
+    // Precargado con lo que adivinó el parser: la sugerencia sigue vigente.
+    expect(selector).toHaveValue("product");
+  });
+
+  test("se puede moverla a Ventas y el confirm manda la sección corregida", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaMalClasificada());
+    mockConfirmFile.mockResolvedValue({
+      file_id: "file-1",
+      status: "DONE",
+      message: "ok",
+    });
+    renderPanel();
+
+    const selector = await screen.findByLabelText("Sección de la hoja Ventas");
+    fireEvent.change(selector, { target: { value: "sale" } });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Confirmar importación/ })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/ }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const contextEntity = mockConfirmFile.mock.calls[0]![4];
+    expect(contextEntity).toEqual({ "sheet:Ventas": "sale" });
+  });
+
+  test("Clientes y Proveedores son destinos ofrecidos", async () => {
+    // Estuvieron afuera mientras `_import_master_entities` ignoraba el override:
+    // elegirlos confirmaba sin error y no importaba nada. Ahora el importador
+    // los honra, así que la hoja "Clientes" de la captura tiene salida.
+    mockGetPreview.mockResolvedValue(previewConHojaMalClasificada());
+    renderPanel();
+
+    const selector = await screen.findByLabelText("Sección de la hoja Ventas");
+    for (const seccion of ["Ventas", "Gastos", "Productos", "Clientes", "Proveedores"]) {
+      expect(within(selector).getByRole("option", { name: seccion })).toBeInTheDocument();
+    }
+  });
+
+  test("el conteo de filas sigue visible al lado del desplegable", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaMalClasificada());
+    renderPanel();
+
+    await screen.findByLabelText("Sección de la hoja Ventas");
+    expect(screen.getByText(/1187 filas/)).toBeInTheDocument();
   });
 });
