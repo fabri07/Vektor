@@ -85,14 +85,20 @@ async def test_compute_business_state_from_onboarding_only(
 ) -> None:
     """
     When there are no real transactions, estimates from BusinessProfile are used.
-    Expected completeness (onboarding < 7 days):
-      ventas     25  (estimate > 0)
-      mercaderia 20  (estimate > 0)
-      gastos     15  (estimate > 0)
-      caja       20  (onboarding < 7 days, cash_on_hand_estimate > 0)
-      productos   0  (estimate = 3, < 5)
-      proveedores 10 (estimate = 2, >= 1)
-      total      90 → HIGH
+
+    Los seis inputs salen de la encuesta, así que cada uno vale
+    `PESO_DECLARADO` (0.4) de su peso completo:
+      ventas      25 × 0.4 = 10  (estimate > 0)
+      mercaderia  20 × 0.4 =  8  (estimate > 0)
+      gastos      15 × 0.4 =  6  (estimate > 0)
+      caja        20 × 0.4 =  8  (cash_source = "onboarding" → declarado)
+      productos    0            (estimate = 3, < 5)
+      proveedores 10 × 0.4 =  4  (estimate = 2, >= 1)
+      total       36 → LOW
+
+    Antes daba 90 → HIGH: los `*_est` ya traían las estimaciones adentro, así
+    que la métrica premiaba haber contestado el formulario. Un negocio del que
+    no se registró ni un movimiento no puede habilitar análisis.
     """
     redis = FakeRedis()
     state = await compute_business_state(
@@ -110,20 +116,21 @@ async def test_compute_business_state_from_onboarding_only(
     assert state.supplier_count == 2
     assert state.product_count == 3  # estimate, < 5
 
-    # completeness: 25+20+15+20+0+10 = 90
-    assert state.data_completeness_score == 90.0
-    assert state.confidence_level == "HIGH"
-    assert state.main_concern is None
+    # completeness: (25+20+15+20+10) × 0.4 = 36
+    assert state.data_completeness_score == 36.0
+    assert state.confidence_level == "LOW"
+    # Y lo dice con todas las letras, en vez de callarse (antes: `None`).
+    assert state.main_concern == "Datos insuficientes para un análisis confiable"
 
     # Redis should be populated
     store = redis.snapshot()
-    # Las keys llevan el prefijo de versión v3 (se eliminó el campo `ruleset`, y
-    # con él la clave del blob donde vivía escondido el vertical: un blob v2 leído
-    # con este código moriría con KeyError).
+    # Las keys llevan el prefijo de versión v4: `data_completeness_score` cambió
+    # de significado (pondera por procedencia), y un blob v3 deserializa sin
+    # error — serviría la confianza vieja durante las 24 h del TTL.
     assert _cache_key(sample_tenant.tenant_id) in store
     assert _hash_key(sample_tenant.tenant_id) in store
-    assert "business_state:v3:" in _cache_key(sample_tenant.tenant_id)
-    assert "last_inputs_hash:v3:" in _hash_key(sample_tenant.tenant_id)
+    assert "business_state:v4:" in _cache_key(sample_tenant.tenant_id)
+    assert "last_inputs_hash:v4:" in _hash_key(sample_tenant.tenant_id)
 
 
 # ── Montos del onboarding sin contestar ──────────────────────────────────────
@@ -198,8 +205,12 @@ async def test_completeness_increases_with_products(
 ) -> None:
     """
     Adding ≥5 active products should add 10 pts to completeness vs. baseline.
-    Baseline (test_1): 90 pts (product_count_estimate = 3, no +10).
-    After adding 5 real products: 90 + 10 = 100.
+    Baseline (test_1): 36 pts (todo declarado, product_count_estimate = 3).
+    Los 5 productos son reales, así que suman los 10 puntos COMPLETOS (no el
+    0.4 de un dato declarado): 36 + 10 = 46.
+
+    Sigue en LOW a propósito. Cargar el catálogo no es cargar el negocio: sin
+    una venta ni un gasto registrado no hay con qué medir salud financiera.
     """
     # Add 5 active products
     for i in range(5):
@@ -222,8 +233,8 @@ async def test_completeness_increases_with_products(
 
     # product_count now = 5 (real), so +10 pts
     assert state.product_count == 5
-    assert state.data_completeness_score == 100.0
-    assert state.confidence_level == "HIGH"
+    assert state.data_completeness_score == 46.0
+    assert state.confidence_level == "LOW"
     assert len(state.products) == 5
 
 
@@ -460,3 +471,139 @@ def test_un_vertical_desconocido_en_la_cache_no_pasa_silencioso() -> None:
     blob = _serialize_state(_estado_de_ejemplo(vertical_code="rubro_inexistente"))
     with pytest.raises(ValueError, match="rubro_inexistente"):
         _deserialize_state(blob)
+
+
+# ── Completeness: observado vs declarado ─────────────────────────────────────
+#
+# `data_completeness_score` es la compuerta de la no-invention rule: por debajo
+# de 50 la UI muestra empty state y los jobs no persisten análisis. Pero se
+# calculaba sobre los `*_est`, que caen a las estimaciones del onboarding
+# cuando no hay datos reales — así que medía "¿contestó la encuesta?", no
+# "¿tengo datos?". Contestar los 4 montos daba 80 (HIGH) con la base vacía, y
+# el dashboard mostraba un score seguro de un negocio del que no se sabe nada.
+
+
+@pytest.mark.asyncio
+async def test_solo_encuesta_no_alcanza_la_compuerta_de_no_invencion(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """Sin una sola transacción real, la confianza no puede habilitar análisis."""
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    # El perfil tiene los cuatro montos contestados y la base no tiene nada.
+    assert state.monthly_sales_est > 0
+    assert state.confidence_level == "LOW"
+    assert state.data_completeness_score < 50.0
+
+
+async def _cargar_ventas(
+    db_session: AsyncSession, tenant_id: uuid.UUID, cantidad: int
+) -> None:
+    hoy = datetime.now(UTC).date()
+    for i in range(cantidad):
+        db_session.add(
+            SaleEntry(
+                tenant_id=tenant_id,
+                amount=Decimal("5000.00"),
+                quantity=1,
+                transaction_date=hoy - timedelta(days=(i % 25) + 1),
+                payment_method="cash",
+            )
+        )
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_ventas_reales_valen_mas_que_la_estimacion_declarada(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """Con ventas suficientes para dominar el blend, ventas pasa a observado."""
+    solo_encuesta = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    await _cargar_ventas(db_session, sample_tenant.tenant_id, 12)
+
+    con_ventas = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert con_ventas.data_completeness_score > solo_encuesta.data_completeness_score
+
+
+@pytest.mark.asyncio
+async def test_una_venta_suelta_no_abre_la_compuerta(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """Pocas ventas NO alcanzan para cobrar los 25 puntos de la dimensión.
+
+    Con `sale_count < 10`, `monthly_sales_est` sigue siendo 70% la estimación
+    declarada. Acreditar ahí la dimensión completa dejaría al dashboard
+    mostrando un score armado sobre un revenue mayormente inventado por el
+    formulario — con UNA venta de $500 encima de los cuatro montos declarados,
+    la cuenta daba 51 y la compuerta de no-invención se abría sola.
+    """
+    await _cargar_ventas(db_session, sample_tenant.tenant_id, 1)
+
+    state = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert state.confidence_level == "LOW"
+    assert state.data_completeness_score < 50.0
+
+
+@pytest.mark.asyncio
+async def test_la_caja_observada_no_depende_del_calendario(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """Los mismos datos no pueden valer distinto por la antigüedad del alta.
+
+    El tiering de `cash_source` prefiere el estimado del onboarding por sobre el
+    flujo durante los 7 días del alta. Si la procedencia de la caja se leyera de
+    ahí, un tenant con movimientos líquidos reales valdría 8 puntos el día 1 y
+    20 el día 8 sin que cambie un solo dato.
+    """
+    await _cargar_ventas(db_session, sample_tenant.tenant_id, 12)
+
+    # Día 1: el perfil se acaba de tocar → el tiering elige "onboarding".
+    recien_dado_de_alta = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+    assert recien_dado_de_alta.cash_source == "onboarding"
+
+    # Día 8: mismos datos, sólo envejeció el perfil → el tiering elige "flujo".
+    kiosco_profile.updated_at = datetime.now(UTC) - timedelta(days=8)
+    await db_session.commit()
+
+    pasada_una_semana = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+    assert pasada_una_semana.cash_source == "flujo"
+
+    assert (
+        recien_dado_de_alta.data_completeness_score
+        == pasada_una_semana.data_completeness_score
+    )

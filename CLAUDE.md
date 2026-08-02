@@ -16,6 +16,7 @@ Leé esto antes de tocar código. El detalle completo está más abajo.
 3. **`tenant_id`** sale del JWT en cada query de negocio — nunca del body/path.
 4. **`ActionType`** es un set cerrado (31 valores en `shared/schemas.py`); agregar/quitar obliga a tocar `RiskEngine` + tests.
 5. **No-invention:** con `confidence == LOW` (`data_completeness < 50`) → empty state y pedir datos. Nunca maquillar scores con defaults (`or 70`, `or 50`); si `0` es válido, usar `if value is None`, no `or`.
+5b. **`data_completeness_score` pondera por PROCEDENCIA** (`business_state_service._compute_completeness`): un input OBSERVADO (transacciones, arqueo, maestros cargados) vale su peso completo; uno sólo DECLARADO en el onboarding vale `PESO_DECLARADO` (0.4). Los seis declarados y ninguno observado dan 40 — por debajo de la compuerta de 50 a propósito: contestar un formulario no habilita conclusiones sobre un negocio del que no se registró un movimiento. **Nunca calcular completeness sobre los `*_est`**, que ya traen el fallback a las estimaciones adentro: eso mide "¿contestó la encuesta?", no "¿tengo datos?".
 6. **Auditoría + defensa:** toda decisión → `decision_audit_log` (insert-only); todo input de usuario a un LLM → `wrap_user_input()`.
 7. **Mostrar plan antes de escribir código y esperar confirmación.** Responder en español (Argentina).
 
@@ -510,7 +511,7 @@ El historial de sprints (1–21), los proyectos mergeados post-Sprint-21 y la ca
 - Todo input de usuario a LLM pasa por `wrap_user_input()`.
 - Toda aritmética financiera va por un servicio determinístico — LLMs nunca calculan montos. Métricas de negocio: `FactsService` (única fuente de verdad). Aritmética puntual del chat: `DeterministicFinance` (hasta migrar a FactsService).
 - Custom fields no se validan en write time (MVP). Agregar validación en `field_definition_service.validate_custom_fields()` cuando sea necesario.
-- **No-invention rule:** ningún componente del dashboard, agente LLM, ni job de background puede mostrar análisis, scores, narrativas, alertas o conclusiones cuando `confidence_level == "LOW"` (`data_completeness_score < 50`). La UI muestra un empty state solicitando los datos faltantes. Los jobs no persisten `Insight`, `ActionSuggestion` ni notificaciones analíticas con `confidence_level == "LOW"`. Nunca reemplazar scores `None`/`0` con defaults neutrales (`or 70`, `or 50`, etc.): si falta un componente, el score real es 0 o ausente — bajar la confianza, no maquillarlo.
+- **No-invention rule:** ningún componente del dashboard, agente LLM, ni job de background puede mostrar análisis, scores, narrativas, alertas o conclusiones cuando `confidence_level == "LOW"` (`data_completeness_score < 50`). La UI muestra un empty state solicitando los datos faltantes. Los jobs no persisten `Insight`, `ActionSuggestion` ni notificaciones analíticas con `confidence_level == "LOW"`. Nunca reemplazar scores `None`/`0` con defaults neutrales (`or 70`, `or 50`, etc.): si falta un componente, el score real es 0 o ausente — bajar la confianza, no maquillarlo. La compuerta sólo sirve si `data_completeness_score` mide datos reales y no respuestas de formulario: ver invariante 5b.
 
 ---
 
