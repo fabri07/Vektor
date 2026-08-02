@@ -33,6 +33,12 @@ interface WizardState {
   isSubmitting: boolean;
   formSubmitted: boolean;
   pendingFile: File | null;
+  /**
+   * Id del archivo subido. El upload siempre lo devolvió y se tiraba; sin él
+   * el paso 3 no puede llevar al usuario a revisar SU archivo, que es el
+   * único camino por el que sus datos entran al sistema.
+   */
+  uploadedFileId: string | null;
 }
 
 
@@ -44,6 +50,7 @@ export function OnboardingWizard() {
     isSubmitting: false,
     formSubmitted: false,
     pendingFile: null,
+    uploadedFileId: null,
   });
 
   /*
@@ -116,9 +123,10 @@ export function OnboardingWizard() {
       }
     }
 
+    let uploadedFileId: string | null = null;
     if (file) {
       try {
-        await ingestionService.upload(file);
+        uploadedFileId = (await ingestionService.upload(file)).file_id;
       } catch {
         setState((prev) => ({
           ...prev,
@@ -131,15 +139,21 @@ export function OnboardingWizard() {
       }
     }
 
-    setState((prev) => ({ ...prev, isSubmitting: false, step: 3 }));
+    setState((prev) => ({ ...prev, isSubmitting: false, step: 3, uploadedFileId }));
   }
 
   async function handleRetryUpload() {
     if (!state.pendingFile) return;
     setState((prev) => ({ ...prev, isSubmitting: true, submitError: null }));
     try {
-      await ingestionService.upload(state.pendingFile);
-      setState((prev) => ({ ...prev, isSubmitting: false, pendingFile: null, step: 3 }));
+      const { file_id } = await ingestionService.upload(state.pendingFile);
+      setState((prev) => ({
+        ...prev,
+        isSubmitting: false,
+        pendingFile: null,
+        uploadedFileId: file_id,
+        step: 3,
+      }));
     } catch {
       setState((prev) => ({
         ...prev,
@@ -150,13 +164,21 @@ export function OnboardingWizard() {
     }
   }
 
-  const { step, formData, submitError, isSubmitting, pendingFile, formSubmitted } = state;
+  const {
+    step,
+    formData,
+    submitError,
+    isSubmitting,
+    pendingFile,
+    formSubmitted,
+    uploadedFileId,
+  } = state;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-vk-bg-light">
       <div className="flex min-h-full items-start justify-center px-4 py-10 sm:items-center sm:py-16">
         <div className="w-full max-w-2xl">
-          {/* Progress bar — visible en todos los pasos; el 3 es "Tu score" */}
+          {/* Progress bar — visible en todos los pasos; el 3 es "Siguiente paso" */}
           <ProgressBar currentStep={step} />
 
           {/* Card */}
@@ -227,7 +249,7 @@ export function OnboardingWizard() {
               </>
             )}
 
-            {step === 3 && <Step4Loading />}
+            {step === 3 && <Step4Loading uploadedFileId={uploadedFileId} />}
           </div>
 
           {/* Footer note */}

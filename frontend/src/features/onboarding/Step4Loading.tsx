@@ -1,127 +1,100 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+/**
+ * Cierre del onboarding. NO muestra puntaje, a propósito.
+ *
+ * Véktor no depura ni organiza los datos de un archivo en la primera pasada:
+ * el usuario tiene que definir qué significa cada columna de sus registros
+ * antes de que se importe nada. Hasta esa confirmación no hay ventas, gastos
+ * ni productos en la base — y un puntaje de salud sin movimientos reales no
+ * mide el negocio, mide lo que la persona escribió en un formulario.
+ *
+ * Antes este paso polleaba `/health-scores/latest` y pintaba lo que viniera.
+ * Recién terminado el alta eso es `{status: "NO_DATA"}`, que se casteaba a
+ * score: `Math.round(Number(undefined))` → **`NaN/100`** en la cara del
+ * usuario, y 2,5s después un redirect al dashboard.
+ */
+
 import { useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
-import {
-  healthScoreService,
-  type HealthScoreLatest,
-} from "@/services/health_score.service";
-import { Badge } from "@/components/ui/Badge";
 
-const LEVEL_LABELS: Record<string, string> = {
-  HEALTHY: "Saludable",
-  MODERATE: "Moderado",
-  AT_RISK: "En riesgo",
-  CRITICAL: "Crítico",
-};
+interface Step4LoadingProps {
+  /** Archivo subido en el paso 2, si hubo. Define a dónde sigue el usuario. */
+  uploadedFileId: string | null;
+}
 
-const LEVEL_BADGE_VARIANT: Record<string, "success" | "warning" | "danger" | "default"> = {
-  HEALTHY: "success",
-  MODERATE: "warning",
-  AT_RISK: "danger",
-  CRITICAL: "danger",
-};
-
-const MAX_POLLS = 20; // 40 segundos máx
-
-function ScorePreview({ score }: { score: HealthScoreLatest }) {
-  const levelLabel = LEVEL_LABELS[score.level] ?? score.level;
-  const badgeVariant = LEVEL_BADGE_VARIANT[score.level] ?? "default";
-
+function BotonPrimario({
+  children,
+  onClick,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+}) {
   return (
-    <div className="mt-8 w-full rounded-2xl border border-vk-border-w bg-vk-surface-w p-6 text-center shadow-vk-sm">
-      <p className="text-sm font-medium text-vk-text-muted">
-        Tu puntaje de salud financiera
-      </p>
-      <p className="mt-2 leading-none">
-        <span
-          className="font-bold text-vk-navy"
-          style={{ fontSize: "var(--vk-text-metric)" }}
-        >
-          {Math.round(Number(score.score_total))}
-        </span>
-        <span className="text-2xl font-light text-vk-text-muted">/100</span>
-      </p>
-      <div className="mt-3 flex justify-center">
-        <Badge variant={badgeVariant}>{levelLabel}</Badge>
-      </div>
-      <p className="mt-4 text-sm text-vk-text-muted">
-        Redirigiendo al chat...
-      </p>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className="mt-6 h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
+    >
+      {children}
+    </button>
   );
 }
 
-export function Step4Loading() {
+export function Step4Loading({ uploadedFileId }: Step4LoadingProps) {
   const router = useRouter();
-  const pollCount = useRef(0);
-  const [timedOut, setTimedOut] = useState(false);
 
-  const { data: score } = useQuery<HealthScoreLatest | null>({
-    queryKey: ["health-score-latest-onboarding"],
-    queryFn: healthScoreService.getLatest,
-    refetchInterval: (query) => {
-      if (query.state.data != null) return false;
-      if (pollCount.current >= MAX_POLLS) return false;
-      pollCount.current += 1;
-      return 2_000;
-    },
-    retry: false,
-  });
+  if (uploadedFileId) {
+    return (
+      <div className="flex flex-col items-center py-8 text-center">
+        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-vk-blue/10">
+          <svg
+            className="h-7 w-7 text-vk-blue"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+            />
+          </svg>
+        </div>
 
-  useEffect(() => {
-    if (!score) return;
-    const t = setTimeout(() => {
-      router.replace("/dashboard");
-    }, 2_500);
-    return () => clearTimeout(t);
-  }, [score, router]);
+        <h2 className="mt-5 text-xl font-semibold text-vk-text-primary">
+          Listo. Ahora falta que revises tu archivo
+        </h2>
+        <p className="mt-2 max-w-md text-sm leading-6 text-vk-text-muted">
+          Ya lo leímos, pero no lo importamos todavía: necesitamos que nos
+          digas qué es cada columna de tus registros. Cuando lo confirmes, se
+          cargan tus ventas y gastos y ahí sí calculamos tu salud financiera.
+        </p>
 
-  // Fallback: mostrar mensaje si el score no llegó a tiempo
-  useEffect(() => {
-    const t = setTimeout(
-      () => {
-        setTimedOut(true);
-      },
-      (MAX_POLLS + 1) * 2_000,
+        <BotonPrimario
+          onClick={() => router.replace(`/ingestion?file=${uploadedFileId}`)}
+        >
+          Revisar mi archivo
+        </BotonPrimario>
+      </div>
     );
-    return () => clearTimeout(t);
-  }, []);
+  }
 
   return (
     <div className="flex flex-col items-center py-8 text-center">
-      {score ? (
-        <ScorePreview score={score} />
-      ) : timedOut ? (
-        <>
-          <h2 className="text-xl font-semibold text-vk-text-primary">
-            El análisis está tardando más de lo esperado
-          </h2>
-          <p className="mt-2 text-sm text-vk-text-muted">
-            Tus datos se guardaron correctamente. El score de salud va a estar listo en unos minutos.
-          </p>
-          <button
-            type="button"
-            onClick={() => router.replace("/dashboard")}
-            className="mt-6 h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
-          >
-            Ir al chat
-          </button>
-        </>
-      ) : (
-        <>
-          <div className="relative flex h-20 w-20 items-center justify-center">
-            <div className="absolute inset-0 animate-spin rounded-full border-4 border-vk-border-w border-t-vk-navy" />
-          </div>
-          <h2 className="mt-6 text-xl font-semibold text-vk-text-primary">
-            Perfecto. Analizando tu negocio...
-          </h2>
-          <p className="mt-2 text-sm text-vk-text-muted">
-            Esto tarda menos de 10 segundos.
-          </p>
-        </>
-      )}
+      <h2 className="text-xl font-semibold text-vk-text-primary">
+        Todavía no hay datos para analizar
+      </h2>
+      <p className="mt-2 max-w-md text-sm leading-6 text-vk-text-muted">
+        Lo que respondiste quedó guardado, pero un puntaje de salud necesita
+        movimientos reales de tu negocio. Cargá tus ventas y gastos —por
+        archivo o a mano— y lo calculamos.
+      </p>
+
+      <BotonPrimario onClick={() => router.replace("/ingestion")}>
+        Cargar mis datos
+      </BotonPrimario>
     </div>
   );
 }

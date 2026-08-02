@@ -12,6 +12,19 @@ import {
   type RereadUndoResponse,
 } from "@/services/ingestion.service";
 
+// `?file=<id>` abre ese archivo expandido (el usuario llega así desde el
+// cierre del onboarding). Sin parámetro, la lista arranca toda colapsada.
+const mockSearchParams = new URLSearchParams();
+jest.mock("next/navigation", () => ({
+  useSearchParams: () => mockSearchParams,
+}));
+
+// El panel de mapeo hace sus propias llamadas (preview, catálogo de campos,
+// sugerencias); acá sólo interesa SI está montado, no qué muestra adentro.
+jest.mock("../ColumnMapperPanel", () => ({
+  ColumnMapperPanel: () => <div data-testid="column-mapper-panel" />,
+}));
+
 const mockAddToast = jest.fn();
 jest.mock("@/stores/toastStore", () => ({
   useToastStore: (selector: (s: { add: jest.Mock }) => unknown) =>
@@ -325,5 +338,125 @@ describe("FileListSection — deshacer relectura (F9b)", () => {
     await waitFor(() => expect(mockRereadUndo).toHaveBeenCalledTimes(2));
 
     await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+  });
+});
+
+/**
+ * La lista caía a `[]` ante cualquier fallo de la API y la pantalla afirmaba
+ * "No hay archivos cargados todavía" — con archivos en la base. Un error de
+ * red no es un estado vacío: la UI no puede afirmar que no hay nada cuando lo
+ * que pasó es que no pudo preguntar.
+ */
+describe("FileListSection — la API falla", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("un error no se renderiza como 'no hay archivos'", async () => {
+    mockListFiles.mockRejectedValue(new Error("Network Error"));
+
+    renderList();
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /no pudimos cargar tus archivos/i,
+      ),
+    );
+    expect(
+      screen.queryByText(/no hay archivos cargados todavía/i),
+    ).not.toBeInTheDocument();
+  });
+
+  test("se puede reintentar sin recargar la página", async () => {
+    const user = userEvent.setup();
+    mockListFiles.mockRejectedValueOnce(new Error("Network Error"));
+
+    renderList();
+    await screen.findByRole("alert");
+
+    mockListFiles.mockResolvedValue([fileWith("NEEDS_CONFIRMATION")]);
+    await user.click(screen.getByRole("button", { name: /reintentar/i }));
+
+    expect(await screen.findByText("ventas.csv")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * El cierre del onboarding manda a `/ingestion?file=<id>` diciéndole al
+ * usuario que le falta revisar ESE archivo. Si aterriza en una tabla toda
+ * colapsada, lo mandamos a buscar cuál era.
+ */
+describe("FileListSection — llegada desde el onboarding", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSearchParams.delete("file");
+  });
+
+  test("?file=<id> abre ese archivo ya expandido", async () => {
+    mockSearchParams.set("file", "file-1");
+    mockListFiles.mockResolvedValue([fileWith("NEEDS_CONFIRMATION")]);
+
+    renderList();
+
+    // El panel de mapeo del archivo apuntado ya está en pantalla, sin clicks.
+    expect(await screen.findByTestId("column-mapper-panel")).toBeInTheDocument();
+  });
+
+  test("sin ?file la lista arranca colapsada", async () => {
+    mockListFiles.mockResolvedValue([fileWith("NEEDS_CONFIRMATION")]);
+
+    renderList();
+
+    await screen.findByText("ventas.csv");
+    expect(screen.queryByTestId("column-mapper-panel")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Dos huecos del deep link, encontrados en review:
+ *  - `expandedId` se sembraba con un inicializador de `useState`, que sólo
+ *    corre al montar: navegar client-side a `?file=` estando ya en /ingestion
+ *    no abría nada, en silencio.
+ *  - El panel sólo se monta con `NEEDS_CONFIRMATION`. El archivo recién subido
+ *    se parsea async, así que puede aterrizar en PROCESSING, FAILED o
+ *    NEEDS_COMPLETION — y el usuario venía de un botón que le prometió
+ *    "Revisar mi archivo".
+ */
+describe("FileListSection — deep link que no puede abrir el panel", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSearchParams.delete("file");
+  });
+
+  test("archivo apuntado todavía procesando: lo dice en vez de no hacer nada", async () => {
+    mockSearchParams.set("file", "file-1");
+    mockListFiles.mockResolvedValue([fileWith("PROCESSING")]);
+
+    renderList();
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /estamos leyendo .*ventas\.csv/i,
+    );
+    expect(screen.queryByTestId("column-mapper-panel")).not.toBeInTheDocument();
+  });
+
+  test("archivo apuntado que falló: lo dice", async () => {
+    mockSearchParams.set("file", "file-1");
+    mockListFiles.mockResolvedValue([fileWith("FAILED")]);
+
+    renderList();
+
+    expect(await screen.findByRole("status")).toHaveTextContent(/no pudimos leer/i);
+  });
+
+  test("archivo ya importado no genera aviso", async () => {
+    mockSearchParams.set("file", "file-1");
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+
+    renderList();
+
+    await screen.findByText("ventas.csv");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
