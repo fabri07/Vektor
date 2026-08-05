@@ -17,6 +17,8 @@ import pytest
 
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
+    CROSS_ENTITY_FORBIDDEN_FIELDS,
+    CROSS_ENTITY_PREFIXES,
     CROSS_ENTITY_TARGETS,
     parse_target,
 )
@@ -50,6 +52,18 @@ class TestGramaticaDelTarget:
         assert parsed.kind == "custom"
         assert parsed.entity is None
         assert parsed.field == "hora_de_venta"
+
+    @pytest.mark.parametrize(
+        "variante", ["custom_field:obs", "custom_field: obs", "custom_field:obs "]
+    )
+    def test_la_clave_propia_se_normaliza_como_el_resto(self, variante: str) -> None:
+        """Sin esto, el espacio decidía si dos columnas colisionaban o no.
+
+        ``"custom_field:obs "`` ya colapsaba a ``obs`` porque el strip de afuera
+        lo alcanzaba, pero ``"custom_field: obs"`` quedaba como clave distinta:
+        dos columnas compartían campo y la colisión no se detectaba.
+        """
+        assert parse_target(variante).field == "obs"
 
     def test_target_cruzado_separa_entidad_y_campo(self) -> None:
         parsed = parse_target("customer:dni")
@@ -92,19 +106,50 @@ class TestGramaticaDelTarget:
 class TestAllowlistCruzada:
     """La matriz de rutas permitidas es explícita, no un producto cartesiano."""
 
-    def test_ninguna_hoja_puede_escribir_stock_units(self) -> None:
+    def test_ninguna_hoja_puede_escribir_un_campo_prohibido(self) -> None:
         """El invariante que ya costó un incidente de inventario.
 
         ``stock_units`` es la proyección de un ledger de movimientos: se toca
         por ``+= qty`` con su movimiento, nunca por ``setattr`` desde una
         columna. Una venta que lo escriba rompe la conciliación stock↔movimientos
         y encima no tiene un ``stock_treatment`` que le dé sentido contable.
+
+        Se itera la CONSTANTE y no el literal: así el guard de campos prohibidos
+        es de verdad un segundo cinturón —agregarle un campo lo cubre acá
+        automáticamente— y no una lista decorativa que nadie lee.
         """
+        assert CROSS_ENTITY_FORBIDDEN_FIELDS, "la lista de prohibidos no puede estar vacía"
         for origen, destinos in CROSS_ENTITY_TARGETS.items():
             for destino, campos in destinos.items():
-                assert "stock_units" not in campos, (
-                    f"{origen} → {destino} habilita stock_units"
-                )
+                for prohibido in CROSS_ENTITY_FORBIDDEN_FIELDS:
+                    assert prohibido not in campos, (
+                        f"{origen} → {destino} habilita {prohibido}"
+                    )
+
+    def test_ningun_cruzado_duplica_una_referencia_canonica(self) -> None:
+        """La REGLA, no una instancia: si la hoja ya puede expresar el campo, fuera.
+
+        Los campos de referencia siguen la convención ``{entidad}_{campo}``
+        (``customer_dni``, ``supplier_name``, ``product_name``). Cuando existen,
+        la columna ya tiene un camino canónico que pasa por el resolvedor de
+        referencias, cuya creación de maestros gobierna
+        ``*_REFERENCE_CREATION_MODE``. Ofrecer ADEMÁS una ruta cruzada que
+        escriba el maestro directo deja dos caminos para la misma columna con
+        semánticas distintas y sin nadie que arbitre cuál gana.
+
+        Este test es el que hace que la exclusión de ``sale → product:name`` sea
+        un principio y no un caso especial: antes estaba escrita a mano para
+        productos mientras clientes y proveedores la violaban.
+        """
+        for origen, destinos in CROSS_ENTITY_TARGETS.items():
+            canonicos_origen = CANONICAL_FIELDS.get(origen, {})
+            for destino, campos in destinos.items():
+                for campo in campos:
+                    referencia = f"{destino}_{campo}"
+                    assert referencia not in canonicos_origen, (
+                        f"{origen} → {destino}:{campo} duplica el campo canónico "
+                        f"«{referencia}» que la hoja de {origen} ya tiene"
+                    )
 
     def test_todo_campo_permitido_existe_en_su_entidad_destino(self) -> None:
         """Una allowlist que nombra un campo inexistente es una promesa vacía.
@@ -132,6 +177,27 @@ class TestAllowlistCruzada:
         desde_venta = CROSS_ENTITY_TARGETS.get("sale", {}).get("product", frozenset())
         for identidad in ("name", "sku", "barcode"):
             assert identidad not in desde_venta
+
+    def test_un_catalogo_de_productos_no_crea_proveedores(self) -> None:
+        """La Reforma de Proveedores: marca ≠ proveedor.
+
+        En un catálogo, la columna "Tienda"/"Proveedor" es la MARCA y va a
+        ``Product.custom_fields["marca"]``. Habilitar una ruta
+        ``product → supplier`` recrearía las filas marca-como-proveedor que hubo
+        que limpiar con ``deactivate_brand_suppliers.py`` y marcar con
+        ``_brand_collapsed``. Si alguna vez se habilita, primero hay que definir
+        que sólo VINCULE a un proveedor existente y nunca cree.
+        """
+        assert CROSS_ENTITY_TARGETS.get("product", {}).get("supplier") is None
+
+    def test_custom_field_no_puede_ser_una_entidad(self) -> None:
+        """Si alguien agregara una entidad llamada ``custom_field``, que falle acá.
+
+        La gramática la resuelve por orden (el prefijo de campo propio se chequea
+        antes que el de entidad), así que no habría ambigüedad — pero la entidad
+        quedaría permanentemente inalcanzable como prefijo cruzado, en silencio.
+        """
+        assert "custom_field" not in CROSS_ENTITY_PREFIXES
 
 
 class TestResolucionDeColumnas:

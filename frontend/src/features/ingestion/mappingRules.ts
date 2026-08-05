@@ -80,3 +80,36 @@ export function scalarCollisions(
       columns,
     }));
 }
+
+const CUSTOM_FIELD_PREFIX = "custom_field:";
+
+/**
+ * Campos PROPIOS con más de una columna apuntándoles.
+ *
+ * Misma forma que `scalarCollisions` porque es el mismo problema en la otra
+ * rama del mapeo: un campo propio guarda un valor por fila, así que de dos
+ * columnas al mismo destino sobrevive una sola. Espeja
+ * `_colliding_custom_fields` del confirm.
+ *
+ * Sin esto, escribir dos veces el mismo nombre de campo personalizado
+ * (`commitCustom` no chequea contra las otras columnas de la hoja) da el OK en
+ * pantalla y 422 al confirmar — exactamente la divergencia que este módulo
+ * existe para evitar.
+ */
+export function customFieldCollisions(
+  mappings: Record<string, string>,
+): ScalarCollision[] {
+  const porClave = new Map<string, string[]>();
+  for (const [col, target] of Object.entries(mappings)) {
+    if (!target?.startsWith(CUSTOM_FIELD_PREFIX)) continue;
+    const clave = target.slice(CUSTOM_FIELD_PREFIX.length);
+    porClave.set(clave, [...(porClave.get(clave) ?? []), col]);
+  }
+  return [...porClave.entries()]
+    .filter(([, cols]) => cols.length > 1)
+    .map(([clave, columns]) => ({
+      target: `${CUSTOM_FIELD_PREFIX}${clave}`,
+      label: clave,
+      columns,
+    }));
+}

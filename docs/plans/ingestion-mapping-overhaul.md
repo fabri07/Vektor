@@ -341,11 +341,13 @@ El 422 pasa a usar labels humanos (`CANONICAL_FIELDS[entity][field]`), como ya h
 
 Sintaxis `{entidad}:{campo}` **en inglés** (el español va en el label). El prefijo viaja dentro de `target_field`, así que `context_mappings` no cambia de forma: **sin migración**.
 
-**Permitido:** venta → identificadores de cliente · gasto/compra → identificadores de producto y de proveedor · catálogo → datos descriptivos del producto.
+**La regla que gobierna la allowlist** (congelada en `test_ningun_cruzado_duplica_una_referencia_canonica`, F-0): una ruta cruzada existe para alcanzar campos que la entidad de la hoja **no puede expresar**. Si el campo ya tiene contraparte canónica en la hoja de origen —convención `{entidad}_{campo}`: `customer_dni`, `supplier_name`, `product_name`— queda **fuera**. Dos rutas para la misma columna con semánticas de creación distintas (la canónica pasa por el resolvedor de referencias, gobernado por `*_REFERENCE_CREATION_MODE`; la cruzada escribiría el maestro directo) es un bug esperando, sin nadie que arbitre cuál gana.
 
-**Reconciliación:** `sale → product:sku|barcode|name` son **identidad, no escritura**. Ya existen como campos canónicos de venta y F-H1 los usa para resolver; exponerlos como escritura cruzada permitiría **renombrar un maestro desde una transacción**, contra la regla "ninguna ruta puede modificar un maestro sin identidad suficiente". Van en el optgroup "Campos de esta venta", no en "Mandar a Productos".
+Esto corrige el borrador previo, que excluía `sale → product:name` por ese principio y a la vez habilitaba `sale → customer:name` y `expense → supplier:name`, que son el mismo caso.
 
-**Prohibido:** `venta → product:stock_units` (doble guard) · venta → costos o precios vigentes por inferencia · cualquier ruta que modifique un maestro sin identidad suficiente · el producto cartesiano entidad × campo.
+**Permitido:** venta → campos de cliente **sin** contraparte canónica (`last_name`, `address`, `locality`, `province`, `postal_code`, `customer_type`, `iva_condition`) · gasto/compra → identificadores de producto (`sku`, `barcode`, `unit_cost_ars`, `category`) y campos de proveedor sin contraparte (`last_name`, `payment_method`).
+
+**Prohibido:** `venta → product:stock_units` (doble guard: fuera de la allowlist **y** en `CROSS_ENTITY_FORBIDDEN_FIELDS`) · `sale → product:{name,sku,barcode}`, que son identidad y viven en el optgroup "Campos de esta venta" · **`product → supplier:*`**, que recrearía las filas marca-como-proveedor que cerró la Reforma de Proveedores y hubo que limpiar con `deactivate_brand_suppliers.py` + `_brand_collapsed` (si F-D la quiere, primero tiene que definir que sólo VINCULE a un proveedor existente y nunca cree) · venta → costos o precios vigentes por inferencia · el producto cartesiano entidad × campo.
 
 **Semántica:** `fill_if_empty` — nunca pisa un dato existente por default (1187 ventas dan 1187 valores posibles del mismo campo; pisar hace ganar a la última fila del archivo, que es elegir un dato de negocio por un detalle de implementación). Agrupar por identidad, resolver conflictos **dentro del archivo antes de escribir**, **una escritura por entidad resuelta, no una por fila**. Preview: *"Tres filas proponen dos teléfonos distintos para el mismo cliente."*
 

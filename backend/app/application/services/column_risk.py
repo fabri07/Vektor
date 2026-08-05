@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.column_mapping_service import (
     REQUIRED_FIELDS,
     ColumnMappingService,
+    parse_target,
 )
 from app.application.services.file_parsing import (
     _NULL_STRINGS,
@@ -163,10 +164,6 @@ def _is_real_target(target_field: str | None) -> bool:
 
     ``ignore`` y los custom fields quedan fuera (siempre opcionales, sin validador
     canónico; su tratamiento de nulos no es parte de F8a)."""
-    from app.application.services.column_mapping_service import (  # noqa: PLC0415
-        parse_target,
-    )
-
     return parse_target(target_field).kind == "canonical"
 
 

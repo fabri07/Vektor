@@ -7,6 +7,7 @@
 
 import {
   coversRequired,
+  customFieldCollisions,
   missingRequiredFields,
   scalarCollisions,
 } from "../mappingRules";
@@ -134,5 +135,36 @@ describe("scalarCollisions", () => {
       "sale_price_ars",
       "stock_units",
     ]);
+  });
+});
+
+describe("customFieldCollisions", () => {
+  it("dos columnas con el mismo nombre de campo propio colisionan", () => {
+    const colisiones = customFieldCollisions({
+      Observaciones: "custom_field:obs",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.label).toBe("obs");
+    expect(colisiones[0]?.columns.sort()).toEqual(["Obs.", "Observaciones"]);
+  });
+
+  it("nombres distintos no colisionan", () => {
+    expect(
+      customFieldCollisions({
+        Observaciones: "custom_field:observaciones",
+        "Obs.": "custom_field:obs",
+      }),
+    ).toEqual([]);
+  });
+
+  it("no confunde un campo canónico con uno propio", () => {
+    expect(
+      customFieldCollisions({ a: "sale_price_ars", b: "sale_price_ars" }),
+    ).toEqual([]);
+  });
+
+  it("ignorar y sin mapear no compiten por ningún campo", () => {
+    expect(customFieldCollisions({ a: "ignore", b: "ignore", c: "" })).toEqual([]);
   });
 });

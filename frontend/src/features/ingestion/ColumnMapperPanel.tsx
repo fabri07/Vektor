@@ -24,6 +24,7 @@ import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 import {
+  customFieldCollisions,
   missingRequiredFields,
   scalarCollisions,
   type SheetIssues,
@@ -444,7 +445,14 @@ function SheetMapperSection({
     catalog?.[entity]?.required ?? [],
     mappings,
   );
-  const colisiones = scalarCollisions(fields, mappings);
+  // Las dos ramas del mapeo colisionan igual: un escalar canónico y un campo
+  // propio guardan un valor por fila, así que de dos columnas al mismo destino
+  // sobrevive una sola. Se muestran juntas porque para el usuario son el mismo
+  // problema y la salida es la misma.
+  const colisiones = [
+    ...scalarCollisions(fields, mappings),
+    ...customFieldCollisions(mappings),
+  ];
   const reqMissing = faltanRequeridos.length > 0;
 
   // `faltanRequeridos`/`colisiones` se recomputan en cada render (arrays nuevos),
@@ -1412,7 +1420,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     catalog?.[entityType]?.required ?? [],
     mappings,
   );
-  const colisiones = scalarCollisions(fields, mappings);
+  // Las dos ramas del mapeo colisionan igual: un escalar canónico y un campo
+  // propio guardan un valor por fila, así que de dos columnas al mismo destino
+  // sobrevive una sola. Se muestran juntas porque para el usuario son el mismo
+  // problema y la salida es la misma.
+  const colisiones = [
+    ...scalarCollisions(fields, mappings),
+    ...customFieldCollisions(mappings),
+  ];
 
   // Preview rows para la tabla secundaria
   const previewRows = (

@@ -446,8 +446,12 @@ def parse_target(target: str | None) -> ParsedTarget:
     if value == "ignore":
         return ParsedTarget(kind="ignore", entity=None, field="")
     if value.startswith(_CUSTOM_FIELD_PREFIX):
+        # La clave se normaliza igual que el resto del string: sin esto,
+        # "custom_field:obs " y "custom_field:obs" eran la misma clave (el strip
+        # de afuera la alcanzaba) pero "custom_field: obs" era OTRA, así que dos
+        # columnas podían compartir campo sin que la colisión se detectara.
         return ParsedTarget(
-            kind="custom", entity=None, field=value[len(_CUSTOM_FIELD_PREFIX) :]
+            kind="custom", entity=None, field=value[len(_CUSTOM_FIELD_PREFIX) :].strip()
         )
     prefix, sep, rest = value.partition(":")
     if sep and prefix in CROSS_ENTITY_PREFIXES and rest:
@@ -462,24 +466,35 @@ def parse_target(target: str | None) -> ParsedTarget:
 #: cartesiano: cada par se habilita a mano porque cada uno tiene una semántica
 #: distinta de identidad y de escritura.
 #:
-#: Fuera a propósito:
+#: REGLA que gobierna qué entra (la testea ``test_ningun_cruzado_duplica_una_
+#: referencia_canonica``): una ruta cruzada existe para alcanzar campos que la
+#: entidad de la hoja NO puede expresar. Si el campo ya tiene contraparte
+#: canónica en la hoja de origen —convención ``{entidad}_{campo}``:
+#: ``customer_dni``, ``supplier_name``, ``product_name``— queda FUERA, porque
+#: dos rutas para la misma columna con semánticas de creación distintas es un
+#: bug esperando: la canónica pasa por el resolvedor de referencias (cuya
+#: creación gobierna ``*_REFERENCE_CREATION_MODE``) y la cruzada escribiría el
+#: maestro directo, sin arbitraje entre las dos.
+#:
+#: Fuera a propósito, además de lo que saca la regla:
 #:  - ``product:stock_units`` desde cualquier hoja — es la proyección de un
 #:    ledger de movimientos, no un campo que se setea desde una columna.
-#:  - ``sale → product:{name,sku,barcode}`` — son IDENTIDAD (ya existen como
-#:    campos canónicos de venta y los usa ``_resolve_product``). Como ruta de
-#:    escritura permitirían renombrar un maestro desde una transacción.
+#:  - ``product → supplier:*`` — un catálogo de productos NO crea proveedores:
+#:    la columna "Tienda"/"Proveedor" de un catálogo es la MARCA, y va a
+#:    ``Product.custom_fields["marca"]``. Habilitar esta ruta recrearía
+#:    exactamente las filas marca-como-proveedor que hubo que limpiar con
+#:    ``deactivate_brand_suppliers.py`` + el flag ``_brand_collapsed``. Si F-D
+#:    la quiere, primero tiene que definir que solo VINCULE a un proveedor
+#:    existente y nunca cree.
 #:  - ``notes`` — no es escalar, así que dos columnas podrían apuntarle y habría
 #:    que inventar cómo concatenarlas.
 CROSS_ENTITY_TARGETS: dict[str, dict[str, frozenset[str]]] = {
     "sale": {
+        # name/dni/cuit/email/phone quedan fuera: ya son customer_* canónicos
+        # de la venta y los consume `_customer_reference_record`.
         "customer": frozenset(
             {
-                "name",
                 "last_name",
-                "dni",
-                "cuit",
-                "email",
-                "phone",
                 "address",
                 "locality",
                 "province",
@@ -491,11 +506,11 @@ CROSS_ENTITY_TARGETS: dict[str, dict[str, frozenset[str]]] = {
     },
     "expense": {
         "product": frozenset({"sku", "barcode", "unit_cost_ars", "category"}),
-        "supplier": frozenset({"name", "last_name", "cuil", "email", "phone"}),
+        # name/cuil/email/phone quedan fuera: ya son supplier_* canónicos del
+        # gasto y los consume `_supplier_reference_record`.
+        "supplier": frozenset({"last_name", "payment_method"}),
     },
-    "product": {
-        "supplier": frozenset({"name", "cuil", "email", "phone"}),
-    },
+    "product": {},
     "customer": {},
     "supplier": {},
 }

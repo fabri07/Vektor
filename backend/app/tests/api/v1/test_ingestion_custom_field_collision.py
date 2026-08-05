@@ -169,6 +169,13 @@ class TestColisionDeCampoPropio:
 
         Si el usuario ya decidió dropear una de las dos, después del drop queda
         una sola columna: bloquear sería exigirle deshacer una decisión tomada.
+
+        OJO con el alcance: este payload es a mano, no algo que el panel pueda
+        producir hoy. ``build_contextual_column_risk`` saltea los campos propios
+        (``_is_real_target`` los excluye), así que la UI nunca ofrece
+        ``drop_column`` para uno. Lo que se defiende acá es el filtro
+        ``_dropped_by_risk`` de la validación, que sí tiene que respetar la
+        decisión venga de donde venga.
         """
         body = {
             "column_mappings": [
@@ -194,6 +201,66 @@ class TestColisionDeCampoPropio:
         )
 
         assert response.status_code == 200, response.text
+
+    async def test_la_rama_plana_tambien_rechaza(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """El camino legacy de una sola tabla, sin ``mapping_contexts``.
+
+        Los mapeos sin ``context_id`` van por una rama distinta del confirm, con
+        su propia copia de las validaciones. Sin este caso la validación podía
+        borrarse de ahí sin que ningún test se enterara —comprobado revirtiéndola
+        y viendo la suite pasar igual—, y es la rama por la que entra un CSV de
+        una sola hoja, que es el archivo más común.
+        """
+        rows = [
+            {"Productos": "Vela aromática 200g", "Observaciones": "a", "Obs.": "b"}
+        ]
+        plano = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="catalogo_plano.csv",
+            s3_key="uploads/test/uuid/catalogo_plano.csv",
+            content_type="text/csv",
+            size_bytes=512,
+            purpose="stock",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "stock",
+                "has_producto": True,
+                "row_count": 1,
+                "stock_detectado": rows,
+            },
+        )
+        db_session.add(plano)
+        await db_session.commit()
+
+        body = {
+            "column_mappings": [
+                # Sin context_id: es lo que manda por la rama plana.
+                {"source_column": "Productos", "target_field": "name"},
+                {"source_column": "Observaciones", "target_field": "custom_field:obs"},
+                {"source_column": "Obs.", "target_field": "custom_field:obs"},
+            ],
+            "confirmed_fields": {"productos": True},
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{plano.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "Observaciones" in detail
+        assert "Obs." in detail
 
     async def test_una_columna_ignorada_no_compite_por_el_campo(
         self,

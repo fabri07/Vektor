@@ -1613,7 +1613,7 @@ async def confirm_file(
     _effective_risk_decisions: list[ColumnRiskDecision] = []
     if body.column_risk_decisions:
         for _m in body.column_mappings:
-            if _m.target_field == "ignore":
+            if parse_target(_m.target_field).kind in ("ignore", "none"):
                 continue
             _cid = _m.context_id or "table"
             _risk_context_entities[_cid] = _entity_for(_m)
