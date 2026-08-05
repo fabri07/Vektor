@@ -4868,6 +4868,16 @@ async def _insert_multisheet_data(
             _register_product_identity_cache(
                 products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
             )
+            # F-H1: además de la caché de identidad, los índices TRANSACCIONALES
+            # que consulta `_resolve_product`. Sin esto, un producto creado por
+            # una hoja de catálogo es invisible para las ventas del MISMO
+            # archivo: la caché de identidad la usa el upsert de productos, no el
+            # link de ventas. La ruta de compras ya lo hacía (review F2 #2); la
+            # de catálogo no, así que una venta nunca vinculaba contra el
+            # catálogo que venía adjunto, sin importar el orden de las solapas.
+            _register_product_transaction_indexes(
+                _new_id, name, sku, _by_sku, _by_name, _by_token
+            )
             # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
             # = compra real, si trae costo).
             await _apply_catalog_stock(
@@ -4936,7 +4946,30 @@ async def _insert_multisheet_data(
     contexts = summary.get("mapping_contexts")
     if contexts:
         # ── Path por contexto (hoja/grupo) ──────────────────────────────────────
-        for ctx in contexts:
+        # F-H2 (paso 1/2): primero las hojas que DECLARAN identidades —catálogos y
+        # saldos de apertura—, después las que registran movimientos. El recorrido
+        # iba en el orden del archivo, así que un libro con la solapa de Ventas
+        # antes que la de Productos resolvía sus ventas contra un catálogo que
+        # todavía no existía: el mismo archivo daba resultados distintos según cómo
+        # el usuario hubiera ordenado las solapas.
+        #
+        # Los maestros (customer/supplier) ya vienen importados desde
+        # `_import_master_entities`, antes de esta función.
+        #
+        # NO es un orden por tipo de hoja: dentro de los movimientos, compras y
+        # ventas se ordenan por fecha (paso 2/2), porque una compra posterior no
+        # puede justificar una venta anterior. Acá sólo se garantiza que la
+        # identidad exista antes de que alguien la busque.
+        #
+        # `sorted` es estable: entre hojas del mismo grupo se conserva el orden del
+        # archivo, que es el desempate final cuando no hay fecha.
+        def _orden_de_pasada(ctx: dict[str, Any]) -> int:
+            _cid = ctx.get("context_id")
+            # MISMA prioridad que abajo: override del usuario → entidad del summary.
+            _ent = (context_entity or {}).get(_cid or "") or ctx.get("entity_type")
+            return 0 if _ent == "product" else 1
+
+        for ctx in sorted(contexts, key=_orden_de_pasada):
             ctx_id = ctx.get("context_id")
             base_entity = ctx.get("entity_type")
             # FASE F: el usuario puede reasignar una hoja no clasificada a un
