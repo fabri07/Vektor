@@ -38,6 +38,7 @@ from app.application.services.column_mapping_service import (
     REQUIRED_FIELDS,
     SINGLE_VALUE_FIELDS,
     ColumnMappingService,
+    parse_target,
     validate_required_date_mapping,
 )
 from app.application.services.column_risk import (
@@ -1292,7 +1293,7 @@ async def confirm_file(
         mapped = {
             m.target_field
             for m in mappings
-            if m.target_field != "ignore" and not m.target_field.startswith("custom_field:")
+            if parse_target(m.target_field).kind == "canonical"
         }
         return set(REQUIRED_FIELDS.get(entity_type, [])) - mapped
 
@@ -1332,6 +1333,40 @@ async def confirm_file(
                 continue  # el usuario ya decidió sacarla: no compite por el campo
             by_target[m.target_field].append(m.source_column)
         return {t: cols for t, cols in by_target.items() if len(cols) > 1}
+
+    def _colliding_custom_fields(mappings: list[ColumnMapping]) -> dict[str, list[str]]:
+        """Campos PROPIOS con más de una columna apuntándoles.
+
+        Hermano de ``_colliding_scalars``, para la otra rama del mapeo. Un campo
+        propio guarda un valor por fila, así que dos columnas al mismo destino
+        tienen exactamente el mismo problema que dos columnas a un escalar
+        canónico: sólo una sobrevive. El importador ahora se queda con la
+        primera (first-wins, igual que la rama canónica), pero elegir por orden
+        del archivo sigue siendo elegir un dato por un detalle de
+        implementación — así que se le pregunta al usuario.
+
+        No depende de la entidad: un campo propio es del tenant, no del catálogo
+        canónico de la sección.
+        """
+        by_key: dict[str, list[str]] = defaultdict(list)
+        for m in mappings:
+            parsed = parse_target(m.target_field)
+            if parsed.kind != "custom":
+                continue
+            if (m.context_id or "table", m.source_column) in _dropped_by_risk:
+                continue  # el usuario ya decidió sacarla: no compite por el campo
+            by_key[parsed.field].append(m.source_column)
+        return {k: cols for k, cols in by_key.items() if len(cols) > 1}
+
+    def _custom_collision_detail(colisiones: dict[str, list[str]]) -> str:
+        partes = [
+            f"«{key}» ← {', '.join(cols)}" for key, cols in sorted(colisiones.items())
+        ]
+        return (
+            "Hay más de una columna guardándose con el mismo nombre de campo "
+            f"propio, y solo se puede guardar una: {'; '.join(partes)}. Cambiale "
+            "el nombre a una, o mandala a «Ignorar»."
+        )
 
     def _collision_detail(entity_type: str, colisiones: dict[str, list[str]]) -> str:
         etiquetas = CANONICAL_FIELDS.get(entity_type, {})
@@ -1424,6 +1459,15 @@ async def confirm_file(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=_collision_detail(_entity_type, _colisiones),
                 )
+            if _cf_colisiones := _colliding_custom_fields(_flat_mappings):
+                await _emit_validation_reject(
+                    "colision_campo_propio",
+                    {"entity_type": _entity_type, "colisiones": _cf_colisiones},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=_custom_collision_detail(_cf_colisiones),
+                )
 
     # Validación de requeridos — por contexto (multi-hoja), solo contextos incluidos
     if _ctx_mappings:
@@ -1464,6 +1508,22 @@ async def confirm_file(
                         detail=(
                             f"En la hoja «{_hoja(_cid)}»: "
                             f"{_collision_detail(_ent, _colisiones)}"
+                        ),
+                    )
+                if _cf_colisiones := _colliding_custom_fields(_ms):
+                    await _emit_validation_reject(
+                        "colision_campo_propio",
+                        {
+                            "context_id": _cid,
+                            "entity_type": _ent,
+                            "colisiones": _cf_colisiones,
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"En la hoja «{_hoja(_cid)}»: "
+                            f"{_custom_collision_detail(_cf_colisiones)}"
                         ),
                     )
 
@@ -1692,8 +1752,9 @@ async def confirm_file(
                     _mapping.source_column,
                 ) in _dropped_pairs:
                     continue
-                if _mapping.target_field.startswith("custom_field:"):
-                    _field_key = _mapping.target_field[len("custom_field:"):]
+                _parsed_target = parse_target(_mapping.target_field)
+                if _parsed_target.kind == "custom":
+                    _field_key = _parsed_target.field
                     await ensure_custom_field_exists(
                         session,
                         tenant.tenant_id,

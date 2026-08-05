@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -397,6 +398,114 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
 }
 
 
+# ── F-0: gramática de un ``target_field`` ────────────────────────────────────
+# Un target puede ser cuatro cosas y hasta acá cada consumidor las distinguía
+# con su propio ``startswith("custom_field:")``. Seis copias de la misma regla
+# son seis oportunidades de que una quede vieja — y la próxima forma de target
+# (``{entidad}:{campo}``, ruteo entre secciones) usa el MISMO separador que los
+# campos propios, así que una copia desactualizada empezaría a leer
+# ``custom_field:marca`` como "entidad custom_field, campo marca".
+
+#: Entidades que pueden aparecer como prefijo de un target cruzado. Es lo que
+#: distingue ``customer:dni`` (cruzado) de ``custom_field:marca`` (campo propio)
+#: sin depender del orden en que aparezcan los dos puntos.
+CROSS_ENTITY_PREFIXES: frozenset[str] = frozenset(CANONICAL_FIELDS)
+
+_CUSTOM_FIELD_PREFIX = "custom_field:"
+
+
+@dataclass(frozen=True)
+class ParsedTarget:
+    """Qué es un ``target_field``, resuelto en un solo lugar.
+
+    ``kind``:
+      - ``none``      — sin mapear (nadie lo miró todavía)
+      - ``ignore``    — el usuario decidió explícitamente dejarla afuera
+      - ``canonical`` — campo de la entidad de la propia hoja
+      - ``custom``    — campo propio del tenant; ``field`` es la clave sin prefijo
+      - ``cross``     — campo de OTRA entidad; ``entity`` dice cuál
+
+    ``none`` e ``ignore`` no se colapsan a propósito: uno es una columna sin
+    revisar y el otro una decisión tomada. Tratarlos igual deja que una columna
+    que nadie miró se descarte como si alguien lo hubiera querido.
+    """
+
+    kind: str
+    entity: str | None
+    field: str
+
+
+def parse_target(target: str | None) -> ParsedTarget:
+    """Fuente ÚNICA de verdad sobre qué representa un ``target_field``.
+
+    Nadie más debería hacer ``startswith("custom_field:")`` a mano.
+    """
+    if target is None or not target.strip():
+        return ParsedTarget(kind="none", entity=None, field="")
+    value = target.strip()
+    if value == "ignore":
+        return ParsedTarget(kind="ignore", entity=None, field="")
+    if value.startswith(_CUSTOM_FIELD_PREFIX):
+        return ParsedTarget(
+            kind="custom", entity=None, field=value[len(_CUSTOM_FIELD_PREFIX) :]
+        )
+    prefix, sep, rest = value.partition(":")
+    if sep and prefix in CROSS_ENTITY_PREFIXES and rest:
+        return ParsedTarget(kind="cross", entity=prefix, field=rest)
+    # Prefijo desconocido: NO se inventa una entidad. Queda como canónico, que es
+    # la forma que el confirm ya sabe rechazar cuando el campo no existe.
+    return ParsedTarget(kind="canonical", entity=None, field=value)
+
+
+#: Rutas de escritura entre secciones habilitadas, explícitas por par
+#: (entidad de la hoja → entidad destino → campos). NO es un producto
+#: cartesiano: cada par se habilita a mano porque cada uno tiene una semántica
+#: distinta de identidad y de escritura.
+#:
+#: Fuera a propósito:
+#:  - ``product:stock_units`` desde cualquier hoja — es la proyección de un
+#:    ledger de movimientos, no un campo que se setea desde una columna.
+#:  - ``sale → product:{name,sku,barcode}`` — son IDENTIDAD (ya existen como
+#:    campos canónicos de venta y los usa ``_resolve_product``). Como ruta de
+#:    escritura permitirían renombrar un maestro desde una transacción.
+#:  - ``notes`` — no es escalar, así que dos columnas podrían apuntarle y habría
+#:    que inventar cómo concatenarlas.
+CROSS_ENTITY_TARGETS: dict[str, dict[str, frozenset[str]]] = {
+    "sale": {
+        "customer": frozenset(
+            {
+                "name",
+                "last_name",
+                "dni",
+                "cuit",
+                "email",
+                "phone",
+                "address",
+                "locality",
+                "province",
+                "postal_code",
+                "customer_type",
+                "iva_condition",
+            }
+        ),
+    },
+    "expense": {
+        "product": frozenset({"sku", "barcode", "unit_cost_ars", "category"}),
+        "supplier": frozenset({"name", "last_name", "cuil", "email", "phone"}),
+    },
+    "product": {
+        "supplier": frozenset({"name", "cuil", "email", "phone"}),
+    },
+    "customer": {},
+    "supplier": {},
+}
+
+#: Campos que ninguna ruta cruzada puede escribir, pase lo que pase. Es defensa
+#: en profundidad sobre ``CROSS_ENTITY_TARGETS``: la allowlist ya no los tiene,
+#: y este guard rechaza igual si alguien los agrega por error.
+CROSS_ENTITY_FORBIDDEN_FIELDS: frozenset[str] = frozenset({"stock_units"})
+
+
 # Targets canónicos que representan la fecha de negocio de una fila.
 _DATE_TARGET_FIELDS: frozenset[str] = frozenset({"transaction_date", "expense_date"})
 
@@ -778,7 +887,7 @@ class ColumnMappingService:
             target = mapping["target_field"]
 
             # No aprendemos "ignore" ni custom_fields
-            if target == "ignore" or target.startswith("custom_field:"):
+            if parse_target(target).kind in ("ignore", "none", "custom"):
                 continue
 
             result = await self.db.execute(

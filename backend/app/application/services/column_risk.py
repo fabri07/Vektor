@@ -163,9 +163,11 @@ def _is_real_target(target_field: str | None) -> bool:
 
     ``ignore`` y los custom fields quedan fuera (siempre opcionales, sin validador
     canónico; su tratamiento de nulos no es parte de F8a)."""
-    if not target_field or target_field == "ignore":
-        return False
-    return not target_field.startswith("custom_field:")
+    from app.application.services.column_mapping_service import (  # noqa: PLC0415
+        parse_target,
+    )
+
+    return parse_target(target_field).kind == "canonical"
 
 
 def resolve_contexts(summary: dict[str, Any]) -> list[dict[str, Any]]:

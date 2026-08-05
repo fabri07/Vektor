@@ -2480,14 +2480,25 @@ def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[
     (amount, transaction_date, name, sale_price_ars, ...) → source_col; el segundo
     mapea cf_key → source_col para los targets `custom_field:{key}`. Ignora "ignore".
     """
+    from app.application.services.column_mapping_service import (  # noqa: PLC0415
+        parse_target,
+    )
+
     target_to_col: dict[str, str] = {}
     custom_field_cols: dict[str, str] = {}
     for src_col, target in mapping.items():
-        if target == "ignore":
+        parsed = parse_target(target)
+        if parsed.kind in ("ignore", "none"):
             continue
-        if target.startswith("custom_field:"):
-            custom_field_cols[target[len("custom_field:"):]] = src_col
-        elif target not in target_to_col:
+        if parsed.kind == "custom":
+            # F-0: first-wins, igual que la rama canónica. Antes esta rama no
+            # tenía guard: dos columnas que colapsaran al mismo campo propio
+            # hacían que la SEGUNDA pisara a la primera en silencio, así que el
+            # valor guardado dependía del orden de las columnas del Excel
+            # (el incidente ASTERIA, en versión campo propio).
+            if parsed.field not in custom_field_cols:
+                custom_field_cols[parsed.field] = src_col
+        elif parsed.kind == "canonical" and target not in target_to_col:
             target_to_col[target] = src_col
     return target_to_col, custom_field_cols
 
@@ -2857,15 +2868,11 @@ async def _insert_confirmed_data_impl(
 
         if column_mappings:
             # Construir lookup: target_field → primer source_col que lo mapee
-            for src_col, target in column_mappings.items():
-                if target == "ignore":
-                    continue
-                if target.startswith("custom_field:"):
-                    cf_key = target[len("custom_field:"):]
-                    custom_field_cols[cf_key] = src_col
-                else:
-                    if target not in target_to_col:
-                        target_to_col[target] = src_col
+            # Misma resolución que `_resolve_target_cols` (incluido el first-wins
+            # de la rama custom): son el mismo contrato en dos caminos distintos.
+            _canon, _custom = _resolve_target_cols(column_mappings)
+            target_to_col.update(_canon)
+            custom_field_cols.update(_custom)
 
             # Remapear columnas de fecha y monto usando el mapeo explícito
             fecha_col = (
