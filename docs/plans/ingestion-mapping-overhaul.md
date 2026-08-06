@@ -164,7 +164,7 @@ Implementación: `_evidencia_de_producto` / `_declarar_evidencia` / `_evaluar_hi
 ```
 F-H3.a  contrato: eje `inventory_effect` por hoja + defaults      ✅ entregado
 F-H3.b  cálculo del impacto por fecha + warnings (NO toca stock)  ✅ entregado
-F-H3.c  preview: stock inicial → movimientos → final, negativos, ambigüedades
+F-H3.c  preview: stock inicial → movimientos → final, negativos, ambigüedades  ✅ entregado
 F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
 ```
 
@@ -177,6 +177,8 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
 > 3. **Confirmar → revisar → aplicar** (recomendada): el confirm no toca stock (ya es así por el default `informational`) y devuelve el impacto; el usuario lo revisa y aplica el replay por hoja en un segundo paso. Es literalmente "el replay queda a un clic", y no necesita ni dry-run ni un segundo resolvedor.
 >
 > La 3 es la que sale gratis con lo ya entregado, pero convierte el replay en una acción posterior al import en vez de una opción del confirm. **Es una decisión de producto, no técnica.**
+>
+> **Resuelto: se eligió la 3.** El confirm no toca stock y devuelve el impacto; el replay es un paso posterior. **Regla que F-H3.d hereda:** el impacto que se muestre al aplicar se **recalcula dentro de la transacción del apply**, nunca se lee de lo que devolvió el confirm. Entre confirmar y aplicar el stock pudo cambiar, y mostrar un número viejo para una operación que va a escribir otro es exactamente lo que ya pagó F11 (por eso ahí el DELETE recalcula y su resultado es el autoritativo, no el del preview).
 
 ### F-H3.0 · La cola cronológica (movida acá desde F-H2)
 
@@ -467,6 +469,8 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H3.b ✅ | el saldo de apertura es el PREVIO al archivo (registrar tras `_apply_purchase_to_stock` lo contaría dos veces — mutation-testeado) |
 | F-H3.b ✅ | venta 10/03 + compra 20/03 → `primer_negativo_en = 10/03`, saldo final 4: tocar negativo ≠ quedar negativo |
 | F-H3.b ✅ | una hoja `no_inventory` no entra en la proyección |
+| F-H3.c ✅ | el confirm devuelve el impacto por producto; el stock real no se movió |
+| F-H3.c ✅ | con más productos que el máximo listado, `inventory_impact_total` reporta el TOTAL, no lo listado (mutation-testeado) |
 | F-H3.d | a igual fecha, la compra se **aplica** antes que la venta |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11** |
