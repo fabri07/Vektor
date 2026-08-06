@@ -162,13 +162,21 @@ Implementación: `_evidencia_de_producto` / `_declarar_evidencia` / `_evaluar_hi
 **Orden de entrega de la fase** (consecuencia de que el default sea `informational`):
 
 ```
-F-H3.a  contrato: eje `inventory_effect` por hoja + defaults      (sin cambio de efecto)
-F-H3.b  cola cronológica + cálculo del impacto + warnings          (NO toca stock)
+F-H3.a  contrato: eje `inventory_effect` por hoja + defaults      ✅ entregado
+F-H3.b  cálculo del impacto por fecha + warnings (NO toca stock)  ✅ entregado
 F-H3.c  preview: stock inicial → movimientos → final, negativos, ambigüedades
 F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
 ```
 
 `c` y `d` no son "después": son **la condición** para que `d` exista. Sin preview ni fórmula reconciliada, el replay no se habilita.
+
+> **Decisión abierta de F-H3.c — la forma del flujo.** El impacto se calcula HOY como subproducto de la inserción (necesita la identidad resuelta, que sólo existe al importar). Mostrarlo *antes* de confirmar exige elegir una de tres, y las tres cambian la UX:
+>
+> 1. **Dry-run real**: correr el import en una transacción y hacer rollback. Reusa todo, cuesta el doble de tiempo de import y hay que garantizar que no queden efectos afuera de la transacción (Celery, fingerprints).
+> 2. **Proyección sin persistir**: recalcular identidad sin insertar. Duplica el resolvedor — exactamente lo que F-0 vino a evitar.
+> 3. **Confirmar → revisar → aplicar** (recomendada): el confirm no toca stock (ya es así por el default `informational`) y devuelve el impacto; el usuario lo revisa y aplica el replay por hoja en un segundo paso. Es literalmente "el replay queda a un clic", y no necesita ni dry-run ni un segundo resolvedor.
+>
+> La 3 es la que sale gratis con lo ya entregado, pero convierte el replay en una acción posterior al import en vez de una opción del confirm. **Es una decisión de producto, no técnica.**
 
 ### F-H3.0 · La cola cronológica (movida acá desde F-H2)
 
@@ -450,8 +458,17 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H2 ✅ | compra ANTERIOR a la venta → sin advertencia (control: si no, la advertencia estaría prendida siempre) |
 | F-H2 ✅ | producto preexistente en la base → fuera del chequeo, sus ventas viejas no se marcan |
 | F-H2 ✅ | la huella de idempotencia numera la fila DENTRO DE SU HOJA (mutation-testeado: índice global → rojo) |
-| F-H3.0 | a igual fecha, la compra se aplica antes que la venta |
-| F-H3.0 | idempotencia del import intacta tras pasar a dos pasadas |
+| F-H3.a ✅ | `historical_replay` no es el default de NINGUNA combinación de hoja (7 entidades × 7 mapeos) |
+| F-H3.a ✅ | un efecto para una hoja inexistente → 422 con traza, antes del lease |
+| F-H3.a ✅ | el efecto RESUELTO queda en el `STAGE_CONFIRM` (el default no viaja en el payload) |
+| F-H3.b ✅ | apertura 10 + compra 5 − venta 4 → saldo final proyectado 11, **stock real sin tocar** |
+| F-H3.b ✅ | a igual fecha, la compra entra antes que la venta (sin negativo intermedio falso) |
+| F-H3.b ✅ | el catálogo declara un ABSOLUTO: pisa el saldo previo, no se le suma |
+| F-H3.b ✅ | el saldo de apertura es el PREVIO al archivo (registrar tras `_apply_purchase_to_stock` lo contaría dos veces — mutation-testeado) |
+| F-H3.b ✅ | venta 10/03 + compra 20/03 → `primer_negativo_en = 10/03`, saldo final 4: tocar negativo ≠ quedar negativo |
+| F-H3.b ✅ | una hoja `no_inventory` no entra en la proyección |
+| F-H3.d | a igual fecha, la compra se **aplica** antes que la venta |
+| F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11** |
 | F-H3 | re-confirmar el mismo archivo no aplica el movimiento dos veces |
 | F-H3 | borrar el import revierte exactamente sus movimientos (incremental, nunca `Σ(movimientos)`) |

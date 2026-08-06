@@ -23,7 +23,7 @@ from app.application.services.inventory_movement_origin import (
 from app.application.services.inventory_temporal_service import (
     CAUSE_NO_PURCHASES_OR_OVERSOLD,
     CAUSE_PURCHASES_DATED_AFTER_SALES,
-    _Event,
+    TimelineEvent,
     check_products_temporal_divergence,
     replay_timeline,
 )
@@ -91,8 +91,8 @@ def test_replay_pure_credit_before_debit_same_day() -> None:
     from datetime import date
 
     events = [
-        _Event(date(2026, 1, 1), -10, kind_rank=3),  # venta
-        _Event(date(2026, 1, 1), 10, kind_rank=0),  # compra (mismo día)
+        TimelineEvent(date(2026, 1, 1), -10, kind_rank=3),  # venta
+        TimelineEvent(date(2026, 1, 1), 10, kind_rank=0),  # compra (mismo día)
     ]
     result = replay_timeline(opening_anchor_qty=0, events=events)
     assert result.min_balance == 0
@@ -104,8 +104,8 @@ def test_replay_pure_detects_dip_and_dates() -> None:
     from datetime import date
 
     events = [
-        _Event(date(2026, 1, 10), -10, kind_rank=3),  # venta antes
-        _Event(date(2026, 2, 1), 20, kind_rank=0),  # compra después
+        TimelineEvent(date(2026, 1, 10), -10, kind_rank=3),  # venta antes
+        TimelineEvent(date(2026, 2, 1), 20, kind_rank=0),  # compra después
     ]
     result = replay_timeline(opening_anchor_qty=2, events=events)
     assert result.min_balance == -8

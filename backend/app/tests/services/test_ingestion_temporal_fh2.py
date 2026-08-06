@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -296,3 +297,191 @@ class TestInvarianteTemporal:
         )
 
         assert not counts.get("historial_insuficiente")
+
+
+@pytest.mark.asyncio
+class TestProyeccionDeInventario:
+    """F-H3.b: el import calcula el impacto sobre el stock, y no lo aplica.
+
+    Las dos mitades importan igual. Que la cuenta sea correcta sirve de poco si
+    aplicarla no era la intención; que no se aplique sirve de poco si la cuenta
+    que se muestra está mal.
+    """
+
+    async def test_calcula_el_impacto_sin_mover_el_stock(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        counts = await _importar(
+            db_session,
+            sample_tenant,
+            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05"),
+        )
+
+        producto = (await db_session.execute(select(Product))).scalars().one()
+        impacto = counts["impacto_inventario"]
+        assert len(impacto) == 1
+        fila = impacto[0]
+        assert fila["product_id"] == str(producto.id)
+        # La compra trae 5; la venta, 1 (sin columna de cantidad → 1).
+        assert fila["compradas"] == 5
+        assert fila["vendidas"] == 1
+        # ABSOLUTOS, no `final == inicial + 4`: el saldo de apertura tiene que ser
+        # el PREVIO al archivo. El producto lo crea esta misma compra, así que es
+        # 0. Si la proyección se registrara DESPUÉS de `_apply_purchase_to_stock`
+        # leería 5 —la compra ya aplicada— y la contaría dos veces; una aserción
+        # relativa no ve esa diferencia porque los dos lados se corren juntos.
+        assert fila["saldo_inicial"] == 0
+        assert fila["saldo_final"] == 4
+
+        # Y el stock REAL: la compra sí suma (comportamiento de siempre), la venta
+        # NO descuenta. El default es `informational` y nadie pidió el replay.
+        assert producto.stock_units == 5
+
+    async def test_una_venta_anterior_a_su_compra_proyecta_negativo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El caso que el aviso tiene que poder nombrar.
+
+        Vender el 10/03 lo que se compró el 20/03 deja el saldo abajo de cero en
+        el medio, aunque termine en positivo: falta la compra vieja.
+        """
+        counts = await _importar(
+            db_session,
+            sample_tenant,
+            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-20"),
+        )
+
+        assert counts["stock_proyectado_negativo"] == 1
+        fila = counts["impacto_inventario"][0]
+        assert fila["primer_negativo_en"] == "2024-03-10"
+        assert fila["minimo"] == -1
+        # Termina bien: 0 − 1 + 5 = 4. Tocar negativo ≠ quedar negativo.
+        assert fila["saldo_final"] == 4
+
+    async def test_nadie_pidio_el_replay(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        counts = await _importar(
+            db_session,
+            sample_tenant,
+            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05"),
+        )
+        assert counts["hojas_con_replay"] == 0
+
+    async def test_una_hoja_no_inventory_no_entra_en_la_proyeccion(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Declarar que una hoja no habla de inventario la saca de la cuenta."""
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05"),
+            {"ventas": True, "gastos": True},
+            context_mappings=_MAPPINGS,
+            context_confirmed=_CONFIRMED,
+            inventory_effect={_VENTAS: "no_inventory", _COMPRAS: "no_inventory"},
+        )
+        assert counts["impacto_inventario"] == []
+
+
+@pytest.mark.asyncio
+class TestProyeccionEnArchivoDeUnaSolaHoja:
+    """El hueco que casi se escapa: la proyección vivía sólo en el multi-hoja.
+
+    `_insert_multisheet_data` corre para `inferred_type == "mixed"` o
+    `multi_sheet`; un archivo de UNA hoja de ventas —el import más común que
+    existe— usa el bloque inline de `_insert_confirmed_data_impl`. Calcular el
+    impacto sólo para los libros de varias hojas es una funcionalidad a medias
+    que nadie notaría que falta: el archivo importa bien y el aviso no aparece.
+    """
+
+    @staticmethod
+    def _summary_una_hoja() -> dict[str, Any]:
+        return {
+            "file_type": "spreadsheet",
+            "inferred_type": "ventas",
+            "confidence": "HIGH",
+            "has_venta": True,
+            "row_count": 2,
+            "ventas_detectadas": [
+                {
+                    "fecha": "2024-03-10",
+                    "producto": _PRODUCTO,
+                    "cantidad": "3",
+                    "monto": "2100",
+                },
+                {
+                    "fecha": "2024-03-12",
+                    "producto": _PRODUCTO,
+                    "cantidad": "2",
+                    "monto": "1400",
+                },
+            ],
+        }
+
+    async def test_calcula_el_impacto_y_no_toca_el_stock(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        producto = Product(
+            tenant_id=sample_tenant.tenant_id,
+            name=_PRODUCTO,
+            sale_price_ars=Decimal("2100"),
+            unit_cost_ars=Decimal("1200"),
+            stock_units=10,
+        )
+        db_session.add(producto)
+        await db_session.flush()
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            self._summary_una_hoja(),
+            {"ventas": True},
+            column_mappings={
+                "fecha": "transaction_date",
+                "producto": "product_name",
+                "cantidad": "quantity",
+                "monto": "amount",
+            },
+        )
+
+        impacto = counts["impacto_inventario"]
+        assert len(impacto) == 1
+        assert impacto[0]["vendidas"] == 5
+        assert impacto[0]["saldo_inicial"] == 10
+        assert impacto[0]["saldo_final"] == 5
+        # El stock REAL no se movió: nadie pidió el replay.
+        await db_session.refresh(producto)
+        assert producto.stock_units == 10
+
+    async def test_reporta_el_negativo_proyectado(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Vender 5 de un producto con 2 en stock: la historia no cierra."""
+        producto = Product(
+            tenant_id=sample_tenant.tenant_id,
+            name=_PRODUCTO,
+            sale_price_ars=Decimal("2100"),
+            unit_cost_ars=Decimal("1200"),
+            stock_units=2,
+        )
+        db_session.add(producto)
+        await db_session.flush()
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            self._summary_una_hoja(),
+            {"ventas": True},
+            column_mappings={
+                "fecha": "transaction_date",
+                "producto": "product_name",
+                "cantidad": "quantity",
+                "monto": "amount",
+            },
+        )
+
+        assert counts["stock_proyectado_negativo"] == 1
+        fila = counts["impacto_inventario"][0]
+        assert fila["saldo_final"] == -3
+        assert fila["primer_negativo_en"] == "2024-03-10"

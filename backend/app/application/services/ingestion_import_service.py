@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
 from app.application.services import maintenance_lock_service, stock_service
+from app.application.services._import_projection import ImportProjectionRecorder
 from app.application.services._savepoint import (
     SavepointConflictError,
     guarded_savepoint,
@@ -52,6 +53,7 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
 )
+from app.domain.inventory_effect import HISTORICAL_REPLAY
 from app.domain.product_categories import normalize_product_category
 from app.domain.text_norm import (
     normalize_barcode,
@@ -2544,6 +2546,10 @@ async def insert_confirmed_data(
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
     stock_treatment: str | dict[str, str] | None = None,
+    # F-H3.a: efecto de inventario RESUELTO por hoja (`{context_id: modo}`).
+    # Eje separado de `stock_treatment`, que es contable. None = cada hoja cae
+    # a `informational`: se calcula el impacto y no se toca stock.
+    inventory_effect: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
 
@@ -2575,6 +2581,7 @@ async def insert_confirmed_data(
         source=source,
         uploaded_file_id=uploaded_file_id,
         stock_treatment=stock_treatment,
+        inventory_effect=inventory_effect,
     )
     await session.flush()
     await assign_orphan_sales_to_local(session, tenant_id)
@@ -2639,6 +2646,7 @@ async def _insert_confirmed_data_impl(
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
     stock_treatment: str | dict[str, str] | None = None,
+    inventory_effect: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -2768,6 +2776,28 @@ async def _insert_confirmed_data_impl(
     # fila al aplicar stock, y para que con autoflush=False los productos recién
     # creados reciban su stock (session.get no ve pendientes sin flush).
     _product_cache: dict[uuid.UUID, Any] = {}
+    # F-H3.b: uno solo para toda la corrida, compartido por el camino multi-hoja
+    # y el de una sola hoja. Registra lo que el archivo declara sobre el stock;
+    # no aplica nada.
+    _proyeccion_recorder = ImportProjectionRecorder(
+        session, tenant_id, _product_cache, inventory_effect
+    )
+
+    def _volcar_impacto_de_inventario() -> None:
+        """Deja el impacto proyectado en ``counts``.
+
+        Se llama en los DOS puntos de salida —el multi-hoja retorna temprano— y
+        no en cada camino de inserción: si sólo estuviera en uno, el archivo se
+        importaría igual y el aviso no aparecería, que es la clase de falla que
+        nadie reporta porque no rompe nada visible.
+        """
+        _proyeccion_recorder.volcar_en(counts)
+        # Cuántas hojas pidieron aplicar la historia. Hoy siempre 0 (el replay se
+        # implementa en F-H3.d); queda contado para que el día que deje de serlo
+        # se vea en la traza y no haya que deducirlo del stock resultante.
+        counts["hojas_con_replay"] = sum(
+            1 for efecto in (inventory_effect or {}).values() if efecto == HISTORICAL_REPLAY
+        )
 
     if file_type == "spreadsheet":
         inferred_type = summary.get("inferred_type", "general")
@@ -2793,11 +2823,13 @@ async def _insert_confirmed_data_impl(
                 seen_fp=seen_fp,
                 product_cache=_product_cache,
                 stock_is_purchase_for=stock_is_purchase_for,
+                proyeccion=_proyeccion_recorder,
             )
             if seen_fp is not None and _preloaded_fp is not None:
                 await _persist_import_fingerprints(
                     session, tenant_id, seen_fp - _preloaded_fp
                 )
+            _volcar_impacto_de_inventario()
             return counts
 
         # Índice de identidad de clientes para resolver la referencia por fila en
@@ -3142,6 +3174,14 @@ async def _insert_confirmed_data_impl(
                         by_barcode=_identity_indexes.by_barcode,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
+                    # F-H3.b: la venta entra a la proyección. NO descuenta stock —
+                    # bajo el default (`informational`) sólo se calcula qué pasaría.
+                    # Una fila sin fecha ya se fue a /otros más arriba y nunca llega
+                    # acá; el guard lo hace explícito en vez de darlo por sabido.
+                    if tx_date is not None:
+                        await _proyeccion_recorder.registrar_venta(
+                            entry.product_id, tx_date.date(), qty
+                        )
                     # F7c: resolución de cliente por fila — matched/anonymous/
                     # unresolved. Nunca crea: solo vincula contra un cliente
                     # existente (maestro importado arriba o ya en la DB) o cae al
@@ -3409,6 +3449,17 @@ async def _insert_confirmed_data_impl(
                             _bump_reference_counts(counts, "compras_proveedor", "matched")
                         if cf:
                             expense.custom_fields = cf
+                        # F-H3.b: ANTES de `_apply_purchase_to_stock`, que hace
+                        # `stock_units += qty`. Registrar después leería un saldo
+                        # que ya incluye esta compra y la contaría dos veces.
+                        # Sin fecha la fila ya se fue a /otros (ver el mismo guard
+                        # en la venta).
+                        if tx_date is not None:
+                            await _proyeccion_recorder.registrar_compra(
+                                expense.product_id,
+                                tx_date.date(),
+                                _parse_qty(exp_qty_raw),
+                            )
                         await _apply_purchase_to_stock(
                             session,
                             tenant_id,
@@ -3673,6 +3724,11 @@ async def _insert_confirmed_data_impl(
                         existing.list_price_ars = list_price
                     if stock_val > 0:
                         _delta = stock_val - existing.stock_units
+                        # F-H3.b: el catálogo declara un ABSOLUTO (pisa la apertura,
+                        # no se le suma). Antes del `=`, que ya cambia el previo.
+                        _proyeccion_recorder.declarar_catalogo(
+                            existing.id, name, int(existing.stock_units), stock_val
+                        )
                         existing.stock_units = stock_val
                         # FASE 3 + A2/A5: audit del cambio de stock + sync de balance;
                         # y si entró stock real (_delta>0) con costo, su COGS.
@@ -3887,6 +3943,10 @@ async def _insert_confirmed_data_impl(
                     _register_product_identity_cache(
                         products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
                     )
+                    # F-H3.b: producto NUEVO → el saldo previo al archivo es 0.
+                    _proyeccion_recorder.declarar_catalogo(
+                        new_product_id, name, 0, stock_val
+                    )
                     # FASE 3 + A2/A5: audit del ingreso inicial de stock + balance +,
                     # si trae stock con costo, su COGS (stock inicial = compra real).
                     await _apply_catalog_stock(
@@ -4051,6 +4111,8 @@ async def _insert_confirmed_data_impl(
                 for text_row in summary.get("gastos_detectados", []):
                     _add_text_expense(text_row)
 
+    _volcar_impacto_de_inventario()
+
     await session.flush()
     # Persistir en lote (idempotente) las huellas nuevas del camino batch.
     if seen_fp is not None and _preloaded_fp is not None:
@@ -4119,6 +4181,9 @@ async def _insert_multisheet_data(
     product_cache: dict[uuid.UUID, Any] | None = None,
     # Resuelve el tratamiento POR HOJA (ver `stock_is_purchase_for` en el caller).
     stock_is_purchase_for: Callable[[str | None], bool] = lambda _ctx: False,
+    # F-H3.b: registrador del impacto sobre el stock. Compartido con el camino
+    # de una sola hoja para que la proyección salga igual por los dos.
+    proyeccion: ImportProjectionRecorder | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -4257,6 +4322,7 @@ async def _insert_multisheet_data(
         cols: dict[str, str],
         cf_cols: dict[str, str],
         row_ref: str | None = None,
+        context_id: str | None = None,
     ) -> bool:
         """Inserta una venta. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
@@ -4327,6 +4393,14 @@ async def _insert_multisheet_data(
         # F-H2: la venta se vincula igual; lo que NO se afirma es que hubiera
         # stock. Vincular es identidad, no disponibilidad.
         _evaluar_historial(entry.product_id, tx_date, _clean_str(_venta_producto, 299))
+        # F-H3.b: la venta entra a la proyección. NO descuenta stock — bajo el
+        # default (`informational`) sólo se calcula qué pasaría. Si el producto
+        # no está registrado todavía es porque nada de este archivo lo tocó, así
+        # que su stock actual ES el previo.
+        if proyeccion is not None:
+            await proyeccion.registrar_venta(
+                entry.product_id, tx_date.date(), qty, context_id
+            )
         # F7c: resolución de cliente por fila — matched/anonymous/unresolved.
         # Nunca crea: solo vincula (maestro importado arriba o ya en la DB) o cae
         # al sentinela "Local" con traza si la referencia no matchea.
@@ -4359,6 +4433,7 @@ async def _insert_multisheet_data(
         cols: dict[str, str],
         cf_cols: dict[str, str],
         row_ref: str | None = None,
+        context_id: str | None = None,
     ) -> bool:
         """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
@@ -4546,6 +4621,13 @@ async def _insert_multisheet_data(
         # ventas viejas quedarían marcadas como no justificadas.
         if _has_qty:
             _declarar_evidencia(expense.product_id, tx_date, solo_si_conocido=True)
+        # F-H3.b: la compra entra a la proyección ANTES de `_apply_purchase_to_stock`,
+        # que hace `stock_units += qty`. Registrarla después leería un saldo que ya
+        # incluye esta misma compra y la contaría dos veces.
+        if proyeccion is not None:
+            await proyeccion.registrar_compra(
+                expense.product_id, tx_date.date(), _parse_qty(exp_qty_raw), context_id
+            )
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
@@ -4772,6 +4854,14 @@ async def _insert_multisheet_data(
                 existing.list_price_ars = list_price
             if stock_val > 0:
                 _delta = stock_val - existing.stock_units
+                # F-H3.b: un catálogo declara un ABSOLUTO, no un movimiento. Es la
+                # apertura del replay y pisa el saldo previo en vez de sumarse: leer
+                # "tengo 10 en góndola" como "entraron 10" inventa una compra sobre
+                # un producto que ya existía. Antes del `=`, que ya lo cambia.
+                if proyeccion is not None:
+                    proyeccion.declarar_catalogo(
+                        existing.id, name, int(existing.stock_units), stock_val
+                    )
                 existing.stock_units = stock_val
                 # A2/A5: movimiento estampado catalog_initial_stock + COGS del delta.
                 await _apply_catalog_stock(
@@ -4972,6 +5062,10 @@ async def _insert_multisheet_data(
             # identidad sin fecha, que alcanza para vincular una venta pero no
             # para sostener que el producto ya estaba ese día.
             _declarar_evidencia(_new_id, _acquired)
+            # F-H3.b: producto NUEVO → el saldo previo al archivo es 0, y el
+            # catálogo declara el absoluto (ver el caso análogo en _merge_into_existing).
+            if proyeccion is not None:
+                proyeccion.declarar_catalogo(_new_id, name, 0, stock_val)
             # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
             # = compra real, si trae costo).
             await _apply_catalog_stock(
@@ -5144,9 +5238,9 @@ async def _insert_multisheet_data(
                     else None
                 )
                 if entity == "sale":
-                    _did_insert = await _add_sale(row, cols, cf_cols, _row_ref)
+                    _did_insert = await _add_sale(row, cols, cf_cols, _row_ref, ctx_id)
                 elif entity == "expense":
-                    _did_insert = await _add_expense(row, cols, cf_cols, _row_ref)
+                    _did_insert = await _add_expense(row, cols, cf_cols, _row_ref, ctx_id)
                 else:
                     # F6-B2: la CREACIÓN de producto no fingerprintea (dedup por
                     # identidad/upsert), pero SÍ su CAPTURA a /otros (identidad

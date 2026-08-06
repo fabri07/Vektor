@@ -1916,6 +1916,9 @@ async def confirm_file(
             # acepta el tipo ancho porque también lee el valor guardado en el
             # summary por una relectura anterior, que llega como str/dict plano.
             stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
+            # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
+            # el default no viaja en el payload y el importador no sabe calcularlo.
+            inventory_effect=_inventory_effects,
             # Ledger de reversa: `products` no tiene columna de origen, así que
             # sin este detalle no hay forma de saber qué productos creó este
             # archivo — y borrarlo no podría deshacerlos.
@@ -2277,6 +2280,25 @@ async def confirm_file(
         warnings.append(
             f"{counts['filas_riesgo_a_otros']} fila(s) con datos faltantes o inválidos en "
             "columnas riesgosas se enviaron a «Otros» para que las completes."
+        )
+
+    # F-H3.b: el impacto que el archivo TENDRÍA sobre el stock. Nada se aplicó —
+    # el default es `informational`—, así que el aviso dice qué pasaría, no qué
+    # pasó. Un saldo que se va abajo de cero al reproducir la historia casi
+    # siempre significa que faltan compras viejas, no que el stock de hoy esté
+    # mal: por eso informa y no bloquea.
+    if counts.get("stock_proyectado_negativo"):
+        _impacto = counts.get("impacto_inventario") or []
+        _neg = [p for p in _impacto if p.get("primer_negativo_en")]
+        _muestra = ", ".join(f"«{p['product_name']}»" for p in _neg[:3])
+        _resto = len(_neg) - 3
+        if _resto > 0:
+            _muestra += f" y {_resto} más"
+        warnings.append(
+            f"Si se aplicara la historia de este archivo, {len(_neg)} producto(s) "
+            f"quedarían con stock negativo en algún momento ({_muestra}). No se "
+            "modificó el stock: probablemente falten compras anteriores. Revisá el "
+            "detalle antes de aplicar el histórico."
         )
 
     # F-H2: vincular una venta a un producto es resolver su IDENTIDAD, no afirmar
