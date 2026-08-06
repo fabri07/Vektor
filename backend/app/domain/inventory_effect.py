@@ -43,6 +43,13 @@ CURRENT_SNAPSHOT = "current_snapshot"
 #: servicios, un resumen contable, el libro diario).
 NO_INVENTORY = "no_inventory"
 
+#: Clave de ``custom_fields`` donde una venta importada guarda de QUÉ HOJA vino
+#: (F-H3.d.2). No existe otro link: ``source_row_ref`` es el sha256 del ancla y no
+#: se puede volver atrás. Sin esto el replay sólo podría aplicarse al archivo
+#: entero, y un libro con una hoja `informational` y otra `historical_replay`
+#: terminaría aplicando las dos — o sea, ignorando lo que el usuario declaró.
+IMPORT_CONTEXT_FIELD = "_import_context"
+
 InventoryEffect = Literal[
     "informational",
     "historical_replay",

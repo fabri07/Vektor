@@ -159,9 +159,17 @@ async def test_context_custom_field_persisted(
     )
     assert counts["ventas"] == 1
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
-    # F7c: toda venta lleva la traza de resolución de cliente por fila — acá
-    # "anonymous" porque la hoja no mapea ninguna columna customer_*.
-    assert sale.custom_fields == {"vendedor": "Juan", "_customer_resolution": "anonymous"}
+    # La igualdad es exacta a propósito: lo que se guarda acá es lo que después lee
+    # el resto del sistema, así que una clave nueva tiene que pasar por este test.
+    # Además del valor mapeado van dos marcas internas: la traza de resolución de
+    # cliente por fila (F7c — "anonymous" porque la hoja no mapea ninguna columna
+    # customer_*) y la hoja de origen (F-H3.d.2, lo que permite aplicar el replay
+    # por hoja en vez de al archivo entero).
+    assert sale.custom_fields == {
+        "vendedor": "Juan",
+        "_customer_resolution": "anonymous",
+        "_import_context": "sheet:Ventas",
+    }
     # El marcador interno nunca se filtra a custom_fields.
     assert "__context__" not in sale.custom_fields
 

@@ -53,7 +53,7 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
 )
-from app.domain.inventory_effect import HISTORICAL_REPLAY
+from app.domain.inventory_effect import HISTORICAL_REPLAY, IMPORT_CONTEXT_FIELD
 from app.domain.product_categories import normalize_product_category
 from app.domain.text_norm import (
     normalize_barcode,
@@ -2782,6 +2782,15 @@ async def _insert_confirmed_data_impl(
     _proyeccion_recorder = ImportProjectionRecorder(
         session, tenant_id, _product_cache, inventory_effect
     )
+    # F-H3.d.2: el camino de una sola tabla no recorre contextos —no tiene por qué,
+    # hay uno solo—, pero el archivo IGUAL tiene su hoja y el usuario igual pudo
+    # declararle un efecto. Sin esto, un `.xlsx` plano quedaba clavado en el default
+    # aunque hubiera elegido otra cosa, y las ventas no sabrían a qué hoja pertenecen.
+    # Se exige que haya exactamente UNA: con cero no hay nada que declarar, y con
+    # varias este camino no es el que corresponde (esas van por `_insert_multisheet_data`).
+    _ctx_inline: str | None = (
+        next(iter(inventory_effect)) if inventory_effect and len(inventory_effect) == 1 else None
+    )
 
     def _volcar_impacto_de_inventario() -> None:
         """Deja el impacto proyectado en ``counts``.
@@ -3180,7 +3189,7 @@ async def _insert_confirmed_data_impl(
                     # acá; el guard lo hace explícito en vez de darlo por sabido.
                     if tx_date is not None:
                         await _proyeccion_recorder.registrar_venta(
-                            entry.product_id, tx_date.date(), qty
+                            entry.product_id, tx_date.date(), qty, _ctx_inline
                         )
                     # F7c: resolución de cliente por fila — matched/anonymous/
                     # unresolved. Nunca crea: solo vincula contra un cliente
@@ -3202,6 +3211,10 @@ async def _insert_confirmed_data_impl(
                         if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                             cf["_customer_reference_raw"] = _cust_ref.raw_value
                     _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+                    # F-H3.d.2: de qué hoja vino, para que el replay se pueda aplicar
+                    # por hoja y no al archivo entero (ver IMPORT_CONTEXT_FIELD).
+                    if _ctx_inline:
+                        cf[IMPORT_CONTEXT_FIELD] = _ctx_inline
                     if cf:
                         entry.custom_fields = cf
                     # Mejora D: trazabilidad import → fila origen.
@@ -3459,6 +3472,7 @@ async def _insert_confirmed_data_impl(
                                 expense.product_id,
                                 tx_date.date(),
                                 _parse_qty(exp_qty_raw),
+                                _ctx_inline,
                             )
                         await _apply_purchase_to_stock(
                             session,
@@ -4420,6 +4434,9 @@ async def _insert_multisheet_data(
             if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                 cf["_customer_reference_raw"] = _cust_ref.raw_value
         _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+        # F-H3.d.2: de qué hoja vino (ver IMPORT_CONTEXT_FIELD).
+        if context_id:
+            cf[IMPORT_CONTEXT_FIELD] = context_id
         if cf:
             entry.custom_fields = cf
         if row_ref is not None:
