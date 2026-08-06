@@ -395,6 +395,57 @@ class ConfirmIngestionResponse(BaseModel):
     inventory_impact_total: int = 0
 
 
+class InventoryReplayRequest(BaseModel):
+    """F-H3.d.4: aplicar al inventario la historia de ventas de un archivo."""
+
+    #: Hojas a aplicar. `None` = todas las del archivo. El eje se declara POR HOJA
+    #: al confirmar, así que aplicar todo por default sería contradecir la
+    #: declaración cuando el libro mezcla hojas con distinto efecto.
+    context_ids: list[str] | None = None
+    #: `True` = calcular y mostrar sin escribir. El cálculo es el MISMO que el del
+    #: apply; lo único que cambia es si se persiste.
+    dry_run: bool = False
+
+
+class PendingSaleItem(BaseModel):
+    """Una venta cuyo descuento no se pudo aplicar por falta de stock."""
+
+    sale_id: str
+    product_id: str
+    product_name: str
+    quantity: int
+    #: Unidades que había cuando le tocó el turno. Siempre menor que `quantity`.
+    disponible: int
+
+
+class InventoryReplayResponse(BaseModel):
+    """Resultado del replay. Los números son los recalculados en esta corrida.
+
+    Nunca son los que devolvió el confirm: entre confirmar y aplicar el stock pudo
+    cambiar, y mostrar un número viejo para una operación que escribió otro es el
+    error que ya se pagó en el borrado por procedencia.
+    """
+
+    file_id: UUID
+    dry_run: bool
+    #: Ventas cuyo descuento se aplicó en esta corrida.
+    aplicadas: int
+    #: Ventas que ya estaban descontadas (aplicar de nuevo, o descontadas en vivo).
+    #: No son un error: son el no-op idempotente.
+    ya_aplicadas: int
+    #: Ventas que quedaron pendientes por falta de stock. NO se anulan: la venta ya
+    #: está en los libros y anularla cambiaría facturación confirmada. El usuario
+    #: carga el inventario que falta y vuelve a aplicar.
+    sin_stock: list[PendingSaleItem] = Field(default_factory=list)
+    #: Por producto: saldo antes → ventas → saldo después.
+    impacto: list[InventoryImpactItem] = Field(default_factory=list)
+    hojas: list[str] = Field(default_factory=list)
+    #: `False` si alguna venta del archivo no tiene registrada su hoja (importada
+    #: antes de que el import la estampara): el alcance real fue el archivo entero.
+    alcance_por_hoja: bool = True
+    warnings: list[str] = Field(default_factory=list)
+
+
 # ── Relectura de archivos (REREAD_FILE) ────────────────────────────────────────
 
 

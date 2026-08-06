@@ -191,6 +191,8 @@ async def decrement_stock(
     db: AsyncSession,
     *,
     occurred_at: datetime | None = None,
+    source_upload_id: uuid.UUID | None = None,
+    source_type: str | None = None,
 ) -> InventoryMovement:
     # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
     await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
@@ -216,6 +218,13 @@ async def decrement_stock(
         movement_type="sale",
         qty=-qty,
         source_event_id=source_event_id,
+        # F-H3.d.4: procedencia, cuando el descuento viene de aplicar la historia de
+        # un archivo. Sin `source_upload_id` el movimiento quedaría fuera de la
+        # reversa por borrado (que voidea por archivo) y borrar el import dejaría el
+        # descuento aplicado para siempre. NULL en el descuento de una venta en vivo,
+        # que no viene de ningún archivo.
+        source_upload_id=source_upload_id,
+        source_type=source_type,
         # Fecha de NEGOCIO del movimiento (venta): si el caller la conoce (fecha de
         # la venta), se usa esa; si no, el momento del registro.
         occurred_at=ensure_utc(occurred_at) or datetime.now(UTC),

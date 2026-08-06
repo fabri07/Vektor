@@ -16,6 +16,7 @@ aunque el usuario hubiera elegido otra cosa.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -153,7 +154,7 @@ class TestLaVentaGuardaSuHoja:
             tenant_id=sample_tenant.tenant_id,
             amount=Decimal("2100"),
             quantity=2,
-            transaction_date=importer.datetime(2024, 3, 10),
+            transaction_date=datetime(2024, 3, 10),
         )
         db_session.add(venta)
         await db_session.flush()

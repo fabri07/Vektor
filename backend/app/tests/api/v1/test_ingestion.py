@@ -3610,3 +3610,71 @@ class TestImpactoDeInventarioEnLaRespuesta:
         assert data["inventory_impact_total"] == cantidad
         assert len(data["inventory_impact"]) == ingestion_module._MAX_IMPACTO_LISTADO
         assert data["inventory_impact_total"] > len(data["inventory_impact"])
+
+
+# ── F-H3.d.4: aplicar el replay de inventario ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestInventoryReplayEndpoint:
+    """El segundo paso de "confirmar → revisar → aplicar" (F-H3.c)."""
+
+    async def test_archivo_inexistente_da_404(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        response = await client.post(
+            f"/api/v1/ingestion/files/{uuid.uuid4()}/inventory-replay",
+            headers=auth_headers,
+            json={"dry_run": True},
+        )
+        assert response.status_code == 404
+
+    async def test_dry_run_devuelve_el_impacto_sin_escribir(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        confirmed_file: UploadedFile,
+    ) -> None:
+        from app.persistence.models.product import Product
+        from app.persistence.models.transaction import SaleEntry
+
+        producto = Product(
+            id=uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            name="Vela aromática 200g",
+            sale_price_ars=Decimal("1050"),
+            unit_cost_ars=Decimal("600"),
+            stock_units=10,
+        )
+        db_session.add(producto)
+        await db_session.flush()
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                product_id=producto.id,
+                amount=Decimal("2100"),
+                quantity=4,
+                transaction_date=datetime(2024, 3, 10, tzinfo=UTC),
+                source_upload_id=confirmed_file.id,
+                custom_fields={"_import_context": "sheet:ventas"},
+            )
+        )
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{confirmed_file.id}/inventory-replay",
+            headers=auth_headers,
+            json={"dry_run": True},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["dry_run"] is True
+        assert data["aplicadas"] == 0
+        assert data["hojas"] == ["sheet:ventas"]
+        assert data["alcance_por_hoja"] is True
+        assert [(p["saldo_inicial"], p["saldo_final"]) for p in data["impacto"]] == [(10, 6)]
+        await db_session.refresh(producto)
+        assert producto.stock_units == 10

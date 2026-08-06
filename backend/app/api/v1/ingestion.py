@@ -141,8 +141,11 @@ from app.schemas.ingestion import (
     FilePreviewResponse,
     FileStatusItem,
     InventoryImpactItem,
+    InventoryReplayRequest,
+    InventoryReplayResponse,
     MasterPreviewSample,
     MasterPreviewSummary,
+    PendingSaleItem,
     PreservedEntity,
     RereadApplyStartResponse,
     RereadCounts,
@@ -2572,4 +2575,86 @@ async def reread_undo(
         removed=result["removed"],
         status=result["status"],
         not_reverted_entities=result.get("not_reverted_entities", []),
+    )
+
+
+@router.post(
+    "/files/{file_id}/inventory-replay",
+    response_model=InventoryReplayResponse,
+    summary="Aplica al inventario la historia de ventas de un archivo (por hoja)",
+    dependencies=[
+        Depends(require_modify_access),
+        Depends(ensure_tenant_not_under_maintenance),
+    ],
+)
+async def inventory_replay(
+    file_id: uuid.UUID,
+    body: InventoryReplayRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> InventoryReplayResponse:
+    """F-H3.d.4 — el segundo paso de "confirmar → revisar → aplicar".
+
+    Confirmar no toca stock (`inventory_effect` default: `informational`); acá el
+    usuario aplica la historia de las hojas que eligió.
+
+    Gateado con ``require_modify_access`` (PIN) porque mueve inventario en masa:
+    es la misma clase de operación que la relectura, no un alta de datos.
+
+    ``dry_run`` corre EXACTAMENTE el mismo cálculo sin escribir. El número que
+    devuelve el apply es el autoritativo: entre un preview y la escritura el stock
+    pudo cambiar, y por eso el cálculo se rehace adentro de la transacción que
+    escribe (misma regla que el borrado por procedencia).
+    """
+    from app.application.services import inventory_replay_service  # noqa: PLC0415
+
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
+        )
+
+    outcome = await inventory_replay_service.run_inventory_replay(
+        session,
+        tenant.tenant_id,
+        file_id,
+        context_ids=body.context_ids,
+        apply=not body.dry_run,
+    )
+    if not body.dry_run:
+        await session.commit()
+
+    warnings: list[str] = []
+    if not outcome.alcance_por_hoja:
+        warnings.append(
+            "Algunas ventas de este archivo no tienen registrada la hoja de origen "
+            "(se importaron antes de que se guardara ese dato): el alcance fue el "
+            "archivo completo, no las hojas elegidas."
+        )
+    if outcome.sin_stock:
+        warnings.append(
+            f"{len(outcome.sin_stock)} venta(s) quedaron sin aplicar por falta de "
+            "stock. No se anularon: cargá el inventario que falta y volvé a aplicar."
+        )
+
+    return InventoryReplayResponse(
+        file_id=file_id,
+        dry_run=body.dry_run,
+        aplicadas=outcome.aplicadas,
+        ya_aplicadas=outcome.ya_aplicadas,
+        sin_stock=[
+            PendingSaleItem(
+                sale_id=str(p.sale_id),
+                product_id=str(p.product_id),
+                product_name=p.product_name,
+                quantity=p.quantity,
+                disponible=p.disponible,
+            )
+            for p in outcome.sin_stock
+        ],
+        impacto=[InventoryImpactItem(**p.as_dict()) for p in outcome.impacto.productos],
+        hojas=outcome.hojas,
+        alcance_por_hoja=outcome.alcance_por_hoja,
+        warnings=warnings,
     )

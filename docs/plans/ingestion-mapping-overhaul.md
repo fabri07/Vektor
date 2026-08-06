@@ -172,8 +172,19 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
         d.1 fórmula V14 reconciliada          ✅ entregado
         d.2 context_id estampado en la venta  ✅ entregado
         d.3 gate al confirmar (cola + /otros) ✅ entregado
-        d.4 endpoint de apply   d.5 botón
+        d.4 endpoint de apply                 ✅ entregado
+        d.5 botón
 ```
+
+> **Forma final de d.4.** `POST /ingestion/files/{id}/inventory-replay` (gate
+> `require_modify_access`, igual que `reread/apply`), body `{context_ids?, dry_run?}`.
+> `preview` y `apply` son **la misma función** con un flag: si el preview corriera por
+> su lado, lo que se muestra y lo que se escribe podrían separarse con el tiempo. El
+> movimiento lleva `source_event_id="sale:{id}"` (idempotencia + no doble conteo con la
+> venta en vivo, **V13**) y `source_upload_id` (la reversa por borrado, **V15** — probado
+> de punta a punta, no asumido). Si entre el confirm y el apply el stock ya no alcanza,
+> el descuento queda **pendiente** y se informa: la venta ya está en los libros y
+> anularla cambiaría facturación confirmada.
 
 > **Límite honesto de d.3, declarado y no silencioso.** En el archivo de **una sola
 > tabla** no hay pasadas separadas: la misma fila puede dar venta, gasto y producto
@@ -510,10 +521,13 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H3.d.3 ✅ | una fila rechazada NO consume stock: no arrastra a las que sí entraban |
 | F-H3.d.3 ✅ | re-confirmar no duplica la captura en `/otros` (mutation-testeado: sin huella → dos filas) |
 | F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos se **abstiene** y lo reporta |
-| F-H3.d.4 | aplicar dos veces no descuenta dos veces (`source_event_id="sale:{id}"`) |
-| F-H3.d.4 | el impacto que devuelve el apply se recalcula contra el stock actual, no el del confirm |
-| F-H3.d.4 | si el stock cambió entre confirm y apply, el descuento queda **pendiente**: no se anula la venta |
-| F-H3.d.4 | borrar el archivo revierte los movimientos del replay (llevan `source_upload_id`) |
+| F-H3.d.4 ✅ | aplicar dos veces no descuenta dos veces (`source_event_id="sale:{id}"`, mutation-testeado) |
+| F-H3.d.4 ✅ | una venta ya descontada EN VIVO no se vuelve a descontar acá (**V13**) |
+| F-H3.d.4 ✅ | el impacto que devuelve el apply se recalcula contra el stock actual, no el del confirm |
+| F-H3.d.4 ✅ | si el stock cambió entre confirm y apply, el descuento queda **pendiente**: no se anula la venta (mutation-testeado) |
+| F-H3.d.4 ✅ | cargar el stock que faltaba y reintentar sí lo aplica |
+| F-H3.d.4 ✅ | borrar el archivo revierte los movimientos del replay — **end-to-end**, no por la columna (mutation-testeado) |
+| F-H3.d.4 ✅ | `dry_run` calcula y no escribe; sólo aplica las hojas pedidas; una venta sin hoja registrada lo **declara** |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11** |
 | F-H3 | re-confirmar el mismo archivo no aplica el movimiento dos veces |
