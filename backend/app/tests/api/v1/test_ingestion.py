@@ -27,6 +27,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.api.v1.ingestion as ingestion_module
 from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
     PROCESSING_STATUS_IMPORTING,
@@ -3453,3 +3454,159 @@ class TestEfectoDeInventarioPorHoja:
         )
 
         assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+class TestImpactoDeInventarioEnLaRespuesta:
+    """F-H3.c: el confirm devuelve el impacto proyectado para mostrarlo."""
+
+    async def test_devuelve_el_impacto_por_producto_sin_tocar_stock(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        producto = Product(
+            tenant_id=sample_tenant.tenant_id,
+            name="Vela aromática 200g",
+            sale_price_ars=Decimal("2100"),
+            unit_cost_ars=Decimal("1200"),
+            stock_units=10,
+        )
+        db_session.add(producto)
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas-impacto.xlsx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "row_count": 1,
+                "ventas_detectadas": [
+                    {
+                        "fecha": "2024-03-10",
+                        "producto": "Vela aromática 200g",
+                        "cantidad": "4",
+                        "monto": "8400",
+                    }
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "producto", "target_field": "product_name"},
+                    {"source_column": "cantidad", "target_field": "quantity"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["inventory_impact_total"] == 1
+        fila = data["inventory_impact"][0]
+        assert fila["product_name"] == "Vela aromática 200g"
+        assert fila["saldo_inicial"] == 10
+        assert fila["vendidas"] == 4
+        assert fila["saldo_final"] == 6
+        assert fila["primer_negativo_en"] is None
+
+        # El stock REAL no se movió: el default es `informational`.
+        await db_session.refresh(producto)
+        assert producto.stock_units == 10
+
+    async def test_el_total_no_miente_cuando_la_lista_se_corta(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """Un corte que no se declara se lee como el total.
+
+        Con más productos que el máximo listado, la respuesta trae los primeros
+        —los negativos van arriba, así que el corte se lleva lo menos
+        interesante— y el total completo aparte, para que la UI pueda decir
+        "mostrando N de M" en vez de dar a entender que N es todo.
+        """
+        cantidad = ingestion_module._MAX_IMPACTO_LISTADO + 5
+        for i in range(cantidad):
+            db_session.add(
+                Product(
+                    tenant_id=sample_tenant.tenant_id,
+                    name=f"Producto {i:03d}",
+                    sale_price_ars=Decimal("1000"),
+                    unit_cost_ars=Decimal("500"),
+                    stock_units=50,
+                )
+            )
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas-masivas.xlsx",
+            s3_key="uploads/test/uuid/ventas-masivas.xlsx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "row_count": cantidad,
+                "ventas_detectadas": [
+                    {
+                        "fecha": "2024-03-10",
+                        "producto": f"Producto {i:03d}",
+                        "cantidad": "1",
+                        "monto": "1000",
+                    }
+                    for i in range(cantidad)
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"ventas": True},
+                "column_mappings": [
+                    {"source_column": "fecha", "target_field": "transaction_date"},
+                    {"source_column": "producto", "target_field": "product_name"},
+                    {"source_column": "cantidad", "target_field": "quantity"},
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["inventory_impact_total"] == cantidad
+        assert len(data["inventory_impact"]) == ingestion_module._MAX_IMPACTO_LISTADO
+        assert data["inventory_impact_total"] > len(data["inventory_impact"])

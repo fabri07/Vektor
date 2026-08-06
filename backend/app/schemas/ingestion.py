@@ -352,6 +352,32 @@ class ConfirmIngestionRequest(BaseModel):
     )
 
 
+class InventoryImpactItem(BaseModel):
+    """F-H3.c: qué le PASARÍA al stock de un producto si se aplicara el archivo.
+
+    Nada de esto se aplicó: con el default (`informational`) el import calcula y
+    reporta. Los números son los del replay por fecha, no un neto de unidades:
+    ``minimo``/``primer_negativo_en`` sólo existen porque se reprodujo la
+    secuencia día por día.
+    """
+
+    product_id: str
+    product_name: str
+    #: Saldo ANTES del archivo (o el absoluto que declara un catálogo).
+    saldo_inicial: int
+    #: Saldo tras reproducir compras y ventas por fecha.
+    saldo_final: int
+    compradas: int
+    vendidas: int
+    #: Menor saldo alcanzado durante la secuencia, y cuándo.
+    minimo: int
+    minimo_en: str | None = None
+    #: Primer día en que el saldo se fue abajo de cero. `None` = nunca.
+    #: Tocar negativo NO es lo mismo que quedar negativo (`saldo_final < 0`): un
+    #: final sano con un pozo en el medio significa que faltan compras viejas.
+    primer_negativo_en: str | None = None
+
+
 class ConfirmIngestionResponse(BaseModel):
     file_id: UUID
     status: str
@@ -360,6 +386,13 @@ class ConfirmIngestionResponse(BaseModel):
     # identificado"), compras sin producto detallado (stock incompleto), filas a "Otros".
     # No bloquean; el frontend los muestra en un banner para que el usuario revise.
     warnings: list[str] = Field(default_factory=list)
+    # F-H3.c: el impacto proyectado sobre el inventario, para MOSTRARLO. Ordenado
+    # con los productos que se van a negativo primero. Acotado (ver
+    # `inventory_impact_total`): un catálogo de 1258 productos no entra en una
+    # respuesta de confirm, y truncar sin decirlo se leería como "esto es todo".
+    inventory_impact: list[InventoryImpactItem] = Field(default_factory=list)
+    #: Cuántos productos tienen impacto en total, incluidos los que no se listan.
+    inventory_impact_total: int = 0
 
 
 # ── Relectura de archivos (REREAD_FILE) ────────────────────────────────────────

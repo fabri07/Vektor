@@ -7,11 +7,13 @@ import { Button } from "@/components/ui/Button";
 import {
   ingestionService,
   type FilePreview,
+  type InventoryImpactItem,
   type StockTreatment,
 } from "@/services/ingestion.service";
 import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
+import { InventoryImpactPanel } from "./InventoryImpactPanel";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 
 const ACCEPTED_EXTENSIONS = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
@@ -74,6 +76,12 @@ export function FileUploadSection() {
   const [duplicateDetail, setDuplicateDetail] = useState<string | null>(null);
   // Avisos human-in-the-loop del import confirmado (sin proveedor/producto, a "Otros").
   const [confirmWarnings, setConfirmWarnings] = useState<string[]>([]);
+  // F-H3.c: impacto proyectado en el inventario (calculado, NO aplicado). El
+  // total va aparte porque la lista viene acotada por el backend.
+  const [inventoryImpact, setInventoryImpact] = useState<InventoryImpactItem[]>(
+    [],
+  );
+  const [inventoryImpactTotal, setInventoryImpactTotal] = useState(0);
   // A: tratamiento del stock cuando el archivo trae productos (default: saldo de apertura).
   const [stockTreatment, setStockTreatment] =
     useState<StockTreatment>("opening_balance");
@@ -209,6 +217,10 @@ export function FileUploadSection() {
         hasStock ? stockTreatment : undefined,
       );
       setConfirmWarnings(result.warnings ?? []);
+      // F-H3.c: el impacto proyectado sobre el stock, para que el usuario pueda
+      // decidir si aplicarlo. El import NO lo aplicó.
+      setInventoryImpact(result.inventory_impact ?? []);
+      setInventoryImpactTotal(result.inventory_impact_total ?? 0);
       setPhase("done");
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
     } catch {
@@ -471,6 +483,14 @@ export function FileUploadSection() {
             ))}
           </ul>
         </div>
+      )}
+
+      {/* F-H3.c: qué le pasaría al stock si se aplicara la historia del archivo */}
+      {phase === "done" && (
+        <InventoryImpactPanel
+          items={inventoryImpact}
+          total={inventoryImpactTotal}
+        />
       )}
 
       {/* Actions */}

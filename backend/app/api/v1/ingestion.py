@@ -140,6 +140,7 @@ from app.schemas.ingestion import (
     FileDeletionResult,
     FilePreviewResponse,
     FileStatusItem,
+    InventoryImpactItem,
     MasterPreviewSample,
     MasterPreviewSummary,
     PreservedEntity,
@@ -156,6 +157,13 @@ from app.schemas.ingestion import (
 router = APIRouter()
 
 logger = get_logger(__name__)
+
+#: F-H3.c: cuántos productos del impacto proyectado se devuelven en el confirm.
+#: Un catálogo real puede tener más de mil y la respuesta se vuelve impagable;
+#: la lista ya viene ordenada con los negativos primero, así que el corte se
+#: lleva lo menos interesante. El total completo viaja en
+#: `inventory_impact_total` — un corte que no se declara se lee como el total.
+_MAX_IMPACTO_LISTADO = 100
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 # MAX_FILE_SIZE_BYTES / MAX_FILE_SIZE_LABEL: única fuente de verdad en file_parsing.
@@ -2382,11 +2390,20 @@ async def confirm_file(
     except Exception:  # noqa: BLE001
         logger.warning("ingestion.confirm.temporal_check_failed", file_id=str(file_id))
 
+    # F-H3.c: el impacto proyectado, para que la UI lo muestre producto por
+    # producto. Ya viene ordenado con los negativos arriba, así que el corte se
+    # lleva lo menos interesante — y el total va aparte porque truncar sin
+    # decirlo se leería como "estos son todos los productos afectados".
+    _impacto_filas = counts.get("impacto_inventario") or []
     return ConfirmIngestionResponse(
         file_id=record.id,
         status=PROCESSING_STATUS_DONE,
         message=message,
         warnings=warnings,
+        inventory_impact=[
+            InventoryImpactItem(**fila) for fila in _impacto_filas[:_MAX_IMPACTO_LISTADO]
+        ],
+        inventory_impact_total=len(_impacto_filas),
     )
 
 

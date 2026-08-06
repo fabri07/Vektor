@@ -93,6 +93,31 @@ export interface FilePreview {
   master_previews: MasterPreviewSummary[];
 }
 
+/**
+ * F-H3: qué le PASARÍA al stock de un producto si se aplicara la historia del
+ * archivo. Nada de esto se aplicó — el import calcula y reporta; aplicar la
+ * historia es una decisión aparte, hoja por hoja.
+ */
+export interface InventoryImpactItem {
+  product_id: string;
+  product_name: string;
+  /** Saldo ANTES del archivo (o el absoluto que declara un catálogo). */
+  saldo_inicial: number;
+  /** Saldo tras reproducir compras y ventas por fecha. */
+  saldo_final: number;
+  compradas: number;
+  vendidas: number;
+  /** Menor saldo alcanzado durante la secuencia, y cuándo (ISO). */
+  minimo: number;
+  minimo_en?: string | null;
+  /**
+   * Primer día en que el saldo se fue abajo de cero. `null` = nunca.
+   * Tocar negativo NO es lo mismo que quedar negativo (`saldo_final < 0`): un
+   * final sano con un pozo en el medio significa que faltan compras viejas.
+   */
+  primer_negativo_en?: string | null;
+}
+
 export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
@@ -100,6 +125,11 @@ export interface ConfirmIngestionResult {
   // Avisos human-in-the-loop tras confirmar (compras sin proveedor/producto, filas a
   // "Otros"). No bloquean; se muestran en un banner para que el usuario los revise.
   warnings?: string[];
+  // F-H3.c: impacto proyectado sobre el inventario, para mostrarlo. Ordenado con
+  // los productos que se van a negativo primero, y ACOTADO: comparar contra
+  // `inventory_impact_total` antes de decir "estos son todos".
+  inventory_impact?: InventoryImpactItem[];
+  inventory_impact_total?: number;
 }
 
 /**

@@ -14,11 +14,15 @@ import {
   type ColumnMapping,
   type ColumnMappingSuggestion,
   type ColumnRiskDecision,
+  type ConfirmIngestionResult,
   type ContextualColumnRisk,
+  type InventoryImpactItem,
   type MappingContext,
   type MasterPreviewSummary,
   type StockTreatment,
 } from "@/services/ingestion.service";
+import { Button } from "@/components/ui/Button";
+import { InventoryImpactPanel } from "./InventoryImpactPanel";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
@@ -304,6 +308,50 @@ function UnmappedModal({
  * matchea con ninguna hoja NO se descarta: vuelve como `general` y se muestra a
  * nivel archivo. Perder un aviso sería peor que mostrarlo en el lugar genérico.
  */
+/**
+ * F-H3.c — el impacto sobre el inventario después de confirmar.
+ *
+ * Vive en un hook porque este archivo tiene DOS flujos de confirmación
+ * (`MultiContextMapper` y `ColumnMapperPanel`) con el mismo `onSuccess`
+ * duplicado. F-B va a unificarlos; hasta entonces, esto evita que la próxima
+ * copia sea justo la que decide si el usuario ve o no lo que le pasaría al
+ * stock.
+ *
+ * Cuando hay impacto el panel NO se cierra: una tabla de saldo inicial →
+ * movimientos → saldo final no entra en un toast, y es exactamente lo que hay
+ * que mirar para decidir si aplicar esa historia.
+ */
+function useImpactoPostConfirm(onDone: () => void) {
+  const [impacto, setImpacto] = useState<InventoryImpactItem[]>([]);
+  const [impactoTotal, setImpactoTotal] = useState(0);
+
+  /** `true` si hay algo que mostrar (y por lo tanto NO hay que cerrar). */
+  function registrar(result: ConfirmIngestionResult): boolean {
+    const items = result.inventory_impact ?? [];
+    if (items.length === 0) return false;
+    setImpacto(items);
+    setImpactoTotal(result.inventory_impact_total ?? items.length);
+    return true;
+  }
+
+  const vista =
+    impacto.length > 0 ? (
+      <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
+        <p className="text-sm font-semibold text-vk-text-primary">
+          Datos importados
+        </p>
+        <InventoryImpactPanel items={impacto} total={impactoTotal} />
+        <div className="mt-3">
+          <Button size="sm" onClick={onDone}>
+            Listo
+          </Button>
+        </div>
+      </div>
+    ) : null;
+
+  return { registrar, vista };
+}
+
 export function splitWarningsByContext(
   warnings: string[],
   contexts: MappingContext[],
@@ -931,6 +979,9 @@ function MultiContextMapper({
     [fileId, riskRecomputeInput],
   );
 
+  const { registrar: registrarImpacto, vista: vistaImpacto } =
+    useImpactoPostConfirm(onDone);
+
   const confirmMutation = useMutation({
     mutationFn: () => {
       const columnMappings: ColumnMapping[] = [];
@@ -976,6 +1027,9 @@ function MultiContextMapper({
       // Avisos human-in-the-loop: el panel se cierra en onDone(), así que van como
       // toasts (compras sin proveedor/producto, filas a "Otros").
       for (const w of result.warnings ?? []) toast(w, "warning");
+      // F-H3.c: con impacto sobre el inventario el panel queda abierto para
+      // mostrarlo; sin impacto se cierra como siempre.
+      if (registrarImpacto(result)) return;
       onDone();
     },
     onError: (error) => {
@@ -999,6 +1053,9 @@ function MultiContextMapper({
   const errDetail = (
     confirmMutation.error as { response?: { data?: { detail?: string } } } | null
   )?.response?.data?.detail;
+
+  // F-H3.c: importado y con impacto sobre el stock → mostrarlo en vez del mapeo.
+  if (vistaImpacto) return vistaImpacto;
 
   return (
     <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
@@ -1292,6 +1349,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     setInitialized(true);
   }
 
+  const { registrar: registrarImpacto, vista: vistaImpacto } =
+    useImpactoPostConfirm(onDone);
+
   const confirmMutation = useMutation({
     mutationFn: (columnMappings: ColumnMapping[]) =>
       ingestionService.confirmFile(
@@ -1309,6 +1369,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       // Avisos human-in-the-loop: el panel se cierra en onDone(), así que van como
       // toasts (compras sin proveedor/producto, filas a "Otros").
       for (const w of result.warnings ?? []) toast(w, "warning");
+      // F-H3.c: con impacto sobre el inventario el panel queda abierto para
+      // mostrarlo; sin impacto se cierra como siempre.
+      if (registrarImpacto(result)) return;
       onDone();
     },
     onError: (error) => {
@@ -1451,6 +1514,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       />
     );
   }
+
+  // F-H3.c: ídem para el archivo de un solo contexto.
+  if (vistaImpacto) return vistaImpacto;
 
   return (
     <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
