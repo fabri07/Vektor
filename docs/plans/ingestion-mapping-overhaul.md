@@ -174,7 +174,20 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
         d.3 gate al confirmar (cola + /otros) ✅ entregado
         d.4 endpoint de apply                 ✅ entregado
         d.5 botón en el panel de impacto      ✅ entregado
+        d.6 el replay que no se puede validar no se confirma  ✅ entregado
+F-H3.e  selector de efecto por hoja en la UI                      ⛔ PENDIENTE
 ```
+
+> **Falta el selector: hoy `historical_replay` sólo se alcanza por API.** El
+> frontend no manda `inventory_effect` en el confirm (`ingestion.service.ts` manda
+> `stock_treatment` y nada más), así que todas las hojas entran con su default y
+> el 422 de d.6 no puede dispararse desde la pantalla. Todo lo de abajo está
+> cableado y probado punta a punta contra el endpoint; lo que falta es el control
+> que deja al usuario elegir. Las etiquetas ya están en `EFFECT_LABELS`
+> (`domain/inventory_effect.py`), en castellano y **con el alcance correcto**: el
+> eje es de la HOJA, así que la etiqueta dice "estas filas no modificarán el
+> inventario" y nunca "este archivo", que sería falso cuando el catálogo de la
+> hoja de al lado ya dejó su saldo.
 
 > **Forma final de d.4.** `POST /ingestion/files/{id}/inventory-replay` (gate
 > `require_modify_access`, igual que `reread/apply`), body `{context_ids?, dry_run?}`.
@@ -186,14 +199,32 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
 > el descuento queda **pendiente** y se informa: la venta ya está en los libros y
 > anularla cambiaría facturación confirmada.
 
-> **Límite honesto de d.3, declarado y no silencioso.** En el archivo de **una sola
-> tabla** no hay pasadas separadas: la misma fila puede dar venta, gasto y producto
-> en la misma vuelta, así que el stock que el propio archivo declara todavía no
-> existe cuando el gate mira. Si ese archivo además crea productos, el gate **se
-> abstiene** y lo deja en `counts["replay_sin_gatear"]` en vez de rechazar ventas
-> contra un saldo que el archivo está por cargar. Las ventas entran y el replay
-> posterior dice cuáles no se pudieron aplicar. En el camino multi-hoja no pasa: el
-> orden de pasada (catálogos → compras → ventas) garantiza que el stock ya esté.
+> **Límite de d.3 — y por qué el archivo se rechaza en vez de importarse a medias
+> (d.6).** En el archivo de **una sola tabla** no hay pasadas separadas: la misma
+> fila puede dar venta, gasto y producto en la misma vuelta, así que el stock que el
+> propio archivo declara todavía no existe cuando el gate mira. En el camino
+> multi-hoja no pasa: el orden de pasada (catálogos → compras → ventas) garantiza
+> que el stock ya esté.
+>
+> La primera versión **se abstenía** (`counts["replay_sin_gatear"]`) y dejaba entrar
+> el archivo. Eso está mal por lo que promete el modo: elegir `historical_replay` es
+> pedir que Véktor valide cada venta contra el stock, y abstenerse importaba las
+> ventas sin respaldo igual, reportando el import como un replay. Hoy el confirm lo
+> **rechaza con 422 antes del lease** (`replay_no_gateable`, mensaje en castellano
+> con la hoja y las dos salidas: importar sin que las ventas toquen el inventario, o
+> separar el saldo inicial de los movimientos en hojas distintas). No se degrada a
+> `informational` en silencio, por la misma regla que ya rige en
+> `resolve_inventory_effects`: un override que no se puede honrar no se ignora.
+> Queda un respaldo en el importador —degrada la hoja y lo cuenta en
+> `replay_degradado` con aviso— para la divergencia posible entre lo que ve el
+> confirm (el mapeo declarado) y lo que ve el importador (las columnas resueltas);
+> nunca aborta la operación en curso ni la reporta como un replay aplicado.
+>
+> **Es transitorio, no una limitación del dominio.** Se levanta preparando el import
+> en pasadas: leer todas las filas → resolver identidades y saldos de apertura
+> **en memoria** (sin escribir productos) → construir compras y ventas → ordenar los
+> movimientos → simular → mostrar el preview → aplicar todo atómicamente. Mientras
+> eso no exista, el único camino habilitado para ese archivo es `informational`.
 
 `c` y `d` no son "después": son **la condición** para que `d` exista. Sin preview ni fórmula reconciliada, el replay no se habilita.
 
@@ -489,6 +520,13 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 
 **Por etapa, antes de cerrarla:** `cd backend && make check` y la suite con el entorno del CI (`backend/.venv/bin/python -m pytest`, SQLite en memoria, `ENABLE_EMAIL_VERIFICATION=false`), corriendo **los mismos comandos que `ci-backend.yml`**. **Nunca `ruff format`/`make format`** durante una fase: el backend no está normalizado y reformatea el archivo entero (ver la regla en `CLAUDE.md`). `git diff --stat` + `git diff --check` antes de cada commit. Frontend: `npm run type-check && npm run lint && npm run test`. Todo test nuevo de regresión se **mutation-testea**: revertir el fix y confirmar que falla.
 
+La compuerta de F-H3 es un test **HTTP end-to-end** con un `.xlsx` de tres hojas
+generado en el propio test y parseado por el parser de producción
+(`test_ingestion_replay_end_to_end.py`). Reemplaza al smoke sobre un tenant demo, que
+se sacó: no representa el entorno real, no corre en CI y no prueba nada que este test
+no pruebe con base aislada. El libro se arma con openpyxl en vez de versionar un
+binario, para poder leer qué contiene sin abrirlo con Excel.
+
 | Fase | Test compuerta |
 |---|---|
 | F-0 | dos columnas al mismo `custom_field:` → 422; `_resolve_target_cols` first-wins; `product:stock_units` desde venta rechazado |
@@ -520,7 +558,7 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H3.d.3 ✅ | el gate corre para el ARCHIVO, no por hoja: dos hojas de ventas comparten el mismo stock (mutation-testeado) |
 | F-H3.d.3 ✅ | una fila rechazada NO consume stock: no arrastra a las que sí entraban |
 | F-H3.d.3 ✅ | re-confirmar no duplica la captura en `/otros` (mutation-testeado: sin huella → dos filas) |
-| F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos se **abstiene** y lo reporta |
+| F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos, ver F-H3.d.6 |
 | F-H3.d.4 ✅ | aplicar dos veces no descuenta dos veces (`source_event_id="sale:{id}"`, mutation-testeado) |
 | F-H3.d.4 ✅ | una venta ya descontada EN VIVO no se vuelve a descontar acá (**V13**) |
 | F-H3.d.4 ✅ | el impacto que devuelve el apply se recalcula contra el stock actual, no el del confirm |
@@ -530,11 +568,18 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H3.d.4 ✅ | `dry_run` calcula y no escribe; sólo aplica las hojas pedidas; una venta sin hoja registrada lo **declara** |
 | F-H3.d.5 ✅ | el panel sin `fileId` es sólo informativo; con sólo compras no ofrece aplicar (no hay nada que hacer) |
 | F-H3.d.5 ✅ | tras aplicar muestra lo que devolvió el SERVIDOR, y dice que las ventas sin stock **no se anularon** |
+| F-H3.d.6 ✅ | archivo plano que crea productos + `historical_replay` → **422 antes del lease**, con la hoja y las dos salidas en el mensaje (mutation-testeado) |
+| F-H3.d.6 ✅ | el rechazo deja `STAGE_REJECT` con `motivo=replay_no_gateable`; nada a medio importar |
+| F-H3.d.6 ✅ | el MISMO archivo en `informational` entra: la salida que el mensaje ofrece existe |
+| F-H3.d.6 ✅ | sin alta de productos el gate corre normalmente (control: si no, el bloqueo apagó el replay entero) |
+| F-H3.d.6 ✅ | el respaldo del importador degrada a `informational`, cuenta `replay_degradado` y deja `hojas_con_replay=0` (mutation-testeado) |
+| F-H3.d.6 ✅ | archivo de UNA tabla con mapeo por contexto: `quantity` llega al importador (antes se perdía y toda venta valía 1 unidad) |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
-| **F-H3** | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11** |
-| F-H3 | re-confirmar el mismo archivo no aplica el movimiento dos veces |
-| F-H3 | borrar el import revierte exactamente sus movimientos (incremental, nunca `Σ(movimientos)`) |
-| F-H3 | `informational` no modifica stock; `current_snapshot` fija absoluto; `no_inventory` no crea movimiento |
+| **F-H3** ✅ | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11, cruzando `.xlsx` real → confirm → apply → saldo persistido** |
+| F-H3 ✅ | re-confirmar el mismo archivo no aplica el movimiento dos veces |
+| F-H3 ✅ | borrar el import revierte exactamente sus movimientos (incremental, nunca `Σ(movimientos)`) |
+| F-H3 ✅ | `informational` no descuenta la venta (la apertura y la compra sí tocaron el stock: el eje es de la HOJA) |
+| F-H3 | `current_snapshot` fija absoluto; `no_inventory` no crea movimiento |
 | F-H3 | replay histórico negativo → advertencia, **no** `InsufficientStockError` |
 | F-H4 | las 7 filas de la tabla de precio, incluida la discrepancia con tolerancia de 1 centavo |
 | **F-H6** | **`Envío = 2.000` repetido en 10 filas del mismo comprobante → se cuenta UNA vez, no $20.000** |
