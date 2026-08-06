@@ -33,7 +33,12 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
     UploadedFile,
 )
-from app.persistence.models.pipeline_event import STAGE_REJECT, PipelineEvent
+from app.persistence.models.inventory import InventoryMovement
+from app.persistence.models.pipeline_event import (
+    STAGE_CONFIRM,
+    STAGE_REJECT,
+    PipelineEvent,
+)
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -3246,3 +3251,205 @@ class TestRereadApplyEnqueueEndpoint:
             )
         assert response2.status_code == 202
         mock_delay.assert_called_once()
+
+
+@pytest.mark.asyncio
+class TestEfectoDeInventarioPorHoja:
+    """F-H3.a: el contrato del efecto de inventario, en el confirm.
+
+    Acá se prueba lo que el módulo de dominio no puede: que el endpoint arme el
+    perfil de cada hoja con su entidad EFECTIVA y su mapeo, y que un override
+    que no se puede honrar corte antes del lease.
+    """
+
+    @staticmethod
+    async def _archivo(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.xlsx",
+            s3_key="uploads/test/uuid/ventas.xlsx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            size_bytes=512,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "row_count": 1,
+                "mapping_contexts": [
+                    {
+                        "context_id": "sheet:Ventas",
+                        "label": "Ventas",
+                        "entity_type": "sale",
+                        "headers": ["fecha", "producto", "cantidad", "monto"],
+                        "row_count": 1,
+                        "preview_rows": [],
+                    }
+                ],
+                "ventas_detectadas": [
+                    {
+                        "__context__": "sheet:Ventas",
+                        "fecha": "2024-03-10",
+                        "producto": "Vela aromática 200g",
+                        "cantidad": "2",
+                        "monto": "2100",
+                    }
+                ],
+            },
+        )
+        db_session.add(record)
+        await db_session.commit()
+        return record
+
+    @staticmethod
+    def _body(inventory_effect: dict[str, str] | None) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "confirmed_fields": {"ventas": True},
+            "context_confirmed": {"sheet:Ventas": True},
+            "column_mappings": [
+                {
+                    "source_column": "fecha",
+                    "target_field": "transaction_date",
+                    "context_id": "sheet:Ventas",
+                },
+                {
+                    "source_column": "producto",
+                    "target_field": "product_name",
+                    "context_id": "sheet:Ventas",
+                },
+                {
+                    "source_column": "cantidad",
+                    "target_field": "quantity",
+                    "context_id": "sheet:Ventas",
+                },
+                {
+                    "source_column": "monto",
+                    "target_field": "amount",
+                    "context_id": "sheet:Ventas",
+                },
+            ],
+        }
+        if inventory_effect is not None:
+            body["inventory_effect"] = inventory_effect
+        return body
+
+    async def test_el_default_queda_en_la_traza_sin_que_el_cliente_lo_mande(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """El confirm viejo (sin el campo) sigue andando y deja dicho qué se aplicó.
+
+        El default no viaja en el payload, así que sin esto no habría forma de
+        saber después por qué el stock quedó como quedó.
+        """
+        record = await self._archivo(db_session, sample_tenant)
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json=self._body(None),
+        )
+
+        assert response.status_code == 200
+        eventos = (
+            (
+                await db_session.execute(
+                    select(PipelineEvent).where(
+                        PipelineEvent.file_id == record.id,
+                        PipelineEvent.stage == STAGE_CONFIRM,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert eventos
+        detalle = eventos[-1].detail or {}
+        assert detalle["inventory_effect"] == {"sheet:Ventas": "informational"}
+
+    async def test_una_hoja_de_ventas_no_toca_stock_por_default(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        mock_score_trigger: unittest.mock.MagicMock,
+    ) -> None:
+        """El invariante de la fase, visto desde afuera.
+
+        Importar ventas históricas no puede mover el inventario sin que alguien
+        lo haya pedido para esa hoja.
+        """
+        record = await self._archivo(db_session, sample_tenant)
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json=self._body(None),
+        )
+
+        assert response.status_code == 200
+        movimientos = (
+            (
+                await db_session.execute(
+                    select(InventoryMovement).where(
+                        InventoryMovement.tenant_id == sample_tenant.tenant_id,
+                        InventoryMovement.movement_type == "sale",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert movimientos == []
+
+    async def test_un_efecto_para_una_hoja_inexistente_corta_antes_del_lease(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """No se ignora en silencio: el usuario cree haber decidido algo que no va a pasar."""
+        record = await self._archivo(db_session, sample_tenant)
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json=self._body({"sheet:Fantasma": "historical_replay"}),
+        )
+
+        assert response.status_code == 422
+        assert "sheet:Fantasma" in response.json()["detail"]
+
+        refreshed = (
+            await db_session.execute(select(UploadedFile).where(UploadedFile.id == record.id))
+        ).scalar_one()
+        assert refreshed.processing_status == PROCESSING_STATUS_NEEDS_CONFIRMATION
+        assert refreshed.import_attempt_id is None
+
+    async def test_un_modo_desconocido_lo_rechaza_el_schema(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        record = await self._archivo(db_session, sample_tenant)
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json=self._body({"sheet:Ventas": "replay"}),
+        )
+
+        assert response.status_code == 422

@@ -88,6 +88,11 @@ from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
 from app.config.settings import get_settings
+from app.domain.inventory_effect import (
+    InvalidInventoryEffectError,
+    SheetInventoryProfile,
+    resolve_inventory_effects,
+)
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
     process_image_ocr,
@@ -1527,6 +1532,36 @@ async def confirm_file(
                         ),
                     )
 
+    # ── F-H3.a: efecto de inventario por hoja ───────────────────────────────────
+    # Se resuelve ANTES del lease, con el mapeo ya validado, por la misma razón que
+    # el resto de las validaciones de esta zona: un rechazo acá no deja nada a medio
+    # importar. El default NUNCA es `historical_replay` — ver domain/inventory_effect.
+    _inventory_effects: dict[str, str] = {}
+    if _ctx_mappings:
+        _perfiles = [
+            SheetInventoryProfile(
+                context_id=_cid,
+                entity=_entity_for(_ms[0]),
+                mapped_fields=frozenset(
+                    m.target_field
+                    for m in _ms
+                    if parse_target(m.target_field).kind == "canonical"
+                ),
+            )
+            for _cid, _ms in _mappings_por_contexto.items()
+        ]
+        try:
+            _inventory_effects = resolve_inventory_effects(_perfiles, body.inventory_effect)
+        except InvalidInventoryEffectError as exc:
+            await _emit_validation_reject(
+                "efecto_de_inventario_invalido",
+                {"inventory_effect": body.inventory_effect, "motivo": str(exc)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
     # ── F6-A1: bloqueo por fecha faltante, ANTES del lease ──────────────────────
     # Una venta/gasto sin columna de fecha resoluble caía al fallback "hoy" (dato
     # inventado — invariante 2d). Se rechaza upfront, no por fila: sin este gate un
@@ -2092,6 +2127,11 @@ async def confirm_file(
                     },
                 },
                 "stock_treatment": body.stock_treatment,
+                # F-H3.a: el efecto RESUELTO, no lo que mandó el cliente. Saber con
+                # qué mapeo entró un precio ya obligaba a guardar el snapshot (F10);
+                # saber por qué el stock quedó como quedó necesita lo mismo, y el
+                # default no viaja en el payload.
+                "inventory_effect": _inventory_effects,
                 "column_risk": {
                     "contextos_afectados": len(_column_risk_contexts),
                     "filas_riesgo_a_otros": counts.get("filas_riesgo_a_otros", 0),

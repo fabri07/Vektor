@@ -318,6 +318,30 @@ class ConfirmIngestionRequest(BaseModel):
             "significando 'para todas las hojas de producto' (compatibilidad)."
         ),
     )
+    inventory_effect: (
+        dict[
+            str,
+            Literal["informational", "historical_replay", "current_snapshot", "no_inventory"],
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description=(
+            "F-H3: qué le hace al INVENTARIO cada hoja, como `{context_id: modo}`.\n\n"
+            "- `informational`: calcula el impacto y lo reporta, sin tocar stock.\n"
+            "- `historical_replay`: las compras suman y las ventas restan.\n"
+            "- `current_snapshot`: el archivo declara el saldo absoluto (una foto).\n"
+            "- `no_inventory`: la cantidad no habla de inventario.\n\n"
+            "Eje SEPARADO de `stock_treatment`, que es contable (¿el stock inicial "
+            "del catálogo genera COGS y baja de caja?). Fusionarlos haría que elegir "
+            "'las ventas descuentan' declare en silencio que el catálogo genera COGS.\n\n"
+            "Si se omite, cada hoja toma su default; el default NUNCA es "
+            "`historical_replay`: aplicar el histórico de un archivo que puede estar "
+            "incompleto o solaparse con saldos ya cargados es una decisión del "
+            "usuario, hoja por hoja. Un modo inválido o una hoja inexistente se "
+            "rechazan con 422 en vez de ignorarse."
+        ),
+    )
     column_risk_decisions: list[ColumnRiskDecision] = Field(
         default_factory=list,
         description=(
