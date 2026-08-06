@@ -535,12 +535,21 @@ class TestElGateTambienCorreEnElArchivoPlano:
         assert counts["ventas"] == 2
         assert counts.get("ventas_sin_stock", 0) == 0
 
-    async def test_si_el_archivo_tambien_carga_productos_el_gate_se_abstiene_y_lo_dice(
+    async def test_si_el_archivo_tambien_carga_productos_degrada_y_no_dice_que_aplico(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """No hay pasadas separadas acá: el stock que el archivo declara todavía no
+        """F-H3.d.6 — el respaldo del importador, no el camino normal.
+
+        No hay pasadas separadas acá: el stock que el archivo declara todavía no
         existe cuando el gate mira, así que rechazaría ventas contra un saldo que el
-        propio archivo está por cargar. Se abstiene, y queda dicho en `counts`.
+        propio archivo está por cargar. Ese archivo el confirm lo rechaza con 422
+        antes de tomar el lease (ver `test_ingestion_replay_no_gateable.py`); si
+        igual llega hasta acá —el confirm mira el mapeo declarado y el importador
+        las columnas ya resueltas— la hoja se degrada a `informational`.
+
+        Antes se abstenía y seguía marcada como `historical_replay`: las ventas sin
+        respaldo entraban a los libros igual y el import se reportaba como un replay.
+        Lo que se afirma acá es lo segundo — que NO se reporta como replay aplicado.
         """
         await _crear_producto(db_session, sample_tenant, stock=10)
         summary = self._summary("6", "6")
@@ -555,6 +564,12 @@ class TestElGateTambienCorreEnElArchivoPlano:
         )
         await db_session.flush()
 
-        assert counts["replay_sin_gatear"] == 1
+        assert counts["replay_degradado"] == 1
+        # La degradación tiene que verse en el contador que el confirm traza: si
+        # dijera 1, la traza afirmaría un replay que no ocurrió.
+        assert counts["hojas_con_replay"] == 0
+        assert "replay_sin_gatear" not in counts
+        # El import se preserva entero (no se aborta) y ninguna venta se rechaza:
+        # sin saldo previo confiable, rechazar sería inventar el criterio.
         assert counts["ventas"] == 2
         assert counts.get("ventas_sin_stock", 0) == 0
