@@ -63,8 +63,14 @@ VALID_EFFECTS: frozenset[str] = frozenset(
 
 #: Etiquetas para los mensajes de error y la UI. En castellano, describiendo lo
 #: que PASA con el stock, no el nombre técnico del modo.
+#:
+#: **El alcance es la HOJA, no el archivo.** Un catálogo en `current_snapshot` y
+#: una hoja de ventas en `informational` conviven en el mismo libro: el catálogo
+#: deja el stock en su saldo y las ventas no lo descuentan. Decir "este archivo no
+#: modifica el inventario" sería falso —lo modificó la otra hoja—, así que las
+#: etiquetas hablan de las filas de ESTA hoja.
 EFFECT_LABELS: dict[str, str] = {
-    INFORMATIONAL: "Calcular el impacto sin modificar el stock",
+    INFORMATIONAL: "Estas filas no modificarán el inventario (se calcula el impacto y se muestra)",
     HISTORICAL_REPLAY: "Aplicar la historia: las compras suman y las ventas restan",
     CURRENT_SNAPSHOT: "El archivo declara el stock actual (saldo absoluto)",
     NO_INVENTORY: "Estas cantidades no afectan el inventario",

@@ -23,6 +23,19 @@ afuera es la del 10/03 en los dos casos.
 No decide identidad: cada fila llega con su producto ya resuelto (F-H1/F-H2). El
 saldo de apertura tampoco se calcula acá — lo trae el caller, que es el único que
 sabe leer la DB.
+
+**Dónde NO se puede gatear todavía, y por qué se rechaza en vez de seguir.** En un
+archivo de UNA sola tabla donde las mismas filas dan la venta *y* dan de alta el
+producto, no hay saldo contra el cual evaluar: el stock que respaldaría a esas
+ventas lo está cargando el propio archivo, en la misma pasada. El camino
+multi-hoja no tiene el problema —recorre catálogos → compras → ventas y calcula el
+gate al llegar a la primera hoja de ventas—, así que esto es un límite del archivo
+plano, no del dominio. Es **transitorio**: se levanta el día que el import prepare
+identidades y saldos provisionales en memoria antes de construir los movimientos
+(ver `docs/plans/ingestion-mapping-overhaul.md`). Hasta entonces el confirm lo
+rechaza antes de tomar el lease: elegir ``historical_replay`` es pedir que Véktor
+valide cada venta contra el stock, y degradar eso en silencio a "importé todo sin
+validar nada" es peor que no dejar confirmar.
 """
 
 from __future__ import annotations
@@ -31,6 +44,42 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
+
+#: Motivo del rechazo en la traza (`STAGE_REJECT`) y en el contador del respaldo.
+#: Uno solo para los dos lugares: si el confirm y el importador nombraran distinto
+#: la misma situación, buscarla en `pipeline_events` daría la mitad de los casos.
+MOTIVO_REPLAY_NO_GATEABLE = "replay_no_gateable"
+
+#: Lo que se le dice al usuario. Explica QUÉ pasa con su archivo y ofrece las dos
+#: salidas reales, en vez de nombrar el modo técnico que eligió.
+MENSAJE_REPLAY_NO_GATEABLE = (
+    "En la hoja «{hoja}»: el archivo da de alta productos y además trae "
+    "movimientos históricos en las mismas filas. Véktor puede analizarlo y "
+    "mostrarte el impacto, pero todavía no puede aplicar la reconstrucción del "
+    "inventario en una sola confirmación: el stock contra el que habría que "
+    "validar cada venta lo está cargando este mismo archivo. Importalo sin que "
+    "las ventas modifiquen el inventario, o separá el saldo inicial de los "
+    "movimientos en hojas distintas."
+)
+
+
+def replay_no_gateable(
+    *,
+    hoja_unica: bool,
+    pide_replay: bool,
+    da_de_alta_productos: bool,
+    trae_ventas: bool,
+) -> bool:
+    """¿Este confirm pide un replay que no se puede validar?
+
+    Los cuatro datos los arma cada caller con lo que tiene a mano, y ahí está la
+    única diferencia entre los dos: el confirm los deriva del mapeo declarado y de
+    las señales del parseo —antes del lease, que es donde un rechazo no deja nada a
+    medias—, y el importador de las columnas ya resueltas, que incluyen las
+    autodetectadas sin mapeo explícito. Por eso el importador conserva su propio
+    respaldo: puede ver una alta de productos que el confirm no llegó a ver.
+    """
+    return hoja_unica and pide_replay and da_de_alta_productos and trae_ventas
 
 
 @dataclass(frozen=True)
