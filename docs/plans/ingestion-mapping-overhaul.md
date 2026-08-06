@@ -33,6 +33,9 @@ Salieron de leer el código, no del enunciado:
 | **V13** | `decrement_for_sale` **NO** excluye ventas por `source_upload_id` — no existe tal guarda. La exclusión de hoy es estructural: el import nunca llama al servicio. Reusando `source_event_id="sale:{id}"`, el índice único parcial (`20260729_0001`) + el fast-path de `_live_sale_movement` vuelven no-op cualquier descuento en vivo posterior: la no-duplicación sale gratis, sin guarda nueva. | `stock_service.py:429-498` |
 | **V14** | El chequeo de integridad **no mira el ledger** para las ventas: `stock_esperado = ancla + compras + ajustes + mermas − SUM(sales_entries.quantity)`, y los movimientos `sale` se ignoran (`MOVEMENT_CLASS_IGNORE_SALE → pass`). La fórmula **asume que toda venta descontó stock**: cierto bajo `historical_replay`, falso A PROPÓSITO bajo `current_snapshot`/`informational` → divergencias falsas si no se reconcilia. | `inventory_integrity_service.py:148,169` |
 | **V15** | La reversa por borrado **ya cubre** los movimientos nuevos: voidea todo `InventoryMovement` con `source_upload_id == file_id`, incremental. Los `sale` del import se revierten gratis si llevan `source_upload_id`. Un requisito menos. | `file_deletion_service.py:956-965` |
+| **V16** | Las **compras** del import ya suman stock **sin mirar `inventory_effect`**: `_apply_purchase_to_stock` corre siempre, y el registrador de la proyección sólo excluye `no_inventory`. El eje, en los hechos, gobierna **el lado de las ventas**. | `ingestion_import_service.py:1945-2020`, `_import_projection.py:61-62` |
+| **V17** | `decrement_stock` clampea (`stock_units = max(0, …)`) pero `void_movement` revierte `movement.qty` **exacto** y no clampea. Un descuento clampeado + su reversa **infla** el stock. Hoy es inerte porque las ventas en vivo validan antes; un replay histórico lo vuelve real. | `stock_service.py:211` vs `:401` |
+| **V18** | **No existe link persistido venta → hoja.** `source_row_ref` es el `sha256` del ancla, irreversible. Aplicar por hoja exige estampar el `context_id` (entra en `sales_entries.custom_fields`, sin migración). | `_source_row_ref:951` |
 
 **Conclusión de V1+V2:** la jerarquía no falla por falta de regla, falla por **orden y visibilidad**. Ordenar por entidad (product → expense → sale) resuelve la **identidad** —y sólo eso: no convierte a la compra del 20/03 en justificación de la venta del 10/03, porque eso se decide comparando fechas, no por el orden en que se aplicó (F-H2). El orden **cronológico** es otra cosa y sirve para otra: reproducir cuántas unidades había, que recién importa cuando las ventas mueven stock (F-H3.0).
 
@@ -166,6 +169,8 @@ F-H3.a  contrato: eje `inventory_effect` por hoja + defaults      ✅ entregado
 F-H3.b  cálculo del impacto por fecha + warnings (NO toca stock)  ✅ entregado
 F-H3.c  preview: stock inicial → movimientos → final, negativos, ambigüedades  ✅ entregado
 F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
+        d.1 fórmula V14 reconciliada        d.2 context_id estampado en la venta
+        d.3 gate al confirmar (cola + /otros)  d.4 endpoint de apply   d.5 botón
 ```
 
 `c` y `d` no son "después": son **la condición** para que `d` exista. Sin preview ni fórmula reconciliada, el replay no se habilita.
@@ -179,6 +184,18 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
 > La 3 es la que sale gratis con lo ya entregado, pero convierte el replay en una acción posterior al import en vez de una opción del confirm. **Es una decisión de producto, no técnica.**
 >
 > **Resuelto: se eligió la 3.** El confirm no toca stock y devuelve el impacto; el replay es un paso posterior. **Regla que F-H3.d hereda:** el impacto que se muestre al aplicar se **recalcula dentro de la transacción del apply**, nunca se lee de lo que devolvió el confirm. Entre confirmar y aplicar el stock pudo cambiar, y mostrar un número viejo para una operación que va a escribir otro es exactamente lo que ya pagó F11 (por eso ahí el DELETE recalcula y su resultado es el autoritativo, no el del preview).
+
+> **Decisiones de F-H3.d (2026-08-06), tomadas por el usuario sobre los hallazgos V16–V18.**
+>
+> **1 · El stock nunca queda negativo, y la venta sin respaldo no se importa.** No se elige entre "clampear" y "dejar negativo": la fila que se quedaría sin stock **no entra como venta**, va a `/otros` con el motivo, el usuario carga el inventario que falta y la registra desde ahí con la importación masiva que ya existe. Esto **sube** el caso de `stock_historico_negativo` de *advertencia* a *bloqueante de la fila* — pero **sólo cuando la hoja declaró `historical_replay`**. Con el default `informational` nada de esto corre: el archivo se importa entero y sólo se reporta el impacto.
+>
+> Consecuencia de orden: decidir *cuál* venta se queda sin respaldo exige recorrer las ventas de cada producto **por fecha**, no en el orden del Excel — si no, qué fila se rechaza depende de la solapa. **Acá la cola cronológica de F-H3.0 deja de ser preparatoria y se vuelve el mecanismo.**
+>
+> Al **aplicar** (paso posterior) la regla no puede ser la misma: la venta ya está en los libros y anularla cambiaría facturación ya confirmada. Si entre el confirm y el apply el stock cambió y ya no alcanza, ese descuento **no se aplica y queda pendiente**, listado; el usuario carga stock y vuelve a aplicar (idempotente: sólo entran los que faltaban). Es la única salida no destructiva que respeta "las cantidades no quedan negativas".
+>
+> **2 · `inventory_effect` gobierna el descuento de las VENTAS, no la suma de las compras (V16).** Una compra que no sube stock está mal en cualquier modo; una venta que descuenta depende de si la historia está completa. Se documenta en el contrato y en el copy — no se cambia el comportamiento de compras, que hoy suman al confirmar.
+>
+> **3 · El apply es por hoja.** El import estampa el `context_id` en `custom_fields` de cada venta (**V18**, sin migración). Los archivos importados antes de d.2 no lo tienen: el apply los trata como una sola hoja **y lo dice** — un alcance silenciosamente distinto del declarado es peor que uno declarado.
 
 ### F-H3.0 · La cola cronológica (movida acá desde F-H2)
 
@@ -242,7 +259,7 @@ Cada hoja declara qué significan sus cantidades:
 - **Eliminar el import revierte exactamente sus movimientos**, vía `void_movement` con ajuste incremental. `stock_units` **NUNCA** por `setattr` ni recalculado como `Σ(movimientos)` — su reversa es exclusivamente incremental (invariante ya pagado con un incidente). Ya está resuelto por el borrado por procedencia (**V15**): alcanza con que el movimiento lleve `source_upload_id`.
 - **Sin doble conteo con la venta en vivo**: reusar `source_event_id="sale:{id}"` (**V13**). No hay guarda por `source_upload_id` que "siga" excluyendo nada — nunca existió; la clave compartida hace que el índice único parcial resuelva la carrera sin código nuevo.
 - **Sin doble conteo con el chequeo de integridad**: **no alcanza con el `source_type`**. La fórmula de `inventory_integrity_service` resta `SUM(sales_entries.quantity)` asumiendo que toda venta descontó (**V14**); hay que hacer que reste sólo las ventas cuyo efecto se aplicó, o los modos que no descuentan generan divergencias falsas. Es requisito del replay.
-- **Stock negativo histórico NO levanta `InsufficientStockError`.** La prohibición de negativo es para ventas en vivo. Un replay histórico puede dar negativo legítimamente (falta el inventario inicial): **advierte, no bloquea**.
+- **El stock nunca queda negativo — y tampoco se clampea (V17).** El clamp de `decrement_stock` (`max(0, …)`) descuenta menos de lo que dice el movimiento, y `void_movement` revierte el movimiento **entero**: la reversa por borrado inflaría el stock. Así que la venta sin respaldo **no se importa** (va a `/otros`) en vez de descontarse a medias. Lo que llega al descuento siempre tiene stock que lo cubre, y el clamp vuelve a ser inerte como lo es para las ventas en vivo. `InsufficientStockError` sigue sin levantarse en el replay: la fila se desvía, no explota.
 
 **Taxonomía de incidencias, cada una con su severidad:**
 
@@ -250,7 +267,8 @@ Cada hoja declara qué significan sus cantidades:
 |---|---|---|
 | `producto_no_resuelto` | **bloqueante de la fila** | → /otros con candidatos |
 | `cantidad_cero_o_negativa` | **bloqueante de la fila** | → /otros |
-| `stock_historico_negativo` | advertencia | importa; se reporta |
+| `venta_sin_stock_que_la_respalde` | **bloqueante de la fila, sólo bajo `historical_replay`** | → /otros con el motivo; el usuario carga el inventario y la importa desde ahí |
+| `stock_historico_negativo` | advertencia (modos que no aplican) | importa; se reporta el saldo proyectado |
 | `historial_insuficiente_para_validar` | advertencia explícita | importa; se reporta que **no se pudo evaluar** |
 | `cantidad_ausente` | informativa | la fila entra; no afecta stock |
 
@@ -471,7 +489,16 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H3.b ✅ | una hoja `no_inventory` no entra en la proyección |
 | F-H3.c ✅ | el confirm devuelve el impacto por producto; el stock real no se movió |
 | F-H3.c ✅ | con más productos que el máximo listado, `inventory_impact_total` reporta el TOTAL, no lo listado (mutation-testeado) |
-| F-H3.d | a igual fecha, la compra se **aplica** antes que la venta |
+| F-H3.d.1 | una venta importada que NO descontó no cuenta en `stock_esperado` (hoy da divergencia falsa) |
+| F-H3.d.1 | una venta EN VIVO sin su movimiento **sigue** dando divergencia (control: si no, el chequeo dejó de detectar) |
+| F-H3.d.2 | la venta importada guarda su `context_id`; una venta manual no gana la clave |
+| F-H3.d.3 | `historical_replay` + stock insuficiente: la fila NO entra a `sales_entries` y aparece en `/otros` con el motivo |
+| F-H3.d.3 | el rechazo se decide por FECHA, no por orden de solapa (mutation-testeado: orden del Excel → rojo) |
+| F-H3.d.3 | `informational` (default) con el mismo archivo: importa TODO, nada a `/otros` |
+| F-H3.d.4 | aplicar dos veces no descuenta dos veces (`source_event_id="sale:{id}"`) |
+| F-H3.d.4 | el impacto que devuelve el apply se recalcula contra el stock actual, no el del confirm |
+| F-H3.d.4 | si el stock cambió entre confirm y apply, el descuento queda **pendiente**: no se anula la venta |
+| F-H3.d.4 | borrar el archivo revierte los movimientos del replay (llevan `source_upload_id`) |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11** |
 | F-H3 | re-confirmar el mismo archivo no aplica el movimiento dos veces |
