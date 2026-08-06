@@ -1,4 +1,4 @@
-.PHONY: dev test migrate migrate-down lint format typecheck clean build help seed-vertical-fields
+.PHONY: dev test migrate migrate-down lint format fix format-normalize-global typecheck clean build help seed-vertical-fields
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 DOCKER_COMPOSE = docker compose
@@ -88,7 +88,28 @@ test-file: ## Run a specific test file (use: make test-file FILE=app/tests/api/v
 lint: ## Run ruff linter
 	ruff check app
 
-format: ## Auto-format with ruff
+format: ## ⛔ Vedado durante cambios funcionales (ver format-normalize-global)
+	@echo "⛔ 'make format' está vedado."
+	@echo ""
+	@echo "El backend NUNCA pasó por 'ruff format', así que correrlo sobre un archivo"
+	@echo "que estás tocando reformatea el archivo ENTERO: ~400 líneas de ruido ajeno"
+	@echo "mezcladas con el cambio funcional. Eso rompe la revisión, esconde"
+	@echo "regresiones y hace que revertir el commit revierta cosas que no querías."
+	@echo ""
+	@echo "El CI exige 'ruff check .', NO 'ruff format --check'. Usá:"
+	@echo "  make lint    → ruff check (lo que exige el CI)"
+	@echo "  make fix     → ruff check --fix (autofix de lint, SIN reformatear;"
+	@echo "                 inspeccioná el diff antes de commitear)"
+	@echo ""
+	@echo "La normalización global es un trabajo aparte, en un commit exclusivo y sin"
+	@echo "cambios funcionales: 'make format-normalize-global'. Antes de correrlo hay"
+	@echo "que cerrar o pausar las ramas activas y avisar para que rebasen."
+	@exit 1
+
+fix: ## Autofix de lint (ruff check --fix) — NO reformatea. Revisá el diff.
+	ruff check --fix app
+
+format-normalize-global: ## ⚠️ Normalización GLOBAL de formato. Commit exclusivo, sin cambios funcionales.
 	ruff format app
 	ruff check --fix app
 

@@ -132,7 +132,9 @@ make test-file FILE=app/tests/api/v1/test_auth.py
 pytest app/tests/api/v1/test_auth.py::test_login -v
 
 # Calidad
-make lint / make format / make typecheck / make check
+make lint / make typecheck / make check
+make fix                    # ruff check --fix (autofix de lint, NO reformatea)
+# `make format` está VEDADO (falla a propósito) — ver la regla de formato abajo
 
 # Migraciones (dir: backend/app/persistence/migrations/versions/, NO backend/alembic/versions/)
 make migrate / make migrate-down   # contra Docker Postgres local
@@ -501,6 +503,7 @@ El historial de sprints (1–21), los proyectos mergeados post-Sprint-21 y la ca
 ## Reglas de trabajo
 
 - **Mostrar plan antes de escribir código y esperar confirmación.**
+- **El backend NO está normalizado con `ruff format`.** No correr `ruff format` ni `make format` durante un cambio funcional: como ningún archivo pasó por el formateador, tocar uno solo lo reformatea entero y mete cientos de líneas de ruido ajeno en el diff — se pierde la revisión, se esconden regresiones y revertir el commit revierte cosas que nadie quiso tocar. El CI exige **`ruff check .`**, nunca `ruff format --check`. `make format` falla a propósito y explica esto; `make fix` corre `ruff check --fix` (inspeccionar el diff antes de commitear). La normalización global es un trabajo aparte: cerrar/pausar las ramas activas → `make format-normalize-global` → **un commit exclusivo sin cambios funcionales** → recién ahí agregar `ruff format --check .` al CI y avisar para que rebasen. Antes de cada commit: `git diff --stat` y `git diff --check`.
 - Tipos estrictos (`mypy strict=true`). Cada endpoint necesita schema Pydantic.
 - `tenant_id` del JWT en CADA query de negocio — nunca del cliente.
 - Scores recalculan solo ante cambios de datos (Celery async).
