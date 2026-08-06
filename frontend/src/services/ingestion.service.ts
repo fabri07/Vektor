@@ -118,6 +118,41 @@ export interface InventoryImpactItem {
   primer_negativo_en?: string | null;
 }
 
+/**
+ * F-H3.d.4 — una venta cuyo descuento no se pudo aplicar por falta de stock.
+ *
+ * NO se anula: la venta ya está en los libros y anularla cambiaría facturación
+ * confirmada. Queda pendiente hasta que el usuario cargue el inventario que falta.
+ */
+export interface PendingSaleItem {
+  sale_id: string;
+  product_id: string;
+  product_name: string;
+  quantity: number;
+  /** Unidades que había cuando le tocó el turno. Siempre menor que `quantity`. */
+  disponible: number;
+}
+
+/**
+ * F-H3.d.4 — resultado de aplicar la historia de ventas del archivo al inventario.
+ *
+ * Los números son los RECALCULADOS en esa corrida, no los que devolvió el confirm:
+ * entre confirmar y aplicar el stock pudo cambiar.
+ */
+export interface InventoryReplayResult {
+  file_id: string;
+  dry_run: boolean;
+  aplicadas: number;
+  /** Ya estaban descontadas (aplicar de nuevo, o descontadas en vivo). No es error. */
+  ya_aplicadas: number;
+  sin_stock: PendingSaleItem[];
+  impacto: InventoryImpactItem[];
+  hojas: string[];
+  /** `false` = alguna venta no tiene registrada su hoja; el alcance fue el archivo. */
+  alcance_por_hoja: boolean;
+  warnings: string[];
+}
+
 export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
@@ -555,6 +590,28 @@ export const ingestionService = {
   ): Promise<RereadRunStatusResponse> {
     const res = await api.get<RereadRunStatusResponse>(
       `/ingestion/files/${fileId}/reread/runs/${runId}`,
+    );
+    return res.data;
+  },
+
+  /**
+   * F-H3.d.4 — aplica al inventario la historia de ventas del archivo.
+   *
+   * `dryRun` corre el MISMO cálculo sin escribir. Sin `contextIds` aplica todas
+   * las hojas del archivo. El descuento es idempotente: reintentarlo después de
+   * cargar el stock que faltaba sólo aplica lo que había quedado pendiente.
+   */
+  async applyInventoryReplay(
+    fileId: string,
+    options?: { contextIds?: string[]; dryRun?: boolean },
+  ): Promise<InventoryReplayResult> {
+    const res = await api.post<InventoryReplayResult>(
+      `/ingestion/files/${fileId}/inventory-replay`,
+      {
+        context_ids: options?.contextIds ?? null,
+        dry_run: options?.dryRun ?? false,
+      },
+      { timeout: CONFIRM_TIMEOUT_MS },
     );
     return res.data;
   },

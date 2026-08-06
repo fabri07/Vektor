@@ -321,7 +321,7 @@ function UnmappedModal({
  * movimientos → saldo final no entra en un toast, y es exactamente lo que hay
  * que mirar para decidir si aplicar esa historia.
  */
-function useImpactoPostConfirm(onDone: () => void) {
+function useImpactoPostConfirm(onDone: () => void, fileId: string) {
   const [impacto, setImpacto] = useState<InventoryImpactItem[]>([]);
   const [impactoTotal, setImpactoTotal] = useState(0);
 
@@ -340,7 +340,11 @@ function useImpactoPostConfirm(onDone: () => void) {
         <p className="text-sm font-semibold text-vk-text-primary">
           Datos importados
         </p>
-        <InventoryImpactPanel items={impacto} total={impactoTotal} />
+        <InventoryImpactPanel
+          items={impacto}
+          total={impactoTotal}
+          fileId={fileId}
+        />
         <div className="mt-3">
           <Button size="sm" onClick={onDone}>
             Listo
@@ -980,7 +984,7 @@ function MultiContextMapper({
   );
 
   const { registrar: registrarImpacto, vista: vistaImpacto } =
-    useImpactoPostConfirm(onDone);
+    useImpactoPostConfirm(onDone, fileId);
 
   const confirmMutation = useMutation({
     mutationFn: () => {
@@ -1350,7 +1354,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   }
 
   const { registrar: registrarImpacto, vista: vistaImpacto } =
-    useImpactoPostConfirm(onDone);
+    useImpactoPostConfirm(onDone, fileId);
 
   const confirmMutation = useMutation({
     mutationFn: (columnMappings: ColumnMapping[]) =>

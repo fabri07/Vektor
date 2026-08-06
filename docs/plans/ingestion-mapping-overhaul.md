@@ -173,7 +173,7 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
         d.2 context_id estampado en la venta  ✅ entregado
         d.3 gate al confirmar (cola + /otros) ✅ entregado
         d.4 endpoint de apply                 ✅ entregado
-        d.5 botón
+        d.5 botón en el panel de impacto      ✅ entregado
 ```
 
 > **Forma final de d.4.** `POST /ingestion/files/{id}/inventory-replay` (gate
@@ -528,6 +528,8 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H3.d.4 ✅ | cargar el stock que faltaba y reintentar sí lo aplica |
 | F-H3.d.4 ✅ | borrar el archivo revierte los movimientos del replay — **end-to-end**, no por la columna (mutation-testeado) |
 | F-H3.d.4 ✅ | `dry_run` calcula y no escribe; sólo aplica las hojas pedidas; una venta sin hoja registrada lo **declara** |
+| F-H3.d.5 ✅ | el panel sin `fileId` es sólo informativo; con sólo compras no ofrece aplicar (no hay nada que hacer) |
+| F-H3.d.5 ✅ | tras aplicar muestra lo que devolvió el SERVIDOR, y dice que las ventas sin stock **no se anularon** |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11** |
 | F-H3 | re-confirmar el mismo archivo no aplica el movimiento dos veces |

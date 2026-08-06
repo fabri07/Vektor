@@ -490,6 +490,7 @@ export function FileUploadSection() {
         <InventoryImpactPanel
           items={inventoryImpact}
           total={inventoryImpactTotal}
+          fileId={fileId ?? undefined}
         />
       )}
 

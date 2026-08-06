@@ -1,6 +1,14 @@
 "use client";
 
-import type { InventoryImpactItem } from "@/services/ingestion.service";
+import { useState } from "react";
+
+import { Button } from "@/components/ui/Button";
+import { useToastStore } from "@/stores/toastStore";
+import type {
+  InventoryImpactItem,
+  InventoryReplayResult,
+} from "@/services/ingestion.service";
+import { ingestionService } from "@/services/ingestion.service";
 
 /**
  * F-H3.c — el impacto que el archivo TENDRÍA sobre el inventario.
@@ -13,6 +21,13 @@ import type { InventoryImpactItem } from "@/services/ingestion.service";
  *
  * Nada de esto se aplicó. El copy lo dice en presente condicional a propósito
  * ("quedaría", "pasaría") — decirlo en pasado sugeriría que el stock ya cambió.
+ *
+ * F-H3.d.5 — con `fileId` el panel deja aplicarlo. Lo que se aplica son las
+ * VENTAS: las compras del archivo ya subieron el stock al confirmar (por eso
+ * aparecen en la columna "Compras" de la tabla y no vuelven a moverse). El
+ * resultado que se muestra después es el que devolvió el servidor, recalculado
+ * contra el stock del momento — no el de esta tabla, que puede haber quedado
+ * vieja si entre el import y el clic pasó cualquier otra cosa.
  */
 
 function formatearFecha(iso: string | null | undefined): string {
@@ -27,15 +42,42 @@ function formatearFecha(iso: string | null | undefined): string {
 export function InventoryImpactPanel({
   items,
   total,
+  fileId,
 }: {
   items: InventoryImpactItem[];
   /** Total de productos con impacto, incluidos los que no se listan. */
   total: number;
+  /** Con el id del archivo, el panel ofrece aplicar las ventas al inventario. */
+  fileId?: string;
 }) {
+  const [aplicando, setAplicando] = useState(false);
+  const [resultado, setResultado] = useState<InventoryReplayResult | null>(null);
+  const addToast = useToastStore((s) => s.add);
+
   if (items.length === 0) return null;
 
   const conNegativo = items.filter((p) => p.primer_negativo_en);
   const ocultos = Math.max(0, total - items.length);
+  const hayVentas = items.some((p) => p.vendidas > 0);
+
+  async function aplicar() {
+    if (!fileId) return;
+    setAplicando(true);
+    try {
+      const res = await ingestionService.applyInventoryReplay(fileId);
+      setResultado(res);
+      addToast(
+        res.aplicadas === 1
+          ? "Se aplicó 1 venta al inventario."
+          : `Se aplicaron ${res.aplicadas} ventas al inventario.`,
+        res.sin_stock.length > 0 ? "warning" : "success",
+      );
+    } catch {
+      addToast("No se pudo aplicar al inventario. Probá de nuevo.", "error");
+    } finally {
+      setAplicando(false);
+    }
+  }
 
   return (
     <section className="mt-3 rounded-lg border border-vektor-border bg-vektor-surface p-4">
@@ -115,6 +157,68 @@ export function InventoryImpactPanel({
           Mostrando {items.length} de {total} productos con impacto (los que
           quedan en negativo aparecen primero).
         </p>
+      )}
+
+      {fileId && hayVentas && resultado === null && (
+        <div className="mt-4 border-t border-vektor-border/50 pt-3">
+          <p className="text-xs text-vektor-ink/70">
+            Las compras del archivo ya se cargaron al stock. Lo que falta aplicar
+            son las <strong>ventas</strong>: descontarlas deja el inventario como
+            quedó después de esta historia.
+          </p>
+          <Button
+            size="sm"
+            className="mt-2"
+            disabled={aplicando}
+            onClick={() => void aplicar()}
+          >
+            {aplicando ? "Aplicando…" : "Aplicar las ventas al inventario"}
+          </Button>
+        </div>
+      )}
+
+      {resultado && (
+        <div className="mt-4 border-t border-vektor-border/50 pt-3 text-xs">
+          <p className="text-vektor-ink">
+            {resultado.aplicadas === 1
+              ? "Se descontó 1 venta del inventario."
+              : `Se descontaron ${resultado.aplicadas} ventas del inventario.`}
+            {resultado.ya_aplicadas > 0 &&
+              ` ${resultado.ya_aplicadas} ya estaban descontadas.`}
+          </p>
+          {resultado.sin_stock.length > 0 && (
+            <div className="mt-2 rounded border border-vk-warning/20 bg-vk-warning-bg px-3 py-2 text-vk-warning">
+              <p className="font-medium">
+                {resultado.sin_stock.length === 1
+                  ? "1 venta quedó sin descontar por falta de stock."
+                  : `${resultado.sin_stock.length} ventas quedaron sin descontar por falta de stock.`}
+              </p>
+              <p className="mt-1">
+                No se anularon: siguen registradas como ventas. Cargá el
+                inventario que falta y volvé a aplicar — sólo entran las que
+                quedaron pendientes.
+              </p>
+              <ul className="mt-2 list-disc space-y-0.5 pl-4">
+                {resultado.sin_stock.slice(0, 5).map((v) => (
+                  <li key={v.sale_id}>
+                    {v.product_name}: se vendieron {v.quantity} y quedaban{" "}
+                    {v.disponible}
+                  </li>
+                ))}
+              </ul>
+              {resultado.sin_stock.length > 5 && (
+                <p className="mt-1">
+                  y {resultado.sin_stock.length - 5} más.
+                </p>
+              )}
+            </div>
+          )}
+          {resultado.warnings.map((w, i) => (
+            <p key={i} className="mt-2 text-vektor-ink/70">
+              {w}
+            </p>
+          ))}
+        </div>
       )}
     </section>
   );
