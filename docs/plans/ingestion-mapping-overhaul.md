@@ -29,7 +29,10 @@ Salieron de leer el código, no del enunciado:
 | **V9** | `_resolve_target_cols` es **last-wins** para custom fields y first-wins para canónicos. | `ingestion_import_service.py:2483-2489` |
 | **V10** | La pasada que marca `required_missing` itera sobre `status == "unmapped"`. Con F-A ninguna columna queda unmapped → **el aviso desaparece en silencio**. | `column_mapping_service.py:625-640` |
 | **V11** | `SUPPLIER_REFERENCE_CREATION_MODE` default de código es **`"legacy"`**, en `app/config/settings.py:276`. El plan **no** afirma que producción use `link_only`. | verificado |
-| **V12** | Ya existe `stock_treatment` **por hoja** (`{context_id: "opening_balance"\|"purchase"}`). Es el control donde debe vivir el efecto de inventario, no un selector nuevo. | F10 |
+| **V12** | Ya existe `stock_treatment` **por hoja** (`{context_id: "opening_balance"\|"purchase"}`). ⚠️ **Corregido en F-H3.1:** responde una pregunta CONTABLE sobre el stock inicial del catálogo (¿compra real con COGS+caja, o saldo de apertura?), NO "cómo afectan al inventario las filas de esta hoja". Son dos ejes y no se fusionan. | F10 + revisión F-H3 |
+| **V13** | `decrement_for_sale` **NO** excluye ventas por `source_upload_id` — no existe tal guarda. La exclusión de hoy es estructural: el import nunca llama al servicio. Reusando `source_event_id="sale:{id}"`, el índice único parcial (`20260729_0001`) + el fast-path de `_live_sale_movement` vuelven no-op cualquier descuento en vivo posterior: la no-duplicación sale gratis, sin guarda nueva. | `stock_service.py:429-498` |
+| **V14** | El chequeo de integridad **no mira el ledger** para las ventas: `stock_esperado = ancla + compras + ajustes + mermas − SUM(sales_entries.quantity)`, y los movimientos `sale` se ignoran (`MOVEMENT_CLASS_IGNORE_SALE → pass`). La fórmula **asume que toda venta descontó stock**: cierto bajo `historical_replay`, falso A PROPÓSITO bajo `current_snapshot`/`informational` → divergencias falsas si no se reconcilia. | `inventory_integrity_service.py:148,169` |
+| **V15** | La reversa por borrado **ya cubre** los movimientos nuevos: voidea todo `InventoryMovement` con `source_upload_id == file_id`, incremental. Los `sale` del import se revierten gratis si llevan `source_upload_id`. Un requisito menos. | `file_deletion_service.py:956-965` |
 
 **Conclusión de V1+V2:** la jerarquía no falla por falta de regla, falla por **orden y visibilidad**. Ordenar por entidad (product → expense → sale) resuelve la **identidad** —y sólo eso: no convierte a la compra del 20/03 en justificación de la venta del 10/03, porque eso se decide comparando fechas, no por el orden en que se aplicó (F-H2). El orden **cronológico** es otra cosa y sirve para otra: reproducir cuántas unidades había, que recién importa cuando las ventas mueven stock (F-H3.0).
 
@@ -156,9 +159,20 @@ Implementación: `_evidencia_de_producto` / `_declarar_evidencia` / `_evaluar_hi
 
 ## F-H3 · Efecto de inventario declarado por hoja
 
+**Orden de entrega de la fase** (consecuencia de que el default sea `informational`):
+
+```
+F-H3.a  contrato: eje `inventory_effect` por hoja + defaults      (sin cambio de efecto)
+F-H3.b  cola cronológica + cálculo del impacto + warnings          (NO toca stock)
+F-H3.c  preview: stock inicial → movimientos → final, negativos, ambigüedades
+F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
+```
+
+`c` y `d` no son "después": son **la condición** para que `d` exista. Sin preview ni fórmula reconciliada, el replay no se habilita.
+
 ### F-H3.0 · La cola cronológica (movida acá desde F-H2)
 
-Es el primer paso de la fase, porque **es acá donde el orden pasa a mover stock**. Dos pasadas:
+Se construye en **F-H3.b**, donde ya calcula el impacto aunque todavía no lo aplique. Dos pasadas:
 
 **Paso 1 — Identidades, sin aplicar movimientos.** Ya entregado en F-H1/F-H2: maestros, catálogos, saldos iniciales y las identidades que declaran las compras. Al entrar a la cola, **toda fila ya sabe de qué producto habla** (`identity_resolved`); la cola nunca decide identidad.
 
@@ -185,33 +199,39 @@ La cola **no reemplaza** el chequeo de fechas de F-H2: reproducir movimientos en
 
 ### F-H3.1 · Modos de inventario por hoja
 
-Cada hoja declara qué significan sus cantidades. Extiende el `stock_treatment` por hoja que ya existe (**V12**) — no es un control nuevo:
+Cada hoja declara qué significan sus cantidades:
 
-| modo | comportamiento | equivalencia F10 |
-|---|---|---|
-| `historical_replay` | compras suman y ventas restan; **el stock final refleja las ventas** | ≈ `purchase` |
-| `current_snapshot` | el archivo declara el saldo absoluto final | ≈ `opening_balance` |
-| `informational` | calcula y advierte, **sin modificar stock** | — |
-| `no_inventory` | cantidad puramente transaccional, no asociada a producto | — |
+| modo | comportamiento |
+|---|---|
+| `informational` | calcula el impacto y lo advierte, **sin modificar stock** |
+| `historical_replay` | compras suman y ventas restan; **el stock final refleja las ventas** |
+| `current_snapshot` | el archivo declara el saldo absoluto final |
+| `no_inventory` | cantidad puramente transaccional, no asociada a producto |
 
-Los valores viejos (`opening_balance`, `purchase`) siguen aceptándose y se mapean al modo equivalente (retrocompatibilidad).
+**Son DOS ejes, no uno.** El plan decía que esto "extiende el `stock_treatment` que ya existe (**V12**)", con la equivalencia `historical_replay ≈ purchase` / `current_snapshot ≈ opening_balance`. **Está mal y no se implementa así.** `stock_treatment` responde una pregunta *contable* sobre el stock inicial de un catálogo — ¿es una compra real (COGS + baja de caja) o un saldo de apertura? —, que no es la pregunta de F-H3: *¿cómo afectan al inventario las filas de esta hoja?*. Fusionarlos haría que alguien que elige "las ventas de esta hoja descuentan" declare **en silencio** que su catálogo genera COGS y baja de caja. El eje nuevo (`inventory_effect`) va **al lado** de `stock_treatment`, que no cambia de semántica.
 
 **Pregunta al usuario** cuando una hoja tiene producto y cantidad: *"¿Cómo deben afectar estas filas al inventario?"*, con default por tipo detectado:
 
 | tipo detectado | default |
 |---|---|
-| Catálogo | `current_snapshot` |
-| Compras | `historical_replay` |
-| Ventas históricas | `historical_replay`, **con preview del resultado** |
-| Resumen contable / libro diario | `no_inventory` |
+| Ventas históricas | **`informational`** |
+| Compras históricas | **`informational`** (salvo onboarding guiado) |
+| Catálogo con stock actual | `current_snapshot` |
+| Saldo inicial declarado | `current_snapshot` |
+| Importación operativa incremental **claramente identificada** | `historical_replay`, tras confirmación |
+| Ventas sin producto / resumen contable / libro diario | `no_inventory` |
+
+> **Decisión del usuario (2026-08-05): el default nunca es `historical_replay`.** El histórico es la capacidad correcta, pero aplicarlo automáticamente es peligroso cuando el archivo puede estar **incompleto** o **solaparse con saldos ya cargados** — y un archivo real (10.931 ventas) movería el inventario entero de una sola confirmación. Véktor calcula y muestra el impacto histórico; no toca stock hasta que el usuario elija `historical_replay` para esa hoja.
+>
+> **Consecuencia de orden:** el preview y la fórmula de reconciliación (**V14**) son **requisitos del replay**, no fases posteriores. El replay no se habilita sin ellos.
 
 **Esto corrige V3**: bajo `historical_replay` las ventas importadas **sí** generan movimiento `sale` y descuentan stock. Requisitos que lo hacen seguro:
 
 - **Preview obligatorio del stock resultante** antes de confirmar (por producto: saldo previo → movimientos → saldo final).
 - **Idempotencia por archivo, hoja y fila**: el movimiento lleva `source_upload_id` + `source_row_hash` (columnas existentes, **V4**). Nunca se aplica dos veces el mismo movimiento.
-- **Eliminar el import revierte exactamente sus movimientos**, vía `void_movement` con ajuste incremental. `stock_units` **NUNCA** por `setattr` ni recalculado como `Σ(movimientos)` — su reversa es exclusivamente incremental (invariante ya pagado con un incidente).
-- **Sin doble conteo con la venta en vivo**: `decrement_for_sale` sigue excluyendo las ventas con `source_upload_id`. Bajo `historical_replay` el import es el dueño del ledger de esa fila.
-- **Sin doble conteo con el chequeo de integridad**: `inventory_integrity_service` ya ignora los `sale` del ledger; los movimientos nuevos llevan `source_type` propio (`sale_import`) para que la clasificación de `inventory_movement_origin.classify_stock_movement` los reconozca.
+- **Eliminar el import revierte exactamente sus movimientos**, vía `void_movement` con ajuste incremental. `stock_units` **NUNCA** por `setattr` ni recalculado como `Σ(movimientos)` — su reversa es exclusivamente incremental (invariante ya pagado con un incidente). Ya está resuelto por el borrado por procedencia (**V15**): alcanza con que el movimiento lleve `source_upload_id`.
+- **Sin doble conteo con la venta en vivo**: reusar `source_event_id="sale:{id}"` (**V13**). No hay guarda por `source_upload_id` que "siga" excluyendo nada — nunca existió; la clave compartida hace que el índice único parcial resuelva la carrera sin código nuevo.
+- **Sin doble conteo con el chequeo de integridad**: **no alcanza con el `source_type`**. La fórmula de `inventory_integrity_service` resta `SUM(sales_entries.quantity)` asumiendo que toda venta descontó (**V14**); hay que hacer que reste sólo las ventas cuyo efecto se aplicó, o los modos que no descuentan generan divergencias falsas. Es requisito del replay.
 - **Stock negativo histórico NO levanta `InsufficientStockError`.** La prohibición de negativo es para ventas en vivo. Un replay histórico puede dar negativo legítimamente (falta el inventario inicial): **advierte, no bloquea**.
 
 **Taxonomía de incidencias, cada una con su severidad:**
