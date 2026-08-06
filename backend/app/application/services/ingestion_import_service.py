@@ -2709,6 +2709,21 @@ async def _insert_confirmed_data_impl(
         "compras_proveedor_identificado": 0,
         "compras_proveedor_anonimo": 0,
         "compras_proveedor_no_resuelto": 0,
+        # F-H2: vender no prueba que hubiera stock. Cuando la ÚNICA evidencia del
+        # producto la aporta este mismo archivo, se compara su fecha contra la de
+        # la venta. Dos casos, que no significan lo mismo y por eso no se suman:
+        #   historial_insuficiente → la evidencia es POSTERIOR a la venta (una
+        #     compra del 20/03 no justifica una venta del 10/03). Se nombra el
+        #     producto: es un dato concreto que el usuario puede revisar.
+        #   historial_sin_fecha    → el producto se declaró sin fecha (un catálogo
+        #     sin columna de adquisición, que es el caso más común). Alcanza para
+        #     la identidad, no para afirmar disponibilidad. Una sola línea
+        #     agregada — advertir por fila sería ruido en cada import.
+        # Ninguno de los dos bloquea: un negocio que arranca con mercadería y sin
+        # las facturas viejas tiene que poder importar su historia.
+        "historial_insuficiente": 0,
+        "historial_sin_fecha": 0,
+        "historial_insuficiente_productos": [],
     }
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
@@ -4161,6 +4176,58 @@ async def _insert_multisheet_data(
     # F2-T2: índices de identidad pre-cargados UNA vez para esta corrida (no un
     # SELECT por fila) — alimentan el motor de resolución en _add_product.
     _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
+    # F-H2: desde cuándo ESTE archivo puede probar que el producto existía.
+    # Solo los productos que el archivo DECLARA (catálogo o compra de mercadería).
+    # Un producto que ya estaba en la base queda afuera a propósito: tiene su
+    # propia historia y este import no es la autoridad sobre ella.
+    _evidencia_de_producto: dict[uuid.UUID, datetime | None] = {}
+
+    def _declarar_evidencia(
+        product_id: uuid.UUID | None,
+        fecha: datetime | None,
+        *,
+        solo_si_conocido: bool = False,
+    ) -> None:
+        """Registra que este archivo declara el producto, y desde cuándo.
+
+        ``None`` significa "declarado sin fecha" y es ABSORBENTE: si alguna fila
+        declaró el producto sin fecha, no se puede afirmar disponibilidad para
+        ninguna venta, y una fecha posterior de otra fila no arregla eso. Entre
+        fechas gana la más temprana, que es la que puede justificar más ventas.
+
+        ``solo_si_conocido`` es para las filas que VINCULAN sin declarar (la
+        segunda compra del mismo producto): adelantan la fecha si el archivo ya
+        lo había declarado, pero no meten acá un producto preexistente. Esa
+        distinción es la que evita el falso positivo obvio — un producto con
+        años de historia propia no queda "sin justificar" porque este archivo
+        traiga una compra reciente.
+        """
+        if product_id is None:
+            return
+        if product_id not in _evidencia_de_producto:
+            if not solo_si_conocido:
+                _evidencia_de_producto[product_id] = fecha
+            return
+        previa = _evidencia_de_producto[product_id]
+        if previa is None or fecha is None:
+            _evidencia_de_producto[product_id] = None
+        else:
+            _evidencia_de_producto[product_id] = min(previa, fecha)
+
+    def _evaluar_historial(
+        product_id: uuid.UUID | None, tx_date: datetime, nombre: str | None
+    ) -> None:
+        """¿Este archivo puede sostener que el producto existía al vender?"""
+        if product_id is None or product_id not in _evidencia_de_producto:
+            return
+        evidencia = _evidencia_de_producto[product_id]
+        if evidencia is None:
+            counts["historial_sin_fecha"] += 1
+        elif evidencia.date() > tx_date.date():
+            counts["historial_insuficiente"] += 1
+            _productos = counts["historial_insuficiente_productos"]
+            if nombre and nombre not in _productos:
+                _productos.append(nombre)
 
     def _val(row: dict[str, Any], col: str | None, keywords: set[str] | tuple[str, ...]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
@@ -4238,15 +4305,19 @@ async def _insert_multisheet_data(
         )
         cf = _custom_fields(row, cf_cols)
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
+        _venta_producto = _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
         entry.product_id = _resolve_product(
             _by_sku,
             _by_name,
-            _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
+            _venta_producto,
             _val(row, cols.get("sku"), _SKU_COLS),
             _by_token,
             by_barcode=_identity_indexes.by_barcode,
             barcode=_val(row, cols.get("barcode"), _BARCODE_COLS),
         )
+        # F-H2: la venta se vincula igual; lo que NO se afirma es que hubiera
+        # stock. Vincular es identidad, no disponibilidad.
+        _evaluar_historial(entry.product_id, tx_date, _clean_str(_venta_producto, 299))
         # F7c: resolución de cliente por fila — matched/anonymous/unresolved.
         # Nunca crea: solo vincula (maestro importado arriba o ya en la DB) o cae
         # al sentinela "Local" con traza si la referencia no matchea.
@@ -4451,12 +4522,21 @@ async def _insert_multisheet_data(
             # Review F2 #3: solo "created" creó un producto incompleto.
             if _action == "created":
                 counts["sin_producto"] += 1
+                # F-H2: la compra que crea el producto es la evidencia más
+                # temprana que este archivo tiene de él.
+                _declarar_evidencia(_pid, tx_date)
             # Review F2 #2: registrar en los índices transaccionales para que
             # ventas/gastos POSTERIORES del mismo archivo puedan vincularlo.
             if _pid is not None:
                 _register_product_transaction_indexes(
                     _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token
                 )
+        # F-H2: una compra posterior de un producto que este archivo ya declaró
+        # no lo "re-declara", pero si viene con fecha más temprana la adelanta.
+        # Sin `solo_si_conocido` un producto preexistente entraría acá y sus
+        # ventas viejas quedarían marcadas como no justificadas.
+        if _has_qty:
+            _declarar_evidencia(expense.product_id, tx_date, solo_si_conocido=True)
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
@@ -4878,6 +4958,11 @@ async def _insert_multisheet_data(
             _register_product_transaction_indexes(
                 _new_id, name, sku, _by_sku, _by_name, _by_token
             )
+            # F-H2: el catálogo declara el producto. Su fecha es la de adquisición
+            # SI la trae; un catálogo sin esa columna —el caso común— declara
+            # identidad sin fecha, que alcanza para vincular una venta pero no
+            # para sostener que el producto ya estaba ese día.
+            _declarar_evidencia(_new_id, _acquired)
             # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
             # = compra real, si trae costo).
             await _apply_catalog_stock(
@@ -4956,18 +5041,27 @@ async def _insert_multisheet_data(
         # Los maestros (customer/supplier) ya vienen importados desde
         # `_import_master_entities`, antes de esta función.
         #
-        # NO es un orden por tipo de hoja: dentro de los movimientos, compras y
-        # ventas se ordenan por fecha (paso 2/2), porque una compra posterior no
-        # puede justificar una venta anterior. Acá sólo se garantiza que la
-        # identidad exista antes de que alguien la busque.
+        # F-H2 (paso 2/2): las compras van antes que las ventas por la MISMA razón
+        # —una compra de mercadería declara el producto que compra—, no porque una
+        # compra "justifique" una venta. Justificar es un juicio sobre FECHAS y se
+        # resuelve aparte, comparando la evidencia contra la fecha de la venta
+        # (`_evaluar_historial`): una compra del 20/03 declara el producto y aun así
+        # deja marcada como no validable la venta del 10/03.
+        #
+        # Ordenar la aplicación de los movimientos por fecha recién tiene efecto
+        # observable cuando las ventas consuman stock (F-H3, hoy no lo hacen:
+        # `stock_service.py:538-540`). Hacerlo antes sería mover la venta delante
+        # de la compra que le da identidad para no ganar nada.
         #
         # `sorted` es estable: entre hojas del mismo grupo se conserva el orden del
         # archivo, que es el desempate final cuando no hay fecha.
+        _prioridad_de_pasada = {"product": 0, "expense": 1, "sale": 2}
+
         def _orden_de_pasada(ctx: dict[str, Any]) -> int:
             _cid = ctx.get("context_id")
             # MISMA prioridad que abajo: override del usuario → entidad del summary.
             _ent = (context_entity or {}).get(_cid or "") or ctx.get("entity_type")
-            return 0 if _ent == "product" else 1
+            return _prioridad_de_pasada.get(_ent or "", 3)
 
         for ctx in sorted(contexts, key=_orden_de_pasada):
             ctx_id = ctx.get("context_id")

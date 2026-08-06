@@ -2239,6 +2239,31 @@ async def confirm_file(
             "columnas riesgosas se enviaron a «Otros» para que las completes."
         )
 
+    # F-H2: vincular una venta a un producto es resolver su IDENTIDAD, no afirmar
+    # que había stock ese día. Estos dos avisos son lo que el archivo puede probar
+    # sobre sí mismo, y por eso no dependen del ancla `catalog_initial_stock` que
+    # sí necesita el chequeo de divergencia de más abajo (que es el complemento:
+    # mira el stock reconstruible del tenant, no lo que declara este archivo, y
+    # sobre datos históricos sin ancla no cubre nada).
+    if counts.get("historial_insuficiente"):
+        _productos = counts.get("historial_insuficiente_productos") or []
+        _muestra = ", ".join(f"«{p}»" for p in _productos[:3])
+        _resto = len(_productos) - 3
+        if _resto > 0:
+            _muestra += f" y {_resto} más"
+        warnings.append(
+            f"{counts['historial_insuficiente']} venta(s) son anteriores a la primera "
+            f"compra que este archivo registra de su producto ({_muestra}). Se "
+            "importaron y quedaron vinculadas, pero no se puede afirmar que hubiera "
+            "stock ese día: puede faltar la compra vieja."
+        )
+    if counts.get("historial_sin_fecha"):
+        warnings.append(
+            f"{counts['historial_sin_fecha']} venta(s) corresponden a productos que este "
+            "archivo declara sin fecha de adquisición. Se vincularon igual; verificar el "
+            "stock a la fecha de cada venta necesitaría esa fecha o la compra original."
+        )
+
     # Aviso temporal (human-in-the-loop): si las ventas recién importadas dejan el stock
     # reconstruible en negativo por FECHAS (compras posteriores a las ventas, o compra sin
     # registrar), advertir. Read-only, no bloquea y falla-silencioso (un aviso nunca debe
