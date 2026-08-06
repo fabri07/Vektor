@@ -28,6 +28,7 @@ from app.domain.inventory_effect import IMPORT_CONTEXT_FIELD
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 
 _VENTAS = "sheet:ventas"
 _TABLA = "table:0"
@@ -222,3 +223,337 @@ class TestElEfectoDeclaradoLlegaALaProyeccion:
 
         assert [p["product_name"] for p in counts["impacto_inventario"]] == [_PRODUCTO]
         assert counts["impacto_inventario"][0]["vendidas"] == 2
+
+
+# --- F-H3.d.3: la venta sin stock que la respalde no entra ---------------------
+#
+# Bajo `historical_replay` la hoja pide que sus ventas descuenten. Una venta que
+# no tiene unidades detrás no se puede aplicar de ninguna forma honesta: dejar el
+# stock negativo inventa un inventario que nadie tiene, y clampear a cero hace que
+# el movimiento diga una cosa y el stock otra (y entonces borrar el archivo lo
+# infla). La fila va a "Otros" y el usuario la registra después de cargar el stock.
+
+_VENTAS_A = "sheet:ventas-a"
+_VENTAS_B = "sheet:ventas-b"
+
+
+def _summary_dos_ventas(
+    *,
+    fecha_primera: str,
+    fecha_segunda: str,
+    cantidad: int = 6,
+) -> dict[str, Any]:
+    """Dos ventas del mismo producto en UNA hoja."""
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_venta": True,
+        "row_count": 2,
+        "ventas_detectadas": [
+            {
+                "fecha": fecha_primera,
+                "producto": _PRODUCTO,
+                "cantidad": str(cantidad),
+                "monto": "2100",
+                "__context__": _VENTAS,
+            },
+            {
+                "fecha": fecha_segunda,
+                "producto": _PRODUCTO,
+                "cantidad": str(cantidad),
+                "monto": "2100",
+                "__context__": _VENTAS,
+            },
+        ],
+        "mapping_contexts": [_ctx(_VENTAS, "Ventas")],
+    }
+
+
+async def _importar_ventas(
+    db: AsyncSession,
+    tenant: Tenant,
+    summary: dict[str, Any],
+    efectos: dict[str, str],
+) -> dict[str, Any]:
+    contextos = [str(c["context_id"]) for c in summary["mapping_contexts"]]
+    return await importer.insert_confirmed_data(
+        db,
+        tenant.tenant_id,
+        summary,
+        {"ventas": True},
+        context_mappings=dict.fromkeys(contextos, _MAPPING_VENTAS),
+        context_confirmed=dict.fromkeys(contextos, True),
+        inventory_effect=efectos,
+    )
+
+
+async def _otros(db: AsyncSession) -> list[UnclassifiedRecord]:
+    return list((await db.execute(select(UnclassifiedRecord))).scalars().all())
+
+
+@pytest.mark.asyncio
+class TestVentaSinRespaldoNoEntra:
+    async def test_replay_manda_a_otros_la_que_no_se_puede_cubrir(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """10 unidades y dos ventas de 6: entra la primera, la segunda va a Otros."""
+        await _crear_producto(db_session, sample_tenant, stock=10)
+
+        counts = await _importar_ventas(
+            db_session,
+            sample_tenant,
+            _summary_dos_ventas(fecha_primera="2024-03-03", fecha_segunda="2024-03-10"),
+            {_VENTAS: "historical_replay"},
+        )
+        await db_session.flush()
+
+        assert counts["ventas"] == 1
+        assert counts["ventas_sin_stock"] == 1
+        venta = await _venta_unica(db_session)
+        assert venta.quantity == 6
+        assert venta.transaction_date.strftime("%Y-%m-%d") == "2024-03-03"
+        capturas = await _otros(db_session)
+        assert len(capturas) == 1
+        assert "sin stock que la respalde" in (capturas[0].context_label or "")
+
+    async def test_la_rechazada_es_la_mas_nueva_aunque_venga_primera_en_el_archivo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Control del anterior: el archivo con las filas dadas vuelta da lo mismo.
+
+        Si el gate recorriera en el orden del Excel, acá entraría la del 10/03 y se
+        rechazaría la del 03/03 — el resultado dependería de cómo ordenó las filas
+        quien armó la planilla.
+        """
+        await _crear_producto(db_session, sample_tenant, stock=10)
+
+        await _importar_ventas(
+            db_session,
+            sample_tenant,
+            _summary_dos_ventas(fecha_primera="2024-03-10", fecha_segunda="2024-03-03"),
+            {_VENTAS: "historical_replay"},
+        )
+        await db_session.flush()
+
+        venta = await _venta_unica(db_session)
+        assert venta.transaction_date.strftime("%Y-%m-%d") == "2024-03-03"
+
+    async def test_con_el_default_entran_las_dos(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """`informational` no gatea nada: el archivo entra entero y sólo se informa.
+
+        Es el control que impide que el gate se convierta en una regla global. Sin
+        esto, "la fila no entró" no distinguiría entre el modo declarado y un bug
+        que rechaza ventas siempre.
+        """
+        await _crear_producto(db_session, sample_tenant, stock=10)
+
+        counts = await _importar_ventas(
+            db_session,
+            sample_tenant,
+            _summary_dos_ventas(fecha_primera="2024-03-03", fecha_segunda="2024-03-10"),
+            {_VENTAS: "informational"},
+        )
+        await db_session.flush()
+
+        assert counts["ventas"] == 2
+        assert counts.get("ventas_sin_stock", 0) == 0
+        assert await _otros(db_session) == []
+
+    async def test_el_stock_no_se_toca_ni_con_replay_declarado(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Confirmar sigue sin mover stock: el replay es el paso posterior (F-H3.c).
+
+        El gate decide qué se puede importar, no aplica nada.
+        """
+        producto = await _crear_producto(db_session, sample_tenant, stock=10)
+
+        await _importar_ventas(
+            db_session,
+            sample_tenant,
+            _summary_dos_ventas(fecha_primera="2024-03-03", fecha_segunda="2024-03-10"),
+            {_VENTAS: "historical_replay"},
+        )
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        assert producto.stock_units == 10
+
+    async def test_dos_hojas_de_ventas_comparten_el_mismo_stock(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El gate corre para el archivo, no por hoja.
+
+        Con 10 unidades y una venta de 6 en cada hoja, evaluar hoja por hoja dejaría
+        entrar las dos (6 <= 10 las dos veces) y el archivo consumiría 12.
+        """
+        await _crear_producto(db_session, sample_tenant, stock=10)
+        summary = {
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "has_venta": True,
+            "row_count": 2,
+            "ventas_detectadas": [
+                {
+                    "fecha": "2024-03-03",
+                    "producto": _PRODUCTO,
+                    "cantidad": "6",
+                    "monto": "2100",
+                    "__context__": _VENTAS_A,
+                },
+                {
+                    "fecha": "2024-03-10",
+                    "producto": _PRODUCTO,
+                    "cantidad": "6",
+                    "monto": "2100",
+                    "__context__": _VENTAS_B,
+                },
+            ],
+            "mapping_contexts": [_ctx(_VENTAS_A, "Ventas 1"), _ctx(_VENTAS_B, "Ventas 2")],
+        }
+
+        counts = await _importar_ventas(
+            db_session,
+            sample_tenant,
+            summary,
+            {_VENTAS_A: "historical_replay", _VENTAS_B: "historical_replay"},
+        )
+        await db_session.flush()
+
+        assert counts["ventas"] == 1
+        assert counts["ventas_sin_stock"] == 1
+
+    async def test_reconfirmar_no_duplica_la_captura_en_otros(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """La fila derivada a Otros es output persistido: su huella tiene que quedar.
+
+        Sin registrar el fingerprint, re-confirmar el archivo dejaría dos veces la
+        misma venta en la bandeja.
+        """
+        await _crear_producto(db_session, sample_tenant, stock=10)
+        file_id = uuid.uuid4()
+        summary = _summary_dos_ventas(fecha_primera="2024-03-03", fecha_segunda="2024-03-10")
+
+        for _ in range(2):
+            contextos = [str(c["context_id"]) for c in summary["mapping_contexts"]]
+            await importer.insert_confirmed_data(
+                db_session,
+                sample_tenant.tenant_id,
+                summary,
+                {"ventas": True},
+                context_mappings=dict.fromkeys(contextos, _MAPPING_VENTAS),
+                context_confirmed=dict.fromkeys(contextos, True),
+                inventory_effect={_VENTAS: "historical_replay"},
+                uploaded_file_id=file_id,
+            )
+            await db_session.flush()
+
+        assert len(await _otros(db_session)) == 1
+        assert len((await db_session.execute(select(SaleEntry))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+class TestElGateTambienCorreEnElArchivoPlano:
+    """El camino de una sola tabla es el import más común que existe.
+
+    Gatear sólo los libros multi-hoja dejaría el caso más frecuente —"mis ventas
+    del año" en un CSV— sin la protección, y nadie lo notaría hasta ver el stock.
+    """
+
+    def _summary(self, cantidad_1: str, cantidad_2: str) -> dict[str, Any]:
+        return {
+            "file_type": "spreadsheet",
+            "inferred_type": "ventas",
+            "has_venta": True,
+            "row_count": 2,
+            "ventas_detectadas": [
+                {
+                    "fecha": "2024-03-03",
+                    "producto": _PRODUCTO,
+                    "cantidad": cantidad_1,
+                    "monto": "2100",
+                },
+                {
+                    "fecha": "2024-03-10",
+                    "producto": _PRODUCTO,
+                    "cantidad": cantidad_2,
+                    "monto": "2100",
+                },
+            ],
+            "mapping_contexts": [_ctx(_TABLA, "Hoja 1")],
+        }
+
+    async def _importar(
+        self,
+        db: AsyncSession,
+        tenant: Tenant,
+        summary: dict[str, Any],
+        efecto: str,
+        confirmados: dict[str, bool] | None = None,
+    ) -> dict[str, Any]:
+        return await importer.insert_confirmed_data(
+            db,
+            tenant.tenant_id,
+            summary,
+            confirmados or {"ventas": True},
+            column_mappings=_MAPPING_VENTAS,
+            inventory_effect={_TABLA: efecto},
+        )
+
+    async def test_manda_a_otros_la_que_no_se_puede_cubrir(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await _crear_producto(db_session, sample_tenant, stock=10)
+
+        counts = await self._importar(
+            db_session, sample_tenant, self._summary("6", "6"), "historical_replay"
+        )
+        await db_session.flush()
+
+        assert counts["ventas"] == 1
+        assert counts["ventas_sin_stock"] == 1
+        assert (await _venta_unica(db_session)).transaction_date.strftime(
+            "%Y-%m-%d"
+        ) == "2024-03-03"
+
+    async def test_con_el_default_entran_las_dos(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await _crear_producto(db_session, sample_tenant, stock=10)
+
+        counts = await self._importar(
+            db_session, sample_tenant, self._summary("6", "6"), "informational"
+        )
+        await db_session.flush()
+
+        assert counts["ventas"] == 2
+        assert counts.get("ventas_sin_stock", 0) == 0
+
+    async def test_si_el_archivo_tambien_carga_productos_el_gate_se_abstiene_y_lo_dice(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """No hay pasadas separadas acá: el stock que el archivo declara todavía no
+        existe cuando el gate mira, así que rechazaría ventas contra un saldo que el
+        propio archivo está por cargar. Se abstiene, y queda dicho en `counts`.
+        """
+        await _crear_producto(db_session, sample_tenant, stock=10)
+        summary = self._summary("6", "6")
+        summary["has_producto"] = True
+
+        counts = await self._importar(
+            db_session,
+            sample_tenant,
+            summary,
+            "historical_replay",
+            confirmados={"ventas": True, "productos": True},
+        )
+        await db_session.flush()
+
+        assert counts["replay_sin_gatear"] == 1
+        assert counts["ventas"] == 2
+        assert counts.get("ventas_sin_stock", 0) == 0

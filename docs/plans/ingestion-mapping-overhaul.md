@@ -169,9 +169,20 @@ F-H3.a  contrato: eje `inventory_effect` por hoja + defaults      ✅ entregado
 F-H3.b  cálculo del impacto por fecha + warnings (NO toca stock)  ✅ entregado
 F-H3.c  preview: stock inicial → movimientos → final, negativos, ambigüedades  ✅ entregado
 F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
-        d.1 fórmula V14 reconciliada        d.2 context_id estampado en la venta
-        d.3 gate al confirmar (cola + /otros)  d.4 endpoint de apply   d.5 botón
+        d.1 fórmula V14 reconciliada          ✅ entregado
+        d.2 context_id estampado en la venta  ✅ entregado
+        d.3 gate al confirmar (cola + /otros) ✅ entregado
+        d.4 endpoint de apply   d.5 botón
 ```
+
+> **Límite honesto de d.3, declarado y no silencioso.** En el archivo de **una sola
+> tabla** no hay pasadas separadas: la misma fila puede dar venta, gasto y producto
+> en la misma vuelta, así que el stock que el propio archivo declara todavía no
+> existe cuando el gate mira. Si ese archivo además crea productos, el gate **se
+> abstiene** y lo deja en `counts["replay_sin_gatear"]` en vez de rechazar ventas
+> contra un saldo que el archivo está por cargar. Las ventas entran y el replay
+> posterior dice cuáles no se pudieron aplicar. En el camino multi-hoja no pasa: el
+> orden de pasada (catálogos → compras → ventas) garantiza que el stock ya esté.
 
 `c` y `d` no son "después": son **la condición** para que `d` exista. Sin preview ni fórmula reconciliada, el replay no se habilita.
 
@@ -492,9 +503,13 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H3.d.1 | una venta importada que NO descontó no cuenta en `stock_esperado` (hoy da divergencia falsa) |
 | F-H3.d.1 | una venta EN VIVO sin su movimiento **sigue** dando divergencia (control: si no, el chequeo dejó de detectar) |
 | F-H3.d.2 | la venta importada guarda su `context_id`; una venta manual no gana la clave |
-| F-H3.d.3 | `historical_replay` + stock insuficiente: la fila NO entra a `sales_entries` y aparece en `/otros` con el motivo |
-| F-H3.d.3 | el rechazo se decide por FECHA, no por orden de solapa (mutation-testeado: orden del Excel → rojo) |
-| F-H3.d.3 | `informational` (default) con el mismo archivo: importa TODO, nada a `/otros` |
+| F-H3.d.3 ✅ | `historical_replay` + stock insuficiente: la fila NO entra a `sales_entries` y aparece en `/otros` con el motivo |
+| F-H3.d.3 ✅ | el rechazo se decide por FECHA, no por orden de solapa (mutation-testeado: orden del Excel → rojo) |
+| F-H3.d.3 ✅ | `informational` (default) con el mismo archivo: importa TODO, nada a `/otros` |
+| F-H3.d.3 ✅ | el gate corre para el ARCHIVO, no por hoja: dos hojas de ventas comparten el mismo stock (mutation-testeado) |
+| F-H3.d.3 ✅ | una fila rechazada NO consume stock: no arrastra a las que sí entraban |
+| F-H3.d.3 ✅ | re-confirmar no duplica la captura en `/otros` (mutation-testeado: sin huella → dos filas) |
+| F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos se **abstiene** y lo reporta |
 | F-H3.d.4 | aplicar dos veces no descuenta dos veces (`source_event_id="sale:{id}"`) |
 | F-H3.d.4 | el impacto que devuelve el apply se recalcula contra el stock actual, no el del confirm |
 | F-H3.d.4 | si el stock cambió entre confirm y apply, el descuento queda **pendiente**: no se anula la venta |
