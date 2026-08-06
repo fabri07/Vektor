@@ -31,15 +31,19 @@ Salieron de leer el código, no del enunciado:
 | **V11** | `SUPPLIER_REFERENCE_CREATION_MODE` default de código es **`"legacy"`**, en `app/config/settings.py:276`. El plan **no** afirma que producción use `link_only`. | verificado |
 | **V12** | Ya existe `stock_treatment` **por hoja** (`{context_id: "opening_balance"\|"purchase"}`). Es el control donde debe vivir el efecto de inventario, no un selector nuevo. | F10 |
 
-**Conclusión de V1+V2:** la jerarquía no falla por falta de regla, falla por **orden y visibilidad**. Pero **ordenar por entidad (product → expense → sale) tampoco alcanza**: procesar todas las compras antes que todas las ventas haría que una compra del 20/03 justifique una venta del 10/03. El orden correcto es **cronológico**, no por tipo de hoja (ver F-H2).
+**Conclusión de V1+V2:** la jerarquía no falla por falta de regla, falla por **orden y visibilidad**. Ordenar por entidad (product → expense → sale) resuelve la **identidad** —y sólo eso: no convierte a la compra del 20/03 en justificación de la venta del 10/03, porque eso se decide comparando fechas, no por el orden en que se aplicó (F-H2). El orden **cronológico** es otra cosa y sirve para otra: reproducir cuántas unidades había, que recién importa cuando las ventas mueven stock (F-H3.0).
 
 ---
 
 ## Orden de entrega
 
 ```
-F-0  contrato e invariantes (sin cambio de comportamiento)
-F-H  jerarquía, orden temporal, cantidades y costos      ← corrige datos
+F-0  contrato e invariantes (sin cambio de comportamiento)          ✅ entregado
+F-H1 jerarquía: la identidad existe antes de que alguien la busque  ✅ entregado
+F-H2 identidad ≠ validez temporal (la evidencia se juzga por fecha) ✅ entregado
+F-H3 efecto de inventario por hoja + cola cronológica  ← corrige datos
+F-H4 precio unitario × cantidad = monto
+F-H6 costos de compra agrupados (envío, costo final)
 F-A  nombre original + preservación de edición
 F-B  claridad visual + extracción del monolito
 F-C  obligatorios explicados
@@ -119,15 +123,46 @@ Esto permite importar un negocio que empieza a usar Véktor con stock ya existen
 
 **Prerrequisito técnico (V2):** `_add_product` debe llamar a `_register_product_transaction_indexes`, igual que la ruta de compras. Sin esto, un producto del catálogo del mismo archivo es invisible para sus ventas.
 
-## F-H2 · Resolución temporal
+## F-H2 · Identidad ≠ validez temporal  ✅ ENTREGADO
 
-Reemplaza la idea equivocada de "ordenar las hojas por entidad". El orden correcto es **cronológico**, y se logra en dos pasos:
+Son **dos preguntas distintas** sobre la misma fila, y colapsarlas es el error que estaba abajo del bug original:
 
-**Paso 1 — Identidades, sin aplicar movimientos.**
-Maestros (`_import_master_entities`, ya existe), catálogos y saldos iniciales. Se declaran productos, clientes y proveedores; **no se toca inventario todavía**.
+| pregunta | qué decide | cómo se resuelve |
+|---|---|---|
+| **Resolución de identidad** | ¿de qué producto habla esta fila? | por **orden de pasada** sobre todo el lote |
+| **Validez temporal** | ¿ese producto existía / tenía unidades en la fecha de la venta? | por **comparación de fechas**, nunca por el orden en que se aplicó |
 
-**Paso 2 — Movimientos, ordenados por fecha.**
-Compras, ventas, devoluciones, mermas y ajustes de **todas** las hojas entran a una sola secuencia ordenada por:
+Vocabulario, que las fases siguientes heredan:
+
+```text
+identity_resolved   = true | false
+temporally_available = true | false | unknown
+```
+
+- `false` en identidad → la fila no se puede importar: va a `/otros` con `match_candidates`.
+- `false` en disponibilidad → hay evidencia y es **posterior** a la venta (contador `historial_insuficiente`, nombra los productos).
+- `unknown` → el archivo declara el producto **sin fecha** (un catálogo sin columna de adquisición, el caso más común) o el historial es incompleto: **no se pudo evaluar**, que no es lo mismo que "no había" (contador `historial_sin_fecha`, una línea agregada).
+- Un producto **preexistente en la base** queda fuera del chequeo: tiene su propia historia y el archivo importado no es autoridad sobre ella. Sin esta regla, traer una compra reciente marcaba como injustificadas todas las ventas viejas del producto.
+
+**Orden de pasada (identidad):** catálogos y saldos de apertura → compras → ventas. Las compras van antes que las ventas porque **una compra de mercadería declara el producto que compra**, no porque "justifique" nada. Los maestros ya vienen de `_import_master_entities`, antes del dispatch.
+
+**Invariante:** *una compra futura nunca justifica una venta anterior.* La compra del 20/03 declara el producto **y aun así** deja la venta del 10/03 en `temporally_available = false`. Es advertencia, jamás bloqueo: un negocio que arranca con mercadería y sin las facturas viejas tiene que poder importar su historia.
+
+Las fechas ausentes generan **ambigüedad visible** (`unknown`), nunca una precedencia inventada (invariante 2d: el timing de inserción no es evidencia).
+
+Implementación: `_evidencia_de_producto` / `_declarar_evidencia` / `_evaluar_historial` en `ingestion_import_service.py`; avisos en `api/v1/ingestion.py`. Tests: `test_ingestion_temporal_fh2.py` (+ `test_ingestion_sheet_order_fh1.py`, que es el caso "Ventas primero, Productos después resuelve identidad").
+
+> **La cola cronológica global se movió a F-H3 — decisión, no omisión.** Construirla acá agrega la parte más invasiva del programa sin efecto observable (las ventas importadas todavía no descuentan stock, **V3**) y con un costo real: mandar la venta del 10/03 delante de la compra del 20/03 que la declara la deja sin identidad. La cola pertenece al lugar donde el orden mueve stock, y ahí correrá sobre identidades ya resueltas.
+
+## F-H3 · Efecto de inventario declarado por hoja
+
+### F-H3.0 · La cola cronológica (movida acá desde F-H2)
+
+Es el primer paso de la fase, porque **es acá donde el orden pasa a mover stock**. Dos pasadas:
+
+**Paso 1 — Identidades, sin aplicar movimientos.** Ya entregado en F-H1/F-H2: maestros, catálogos, saldos iniciales y las identidades que declaran las compras. Al entrar a la cola, **toda fila ya sabe de qué producto habla** (`identity_resolved`); la cola nunca decide identidad.
+
+**Paso 2 — Movimientos, ordenados por fecha.** Compras, ventas, devoluciones, mermas y ajustes de **todas** las hojas entran a una sola secuencia ordenada por:
 
 1. fecha efectiva;
 2. a igual fecha: **apertura → compra/devolución → venta/merma → ajuste**;
@@ -136,15 +171,19 @@ Compras, ventas, devoluciones, mermas y ajustes de **todas** las hojas entran a 
 
 El desempate crédito-antes-que-débito ya existe en `inventory_temporal_service.replay_timeline:144` — **reusar esa función, no escribir un segundo replay.**
 
-**Invariante:** *una compra futura nunca resuelve una venta anterior.* Si la única evidencia del producto es posterior a la venta, la identidad puede resolverse pero **no se afirma que había stock**: se registra `historial_insuficiente_para_validar`.
+La cola **no reemplaza** el chequeo de fechas de F-H2: reproducir movimientos en orden dice cuántas unidades había, no si la evidencia es admisible. Una compra futura sigue sin justificar una venta anterior aunque el replay la aplique después.
 
-Si un producto ya existía en un catálogo pero no hay evidencia de compra histórica: identidad resuelta, advertencia registrada, sin afirmar disponibilidad.
+> **Consecuencia estructural — la parte más invasiva del programa.** `_insert_multisheet_data` deja de ser un loop por contexto que inserta a medida que recorre. Los anclas de idempotencia siguen siendo por `(archivo, contexto, índice DENTRO DE SU HOJA)`, así que reordenar **no** los invalida — y eso ya está clavado por `test_la_huella_numera_la_fila_dentro_de_su_hoja`, que se pone rojo si el índice pasa a derivarse de la posición en la cola.
 
-Las fechas ausentes generan **ambigüedad visible**, nunca una precedencia inventada (invariante 2d: el timing de inserción no es evidencia).
+**Tests reservados para esta fase** (no se pueden escribir antes: hoy no hay movimiento de stock desde ventas que observar):
 
-> **Consecuencia estructural — la parte más invasiva del programa.** `_insert_multisheet_data` deja de ser un loop por contexto que inserta a medida que recorre, y pasa a dos pasadas: identidades → cola cronológica global. Los anclas de idempotencia siguen siendo por `(archivo, contexto, fila)`, así que reordenar **no** los invalida. Test de idempotencia de regresión **antes** de tocar la estructura.
+- compra anterior a la venta → venta válida (`temporally_available = true`);
+- compra futura → no justifica la venta (`false`), aunque el replay la aplique;
+- historial incompleto → `unknown`, distinguible de "producto desconocido";
+- replay idempotente: re-confirmar el mismo archivo no aplica el movimiento dos veces;
+- eliminar el import revierte exactamente sus movimientos (incremental, nunca `Σ(movimientos)`).
 
-## F-H3 · Efecto de inventario declarado por hoja
+### F-H3.1 · Modos de inventario por hoja
 
 Cada hoja declara qué significan sus cantidades. Extiende el `stock_treatment` por hoja que ya existe (**V12**) — no es un control nuevo:
 
@@ -378,7 +417,7 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 
 ## Verificación
 
-**Por etapa, antes de cerrarla:** `cd backend && make check` y la suite con el entorno del CI (`backend/.venv/bin/python -m pytest`, SQLite en memoria, `ENABLE_EMAIL_VERIFICATION=false`), corriendo **los mismos comandos que `ci-backend.yml`**. Frontend: `npm run type-check && npm run lint && npm run test`. Todo test nuevo de regresión se **mutation-testea**: revertir el fix y confirmar que falla.
+**Por etapa, antes de cerrarla:** `cd backend && make check` y la suite con el entorno del CI (`backend/.venv/bin/python -m pytest`, SQLite en memoria, `ENABLE_EMAIL_VERIFICATION=false`), corriendo **los mismos comandos que `ci-backend.yml`**. **Nunca `ruff format`/`make format`** durante una fase: el backend no está normalizado y reformatea el archivo entero (ver la regla en `CLAUDE.md`). `git diff --stat` + `git diff --check` antes de cada commit. Frontend: `npm run type-check && npm run lint && npm run test`. Todo test nuevo de regresión se **mutation-testea**: revertir el fix y confirmar que falla.
 
 | Fase | Test compuerta |
 |---|---|
@@ -386,9 +425,13 @@ No es aceptar literalmente cualquier archivo, sino **cualquier estructura tabula
 | F-H1 | libro con Ventas antes que Productos: las ventas resuelven contra el catálogo del mismo archivo (**V1**+**V2**) |
 | F-H1 | hoja sin columna de producto → importa como ingreso no inventariable |
 | F-H1 | producto informado sin identidad → `/otros` con candidatos, no en `sales_entries` |
-| **F-H2** | **venta 10/03 + compra 20/03 del mismo producto → la venta NO se valida como disponible; `historial_insuficiente_para_validar`** |
-| F-H2 | a igual fecha, la compra se aplica antes que la venta |
-| F-H2 | idempotencia del import intacta tras pasar a dos pasadas |
+| **F-H2** ✅ | **venta 10/03 + compra 20/03 del mismo producto → vincula (identidad) pero `temporally_available = false`** |
+| F-H2 ✅ | la venta vincula contra el producto que declara la hoja de compras, sin importar la solapa ni la fecha |
+| F-H2 ✅ | compra ANTERIOR a la venta → sin advertencia (control: si no, la advertencia estaría prendida siempre) |
+| F-H2 ✅ | producto preexistente en la base → fuera del chequeo, sus ventas viejas no se marcan |
+| F-H2 ✅ | la huella de idempotencia numera la fila DENTRO DE SU HOJA (mutation-testeado: índice global → rojo) |
+| F-H3.0 | a igual fecha, la compra se aplica antes que la venta |
+| F-H3.0 | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11** |
 | F-H3 | re-confirmar el mismo archivo no aplica el movimiento dos veces |
 | F-H3 | borrar el import revierte exactamente sus movimientos (incremental, nunca `Σ(movimientos)`) |

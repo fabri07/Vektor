@@ -2721,6 +2721,15 @@ async def _insert_confirmed_data_impl(
         #     agregada — advertir por fila sería ruido en cada import.
         # Ninguno de los dos bloquea: un negocio que arranca con mercadería y sin
         # las facturas viejas tiene que poder importar su historia.
+        #
+        # Vocabulario del plan (`docs/plans/ingestion-mapping-overhaul.md`, F-H2),
+        # que F-H3 hereda cuando la cola cronológica reproduzca las cantidades:
+        #   identity_resolved     true/false  → false va a /otros, no cuenta acá
+        #   temporally_available  true        → sin contador (no hay nada que avisar)
+        #                         false       → historial_insuficiente
+        #                         unknown     → historial_sin_fecha
+        # "unknown" es NO SE PUDO EVALUAR, que no es "no había": colapsarlo con
+        # `false` sería inventar un juicio que los datos no sostienen.
         "historial_insuficiente": 0,
         "historial_sin_fecha": 0,
         "historial_insuficiente_productos": [],
