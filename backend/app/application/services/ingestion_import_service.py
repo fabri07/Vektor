@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,8 +59,10 @@ from app.domain.inventory_effect import (
     INFORMATIONAL,
 )
 from app.domain.inventory_replay_gate import (
+    MOTIVO_REPLAY_NO_GATEABLE,
     ReplayRow,
     UnbackedRow,
+    replay_no_gateable,
     rows_without_stock_backing,
 )
 from app.domain.product_categories import normalize_product_category
@@ -2810,12 +2812,10 @@ async def _insert_confirmed_data_impl(
         nadie reporta porque no rompe nada visible.
         """
         _proyeccion_recorder.volcar_en(counts)
-        # Cuántas hojas pidieron aplicar la historia. Hoy siempre 0 (el replay se
-        # implementa en F-H3.d); queda contado para que el día que deje de serlo
-        # se vea en la traza y no haya que deducirlo del stock resultante.
-        counts["hojas_con_replay"] = sum(
-            1 for efecto in (inventory_effect or {}).values() if efecto == HISTORICAL_REPLAY
-        )
+        # Cuántas hojas van a aplicar la historia. Sale del registrador, no del
+        # `inventory_effect` que entró: si el respaldo de F-H3.d.6 degradó una hoja,
+        # contarla acá diría que hubo un replay que justamente no va a haber.
+        counts["hojas_con_replay"] = _proyeccion_recorder.hojas_con_replay()
 
     if file_type == "spreadsheet":
         inferred_type = summary.get("inferred_type", "general")
@@ -2849,6 +2849,19 @@ async def _insert_confirmed_data_impl(
                 )
             _volcar_impacto_de_inventario()
             return counts
+
+        # F-H3.d.6: el archivo de UNA sola tabla también tiene su hoja, y la UI
+        # manda los mapeos cualificados por ella (`file_parsing` arma un contexto
+        # aunque haya uno solo). Sin esto, acá `column_mappings` llegaba vacío y
+        # todo lo que existe SÓLO por mapeo explícito —`quantity`, `unit_price`,
+        # `payment_method`, `category`, los campos personalizados— se perdía: las
+        # columnas con autodetección (fecha, monto, nombre) seguían andando y las
+        # otras no, así que la falla no se veía en el conteo de filas importadas.
+        # El gate de `historical_replay` lo destapó: sin `quantity` toda venta
+        # valía 1 unidad y el respaldo se evaluaba contra una cantidad inventada.
+        # Sólo con UN contexto: con varios, el camino correcto es el multi-hoja.
+        if not column_mappings and context_mappings and len(context_mappings) == 1:
+            column_mappings = next(iter(context_mappings.values()))
 
         # Índice de identidad de clientes para resolver la referencia por fila en
         # ventas (F7c). Incluye los clientes recién creados por el paso maestro de
@@ -3098,21 +3111,37 @@ async def _insert_confirmed_data_impl(
         # F-H3.d.3 — el gate en el archivo de una sola tabla.
         #
         # Corre ANTES del recorrido porque acá no hay pasadas separadas: una misma
-        # fila puede dar venta, gasto y producto en la misma vuelta. Eso pone un
-        # límite honesto y por eso el gate se abstiene cuando el archivo también
-        # crea productos: el stock que esas filas declaran todavía no existe, y
-        # rechazar ventas contra un saldo que el propio archivo está por cargar
-        # sería peor que no evaluar. Cuando se abstiene lo deja dicho en `counts`,
-        # no en silencio — las ventas entran y el replay posterior dirá cuáles no
-        # se pudieron aplicar.
+        # fila puede dar venta, gasto y producto en la misma vuelta. Cuando el
+        # archivo también da de alta productos no hay saldo contra el cual evaluar
+        # —lo carga el propio archivo—, y ese caso el confirm ya lo rechaza antes
+        # de tomar el lease (F-H3.d.6).
+        #
+        # Esto es el RESPALDO de aquel rechazo, para la divergencia posible entre
+        # los dos: el confirm mira el mapeo declarado y acá las columnas ya están
+        # resueltas, incluidas las autodetectadas sin mapeo. Si igual llega, la
+        # hoja se degrada a `informational` y queda contado. No levanta excepción:
+        # a esta altura el lease está tomado y la operación en curso: se preserva
+        # el import, pero NUNCA se reporta como un replay que se validó.
         _sin_respaldo_plano: dict[tuple[str, int], UnbackedRow] = {}
         if (
             wants_ventas
             and _ctx_inline
             and _proyeccion_recorder.effect_for(_ctx_inline) == HISTORICAL_REPLAY
         ):
-            if wants_productos:
-                counts["replay_sin_gatear"] = counts.get("replay_sin_gatear", 0) + 1
+            if replay_no_gateable(
+                hoja_unica=True,
+                pide_replay=True,
+                da_de_alta_productos=wants_productos,
+                trae_ventas=True,
+            ):
+                counts["replay_degradado"] = counts.get("replay_degradado", 0) + 1
+                _proyeccion_recorder.degradar_a_informational(_ctx_inline)
+                logger.warning(
+                    "ingestion.replay.degradado_a_informational",
+                    motivo=MOTIVO_REPLAY_NO_GATEABLE,
+                    context_id=_ctx_inline,
+                    uploaded_file_id=str(uploaded_file_id) if uploaded_file_id else None,
+                )
             else:
                 _candidatas_planas: list[ReplayRow] = []
                 for _idx, _row in enumerate(rows):
@@ -3135,8 +3164,12 @@ async def _insert_confirmed_data_impl(
                         _prod = _product_cache.get(_pid) or await session.get(Product, _pid)
                         if _prod is not None and _prod.tenant_id == tenant_id:
                             _saldos_planos[_pid] = int(_prod.stock_units)
+                    # `ReplayRow.key` es `Hashable` porque el gate lo usan dos
+                    # momentos distintos (acá una tupla hoja+fila, en el apply el
+                    # id de la venta). Acá sabemos cuál de los dos es: lo pusimos
+                    # nosotros tres líneas arriba.
                     _sin_respaldo_plano = {
-                        r.key: r
+                        cast("tuple[str, int]", r.key): r
                         for r in rows_without_stock_backing(_candidatas_planas, _saldos_planos)
                     }
 
@@ -5373,7 +5406,12 @@ async def _insert_multisheet_data(
                 _prod = (product_cache or {}).get(_pid) or await session.get(Product, _pid)
                 if _prod is not None and _prod.tenant_id == tenant_id:
                     _saldos[_pid] = int(_prod.stock_units)
-            return {r.key: r for r in rows_without_stock_backing(_candidatas, _saldos)}
+            # `key` es `Hashable` en el gate (dos callers la arman distinto); acá
+            # es la tupla (hoja, índice de fila) que armamos más arriba.
+            return {
+                cast("tuple[str, int]", r.key): r
+                for r in rows_without_stock_backing(_candidatas, _saldos)
+            }
 
         #: ``None`` = todavía no se calculó. Se calcula al llegar a la primera hoja de
         #: ventas, que por el orden de pasada es después de catálogos y compras — antes

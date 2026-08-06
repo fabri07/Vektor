@@ -26,7 +26,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.inventory_effect import INFORMATIONAL, NO_INVENTORY
+from app.domain.inventory_effect import HISTORICAL_REPLAY, INFORMATIONAL, NO_INVENTORY
 from app.domain.inventory_projection import (
     ImportImpact,
     ProductProjection,
@@ -57,6 +57,28 @@ class ImportProjectionRecorder:
         no puede terminar aplicando la historia entera de un archivo por omisión.
         """
         return self._inventory_effect.get(context_id or "", INFORMATIONAL)
+
+    def degradar_a_informational(self, context_id: str | None) -> None:
+        """Baja una hoja a ``informational`` cuando su replay no se pudo validar.
+
+        Es el respaldo de F-H3.d.6, no el camino normal: el confirm rechaza esos
+        archivos antes de tomar el lease. Acá la operación ya está en curso y
+        abortarla sería peor, así que se degrada y el importador lo deja contado
+        (``replay_degradado``) — nunca reportado como un replay que se aplicó.
+
+        Copia el dict antes de tocarlo: el original es el que armó el confirm y
+        también lo lee para trazar. Un import no puede cambiarle el payload al
+        caller de rebote.
+        """
+        self._inventory_effect = {**self._inventory_effect, (context_id or ""): INFORMATIONAL}
+
+    def hojas_con_replay(self) -> int:
+        """Cuántas hojas van a aplicar la historia, DESPUÉS de degradaciones.
+
+        Contarlo sobre el dict de entrada diría que hubo un replay donde el
+        respaldo justamente lo desactivó.
+        """
+        return sum(1 for efecto in self._inventory_effect.values() if efecto == HISTORICAL_REPLAY)
 
     def _cuenta_inventario(self, context_id: str | None) -> bool:
         return self.effect_for(context_id) != NO_INVENTORY
