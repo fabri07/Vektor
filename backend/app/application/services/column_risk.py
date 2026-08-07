@@ -45,6 +45,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.column_mapping_service import (
+    REQUIRED_ALTERNATIVES,
     REQUIRED_FIELDS,
     ColumnMappingService,
     parse_target,
@@ -469,7 +470,25 @@ def validate_column_risk_decisions(
                 (decision.context_id, decision.target_field), set()
             )
             surviving_cols = mapped_cols - dropped_cols
-            if field_requirement == "required" and not surviving_cols:
+            # F-H4: un requerido también se cubre con su alternativa completa
+            # (`amount` con `unit_price` + `quantity`). Sin esto, las dos
+            # validaciones dirían cosas distintas sobre el mismo archivo: el
+            # confirm aceptaría la hoja sin columna de monto, pero eliminar esa
+            # columna —justo el caso que motiva F-H4, una columna de monto casi
+            # toda vacía al lado de precio y cantidad completos— daría 422.
+            _alternativa = REQUIRED_ALTERNATIVES.get(entity, {}).get(
+                decision.target_field
+            )
+            _cubierto_por_alternativa = bool(_alternativa) and all(
+                set(target_to_cols.get(campo, []))
+                - dropped_by_target.get((decision.context_id, campo), set())
+                for campo in (_alternativa or frozenset())
+            )
+            if (
+                field_requirement == "required"
+                and not surviving_cols
+                and not _cubierto_por_alternativa
+            ):
                 violations.append(
                     ColumnRiskViolation(
                         context_id=decision.context_id,

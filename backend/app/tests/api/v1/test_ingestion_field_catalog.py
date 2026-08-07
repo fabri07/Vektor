@@ -78,6 +78,32 @@ class TestFieldCatalog:
         # Varias columnas pueden alimentar una descripción: no bloquea.
         assert producto["description"] is False
 
+    async def test_publica_la_alternativa_del_monto(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """F-H4: `amount OR (unit_price AND quantity)` viaja en el catálogo.
+
+        Si la UI tuviera su propia copia de esta regla, bloquearía un archivo sin
+        columna de monto que el confirm acepta — la misma clase de divergencia que
+        obligó a crear este endpoint.
+        """
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        catalog = response.json()
+
+        assert catalog["sale"]["required_alternatives"] == {
+            "amount": ["quantity", "unit_price"]
+        }
+        # Los dos campos de la alternativa existen de verdad en la entidad: una
+        # alternativa que nombre un campo inexistente no se puede mapear nunca.
+        valores = {f["value"] for f in catalog["sale"]["fields"]}
+        assert {"quantity", "unit_price"} <= valores
+
+        # Las demás entidades no tienen alternativa: gastos y compras entran en
+        # F-H6 (hoy no tienen `unit_price` ni `quantity` en su catálogo).
+        for entity, entry in catalog.items():
+            if entity != "sale":
+                assert entry["required_alternatives"] == {}
+
     async def test_requiere_autenticacion(self, client: AsyncClient) -> None:
         response = await client.get("/api/v1/ingestion/field-catalog")
         assert response.status_code in (401, 403)

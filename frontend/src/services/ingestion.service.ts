@@ -204,6 +204,15 @@ export interface FieldCatalogEntry {
 export interface EntityFieldCatalog {
   /** Un `custom_field:` NO cubre un requerido (misma regla que el confirm). */
   required: string[];
+  /**
+   * Qué otro conjunto COMPLETO de campos cubre un requerido (F-H4):
+   * `{ amount: ["unit_price", "quantity"] }` — si la planilla trae el precio
+   * unitario y la cantidad, el total es una cuenta y no hace falta la columna.
+   *
+   * Viene del backend por la misma razón que `fields`: con una copia acá, la
+   * pantalla bloquearía un archivo que el confirm acepta.
+   */
+  required_alternatives: Record<string, string[]>;
   fields: FieldCatalogEntry[];
 }
 

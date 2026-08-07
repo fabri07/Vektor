@@ -299,3 +299,128 @@ def test_decision_sobre_columna_no_mapeada_no_es_explicitly_selected() -> None:
     violations = validate_column_risk_decisions(decisions, context_mappings, context_entities)
 
     assert len(violations) == 1
+
+
+# ── F-H4: el monto tiene alternativa, y las dos validaciones tienen que saberlo ──
+
+
+def test_drop_del_monto_con_precio_y_cantidad_mapeados_ok() -> None:
+    """Eliminar la columna del monto es legal si queda con qué calcularlo.
+
+    Es el caso que motiva F-H4 y no una hipótesis: una columna de monto casi toda
+    vacía al lado de precio unitario y cantidad completos es exactamente lo que
+    dispara el protocolo de riesgo. Sin esta regla, el confirm aceptaría la hoja
+    sin monto mapeado pero eliminarlo daría 422 — dos validaciones diciendo cosas
+    distintas sobre el mismo archivo.
+    """
+    context_mappings = {
+        "table": [
+            MappingEntry("fecha", "transaction_date", user_selected=False),
+            MappingEntry("monto", "amount", user_selected=False),
+            MappingEntry("p_unit", "unit_price", user_selected=True),
+            MappingEntry("cant", "quantity", user_selected=True),
+        ]
+    }
+    decisions = [
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="monto",
+            target_field="amount",
+            action="drop_column",
+        )
+    ]
+
+    violations = validate_column_risk_decisions(
+        decisions, context_mappings, {"table": "sale"}
+    )
+
+    assert violations == []
+
+
+def test_drop_del_monto_con_media_alternativa_es_violacion() -> None:
+    """Control: sin la cantidad no hay nada que calcular, así que el monto sigue
+    siendo obligatorio y eliminarlo deja la hoja sin importar."""
+    context_mappings = {
+        "table": [
+            MappingEntry("fecha", "transaction_date", user_selected=False),
+            MappingEntry("monto", "amount", user_selected=False),
+            MappingEntry("p_unit", "unit_price", user_selected=True),
+        ]
+    }
+    decisions = [
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="monto",
+            target_field="amount",
+            action="drop_column",
+        )
+    ]
+
+    violations = validate_column_risk_decisions(
+        decisions, context_mappings, {"table": "sale"}
+    )
+
+    assert len(violations) == 1
+    assert violations[0].target_field == "amount"
+
+
+def test_drop_del_monto_y_de_la_alternativa_en_el_mismo_pedido_es_violacion() -> None:
+    """La alternativa se evalúa sobre lo que va a QUEDAR, no sobre lo que llegó:
+    eliminar el monto y la cantidad en el mismo batch deja la hoja sin ninguna
+    de las dos vías."""
+    context_mappings = {
+        "table": [
+            MappingEntry("fecha", "transaction_date", user_selected=False),
+            MappingEntry("monto", "amount", user_selected=False),
+            MappingEntry("p_unit", "unit_price", user_selected=True),
+            MappingEntry("cant", "quantity", user_selected=True),
+        ]
+    }
+    decisions = [
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="monto",
+            target_field="amount",
+            action="drop_column",
+        ),
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="cant",
+            target_field="quantity",
+            action="drop_column",
+        ),
+    ]
+
+    violations = validate_column_risk_decisions(
+        decisions, context_mappings, {"table": "sale"}
+    )
+
+    assert [v.target_field for v in violations] == ["amount"]
+
+
+def test_el_gasto_no_tiene_alternativa_para_su_monto() -> None:
+    """Gastos y compras quedan afuera hasta F-H6: hoy no tienen `unit_price` ni
+    `quantity` en su catálogo, así que derivar sería adivinar desde columnas que
+    nadie declaró."""
+    context_mappings = {
+        "table": [
+            MappingEntry("fecha", "expense_date", user_selected=False),
+            MappingEntry("monto", "amount", user_selected=False),
+            MappingEntry("p_unit", "unit_price", user_selected=True),
+            MappingEntry("cant", "quantity", user_selected=True),
+        ]
+    }
+    decisions = [
+        ColumnRiskDecision(
+            context_id="table",
+            source_column="monto",
+            target_field="amount",
+            action="drop_column",
+        )
+    ]
+
+    violations = validate_column_risk_decisions(
+        decisions, context_mappings, {"table": "expense"}
+    )
+
+    assert len(violations) == 1

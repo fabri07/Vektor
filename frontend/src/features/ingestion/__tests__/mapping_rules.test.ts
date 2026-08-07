@@ -40,36 +40,106 @@ describe("coversRequired", () => {
 });
 
 describe("missingRequiredFields", () => {
+  // La alternativa del catálogo para ventas (F-H4). Las entidades sin
+  // alternativa la reciben vacía, que es lo que manda el backend.
+  const SIN_ALTERNATIVA: Record<string, string[]> = {};
+  const ALT_VENTA: Record<string, string[]> = {
+    amount: ["quantity", "unit_price"],
+  };
+
   it("detecta el requerido que quedó en un campo personalizado", () => {
-    const faltan = missingRequiredFields(["name"], {
-      Productos: "custom_field:nombre_del_producto",
-      "Precio de venta final": "sale_price_ars",
-    });
+    const faltan = missingRequiredFields(
+      ["name"],
+      {
+        Productos: "custom_field:nombre_del_producto",
+        "Precio de venta final": "sale_price_ars",
+      },
+      SIN_ALTERNATIVA,
+    );
     expect(faltan).toEqual(["name"]);
   });
 
   it("no reporta nada cuando el requerido está en su campo canónico", () => {
     expect(
-      missingRequiredFields(["name"], {
-        Productos: "name",
-        "Precio de compra": "unit_cost_ars",
-      }),
+      missingRequiredFields(
+        ["name"],
+        { Productos: "name", "Precio de compra": "unit_cost_ars" },
+        SIN_ALTERNATIVA,
+      ),
     ).toEqual([]);
   });
 
   it("alcanza con que UNA columna cubra el requerido", () => {
     expect(
-      missingRequiredFields(["name"], {
-        Alias: "custom_field:alias",
-        Productos: "name",
-      }),
+      missingRequiredFields(
+        ["name"],
+        { Alias: "custom_field:alias", Productos: "name" },
+        SIN_ALTERNATIVA,
+      ),
     ).toEqual([]);
   });
 
   it("reporta varios requeridos faltantes a la vez", () => {
     expect(
-      missingRequiredFields(["amount", "transaction_date"], { detalle: "notes" }),
+      missingRequiredFields(
+        ["amount", "transaction_date"],
+        { detalle: "notes" },
+        SIN_ALTERNATIVA,
+      ),
     ).toEqual(["amount", "transaction_date"]);
+  });
+
+  // F-H4: `amount OR (unit_price AND quantity)`.
+  it("el precio unitario y la cantidad cubren el monto", () => {
+    expect(
+      missingRequiredFields(
+        ["amount", "transaction_date"],
+        { Fecha: "transaction_date", "P. unit": "unit_price", Cant: "quantity" },
+        ALT_VENTA,
+      ),
+    ).toEqual([]);
+  });
+
+  it("la alternativa INCOMPLETA no cubre nada", () => {
+    // Con el precio pero sin la cantidad no hay total que calcular: bloquear acá
+    // es lo mismo que hace el confirm.
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        { Fecha: "transaction_date", "P. unit": "unit_price" },
+        ALT_VENTA,
+      ),
+    ).toEqual(["amount"]);
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        { Fecha: "transaction_date", Cant: "quantity" },
+        ALT_VENTA,
+      ),
+    ).toEqual(["amount"]);
+  });
+
+  it("un campo personalizado tampoco cubre por alternativa", () => {
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        {
+          "P. unit": "custom_field:unit_price",
+          Cant: "custom_field:quantity",
+        },
+        ALT_VENTA,
+      ),
+    ).toEqual(["amount"]);
+  });
+
+  it("sin alternativa declarada, el requerido sigue siendo requerido", () => {
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        { "P. unit": "unit_price", Cant: "quantity" },
+        SIN_ALTERNATIVA,
+      ),
+    ).toEqual(["amount"]);
   });
 });
 

@@ -204,6 +204,12 @@ class EntityFieldCatalog(BaseModel):
     # Un requerido se cubre SOLO con un campo canónico: un `custom_field:` guarda
     # el dato pero no satisface el requerido (misma regla que `_missing_required`).
     required: list[str]
+    # F-H4: qué otro conjunto COMPLETO de campos cubre un requerido —
+    # `{"amount": ["unit_price", "quantity"]}`. Viaja en el catálogo porque la UI
+    # tiene que poder decir exactamente lo mismo que el confirm sobre si una hoja
+    # se puede importar; con una copia propia, la pantalla bloquearía un archivo
+    # que el backend acepta (o al revés). Vacío para las entidades sin alternativa.
+    required_alternatives: dict[str, list[str]] = {}
     fields: list[FieldCatalogEntry]
 
 

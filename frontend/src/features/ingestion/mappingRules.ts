@@ -42,14 +42,25 @@ export const coversRequired = (target: string): boolean =>
  * `if _ctx_mappings:`). Sin mapeo explícito el importador resuelve las columnas
  * por heurística de headers, así que bloquear acá inventaría un problema que el
  * backend no tiene y trabaría el flujo más común: aceptar el mapeo tal como vino.
+ *
+ * `alternatives` (F-H4) llega del catálogo y es obligatorio a propósito: un
+ * default silencioso haría que un call site nuevo bloqueara archivos que el
+ * confirm acepta, sin que nada avise. Un requerido se cubre por alternativa solo
+ * si están mapeados TODOS sus campos — con el precio unitario pero sin la
+ * cantidad no hay total que calcular.
  */
 export function missingRequiredFields(
   required: string[],
   mappings: Record<string, string>,
+  alternatives: Record<string, string[]>,
 ): string[] {
   if (Object.keys(mappings).length === 0) return [];
   const cubiertos = new Set(Object.values(mappings).filter(coversRequired));
-  return required.filter((r) => !cubiertos.has(r));
+  return required.filter(
+    (r) =>
+      !cubiertos.has(r) &&
+      !(alternatives[r]?.length && alternatives[r].every((c) => cubiertos.has(c))),
+  );
 }
 
 /**

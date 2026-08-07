@@ -48,7 +48,7 @@ F-0  contrato e invariantes (sin cambio de comportamiento)          ✅ entregad
 F-H1 jerarquía: la identidad existe antes de que alguien la busque  ✅ entregado
 F-H2 identidad ≠ validez temporal (la evidencia se juzga por fecha) ✅ entregado
 F-H3 efecto de inventario por hoja + cola cronológica  ← corrige datos
-F-H4 precio unitario × cantidad = monto
+F-H4 precio unitario × cantidad = monto                             ✅ entregado
 F-H6 costos de compra agrupados (envío, costo final)
 F-A  nombre original + preservación de edición
 F-B  claridad visual + extracción del monolito
@@ -361,6 +361,20 @@ Tolerancia monetaria **explícita**: 1 centavo tras el redondeo a `Decimal("0.01
 
 Evidencia preservada sin migración: el monto original discrepante va a la traza (`pipeline_events`, `STAGE_CONFIRM`) y a `custom_fields`.
 
+### Entregado (3 commits, sin migraciones)
+
+`domain/line_amount.py` (puro) → cableado en los **dos** caminos de inserción de ventas → **requerido condicional**, que es lo que lo vuelve alcanzable desde la pantalla.
+
+> **El requerido tenía que moverse en la misma fase, no en F-C.** `REQUIRED_FIELDS["sale"]` incluye `amount`, así que el confirm rechazaba con 422 un archivo de precio + cantidad sin total: el cálculo habría quedado escrito y sin forma de dispararse desde la UI — el agujero exacto de F-H3.e. La regla es `amount OR (unit_price AND quantity)`, declarativa en `REQUIRED_ALTERNATIVES` (`column_mapping_service`), servida por `GET /ingestion/field-catalog` y consumida por `missingRequiredFields`: el frontend **no** tiene copia. Lo que F-C agrega encima es el *motivo* legible, no el *si*.
+
+**Tres hallazgos verificados antes de escribir** (V19–V21 del listado de arriba): el 422 del requerido · la compuerta `wants_ventas` del camino plano, que exige columna de monto y saltea la hoja ENTERA antes de mirar una fila · el **piso en 1** de `_venta_cantidad`, que existe para el gate de replay y que, usado para derivar, le pondría `precio × 1` a cada fila con la celda de cantidad vacía. Por eso la derivación lee la cantidad **cruda** y sólo por mapeo explícito.
+
+**Validación final por fila:** la que no tiene monto ni pareja que lo calcule va a "Otros" con el motivo, en vez de desaparecer. Consecuencia elegida, no colateral: la captura es output persistido, así que **registra huella** y el archivo corregido no la re-importa (se completa desde "Otros"). Eso reemplaza al contrato B1 —"no quemar la fila así el archivo corregido la importa"—, que existía porque hasta acá la fila no quedaba en ningún lado. Es el mismo criterio que ya rige para una fecha ilegible (F6-A2).
+
+**Dos límites declarados.** (1) En el camino plano la captura no corre si el archivo también trae productos: ahí el bucle de productos recorre las MISMAS filas más abajo, y capturar una fila de catálogo la mandaría a la bandeja *y* haría que el bucle la saltee (`_captured_to_otros_rows`), dejando el catálogo entero en "Otros" sin crear un producto. (2) **Gastos y compras quedan afuera hasta F-H6**: no tienen `unit_price` ni `quantity` en su catálogo de campos, y derivar desde columnas autodetectadas es justo lo que F10 prohíbe.
+
+**Armonía con F8:** `validate_column_risk_decisions` también conoce la alternativa. Sin eso, el confirm aceptaba la hoja sin monto mapeado pero *eliminar* la columna de monto —una columna casi toda vacía al lado de precio y cantidad completos, que es el caso que dispara el protocolo de riesgo— daba 422: dos validaciones diciendo cosas distintas sobre el mismo archivo.
+
 ## F-H5 · Confirmación atómica
 
 **Antes de escribir:** resolver identidades → construir la cola cronológica de movimientos en memoria → validar relaciones bloqueantes → calcular importables / rechazadas / warnings → **preview final** (incluye el stock resultante de F-H3).
@@ -581,7 +595,14 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3 ✅ | `informational` no descuenta la venta (la apertura y la compra sí tocaron el stock: el eje es de la HOJA) |
 | F-H3 | `current_snapshot` fija absoluto; `no_inventory` no crea movimiento |
 | F-H3 | replay histórico negativo → advertencia, **no** `InsufficientStockError` |
-| F-H4 | las 7 filas de la tabla de precio, incluida la discrepancia con tolerancia de 1 centavo |
+| **F-H4** ✅ | **las 7 filas de la tabla de precio, incluida la discrepancia con tolerancia de 1 centavo** |
+| F-H4 ✅ | confirm HTTP sin columna de monto, con `unit_price`+`quantity` → 200 y la venta queda con el monto calculado (hoy daba 422: sin esto la derivación es inalcanzable desde la pantalla) |
+| F-H4 ✅ | media alternativa (sólo precio, o sólo cantidad) → sigue pidiendo el monto, con traza `requeridos_sin_mapear` |
+| F-H4 ✅ | `custom_field:amount` no cubre el requerido, y `custom_field:unit_price`+`custom_field:quantity` tampoco cubren por alternativa |
+| F-H4 ✅ | el camino plano y el multi-hoja dan la MISMA venta sobre las mismas filas (mutation-testeado: la compuerta `wants_ventas` vieja → rojo) |
+| F-H4 ✅ | cantidad vacía con precio mapeado NO vale `precio × 1` (mutation-testeado: usar `_venta_cantidad` con su piso → rojo) |
+| F-H4 ✅ | la fila que no se puede resolver va a "Otros" con el motivo; la fila de relleno (todas las celdas vacías) NO (mutation-testeado) |
+| F-H4 ✅ | eliminar la columna de monto es legal si quedan precio y cantidad; con media alternativa sigue siendo violación (armonía con F8) |
 | **F-H6** | **`Envío = 2.000` repetido en 10 filas del mismo comprobante → se cuenta UNA vez, no $20.000** |
 | F-H6 | sin identidad de comprobante → no distribuye, queda gasto separado |
 | F-H6 | distribución por subtotal cuadra al centavo; no distribuido no toca `unit_cost_ars`; el gasto atribuido a inventario no se cuenta dos veces |

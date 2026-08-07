@@ -496,6 +496,7 @@ function SheetMapperSection({
   const faltanRequeridos = missingRequiredFields(
     catalog?.[entity]?.required ?? [],
     mappings,
+    catalog?.[entity]?.required_alternatives ?? {},
   );
   // Las dos ramas del mapeo colisionan igual: un escalar canónico y un campo
   // propio guardan un valor por fila, así que de dos columnas al mismo destino
@@ -1486,6 +1487,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const faltanRequeridos = missingRequiredFields(
     catalog?.[entityType]?.required ?? [],
     mappings,
+    catalog?.[entityType]?.required_alternatives ?? {},
   );
   // Las dos ramas del mapeo colisionan igual: un escalar canónico y un campo
   // propio guardan un valor por fila, así que de dos columnas al mismo destino

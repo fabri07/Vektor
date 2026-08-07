@@ -35,9 +35,11 @@ from app.application.services import ingestion_import_service as _iis
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
     MASTER_REFERENCE_TARGETS,
+    REQUIRED_ALTERNATIVES,
     REQUIRED_FIELDS,
     SINGLE_VALUE_FIELDS,
     ColumnMappingService,
+    missing_required_fields,
     parse_target,
     validate_required_date_mapping,
 )
@@ -985,6 +987,10 @@ async def get_field_catalog(
     return {
         entity: EntityFieldCatalog(
             required=list(REQUIRED_FIELDS.get(entity, [])),
+            required_alternatives={
+                campo: sorted(alternativa)
+                for campo, alternativa in REQUIRED_ALTERNATIVES.get(entity, {}).items()
+            },
             fields=[
                 FieldCatalogEntry(
                     value=value,
@@ -1317,7 +1323,11 @@ async def confirm_file(
             for m in mappings
             if parse_target(m.target_field).kind == "canonical"
         }
-        return set(REQUIRED_FIELDS.get(entity_type, [])) - mapped
+        # F-H4: un requerido puede estar cubierto por una alternativa completa
+        # (`amount` por `unit_price` + `quantity`). La regla vive en
+        # `column_mapping_service` y la sirve el catálogo, para que la pantalla
+        # no pueda decir que falta algo que el confirm acepta, ni al revés.
+        return missing_required_fields(entity_type, mapped)
 
     # Columnas que las decisiones de riesgo (F8) van a ELIMINAR del mapeo
     # efectivo. La colisión se evalúa sobre lo que va a quedar, no sobre lo que

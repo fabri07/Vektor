@@ -109,6 +109,41 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
     "supplier": ["name"],
 }
 
+# F-H4: qué OTRO conjunto de campos cubre un requerido. `amount OR (unit_price
+# AND quantity)`: si el archivo trae el precio unitario y la cantidad, el total
+# es una cuenta y exigir la columna obligaba a reescribir la planilla antes de
+# subirla — la queja que originó este programa.
+#
+# La alternativa tiene que ser COMPLETA: con sólo el precio o sólo la cantidad no
+# hay nada que calcular. Y sólo cuenta lo mapeado a campos CANÓNICOS, por la
+# misma razón que el requerido: un `custom_field:` guarda el dato pero no lo
+# vuelve un precio unitario para el importador.
+#
+# Vive acá, al lado de `REQUIRED_FIELDS`, y la sirve el catálogo
+# (`GET /ingestion/field-catalog`): el frontend NO puede tener su propia copia.
+# La copia que existía divergió una vez y la pantalla terminó mostrando una cosa
+# y mandando otra (incidente ASTERIA).
+REQUIRED_ALTERNATIVES: dict[str, dict[str, frozenset[str]]] = {
+    "sale": {"amount": frozenset({"unit_price", "quantity"})},
+}
+
+
+def missing_required_fields(entity_type: str, mapped: set[str]) -> set[str]:
+    """Requeridos que ``mapped`` no cubre, ni directo ni por alternativa.
+
+    ``mapped`` son los targets CANÓNICOS mapeados (el caller filtra los
+    ``custom_field:`` y los cruzados). Fuente única: la validación del confirm y
+    el catálogo que consume la UI llaman acá, así que no pueden discrepar sobre
+    si una hoja se puede importar.
+    """
+    alternativas = REQUIRED_ALTERNATIVES.get(entity_type, {})
+    return {
+        campo
+        for campo in REQUIRED_FIELDS.get(entity_type, [])
+        if campo not in mapped
+        and not (campo in alternativas and alternativas[campo] <= mapped)
+    }
+
 # ── Heurísticas: entity_type → target_field → keywords (substring match) ─────
 _HEURISTICS: dict[str, dict[str, set[str]]] = {
     "sale": {
