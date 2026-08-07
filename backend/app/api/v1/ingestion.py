@@ -2360,6 +2360,29 @@ async def confirm_file(
             f"{counts['proveedores_invalidos']} fila(s) de proveedores tenían datos "
             "inválidos o ambiguos y no se importaron."
         )
+    # F-H4: el monto salió de una cuenta y no del archivo. Los dos avisos existen
+    # porque no significan lo mismo: calcular un total que faltaba es el caso
+    # esperado (y hay que decirlo para que nadie crea que el archivo lo traía);
+    # que el total del archivo no cuadre con precio × cantidad casi siempre
+    # significa que la planilla tiene un descuento, un impuesto o una cantidad que
+    # mide otra cosa, y eso lo tiene que mirar el dueño del negocio.
+    if counts.get("montos_calculados"):
+        warnings.append(
+            f"{counts['montos_calculados']} fila(s) no traían el monto: se calculó "
+            "como precio unitario × cantidad."
+        )
+    if counts.get("montos_discrepantes"):
+        warnings.append(
+            f"{counts['montos_discrepantes']} fila(s) tenían un monto distinto de "
+            "precio unitario × cantidad. Se guardó el calculado y el monto original "
+            "quedó registrado en cada fila. Revisalas: suele ser un descuento, un "
+            "impuesto o una cantidad que mide otra cosa."
+        )
+    if counts.get("filas_sin_monto"):
+        warnings.append(
+            f"{counts['filas_sin_monto']} fila(s) sin monto quedaron en «Otros»: no "
+            "traían el total ni el precio unitario y la cantidad para calcularlo."
+        )
     if counts.get("otros"):
         # F1-fix: cubre también los productos con nombre ambiguo (F1) — ya no
         # generan un warning propio, "otros" los cuenta porque la fila ambigua

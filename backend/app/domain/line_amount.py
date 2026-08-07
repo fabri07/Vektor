@@ -45,6 +45,15 @@ CENTAVO = Decimal("0.01")
 #: reportada.
 TOLERANCIA = Decimal("0.01")
 
+#: Claves internas en ``custom_fields`` de la fila importada. El prefijo
+#: ``_vektor_`` está RESERVADO: ``custom_fields`` guarda también los campos
+#: propios que el usuario mapeó, cuyas claves salen de los headers del archivo
+#: (``custom_field_slug()``, que normaliza a ``[a-z0-9_]`` y nunca arranca con
+#: guión bajo). Sin el namespace, una planilla con una columna "amount source"
+#: pisaría la evidencia de por qué el monto quedó como quedó.
+AMOUNT_ORIGINAL_FIELD = "_vektor_amount_original"
+AMOUNT_SOURCE_FIELD = "_vektor_amount_source"
+
 #: De dónde salió el monto que se va a guardar.
 #: - ``file``: lo trajo el archivo (con o sin precio/cantidad al lado).
 #: - ``calculated``: el archivo no traía monto; es ``precio × cantidad``.

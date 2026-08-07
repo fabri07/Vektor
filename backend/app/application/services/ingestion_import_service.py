@@ -65,6 +65,12 @@ from app.domain.inventory_replay_gate import (
     replay_no_gateable,
     rows_without_stock_backing,
 )
+from app.domain.line_amount import (
+    AMOUNT_ORIGINAL_FIELD,
+    AMOUNT_SOURCE_FIELD,
+    LineAmount,
+    resolve_line_amount,
+)
 from app.domain.product_categories import normalize_product_category
 from app.domain.text_norm import (
     normalize_barcode,
@@ -970,6 +976,44 @@ def _source_row_ref(anchor: str | None) -> str | None:
     if anchor is None:
         return None
     return hashlib.sha256(anchor.encode()).hexdigest()
+
+
+def _registrar_monto_derivado(
+    cf: dict[str, str], linea: LineAmount, counts: dict[str, Any]
+) -> None:
+    """F-H4: deja en la fila y en los contadores de dónde salió el monto.
+
+    Sólo cuando el monto NO lo trajo el archivo: marcar cada venta normal con
+    ``source=file`` sería ruido en el 99 % de las filas. El monto original de una
+    discrepancia se conserva acá porque la columna ``amount`` ya guarda el
+    calculado — sin esto, la única forma de saber qué decía la planilla sería
+    volver a abrirla.
+    """
+    origen = linea.source
+    if origen is None or origen == "file":
+        return
+    cf[AMOUNT_SOURCE_FIELD] = origen
+    if origen == "calculated":
+        counts["montos_calculados"] = counts.get("montos_calculados", 0) + 1
+    if linea.original is not None:
+        cf[AMOUNT_ORIGINAL_FIELD] = str(linea.original)
+        counts["montos_discrepantes"] = counts.get("montos_discrepantes", 0) + 1
+
+
+def _fila_con_contenido(row: dict[str, Any]) -> bool:
+    """¿La fila dice algo, o son celdas vacías con forma de fila?
+
+    F-H4: una fila que no produjo nada se manda a "Otros" en vez de desaparecer
+    en silencio — pero las planillas traen filas de relleno al final de la hoja
+    (todas las celdas en blanco) y mandarlas a la bandeja la llenaría de ruido
+    que nadie puede clasificar. Distinguir "no pude" de "no había nada" es el
+    mismo criterio que ya rige en el resto del importador.
+    """
+    return any(
+        str(v).strip().lower() not in {"", "none", "nan"}
+        for k, v in row.items()
+        if k != "__context__" and v is not None
+    )
 
 
 def _capture_unclassified(
@@ -2752,6 +2796,18 @@ async def _insert_confirmed_data_impl(
         "historial_insuficiente": 0,
         "historial_sin_fecha": 0,
         "historial_insuficiente_productos": [],
+        # F-H4: el monto de la línea salió de una cuenta y no del archivo.
+        #   montos_calculados   → el archivo no traía total; es precio × cantidad.
+        #   montos_discrepantes → traía total, difería más de un centavo del
+        #     cálculo y se usó el cálculo. Casi siempre significa que la planilla
+        #     tiene un descuento, un impuesto o una cantidad que mide otra cosa:
+        #     por eso se avisa con el original a la vista, no se corrige callado.
+        #   filas_sin_monto     → ni monto ni pareja precio×cantidad. La fila no
+        #     se descarta: va a "Otros" (y ya suma en `otros`; este contador
+        #     existe para poder decir POR QUÉ está ahí).
+        "montos_calculados": 0,
+        "montos_discrepantes": 0,
+        "filas_sin_monto": 0,
     }
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
@@ -3016,7 +3072,11 @@ async def _insert_confirmed_data_impl(
             inferred_type != "stock"
             and confirmed_fields.get("ventas")
             and (summary.get("has_venta") or inferred_type in ("ventas", "general"))
-            and venta_col
+            # F-H4: sin columna de monto la hoja igual se importa si el usuario
+            # mapeó precio unitario Y cantidad — el total es una cuenta. Sin esta
+            # compuerta la derivación quedaría escrita pero inalcanzable: la hoja
+            # entera se saltearía antes de llegar a la primera fila.
+            and (venta_col or (unit_price_col and qty_col))
         )
         wants_gastos = bool(
             inferred_type != "stock"
@@ -3102,6 +3162,17 @@ async def _insert_confirmed_data_impl(
                 return max(1, int(float(str(qty_raw))))
             except (ValueError, TypeError):
                 return 1
+
+        # F-H4: gemelos de `_venta_cantidad_cruda`/`_venta_precio_unitario` del
+        # camino multi-hoja. SIN piso en 1 y SIN heurística de headers: derivar el
+        # monto lo habilita lo que el usuario mapeó, no una columna que se llama
+        # parecido, y con el piso una celda de cantidad vacía inventaría
+        # `precio × 1` en cada fila.
+        def _venta_cantidad_cruda_plana(row: dict[str, Any]) -> int | None:
+            return (_parse_qty(row.get(qty_col)) or None) if qty_col else None
+
+        def _venta_precio_unitario_plano(row: dict[str, Any]) -> Decimal | None:
+            return _parse_amount(row.get(unit_price_col)) if unit_price_col else None
 
         def _venta_producto_id_plana(row: dict[str, Any]) -> uuid.UUID | None:
             return _resolve_product(
@@ -3262,8 +3333,14 @@ async def _insert_confirmed_data_impl(
                 _captured_to_otros_rows.add(row_index)
                 _captured_to_otros = True
             if wants_ventas and not _captured_to_otros:
-                assert venta_col is not None  # wants_ventas implica venta_col presente
-                amount = _parse_amount(row.get(venta_col))
+                # F-H4: el monto lo trae el archivo o sale de precio × cantidad.
+                # `venta_col` puede ser None: la hoja entró por la pareja mapeada.
+                _linea = resolve_line_amount(
+                    amount=_parse_amount(row.get(venta_col)) if venta_col else None,
+                    unit_price=_venta_precio_unitario_plano(row),
+                    quantity=_venta_cantidad_cruda_plana(row),
+                )
+                amount = _linea.amount
                 if amount:
                     qty = _venta_cantidad_plana(row)
 
@@ -3290,14 +3367,13 @@ async def _insert_confirmed_data_impl(
                         for k, v in custom_field_cols.items()
                         if row.get(v) is not None
                     }
+                    _registrar_monto_derivado(cf, _linea, counts)
 
                     entry = SaleEntry(
                         tenant_id=tenant_id,
                         amount=amount,
                         quantity=qty,
-                        unit_price=(
-                            _parse_amount(row.get(unit_price_col)) if unit_price_col else None
-                        ),
+                        unit_price=_venta_precio_unitario_plano(row),
                         transaction_date=tx_date,
                         payment_method=pay_str,
                         notes=notes_str,
@@ -3633,6 +3709,46 @@ async def _insert_confirmed_data_impl(
                             expense.source_row_ref = _source_row_ref(_row_anchor)
                         session.add(expense)
                         counts["gastos"] += 1
+
+            # F-H4: validación final de la fila. Si no produjo NADA —ni venta, ni
+            # gasto, ni captura— y no es una fila de relleno, se va a "Otros" con el
+            # motivo en vez de desaparecer en silencio, que es lo que pasaba hasta
+            # acá con toda fila sin monto parseable.
+            #
+            # Va DESPUÉS de las dos ramas, no dentro de la de ventas: una fila sin
+            # monto de venta puede ser un gasto perfectamente válido, y capturarla
+            # antes la sacaría de la rama de gastos (`not _captured_to_otros`).
+            #
+            # `wants_productos` la excluye a propósito: en este camino el bucle de
+            # productos recorre las MISMAS filas más abajo, así que en un archivo
+            # "general" una fila de catálogo pasa primero por acá sin monto y recién
+            # después se convierte en Product. Capturarla la mandaría a la bandeja Y
+            # —vía `_captured_to_otros_rows`— haría que el bucle de productos la
+            # saltee: el catálogo entero terminaría en "Otros" sin crear un producto.
+            if (
+                (wants_ventas or wants_gastos)
+                and not wants_productos
+                and not _captured_to_otros
+                and counts["ventas"] + counts["gastos"] == _inserted_before
+                and _fila_con_contenido(row)
+            ):
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=(
+                        "Fila sin monto: no se pudo registrar. Mapeá la columna "
+                        "del monto, o las del precio unitario y la cantidad para "
+                        "que Véktor lo calcule"
+                    ),
+                    suggested_entity="sale" if wants_ventas else "expense",
+                )
+                counts["filas_sin_monto"] += 1
+                _captured_to_otros_rows.add(row_index)
+                _captured_to_otros = True
 
             # B1: registrar la huella si la fila produjo output (venta/gasto O
             # captura a Otros — review F2 #6: una captura a Otros es un resultado
@@ -4486,6 +4602,28 @@ async def _insert_multisheet_data(
         except (ValueError, TypeError):
             return 1
 
+    # F-H4: los dos datos que habilitan calcular el monto. Sólo por MAPEO
+    # EXPLÍCITO —nada de `_val`, que cae a la heurística de headers—: derivar el
+    # total es seguro porque el usuario declaró qué columna es el precio unitario
+    # y cuál la cantidad. Adivinarlo por el nombre del header es exactamente lo
+    # que rompió el import de ASTERIA (ver `domain/line_amount.py` y F10).
+    def _venta_cantidad_cruda(row: dict[str, Any], cols: dict[str, str]) -> int | None:
+        """Cantidad tal como la declaró el archivo, sin el piso en 1.
+
+        `_venta_cantidad` pone piso en 1 para que el gate y la inserción no
+        salteen filas; usar ESA para derivar le inventaría `precio × 1` a cada
+        fila con la celda de cantidad vacía. `_parse_qty` ya devuelve 0 para
+        vacía, ilegible o negativa; el `or None` lo vuelve "no hay cantidad".
+        """
+        col = cols.get("quantity")
+        return (_parse_qty(row.get(col)) or None) if col else None
+
+    def _venta_precio_unitario(
+        row: dict[str, Any], cols: dict[str, str]
+    ) -> Decimal | None:
+        col = cols.get("unit_price")
+        return _parse_amount(row.get(col)) if col else None
+
     def _venta_nombre_producto(row: dict[str, Any], cols: dict[str, str]) -> Any:
         return _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
 
@@ -4507,7 +4645,7 @@ async def _insert_multisheet_data(
         row_ref: str | None = None,
         context_id: str | None = None,
     ) -> bool:
-        """Inserta una venta. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
+        """Inserta una venta. Devuelve ``True`` si produjo output persistido."""
         amount_col = cols.get("amount")
         amount = (
             _parse_amount(row.get(amount_col))
@@ -4515,8 +4653,40 @@ async def _insert_multisheet_data(
             else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))
             or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
         )
-        if not amount:
-            return False
+        # F-H4: si el archivo no trae el total pero sí el precio unitario y la
+        # cantidad, el total es una cuenta. Y si los trae todos y no cuadran, manda
+        # el cálculo: el unitario es el dato y el monto su consecuencia.
+        _unit_price = _venta_precio_unitario(row, cols)
+        _linea = resolve_line_amount(
+            amount=amount,
+            unit_price=_unit_price,
+            quantity=_venta_cantidad_cruda(row, cols),
+        )
+        if _linea.amount is None:
+            # Validación final de la fila: sin monto y sin la pareja que lo calcule
+            # no hay venta que registrar, pero tampoco puede desaparecer sin dejar
+            # rastro. Va a "Otros" con el motivo, salvo que sea una fila de relleno
+            # (ahí devuelve False: no hay output, no se quema la huella y una
+            # relectura corregida puede reintentarla).
+            if not _fila_con_contenido(row):
+                return False
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,  # sin headers de hoja en este scope
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=(
+                    "Fila sin monto: no se pudo registrar la venta. Mapeá la "
+                    "columna del monto, o las del precio unitario y la cantidad "
+                    "para que Véktor lo calcule"
+                ),
+                suggested_entity="sale",
+            )
+            counts["filas_sin_monto"] += 1
+            return True
+        amount = _linea.amount
         tx_date = _venta_fecha(row, cols)
         if tx_date is None:
             # F6-A2: sin fecha reconocible la venta va a /otros — no se inventa "hoy"
@@ -4540,14 +4710,13 @@ async def _insert_multisheet_data(
         # "mercadopago") y filtros/arqueo quedaban inconsistentes.
         pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
         pay = normalize_payment_method(pay_raw) if pay_raw else "cash"
-        # Precio realmente vendido: solo por mapeo explícito, nunca derivado de
-        # amount/quantity (ver models/transaction.py).
-        _up_col = cols.get("unit_price")
         entry = SaleEntry(
             tenant_id=tenant_id,
             amount=amount,
             quantity=qty,
-            unit_price=_parse_amount(row.get(_up_col)) if _up_col else None,
+            # Precio realmente vendido: solo por mapeo explícito, nunca derivado de
+            # amount/quantity (ver models/transaction.py).
+            unit_price=_unit_price,
             transaction_date=tx_date,
             payment_method=pay,
             notes=notes or "Importado desde archivo",
@@ -4555,6 +4724,7 @@ async def _insert_multisheet_data(
             source_upload_id=uploaded_file_id,
         )
         cf = _custom_fields(row, cf_cols)
+        _registrar_monto_derivado(cf, _linea, counts)
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         _venta_producto = _venta_nombre_producto(row, cols)
         entry.product_id = _venta_producto_id(row, cols)

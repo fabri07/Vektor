@@ -26,6 +26,7 @@ from app.application.services.ingestion_import_service import (
 )
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 
 
 def _gastos_summary() -> dict[str, Any]:
@@ -209,16 +210,25 @@ async def test_import_without_uploaded_file_id_not_deduped(
 
 
 @pytest.mark.asyncio
-async def test_invalid_rows_not_burned_reimport_corrected(
+async def test_fila_sin_monto_va_a_otros_y_no_se_reimporta(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """B1 (registración diferida): una fila sin monto NO se quema.
+    """F-H4: una fila sin monto va a "Otros" y su huella queda registrada.
 
-    Primer import del archivo: solo entran las filas con monto parseable; las
-    filas sin monto no insertan nada y NO quedan registradas en la huella.
-    Re-import del MISMO archivo con esas filas AHORA corregidas (monto válido) →
-    las antes-inválidas se importan (no quedaron quemadas). Las que ya habían
-    entrado siguen siendo idempotentes (no se duplican).
+    **Esto reemplaza al contrato B1 anterior** ("una fila sin monto no se quema,
+    así el archivo corregido la importa"), que existía porque hasta F-H4 la fila
+    desaparecía en silencio: no quedaba en ningún lado, y la única vía de rescate
+    era volver a subir el archivo. Ahora la fila se captura con el motivo, así que
+    el rescate es completarla desde "Otros" — y la huella tiene que registrarse,
+    porque una captura es output PERSISTIDO y sin huella re-subir el archivo
+    crearía un segundo `UnclassifiedRecord` para la misma fila.
+
+    Es el mismo criterio que ya rige para una fila con fecha ilegible (F6-A2):
+    capturar y registrar. La consecuencia —el archivo corregido no la re-importa—
+    es explícita y elegida, no un efecto colateral.
+
+    Lo que este test sigue protegiendo de B1: la fila que SÍ entró no se duplica
+    en ningún re-import.
     """
     import uuid as _uuid
 
@@ -266,7 +276,7 @@ async def test_invalid_rows_not_burned_reimport_corrected(
             "stock_detectado": [],
         }
 
-    # 1er import: fila 0 SIN monto → no inserta; fila 1 con monto → inserta.
+    # 1er import: fila 0 SIN monto → "Otros" con el motivo; fila 1 → gasto.
     first = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
@@ -275,11 +285,20 @@ async def test_invalid_rows_not_burned_reimport_corrected(
         uploaded_file_id=uploaded.id,
     )
     assert first["gastos"] == 1
+    assert first["filas_sin_monto"] == 1
+    assert first["otros"] == 1
     expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
     assert {e.description for e in expenses} == {"Comisión MercadoPago"}
 
-    # 2do import del MISMO archivo, fila 0 AHORA con monto válido. La fila 0 no
-    # quedó quemada → se importa; la fila 1 ya estaba → idempotente (no duplica).
+    otros = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(otros) == 1
+    assert "sin monto" in (otros[0].context_label or "").lower()
+    # El motivo dice cómo salir, no sólo qué pasó.
+    assert "precio unitario" in (otros[0].context_label or "")
+
+    # 2do import del MISMO archivo, fila 0 AHORA con monto válido. La captura ya
+    # es output persistido: la fila no se re-importa (se completa desde "Otros") y
+    # —lo que importa— tampoco se duplica en la bandeja.
     second = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
@@ -287,15 +306,14 @@ async def test_invalid_rows_not_burned_reimport_corrected(
         {"gastos": True},
         uploaded_file_id=uploaded.id,
     )
-    assert second["gastos"] == 1  # solo la antes-inválida, ahora corregida
+    assert second["gastos"] == 0
+    assert second["otros"] == 0
 
     expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
-    assert {e.description for e in expenses} == {
-        "Seguro comercio",
-        "Comisión MercadoPago",
-    }
+    assert {e.description for e in expenses} == {"Comisión MercadoPago"}
+    assert len((await db_session.execute(select(UnclassifiedRecord))).scalars().all()) == 1
 
-    # 3er import idéntico al 2do → todo ya registrado → 0 nuevas (sigue idempotente).
+    # 3er import idéntico → sigue idempotente por los dos lados.
     third = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
@@ -304,7 +322,8 @@ async def test_invalid_rows_not_burned_reimport_corrected(
         uploaded_file_id=uploaded.id,
     )
     assert third["gastos"] == 0
-    assert len((await db_session.execute(select(ExpenseEntry))).scalars().all()) == 2
+    assert len((await db_session.execute(select(ExpenseEntry))).scalars().all()) == 1
+    assert len((await db_session.execute(select(UnclassifiedRecord))).scalars().all()) == 1
 
 
 def test_check_nonempty_import_corta_con_datos_y_cero_insertados() -> None:
