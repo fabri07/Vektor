@@ -316,6 +316,42 @@ class TestAlcancePorHoja:
         assert resultado.alcance_por_hoja is False
         assert resultado.hojas == [CONTEXTO_DESCONOCIDO]
 
+    async def test_el_aviso_de_alcance_tambien_sale_cuando_se_eligen_hojas(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Y sobre todo ACÁ, que es el único caso donde el aviso importa.
+
+        El flag se calculaba sobre la lista YA FILTRADA: una venta sin hoja
+        registrada no entra en el filtro, así que `CONTEXTO_DESCONOCIDO` nunca
+        aparecía y el aviso quedaba mudo justo cuando el usuario eligió hojas y
+        se quedó creyendo que aplicó todo lo que había. Con `context_ids=None` sí
+        funcionaba, que es el caso donde no hace falta.
+        """
+        file_id = uuid.uuid4()
+        producto = await _producto(db_session, sample_tenant, stock=10)
+        await _venta_importada(
+            db_session, sample_tenant, producto, file_id, qty=2, hoja="sheet:del-mes"
+        )
+        await _venta_importada(
+            db_session, sample_tenant, producto, file_id, qty=3, day=11, hoja=None
+        )
+
+        resultado = await run_inventory_replay(
+            db_session,
+            sample_tenant.tenant_id,
+            file_id,
+            context_ids=["sheet:del-mes"],
+            apply=True,
+        )
+        await db_session.refresh(producto)
+
+        # Se aplicó SOLO la hoja elegida…
+        assert resultado.aplicadas == 1
+        assert resultado.hojas == ["sheet:del-mes"]
+        assert producto.stock_units == 8
+        # …y el archivo igual avisa que tiene ventas cuyo origen no sabe.
+        assert resultado.alcance_por_hoja is False
+
     async def test_una_venta_de_otro_archivo_no_se_toca(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:

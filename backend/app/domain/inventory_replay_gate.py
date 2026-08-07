@@ -25,9 +25,11 @@ saldo de apertura tampoco se calcula acá — lo trae el caller, que es el únic
 sabe leer la DB.
 
 **Dónde NO se puede gatear todavía, y por qué se rechaza en vez de seguir.** En un
-archivo de UNA sola tabla donde las mismas filas dan la venta *y* dan de alta el
-producto, no hay saldo contra el cual evaluar: el stock que respaldaría a esas
-ventas lo está cargando el propio archivo, en la misma pasada. El camino
+archivo de UNA sola tabla que declara el stock *y* las ventas, no hay saldo contra
+el cual evaluar: el stock que respaldaría a esas ventas lo está cargando el propio
+archivo, en la misma pasada. Da igual si lo declara dando de alta productos o
+comprando mercadería — las dos suman unidades, y el gate plano se calcula antes de
+que ninguna de las dos se aplique. El camino
 multi-hoja no tiene el problema —recorre catálogos → compras → ventas y calcula el
 gate al llegar a la primera hoja de ventas—, así que esto es un límite del archivo
 plano, no del dominio. Es **transitorio**: se levanta el día que el import prepare
@@ -61,8 +63,9 @@ MOTIVO_REPLAY_NO_GATEABLE = "replay_no_gateable"
 #: parte del mensaje: sin eso, mandar a reestructurar el archivo suena a que no
 #: hay otro camino, y sí lo hay.
 MENSAJE_REPLAY_NO_GATEABLE = (
-    "En la hoja «{hoja}»: el archivo da de alta productos y además trae "
-    "movimientos históricos en las mismas filas. Véktor puede analizarlo y "
+    "En la hoja «{hoja}»: el archivo carga stock (da de alta productos o compra "
+    "mercadería) y además trae ventas en las mismas filas. Véktor puede "
+    "analizarlo y "
     "mostrarte el impacto, pero todavía no puede validar cada venta contra el "
     "stock en una sola confirmación: ese stock lo está cargando este mismo "
     "archivo. Importalo sin que las ventas modifiquen el inventario y después "
@@ -80,17 +83,33 @@ def replay_no_gateable(
     pide_replay: bool,
     da_de_alta_productos: bool,
     trae_ventas: bool,
+    trae_compras: bool = False,
 ) -> bool:
     """¿Este confirm pide un replay que no se puede validar?
 
-    Los cuatro datos los arma cada caller con lo que tiene a mano, y ahí está la
-    única diferencia entre los dos: el confirm los deriva del mapeo declarado y de
-    las señales del parseo —antes del lease, que es donde un rechazo no deja nada a
+    Los datos los arma cada caller con lo que tiene a mano, y ahí está la única
+    diferencia entre los dos: el confirm los deriva del mapeo declarado y de las
+    señales del parseo —antes del lease, que es donde un rechazo no deja nada a
     medias—, y el importador de las columnas ya resueltas, que incluyen las
     autodetectadas sin mapeo explícito. Por eso el importador conserva su propio
     respaldo: puede ver una alta de productos que el confirm no llegó a ver.
+
+    **``trae_compras`` es la misma situación que el alta de productos, por otra
+    puerta.** El problema del archivo de una tabla no es dar de alta un producto:
+    es que el stock contra el cual habría que validar lo está declarando el propio
+    archivo, en la misma pasada. Una compra de mercadería suma unidades igual que
+    un catálogo, así que un libro plano con compras y ventas tiene el mismo
+    defecto: el gate mira el saldo de ANTES del archivo y manda a "Otros" ventas
+    que las compras de la fila de abajo respaldan. El mismo libro partido en dos
+    hojas importa bien, porque ahí el orden de pasada (catálogos → compras →
+    ventas) garantiza que el stock ya esté.
     """
-    return hoja_unica and pide_replay and da_de_alta_productos and trae_ventas
+    return (
+        hoja_unica
+        and pide_replay
+        and trae_ventas
+        and (da_de_alta_productos or trae_compras)
+    )
 
 
 @dataclass(frozen=True)

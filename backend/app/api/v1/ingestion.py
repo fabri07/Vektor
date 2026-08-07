@@ -1787,6 +1787,17 @@ async def confirm_file(
                 )
                 and "amount" in _targets_unicos
             ),
+            # Espejo de `wants_gastos`: una compra de mercadería declara stock que
+            # todavía no existe cuando el gate mira, igual que un catálogo.
+            trae_compras=bool(
+                _inferred_type != "stock"
+                and body.confirmed_fields.get("gastos")
+                and (
+                    _summary_for_ctx.get("has_gasto")
+                    or _inferred_type in ("gastos", "general")
+                )
+                and "amount" in _targets_unicos
+            ),
         ):
             await _emit_validation_reject(
                 MOTIVO_REPLAY_NO_GATEABLE,
@@ -2748,6 +2759,21 @@ async def inventory_replay(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         )
 
+    # El eje de inventario se declara POR HOJA al confirmar, así que ESCRIBIR sin
+    # decir sobre cuáles contradice esa declaración: un libro con una hoja de
+    # ventas de servicios (`no_inventory`) y otra de mercadería descontaría las
+    # dos. El preview sí puede correr sobre todo el archivo — es read-only y es la
+    # forma en que la pantalla descubre qué hojas hay para ofrecerlas.
+    if not body.dry_run and not body.context_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Elegí qué hojas aplicar al inventario. Cada hoja declaró su "
+                "propio efecto al importar, así que aplicar el archivo entero "
+                "movería stock por filas que dijiste que no lo mueven."
+            ),
+        )
+
     outcome = await inventory_replay_service.run_inventory_replay(
         session,
         tenant.tenant_id,
@@ -2756,6 +2782,14 @@ async def inventory_replay(
         apply=not body.dry_run,
     )
     if not body.dry_run:
+        # Un replay mueve el stock de muchos productos de una: los componentes de
+        # liquidez y de inventario del score quedaban calculados sobre el estado
+        # anterior hasta que otra escritura cualquiera disparara el recálculo. Va
+        # DESPUÉS del commit por la misma razón que en el borrado: el worker abre
+        # su propia sesión y encolarlo antes lo haría leer un estado inexistente.
+        trigger_score_recalculation_after_commit(
+            session, str(tenant.tenant_id), "inventory_replay"
+        )
         await session.commit()
 
     warnings: list[str] = []

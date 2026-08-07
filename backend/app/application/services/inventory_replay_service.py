@@ -100,9 +100,13 @@ async def _ventas_del_archivo(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     file_id: uuid.UUID,
-    context_ids: list[str] | None,
 ) -> list[SaleEntry]:
-    """Ventas vivas del archivo que pueden mover inventario, filtradas por hoja."""
+    """TODAS las ventas vivas del archivo que pueden mover inventario.
+
+    El filtro por hoja lo aplica el caller sobre esta lista, no esta query: el
+    aviso de alcance necesita saber si el archivo tiene ventas sin hoja
+    registrada, y eso se pierde si el filtro corre antes.
+    """
     ventas = list(
         (
             await session.execute(
@@ -117,10 +121,7 @@ async def _ventas_del_archivo(
         .scalars()
         .all()
     )
-    if context_ids is None:
-        return ventas
-    pedidas = set(context_ids)
-    return [v for v in ventas if _contexto_de(v) in pedidas]
+    return ventas
 
 
 async def _ya_descontadas(
@@ -157,9 +158,21 @@ async def run_inventory_replay(
     lado, lo que se muestra y lo que se aplica podrían separarse con el tiempo, que
     es justo lo que hay que evitar en una operación que mueve inventario.
     """
-    ventas = await _ventas_del_archivo(session, tenant_id, file_id, context_ids)
+    # `alcance_por_hoja` se evalúa sobre TODAS las ventas del archivo, no sobre las
+    # filtradas: si se mirara la lista ya filtrada, una venta sin hoja registrada
+    # quedaría fuera del filtro y el aviso —que existe justamente para decir "hay
+    # ventas cuyo origen no sé"— no se dispararía nunca en el único caso donde
+    # importa, que es cuando el usuario eligió hojas.
+    todas = await _ventas_del_archivo(session, tenant_id, file_id)
+    ventas = (
+        todas
+        if context_ids is None
+        else [v for v in todas if _contexto_de(v) in set(context_ids)]
+    )
     resultado = ReplayOutcome(hojas=sorted({_contexto_de(v) for v in ventas}))
-    resultado.alcance_por_hoja = CONTEXTO_DESCONOCIDO not in resultado.hojas
+    resultado.alcance_por_hoja = CONTEXTO_DESCONOCIDO not in {
+        _contexto_de(v) for v in todas
+    }
     if not ventas:
         return resultado
 

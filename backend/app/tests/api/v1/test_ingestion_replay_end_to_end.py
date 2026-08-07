@@ -351,3 +351,71 @@ class TestReplayEndToEnd:
             (_STOCK_TRAS_CONFIRMAR, _STOCK_FINAL)
         ]
         assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
+
+
+@pytest.mark.asyncio
+class TestElApplyExigeElegirHojas:
+    """El eje de inventario se declara POR HOJA: escribir sin decir sobre cuáles
+    contradice esa declaración.
+
+    Un libro con una hoja de ventas de servicios (`no_inventory`, sus filas no
+    mueven unidades) y otra de mercadería descontaba las dos: el panel mandaba
+    `context_ids=null` y el servicio interpretaba "todas". El preview sí puede
+    correr sobre el archivo entero — es read-only y es la forma en que la
+    pantalla descubre qué hojas ofrecer.
+    """
+
+    async def test_aplicar_sin_hojas_es_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        await _confirmar(client, auth_headers, archivo, "historical_replay")
+
+        respuesta = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/inventory-replay",
+            json={"dry_run": False},
+            headers=auth_headers,
+        )
+        assert respuesta.status_code == 422
+        assert "Elegí qué hojas" in respuesta.json()["detail"]
+
+        # Y no escribió nada: el stock sigue como lo dejó el confirm.
+        assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
+
+    async def test_una_lista_vacia_tampoco_alcanza(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+    ) -> None:
+        """`[]` es "ninguna", no "todas": el default del contrato no puede
+        colarse por una lista vacía."""
+        await _confirmar(client, auth_headers, archivo, "historical_replay")
+
+        respuesta = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/inventory-replay",
+            json={"dry_run": False, "context_ids": []},
+            headers=auth_headers,
+        )
+        assert respuesta.status_code == 422
+
+    async def test_el_preview_sigue_viendo_todo_el_archivo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+    ) -> None:
+        """Sin esto la pantalla no tendría de dónde sacar las hojas para ofrecer."""
+        await _confirmar(client, auth_headers, archivo, "historical_replay")
+
+        respuesta = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/inventory-replay",
+            json={"dry_run": True},
+            headers=auth_headers,
+        )
+        assert respuesta.status_code == 200
+        assert respuesta.json()["hojas"] == [_VENTAS]

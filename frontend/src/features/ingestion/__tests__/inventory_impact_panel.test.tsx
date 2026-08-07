@@ -68,25 +68,72 @@ describe("InventoryImpactPanel", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("aplica y muestra lo que devolvió el servidor", async () => {
-    applyMock.mockResolvedValue(resultado({ aplicadas: 1 }));
+  /**
+   * El apply pasó a exigir hojas elegidas (review #1): el eje de inventario se
+   * declara POR HOJA al importar, así que aplicar el archivo entero movería
+   * stock por filas que el usuario dijo que no lo mueven. El panel las descubre
+   * con el preview y el backend rechaza un apply sin selección.
+   */
+  async function elegirHojas() {
+    fireEvent.click(screen.getByRole("button", { name: /elegir qué ventas/i }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /aplicar las ventas/i }),
+      ).toBeInTheDocument(),
+    );
+  }
+
+  it("aplica SÓLO las hojas elegidas y muestra lo que devolvió el servidor", async () => {
+    applyMock
+      .mockResolvedValueOnce(resultado({ aplicadas: 0, dry_run: true }))
+      .mockResolvedValueOnce(resultado({ aplicadas: 1 }));
     render(<InventoryImpactPanel items={CON_VENTAS} total={1} fileId="f1" />);
+
+    await elegirHojas();
+    expect(applyMock).toHaveBeenNthCalledWith(1, "f1", { dryRun: true });
 
     fireEvent.click(screen.getByRole("button", { name: /aplicar las ventas/i }));
 
     await waitFor(() =>
       expect(screen.getByText(/se descontó 1 venta/i)).toBeInTheDocument(),
     );
-    expect(applyMock).toHaveBeenCalledWith("f1");
+    // La hoja viaja en el apply: sin esto el backend responde 422.
+    expect(applyMock).toHaveBeenNthCalledWith(2, "f1", {
+      contextIds: ["sheet:ventas"],
+    });
     expect(
       screen.queryByRole("button", { name: /aplicar las ventas/i }),
     ).not.toBeInTheDocument();
   });
 
+  it("con varias hojas no aplica hasta que se marque alguna", async () => {
+    applyMock.mockResolvedValueOnce(
+      resultado({ dry_run: true, hojas: ["sheet:enero", "sheet:febrero"] }),
+    );
+    render(<InventoryImpactPanel items={CON_VENTAS} total={1} fileId="f1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: /elegir qué ventas/i }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("sheet:enero")).toBeInTheDocument(),
+    );
+
+    // Ninguna pre-tildada: con más de una hoja, elegir es una decisión real.
+    expect(screen.getByRole("button", { name: /aplicar las ventas/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("sheet:febrero"));
+    fireEvent.click(screen.getByRole("button", { name: /aplicar las ventas/i }));
+
+    await waitFor(() =>
+      expect(applyMock).toHaveBeenNthCalledWith(2, "f1", {
+        contextIds: ["sheet:febrero"],
+      }),
+    );
+  });
+
   it("dice que las ventas sin stock NO se anularon y cómo seguir", async () => {
     // El punto del mensaje: la venta sigue registrada. Sin esa aclaración, "quedó
     // sin descontar" se lee como que la venta se perdió.
-    applyMock.mockResolvedValue(
+    applyMock.mockResolvedValueOnce(resultado({ dry_run: true })).mockResolvedValue(
       resultado({
         aplicadas: 0,
         sin_stock: [
@@ -102,6 +149,7 @@ describe("InventoryImpactPanel", () => {
     );
     render(<InventoryImpactPanel items={CON_VENTAS} total={1} fileId="f1" />);
 
+    await elegirHojas();
     fireEvent.click(screen.getByRole("button", { name: /aplicar las ventas/i }));
 
     await waitFor(() =>

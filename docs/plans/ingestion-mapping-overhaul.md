@@ -220,6 +220,16 @@ F-H3.e  selector de efecto por hoja en la UI                      ⛔ PENDIENTE
 > confirm (el mapeo declarado) y lo que ve el importador (las columnas resueltas);
 > nunca aborta la operación en curso ni la reporta como un replay aplicado.
 >
+> **El alta de productos no era la única puerta (review #3).** El problema del
+> archivo de una tabla nunca fue dar de alta un producto: es que el stock contra
+> el cual habría que validar lo declara el propio archivo, en la misma pasada. Una
+> **compra de mercadería** suma unidades igual que un catálogo, y el gate plano se
+> calcula ANTES del bucle de filas mientras `_apply_purchase_to_stock` corre
+> DENTRO — así que un libro plano de compras + ventas mandaba a "Otros" ventas que
+> sus propias compras respaldan, y el mismo libro partido en dos hojas importaba
+> bien. `replay_no_gateable` toma ahora `trae_compras` y rechaza también ese caso:
+> es la misma situación, no una nueva.
+>
 > **Es transitorio, no una limitación del dominio.** Se levanta preparando el import
 > en pasadas: leer todas las filas → resolver identidades y saldos de apertura
 > **en memoria** (sin escribir productos) → construir compras y ventas → ordenar los

@@ -3255,6 +3255,12 @@ async def _insert_confirmed_data_impl(
                 pide_replay=True,
                 da_de_alta_productos=wants_productos,
                 trae_ventas=True,
+                # El gate se calcula ACÁ, antes del bucle, con el stock previo al
+                # archivo; las compras de este mismo archivo lo suman recién
+                # adentro del bucle (`_apply_purchase_to_stock`). Gatear igual
+                # mandaría a "Otros" ventas que las compras de la fila de abajo
+                # respaldan — y el mismo libro partido en hojas importa bien.
+                trae_compras=wants_gastos,
             ):
                 counts["replay_degradado"] = counts.get("replay_degradado", 0) + 1
                 _proyeccion_recorder.degradar_a_informational(_ctx_inline)

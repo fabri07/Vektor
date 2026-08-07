@@ -313,3 +313,151 @@ class TestReplayNoGateable:
         assert response.status_code == 200, response.text
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
         assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 1
+
+
+def _summary_compras_y_ventas() -> dict[str, Any]:
+    """Un libro plano donde la compra que respalda la venta viene DESPUÉS.
+
+    El caso real: una tabla de movimientos con la compra del 01/03 y la venta del
+    10/03. El stock previo del producto es 0 — todo lo que hay lo trae este mismo
+    archivo, igual que en el catálogo+ventas, pero por otra puerta.
+    """
+    compras = [
+        {
+            "fecha": "2024-03-01",
+            "producto": _PRODUCTO,
+            "cantidad": "10",
+            "monto": "12000",
+            "proveedor": "Distribuidora Sur",
+            "__context__": _CTX,
+        }
+    ]
+    ventas = [
+        {
+            "fecha": "2024-03-10",
+            "producto": _PRODUCTO,
+            "cantidad": "6",
+            "monto": "12600",
+            "__context__": _CTX,
+        }
+    ]
+    headers = ["fecha", "producto", "cantidad", "monto", "proveedor"]
+    return {
+        "confidence": "HIGH",
+        "file_type": "spreadsheet",
+        "inferred_type": "general",
+        "multi_sheet": False,
+        "has_venta": True,
+        "has_gasto": True,
+        "row_count": 2,
+        "headers": headers,
+        "ventas_detectadas": ventas,
+        "gastos_detectados": compras,
+        "preview_rows": [*compras, *ventas],
+        "mapping_contexts": [
+            {
+                "context_id": _CTX,
+                "label": _LABEL,
+                "source_kind": "table",
+                "entity_type": "sale",
+                "headers": headers,
+                "fields": None,
+                "preview_rows": [*compras, *ventas],
+                "row_count": 2,
+            }
+        ],
+    }
+
+
+@pytest_asyncio.fixture
+async def archivo_compras_y_ventas(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> UploadedFile:
+    record = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="movimientos_2024.xlsx",
+        s3_key=f"uploads/test/{uuid.uuid4()}/movimientos_2024.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=1024,
+        purpose="ingestion",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json=_summary_compras_y_ventas(),
+    )
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+@pytest.mark.asyncio
+class TestUnaCompraDelMismoArchivoTampocoSePuedeGatear:
+    """Review #3 — el alta de productos no era la única forma de declarar stock.
+
+    El gate del camino plano se calcula ANTES del bucle de filas, con el saldo
+    previo al archivo; las compras del propio archivo lo suman recién DENTRO del
+    bucle (`_apply_purchase_to_stock`). Así que un libro de una tabla con compras
+    y ventas mandaba a "Otros" ventas que sus propias compras respaldan — y el
+    mismo libro partido en dos hojas importaba bien, porque el orden de pasada
+    (catálogos → compras → ventas) garantiza que el stock ya esté.
+
+    Se rechaza por la misma razón que el catálogo+ventas: elegir
+    `historical_replay` es pedir que Véktor valide cada venta contra el stock, y
+    validar contra un saldo que todavía no incorporó lo que el archivo declara no
+    es validar.
+    """
+
+    async def test_compras_y_ventas_en_una_tabla_no_se_confirma_con_replay(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo_compras_y_ventas: UploadedFile,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        response = await _confirmar(
+            client,
+            auth_headers,
+            archivo_compras_y_ventas,
+            {
+                "column_mappings": _MAPEOS,
+                "confirmed_fields": {"ventas": True, "gastos": True},
+                "context_confirmed": {_CTX: True},
+                "inventory_effect": {_CTX: "historical_replay"},
+            },
+        )
+
+        assert response.status_code == 422, response.text
+        assert _LABEL in response.json()["detail"]
+        # Nada a medio importar: el rechazo va antes del lease.
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
+
+    async def test_el_mismo_libro_sin_replay_entra_entero(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo_compras_y_ventas: UploadedFile,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Control: la salida que ofrece el mensaje existe de verdad.
+
+        Y acá se ve el bug que motivó el rechazo: la venta de 6 unidades entra
+        porque la compra de 10 del mismo archivo la respalda. Bajo el gate viejo
+        esa misma venta se iba a "Otros".
+        """
+        response = await _confirmar(
+            client,
+            auth_headers,
+            archivo_compras_y_ventas,
+            {
+                "column_mappings": _MAPEOS,
+                "confirmed_fields": {"ventas": True, "gastos": True},
+                "context_confirmed": {_CTX: True},
+                "inventory_effect": {_CTX: "informational"},
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
+        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0

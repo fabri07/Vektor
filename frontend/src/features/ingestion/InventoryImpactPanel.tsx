@@ -52,6 +52,14 @@ export function InventoryImpactPanel({
 }) {
   const [aplicando, setAplicando] = useState(false);
   const [resultado, setResultado] = useState<InventoryReplayResult | null>(null);
+  // Hojas del archivo que tienen ventas aplicables, descubiertas con el preview.
+  // `null` = todavía no se preguntó. Se pide a demanda y no al montar: el cálculo
+  // recorre todas las ventas del archivo y la mayoría de los imports no termina
+  // en un replay.
+  const [hojas, setHojas] = useState<string[] | null>(null);
+  const [avisosPreview, setAvisosPreview] = useState<string[]>([]);
+  const [elegidas, setElegidas] = useState<string[]>([]);
+  const [descubriendo, setDescubriendo] = useState(false);
   const addToast = useToastStore((s) => s.add);
 
   if (items.length === 0) return null;
@@ -60,11 +68,40 @@ export function InventoryImpactPanel({
   const ocultos = Math.max(0, total - items.length);
   const hayVentas = items.some((p) => p.vendidas > 0);
 
-  async function aplicar() {
+  /**
+   * Preview read-only: qué hojas del archivo tienen ventas aplicables.
+   *
+   * El eje de inventario se declara POR HOJA al importar, así que aplicar el
+   * archivo entero movería stock por filas que el usuario dijo que no lo mueven
+   * (una hoja de servicios entra como `no_inventory` y no descuenta nada). El
+   * backend rechaza un apply sin hojas elegidas; esto es cómo se eligen.
+   */
+  async function descubrirHojas() {
     if (!fileId) return;
+    setDescubriendo(true);
+    try {
+      const res = await ingestionService.applyInventoryReplay(fileId, {
+        dryRun: true,
+      });
+      setHojas(res.hojas);
+      setAvisosPreview(res.warnings);
+      // Con una sola hoja no hay nada que elegir: se pre-tilda para no pedir un
+      // clic que no decide nada.
+      setElegidas(res.hojas.length === 1 ? res.hojas : []);
+    } catch {
+      addToast("No se pudieron leer las hojas del archivo.", "error");
+    } finally {
+      setDescubriendo(false);
+    }
+  }
+
+  async function aplicar() {
+    if (!fileId || elegidas.length === 0) return;
     setAplicando(true);
     try {
-      const res = await ingestionService.applyInventoryReplay(fileId);
+      const res = await ingestionService.applyInventoryReplay(fileId, {
+        contextIds: elegidas,
+      });
       setResultado(res);
       addToast(
         res.aplicadas === 1
@@ -166,14 +203,65 @@ export function InventoryImpactPanel({
             son las <strong>ventas</strong>: descontarlas deja el inventario como
             quedó después de esta historia.
           </p>
-          <Button
-            size="sm"
-            className="mt-2"
-            disabled={aplicando}
-            onClick={() => void aplicar()}
-          >
-            {aplicando ? "Aplicando…" : "Aplicar las ventas al inventario"}
-          </Button>
+
+          {hojas === null ? (
+            <Button
+              size="sm"
+              className="mt-2"
+              disabled={descubriendo}
+              onClick={() => void descubrirHojas()}
+            >
+              {descubriendo ? "Leyendo…" : "Elegir qué ventas aplicar"}
+            </Button>
+          ) : hojas.length === 0 ? (
+            <p className="mt-2 text-xs text-vektor-ink/60">
+              No quedan ventas por aplicar en este archivo.
+            </p>
+          ) : (
+            <>
+              <p className="mt-3 text-xs font-medium text-vektor-ink">
+                ¿De qué hojas?
+              </p>
+              <p className="mt-0.5 text-xs text-vektor-ink/60">
+                Cada hoja declaró su propio efecto al importar. Sólo se descuenta
+                lo que marques.
+              </p>
+              <ul className="mt-2 space-y-1">
+                {hojas.map((hoja) => (
+                  <li key={hoja}>
+                    <label className="flex items-center gap-2 text-xs text-vektor-ink">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 rounded border-vektor-border"
+                        checked={elegidas.includes(hoja)}
+                        onChange={(e) =>
+                          setElegidas((prev) =>
+                            e.target.checked
+                              ? [...prev, hoja]
+                              : prev.filter((h) => h !== hoja),
+                          )
+                        }
+                      />
+                      {hoja}
+                    </label>
+                  </li>
+                ))}
+              </ul>
+              {avisosPreview.map((w, i) => (
+                <p key={i} className="mt-2 text-xs text-vektor-ink/70">
+                  {w}
+                </p>
+              ))}
+              <Button
+                size="sm"
+                className="mt-3"
+                disabled={aplicando || elegidas.length === 0}
+                onClick={() => void aplicar()}
+              >
+                {aplicando ? "Aplicando…" : "Aplicar las ventas al inventario"}
+              </Button>
+            </>
+          )}
         </div>
       )}
 
