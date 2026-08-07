@@ -3292,8 +3292,21 @@ async def _insert_confirmed_data_impl(
             # puro, que no necesita fecha) NO se rutean: tx_date=None nunca llega a
             # un registro porque el `if amount:` interno de cada bloque lo protege.
             if tx_date is None:
+                # F-H4: el monto de una venta puede ser una CUENTA, así que acá hay
+                # que resolverlo igual que abajo. Leer sólo la columna rompe el
+                # invariante que este bloque declara: en una hoja de precio ×
+                # cantidad no hay columna de monto, la fila no se rutea, y después
+                # el bloque de ventas SÍ calcula un monto → se arma un `SaleEntry`
+                # con `transaction_date=None` y el import muere con un NOT NULL.
+                # De paso, la sugerencia de "Otros" dice venta y no gasto.
                 _venta_amount = (
-                    _parse_amount(row.get(venta_col)) if (wants_ventas and venta_col) else None
+                    resolve_line_amount(
+                        amount=_parse_amount(row.get(venta_col)) if venta_col else None,
+                        unit_price=_venta_precio_unitario_plano(row),
+                        quantity=_venta_cantidad_cruda_plana(row),
+                    ).amount
+                    if wants_ventas
+                    else None
                 )
                 _gasto_amount = (
                     _parse_amount(row.get(gasto_col)) if (wants_gastos and gasto_col) else None

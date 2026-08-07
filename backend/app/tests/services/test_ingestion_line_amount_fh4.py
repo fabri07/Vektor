@@ -347,6 +347,32 @@ class TestLaFilaQueNoSeResuelve:
         assert counts["filas_sin_monto"] == 0
         assert counts["otros"] == 0
 
+    async def test_una_venta_derivada_sin_fecha_no_llega_a_la_base(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Sin fecha reconocible la fila va a "Otros" (F6-A2) — también si su monto
+        es una cuenta.
+
+        El guard de F6-A2 decide si rutear mirando si la fila "iba a registrar una
+        operación fechada", y eso lo resolvía leyendo la columna de monto. En una
+        hoja de precio × cantidad esa columna no existe: la fila no se ruteaba, y
+        el bloque de ventas de más abajo SÍ calculaba el monto → `SaleEntry` con
+        `transaction_date=None` y el import entero muerto con un NOT NULL. El
+        invariante que el propio bloque declara ("tx_date=None nunca llega a un
+        registro") dejó de valer cuando el monto pasó a poder derivarse.
+        """
+        counts = await _importar_plano(
+            db_session, sample_tenant, [_fila(fecha="no es una fecha")], _MAPEO_SIN_MONTO
+        )
+        assert counts["ventas"] == 0
+        assert counts["otros"] == 1
+        assert await _ventas(db_session, sample_tenant) == []
+
+        capturada = (await _otros(db_session, sample_tenant))[0]
+        assert "fecha" in (capturada.context_label or "").lower()
+        # Y la sugerencia dice venta: la hoja es de ventas.
+        assert capturada.suggested_entity == "sale"
+
     async def test_el_camino_plano_captura_igual(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
