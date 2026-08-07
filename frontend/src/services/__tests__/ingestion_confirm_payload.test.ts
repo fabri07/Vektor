@@ -59,6 +59,34 @@ describe("confirmFile — cuerpo del POST", () => {
     expect(bodyDelConfirm().inventory_effect).toBeNull();
   });
 
+  test("la decisión sobre envíos sin comprobante viaja por hoja", async () => {
+    // F-H6.b: sin esto, la elección del usuario se quedaba en la pantalla y el
+    // backend no cobraba ningún envío — exactamente el agujero de F-H3.e.
+    await ingestionService.confirmFile(
+      "f1",
+      { gastos: true },
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [{ context_id: "sheet:Compras", action: "una_por_hoja" }],
+    );
+
+    expect(bodyDelConfirm().shipping_decisions).toEqual([
+      { context_id: "sheet:Compras", action: "una_por_hoja" },
+    ]);
+  });
+
+  test("sin decisión de envío manda una lista vacía", async () => {
+    // Vacío y "no mandé nada" significan lo mismo para el backend: ninguna hoja
+    // declaró qué hacer, así que no se cobra ningún envío sin comprobante.
+    await ingestionService.confirmFile("f1", { gastos: true });
+
+    expect(bodyDelConfirm().shipping_decisions).toEqual([]);
+  });
+
   test("el efecto no pisa el tratamiento de stock: son dos ejes", async () => {
     // `stock_treatment` decide si el stock inicial genera un gasto (contable);
     // `inventory_effect`, qué pasa con las unidades. Mandar uno no puede

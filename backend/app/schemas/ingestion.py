@@ -213,6 +213,23 @@ class EntityFieldCatalog(BaseModel):
     fields: list[FieldCatalogEntry]
 
 
+class ShippingDecision(BaseModel):
+    """F-H6.b — qué hacer con los envíos de UNA hoja que no traen comprobante.
+
+    Sin decisión no se cobra nada: Véktor no puede saber si una cifra repetida en
+    diez filas es un flete o diez, y elegir sería inventar un dato contable. Quien
+    armó la planilla sí lo sabe, así que lo declara por hoja.
+
+    Misma forma que `ColumnRiskDecision`: la pantalla ya sabe mandar decisiones
+    por contexto y el confirm ya sabe validarlas antes del lease.
+    """
+
+    context_id: str
+    #: `una_por_hoja`: la hoja es el comprobante — cada cifra distinta se cobra
+    #: una vez. `una_por_fila`: cada fila trae su propio flete.
+    action: Literal["una_por_hoja", "una_por_fila"]
+
+
 class InventoryEffectOption(BaseModel):
     """Un modo de inventario ofrecible, con su texto en castellano."""
 
@@ -381,6 +398,15 @@ class ConfirmIngestionRequest(BaseModel):
             "F8b: decisiones del usuario sobre columnas riesgosas (F8a) detectadas "
             "en el preview/column-risk. Opcional — vacío por default para mantener "
             "compatibilidad con confirms previos (F7) que no conocen este campo."
+        ),
+    )
+    shipping_decisions: list[ShippingDecision] = Field(
+        default_factory=list,
+        description=(
+            "F-H6.b: qué hacer, por hoja, con los costos de envío que NO traen "
+            "número de comprobante. Sin decisión no se cobran: una cifra repetida "
+            "en varias filas es indistinguible de varios envíos iguales, y elegir "
+            "por el usuario inventaría un dato contable. Vacío por default."
         ),
     )
 

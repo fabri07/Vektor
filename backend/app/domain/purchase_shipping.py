@@ -12,6 +12,12 @@ es indistinguible de diez envíos de 2.000 — y elegir uno de los dos sería in
 un dato contable. Por eso, sin identidad de comprobante, la columna no genera
 ningún gasto y el import lo dice (regla no-invention: ver `CLAUDE.md`).
 
+**El usuario tiene dos salidas, y son explícitas.** Que Véktor no pueda deducirlo
+no significa que el dato se pierda: quien armó la planilla sabe si ese flete es
+uno solo o varios, y puede declararlo por hoja (`SIN_COMPROBANTE_UNA_POR_HOJA` /
+`SIN_COMPROBANTE_UNA_POR_FILA`). Lo que nunca pasa es que Véktor elija por él —
+por eso no hay default: sin decisión, no se cobra.
+
 Sin sesión ni ORM: recibe las filas ya leídas y devuelve qué cobrar. Quién lo
 persiste —y como qué categoría— es del importador.
 """
@@ -24,6 +30,25 @@ from decimal import Decimal
 #: Clave de un comprobante: proveedor + número, ya normalizados por el caller.
 #: El proveedor entra porque dos proveedores pueden emitir el mismo número.
 ComprobanteKey = tuple[str, str]
+
+#: Qué hacer con las filas que traen envío y NO tienen comprobante. Sin decisión
+#: del usuario no se cobra nada: ver el docstring del módulo.
+#:
+#: - `una_por_hoja`: la hoja ES el comprobante. Cada cifra distinta se cobra una
+#:   vez —misma regla que dentro de un comprobante—, así que un archivo con dos
+#:   fletes legítimos no queda sin salida y una repetición no se suma.
+#: - `una_por_fila`: cada fila trae su propio flete. Diez filas de 2.000 son
+#:   $20.000, que es exactamente lo que el usuario está declarando.
+SIN_COMPROBANTE_UNA_POR_HOJA = "una_por_hoja"
+SIN_COMPROBANTE_UNA_POR_FILA = "una_por_fila"
+SHIPPING_FALLBACKS: frozenset[str] = frozenset(
+    {SIN_COMPROBANTE_UNA_POR_HOJA, SIN_COMPROBANTE_UNA_POR_FILA}
+)
+
+#: Marca de un cargo que NO salió de un comprobante, sino de la decisión del
+#: usuario. El importador la usa para redactar la descripción del gasto: decir
+#: «comprobante ''» sería peor que decir que no lo tiene.
+SIN_COMPROBANTE = ""
 
 
 @dataclass(frozen=True)
@@ -72,7 +97,11 @@ class ShippingPlan:
         return sum((c.amount for c in self.charges), Decimal("0"))
 
 
-def plan_shipping_charges(lines: list[ShippingLine]) -> ShippingPlan:
+def plan_shipping_charges(
+    lines: list[ShippingLine],
+    *,
+    sin_comprobante: str | None = None,
+) -> ShippingPlan:
     """Agrupa los envíos declarados y devuelve qué cobrar una sola vez.
 
     Regla, en una línea: **una cifra por comprobante se cobra una vez**.
@@ -81,8 +110,16 @@ def plan_shipping_charges(lines: list[ShippingLine]) -> ShippingPlan:
     - Cifras distintas en el mismo comprobante → un cargo por cifra, y se avisa:
       puede ser un flete y un seguro, o puede ser que la planilla tenga el total
       en una fila y el prorrateo en las otras. Véktor no elige por el usuario.
-    - Fila sin proveedor o sin número de comprobante → no se cobra nada y se
-      reporta. Ver el docstring del módulo.
+    - Fila sin proveedor o sin número de comprobante → depende de
+      ``sin_comprobante``, que es una decisión del USUARIO por hoja:
+
+      ``None`` (default)      no se cobra y se reporta. Véktor no puede saber si
+                              es un flete repetido o varios distintos.
+      ``una_por_hoja``        la hoja es el comprobante: una cifra, un cargo.
+                              La agrupación es sólo por importe — el proveedor
+                              puede faltar y el usuario ya declaró que estas
+                              filas comparten operación.
+      ``una_por_fila``        cada fila es su propio flete.
 
     El orden de `charges` sigue el de aparición en el archivo: dos corridas sobre
     el mismo archivo tienen que producir los mismos gastos, en el mismo orden.
@@ -97,6 +134,35 @@ def plan_shipping_charges(lines: list[ShippingLine]) -> ShippingPlan:
             # problema: la mayoría de las filas de un libro no traen flete.
             continue
         if not line.supplier or not line.invoice:
+            if sin_comprobante == SIN_COMPROBANTE_UNA_POR_FILA:
+                # Cada fila, su cargo. La clave lleva el índice para que dos filas
+                # con la misma cifra NO colapsen: es justo lo que el usuario dijo.
+                plan.charges.append(
+                    ShippingCharge(
+                        supplier=line.supplier,
+                        invoice=SIN_COMPROBANTE,
+                        amount=line.amount,
+                        row_indexes=[line.row_index],
+                    )
+                )
+                continue
+            if sin_comprobante == SIN_COMPROBANTE_UNA_POR_HOJA:
+                # La hoja es el comprobante: se agrupa SÓLO por importe. El
+                # proveedor puede estar vacío y el usuario ya declaró que estas
+                # filas comparten la operación.
+                key = (SIN_COMPROBANTE, SIN_COMPROBANTE)
+                cifras = por_comprobante.setdefault(key, {})
+                de_la_hoja = cifras.get(line.amount)
+                if de_la_hoja is None:
+                    de_la_hoja = ShippingCharge(
+                        supplier=line.supplier,
+                        invoice=SIN_COMPROBANTE,
+                        amount=line.amount,
+                    )
+                    cifras[line.amount] = de_la_hoja
+                    orden.append((key, line.amount))
+                de_la_hoja.row_indexes.append(line.row_index)
+                continue
             plan.sin_identidad.append(line.row_index)
             continue
         key = (line.supplier, line.invoice)
@@ -112,5 +178,11 @@ def plan_shipping_charges(lines: list[ShippingLine]) -> ShippingPlan:
 
     for key, monto in orden:
         plan.charges.append(por_comprobante[key][monto])
-    plan.cifras_distintas = [k for k, cifras in por_comprobante.items() if len(cifras) > 1]
+    # El pseudo-comprobante de `una_por_hoja` queda afuera: ahí dos cifras
+    # distintas son lo esperado (dos fletes), no la anomalía que este aviso señala.
+    plan.cifras_distintas = [
+        k
+        for k, cifras in por_comprobante.items()
+        if len(cifras) > 1 and k != (SIN_COMPROBANTE, SIN_COMPROBANTE)
+    ]
     return plan

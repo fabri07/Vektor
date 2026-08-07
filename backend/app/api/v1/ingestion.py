@@ -1694,6 +1694,31 @@ async def confirm_file(
             detail=_detalle_plano,
         )
 
+    # ── F-H6.b: la decisión sobre envíos sin comprobante apunta a una hoja real ──
+    # Mismo criterio que el efecto de inventario: una decisión que no se puede
+    # honrar no se ignora en silencio, porque significa que el usuario cree haber
+    # resuelto algo sobre sus costos que no va a pasar. Va antes del lease.
+    if body.shipping_decisions:
+        _hojas_con_envio = {
+            _cid
+            for _cid, _ms in _mappings_por_contexto.items()
+            if any(m.target_field == "shipping_cost" for m in _ms)
+        }
+        for _dec in body.shipping_decisions:
+            if _dec.context_id not in _hojas_con_envio:
+                await _emit_validation_reject(
+                    "decision_de_envio_sin_columna",
+                    {"context_id": _dec.context_id, "action": _dec.action},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"La decisión sobre el envío apunta a la hoja "
+                        f"«{_hoja(_dec.context_id)}», que no tiene ninguna columna "
+                        "mapeada como envío."
+                    ),
+                )
+
     # ── F6-A1: bloqueo por fecha faltante, ANTES del lease ──────────────────────
     # Una venta/gasto sin columna de fecha resoluble caía al fallback "hoy" (dato
     # inventado — invariante 2d). Se rechaza upfront, no por fila: sin este gate un
@@ -2123,6 +2148,9 @@ async def confirm_file(
             # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
             # el default no viaja en el payload y el importador no sabe calcularlo.
             inventory_effect=_inventory_effects,
+            # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
+            # se cobran. El dict va tal cual: acá no hay default que resolver.
+            shipping_decisions={d.context_id: d.action for d in body.shipping_decisions},
             # Ledger de reversa: `products` no tiene columna de origen, así que
             # sin este detalle no hay forma de saber qué productos creó este
             # archivo — y borrarlo no podría deshacerlos.

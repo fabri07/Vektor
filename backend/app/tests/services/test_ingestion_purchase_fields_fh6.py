@@ -58,6 +58,8 @@ async def _importar(
     filas: list[dict[str, Any]],
     headers: list[str],
     mapeo: dict[str, str],
+    *,
+    envios: str | None = None,
 ) -> dict[str, Any]:
     counts = await insert_confirmed_data(
         db,
@@ -66,6 +68,7 @@ async def _importar(
         {"gastos": True},
         context_mappings={_CTX: mapeo},
         context_confirmed={_CTX: True},
+        shipping_decisions={_CTX: envios} if envios else None,
     )
     await db.flush()
     return counts
@@ -396,3 +399,107 @@ class TestElEnvioSeCobraUnaVez:
             await db_session.flush()
 
         assert len(await _logistica(db_session, sample_tenant)) == 1
+
+
+@pytest.mark.asyncio
+class TestLasDosSalidasSinComprobante:
+    """Sin comprobante el usuario decide, y su decisión llega hasta los gastos.
+
+    Véktor no puede deducir si un 2.000 repetido diez veces es un flete o diez,
+    pero quien armó la planilla sí. Lo que no pasa nunca es que se elija solo.
+    """
+
+    async def test_una_por_hoja_cobra_un_solo_envio(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        filas = [_linea_remito(f"Articulo {i}") for i in range(10)]
+        for f in filas:
+            f["comprobante"] = ""
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+
+        counts = await _importar(
+            db_session, sample_tenant, filas, headers, _MAPEO_ENVIO, envios="una_por_hoja"
+        )
+
+        envios = await _logistica(db_session, sample_tenant)
+        assert len(envios) == 1
+        assert envios[0].amount == Decimal("2000.00")
+        # La descripción no puede decir «comprobante ''»: no lo tiene.
+        assert "sin comprobante" in (envios[0].description or "").lower()
+        assert counts.get("envios_sin_comprobante", 0) == 0
+
+    async def test_una_por_fila_cobra_cada_linea(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Es exactamente lo que el usuario declaró: diez fletes de 2.000."""
+        filas = [_linea_remito(f"Articulo {i}") for i in range(10)]
+        for f in filas:
+            f["comprobante"] = ""
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+
+        await _importar(
+            db_session, sample_tenant, filas, headers, _MAPEO_ENVIO, envios="una_por_fila"
+        )
+
+        envios = await _logistica(db_session, sample_tenant)
+        assert len(envios) == 10
+        assert sum(e.amount for e in envios) == Decimal("20000.00")
+
+    async def test_una_por_hoja_con_dos_cifras_cobra_las_dos(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Una cifra, un cargo: sumar convertiría una repetición en un total
+        inflado, y exigir una sola cifra dejaría sin salida a dos fletes reales."""
+        filas = [_linea_remito(f"A{i}", envio="2000") for i in range(5)]
+        filas += [_linea_remito(f"B{i}", envio="3500") for i in range(3)]
+        for f in filas:
+            f["comprobante"] = ""
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+
+        await _importar(
+            db_session, sample_tenant, filas, headers, _MAPEO_ENVIO, envios="una_por_hoja"
+        )
+
+        envios = await _logistica(db_session, sample_tenant)
+        assert sorted(e.amount for e in envios) == [Decimal("2000.00"), Decimal("3500.00")]
+
+    async def test_reconfirmar_con_una_por_fila_no_duplica(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """La huella de un cargo sin comprobante incluye su fila: si no, los diez
+        cargos iguales colapsarían en uno y el segundo import cobraría de nuevo."""
+        import uuid as _uuid
+
+        from app.persistence.models.file import UploadedFile
+
+        subido = UploadedFile(
+            id=_uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            original_filename="compras.xlsx",
+            s3_key="test/compras-2.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ingestion",
+        )
+        db_session.add(subido)
+        await db_session.flush()
+
+        filas = [_linea_remito(f"Articulo {i}") for i in range(3)]
+        for f in filas:
+            f["comprobante"] = ""
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+
+        for _ in range(2):
+            await insert_confirmed_data(
+                db_session,
+                sample_tenant.tenant_id,
+                _summary(filas, headers),
+                {"gastos": True},
+                context_mappings={_CTX: _MAPEO_ENVIO},
+                context_confirmed={_CTX: True},
+                shipping_decisions={_CTX: "una_por_fila"},
+                uploaded_file_id=subido.id,
+            )
+            await db_session.flush()
+
+        assert len(await _logistica(db_session, sample_tenant)) == 3

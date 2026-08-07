@@ -2631,6 +2631,8 @@ async def insert_confirmed_data(
     # Eje separado de `stock_treatment`, que es contable. None = cada hoja cae
     # a `informational`: se calcula el impacto y no se toca stock.
     inventory_effect: dict[str, str] | None = None,
+    # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
+    shipping_decisions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
 
@@ -2663,6 +2665,7 @@ async def insert_confirmed_data(
         uploaded_file_id=uploaded_file_id,
         stock_treatment=stock_treatment,
         inventory_effect=inventory_effect,
+        shipping_decisions=shipping_decisions,
     )
     await session.flush()
     await assign_orphan_sales_to_local(session, tenant_id)
@@ -2728,6 +2731,8 @@ async def _insert_confirmed_data_impl(
     uploaded_file_id: uuid.UUID | None = None,
     stock_treatment: str | dict[str, str] | None = None,
     inventory_effect: dict[str, str] | None = None,
+    # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
+    shipping_decisions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -2923,6 +2928,7 @@ async def _insert_confirmed_data_impl(
                 seen_fp=seen_fp,
                 product_cache=_product_cache,
                 stock_is_purchase_for=stock_is_purchase_for,
+                shipping_decisions=shipping_decisions,
                 proyeccion=_proyeccion_recorder,
             )
             if seen_fp is not None and _preloaded_fp is not None:
@@ -4517,6 +4523,9 @@ async def _insert_multisheet_data(
     # F-H3.b: registrador del impacto sobre el stock. Compartido con el camino
     # de una sola hoja para que la proyección salga igual por los dos.
     proyeccion: ImportProjectionRecorder | None = None,
+    # F-H6.b: `{context_id: "una_por_hoja"|"una_por_fila"}` — qué hacer con los
+    # envíos sin comprobante de cada hoja. Sin entrada, no se cobran.
+    shipping_decisions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -4890,7 +4899,11 @@ async def _insert_multisheet_data(
         if not lineas:
             return
 
-        plan = plan_shipping_charges(lineas)
+        # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
+        # cobra lo que no tiene comprobante — no hay default, a propósito.
+        plan = plan_shipping_charges(
+            lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
+        )
         if plan.sin_identidad:
             counts["envios_sin_comprobante"] = counts.get("envios_sin_comprobante", 0) + len(
                 plan.sin_identidad
@@ -4909,7 +4922,8 @@ async def _insert_multisheet_data(
                 _import_row_anchor(
                     tenant_id,
                     uploaded_file_id,
-                    f"envio:{ctx_id or ''}:{_cargo.invoice}",
+                    f"envio:{ctx_id or ''}:{_cargo.invoice}"
+                    + (f":fila{_cargo.row_indexes[0]}" if not _cargo.invoice else ""),
                     int(_cargo.amount * 100),
                 )
                 if uploaded_file_id is not None
@@ -4949,7 +4963,11 @@ async def _insert_multisheet_data(
                     category="LOGISTICS",
                     expense_type="OPEX",
                     transaction_date=_fecha,
-                    description=f"Envío — comprobante {_cargo.invoice}"[:500],
+                    description=(
+                        f"Envío — comprobante {_cargo.invoice}"
+                        if _cargo.invoice
+                        else "Envío (sin comprobante en el archivo)"
+                    )[:500],
                     is_recurring=False,
                     payment_method="transfer",
                     provenance="REAL",

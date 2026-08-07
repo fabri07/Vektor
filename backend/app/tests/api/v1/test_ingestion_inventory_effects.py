@@ -201,3 +201,54 @@ class TestEfectoPropuestoPorHoja:
             json={"column_mappings": []},
         )
         assert response.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+class TestLaDecisionDeEnvioApuntaAUnaHojaConEnvio:
+    """F-H6.b: una decisión que no se puede honrar no se ignora en silencio.
+
+    Es la misma regla que ya rige para el efecto de inventario: si el usuario cree
+    haber resuelto algo sobre sus costos y ese algo no va a pasar, el confirm lo
+    dice en vez de importar como si nada.
+    """
+
+    async def test_decision_sobre_una_hoja_sin_columna_de_envio_es_422(
+        self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
+    ) -> None:
+        respuesta = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/confirm",
+            json={
+                "column_mappings": [
+                    _map(_VENTAS, "sale", "fecha", "transaction_date"),
+                    _map(_VENTAS, "sale", "monto", "amount"),
+                ],
+                "confirmed_fields": {"ventas": True},
+                "context_confirmed": {_VENTAS: True},
+                "shipping_decisions": [
+                    {"context_id": _VENTAS, "action": "una_por_hoja"}
+                ],
+            },
+            headers=auth_headers,
+        )
+
+        assert respuesta.status_code == 422
+        assert "envío" in respuesta.json()["detail"].lower()
+        # El mensaje nombra la hoja con su label legible, no el context_id crudo.
+        assert "Ventas marzo" in respuesta.json()["detail"]
+
+    async def test_una_accion_invalida_la_rechaza_el_schema(
+        self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
+    ) -> None:
+        respuesta = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/confirm",
+            json={
+                "column_mappings": [_map(_VENTAS, "sale", "fecha", "transaction_date")],
+                "confirmed_fields": {"ventas": True},
+                "context_confirmed": {_VENTAS: True},
+                "shipping_decisions": [
+                    {"context_id": _VENTAS, "action": "lo_que_sea"}
+                ],
+            },
+            headers=auth_headers,
+        )
+        assert respuesta.status_code == 422

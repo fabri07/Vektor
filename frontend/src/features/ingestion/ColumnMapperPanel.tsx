@@ -21,11 +21,13 @@ import {
   type MasterPreviewSummary,
   type StockTreatment,
   type SheetInventoryEffect,
+  type ShippingAction,
 } from "@/services/ingestion.service";
 import { Button } from "@/components/ui/Button";
 import { InventoryImpactPanel } from "./InventoryImpactPanel";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { InventoryEffectChoice } from "./InventoryEffectChoice";
+import { ShippingDecisionChoice } from "./ShippingDecisionChoice";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
@@ -410,6 +412,8 @@ function SheetMapperSection({
   inventoryEffect,
   effectValue,
   onEffectChange,
+  shippingValue,
+  onShippingChange,
 }: {
   fileId: string;
   context: MappingContext;
@@ -434,6 +438,10 @@ function SheetMapperSection({
   inventoryEffect?: SheetInventoryEffect;
   effectValue: string;
   onEffectChange: (ctxId: string, value: string) => void;
+  // F-H6.b: decisión sobre los envíos sin comprobante de ESTA hoja.
+  // `null` = todavía no eligió → no se registran.
+  shippingValue: ShippingAction | null;
+  onShippingChange: (ctxId: string, value: ShippingAction | null) => void;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -805,6 +813,18 @@ function SheetMapperSection({
           del catálogo genera un gasto (contable); éste, qué pasa con las
           unidades. Sin este control, `historical_replay` sólo se alcanzaba por
           API y el archivo entraba siempre con el default de cada hoja. */}
+      {/* F-H6.b: sólo cuando la hoja declara envío y NO declara comprobante.
+          Con comprobante, Véktor agrupa solo y no hay nada que preguntar. */}
+      {included &&
+        Object.values(mappings).includes("shipping_cost") &&
+        !Object.values(mappings).includes("invoice_number") && (
+          <ShippingDecisionChoice
+            value={shippingValue}
+            onChange={(v) => onShippingChange(context.context_id, v)}
+            className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+          />
+        )}
+
       {included && inventoryEffect && (
         <InventoryEffectChoice
           hoja={inventoryEffect}
@@ -868,6 +888,17 @@ function MultiContextMapper({
   const handleEffectChange = useCallback(
     (ctxId: string, value: string) =>
       setEffectByCtx((prev) => ({ ...prev, [ctxId]: value })),
+    [],
+  );
+  // F-H6.b: decisión de envío por hoja. Sólo lo que el usuario eligió: la
+  // ausencia ES la decisión por default (no registrar), así que no se
+  // inicializa con nada.
+  const [shippingByCtx, setShippingByCtx] = useState<
+    Record<string, ShippingAction | null>
+  >({});
+  const handleShippingChange = useCallback(
+    (ctxId: string, value: ShippingAction | null) =>
+      setShippingByCtx((prev) => ({ ...prev, [ctxId]: value })),
     [],
   );
   const mappingsRef = useRef<Record<string, Record<string, string>>>({});
@@ -1090,6 +1121,14 @@ function MultiContextMapper({
         const modo = efectoDe(ctxId);
         if (modo) inventoryEffectPayload[ctxId] = modo;
       }
+      // F-H6.b: sólo las hojas donde el usuario eligió. Sin entrada, sus envíos
+      // sin comprobante no se registran — que es el default seguro.
+      const shippingPayload = Object.entries(shippingByCtx)
+        .filter(([ctxId, action]) => action !== null && included[ctxId])
+        .map(([ctxId, action]) => ({
+          context_id: ctxId,
+          action: action as ShippingAction,
+        }));
       return ingestionService.confirmFile(
         fileId,
         {},
@@ -1103,6 +1142,7 @@ function MultiContextMapper({
         Object.keys(inventoryEffectPayload).length > 0
           ? inventoryEffectPayload
           : undefined,
+        shippingPayload,
       );
     },
     onSuccess: (result) => {
@@ -1198,6 +1238,8 @@ function MultiContextMapper({
             inventoryEffect={effectsByCtx[ctx.context_id]}
             effectValue={efectoDe(ctx.context_id)}
             onEffectChange={handleEffectChange}
+            shippingValue={shippingByCtx[ctx.context_id] ?? null}
+            onShippingChange={handleShippingChange}
           />
         ))}
       </div>

@@ -175,6 +175,19 @@ export interface SheetInventoryEffect {
   options: InventoryEffectOption[];
 }
 
+/**
+ * F-H6.b — qué hacer con los envíos de una hoja que NO traen número de
+ * comprobante. Sin decisión no se cobran: una cifra repetida en varias filas es
+ * indistinguible de varios envíos iguales, y elegir por el usuario inventaría un
+ * dato contable.
+ */
+export type ShippingAction = "una_por_hoja" | "una_por_fila";
+
+export interface ShippingDecision {
+  context_id: string;
+  action: ShippingAction;
+}
+
 export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
@@ -523,6 +536,9 @@ export const ingestionService = {
     // el backend aplica el default de cada hoja y `historical_replay` —el único
     // modo que escribe stock— era inalcanzable desde la pantalla.
     inventoryEffect?: Record<string, string>,
+    // F-H6.b: qué hacer con los envíos sin comprobante, por hoja. Sin entrada
+    // para una hoja, sus envíos sin comprobante no se registran.
+    shippingDecisions?: ShippingDecision[],
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
@@ -536,6 +552,7 @@ export const ingestionService = {
         // `null` y no `{}`: un dict vacío y "no mandé nada" significan lo mismo
         // para el backend (cada hoja toma su default), pero mandar null lo dice.
         inventory_effect: inventoryEffect ?? null,
+        shipping_decisions: shippingDecisions ?? [],
       },
       { timeout: CONFIRM_TIMEOUT_MS },
     );

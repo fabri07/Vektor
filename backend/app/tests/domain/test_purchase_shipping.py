@@ -10,6 +10,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 from app.domain.purchase_shipping import (
+    SIN_COMPROBANTE_UNA_POR_FILA,
+    SIN_COMPROBANTE_UNA_POR_HOJA,
     ShippingLine,
     plan_shipping_charges,
 )
@@ -143,3 +145,83 @@ class TestDeterminismo:
 
         assert [c.invoice for c in primero.charges] == ["c", "a", "b"]
         assert [c.invoice for c in segundo.charges] == [c.invoice for c in primero.charges]
+
+
+class TestLasDosSalidasSinComprobante:
+    """El usuario declara por hoja qué es ese envío sin comprobante.
+
+    Véktor no puede deducirlo, pero quien armó la planilla sí sabe. Lo que nunca
+    pasa es que se elija por él: sin decisión no se cobra (los tests de arriba).
+    """
+
+    def test_una_por_hoja_colapsa_la_repeticion(self) -> None:
+        plan = plan_shipping_charges(
+            [_linea(i, "2000", invoice="") for i in range(10)],
+            sin_comprobante=SIN_COMPROBANTE_UNA_POR_HOJA,
+        )
+
+        assert len(plan.charges) == 1
+        assert plan.total == Decimal("2000")
+        assert plan.charges[0].repetido_en == 10
+        assert plan.sin_identidad == []
+
+    def test_una_por_hoja_con_dos_cifras_son_dos_cargos(self) -> None:
+        """Decisión del usuario: una cifra, un cargo. Sumar convertiría una
+        repetición en un total inflado; exigir una sola cifra dejaría sin salida
+        a un archivo con dos fletes legítimos."""
+        lineas = [_linea(i, "2000", invoice="") for i in range(5)]
+        lineas += [_linea(5 + i, "3500", invoice="") for i in range(3)]
+
+        plan = plan_shipping_charges(lineas, sin_comprobante=SIN_COMPROBANTE_UNA_POR_HOJA)
+
+        assert sorted(c.amount for c in plan.charges) == [Decimal("2000"), Decimal("3500")]
+        assert plan.total == Decimal("5500")
+
+    def test_una_por_hoja_no_reporta_las_cifras_como_anomalia(self) -> None:
+        """Dentro de un comprobante dos cifras son raras y se avisan; en la hoja
+        entera son lo esperado."""
+        lineas = [_linea(0, "2000", invoice=""), _linea(1, "3500", invoice="")]
+        plan = plan_shipping_charges(lineas, sin_comprobante=SIN_COMPROBANTE_UNA_POR_HOJA)
+
+        assert plan.cifras_distintas == []
+
+    def test_una_por_fila_no_colapsa_nada(self) -> None:
+        """Es exactamente lo que el usuario declaró: diez fletes de 2.000."""
+        plan = plan_shipping_charges(
+            [_linea(i, "2000", invoice="") for i in range(10)],
+            sin_comprobante=SIN_COMPROBANTE_UNA_POR_FILA,
+        )
+
+        assert len(plan.charges) == 10
+        assert plan.total == Decimal("20000")
+        assert all(c.repetido_en == 1 for c in plan.charges)
+
+    def test_la_decision_no_toca_las_filas_que_si_tienen_comprobante(self) -> None:
+        """Una hoja puede traer las dos cosas: lo identificable se agrupa por su
+        comprobante y la decisión sólo alcanza al resto."""
+        lineas = [
+            _linea(0, "2000"),
+            _linea(1, "2000"),
+            _linea(2, "900", invoice=""),
+            _linea(3, "900", invoice=""),
+        ]
+
+        plan = plan_shipping_charges(lineas, sin_comprobante=SIN_COMPROBANTE_UNA_POR_FILA)
+
+        # El comprobante colapsa; las sueltas no, porque así se declaró.
+        assert plan.total == Decimal("2000") + Decimal("1800")
+        assert len(plan.charges) == 3
+
+    def test_sin_proveedor_tambien_entra_por_hoja(self) -> None:
+        """La agrupación de `una_por_hoja` es sólo por importe: el proveedor puede
+        faltar y el usuario ya declaró que esas filas comparten la operación."""
+        plan = plan_shipping_charges(
+            [
+                _linea(0, "2000", supplier="", invoice=""),
+                _linea(1, "2000", supplier="", invoice=""),
+            ],
+            sin_comprobante=SIN_COMPROBANTE_UNA_POR_HOJA,
+        )
+
+        assert len(plan.charges) == 1
+        assert plan.total == Decimal("2000")
