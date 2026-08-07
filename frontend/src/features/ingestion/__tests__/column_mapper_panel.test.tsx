@@ -25,6 +25,7 @@ jest.mock("@/services/ingestion.service", () => ({
     confirmFile: jest.fn(),
     cancelFile: jest.fn(),
     recomputeColumnRisk: jest.fn(),
+    fetchInventoryEffects: jest.fn(),
   },
 }));
 
@@ -33,6 +34,25 @@ const mockGetColumnMappings = ingestionService.getColumnMappings as jest.Mock;
 const mockGetFieldCatalog = ingestionService.getFieldCatalog as jest.Mock;
 const mockConfirmFile = ingestionService.confirmFile as jest.Mock;
 const mockRecomputeColumnRisk = ingestionService.recomputeColumnRisk as jest.Mock;
+const mockInventoryEffects = ingestionService.fetchInventoryEffects as jest.Mock;
+
+/**
+ * F-H3.e — lo que el backend ofrece para una hoja de ventas con producto y
+ * cantidad mapeados. Las opciones y sus textos los sirve `/inventory-effects`:
+ * el frontend no tiene lista propia.
+ */
+const EFECTOS_VENTAS = [
+  {
+    context_id: "table",
+    label: "Ventas",
+    default: "informational",
+    options: [
+      { value: "informational", label: "Estas filas no modificarán el inventario" },
+      { value: "historical_replay", label: "Aplicar la historia: las compras suman y las ventas restan" },
+      { value: "no_inventory", label: "Estas cantidades no afectan el inventario" },
+    ],
+  },
+];
 
 // Los selects se arman con lo que devuelve el backend: el frontend dejó de tener
 // su propia copia (divergió y hacía que la UI mostrara "Sin mapear" sobre un
@@ -137,6 +157,8 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     // Default: el recompute no cambia el set (evita vaciar el panel si el
     // debounce llega a dispararse durante un test).
     mockRecomputeColumnRisk.mockResolvedValue([]);
+    // Sin hojas: los tests que no miran el inventario no renderizan el selector.
+    mockInventoryEffects.mockResolvedValue([]);
   });
 
   test("archivo ambiguo (general) muestra el selector de propósito", async () => {
@@ -671,6 +693,137 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     ]);
   });
 
+  /**
+   * F-H3.e — la regresión de la fase: el panel NO mandaba `inventory_effect`, así
+   * que `historical_replay` (el único modo que escribe stock) era inalcanzable
+   * desde la pantalla y todo archivo entraba con el default de cada hoja. Todo lo
+   * demás estaba cableado y probado punta a punta contra el endpoint.
+   */
+  test("el efecto de inventario elegido viaja en el confirm", async () => {
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["Fecha", "Monto"],
+        mapping_contexts: [
+          {
+            context_id: "table",
+            label: "Tabla",
+            source_kind: "table",
+            entity_type: "sale",
+            headers: ["Fecha", "Monto"],
+            fields: null,
+            preview_rows: [],
+            row_count: 1,
+          },
+        ],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-10"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["1500"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    mockInventoryEffects.mockResolvedValue(EFECTOS_VENTAS);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+
+    renderPanel();
+
+    // El modo se elige con el texto que mandó el backend, no con uno de acá.
+    const aplicar = await screen.findByRole("button", {
+      name: EFECTOS_VENTAS[0]!.options[1]!.label,
+    });
+    fireEvent.click(aplicar);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Confirmar importación/i }),
+    );
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // `inventory_effect` es el 8º argumento posicional (índice 7).
+    expect(mockConfirmFile.mock.calls[0][7]).toEqual({
+      table: "historical_replay",
+    });
+  });
+
+  test("sin tocar nada viaja el default que muestra la pantalla", async () => {
+    // Si el panel mandara `undefined`, el backend aplicaría su propio default y
+    // coincidiría por casualidad. Mandarlo explícito es lo que hace que el
+    // `STAGE_CONFIRM` registre con qué modo entró cada hoja.
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["Fecha", "Monto"],
+        mapping_contexts: [
+          {
+            context_id: "table",
+            label: "Tabla",
+            source_kind: "table",
+            entity_type: "sale",
+            headers: ["Fecha", "Monto"],
+            fields: null,
+            preview_rows: [],
+            row_count: 1,
+          },
+        ],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-10"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["1500"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    mockInventoryEffects.mockResolvedValue(EFECTOS_VENTAS);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+
+    renderPanel();
+
+    // El selector ya está: recién ahí el panel sabe qué efecto mandar.
+    await screen.findByRole("button", {
+      name: EFECTOS_VENTAS[0]!.options[0]!.label,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Confirmar importación/i }),
+    );
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    expect(mockConfirmFile.mock.calls[0][7]).toEqual({ table: "informational" });
+  });
+
   test("touched-set: resetear el mapeo (checkbox de confirmedFields) limpia el touched-set", async () => {
     // Regresión: choosePurpose() y el onChange de los checkboxes de
     // confirmedFields re-inicializan `mappings` desde las sugerencias pero
@@ -834,6 +987,8 @@ describe("ColumnMapperPanel — hojas sin clasificar", () => {
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
     mockRecomputeColumnRisk.mockResolvedValue([]);
+    // Sin hojas: los tests que no miran el inventario no renderizan el selector.
+    mockInventoryEffects.mockResolvedValue([]);
   });
 
   test("no arranca en Ventas: pide elegir la sección", async () => {
@@ -980,6 +1135,8 @@ describe("ColumnMapperPanel — corregir una hoja mal clasificada", () => {
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
     mockRecomputeColumnRisk.mockResolvedValue([]);
+    // Sin hojas: los tests que no miran el inventario no renderizan el selector.
+    mockInventoryEffects.mockResolvedValue([]);
   });
 
   test("la sección es un desplegable, no una chapita de sólo lectura", async () => {

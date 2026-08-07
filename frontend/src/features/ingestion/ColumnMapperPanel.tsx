@@ -20,10 +20,12 @@ import {
   type MappingContext,
   type MasterPreviewSummary,
   type StockTreatment,
+  type SheetInventoryEffect,
 } from "@/services/ingestion.service";
 import { Button } from "@/components/ui/Button";
 import { InventoryImpactPanel } from "./InventoryImpactPanel";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
+import { InventoryEffectChoice } from "./InventoryEffectChoice";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
@@ -405,6 +407,9 @@ function SheetMapperSection({
   onIssuesChange,
   stockTreatment,
   onStockTreatmentChange,
+  inventoryEffect,
+  effectValue,
+  onEffectChange,
 }: {
   fileId: string;
   context: MappingContext;
@@ -424,6 +429,11 @@ function SheetMapperSection({
   // Origen del stock de ESTA hoja (solo se pregunta si es de productos).
   stockTreatment: StockTreatment;
   onStockTreatmentChange: (ctxId: string, value: StockTreatment) => void;
+  // F-H3.e: qué le hace al inventario ESTA hoja. Lo sirve el backend con el
+  // mapeo borrador; `undefined` mientras la consulta está en vuelo.
+  inventoryEffect?: SheetInventoryEffect;
+  effectValue: string;
+  onEffectChange: (ctxId: string, value: string) => void;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -790,6 +800,19 @@ function SheetMapperSection({
           className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
         />
       )}
+
+      {/* F-H3.e: eje SEPARADO del de arriba. Aquel decide si el stock inicial
+          del catálogo genera un gasto (contable); éste, qué pasa con las
+          unidades. Sin este control, `historical_replay` sólo se alcanzaba por
+          API y el archivo entraba siempre con el default de cada hoja. */}
+      {included && inventoryEffect && (
+        <InventoryEffectChoice
+          hoja={inventoryEffect}
+          value={effectValue}
+          onChange={(v) => onEffectChange(context.context_id, v)}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
     </div>
   );
 }
@@ -835,6 +858,16 @@ function MultiContextMapper({
   const handleStockTreatmentChange = useCallback(
     (ctxId: string, value: StockTreatment) =>
       setStockTreatmentByCtx((prev) => ({ ...prev, [ctxId]: value })),
+    [],
+  );
+  // F-H3.e: efecto de inventario ELEGIDO por hoja. Sólo lo que el usuario tocó;
+  // el default lo pone el backend y se aplica al render (`efectoDe`), no
+  // copiándolo acá: los defaults cambian mientras se mapea, y un estado
+  // inicializado una vez quedaría mostrando un modo que ya no corresponde.
+  const [effectByCtx, setEffectByCtx] = useState<Record<string, string>>({});
+  const handleEffectChange = useCallback(
+    (ctxId: string, value: string) =>
+      setEffectByCtx((prev) => ({ ...prev, [ctxId]: value })),
     [],
   );
   const mappingsRef = useRef<Record<string, Record<string, string>>>({});
@@ -984,6 +1017,41 @@ function MultiContextMapper({
     [fileId, riskRecomputeInput],
   );
 
+  // F-H3.e: se re-consulta cuando cambia el mapeo — mapear `cantidad` es lo que
+  // habilita que una hoja pueda aplicar su historia al stock.
+  const { data: inventoryEffects = [] } = useQuery({
+    queryKey: ["inventory-effects", fileId, riskRecomputeKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchInventoryEffects(fileId, riskRecomputeInput, signal),
+    // La clave incluye el mapeo, así que cambia con cada edición. Sin conservar
+    // lo anterior, el selector DESAPARECE en cada recálculo —y el confirm que
+    // caiga en esa ventana viaja sin efecto declarado, que es peor que el
+    // parpadeo—. Lo que se muestra mientras tanto es el modo de un mapeo
+    // ligeramente viejo; la respuesta nueva lo corrige apenas llega.
+    placeholderData: (prev) => prev,
+  });
+  const effectsByCtx = useMemo(
+    () => Object.fromEntries(inventoryEffects.map((h) => [h.context_id, h])),
+    [inventoryEffects],
+  );
+  /**
+   * Modo EFECTIVO de una hoja: lo que eligió el usuario si sigue estando entre
+   * las opciones, y si no el default de Véktor. La comprobación importa: sacar
+   * la columna de cantidad puede dejar a la hoja sin poder mover inventario, y
+   * mandar el modo viejo sería mandar algo que el backend ya no ofrece.
+   */
+  const efectoDe = useCallback(
+    (ctxId: string): string => {
+      const hoja = effectsByCtx[ctxId];
+      if (!hoja) return "";
+      const elegido = effectByCtx[ctxId];
+      return elegido && hoja.options.some((o) => o.value === elegido)
+        ? elegido
+        : hoja.default;
+    },
+    [effectsByCtx, effectByCtx],
+  );
+
   const { registrar: registrarImpacto, vista: vistaImpacto } =
     useImpactoPostConfirm(onDone, fileId);
 
@@ -1014,6 +1082,14 @@ function MultiContextMapper({
           });
         }
       }
+      // F-H3.e: el efecto SÓLO de las hojas que viajan. Mandar el de una hoja
+      // excluida da 422 ("apunta a una hoja que no está en el archivo"), porque
+      // el backend arma los perfiles con los mapeos recibidos.
+      const inventoryEffectPayload: Record<string, string> = {};
+      for (const ctxId of Object.keys(contextEntity)) {
+        const modo = efectoDe(ctxId);
+        if (modo) inventoryEffectPayload[ctxId] = modo;
+      }
       return ingestionService.confirmFile(
         fileId,
         {},
@@ -1024,6 +1100,9 @@ function MultiContextMapper({
         // INCLUIDAS; `undefined` si no hay ninguna (el backend asume apertura).
         stockTreatmentPayload,
         riskDecisions,
+        Object.keys(inventoryEffectPayload).length > 0
+          ? inventoryEffectPayload
+          : undefined,
       );
     },
     onSuccess: (result) => {
@@ -1116,6 +1195,9 @@ function MultiContextMapper({
             onIssuesChange={handleIssuesChange}
             stockTreatment={stockTreatmentByCtx[ctx.context_id] ?? "opening_balance"}
             onStockTreatmentChange={handleStockTreatmentChange}
+            inventoryEffect={effectsByCtx[ctx.context_id]}
+            effectValue={efectoDe(ctx.context_id)}
+            onEffectChange={handleEffectChange}
           />
         ))}
       </div>
@@ -1303,6 +1385,30 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     [fileId, riskRecomputeInput],
   );
 
+  // F-H3.e: mismo contrato que en el camino multi-hoja. Este camino manda sus
+  // mapeos con `context_id: "table"`, así que también tiene una hoja a la que
+  // declararle un efecto — sin esto, un archivo de una sola tabla entraba
+  // siempre con el default y nunca podía aplicar su historia.
+  const { data: inventoryEffects = [] } = useQuery({
+    queryKey: ["inventory-effects", fileId, riskRecomputeKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchInventoryEffects(fileId, riskRecomputeInput, signal),
+    // La clave incluye el mapeo, así que cambia con cada edición. Sin conservar
+    // lo anterior, el selector DESAPARECE en cada recálculo —y el confirm que
+    // caiga en esa ventana viaja sin efecto declarado, que es peor que el
+    // parpadeo—. Lo que se muestra mientras tanto es el modo de un mapeo
+    // ligeramente viejo; la respuesta nueva lo corrige apenas llega.
+    placeholderData: (prev) => prev,
+  });
+  const hojaEfecto = inventoryEffects[0];
+  const [effectElegido, setEffectElegido] = useState<string | null>(null);
+  // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
+  // cantidad puede dejar a la hoja sin poder mover inventario.
+  const efectoActual =
+    effectElegido && hojaEfecto?.options.some((o) => o.value === effectElegido)
+      ? effectElegido
+      : (hojaEfecto?.default ?? "");
+
   function choosePurpose(value: string) {
     setPurpose(value);
     const opt = PURPOSE_OPTIONS.find((o) => o.value === value);
@@ -1333,6 +1439,15 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const isMultiContext =
     contexts.length > 1 ||
     (contexts.length === 1 && contexts[0]?.source_kind !== "table");
+  /**
+   * La hoja de una tabla única. El parser la genera como `"table"`, pero se lee
+   * del summary y no se hardcodea: mandar decisiones contra una hoja que el
+   * archivo no tiene da 422 ("apunta a una hoja que no está en el archivo").
+   *
+   * `undefined` en summaries viejos sin `mapping_contexts`: ahí no hay hoja a la
+   * cual referirse y el envío sigue siendo plano, como hasta ahora.
+   */
+  const hojaPlana = contexts[0]?.context_id;
 
   const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
 
@@ -1367,6 +1482,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         undefined,
         hasStock ? stockTreatment : undefined,
         riskDecisions,
+        hojaEfecto && efectoActual
+          ? { [hojaEfecto.context_id]: efectoActual }
+          : undefined,
       ),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
@@ -1474,6 +1592,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         // F8c: mismo touched-set que el recompute — user_selected solo si el
         // usuario cambió el mapeo a mano (no si vino de una sugerencia).
         user_selected: touchedRef.current.has(riskKey("table", src)),
+        // F-H3.e: la columna dice a qué hoja pertenece. Sin esto el confirm
+        // entra por la rama de mapeos planos, donde el efecto de inventario no
+        // se puede resolver contra ninguna hoja y el backend lo rechaza con 422
+        // (antes se descartaba en silencio: el usuario elegía reconstruir su
+        // inventario y no pasaba nada). El resto del payload —las decisiones de
+        // riesgo, el recálculo en vivo— ya viajaba calificado así.
+        ...(hojaPlana ? { context_id: hojaPlana, entity_type: entityType } : {}),
       }));
     confirmMutation.mutate(columnMappings);
   }
@@ -1844,6 +1969,18 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         <StockTreatmentChoice
           value={stockTreatment}
           onChange={setStockTreatment}
+          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
+        />
+      )}
+
+      {/* F-H3.e: qué le hace al inventario esta tabla. Eje separado del de
+          arriba: aquel decide si el stock inicial genera un gasto, éste qué
+          pasa con las unidades. */}
+      {hojaEfecto && !needsPurpose && (
+        <InventoryEffectChoice
+          hoja={hojaEfecto}
+          value={efectoActual}
+          onChange={setEffectElegido}
           className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
         />
       )}

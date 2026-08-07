@@ -153,6 +153,28 @@ export interface InventoryReplayResult {
   warnings: string[];
 }
 
+/**
+ * F-H3.e — qué le hace al INVENTARIO cada hoja, y entre qué puede elegir el
+ * usuario. Lo calcula el backend a partir del mapeo borrador: el default y las
+ * opciones dependen de la entidad de la hoja y de los campos que el mapeo cubre
+ * (sin `cantidad` mapeada, la hoja no mueve unidades). Una tabla fija acá sería
+ * una copia de una regla de dominio — el defecto que rompió el mapeo de columnas.
+ */
+export interface InventoryEffectOption {
+  value: string;
+  /** Describe QUÉ le pasa al stock, no el nombre técnico del modo. */
+  label: string;
+}
+
+export interface SheetInventoryEffect {
+  context_id: string;
+  /** Nombre legible de la hoja, nunca el `context_id` crudo. */
+  label: string;
+  default: string;
+  /** Siempre incluye `default`. Con un solo elemento no hay nada que elegir. */
+  options: InventoryEffectOption[];
+}
+
 export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
@@ -497,6 +519,10 @@ export const ingestionService = {
     stockTreatment?: StockTreatment | Record<string, StockTreatment>,
     // F8c: decisiones del usuario sobre columnas riesgosas (drop / enrutar a Otros).
     columnRiskDecisions?: ColumnRiskDecision[],
+    // F-H3.e: qué le hace al inventario cada hoja, `{context_id: modo}`. Sin esto
+    // el backend aplica el default de cada hoja y `historical_replay` —el único
+    // modo que escribe stock— era inalcanzable desde la pantalla.
+    inventoryEffect?: Record<string, string>,
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
@@ -507,8 +533,35 @@ export const ingestionService = {
         context_entity: contextEntity ?? {},
         stock_treatment: stockTreatment ?? null,
         column_risk_decisions: columnRiskDecisions ?? [],
+        // `null` y no `{}`: un dict vacío y "no mandé nada" significan lo mismo
+        // para el backend (cada hoja toma su default), pero mandar null lo dice.
+        inventory_effect: inventoryEffect ?? null,
       },
       { timeout: CONFIRM_TIMEOUT_MS },
+    );
+    return res.data;
+  },
+
+  /**
+   * F-H3.e: qué propone Véktor para el inventario de cada hoja, con el mapeo
+   * borrador. Read-only. Se vuelve a pedir cuando el mapeo cambia: mapear
+   * `cantidad` es lo que habilita que una hoja pueda aplicar su historia.
+   */
+  async fetchInventoryEffects(
+    fileId: string,
+    body: {
+      columnMappings: ColumnMapping[];
+      contextEntity: Record<string, string>;
+    },
+    signal?: AbortSignal,
+  ): Promise<SheetInventoryEffect[]> {
+    const res = await api.post<SheetInventoryEffect[]>(
+      `/ingestion/files/${fileId}/inventory-effects`,
+      {
+        column_mappings: body.columnMappings,
+        context_entity: body.contextEntity,
+      },
+      { signal },
     );
     return res.data;
   },
