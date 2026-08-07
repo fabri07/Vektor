@@ -19,6 +19,7 @@ from app.domain.inventory_effect import (
     InvalidInventoryEffectError,
     SheetInventoryProfile,
     default_effect_for,
+    options_for,
     resolve_inventory_effects,
 )
 
@@ -134,3 +135,67 @@ class TestResolucion:
             resolve_inventory_effects(
                 [_hoja("sheet:ventas", "sale")], {"sheet:fantasma": HISTORICAL_REPLAY}
             )
+
+
+# ── F-H3.e: qué se le ofrece al usuario para cada hoja ──────────────────────
+
+
+class TestOpcionesPorHoja:
+    """`resolve_inventory_effects` valida el valor y la hoja, no la combinación.
+
+    Ofrecer los cuatro modos en toda hoja entra sin 422 y hace cualquier cosa:
+    `current_snapshot` en una hoja de ventas lee un movimiento como si fuera un
+    saldo. Acotar es responsabilidad del dominio, no de la pantalla — una lista
+    fija en la UI se desactualiza y termina ofreciendo lo que el importador no
+    honra.
+    """
+
+    def test_el_default_siempre_esta_entre_las_opciones(self) -> None:
+        """Si no, la pantalla no podría representar el estado en el que el archivo
+        entra cuando el usuario no toca nada."""
+        for perfil in (
+            _hoja(entity="product", campos=("name", "stock_units")),
+            _hoja(entity="product", campos=("name",)),
+            _hoja(entity="sale", campos=("product_name", "quantity")),
+            _hoja(entity="sale", campos=("amount",)),
+            _hoja(entity="expense", campos=("product_name", "quantity")),
+            _hoja(entity="customer", campos=("name",)),
+            _hoja(entity=None, campos=()),
+        ):
+            assert default_effect_for(perfil) in options_for(perfil)
+
+    def test_una_hoja_de_ventas_puede_aplicar_su_historia(self) -> None:
+        opciones = options_for(_hoja(entity="sale", campos=("product_name", "quantity")))
+        assert HISTORICAL_REPLAY in opciones
+        # Un movimiento no declara un saldo absoluto.
+        assert CURRENT_SNAPSHOT not in opciones
+
+    def test_un_catalogo_no_ofrece_aplicar_la_historia(self) -> None:
+        """Un saldo no es una secuencia de movimientos: no hay historia que aplicar."""
+        opciones = options_for(_hoja(entity="product", campos=("name", "stock_units")))
+        assert CURRENT_SNAPSHOT in opciones
+        assert HISTORICAL_REPLAY not in opciones
+
+    def test_una_hoja_que_no_mueve_unidades_no_ofrece_elegir(self) -> None:
+        """Una venta de servicios (sin producto) o un maestro: no hay decisión."""
+        assert options_for(_hoja(entity="sale", campos=("amount",))) == [NO_INVENTORY]
+        assert options_for(_hoja(entity="customer", campos=("name",))) == [NO_INVENTORY]
+
+    def test_la_cantidad_mapeada_es_lo_que_habilita_el_replay(self) -> None:
+        """La misma hoja cambia de opciones al mapear `quantity` — por eso las
+        opciones se recalculan con el mapeo borrador y no una sola vez."""
+        sin_cantidad = options_for(_hoja(entity="sale", campos=("product_name",)))
+        con_cantidad = options_for(_hoja(entity="sale", campos=("product_name", "quantity")))
+        assert sin_cantidad == [NO_INVENTORY]
+        assert HISTORICAL_REPLAY in con_cantidad
+
+    def test_toda_opcion_ofrecida_es_un_efecto_valido(self) -> None:
+        """Ofrecer algo que `resolve_inventory_effects` rechaza sería mandar al
+        usuario derecho a un 422."""
+        for perfil in (
+            _hoja(entity="product", campos=("name", "stock_units")),
+            _hoja(entity="sale", campos=("product_name", "quantity")),
+            _hoja(entity="expense", campos=("product_name", "quantity")),
+            _hoja(entity=None, campos=()),
+        ):
+            assert set(options_for(perfil)) <= VALID_EFFECTS

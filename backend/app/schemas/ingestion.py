@@ -213,6 +213,33 @@ class EntityFieldCatalog(BaseModel):
     fields: list[FieldCatalogEntry]
 
 
+class InventoryEffectOption(BaseModel):
+    """Un modo de inventario ofrecible, con su texto en castellano."""
+
+    value: str
+    #: De `EFFECT_LABELS`: describe QUÉ le pasa al stock, no el nombre técnico.
+    label: str
+
+
+class SheetInventoryEffect(BaseModel):
+    """F-H3.e — qué propone Véktor para una hoja y entre qué puede elegir el usuario.
+
+    El default y las opciones salen de `domain/inventory_effect` (`default_effect_for`
+    / `options_for`), que dependen de la entidad de la hoja y de los campos que el
+    mapeo BORRADOR ya cubre. Por eso se calcula del lado del servidor y con el mapeo
+    en curso, en vez de una tabla fija en la UI: cambiar una columna a `quantity`
+    cambia lo que la hoja puede hacerle al inventario.
+    """
+
+    context_id: str
+    #: Nombre legible de la hoja (nunca el `context_id` crudo).
+    label: str
+    default: str
+    #: Siempre incluye `default`. Con un solo elemento no hay nada que elegir: la
+    #: hoja no habla de unidades y la UI sólo informa el modo.
+    options: list[InventoryEffectOption]
+
+
 class ColumnMapping(BaseModel):
     source_column: str
     target_field: str  # campo canónico, "ignore", o "custom_field:{key}"

@@ -132,6 +132,38 @@ def default_effect_for(profile: SheetInventoryProfile) -> str:
     return NO_INVENTORY
 
 
+def options_for(profile: SheetInventoryProfile) -> list[str]:
+    """Modos que tiene sentido ofrecerle al usuario para ESTA hoja.
+
+    `resolve_inventory_effects` valida el valor y que la hoja exista, pero no la
+    combinación: elegir `current_snapshot` en una hoja de ventas entra sin 422 y
+    hace cualquier cosa. Ofrecer los cuatro modos siempre traslada al usuario una
+    decisión que el archivo ya responde — la hoja de ventas no declara un saldo
+    absoluto, y un catálogo no tiene ventas que restar.
+
+    Acotar acá y no en la UI es lo mismo que ya se hizo con el catálogo de campos:
+    la pantalla renderiza lo que el dominio ofrece. Una copia en el frontend se
+    desactualiza y termina mostrando opciones que el importador no honra.
+
+    El default de la hoja SIEMPRE está en la lista: sin eso, la pantalla no podría
+    representar el estado en el que el archivo entra si el usuario no toca nada.
+    """
+    default = default_effect_for(profile)
+    if not profile.moves_units and profile.entity != "product":
+        # Nada que decidir: sin producto o sin cantidad, estas filas no hablan de
+        # unidades. Se muestra el modo y no se ofrece cambiarlo.
+        return [default]
+    if profile.entity == "product":
+        # Un catálogo declara una foto del stock. "Aplicar la historia" no aplica:
+        # un saldo no es una secuencia de movimientos.
+        opciones = [CURRENT_SNAPSHOT, NO_INVENTORY]
+    else:
+        # Ventas y compras: informar el impacto (default) o aplicarlo. Declarar un
+        # saldo absoluto desde un movimiento no tiene sentido.
+        opciones = [INFORMATIONAL, HISTORICAL_REPLAY, NO_INVENTORY]
+    return opciones if default in opciones else [default, *opciones]
+
+
 class InvalidInventoryEffectError(ValueError):
     """Valor o contexto inválido en el `inventory_effect` que mandó el cliente."""
 

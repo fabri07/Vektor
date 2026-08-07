@@ -91,9 +91,12 @@ from app.application.services.score_trigger_service import (
 )
 from app.config.settings import get_settings
 from app.domain.inventory_effect import (
+    EFFECT_LABELS,
     HISTORICAL_REPLAY,
     InvalidInventoryEffectError,
     SheetInventoryProfile,
+    default_effect_for,
+    options_for,
     resolve_inventory_effects,
 )
 from app.domain.inventory_replay_gate import (
@@ -148,6 +151,7 @@ from app.schemas.ingestion import (
     FileDeletionResult,
     FilePreviewResponse,
     FileStatusItem,
+    InventoryEffectOption,
     InventoryImpactItem,
     InventoryReplayRequest,
     InventoryReplayResponse,
@@ -161,6 +165,7 @@ from app.schemas.ingestion import (
     RereadPreviewResponse,
     RereadRunStatusResponse,
     RereadUndoResponse,
+    SheetInventoryEffect,
     TenantColumnMappingResponse,
     UploadResponse,
 )
@@ -716,6 +721,87 @@ async def compute_column_risk(
             context_confirmed=body.context_confirmed,
         )
     ]
+
+
+@router.post(
+    "/files/{file_id}/inventory-effects",
+    response_model=list[SheetInventoryEffect],
+    summary="Modo de inventario propuesto y opciones por hoja, para un mapeo borrador",
+)
+async def compute_inventory_effects(
+    file_id: uuid.UUID,
+    body: ColumnRiskRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[SheetInventoryEffect]:
+    """F-H3.e: qué le propone Véktor al inventario de cada hoja, y entre qué puede
+    elegir el usuario. READ-ONLY.
+
+    Existe porque el default (`default_effect_for`) y las opciones (`options_for`)
+    son reglas de DOMINIO que dependen de la entidad de la hoja y de los campos que
+    el mapeo cubre: una hoja de ventas sin columna de cantidad no mueve unidades, y
+    ese mismo archivo con `cantidad` mapeada sí. Calcularlo en la UI sería una copia
+    de la regla que se desactualiza — el defecto que ya se pagó con el catálogo de
+    campos, donde la pantalla mostraba una cosa y mandaba otra.
+
+    Reusa `ColumnRiskRequest` a propósito: la entrada es exactamente la misma —el
+    mapeo borrador con su entidad efectiva por hoja— y un schema gemelo sería otra
+    copia que puede divergir.
+    """
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    summary = record.parsed_summary_json or {}
+    entries, entities = await derive_context_mapping_entries(
+        session,
+        tenant.tenant_id,
+        summary,
+        user_mappings=body.column_mappings,
+        context_entity=cast("dict[str, str]", body.context_entity),
+    )
+    etiquetas = {
+        ctx["context_id"]: str(ctx.get("label") or ctx["context_id"]).strip()
+        for ctx in summary.get("mapping_contexts", [])
+        if ctx.get("context_id")
+    }
+
+    # Los campos salen del mapeo QUE MANDÓ EL CLIENTE, no de `entries`.
+    # `derive_context_mapping_entries` completa las columnas sin mapear con las
+    # sugerencias (historial del tenant, heurística), y el confirm NO las usa para
+    # el perfil: arma `SheetInventoryProfile` con `body.column_mappings`. Leer los
+    # derivados acá haría que la pantalla ofrezca "aplicar la historia" en una hoja
+    # donde el usuario todavía no mapeó la cantidad, y que el confirm resuelva otro
+    # default. La entidad efectiva sí sale de `entities`: ahí `derive` resuelve el
+    # override del usuario con la misma prioridad que el confirm.
+    campos_por_contexto: dict[str, set[str]] = defaultdict(set)
+    for m in body.column_mappings:
+        if parse_target(m.target_field).kind == "canonical":
+            campos_por_contexto[m.context_id or ""].add(m.target_field)
+
+    resultado: list[SheetInventoryEffect] = []
+    for context_id in entries:
+        perfil = SheetInventoryProfile(
+            context_id=context_id,
+            entity=entities.get(context_id),
+            # Sólo campos CANÓNICOS, igual que el confirm: un
+            # `custom_field:cantidad` guarda el dato pero el importador no lo lee
+            # como cantidad, así que no habilita mover inventario.
+            mapped_fields=frozenset(campos_por_contexto.get(context_id, set())),
+        )
+        resultado.append(
+            SheetInventoryEffect(
+                context_id=context_id,
+                label=etiquetas.get(context_id, context_id).strip(),
+                default=default_effect_for(perfil),
+                options=[
+                    InventoryEffectOption(value=v, label=EFFECT_LABELS[v])
+                    for v in options_for(perfil)
+                ],
+            )
+        )
+    return resultado
 
 
 @router.post(
