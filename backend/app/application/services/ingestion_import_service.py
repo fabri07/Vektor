@@ -3089,11 +3089,17 @@ async def _insert_confirmed_data_impl(
         # F-H3.d.3: mismos lectores para el gate y para la inserción. Repetirlos
         # sería suficiente para que el gate rechace una fila y se importe otra.
         def _venta_cantidad_plana(row: dict[str, Any]) -> int:
-            qty_raw = row.get(qty_col) if qty_col else None
+            # Mismo contrato que `_venta_cantidad` del camino multi-hoja: columna
+            # mapeada primero, heurística de headers después, y piso en 1. Sin la
+            # heurística, una hoja con "cantidad" sin mapear hacía que el gate
+            # validara cada venta como 1 unidad; sin el piso, una cantidad 0 o
+            # negativa se saltaba el gate (`qty <= 0` → `continue`) y entraba así,
+            # cuando por la otra rama del importador habría quedado en 1.
+            qty_raw = row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
             if qty_raw in (None, "", "None", "nan"):
                 return 1
             try:
-                return int(float(str(qty_raw)))
+                return max(1, int(float(str(qty_raw))))
             except (ValueError, TypeError):
                 return 1
 
@@ -3473,10 +3479,17 @@ async def _insert_confirmed_data_impl(
                     # Costo unitario: solo de una columna inequívoca y DISTINTA
                     # de la del monto — "costo" suele ser el total de la línea y
                     # escribirlo como unit_cost corrompería el margen.
-                    exp_cost_col = (
-                        target_to_col.get("unit_cost_ars")
-                        if column_mappings
-                        else _find_col(headers, _COSTO_UNITARIO_COLS)
+                    # El mapeo explícito gana, la heurística RELLENA — no es un
+                    # switch todo-o-nada. `unit_cost_ars` no existe en el catálogo
+                    # de `expense` (es cross-entity y `_resolve_target_cols`
+                    # descarta los cross), así que acá `target_to_col` nunca lo
+                    # trae: con el switch viejo, cualquier archivo que llegara con
+                    # mapeos perdía el costo unitario de TODAS sus compras y el
+                    # margen quedaba en cero. Su gemelo multi-hoja siempre usó el
+                    # `or` (ver `_uc_col`); el mismo archivo daba resultados
+                    # distintos según viniera como hoja suelta o como solapa.
+                    exp_cost_col = target_to_col.get("unit_cost_ars") or _find_col(
+                        headers, _COSTO_UNITARIO_COLS
                     )
                     exp_unit_cost = (
                         _parse_amount(row.get(exp_cost_col))
