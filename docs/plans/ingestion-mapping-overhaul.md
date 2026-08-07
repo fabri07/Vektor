@@ -175,19 +175,33 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
         d.4 endpoint de apply                 ✅ entregado
         d.5 botón en el panel de impacto      ✅ entregado
         d.6 el replay que no se puede validar no se confirma  ✅ entregado
-F-H3.e  selector de efecto por hoja en la UI                      ⛔ PENDIENTE
+F-H3.e  selector de efecto por hoja en la UI                      ✅ entregado
 ```
 
-> **Falta el selector: hoy `historical_replay` sólo se alcanza por API.** El
-> frontend no manda `inventory_effect` en el confirm (`ingestion.service.ts` manda
-> `stock_treatment` y nada más), así que todas las hojas entran con su default y
-> el 422 de d.6 no puede dispararse desde la pantalla. Todo lo de abajo está
-> cableado y probado punta a punta contra el endpoint; lo que falta es el control
-> que deja al usuario elegir. Las etiquetas ya están en `EFFECT_LABELS`
-> (`domain/inventory_effect.py`), en castellano y **con el alcance correcto**: el
-> eje es de la HOJA, así que la etiqueta dice "estas filas no modificarán el
-> inventario" y nunca "este archivo", que sería falso cuando el catálogo de la
-> hoja de al lado ya dejó su saldo.
+> **El selector (e).** `POST /ingestion/files/{id}/inventory-effects` sirve, para
+> un mapeo BORRADOR, qué propone Véktor por hoja (`default_effect_for`) y entre
+> qué tiene sentido elegir (`options_for`, nuevo). Las dos son reglas de dominio
+> que dependen de la entidad de la hoja y de los campos mapeados —sin `quantity`
+> la hoja no mueve unidades—, así que calcularlas en la UI sería la copia que ya
+> divergió con el catálogo de campos. El perfil se arma con el mapeo **que manda
+> el cliente**, no con el derivado: `derive_context_mapping_entries` completa las
+> columnas sin mapear con sugerencias y el confirm no las usa, así que leerlas
+> haría que la pantalla ofrezca un modo y el confirm resuelva otro.
+>
+> `options_for` acota porque `resolve_inventory_effects` valida el valor y la
+> hoja, **no la combinación**: `current_snapshot` en una hoja de ventas entra sin
+> 422 y lee un movimiento como si fuera un saldo. Un catálogo no ofrece "aplicar
+> la historia" y una hoja que no mueve unidades no ofrece nada.
+>
+> **Una tabla única mandaba las columnas sin `context_id`**, y por eso su
+> `inventory_effect` se rechazaba con 422 (d.6): el caso más común del producto no
+> podía elegir. El confirm de ese camino ahora califica cada columna con el
+> `context_id` del summary, como ya viajaban las decisiones de riesgo.
+>
+> Las etiquetas salen de `EFFECT_LABELS` (`domain/inventory_effect.py`), en
+> castellano y **con el alcance correcto**: el eje es de la HOJA, así que dicen
+> "estas filas no modificarán el inventario" y nunca "este archivo", que sería
+> falso cuando el catálogo de la hoja de al lado ya dejó su saldo.
 
 > **Forma final de d.4.** `POST /ingestion/files/{id}/inventory-replay` (gate
 > `require_modify_access`, igual que `reread/apply`), body `{context_ids?, dry_run?}`.
@@ -603,6 +617,10 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3 ✅ | re-confirmar el mismo archivo no aplica el movimiento dos veces |
 | F-H3 ✅ | borrar el import revierte exactamente sus movimientos (incremental, nunca `Σ(movimientos)`) |
 | F-H3 ✅ | `informational` no descuenta la venta (la apertura y la compra sí tocaron el stock: el eje es de la HOJA) |
+| F-H3.e ✅ | el endpoint propone un modo por hoja y sólo ofrece los que tienen sentido para esa hoja |
+| F-H3.e ✅ | sacar `cantidad` del mapeo deja a la hoja sin poder aplicar su historia (el default se recalcula con el borrador) |
+| F-H3.e ✅ | el modo elegido VIAJA en el confirm — argumento del componente y cuerpo del POST, mutation-testeado por capa |
+| F-H3.e ✅ | el 422 de d.6 se alcanza desde el payload que manda la pantalla, no sólo desde un curl |
 | F-H3 | `current_snapshot` fija absoluto; `no_inventory` no crea movimiento |
 | F-H3 | replay histórico negativo → advertencia, **no** `InsufficientStockError` |
 | **F-H4** ✅ | **las 7 filas de la tabla de precio, incluida la discrepancia con tolerancia de 1 centavo** |
