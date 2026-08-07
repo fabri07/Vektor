@@ -52,14 +52,25 @@ MOTIVO_REPLAY_NO_GATEABLE = "replay_no_gateable"
 
 #: Lo que se le dice al usuario. Explica QUÉ pasa con su archivo y ofrece las dos
 #: salidas reales, en vez de nombrar el modo técnico que eligió.
+#:
+#: La primera salida es la que resuelve el caso en dos pasos y por eso va primero:
+#: el replay del panel **se recalcula contra el stock del momento**, así que ahí sí
+#: hay saldo para validar. Lo único que se pierde respecto de gatear al confirmar
+#: es dónde queda la venta que no se puede respaldar — por el panel entra a los
+#: libros y su descuento queda pendiente, en vez de irse a "Otros". Decirlo es
+#: parte del mensaje: sin eso, mandar a reestructurar el archivo suena a que no
+#: hay otro camino, y sí lo hay.
 MENSAJE_REPLAY_NO_GATEABLE = (
     "En la hoja «{hoja}»: el archivo da de alta productos y además trae "
     "movimientos históricos en las mismas filas. Véktor puede analizarlo y "
-    "mostrarte el impacto, pero todavía no puede aplicar la reconstrucción del "
-    "inventario en una sola confirmación: el stock contra el que habría que "
-    "validar cada venta lo está cargando este mismo archivo. Importalo sin que "
-    "las ventas modifiquen el inventario, o separá el saldo inicial de los "
-    "movimientos en hojas distintas."
+    "mostrarte el impacto, pero todavía no puede validar cada venta contra el "
+    "stock en una sola confirmación: ese stock lo está cargando este mismo "
+    "archivo. Importalo sin que las ventas modifiquen el inventario y después "
+    "aplicá el histórico desde el panel de impacto —ahí el cálculo corre contra "
+    "el stock ya cargado—, teniendo en cuenta que una venta sin respaldo va a "
+    "entrar igual y su descuento va a quedar pendiente. Si preferís que esas "
+    "ventas ni entren, separá el saldo inicial de los movimientos en hojas "
+    "distintas."
 )
 
 

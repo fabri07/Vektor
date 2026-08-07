@@ -22,12 +22,19 @@ class EventBus:
         """
         try:
             celery_app.send_task(f"events.{event_type.lower()}", kwargs={"payload": payload})
-        except Exception:  # noqa: BLE001 — un evento nunca rompe la respuesta
+        except Exception as exc:  # noqa: BLE001 — un evento nunca rompe la respuesta
             from app.observability.logger import get_logger  # noqa: PLC0415
 
+            # Con el error adentro: un broker caído, una `BROKER_URL` mal puesta y
+            # un `EncodeError` por un `UUID`/`Decimal` crudo en el payload son tres
+            # problemas distintos y sólo el primero se arregla solo. Sin esto, el
+            # tercero —que antes reventaba fuerte en dev— pasaría a perder eventos
+            # en producción detrás de una línea indistinguible de las otras dos.
             get_logger(__name__).warning(
                 "event_bus.emit_failed",
                 event_type=event_type,
+                error=str(exc),
+                error_type=type(exc).__name__,
             )
 
     @staticmethod

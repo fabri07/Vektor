@@ -181,11 +181,54 @@ class TestReplayNoGateable:
         # salidas, no nombrar el modo técnico que el usuario eligió.
         assert _LABEL in detalle
         assert "da de alta productos" in detalle
+        # La salida de dos pasos va nombrada: el replay del panel recalcula contra
+        # el stock del momento, así que el objetivo SÍ es alcanzable sin
+        # reestructurar el archivo. Mandar a partir las hojas como si fuera el
+        # único camino es un mensaje falso.
+        assert "panel de impacto" in detalle
+        assert "quedar pendiente" in detalle
         assert "separá el saldo inicial" in detalle
 
         # Un rechazo pre-lease no deja NADA a medio importar.
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
         assert await _cuantas(db_session, sample_tenant, Product) == 0
+
+    async def test_efecto_sin_hoja_no_se_descarta_en_silencio(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Mapeos planos (sin `context_id`) + `inventory_effect`: 422, no silencio.
+
+        No hay hojas contra las cuales resolver el efecto, así que `_inventory_effects`
+        quedaba vacío y el import salía con el default: el usuario elegía reconstruir
+        su inventario y no pasaba nada — ni el efecto ni un error.
+        """
+        response = await _confirmar(
+            client,
+            auth_headers,
+            archivo,
+            {
+                "column_mappings": [
+                    {"source_column": s, "target_field": t}
+                    for s, t in (
+                        ("fecha", "transaction_date"),
+                        ("producto", "product_name"),
+                        ("cantidad", "quantity"),
+                        ("monto", "amount"),
+                    )
+                ],
+                "confirmed_fields": {"ventas": True},
+                "inventory_effect": {_CTX: "historical_replay"},
+            },
+        )
+
+        assert response.status_code == 422
+        assert "por hoja" in response.json()["detail"]
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
 
     async def test_el_rechazo_deja_traza(
         self,
