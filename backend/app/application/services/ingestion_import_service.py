@@ -4849,12 +4849,32 @@ async def _insert_multisheet_data(
     ) -> bool:
         """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
+        # Mismo criterio que en ventas: una columna declarada para otro campo no
+        # puede releerse como el monto. Con `unit_price` en el catálogo de
+        # `expense`, "precio_compra" es ahora un target explícito y la heurística
+        # del monto ("compra", "costo") se lo llevaría puesto.
+        _mapeadas_gasto = set(cols.values())
         amount = (
             _parse_amount(row.get(amount_col))
             if amount_col
-            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))  # "total" también en compras
-            or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
+            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS, skip=_mapeadas_gasto))
+            or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS, skip=_mapeadas_gasto))
         )
+        # F-H6.a: con `unit_price` y `quantity` en el catálogo de `expense`, una
+        # línea de compra que trae precio y cantidad ya no necesita el total —
+        # F-H4 dejó las compras afuera justamente porque esos campos no existían.
+        # Misma función y mismas reglas que en ventas: el unitario nunca sale del
+        # total, la cantidad es la cruda (sin piso en 1) y sólo por mapeo explícito.
+        _linea_gasto = resolve_line_amount(
+            amount=amount,
+            unit_price=_parse_amount(row.get(cols["unit_price"]))
+            if cols.get("unit_price")
+            else None,
+            quantity=(_parse_qty(row.get(cols["quantity"])) or None)
+            if cols.get("quantity")
+            else None,
+        )
+        amount = _linea_gasto.amount
         if not amount:
             return False
         raw_date = _val(row, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS)
@@ -4898,6 +4918,7 @@ async def _insert_multisheet_data(
             source_upload_id=uploaded_file_id,
         )
         cf = _custom_fields(row, cf_cols)
+        _registrar_monto_derivado(cf, _linea_gasto, counts)
         if cat_label:
             cf = {**cf, "category_label": cat_label}
         # Capturar proveedor real si la fila/mapeo lo trae. F7c: gobernado por
@@ -4965,13 +4986,23 @@ async def _insert_multisheet_data(
             or _row_col(row, _VENTA_TOTAL_COLS)
             or _row_col(row, _GASTO_AMOUNT_COLS)
         )
-        _uc_col = cols.get("unit_cost_ars") or _row_col(row, _COSTO_UNITARIO_COLS)
-        # Mejora C: nunca tomar una columna de "costo total" como costo unitario.
-        unit_cost = (
-            _parse_amount(row.get(_uc_col))
-            if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
-            else None
-        )
+        # F-H6.a: `unit_price` es el target PROPIO de `expense` (antes esta entidad
+        # no tenía dónde declarar el precio unitario de una compra y el costo se
+        # adivinaba). Un mapeo explícito gana sin guardas: los dos filtros de abajo
+        # existen para la HEURÍSTICA —evitar que una columna de total entre como
+        # unitario—, y aplicarlos a lo que el usuario declaró sería descartar su
+        # decisión por el nombre de la columna.
+        _up_col = cols.get("unit_price")
+        if _up_col:
+            unit_cost = _parse_amount(row.get(_up_col))
+        else:
+            _uc_col = cols.get("unit_cost_ars") or _row_col(row, _COSTO_UNITARIO_COLS)
+            # Mejora C: nunca tomar una columna de "costo total" como costo unitario.
+            unit_cost = (
+                _parse_amount(row.get(_uc_col))
+                if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
+                else None
+            )
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el

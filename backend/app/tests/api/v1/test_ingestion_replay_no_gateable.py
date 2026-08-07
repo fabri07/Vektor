@@ -461,3 +461,72 @@ class TestUnaCompraDelMismoArchivoTampocoSePuedeGatear:
         assert response.status_code == 200, response.text
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
         assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
+
+
+@pytest.mark.asyncio
+class TestElBloqueoSeAlcanzaDesdeLaPantalla:
+    """F-H3.e — la compuerta de la fase.
+
+    El 422 de d.6 estaba probado desde un payload armado a mano, pero el frontend
+    NO mandaba `inventory_effect`: todas las hojas entraban con su default y
+    `historical_replay` —el único modo que escribe stock— era inalcanzable desde
+    la UI. Una regla que no se puede disparar desde la pantalla no está entregada.
+
+    Este test arma el payload con la MISMA forma que manda `confirmFile`
+    (`inventory_effect: {context_id: modo}` junto al resto), y verifica que el
+    modo que ofrece el selector llega hasta la decisión del backend.
+    """
+
+    async def test_el_modo_que_ofrece_el_selector_llega_al_backend(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        # Lo que la pantalla ofrece para esta hoja, servido por el endpoint nuevo.
+        opciones = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/inventory-effects",
+            json={"column_mappings": _MAPEOS},
+            headers=auth_headers,
+        )
+        assert opciones.status_code == 200, opciones.text
+        hoja = opciones.json()[0]
+        assert "historical_replay" in [o["value"] for o in hoja["options"]]
+
+        # Elegirlo desde la pantalla dispara el bloqueo: este archivo declara el
+        # stock y las ventas en las mismas filas.
+        respuesta = await _confirmar(
+            client,
+            auth_headers,
+            archivo,
+            _payload("historical_replay"),
+        )
+        assert respuesta.status_code == 422, respuesta.text
+        assert _LABEL in respuesta.json()["detail"]
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
+
+    async def test_el_default_que_muestra_la_pantalla_es_el_que_aplica_el_backend(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Si divergieran, el usuario vería un modo y el archivo entraría con otro."""
+        opciones = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/inventory-effects",
+            json={"column_mappings": _MAPEOS},
+            headers=auth_headers,
+        )
+        default_mostrado = opciones.json()[0]["default"]
+
+        # Confirmar mandando EXPLÍCITAMENTE el default que muestra la pantalla
+        # tiene que comportarse igual que no mandar nada.
+        respuesta = await _confirmar(
+            client, auth_headers, archivo, _payload(default_mostrado)
+        )
+        assert respuesta.status_code == 200, respuesta.text
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 2

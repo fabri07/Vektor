@@ -398,10 +398,14 @@ def test_drop_del_monto_y_de_la_alternativa_en_el_mismo_pedido_es_violacion() ->
     assert [v.target_field for v in violations] == ["amount"]
 
 
-def test_el_gasto_no_tiene_alternativa_para_su_monto() -> None:
-    """Gastos y compras quedan afuera hasta F-H6: hoy no tienen `unit_price` ni
-    `quantity` en su catálogo, así que derivar sería adivinar desde columnas que
-    nadie declaró."""
+def test_el_gasto_tambien_puede_eliminar_su_monto_con_la_alternativa() -> None:
+    """F-H6.a le dio a `expense` los campos que le faltaban.
+
+    Antes esta prueba fijaba lo contrario y decía por qué: sin `unit_price` ni
+    `quantity` en el catálogo de gastos, derivar el monto habría sido adivinar
+    desde columnas que nadie declaró. Con los targets propios, una compra con
+    precio y cantidad se comporta igual que una venta.
+    """
     context_mappings = {
         "table": [
             MappingEntry("fecha", "expense_date", user_selected=False),
@@ -423,4 +427,17 @@ def test_el_gasto_no_tiene_alternativa_para_su_monto() -> None:
         decisions, context_mappings, {"table": "expense"}
     )
 
-    assert len(violations) == 1
+    assert violations == []
+
+    # Control: media alternativa sigue sin alcanzar, igual que en ventas.
+    sin_cantidad = {
+        "table": [e for e in context_mappings["table"] if e.target_field != "quantity"]
+    }
+    assert (
+        len(
+            validate_column_risk_decisions(
+                decisions, sin_cantidad, {"table": "expense"}
+            )
+        )
+        == 1
+    )

@@ -46,6 +46,21 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "is_recurring": "Recurrente",
         "supplier_name": "Proveedor",
         "notes": "Notas",
+        # F-H6.a: una planilla de compras no podía mapear cantidad ni precio
+        # unitario, y ésa es la causa de que el costo entre mal — el importador
+        # los leía sólo por heurística de headers o no los leía. Con el target
+        # explícito, un libro de compras declara qué columna es cada cosa, igual
+        # que una hoja de ventas.
+        "quantity": "Cantidad",
+        # Precio de cada unidad EN ESTA COMPRA. No es el costo de referencia del
+        # producto (`unit_cost_ars`) ni el precio de lista: vive en el movimiento
+        # (`inventory_movements.unit_cost`) y los dos coexisten.
+        "unit_price": "Precio unitario de compra",
+        # Identifican el producto de la línea. Sin ellos la compra no se puede
+        # vincular ni dar de alta con identidad propia.
+        "product_name": "Nombre del producto",
+        "sku": "Código (SKU)",
+        "barcode": "Código de barras (EAN/UPC)",
         # F7a: campos de referencia al proveedor (aditivo, ver nota de sale arriba).
         # Ver la nota de los campos de cliente: mismo criterio de agrupación.
         "supplier_cuil": "Proveedor — CUIL",
@@ -125,6 +140,11 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
 # y mandando otra (incidente ASTERIA).
 REQUIRED_ALTERNATIVES: dict[str, dict[str, frozenset[str]]] = {
     "sale": {"amount": frozenset({"unit_price", "quantity"})},
+    # F-H6.a: la misma regla para compras. F-H4 dejó `expense` afuera porque no
+    # tenía `unit_price` ni `quantity` en su catálogo —derivar desde columnas
+    # autodetectadas es lo que F10 prohíbe—; ahora los tiene y una línea de compra
+    # con precio y cantidad tampoco necesita que le escriban el total.
+    "expense": {"amount": frozenset({"unit_price", "quantity"})},
 }
 
 
@@ -228,6 +248,44 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "supplier",
         },
         "notes": {"notas", "observaciones", "descripcion", "detalle", "obs"},
+        # F-H6.a: los alias tienen que ser INEQUÍVOCOS dentro de `expense`. Un
+        # keyword que empata en longitud con otro de esta misma entidad lo decide
+        # el orden del dict — que es el incidente ASTERIA, donde "precio" y
+        # "compra" empataban sobre `precio_de_compra` y ganaba el costo como
+        # precio de venta. Los largos SÍ ganan (`_match_key` colapsa las
+        # preposiciones y desempata por longitud): "precio_compra" (13) le gana a
+        # "compra" (6) de `amount`, que es lo que hace que un libro de compras
+        # deje de leer el precio unitario como el total de la línea.
+        "unit_price": {
+            "precio_unitario",
+            "precio_unit",
+            "p_unitario",
+            "unitario",
+            "precio_compra",
+            "precio_costo",
+            "costo_unitario",
+            "p_costo",
+        },
+        "quantity": {"cantidad", "qty", "unidades", "cant", "items", "unidad"},
+        # Deliberadamente SIN "descripcion", "detalle", "concepto" ni "nombre":
+        # los tres primeros ya son de `notes`/`category` con la misma longitud
+        # (empate → orden del dict), y un "nombre" suelto en una planilla de
+        # compras es tan probable que sea el del proveedor. Sugerir mal es peor
+        # que no sugerir: el usuario mapea a mano y sigue.
+        "product_name": {"producto", "articulo", "mercaderia", "item"},
+        # Igual criterio: "codigo" a secas en una compra suele ser el número de
+        # comprobante, no el SKU.
+        "sku": {"sku", "codigo_producto", "cod_producto"},
+        "barcode": {
+            "barcode",
+            "ean",
+            "upc",
+            "gtin",
+            "barras",
+            "codigo_de_barras",
+            "cod_barra",
+            "codigo_barra",
+        },
         # F7a: referencia al proveedor (aditivo). "supplier_name" ya existía arriba
         # (no se duplica); acá solo se suman los campos que faltaban.
         "supplier_cuil": {"cuil_proveedor", "proveedor_cuil", "cuil"},
@@ -424,7 +482,12 @@ MASTER_REFERENCE_TARGETS: frozenset[str] = frozenset(
 
 SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
     "sale": frozenset({"amount", "quantity", "transaction_date", "unit_price"}),
-    "expense": frozenset({"amount", "expense_date"}),
+    # F-H6.a: los nuevos son escalares por la misma razón que en `sale` — dos
+    # columnas al mismo destino no se pueden desempatar sin inventar, y hasta F-0
+    # `_resolve_target_cols` se quedaba con la primera del orden del Excel.
+    "expense": frozenset(
+        {"amount", "expense_date", "quantity", "unit_price"}
+    ),
     "product": frozenset(
         {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}
     ),

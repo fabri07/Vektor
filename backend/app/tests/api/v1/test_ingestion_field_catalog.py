@@ -90,19 +90,24 @@ class TestFieldCatalog:
         response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
         catalog = response.json()
 
-        assert catalog["sale"]["required_alternatives"] == {
-            "amount": ["quantity", "unit_price"]
-        }
+        # F-H6.a: compras también. Hasta entonces `expense` no tenía `unit_price`
+        # ni `quantity` en su catálogo, así que derivar habría sido adivinar desde
+        # columnas que nadie declaró.
+        for entidad in ("sale", "expense"):
+            assert catalog[entidad]["required_alternatives"] == {
+                "amount": ["quantity", "unit_price"]
+            }, entidad
         # Los dos campos de la alternativa existen de verdad en la entidad: una
         # alternativa que nombre un campo inexistente no se puede mapear nunca.
-        valores = {f["value"] for f in catalog["sale"]["fields"]}
-        assert {"quantity", "unit_price"} <= valores
+        for entidad in ("sale", "expense"):
+            valores = {f["value"] for f in catalog[entidad]["fields"]}
+            assert {"quantity", "unit_price"} <= valores, entidad
 
-        # Las demás entidades no tienen alternativa: gastos y compras entran en
-        # F-H6 (hoy no tienen `unit_price` ni `quantity` en su catálogo).
+        # Los maestros y el catálogo de productos no tienen alternativa: su
+        # requerido es el nombre, y no hay dos campos que lo calculen.
         for entity, entry in catalog.items():
-            if entity != "sale":
-                assert entry["required_alternatives"] == {}
+            if entity not in ("sale", "expense"):
+                assert entry["required_alternatives"] == {}, entity
 
     async def test_requiere_autenticacion(self, client: AsyncClient) -> None:
         response = await client.get("/api/v1/ingestion/field-catalog")
