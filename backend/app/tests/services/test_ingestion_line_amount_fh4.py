@@ -202,6 +202,144 @@ class TestElMontoSeCalcula:
         assert len(multi) == 2
 
 
+#: Las MISMAS columnas, pero nombradas como las nombra una planilla argentina de
+#: verdad. "precio_unitario" es un keyword de `_VENTA_AMOUNT_COLS`: la heurística
+#: del monto se la lleva puesta si nadie le avisa que el usuario ya la declaró.
+_HEADERS_TRAMPA = ["fecha", "producto", "precio_unitario", "cantidad"]
+_MAPEO_TRAMPA = {
+    "fecha": "transaction_date",
+    "producto": "product_name",
+    "precio_unitario": "unit_price",
+    "cantidad": "quantity",
+}
+
+
+def _fila_trampa() -> dict[str, Any]:
+    return {
+        "fecha": "2024-03-10",
+        "producto": "Vela aromatica",
+        "precio_unitario": "150.50",
+        "cantidad": "3",
+    }
+
+
+@pytest.mark.asyncio
+class TestLaHeuristicaNoSePisaConElMapeo:
+    """Una columna declarada a mano no puede releerse como otra cosa.
+
+    `_VENTA_AMOUNT_COLS` contiene "precio_unitario" (legacy: en un archivo sin
+    total, el precio unitario ERA el monto). Con F-H4 esa lectura pasó a ser
+    activamente dañina: el archivo trae precio y cantidad, el monto se calcula
+    bien, pero el "monto del archivo" que se compara contra el cálculo sale de la
+    MISMA columna del precio → toda fila con cantidad > 1 se reporta como
+    discrepancia, se le estampa `_vektor_amount_original` con un total que nadie
+    escribió, y el confirm avisa "N filas tenían un monto distinto… suele ser un
+    descuento o un impuesto" sobre un archivo sin una sola discrepancia.
+    """
+
+    async def test_multihoja_no_confunde_el_precio_con_el_monto(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        counts = await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            {
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "multi_sheet": True,
+                "mapping_contexts": [
+                    {
+                        "context_id": _CTX,
+                        "entity_type": "sale",
+                        "source_kind": "sheet",
+                        "headers": _HEADERS_TRAMPA,
+                        "fields": None,
+                        "preview_rows": [],
+                        "row_count": 1,
+                    }
+                ],
+                "ventas_detectadas": [{**_fila_trampa(), "__context__": _CTX}],
+                "gastos_detectados": [],
+                "stock_detectado": [],
+            },
+            {"ventas": True},
+            context_mappings={_CTX: _MAPEO_TRAMPA},
+            context_confirmed={_CTX: True},
+        )
+        await db_session.flush()
+
+        assert counts["montos_calculados"] == 1
+        assert counts["montos_discrepantes"] == 0
+
+        venta = (await _ventas(db_session, sample_tenant))[0]
+        assert venta.amount == Decimal("451.50")
+        cf = venta.custom_fields or {}
+        assert cf[AMOUNT_SOURCE_FIELD] == "calculated"
+        assert AMOUNT_ORIGINAL_FIELD not in cf
+
+    async def test_el_camino_plano_tampoco(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Acá el pisón entra por otra puerta: `venta_col` se resuelve con
+        `_find_col` sobre los headers, antes de mirar el mapeo."""
+        filas = [_fila_trampa()]
+        counts = await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            {
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "multi_sheet": False,
+                "has_venta": True,
+                "row_count": 1,
+                "headers": _HEADERS_TRAMPA,
+                "ventas_detectadas": filas,
+                "preview_rows": filas,
+            },
+            {"ventas": True},
+            column_mappings=_MAPEO_TRAMPA,
+        )
+        await db_session.flush()
+
+        assert counts["ventas"] == 1
+        assert counts["montos_calculados"] == 1
+        assert counts["montos_discrepantes"] == 0
+
+        venta = (await _ventas(db_session, sample_tenant))[0]
+        assert venta.amount == Decimal("451.50")
+        assert AMOUNT_ORIGINAL_FIELD not in (venta.custom_fields or {})
+
+    async def test_una_columna_de_total_sin_mapear_sigue_siendo_el_monto(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Control: la heurística NO se apaga entera. Una columna de total que
+        nadie declaró sigue entrando como monto — y ahí sí, si no cuadra con
+        precio × cantidad, la discrepancia es real y hay que reportarla."""
+        fila = {**_fila_trampa(), "total": "400"}
+        counts = await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            {
+                "file_type": "spreadsheet",
+                "inferred_type": "ventas",
+                "multi_sheet": False,
+                "has_venta": True,
+                "row_count": 1,
+                "headers": [*_HEADERS_TRAMPA, "total"],
+                "ventas_detectadas": [fila],
+                "preview_rows": [fila],
+            },
+            {"ventas": True},
+            column_mappings=_MAPEO_TRAMPA,
+        )
+        await db_session.flush()
+
+        assert counts["montos_discrepantes"] == 1
+        venta = (await _ventas(db_session, sample_tenant))[0]
+        assert venta.amount == Decimal("451.50")
+        assert (venta.custom_fields or {})[AMOUNT_ORIGINAL_FIELD] == "400"
+
+
 @pytest.mark.asyncio
 class TestDiscrepancia:
     async def test_el_monto_del_archivo_no_cuadra_gana_el_calculo(

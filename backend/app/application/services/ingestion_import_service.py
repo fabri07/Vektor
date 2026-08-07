@@ -2517,7 +2517,11 @@ def _row_val_categoria(row: dict[str, Any]) -> Any:
     return None
 
 
-def _row_val(row: dict[str, Any], keywords: set[str] | tuple[str, ...]) -> Any:
+def _row_val(
+    row: dict[str, Any],
+    keywords: set[str] | tuple[str, ...],
+    skip: set[str] | None = None,
+) -> Any:
     """Devuelve el valor de la primera columna de *esta* fila cuyo nombre matchea.
 
     A diferencia de `_find_col` (que resuelve una columna fija para todo el
@@ -2527,14 +2531,24 @@ def _row_val(row: dict[str, Any], keywords: set[str] | tuple[str, ...]) -> Any:
     en silencio porque la columna detectada no existía en sus keys.
 
     Con tupla, el orden de keywords es prioridad (ver `_find_col`).
+
+    ``skip`` excluye columnas que el usuario ya declaró para OTRO campo. Una
+    heurística no puede releer una columna mapeada a mano: ``_VENTA_AMOUNT_COLS``
+    contiene ``"precio_unitario"``, así que en el archivo que F-H4 vino a
+    soportar —precio y cantidad mapeados, sin columna de total— el monto "del
+    archivo" salía de la misma columna del precio.
     """
     if isinstance(keywords, tuple):
         for k in keywords:
             for key, val in row.items():
+                if skip and key in skip:
+                    continue
                 if k in key.lower().strip().replace(" ", "_"):
                     return val
         return None
     for key, val in row.items():
+        if skip and key in skip:
+            continue
         norm = key.lower().strip().replace(" ", "_")
         if any(k in norm for k in keywords):
             return val
@@ -3037,6 +3051,26 @@ async def _insert_confirmed_data_impl(
             if inferred_type != "stock" and "amount" in target_to_col:
                 venta_col = target_to_col["amount"]
                 gasto_col = target_to_col["amount"]
+            elif inferred_type != "stock":
+                # Gemelo del `skip` de `_add_sale`: sin monto mapeado, la columna
+                # que eligió la heurística no puede ser una que el usuario declaró
+                # para otro campo. `_VENTA_AMOUNT_COLS` contiene "precio_unitario",
+                # así que en la planilla de precio × cantidad —el archivo que F-H4
+                # vino a soportar— `venta_col` caía sobre la columna del precio y
+                # cada fila con cantidad > 1 quedaba reportada como discrepancia
+                # contra un total que el archivo nunca trajo.
+                # Se RESUELVE DE NUEVO sobre las columnas libres, no se dropea: si
+                # el archivo trae además un "total" que nadie mapeó, ese sigue
+                # siendo el monto (y si no cuadra con precio × cantidad, la
+                # discrepancia es real y hay que reportarla). `_find_col` con un
+                # set devuelve la primera columna en orden de archivo, así que
+                # "precio_unitario" le ganaba a "total" por estar antes.
+                _reservadas = set(target_to_col.values()) | set(custom_field_cols.values())
+                _libres = [h for h in headers if h not in _reservadas]
+                if venta_col in _reservadas:
+                    venta_col = _find_col(_libres, _VENTA_AMOUNT_COLS)
+                if gasto_col in _reservadas:
+                    gasto_col = _find_col(_libres, _GASTO_AMOUNT_COLS)
             nombre_col = (
                 target_to_col.get("product_name")
                 or target_to_col.get("name")
@@ -4671,11 +4705,18 @@ async def _insert_multisheet_data(
     ) -> bool:
         """Inserta una venta. Devuelve ``True`` si produjo output persistido."""
         amount_col = cols.get("amount")
+        # Sin columna de monto mapeada, la heurística NO puede releer una columna
+        # que el usuario declaró para otro campo: `_VENTA_AMOUNT_COLS` contiene
+        # "precio_unitario", así que en una planilla de precio × cantidad el
+        # "monto del archivo" salía de la columna del precio y toda fila con
+        # cantidad > 1 se reportaba como discrepancia contra un total que nadie
+        # escribió.
+        _mapeadas = set(cols.values())
         amount = (
             _parse_amount(row.get(amount_col))
             if amount_col
-            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))
-            or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
+            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS, skip=_mapeadas))
+            or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS, skip=_mapeadas))
         )
         # F-H4: si el archivo no trae el total pero sí el precio unitario y la
         # cantidad, el total es una cuenta. Y si los trae todos y no cuadran, manda
