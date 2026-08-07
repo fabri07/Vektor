@@ -409,6 +409,44 @@ Evidencia preservada sin migración: el monto original discrepante va a la traza
 
 ## F-H6 · Costos de compra agrupados
 
+### Entregado: a (campos) + b (el envío se cobra una vez)
+
+**a — `4c8900cd`.** `CANONICAL_FIELDS["expense"]` no tenía `quantity`,
+`unit_price`, `sku`, `barcode` ni `product_name`. Y la heurística conoce
+`costo_unitario`, `precio_costo` y `precio_compra` pero **no `precio_unitario`**,
+que es como titula la columna media planilla de compras: ahí el costo se perdía
+entero (producto sin costo, margen en cero, stock valuado en nada). Hay un test
+que lo mide. Con los targets propios **las compras entran a F-H4**: una línea con
+precio y cantidad no necesita que le escriban el total, y `REQUIRED_ALTERNATIVES`
+cubre `expense` igual que `sale`.
+
+**b — `790a7ca1` + `cca429e1`.** `domain/purchase_shipping.py` agrupa por
+comprobante (proveedor + número): una cifra por comprobante se cobra UNA vez.
+Cifras distintas en el mismo comprobante se cobran todas y se avisan — pueden ser
+flete y seguro. El gasto es OPEX `LOGISTICS` sin producto ni stock, igual que el
+remito manual, para que el mismo hecho no quede clasificado de dos formas según
+por dónde entró. La huella de idempotencia es del CARGO (comprobante + cifra), no
+de una fila del grupo.
+
+> **Sin comprobante hay dos caminos, y los elige el usuario por hoja**
+> (`ShippingDecision`, mismo protocolo que las decisiones de riesgo, validado
+> antes del lease). «Es un solo envío» → una cifra, un cargo (sumar la columna
+> convertiría un prorrateo en un total inflado; exigir una sola cifra dejaría sin
+> salida a dos fletes reales). «Cada fila es un envío» → diez filas de 2.000 son
+> $20.000, y la pantalla lo dice con el número antes de elegir. **No hay default**:
+> sin decisión no se cobra, y el aviso ofrece además mapear el comprobante para
+> que Véktor agrupe solo. El control aparece únicamente cuando la hoja mapea envío
+> y NO mapea comprobante.
+>
+> La huella de un cargo sin comprobante incluye su fila: si no, los diez cargos
+> iguales de «cada fila es un envío» colapsarían en uno y el segundo import
+> cobraría de nuevo.
+
+**Pendiente de F-H6:** la distribución (c) y el preview del grupo (d), con la
+corrección de **V5** — hoy `_apply_purchase_to_stock:2057` pisa `unit_cost_ars`
+con el precio de la última compra importada, aunque la columna fuera precio de
+lista o facturado.
+
 ### Identidad del comprobante — sin esto no se puede distribuir nada
 
 Una columna `Envío = 2.000` repetida en diez filas se convertiría en $20.000. **Véktor sólo distribuye un costo compartido cuando puede identificar inequívocamente el conjunto de líneas al que pertenece. Si no puede agruparlo, el envío queda como gasto separado.**
@@ -631,8 +669,14 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H4 ✅ | cantidad vacía con precio mapeado NO vale `precio × 1` (mutation-testeado: usar `_venta_cantidad` con su piso → rojo) |
 | F-H4 ✅ | la fila que no se puede resolver va a "Otros" con el motivo; la fila de relleno (todas las celdas vacías) NO (mutation-testeado) |
 | F-H4 ✅ | eliminar la columna de monto es legal si quedan precio y cantidad; con media alternativa sigue siendo violación (armonía con F8) |
-| **F-H6** | **`Envío = 2.000` repetido en 10 filas del mismo comprobante → se cuenta UNA vez, no $20.000** |
-| F-H6 | sin identidad de comprobante → no distribuye, queda gasto separado |
+| **F-H6.b** ✅ | **`Envío = 2.000` repetido en 10 filas del mismo comprobante → se cuenta UNA vez, no $20.000** |
+| F-H6.a ✅ | la heurística NO conoce `precio_unitario`: sin el target explícito el costo de la compra se pierde (medido) |
+| F-H6.a ✅ | el mapeo explícito de `unit_price` gana sin guardas; sin mapeo, la heurística sigue |
+| F-H6.a ✅ | una línea de compra con precio y cantidad no necesita el total (F-H4 en compras) |
+| F-H6.b ✅ | sin comprobante y sin decisión: no se cobra nada y se reporta |
+| F-H6.b ✅ | «un solo envío» colapsa la repetición y cobra una vez por cifra; «cada fila» no colapsa nada |
+| F-H6.b ✅ | re-confirmar no cobra el flete dos veces, tampoco con «cada fila es un envío» |
+| F-H6.b ✅ | una decisión sobre una hoja sin columna de envío → 422 antes del lease |
 | F-H6 | distribución por subtotal cuadra al centavo; no distribuido no toca `unit_cost_ars`; el gasto atribuido a inventario no se cuenta dos veces |
 | F-A | una hoja cuya única columna candidata a fecha se auto-propone como custom **sigue** reportando `required_missing` (**V10**) |
 | F-A | cambiar la sección preserva lo tocado |
