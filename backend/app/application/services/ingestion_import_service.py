@@ -1035,11 +1035,22 @@ def _capture_unclassified(
 
     F2-T2: ``match_candidates`` (solo para filas de producto ambiguas o en
     conflicto de identidad) — forma ``{id, matched_by, name, sku, barcode}``.
+
+    La procedencia se NORMALIZA contra el set de la CHECK: el importador recibe
+    ``source`` libre y la relectura se nombra ``"reread"``, que la columna no
+    acepta. Sin esto, capturar una fila durante una relectura levantaba
+    `IntegrityError` y abortaba el apply entero.
     """
     from app.persistence.models.unclassified_record import (  # noqa: PLC0415
         UnclassifiedRecord,
+        normalize_unclassified_source,
     )
 
+    _source = normalize_unclassified_source(source)
+    if _source != source:
+        logger.debug(
+            "ingestion.otros.source_normalizado", recibido=source, guardado=_source
+        )
     count = 0
     for row in rows:
         row_data = {k: v for k, v in row.items() if k != "__context__"}
@@ -1049,7 +1060,7 @@ def _capture_unclassified(
             UnclassifiedRecord(
                 tenant_id=tenant_id,
                 uploaded_file_id=uploaded_file_id,
-                source=source,
+                source=_source,
                 context_label=(context_label or None),
                 headers=list(headers) if headers else None,
                 row_data={k: ("" if v is None else str(v)) for k, v in row_data.items()},

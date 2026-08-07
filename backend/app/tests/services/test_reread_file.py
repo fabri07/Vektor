@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services import reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
+    RISK_REF_KEY,
     _load_import_fingerprints,
     _persist_import_fingerprints,
     default_confirmed_fields,
@@ -980,10 +981,22 @@ async def test_reread_forced_unverified_does_not_auto_apply(
     await db_session.commit()
 
     assert result.column_risk_outcome == "FORCED_UNVERIFIED"
-    # Ni se dropeó ni se ruteó nada: no se creó ningún registro en "Otros" (eso
-    # solo ocurre en el outcome REAPPLIED, vía ``_reconcile_column_risk``).
-    assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 0
+    # Ni se dropeó ni se ruteó nada: ningún registro viene del protocolo de
+    # riesgo (eso solo ocurre en el outcome REAPPLIED, vía
+    # ``_reconcile_column_risk``), que es lo que este test vigila. Se distingue
+    # por la clave de correlación que SOLO escribe esa vía: desde F-H4 las dos
+    # filas caen igual en "Otros", pero por no tener monto ni con qué calcularlo
+    # —el archivo tiene la columna `monto` entera vacía—, que es un motivo
+    # distinto y una vía distinta.
+    pendientes = await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)
+    assert [r for r in pendientes if RISK_REF_KEY in (r.row_data or {})] == []
     assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_DISMISSED)) == 0
+    # Y la relectura pudo guardarlas: `source="reread"` no es un valor válido de
+    # la columna, así que capturar durante una relectura reventaba la CHECK y se
+    # llevaba puesta la transacción entera del apply.
+    assert len(pendientes) == 2
+    assert {r.source for r in pendientes} == {"reanalysis"}
+    assert all("sin monto" in (r.context_label or "").lower() for r in pendientes)
     assert file.ingestion_version == original_version
     assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
     assert file.reread_summary is not None
