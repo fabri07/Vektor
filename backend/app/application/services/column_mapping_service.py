@@ -61,6 +61,13 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "product_name": "Nombre del producto",
         "sku": "Código (SKU)",
         "barcode": "Código de barras (EAN/UPC)",
+        # F-H6.b: identidad de la OPERACIÓN, no del producto. Es lo que permite
+        # afirmar que varias filas pertenecen al mismo remito y, por lo tanto,
+        # que comparten un envío. Sin esto no se puede agrupar nada.
+        "invoice_number": "Número de comprobante / factura",
+        # Costo compartido de la operación. Se cobra UNA vez por comprobante:
+        # una planilla repite el mismo flete en cada línea del remito.
+        "shipping_cost": "Envío / flete",
         # F7a: campos de referencia al proveedor (aditivo, ver nota de sale arriba).
         # Ver la nota de los campos de cliente: mismo criterio de agrupación.
         "supplier_cuil": "Proveedor — CUIL",
@@ -267,6 +274,21 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "p_costo",
         },
         "quantity": {"cantidad", "qty", "unidades", "cant", "items", "unidad"},
+        # F-H6.b. "numero" y "comprobante" a secas quedan fuera: en un libro de
+        # compras "número" puede ser el de orden de la fila.
+        "invoice_number": {
+            "numero_comprobante",
+            "nro_comprobante",
+            "comprobante_numero",
+            "numero_factura",
+            "nro_factura",
+            "factura_numero",
+            "n_factura",
+            "remito",
+            "nro_remito",
+            "numero_remito",
+        },
+        "shipping_cost": {"envio", "flete", "shipping", "costo_envio", "gastos_envio"},
         # Deliberadamente SIN "descripcion", "detalle", "concepto" ni "nombre":
         # los tres primeros ya son de `notes`/`category` con la misma longitud
         # (empate → orden del dict), y un "nombre" suelto en una planilla de

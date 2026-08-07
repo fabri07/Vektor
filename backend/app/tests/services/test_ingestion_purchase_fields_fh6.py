@@ -262,3 +262,137 @@ class TestElMontoDeUnaCompraTambienSeCalcula:
         assert counts["gastos"] == 1
         # 1200 × 10, no 1200 leído como total de la línea.
         assert (await _gasto(db_session, sample_tenant)).amount == Decimal("12000.00")
+
+
+# ── F-H6.b: el envío de un remito se cobra una vez ──────────────────────────
+
+_HEADERS_ENVIO = ["fecha", "articulo", "cantidad", "precio_unitario", "comprobante", "envio"]
+_MAPEO_ENVIO = {
+    "fecha": "expense_date",
+    "articulo": "product_name",
+    "cantidad": "quantity",
+    "precio_unitario": "unit_price",
+    "comprobante": "invoice_number",
+    "envio": "shipping_cost",
+    "proveedor": "supplier_name",
+}
+
+
+def _linea_remito(
+    articulo: str,
+    *,
+    comprobante: str = "A-0001-12345",
+    envio: str = "2000",
+) -> dict[str, Any]:
+    return {
+        "fecha": "2024-03-05",
+        "articulo": articulo,
+        "cantidad": "1",
+        "precio_unitario": "1000",
+        "comprobante": comprobante,
+        "envio": envio,
+        "proveedor": "Distribuidora Sur",
+    }
+
+
+async def _logistica(db: AsyncSession, tenant: Tenant) -> list[ExpenseEntry]:
+    filas = (
+        (
+            await db.execute(
+                select(ExpenseEntry).where(
+                    ExpenseEntry.tenant_id == tenant.tenant_id,
+                    ExpenseEntry.category == "LOGISTICS",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(filas)
+
+
+@pytest.mark.asyncio
+class TestElEnvioSeCobraUnaVez:
+    async def test_diez_lineas_del_mismo_remito_son_un_solo_envio(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El caso que motiva la fase: $2.000 de flete, no $20.000."""
+        filas = [_linea_remito(f"Articulo {i}") for i in range(10)]
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+
+        counts = await _importar(db_session, sample_tenant, filas, headers, _MAPEO_ENVIO)
+
+        envios = await _logistica(db_session, sample_tenant)
+        assert len(envios) == 1
+        assert envios[0].amount == Decimal("2000.00")
+        assert envios[0].expense_type == "OPEX"
+        assert counts["envios"] == 1
+        assert counts["envios_repetidos_colapsados"] == 1
+
+    async def test_dos_remitos_son_dos_envios(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        filas = [
+            _linea_remito("Vela", comprobante="A-0001-11111", envio="2000"),
+            _linea_remito("Sahumerio", comprobante="A-0001-11111", envio="2000"),
+            _linea_remito("Difusor", comprobante="A-0001-22222", envio="3500"),
+        ]
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+
+        await _importar(db_session, sample_tenant, filas, headers, _MAPEO_ENVIO)
+
+        envios = await _logistica(db_session, sample_tenant)
+        assert sorted(e.amount for e in envios) == [Decimal("2000.00"), Decimal("3500.00")]
+
+    async def test_sin_comprobante_no_se_cobra_y_se_reporta(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Regla no-invention: sin identidad, un 2.000 repetido diez veces es
+        indistinguible de diez envíos de 2.000."""
+        filas = [_linea_remito(f"Articulo {i}") for i in range(10)]
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+        mapeo = {k: v for k, v in _MAPEO_ENVIO.items() if k != "comprobante"}
+
+        counts = await _importar(db_session, sample_tenant, filas, headers, mapeo)
+
+        assert await _logistica(db_session, sample_tenant) == []
+        assert counts["envios_sin_comprobante"] == 10
+        # Las compras en sí entran igual: el envío no bloquea el resto de la hoja.
+        assert counts["gastos"] == 10
+
+    async def test_reconfirmar_no_cobra_el_envio_dos_veces(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """La huella del cargo vive en su propio namespace: la clave es el
+        comprobante + la cifra, no una fila arbitraria del grupo."""
+        import uuid as _uuid
+
+        from app.persistence.models.file import UploadedFile
+
+        subido = UploadedFile(
+            id=_uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            original_filename="compras.xlsx",
+            s3_key="test/compras.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="ingestion",
+        )
+        db_session.add(subido)
+        await db_session.flush()
+
+        filas = [_linea_remito("Vela"), _linea_remito("Sahumerio")]
+        headers = [*_HEADERS_ENVIO, "proveedor"]
+        for _ in range(2):
+            await insert_confirmed_data(
+                db_session,
+                sample_tenant.tenant_id,
+                _summary(filas, headers),
+                {"gastos": True},
+                context_mappings={_CTX: _MAPEO_ENVIO},
+                context_confirmed={_CTX: True},
+                uploaded_file_id=subido.id,
+            )
+            await db_session.flush()
+
+        assert len(await _logistica(db_session, sample_tenant)) == 1

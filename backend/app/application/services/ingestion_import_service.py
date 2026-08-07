@@ -72,6 +72,7 @@ from app.domain.line_amount import (
     resolve_line_amount,
 )
 from app.domain.product_categories import normalize_product_category
+from app.domain.purchase_shipping import ShippingLine, plan_shipping_charges
 from app.domain.text_norm import (
     normalize_barcode,
     normalize_brand,
@@ -4840,6 +4841,132 @@ async def _insert_multisheet_data(
         counts["ventas"] += 1
         return True
 
+    async def _cobrar_envios_de_la_hoja(
+        ctx_id: str | None,
+        rows: list[dict[str, Any]],
+        cols: dict[str, str],
+    ) -> None:
+        """F-H6.b: crea UN gasto de logística por envío declarado en la hoja.
+
+        Una planilla de compras repite el mismo flete en cada línea del remito;
+        importarlo fila por fila multiplica el costo de logística por la cantidad
+        de artículos. La agrupación es por comprobante —proveedor + número—, que
+        es lo único que permite AFIRMAR que dos filas comparten un envío.
+
+        Sin esa identidad no se cobra nada y se reporta: un 2.000 repetido diez
+        veces es indistinguible de diez envíos de 2.000, y elegir uno de los dos
+        sería inventar un dato contable (regla no-invention).
+
+        El gasto es OPEX ``LOGISTICS``, sin producto ni stock — mismo tratamiento
+        que ya le da el remito manual (``supplier_receipt``), para que el mismo
+        hecho de negocio no quede clasificado de dos formas según por dónde entró.
+        """
+        _envio_col = cols.get("shipping_cost")
+        if not _envio_col:
+            return
+        _comp_col = cols.get("invoice_number")
+        _prov_col = cols.get("supplier_name")
+
+        lineas: list[ShippingLine] = []
+        for _idx, _row in enumerate(rows):
+            _monto = _parse_amount(_row.get(_envio_col))
+            if _monto is None:
+                continue
+            lineas.append(
+                ShippingLine(
+                    row_index=_idx,
+                    # Se normalizan acá porque la clave de agrupación tiene que ser
+                    # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
+                    # el mismo comprobante.
+                    supplier=(_clean_str(_row.get(_prov_col), 199) or "").strip().lower()
+                    if _prov_col
+                    else "",
+                    invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
+                    if _comp_col
+                    else "",
+                    amount=_monto,
+                )
+            )
+        if not lineas:
+            return
+
+        plan = plan_shipping_charges(lineas)
+        if plan.sin_identidad:
+            counts["envios_sin_comprobante"] = counts.get("envios_sin_comprobante", 0) + len(
+                plan.sin_identidad
+            )
+        if plan.cifras_distintas:
+            counts["envios_cifras_distintas"] = counts.get(
+                "envios_cifras_distintas", 0
+            ) + len(plan.cifras_distintas)
+
+        for _cargo in plan.charges:
+            # Idempotencia con namespace propio: la clave es el CARGO (comprobante
+            # + cifra), no la fila. Re-confirmar el archivo no puede volver a
+            # cobrar el mismo flete, y usar el ancla de la fila lo ataría a una
+            # línea arbitraria del grupo.
+            _anchor = (
+                _import_row_anchor(
+                    tenant_id,
+                    uploaded_file_id,
+                    f"envio:{ctx_id or ''}:{_cargo.invoice}",
+                    int(_cargo.amount * 100),
+                )
+                if uploaded_file_id is not None
+                else None
+            )
+            if _anchor is not None and await _import_row_seen(
+                session, tenant_id, _anchor, seen_fp
+            ):
+                continue
+
+            _fila = rows[_cargo.row_indexes[0]]
+            _raw_fecha = _val(
+                _fila, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS
+            )
+            _fecha = _parse_date(_raw_fecha) if _raw_fecha is not None else None
+            if _fecha is None:
+                # Sin fecha no se inventa "hoy" (invariante 2d). El envío queda sin
+                # cobrar y se cuenta: el resto de la hoja entra igual.
+                counts["envios_sin_fecha"] = counts.get("envios_sin_fecha", 0) + 1
+                continue
+
+            _sup_id: uuid.UUID | None = None
+            _sup_nombre = _clean_str(_fila.get(_prov_col), 199) if _prov_col else None
+            if _sup_nombre and _supplier_ref_mode != "link_only":
+                _sup_id, _sup_nombre = await _resolve_or_create_supplier(
+                    session,
+                    tenant_id,
+                    _sup_nombre,
+                    _supplier_index,
+                    counts.setdefault("proveedores_creados_ids", []),
+                )
+
+            session.add(
+                ExpenseEntry(
+                    tenant_id=tenant_id,
+                    amount=_cargo.amount.quantize(Decimal("0.01")),
+                    category="LOGISTICS",
+                    expense_type="OPEX",
+                    transaction_date=_fecha,
+                    description=f"Envío — comprobante {_cargo.invoice}"[:500],
+                    is_recurring=False,
+                    payment_method="transfer",
+                    provenance="REAL",
+                    supplier_id=_sup_id,
+                    supplier_name=_sup_nombre,
+                    product_id=None,
+                    source_upload_id=uploaded_file_id,
+                )
+            )
+            counts["envios"] = counts.get("envios", 0) + 1
+            if _cargo.repetido_en > 1:
+                counts["envios_repetidos_colapsados"] = (
+                    counts.get("envios_repetidos_colapsados", 0) + 1
+                )
+            if _anchor is not None:
+                await _register_import_row_fingerprint(session, tenant_id, _anchor, seen_fp)
+
     async def _add_expense(
         row: dict[str, Any],
         cols: dict[str, str],
@@ -5828,6 +5955,13 @@ async def _insert_multisheet_data(
                     )
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
+
+            # F-H6.b: el envío de un comprobante se cobra UNA vez, después de las
+            # líneas. Va acá y no por fila porque la decisión necesita ver la hoja
+            # entera: la misma cifra repetida en diez filas del mismo remito es un
+            # flete, no diez.
+            if entity == "expense":
+                await _cobrar_envios_de_la_hoja(ctx_id, rows, cols)
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
         if confirmed_fields.get("ventas"):

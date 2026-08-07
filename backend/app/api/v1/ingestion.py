@@ -2485,6 +2485,32 @@ async def confirm_file(
             "quedó registrado en cada fila. Revisalas: suele ser un descuento, un "
             "impuesto o una cantidad que mide otra cosa."
         )
+    # F-H6.b: el envío de un comprobante se cobra una vez. Los tres avisos dicen
+    # cosas distintas y por eso no se resumen en uno.
+    if counts.get("envios_repetidos_colapsados"):
+        warnings.append(
+            f"{counts['envios_repetidos_colapsados']} envío(s) figuraban repetidos "
+            "en varias líneas del mismo comprobante: se registró uno solo por "
+            "comprobante, no uno por línea."
+        )
+    if counts.get("envios_sin_comprobante"):
+        warnings.append(
+            f"{counts['envios_sin_comprobante']} fila(s) traían un costo de envío "
+            "pero no el número de comprobante, así que no se registró: sin ese dato "
+            "no se puede saber si es un envío repetido en varias líneas o varios "
+            "envíos distintos. Mapeá la columna del comprobante y volvé a importar."
+        )
+    if counts.get("envios_cifras_distintas"):
+        warnings.append(
+            f"{counts['envios_cifras_distintas']} comprobante(s) traían más de una "
+            "cifra de envío. Se registraron todas —pueden ser flete y seguro—, pero "
+            "revisalas por si la planilla mezcla el total con el prorrateo."
+        )
+    if counts.get("envios_sin_fecha"):
+        warnings.append(
+            f"{counts['envios_sin_fecha']} envío(s) no se registraron porque su fila "
+            "no tiene una fecha reconocible."
+        )
     if counts.get("filas_sin_monto"):
         warnings.append(
             f"{counts['filas_sin_monto']} fila(s) sin monto quedaron en «Otros»: no "
