@@ -51,6 +51,25 @@ SHIPPING_FALLBACKS: frozenset[str] = frozenset(
 SIN_COMPROBANTE = ""
 
 
+def identidad_de_comprobante(supplier: str, invoice: str) -> ComprobanteKey | None:
+    """La clave del comprobante, o ``None`` si el archivo no permite formarla.
+
+    **Hacen falta los dos.** El número solo no alcanza: dos proveedores emiten
+    «Factura 0001» el mismo mes, y agruparlos cobraría un flete y perdería el
+    otro. El proveedor solo tampoco: sin número, dos compras distintas al mismo
+    proveedor son indistinguibles.
+
+    Existe como función y no como un ``if`` adentro del planificador porque hay
+    tres lugares que tienen que responder LO MISMO: acá se agrupa, la validación
+    previa al lease decide si ofrecer el reparto, y el preview dibuja los grupos.
+    Si divergen, la pantalla ofrece repartir un costo entre líneas que el
+    importador después no va a agrupar — y el usuario ve un reparto que no ocurrió.
+    """
+    if not supplier or not invoice:
+        return None
+    return (supplier, invoice)
+
+
 @dataclass(frozen=True)
 class ShippingLine:
     """El costo de envío que declara UNA fila del archivo."""
@@ -124,6 +143,12 @@ def plan_shipping_charges(
     El orden de `charges` sigue el de aparición en el archivo: dos corridas sobre
     el mismo archivo tienen que producir los mismos gastos, en el mismo orden.
     """
+    if sin_comprobante is not None and sin_comprobante not in SHIPPING_FALLBACKS:
+        # Sin esto un valor desconocido caía al `else` y se comportaba como "no
+        # cobrar": un typo en la decisión del usuario borraba el flete en silencio
+        # y el import lo reportaba como si el archivo no tuviera comprobante.
+        raise ValueError(f"sin_comprobante desconocido: {sin_comprobante!r}")
+
     plan = ShippingPlan()
     por_comprobante: dict[ComprobanteKey, dict[Decimal, ShippingCharge]] = {}
     orden: list[tuple[ComprobanteKey, Decimal]] = []
@@ -133,7 +158,7 @@ def plan_shipping_charges(
             # Una celda vacía o en cero no es un envío. No se reporta como
             # problema: la mayoría de las filas de un libro no traen flete.
             continue
-        if not line.supplier or not line.invoice:
+        if identidad_de_comprobante(line.supplier, line.invoice) is None:
             if sin_comprobante == SIN_COMPROBANTE_UNA_POR_FILA:
                 # Cada fila, su cargo. La clave lleva el índice para que dos filas
                 # con la misma cifra NO colapsen: es justo lo que el usuario dijo.
@@ -185,4 +210,50 @@ def plan_shipping_charges(
         for k, cifras in por_comprobante.items()
         if len(cifras) > 1 and k != (SIN_COMPROBANTE, SIN_COMPROBANTE)
     ]
+    return plan
+
+
+def plan_line_shipping(lines: list[ShippingLine]) -> ShippingPlan:
+    """Agrupa los envíos que el archivo YA asignó a cada línea. Regla: se SUMAN.
+
+    Es la hermana de ``plan_shipping_charges`` y la diferencia entre las dos es
+    exactamente la razón de que sean dos targets distintos en el catálogo:
+
+    - «Envío del comprobante» trae la MISMA cifra repetida porque la planilla
+      arrastra un flete único. Repetición → **se colapsa**.
+    - «Envío asignado a esta línea» trae el pedazo que le toca a cada artículo.
+      Dos líneas de $200 son $400 de flete. → **se suma**.
+
+    Por eso este planificador **no necesita decisión del usuario ni comprobante**:
+    sumar valores que cada fila declara como propios nunca es ambiguo, que es lo
+    único que hacía falta preguntar en el otro caso. Las filas sin comprobante se
+    agrupan en un cargo de la hoja en vez de quedar sin cobrar — no hay nada que
+    deducir, sólo un total.
+
+    ``repetido_en`` acá significa **cuántas líneas aportaron**, no cuántas veces
+    figuraba repetida una cifra: el aviso de «se colapsó una repetición» no
+    corresponde a este camino y el importador no lo emite.
+    """
+    plan = ShippingPlan()
+    por_comprobante: dict[ComprobanteKey, ShippingCharge] = {}
+    orden: list[ComprobanteKey] = []
+
+    for line in lines:
+        if line.amount <= 0:
+            continue
+        key = identidad_de_comprobante(line.supplier, line.invoice) or (
+            SIN_COMPROBANTE,
+            SIN_COMPROBANTE,
+        )
+        cargo = por_comprobante.get(key)
+        if cargo is None:
+            cargo = ShippingCharge(
+                supplier=key[0], invoice=key[1], amount=Decimal("0")
+            )
+            por_comprobante[key] = cargo
+            orden.append(key)
+        cargo.amount += line.amount
+        cargo.row_indexes.append(line.row_index)
+
+    plan.charges = [por_comprobante[key] for key in orden]
     return plan

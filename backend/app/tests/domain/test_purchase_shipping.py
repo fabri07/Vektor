@@ -9,10 +9,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from app.domain.purchase_shipping import (
     SIN_COMPROBANTE_UNA_POR_FILA,
     SIN_COMPROBANTE_UNA_POR_HOJA,
     ShippingLine,
+    identidad_de_comprobante,
+    plan_line_shipping,
     plan_shipping_charges,
 )
 
@@ -225,3 +229,93 @@ class TestLasDosSalidasSinComprobante:
 
         assert len(plan.charges) == 1
         assert plan.total == Decimal("2000")
+
+
+class TestLaIdentidadDelComprobanteNecesitaLosDos:
+    def test_proveedor_y_numero_forman_la_clave(self) -> None:
+        assert identidad_de_comprobante(_PROV, _COMP) == (_PROV, _COMP)
+
+    def test_sin_numero_no_hay_identidad(self) -> None:
+        assert identidad_de_comprobante(_PROV, "") is None
+
+    def test_sin_proveedor_tampoco(self) -> None:
+        # El número solo no alcanza: dos proveedores emiten «Factura 0001» el
+        # mismo mes, y agrupar por número cobraría un flete y perdería el otro.
+        assert identidad_de_comprobante("", _COMP) is None
+
+    def test_es_la_misma_regla_que_aplica_el_planificador(self) -> None:
+        # Control de la razón por la que la función existe: si el planificador
+        # tuviera su propio `if`, este test seguiría verde mientras las dos
+        # respuestas divergen.
+        plan = plan_shipping_charges([_linea(0, "2000", supplier="")])
+
+        assert plan.charges == []
+        assert plan.sin_identidad == [0]
+
+
+class TestUnaDecisionInvalidaNoBorraElFleteEnSilencio:
+    def test_un_valor_desconocido_levanta(self) -> None:
+        with pytest.raises(ValueError, match="sin_comprobante"):
+            plan_shipping_charges([_linea(0, "2000")], sin_comprobante="lo_que_sea")
+
+    def test_none_sigue_siendo_valido(self) -> None:
+        # `None` es "el usuario no decidió", que es distinto de "decidió mal".
+        plan = plan_shipping_charges([_linea(0, "2000")], sin_comprobante=None)
+
+        assert plan.total == Decimal("2000")
+
+
+class TestElFleteAsignadoALaLineaSeSuma:
+    def test_dos_lineas_del_mismo_remito_suman_su_flete(self) -> None:
+        # La diferencia con `plan_shipping_charges`, en un test: acá 200 y 200 son
+        # 400, porque cada fila declara el pedazo que le tocó.
+        plan = plan_line_shipping([_linea(0, "200"), _linea(1, "200")])
+
+        assert len(plan.charges) == 1
+        assert plan.total == Decimal("400")
+        assert plan.charges[0].row_indexes == [0, 1]
+
+    def test_la_repeticion_no_se_colapsa(self) -> None:
+        # El mismo input que en el otro planificador da UN cargo de 2000; acá da
+        # 20.000, y es correcto en los dos casos porque son columnas distintas.
+        colapsado = plan_shipping_charges([_linea(i, "2000") for i in range(10)])
+        sumado = plan_line_shipping([_linea(i, "2000") for i in range(10)])
+
+        assert colapsado.total == Decimal("2000")
+        assert sumado.total == Decimal("20000")
+
+    def test_dos_comprobantes_no_se_mezclan(self) -> None:
+        plan = plan_line_shipping(
+            [
+                _linea(0, "100"),
+                _linea(1, "50", invoice="b-0002"),
+            ]
+        )
+
+        assert len(plan.charges) == 2
+        assert {c.amount for c in plan.charges} == {Decimal("100"), Decimal("50")}
+
+    def test_sin_comprobante_no_necesita_decision_del_usuario(self) -> None:
+        # Acá no hay nada que deducir: cada fila declara SU flete, así que el total
+        # de la hoja es un dato, no una interpretación. Por eso no hay `sin_identidad`.
+        plan = plan_line_shipping(
+            [
+                _linea(0, "200", supplier="", invoice=""),
+                _linea(1, "300", supplier="", invoice=""),
+            ]
+        )
+
+        assert plan.total == Decimal("500")
+        assert plan.sin_identidad == []
+
+    def test_cero_y_negativo_se_ignoran(self) -> None:
+        plan = plan_line_shipping([_linea(0, "0"), _linea(1, "-5"), _linea(2, "100")])
+
+        assert plan.total == Decimal("100")
+
+    def test_el_orden_sigue_al_archivo(self) -> None:
+        plan = plan_line_shipping(
+            [_linea(0, "10", invoice="b-0002"), _linea(1, "20", invoice="a-0001")]
+        )
+
+        assert [c.invoice for c in plan.charges] == ["b-0002", "a-0001"]
