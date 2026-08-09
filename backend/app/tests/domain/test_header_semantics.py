@@ -178,3 +178,43 @@ class TestElConceptoNoDependeDeLaHoja:
     def test_un_costo_no_es_un_precio(self) -> None:
         assert _leer("Precio de compra", "product")[0] == "precio"
         assert _leer("Costo unitario", "product") == ("costo", {"unitario"}, ())
+
+
+class TestUnaMagnitudDeDineroNoRivalizaConLoQueMide:
+    """«Costo envío» es un envío; «Precio costo» es un costo.
+
+    Antes las dos palabras quedaban como núcleos rivales y el encabezado se
+    volvía indecidible — y son la familia de encabezados del incidente ASTERIA,
+    donde un costo terminaba en el campo de un precio.
+    """
+
+    def test_una_magnitud_junto_a_otra_cosa_solo_dice_cuanto_de_esa_cosa(self) -> None:
+        a = analyze_header("costo_envio")
+        assert a.concept == "envio"
+        assert a.rivals == ()
+        assert "de_costo" in a.qualifiers
+
+    def test_entre_magnitudes_gana_la_mas_especifica(self) -> None:
+        a = analyze_header("precio_costo")
+        assert a.concept == "costo", "«Precio costo» nombra el costo, no el precio"
+        assert "de_precio" in a.qualifiers
+
+    def test_una_magnitud_sola_sigue_siendo_el_nucleo(self) -> None:
+        assert analyze_header("precio").concept == "precio"
+        assert analyze_header("costo").concept == "costo"
+
+
+class TestUnDebilNucleoConservaSuPropioRol:
+    """«Compra» a secas ya dice de qué operación habla. Sin eso perdía su rol al
+    quedarse sola y la columna terminaba sin regla que la resolviera."""
+
+    def test_el_rol_sobrevive_cuando_la_palabra_esta_sola(self) -> None:
+        assert "de_compra" in analyze_header("compra").qualifiers
+        assert "de_venta" in analyze_header("venta").qualifiers
+
+    def test_pero_una_granularidad_no_se_arrastra(self) -> None:
+        """`total` también es débil, y arrastrar su `por_comprobante` convertiría
+        la columna «Total» —el encabezado más común que existe— en una duda."""
+        a = analyze_header("total")
+        assert a.concept == "monto"
+        assert "por_comprobante" not in a.qualifiers

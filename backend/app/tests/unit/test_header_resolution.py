@@ -174,3 +174,43 @@ class TestLaTablaEsCoherenteConElCatalogo:
                 for regla in reglas:
                     if regla.opciones:
                         assert len(regla.opciones) >= 2, f"{entidad}.{concepto}"
+
+
+class TestLosPadronesDeMaestros:
+    """Las dos entidades que la batería original no cubría — el hueco que dejó
+    pasar una rama que rompía el import de clientes y el de proveedores.
+
+    Se afirma sobre `read_header`, no sobre la cadena: si sólo se probara el
+    resultado final, fuzzy rescataría estos encabezados y el test seguiría verde
+    con la tabla vacía.
+    """
+
+    def test_cliente_en_un_padron_de_clientes_es_el_nombre(self) -> None:
+        r = _leer("Cliente", "customer")
+        assert r.outcome == "unico"
+        assert r.target == "name"
+
+    def test_pero_tipo_cliente_es_su_clasificacion(self) -> None:
+        assert _leer("Tipo cliente", "customer").target == "customer_type"
+
+    def test_proveedor_en_un_padron_de_proveedores_es_el_nombre(self) -> None:
+        r = _leer("Proveedor", "supplier")
+        assert r.outcome == "unico"
+        assert r.target == "name"
+
+    def test_el_iva_de_una_persona_es_su_condicion_fiscal_no_un_monto(self) -> None:
+        for h in ("IVA", "Condición IVA", "Situación IVA"):
+            assert _leer(h, "customer").target == "iva_condition", h
+
+    def test_la_condicion_de_pago_de_un_proveedor_es_el_metodo(self) -> None:
+        assert _leer("Condición de pago", "supplier").target == "payment_method"
+
+
+class TestCompraYVentaNombranCualDeLosTresPrecios:
+    def test_en_un_catalogo_compra_es_el_costo_y_venta_el_precio(self) -> None:
+        assert _leer("Compra", "product").target == "unit_cost_ars"
+        assert _leer("Venta", "product").target == "sale_price_ars"
+
+    def test_un_monto_pelado_no_dice_cual_de_los_tres_es(self) -> None:
+        """Adivinarlo es el bug que F10 cerró: no hay regla, y está bien."""
+        assert _leer("Importe", "product").target is None

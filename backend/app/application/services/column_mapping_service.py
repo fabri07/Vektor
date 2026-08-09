@@ -536,6 +536,11 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "fecha": (_r(target="transaction_date"),),
         "monto": (
             _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
+            _r(
+                "de_pago",
+                opciones=("amount", "payment_method"),
+                duda="¿es cuánto se pagó, o con qué se pagó?",
+            ),
             _r(target="amount"),
         ),
         "precio": (
@@ -558,7 +563,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "telefono": (_r(target="customer_phone"),),
         "metodo_pago": (_r(target="payment_method"),),
         "nota": (_r(target="notes"),),
-        "descripcion": (_r(target="notes"),),
+        "descripcion": (_r(target="product_name"),),
     },
     "expense": {
         "fecha": (_r(target="expense_date"),),
@@ -573,6 +578,9 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         ),
         "costo": (
             _r("unitario", target="unit_price"),
+            # «Precio costo» es el costo POR UNIDAD, no el total de la línea: es
+            # como una planilla de compras nombra el costo unitario.
+            _r("de_precio", target="unit_price"),
             _r("de_producto", opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
             _r("final", opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
             _r(target="amount"),
@@ -614,6 +622,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
             _r("de_compra", target="unit_cost_ars"),
             _r("de_venta", target="sale_price_ars"),
             _r("unitario", target="unit_cost_ars"),
+            _r("final", target="sale_price_ars"),
             _r(
                 opciones=("sale_price_ars", "unit_cost_ars", "list_price_ars"),
                 duda=(
@@ -624,6 +633,14 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
             ),
         ),
         "costo": (_r(target="unit_cost_ars"),),
+        # «Compra» y «Venta» a secas, en un catálogo, dicen cuál de los tres
+        # precios es la columna. Sin calificador NO hay regla: un «Monto» pelado
+        # en un catálogo no dice cuál de los tres es, y adivinarlo es el bug que
+        # F10 cerró.
+        "monto": (
+            _r("de_compra", target="unit_cost_ars"),
+            _r("de_venta", target="sale_price_ars"),
+        ),
         "nombre": (_r(target="name"),),
         "producto": (_r(target="name"),),
         "sku": (_r(target="sku"),),
@@ -646,6 +663,16 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         ),
     },
     "customer": {
+        # Una columna «Cliente» en un padrón de clientes ES el nombre; «Tipo
+        # cliente» es su clasificación. Sin estas dos reglas el encabezado más
+        # canónico del import de clientes no mapeaba, y `name` es requerido.
+        "cliente": (
+            _r("clasificador", target="customer_type"),
+            _r(target="name"),
+        ),
+        # «IVA», «Condición IVA», «Situación IVA»: acá el impuesto no es un monto,
+        # es la categoría fiscal de la persona.
+        "impuesto": (_r(target="iva_condition"),),
         "nombre": (_r(target="name"),),
         "apellido": (_r(target="last_name"),),
         "dni": (_r(target="dni"),),
@@ -660,6 +687,9 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "nota": (_r(target="notes"),),
     },
     "supplier": {
+        # Espejo de `cliente` en customer: «Proveedor» en un padrón de
+        # proveedores es el nombre, y `name` es requerido.
+        "proveedor": (_r(target="name"),),
         "nombre": (_r(target="name"),),
         "apellido": (_r(target="last_name"),),
         "cuil": (_r(target="cuil"),),

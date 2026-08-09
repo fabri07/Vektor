@@ -74,7 +74,16 @@ CONCEPTOS: dict[str, str] = {
     "sku": "sku",
     "codigo": "codigo",
     "cod": "codigo",
+    # `id` a secas nombra un identificador: «ID producto» es el código, no el
+    # nombre. Sin esto `producto` quedaba de núcleo y la columna entraba al campo
+    # NOMBRE, que es lo contrario de lo que dice el encabezado.
+    "id": "codigo",
     "barras": "barcode",
+    # Singular además del plural: una planilla escribe «Cod. barra» tan seguido
+    # como «Código de barras», y sin esto la columna entraba al campo SKU, que es
+    # identidad de producto (F2/F5).
+    "barra": "barcode",
+    "whatsapp": "telefono",
     "ean": "barcode",
     "upc": "barcode",
     "barcode": "barcode",
@@ -108,6 +117,8 @@ CONCEPTOS_BIGRAMA: dict[tuple[str, str], str] = {
     ("metodo", "pago"): "metodo_pago",
     ("medio", "pago"): "metodo_pago",
     ("tipo", "pago"): "metodo_pago",
+    ("condicion", "pago"): "metodo_pago",
+    ("forma", "cobro"): "metodo_pago",
     ("codigo", "postal"): "codigo_postal",
     ("razon", "social"): "nombre",
     ("codigo", "producto"): "sku",
@@ -187,7 +198,35 @@ CALIFICADORES: dict[str, str] = {
     "nro": "identificador",
     "numero": "identificador",
     "n": "identificador",
+    # «Tipo cliente» no es un cliente: es su clasificación. Solo califica.
+    "tipo": "clasificador",
 }
+
+#: Conceptos que nombran una MAGNITUD de dinero. Cuando comparten encabezado con
+#: un concepto que no lo es, la magnitud sólo dice CUÁNTO de esa otra cosa:
+#: «Costo envío» es un envío, no un costo suelto. Y entre magnitudes gana la más
+#: específica — «Precio costo» es el costo.
+#:
+#: Sin esta regla las dos quedaban como núcleos rivales y el encabezado se volvía
+#: indecidible: `costo_envio` perdía el flete y `precio_costo` perdía el costo,
+#: que es la familia de encabezados del incidente ASTERIA.
+MAGNITUDES: frozenset[str] = frozenset({"precio", "costo"})
+
+#: Calificadores de un débil que siguen valiendo cuando ESE débil es el núcleo.
+#:
+#: «Compra» a secas ya dice de qué operación habla; en un catálogo eso alcanza
+#: para saber cuál de los tres precios es. Sin esto la palabra perdía su propio
+#: rol al quedarse sola y la columna terminaba sin regla.
+#:
+#: Sólo los roles, nunca las granularidades: `total` también es un débil, y
+#: arrastrar su `por_comprobante` convertiría la columna «Total» —el encabezado
+#: más común que existe— en una duda sobre el total del comprobante.
+ROLES_PROPIOS: frozenset[str] = frozenset(
+    {"de_compra", "de_venta", "de_gasto", "de_pago", "de_producto", "de_proveedor", "de_cliente"}
+)
+
+#: Cuánto manda cada magnitud cuando sólo hay magnitudes. Mayor gana.
+ESPECIFICIDAD: dict[str, int] = {"costo": 2, "precio": 1}
 
 #: Preposiciones que declaran INCLUSIÓN. El concepto que las sigue deja de ser
 #: núcleo: «Precio sin IVA» es un precio, no un impuesto.
@@ -286,8 +325,24 @@ def analyze_header(normalized: str, entity_type: str = "") -> HeaderAnalysis:
         generos = {ESPECIALIZA[c] for c in candidatos if c in ESPECIALIZA}
         if generos:
             candidatos = [c for c in candidatos if c not in generos] or candidatos
+        # R3-ter: una magnitud de dinero junto a otra cosa sólo dice cuánto de
+        # esa otra cosa; entre magnitudes gana la más específica. Ver MAGNITUDES.
+        if len(candidatos) > 1:
+            no_magnitud = [c for c in candidatos if c not in MAGNITUDES]
+            if no_magnitud:
+                cede = [c for c in candidatos if c in MAGNITUDES]
+            else:
+                ganador = max(candidatos, key=lambda c: ESPECIFICIDAD.get(c, 0))
+                no_magnitud, cede = [ganador], [c for c in candidatos if c != ganador]
+            if cede:
+                calificadores.update(f"de_{c}" for c in cede)
+                candidatos = no_magnitud
     else:
         # Sin fuertes, el primer débil NO-entidad es el núcleo y el resto califica.
+        # El núcleo conserva su propio rol si lo tiene (ver ROLES_PROPIOS).
+        calificadores.update(
+            DEBILES[t][1] for t in debiles if DEBILES[t][1] in ROLES_PROPIOS
+        )
         candidatos = list(dict.fromkeys(DEBILES[t][0] for t in debiles))
         if len(candidatos) > 1:
             # Una entidad nunca es el núcleo si hay otro candidato: «Total factura»
