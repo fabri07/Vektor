@@ -81,6 +81,13 @@ from app.tests.conftest import add_business_profile
 _SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
 
 
+@pytest.fixture(autouse=True)
+def _sin_broker(mock_score_trigger: Any) -> None:
+    """Sin broker en tests, el trigger de score post-import paga ~5s de
+    reintentos de kombu por llamada (fail-safe: el error se traga igual).
+    Mismo patrón que `test_reread_file.py`."""
+
+
 def _load_module() -> ModuleType:
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))

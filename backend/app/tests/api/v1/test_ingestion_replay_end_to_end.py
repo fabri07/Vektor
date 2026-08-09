@@ -45,6 +45,14 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _PRODUCTO = "Vela aromatica 200g"
 
+
+@pytest.fixture(autouse=True)
+def _sin_broker(mock_score_trigger: Any) -> None:
+    """Sin broker en tests, cada confirm/replay/DELETE pagaba ~5s de reintentos
+    de kombu (`trigger_score_recalculation.delay`). El servicio traga el error
+    (fail-safe): ningún assert dependía del encolado. Con el mock, el mismo
+    camino e2e corre en segundos en vez de ~58s."""
+
 _CATALOGO = "sheet:Catalogo"
 _COMPRAS = "sheet:Compras"
 _VENTAS = "sheet:Ventas"

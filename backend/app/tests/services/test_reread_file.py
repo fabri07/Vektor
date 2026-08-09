@@ -55,6 +55,19 @@ from app.persistence.models.unclassified_record import (
 )
 from app.tests.conftest import add_business_profile
 
+
+@pytest.fixture(autouse=True)
+def _sin_broker(mock_score_trigger: Any) -> None:
+    """El reread encola el recálculo de score (`_trigger_score` → `.delay()`).
+
+    Sin broker en tests, kombu reintenta la conexión con backoff: ~4,75s de
+    `time.sleep` POR llamada, ~38s en los tests que aplican y deshacen varias
+    veces (medido con cProfile: 76 sleeps = 38,2s de los ~40s del test). El
+    servicio ya traga el error (fail-safe), así que ningún assert dependía del
+    encolado real. Mismo patrón que `test_file_deletion_end_to_end.py`.
+    """
+
+
 # CSV original (2 filas). El reread vuelve a leer ESTE contenido salvo cuando el
 # test pide una variante (fila extra).
 _CSV_BASE = (
