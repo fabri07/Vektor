@@ -164,6 +164,134 @@ async def test_sin_declarar_nada_el_default_sigue_siendo_apertura(
 
 
 @pytest.mark.asyncio
+async def test_informational_en_ventas_no_frena_la_apertura_ni_la_compra(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El modo de inventario es de la HOJA DE VENTAS, no del archivo (**V16**).
+
+    Un libro con catálogo + compras + ventas donde el usuario declara la hoja de
+    ventas `informational` NO puede leerse como "este archivo no toca stock": la
+    apertura y la compra aplican siempre — el eje gobierna las ventas. Y el
+    confirm no descuenta la venta bajo ningún modo (F-H3.c): el ledger queda con
+    apertura + compra y ningún movimiento `sale`.
+    """
+    fila_catalogo = {
+        "producto": "Vela aromática",
+        "cantidad": "10",
+        "costo": "1200",
+        "__context__": "sheet:catalogo",
+    }
+    fila_compra = {
+        "fecha": "2024-03-05",
+        "producto": "Vela aromática",
+        "cantidad": "5",
+        "monto": "6000",
+        "categoria": "mercaderia",
+        "__context__": "sheet:compras",
+    }
+    fila_venta = {
+        "fecha": "2024-03-10",
+        "producto": "Vela aromática",
+        "cantidad": "4",
+        "monto": "8400",
+        "__context__": "sheet:ventas",
+    }
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_producto": True,
+        "has_gasto": True,
+        "has_venta": True,
+        "stock_detectado": [fila_catalogo],
+        "gastos_detectados": [fila_compra],
+        "ventas_detectadas": [fila_venta],
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:catalogo",
+                "label": "catalogo",
+                "source_kind": "sheet",
+                "entity_type": "product",
+                "headers": ["producto", "cantidad", "costo"],
+                "fields": None,
+                "preview_rows": [fila_catalogo],
+                "row_count": 1,
+            },
+            {
+                "context_id": "sheet:compras",
+                "label": "compras",
+                "source_kind": "sheet",
+                "entity_type": "expense",
+                "headers": ["fecha", "producto", "cantidad", "monto", "categoria"],
+                "fields": None,
+                "preview_rows": [fila_compra],
+                "row_count": 1,
+            },
+            {
+                "context_id": "sheet:ventas",
+                "label": "ventas",
+                "source_kind": "sheet",
+                "entity_type": "sale",
+                "headers": ["fecha", "producto", "cantidad", "monto"],
+                "fields": None,
+                "preview_rows": [fila_venta],
+                "row_count": 1,
+            },
+        ],
+    }
+
+    await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"productos": True, "gastos": True, "ventas": True},
+        context_mappings={
+            "sheet:catalogo": _MAPEO,
+            "sheet:compras": {
+                "fecha": "expense_date",
+                "producto": "product_name",
+                "cantidad": "quantity",
+                "monto": "amount",
+                "categoria": "category",
+            },
+            "sheet:ventas": {
+                "fecha": "transaction_date",
+                "producto": "product_name",
+                "cantidad": "quantity",
+                "monto": "amount",
+            },
+        },
+        context_confirmed={
+            "sheet:catalogo": True,
+            "sheet:compras": True,
+            "sheet:ventas": True,
+        },
+        stock_treatment={"sheet:catalogo": "opening_balance"},
+        inventory_effect={"sheet:ventas": "informational"},
+    )
+    await db_session.flush()
+
+    producto = (
+        (await db_session.execute(select(Product).where(Product.name == "Vela aromática")))
+        .scalars()
+        .one()
+    )
+    # Apertura 10 + compra 5, y la venta NO descontó: 15, no 11.
+    assert int(producto.stock_units) == 15
+    movimientos = sorted(
+        (m.movement_type, int(m.qty))
+        for m in (await db_session.execute(select(InventoryMovement))).scalars()
+    )
+    assert movimientos == [("adjustment", 10), ("purchase", 5)]
+    # La venta igual entró a los libros: informational es "no toques stock",
+    # no "no importes la hoja".
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    ventas = (await db_session.execute(select(SaleEntry))).scalars().all()
+    assert len(ventas) == 1
+
+
+@pytest.mark.asyncio
 async def test_hoja_sin_declarar_cae_al_default_no_a_la_otra_hoja(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
