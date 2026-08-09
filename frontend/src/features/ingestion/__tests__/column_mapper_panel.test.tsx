@@ -1272,7 +1272,8 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
     await waitFor(() => {
       expect(screen.getAllByRole("button", { name: "Monto de venta" }).length).toBeGreaterThan(0);
     });
-    fireEvent.click(screen.getAllByRole("button", { name: "Monto de venta" })[0]);
+    const [primerCandidato] = screen.getAllByRole("button", { name: "Monto de venta" });
+    fireEvent.click(primerCandidato!);
 
     await waitFor(() => {
       const selects = screen.getAllByRole("combobox") as HTMLSelectElement[];
@@ -1318,5 +1319,205 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
       expect(screen.getAllByText("ColRara99").length).toBeGreaterThan(0);
     });
     expect(screen.queryByText(/¿es el precio/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * F-H6.c — que la decisión de costo LLEGUE al servicio.
+ *
+ * Los tests de `PurchaseCostChoice` prueban el componente y los de
+ * `ingestion_confirm_payload` prueban el cuerpo del POST. Falta el tramo del
+ * medio: que el panel arme el payload y se lo pase. Las mutaciones lo mostraron
+ * — sacar `costoPayload` de la llamada dejaba todo en verde.
+ */
+describe("ColumnMapperPanel — F-H6.c: la decisión de costo llega al confirm", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "gastos",
+        headers: ["Fecha", "Monto", "Descuento"],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-05"],
+        target_field: "expense_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["12000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Descuento",
+        normalized_column: "descuento",
+        sample_values: ["2000"],
+        target_field: "discount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+  });
+
+  test("el selector aparece porque la hoja mapea un descuento", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/ya incluye el descuento/i)).toBeInTheDocument();
+    });
+  });
+
+  test("declarar que el monto es bruto viaja en el confirm", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByRole("radio", { name: /El monto es el bruto/ })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /El monto es el bruto/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const decisiones = mockConfirmFile.mock.calls[0]?.[9];
+    expect(decisiones).toEqual([
+      { context_id: "", base: "monto_sin_ajustes", line_shipping: "gasto_aparte" },
+    ]);
+  });
+
+  test("sin tocar nada no se manda ninguna decisión", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/ya incluye el descuento/i)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // `undefined`, no una lista con los defaults: mandar lo que el backend ya
+    // aplica solo es ruido, y omitirlo deja claro en la traza que no hubo decisión.
+    expect(mockConfirmFile.mock.calls[0]?.[9]).toBeUndefined();
+  });
+});
+
+describe("ColumnMapperPanel — F-H6.c multi-hoja: sólo viaja lo que el usuario cambió", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "mixed",
+        mapping_contexts: [
+          {
+            context_id: "hoja1",
+            label: "Compras",
+            source_kind: "sheet",
+            entity_type: "expense",
+            headers: ["Fecha", "Monto", "Descuento"],
+            fields: null,
+            preview_rows: [{ Fecha: "2024-03-05", Monto: "12000", Descuento: "2000" }],
+            row_count: 1,
+          },
+        ],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-05"],
+        target_field: "expense_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["12000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+      {
+        source_column: "Descuento",
+        normalized_column: "descuento",
+        sample_values: ["2000"],
+        target_field: "discount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+    ]);
+  });
+
+  test("una hoja en su default no viaja en el payload", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/ya incluye el descuento/i)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // Mandar los defaults sería ruido: el backend ya los aplica, y omitir la hoja
+    // deja escrito en la traza que el usuario no decidió nada sobre su costo.
+    expect(mockConfirmFile.mock.calls[0]?.[9]).toEqual([]);
+  });
+
+  test("y sí viaja apenas se aparta de un default", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByRole("radio", { name: /El monto es el bruto/ })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /El monto es el bruto/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    expect(mockConfirmFile.mock.calls[0]?.[9]).toEqual([
+      { context_id: "hoja1", base: "monto_sin_ajustes", line_shipping: "gasto_aparte" },
+    ]);
+  });
+
+  test("volver al default después de haber elegido tampoco manda la hoja", async () => {
+    /**
+     * El caso que el filtro existe para cubrir. Una hoja que nunca se tocó no
+     * tiene entrada en el estado y no viaja por eso; una que se cambió y se
+     * volvió atrás SÍ la tiene, y sin el filtro viajaría declarando un default
+     * que el backend ya aplica solo. Arrepentirse tiene que dejar el archivo como
+     * si nunca se hubiera tocado.
+     */
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByRole("radio", { name: /El monto es el bruto/ })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /El monto es el bruto/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /El monto ya es el final/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    expect(mockConfirmFile.mock.calls[0]?.[9]).toEqual([]);
   });
 });

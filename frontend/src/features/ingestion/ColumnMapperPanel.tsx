@@ -23,12 +23,16 @@ import {
   type StockTreatment,
   type SheetInventoryEffect,
   type ShippingAction,
+  type PurchaseCostBase,
+  type PurchaseCostDecision,
+  type PurchaseLineShipping,
 } from "@/services/ingestion.service";
 import { Button } from "@/components/ui/Button";
 import { InventoryImpactPanel } from "./InventoryImpactPanel";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { InventoryEffectChoice } from "./InventoryEffectChoice";
 import { ShippingDecisionChoice } from "./ShippingDecisionChoice";
+import { PurchaseCostChoice } from "./PurchaseCostChoice";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
@@ -470,6 +474,8 @@ function SheetMapperSection({
   onEffectChange,
   shippingValue,
   onShippingChange,
+  costoValue,
+  onCostoChange,
 }: {
   fileId: string;
   context: MappingContext;
@@ -498,6 +504,11 @@ function SheetMapperSection({
   // `null` = todavía no eligió → no se registran.
   shippingValue: ShippingAction | null;
   onShippingChange: (ctxId: string, value: ShippingAction | null) => void;
+  costoValue: { base: PurchaseCostBase; line: PurchaseLineShipping };
+  onCostoChange: (
+    ctxId: string,
+    patch: { base?: PurchaseCostBase; line?: PurchaseLineShipping },
+  ) => void;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -886,6 +897,23 @@ function SheetMapperSection({
           />
         )}
 
+      {/* F-H6.c: aparece sólo si la hoja mapea alguna columna que ajusta el
+          costo. Sin esas columnas no hay nada que preguntar. */}
+      {included && (
+        <PurchaseCostChoice
+          base={costoValue.base}
+          lineShipping={costoValue.line}
+          onBaseChange={(v) => onCostoChange(context.context_id, { base: v })}
+          onLineShippingChange={(v) => onCostoChange(context.context_id, { line: v })}
+          mostrarAjustes={
+            Object.values(mappings).includes("discount") ||
+            Object.values(mappings).includes("taxes")
+          }
+          mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
+
       {included && inventoryEffect && (
         <InventoryEffectChoice
           hoja={inventoryEffect}
@@ -954,6 +982,12 @@ function MultiContextMapper({
   // F-H6.b: decisión de envío por hoja. Sólo lo que el usuario eligió: la
   // ausencia ES la decisión por default (no registrar), así que no se
   // inicializa con nada.
+  // F-H6.c: la decisión de costo de cada hoja. Sólo se manda la de las hojas que
+  // se apartaron de un default — mandar los defaults sería ruido, y el backend ya
+  // los aplica igual.
+  const [costoByCtx, setCostoByCtx] = useState<
+    Record<string, { base: PurchaseCostBase; line: PurchaseLineShipping }>
+  >({});
   const [shippingByCtx, setShippingByCtx] = useState<
     Record<string, ShippingAction | null>
   >({});
@@ -1184,6 +1218,19 @@ function MultiContextMapper({
       }
       // F-H6.b: sólo las hojas donde el usuario eligió. Sin entrada, sus envíos
       // sin comprobante no se registran — que es el default seguro.
+      // F-H6.c: se manda sólo lo que el usuario cambió. Una hoja con los dos ejes
+      // en su default se comporta igual mandándola o no, y omitirla deja claro en
+      // la traza que no hubo decisión.
+      const costoPayload: PurchaseCostDecision[] = Object.entries(costoByCtx)
+        .filter(
+          ([ctxId, d]) =>
+            included[ctxId] && (d.base !== "monto_incluye" || d.line !== "gasto_aparte"),
+        )
+        .map(([ctxId, d]) => ({
+          context_id: ctxId,
+          base: d.base,
+          line_shipping: d.line,
+        }));
       const shippingPayload = Object.entries(shippingByCtx)
         .filter(([ctxId, action]) => action !== null && included[ctxId])
         .map(([ctxId, action]) => ({
@@ -1204,6 +1251,7 @@ function MultiContextMapper({
           ? inventoryEffectPayload
           : undefined,
         shippingPayload,
+        costoPayload,
       );
     },
     onSuccess: (result) => {
@@ -1300,6 +1348,18 @@ function MultiContextMapper({
             effectValue={efectoDe(ctx.context_id)}
             onEffectChange={handleEffectChange}
             shippingValue={shippingByCtx[ctx.context_id] ?? null}
+            costoValue={
+              costoByCtx[ctx.context_id] ?? { base: "monto_incluye", line: "gasto_aparte" }
+            }
+            onCostoChange={(ctxId, patch) =>
+              setCostoByCtx((prev) => ({
+                ...prev,
+                [ctxId]: {
+                  base: patch.base ?? prev[ctxId]?.base ?? "monto_incluye",
+                  line: patch.line ?? prev[ctxId]?.line ?? "gasto_aparte",
+                },
+              }))
+            }
             onShippingChange={handleShippingChange}
           />
         ))}
@@ -1505,6 +1565,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   });
   const hojaEfecto = inventoryEffects[0];
   const [effectElegido, setEffectElegido] = useState<string | null>(null);
+  // F-H6.c: el equivalente de `costoByCtx` para el archivo de una sola tabla,
+  // que no tiene contextos. Default en «no toca nada», igual que allá.
+  const [costoTablaUnica, setCostoTablaUnica] = useState<{
+    base: PurchaseCostBase;
+    line: PurchaseLineShipping;
+  }>({ base: "monto_incluye", line: "gasto_aparte" });
   // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
   // cantidad puede dejar a la hoja sin poder mover inventario.
   const efectoActual =
@@ -1587,6 +1653,19 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         riskDecisions,
         hojaEfecto && efectoActual
           ? { [hojaEfecto.context_id]: efectoActual }
+          : undefined,
+        undefined,
+        // F-H6.c: sólo si se apartó de un default. `context_id: ""` es la tabla
+        // única — el backend la indexa así, igual que el resto de las decisiones
+        // por contexto en este camino.
+        costoTablaUnica.base !== "monto_incluye" || costoTablaUnica.line !== "gasto_aparte"
+          ? [
+              {
+                context_id: "",
+                base: costoTablaUnica.base,
+                line_shipping: costoTablaUnica.line,
+              },
+            ]
           : undefined,
       ),
     onSuccess: (result) => {
@@ -2098,6 +2177,26 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           hoja={hojaEfecto}
           value={efectoActual}
           onChange={setEffectElegido}
+          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
+        />
+      )}
+
+      {/* F-H6.c: la tabla única también puede declarar cómo se calcula el costo.
+          El backend lo soporta en los DOS caminos —el mismo archivo tiene que dar
+          el mismo costo venga como tabla o como solapa—, así que dejarlo sólo en
+          el multi-hoja habría hecho inalcanzable desde acá lo que el importador
+          sí sabe hacer. Es el agujero exacto de F-H3.e, en otra fase. */}
+      {!needsPurpose && (
+        <PurchaseCostChoice
+          base={costoTablaUnica.base}
+          lineShipping={costoTablaUnica.line}
+          onBaseChange={(v) => setCostoTablaUnica((p) => ({ ...p, base: v }))}
+          onLineShippingChange={(v) => setCostoTablaUnica((p) => ({ ...p, line: v }))}
+          mostrarAjustes={
+            Object.values(mappings).includes("discount") ||
+            Object.values(mappings).includes("taxes")
+          }
+          mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
           className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
         />
       )}

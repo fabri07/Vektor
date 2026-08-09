@@ -107,3 +107,30 @@ describe("confirmFile — cuerpo del POST", () => {
     expect(body.inventory_effect).toEqual({ table: "current_snapshot" });
   });
 });
+
+describe("F-H6.c — la decisión de costo viaja por la red", () => {
+  test("el confirm lleva purchase_cost_decisions cuando el usuario declaró algo", async () => {
+    await ingestionService.confirmFile(
+      "f1",
+      {},
+      [],
+      {},
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [{ context_id: "sheet:Compras", base: "monto_sin_ajustes", line_shipping: "al_costo" }],
+    );
+    expect(bodyDelConfirm().purchase_cost_decisions).toEqual([
+      { context_id: "sheet:Compras", base: "monto_sin_ajustes", line_shipping: "al_costo" },
+    ]);
+  });
+
+  test("y va como lista vacía cuando no declaró nada", async () => {
+    await ingestionService.confirmFile("f1", {}, [], {}, {});
+    // Vacío, no `null`: el backend distingue «sin decisiones» de «no mandó el
+    // campo», y una lista vacía dice exactamente que cada hoja toma su default.
+    expect(bodyDelConfirm().purchase_cost_decisions).toEqual([]);
+  });
+});

@@ -183,6 +183,20 @@ export interface SheetInventoryEffect {
  */
 export type ShippingAction = "una_por_hoja" | "una_por_fila";
 
+// F-H6.c: cómo se calcula el costo de las líneas de una hoja de compras. Los
+// defaults no cambian ningún número — aplicar ajustes o capitalizar el flete de
+// línea son decisiones explícitas del usuario, igual que en el remito manual.
+export type PurchaseCostBase = "monto_incluye" | "monto_sin_ajustes";
+export type PurchaseSharedShipping = "no_distribuir" | "por_subtotal";
+export type PurchaseLineShipping = "gasto_aparte" | "al_costo";
+
+export interface PurchaseCostDecision {
+  context_id: string;
+  base?: PurchaseCostBase;
+  shared_shipping?: PurchaseSharedShipping;
+  line_shipping?: PurchaseLineShipping;
+}
+
 export interface ShippingDecision {
   context_id: string;
   action: ShippingAction;
@@ -548,6 +562,11 @@ export const ingestionService = {
     // F-H6.b: qué hacer con los envíos sin comprobante, por hoja. Sin entrada
     // para una hoja, sus envíos sin comprobante no se registran.
     shippingDecisions?: ShippingDecision[],
+    // F-H6.c: cómo se calcula el costo de cada hoja de compras. Sin entrada para
+    // una hoja, sus columnas de ajuste no mueven ningún número — y el backend lo
+    // AVISA en la respuesta, para que un descuento mapeado no quede ignorado en
+    // silencio.
+    purchaseCostDecisions?: PurchaseCostDecision[],
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
@@ -562,6 +581,7 @@ export const ingestionService = {
         // para el backend (cada hoja toma su default), pero mandar null lo dice.
         inventory_effect: inventoryEffect ?? null,
         shipping_decisions: shippingDecisions ?? [],
+        purchase_cost_decisions: purchaseCostDecisions ?? [],
       },
       { timeout: CONFIRM_TIMEOUT_MS },
     );
