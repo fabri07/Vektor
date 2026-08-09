@@ -112,3 +112,27 @@ class TestFieldCatalog:
     async def test_requiere_autenticacion(self, client: AsyncClient) -> None:
         response = await client.get("/api/v1/ingestion/field-catalog")
         assert response.status_code in (401, 403)
+
+    async def test_los_costos_de_compra_llegan_al_catalogo_como_escalares(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """F-M.7 — `discount`, `taxes` y `shipping_cost_line`.
+
+        La UI arma el `<select>` desde acá, así que si el campo no sale servido no
+        se puede elegir aunque el reconocedor lo proponga. Y los tres son
+        escalares: dos columnas de descuento sobre la misma línea no se suman
+        solas ni se elige una — el criterio que ya rechaza con 422.
+
+        `shipping_cost_line` es un campo APARTE de `shipping_cost` a propósito: el
+        del comprobante se cobra una vez y éste se suma, porque el reparto ya lo
+        hizo quien armó la planilla.
+        """
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        gasto = {f["value"]: f for f in response.json()["expense"]["fields"]}
+
+        for campo in ("discount", "taxes", "shipping_cost_line"):
+            assert campo in gasto, f"{campo} no llega al select del frontend"
+            assert gasto[campo]["single_value"] is True, campo
+
+        # Y los dos fletes conviven, cada uno con su etiqueta.
+        assert gasto["shipping_cost"]["label"] != gasto["shipping_cost_line"]["label"]

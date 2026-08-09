@@ -36,8 +36,11 @@ LECTURA_NUEVA: dict[tuple[str, str], tuple[str, object]] = {
     ("product", "Código de barras"): ("unico", "barcode"),
     ("product", "Descripción"): ("unico", "description"),
     # ── El modificador ya no se lleva el campo ───────────────────────────────
-    ("expense", "Bonificación proveedor"): ("sin_evidencia", None),
-    ("expense", "Descuento por producto"): ("sin_evidencia", None),
+    # F-M.7: los dos reconocían el concepto y no tenían dónde ponerlo. Ahora
+    # `discount` existe, así que el calificador de entidad sigue sin llevarse el
+    # campo y además el descuento llega a destino.
+    ("expense", "Bonificación proveedor"): ("unico", "discount"),
+    ("expense", "Descuento por producto"): ("unico", "discount"),
     ("expense", "Envío unitario"): ("sin_evidencia", None),
     ("expense", "Costo final por producto"): ("ambiguo", ("amount", "unit_price")),
     ("expense", "Total factura sin impuestos"): ("sin_evidencia", None),
@@ -52,12 +55,14 @@ LECTURA_NUEVA: dict[tuple[str, str], tuple[str, object]] = {
     ("expense", "Neto sin IVA"): ("unico", "amount"),
     # ── Dos lecturas razonables: se ofrecen, no se elige ─────────────────────
     ("sale", "Precio de venta"): ("ambiguo", ("amount", "unit_price")),
-    # ── Reconocido, pero sin campo donde ponerlo (hoy: silencio) ─────────────
-    ("expense", "Descuento"): ("sin_evidencia", None),
-    ("expense", "Bonificación"): ("sin_evidencia", None),
-    ("expense", "IVA"): ("sin_evidencia", None),
-    ("expense", "Impuestos"): ("sin_evidencia", None),
-    ("expense", "Flete por línea"): ("sin_evidencia", None),
+    # ── F-M.7: conceptos que se reconocían y recién ahora tienen campo ───────
+    ("expense", "Descuento"): ("unico", "discount"),
+    ("expense", "Bonificación"): ("unico", "discount"),
+    ("expense", "IVA"): ("unico", "taxes"),
+    ("expense", "Impuestos"): ("unico", "taxes"),
+    # Semántica OPUESTA a `shipping_cost`: éste se suma, aquél se cobra una vez.
+    ("expense", "Flete por línea"): ("unico", "shipping_cost_line"),
+    # ── Reconocido, pero sin campo donde ponerlo ─────────────────────────────
     ("product", "Marca"): ("sin_evidencia", None),
 }
 
@@ -120,7 +125,9 @@ class TestLoQueNoResuelveConservaLaColumna:
     def test_reconocer_el_concepto_y_no_tener_campo_siempre_se_explica(self) -> None:
         """«No entiendo esto» y «entiendo qué es pero no tengo dónde ponerlo» no
         son el mismo mensaje. El segundo sin `duda` deja al usuario ante un hueco
-        mudo — y es el caso de `Descuento`, `IVA`, `Marca` y `Envío unitario`."""
+        mudo — y es el caso de `Marca`, `Envío unitario` y `Total factura sin
+        impuestos`. (`Descuento` e `IVA` estaban acá hasta F-M.7, que les dio
+        campo propio: la lista se achica a medida que el catálogo crece.)"""
         for entidad, header in LECTURA_NUEVA:
             r = _leer(entidad, header)
             if r.outcome != "unico" and r.concept is not None:

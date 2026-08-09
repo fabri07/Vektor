@@ -227,3 +227,117 @@ class TestColisionDeCampoEscalar:
         )
 
         assert response.status_code == 200, response.text
+
+
+# Con fecha y monto: los requeridos se validan ANTES que la colisión escalar, así
+# que una hoja incompleta rebotaría por el otro motivo y este test no probaría nada.
+_HEADERS_COMPRA = [
+    "Fecha",
+    "Monto",
+    "Producto",
+    "Cantidad",
+    "Bonificación",
+    "Descuento",
+]
+
+
+def _compra_summary() -> dict[str, Any]:
+    rows = [
+        {
+            "Fecha": "2026-03-10",
+            "Monto": "5000",
+            "Producto": "Vela aromática 200g",
+            "Cantidad": "10",
+            "Bonificación": "150",
+            "Descuento": "80",
+            "__context__": "sheet:compras",
+        }
+    ]
+    return {
+        "confidence": "HIGH",
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "row_count": 1,
+        "gastos_detectados": rows,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:compras",
+                "label": "compras",
+                "source_kind": "sheet",
+                "entity_type": "expense",
+                "headers": _HEADERS_COMPRA,
+                "fields": None,
+                "preview_rows": rows,
+                "row_count": 1,
+            }
+        ],
+    }
+
+
+@pytest_asyncio.fixture
+async def compra_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    record = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="compras.xlsx",
+        s3_key="uploads/test/uuid/compras.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=2048,
+        purpose="gastos",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json=_compra_summary(),
+    )
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+@pytest.mark.asyncio
+class TestLosCostosDeCompraTambienSonEscalares:
+    """F-M.7 — `discount`, `taxes` y `shipping_cost_line` son escalares.
+
+    Una planilla real trae «Bonificación» y «Descuento» como columnas separadas y
+    las dos son descuentos. Sumarlas sola sería inventar una cuenta que nadie
+    pidió; quedarse con la primera del orden del Excel es el incidente ASTERIA
+    otra vez, ahora sobre el costo de una compra en vez del precio de un producto.
+    """
+
+    async def test_dos_columnas_de_descuento_rechazan_con_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        compra_file: UploadedFile,
+    ) -> None:
+        body = {
+            "column_mappings": [
+                {
+                    "source_column": c,
+                    "target_field": t,
+                    "context_id": "sheet:compras",
+                    "entity_type": "expense",
+                }
+                for c, t in [
+                    ("Fecha", "expense_date"),
+                    ("Monto", "amount"),
+                    ("Producto", "product_name"),
+                    ("Cantidad", "quantity"),
+                    ("Bonificación", "discount"),
+                    ("Descuento", "discount"),
+                ]
+            ],
+            "confirmed_fields": {"gastos": True},
+            "context_confirmed": {"sheet:compras": True},
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{compra_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "Descuento de la línea" in detail, "el mensaje nombra el campo en castellano"
+        for col in ("Bonificación", "Descuento"):
+            assert col in detail

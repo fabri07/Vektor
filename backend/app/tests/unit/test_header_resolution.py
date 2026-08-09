@@ -33,13 +33,16 @@ class TestLosCincoEncabezadosDelProblema:
 
     def test_bonificacion_proveedor_no_es_el_nombre_del_proveedor(self) -> None:
         r = _leer("Bonificación proveedor", "expense")
-        assert r.outcome == "sin_evidencia"
         assert r.concept == "descuento"
+        # F-M.7: desde que `discount` existe llega a destino. Lo que este test
+        # cuida sigue siendo lo mismo: que el calificador de entidad no se lleve
+        # el campo (antes resolvía a `supplier_name`).
+        assert r.target == "discount"
 
     def test_descuento_por_producto_no_es_el_nombre_del_producto(self) -> None:
         r = _leer("Descuento por producto", "expense")
         assert r.concept == "descuento"
-        assert r.target is None
+        assert r.target == "discount"
 
     def test_precio_con_iva_no_es_un_impuesto(self) -> None:
         r = _leer("Precio con IVA", "expense")
@@ -214,3 +217,50 @@ class TestCompraYVentaNombranCualDeLosTresPrecios:
     def test_un_monto_pelado_no_dice_cual_de_los_tres_es(self) -> None:
         """Adivinarlo es el bug que F10 cerró: no hay regla, y está bien."""
         assert _leer("Importe", "product").target is None
+
+
+class TestLosTresCostosDeUnaCompra:
+    """F-M.7 — descuento, impuestos y el flete YA asignado a la línea.
+
+    Los tres los entendía el reconocedor desde el principio y no tenían dónde ir:
+    la aritmética existía (`domain/purchase_cost.py`) y el campo no.
+    """
+
+    def test_un_descuento_es_un_descuento_aunque_nombre_al_proveedor(self) -> None:
+        assert _leer("Bonificación proveedor", "expense").target == "discount"
+        assert _leer("Descuento", "expense").target == "discount"
+
+    def test_un_impuesto_de_la_linea_tiene_campo_propio(self) -> None:
+        assert _leer("IVA", "expense").target == "taxes"
+        assert _leer("Impuestos", "expense").target == "taxes"
+
+    def test_pero_un_precio_con_iva_sigue_siendo_un_precio(self) -> None:
+        """El caso que da nombre a la fase. `con`/`sin` declaran inclusión: si al
+        existir `taxes` esta columna empezara a resolver ahí, el precio de la
+        línea entraría como impuesto — exactamente el bug que se vino a cerrar."""
+        r = _leer("Precio con IVA", "expense")
+        assert r.outcome == "ambiguo"
+        assert r.target != "taxes"
+        assert set(r.options) == {"amount", "unit_price"}
+
+    def test_el_flete_por_linea_no_es_el_del_comprobante(self) -> None:
+        """Semántica OPUESTA y por eso son campos distintos: el del comprobante se
+        cobra una vez (la cifra repetida se colapsa) y éste se SUMA, porque el
+        reparto ya lo hizo quien armó la planilla."""
+        assert _leer("Flete por línea", "expense").target == "shipping_cost_line"
+        assert _leer("Envío prorrateado", "expense").target == "shipping_cost_line"
+
+    def test_envio_a_secas_sigue_siendo_el_del_comprobante(self) -> None:
+        """Decisión declarada: no se vuelve ambiguo. F-H6.b ya pregunta la
+        granularidad cuando la hoja no trae comprobante, y ahí el número está a la
+        vista. Preguntarlo dos veces es fricción en el header más común."""
+        assert _leer("Envío", "expense").target == "shipping_cost"
+        assert _leer("Flete", "expense").target == "shipping_cost"
+
+    def test_y_el_flete_por_unidad_sigue_sin_tener_campo(self) -> None:
+        """Tres granularidades no son dos: Véktor lee la del comprobante y la de
+        línea, no la de cada unidad. Sigue explicándose en vez de elegir una."""
+        r = _leer("Envío unitario", "expense")
+        assert r.outcome == "sin_evidencia"
+        assert r.concept == "envio"
+        assert r.duda

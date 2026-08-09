@@ -69,6 +69,19 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         # Costo compartido de la operación. Se cobra UNA vez por comprobante:
         # una planilla repite el mismo flete en cada línea del remito.
         "shipping_cost": "Envío / flete",
+        # F-M.7: el flete que el ARCHIVO ya asignó a cada línea. Semántica OPUESTA
+        # a `shipping_cost` y por eso es un campo distinto: aquél se cobra una vez
+        # por comprobante (la cifra repetida se colapsa), éste se SUMA, porque el
+        # reparto lo hizo quien armó la planilla. Fusionarlos obligaría a repartir
+        # algo que ya venía repartido — ver `plan_line_shipping` en
+        # `domain/purchase_shipping.py`.
+        "shipping_cost_line": "Envío ya asignado a esta línea",
+        # Los dos ajustan el costo de la línea. Que se apliquen o no lo decide el
+        # usuario (`BASE_INCLUYE` / `BASE_APLICAR` en `domain/purchase_cost.py`):
+        # restarle un descuento a un total que ya lo tiene descontado lo cuenta
+        # dos veces, y eso no se adivina desde el encabezado.
+        "discount": "Descuento de la línea",
+        "taxes": "Impuestos de la línea",
         # F7a: campos de referencia al proveedor (aditivo, ver nota de sale arriba).
         # Ver la nota de los campos de cliente: mismo criterio de agrupación.
         "supplier_cuil": "Proveedor — CUIL",
@@ -604,12 +617,21 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "barcode": (_r(target="barcode"),),
         "comprobante": (_r(target="invoice_number"),),
         "envio": (
+            # Sigue sin haber campo para el flete POR UNIDAD: Véktor lee el del
+            # comprobante y el ya asignado a la línea, no una tercera granularidad.
             _r("unitario", duda=_ENVIO_UNITARIO),
-            _r("por_linea", duda=_ENVIO_POR_LINEA),
+            _r("por_linea", target="shipping_cost_line"),
+            # `Envío` a secas resuelve al del comprobante y NO se vuelve ambiguo:
+            # F-H6.b ya le pregunta al usuario la granularidad (`una_por_hoja` vs
+            # `una_por_fila`) cuando la hoja no trae comprobante, y esa pregunta se
+            # hace donde el número está a la vista. Preguntarlo dos veces es
+            # fricción en el encabezado más común de un remito. Límite declarado:
+            # un archivo con flete por línea Y comprobante entra como si fuera del
+            # comprobante, salvo que el usuario mapee la columna a mano.
             _r(target="shipping_cost"),
         ),
-        "descuento": (_r(duda=_SIN_CAMPO_DESCUENTO),),
-        "impuesto": (_r(duda=_SIN_CAMPO_IMPUESTO),),
+        "descuento": (_r(target="discount"),),
+        "impuesto": (_r(target="taxes"),),
         "cuil": (_r(target="supplier_cuil"),),
         "email": (_r(target="supplier_email"),),
         "telefono": (_r(target="supplier_phone"),),
@@ -847,7 +869,17 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
     # columnas al mismo destino no se pueden desempatar sin inventar, y hasta F-0
     # `_resolve_target_cols` se quedaba con la primera del orden del Excel.
     "expense": frozenset(
-        {"amount", "expense_date", "quantity", "unit_price"}
+        {
+            "amount",
+            "expense_date",
+            "quantity",
+            "unit_price",
+            # F-M.7: escalares por el mismo motivo. Dos columnas de descuento
+            # sobre la misma línea no se suman solas ni se elige una.
+            "shipping_cost_line",
+            "discount",
+            "taxes",
+        }
     ),
     "product": frozenset(
         {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}

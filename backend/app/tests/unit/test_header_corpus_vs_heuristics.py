@@ -159,9 +159,7 @@ class TestLoQueLaTablaAFIRMASigueCortando:
         ("entidad", "header"),
         [
             ("expense", "Envío unitario"),
-            ("expense", "Bonificación proveedor"),
             ("expense", "Total factura sin impuestos"),
-            ("expense", "Descuento por producto"),
         ],
     )
     def test_una_decision_de_la_tabla_no_la_revisa_la_capa_de_abajo(
