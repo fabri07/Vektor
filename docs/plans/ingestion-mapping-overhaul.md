@@ -493,6 +493,28 @@ El usuario elige; Véktor no reparte solo: no distribuir (**default**) · por ca
 - Envío no distribuido → queda OPEX `LOGISTICS` separado y **no modifica** `unit_cost_ars`.
 - **Corregir V5:** `_apply_purchase_to_stock:1988` hoy pisa `unit_cost_ars` con el precio facturado de la última compra. Pasa a escribir el **costo unitario final** cuando hay distribución, y a no pisar cuando el usuario declaró que esa columna es precio de lista o facturado. El precio facturado sigue por movimiento en `inventory_movements.unit_cost`: **los dos valores se conservan.**
 
+### Flete implícito: el caso que no necesita código y desnuda el default
+
+Un archivo que **no desglosa el envío** porque el proveedor ya lo cargó en el precio unitario no rompe nada y **da el número correcto**: sin columna de envío no hay `ShippingDecision`, `build_line_costs` corre con `shipping_line = 0` y `shared_shipping = 0`, y `unit_cost_ars` queda con el flete adentro — que es el costo real de adquisición, justo lo que la distribución intenta reconstruir cuando el proveedor sí lo desglosa.
+
+El problema es que **los dos caminos no convergen**. Misma compra, $100 de mercadería + $10 de flete:
+
+| | `unit_cost_ars` | Gasto aparte | Margen del producto | Stock valuado |
+|---|---|---|---|---|
+| Flete implícito | **110** | — | menor | mayor |
+| Flete desglosado + `no_distribuir` (**default**) | **100** | $10 OPEX `LOGISTICS` | mayor | menor |
+
+Los dos cuadran en el total ($110 salieron de la caja), pero el margen por producto y la valuación de stock dan distinto. La consecuencia incómoda: **el default hace a Véktor menos preciso justo cuando el proveedor le dio más información.**
+
+Y con **V5** vivo hay un caso peor: si el mismo producto entra una vez implícito (110) y después desglosado (100), `_apply_purchase_to_stock` pisa el costo y **baja de 110 a 100 sin que nada se haya abaratado** — cambió el formato de la planilla, nada más.
+
+Dos piezas, las dos dentro de F-H6.c/d:
+
+1. **Trazar si el costo incluye flete.** `purchase_cost.py` ya reserva `_vektor_costo_base`, pero hoy vive en la fila del gasto, no en el producto. Sin ese dato, comparar dos costos es comparar cosas distintas sin saberlo — mismo criterio de procedencia que ya gobierna los agregados.
+2. **Cerrar V5** (arriba): que una compra nueva no pise un costo que incluía flete con uno que no lo incluye.
+
+**Lo que NO se hace:** cambiar el default a "distribuir". Alteraría el costo de todos los imports existentes, que es exactamente lo que el default vino a evitar (**V6**).
+
 **Archivos F-H:** `ingestion_import_service.py` (dos pasadas en `_insert_multisheet_data`, `_add_product` + índices, `_add_sale:4172`, `_add_expense:4270`, `_apply_purchase_to_stock:1944`, `RowOutcome`), `inventory_temporal_service.py` (reuso de `replay_timeline`), `inventory_movement_origin.py` (`sale_import`), `stock_service.py` (reversa incremental), `column_mapping_service.py` (targets de expense), módulo nuevo de aritmética de precios/costos, `schemas/ingestion.py` (modo de inventario por hoja + warnings estructurados).
 
 ---
