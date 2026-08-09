@@ -1,6 +1,9 @@
 """F-H6.c — aceptación: todo target monetario tiene un consumidor que mueve el costo.
 
-Estas pruebas se escriben ROJAS a propósito, ANTES de implementar F-H6.c.
+Se escribieron ROJAS a propósito, antes de implementar F-H6.c, con
+`xfail(strict=True)`. Las marcas se sacaron al cablear el importador: el `strict`
+las habría reportado como error en cuanto pasaran, que es justo el ratchet que se
+buscaba — no se puede implementar la fase y "olvidarse" de que ya están verdes.
 
 F-M.7 agregó `discount`, `taxes` y `shipping_cost_line` al catálogo: el usuario ya
 puede elegirlos en la pantalla de mapeo. Pero el importador todavía no lee sus
@@ -33,25 +36,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.domain.purchase_cost_decision import PurchaseCostDecision
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
-
-#: El agujero, declarado como marca en vez de como comentario.
-#:
-#: `strict=True` es lo que lo convierte en compuerta: mientras F-H6.c no exista
-#: estos tests fallan y el CI sigue verde, pero **en cuanto pasen, pytest los
-#: reporta como error** y obliga a sacar la marca. Un `xfail` no estricto sería
-#: una nota al pie que nadie vuelve a leer.
-_FALTA_FH6C = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "F-H6.c todavía no existe: el catálogo ofrece `discount`, `taxes` y "
-        "`shipping_cost_line` pero el importador no lee sus valores. Sacar esta "
-        "marca es parte de implementarlo."
-    ),
-)
 
 _CTX = "sheet:Compras"
 _PRODUCTO = "Vela aromatica 200g"
@@ -144,7 +133,11 @@ async def _importar(
     """
     extra: dict[str, Any] = {}
     if costos is not None:
-        extra["purchase_cost_decisions"] = {_CTX: costos}
+        # El MISMO tipo que arma el endpoint al confirmar: si el test construyera
+        # un dict suelto probaría una forma que la API no produce.
+        extra["purchase_cost_decisions"] = {
+            _CTX: PurchaseCostDecision(context_id=_CTX, **costos)
+        }
     counts = await insert_confirmed_data(
         db,
         tenant.tenant_id,
@@ -196,7 +189,6 @@ async def _gastos(db: AsyncSession, tenant: Tenant) -> list[ExpenseEntry]:
 
 @pytest.mark.asyncio
 class TestElDescuentoYLosImpuestosLleganAlCosto:
-    @_FALTA_FH6C
     async def test_un_descuento_declarado_baja_el_costo_final(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
@@ -209,7 +201,6 @@ class TestElDescuentoYLosImpuestosLleganAlCosto:
         )
         assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1000.00")
 
-    @_FALTA_FH6C
     async def test_un_impuesto_declarado_sube_el_costo_final(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
@@ -222,7 +213,6 @@ class TestElDescuentoYLosImpuestosLleganAlCosto:
         )
         assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1250.00")
 
-    @_FALTA_FH6C
     async def test_sin_declarar_la_base_el_monto_se_toma_final_pero_se_avisa(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
@@ -240,7 +230,6 @@ class TestElDescuentoYLosImpuestosLleganAlCosto:
 
 @pytest.mark.asyncio
 class TestLosDosFletesNoSonElMismoCargo:
-    @_FALTA_FH6C
     async def test_el_flete_de_linea_se_suma_a_cada_fila(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
@@ -275,7 +264,6 @@ class TestLosDosFletesNoSonElMismoCargo:
         assert len(fletes) == 1, "la cifra repetida es un solo cargo"
         assert Decimal(str(fletes[0].amount)) == Decimal("500")
 
-    @_FALTA_FH6C
     async def test_los_dos_fletes_conviven_sin_mezclarse(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
@@ -300,7 +288,6 @@ class TestLosDosFletesNoSonElMismoCargo:
 
 @pytest.mark.asyncio
 class TestUnValorInvalidoNoEscribeNada:
-    @_FALTA_FH6C
     async def test_un_modo_desconocido_no_deja_datos_a_medio_importar(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
@@ -325,3 +312,99 @@ class TestUnValorInvalidoNoEscribeNada:
             .all()
         )
         assert productos == []
+
+
+def _summary_plano(filas: list[dict[str, Any]]) -> dict[str, Any]:
+    """El MISMO archivo, pero como tabla suelta en vez de solapa.
+
+    Sin `mapping_contexts` el importador toma el camino plano, que calcula el
+    costo en otro lugar del código. Que los dos den lo mismo no es un detalle:
+    este importador ya pagó dos veces que un camino aprendiera algo y el otro no.
+    """
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "headers": _HEADERS,
+        "gastos_detectados": filas,
+        "ventas_detectadas": [],
+        "stock_detectado": [],
+        "row_count": len(filas),
+    }
+
+
+@pytest.mark.asyncio
+class TestElCaminoPlanoDaElMismoCosto:
+    async def test_un_descuento_declarado_tambien_baja_el_costo_en_una_tabla_suelta(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _summary_plano([_fila(descuento="2000")]),
+            {"gastos": True},
+            column_mappings=_MAPEO,
+            purchase_cost_decisions={
+                "": PurchaseCostDecision(context_id="", base="monto_sin_ajustes")
+            },
+        )
+        await db_session.flush()
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1000.00")
+
+    async def test_y_el_flete_de_linea_tambien_se_capitaliza(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _summary_plano([_fila(flete_linea="300")]),
+            {"gastos": True},
+            column_mappings=_MAPEO,
+            purchase_cost_decisions={
+                "": PurchaseCostDecision(context_id="", line_shipping="al_costo")
+            },
+        )
+        await db_session.flush()
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
+
+
+@pytest.mark.asyncio
+class TestUnaCeldaQueNoSePudoLeerSeCuentaYSeAvisa:
+    """«ver factura» en la columna de descuento no es «sin descuento».
+
+    El import no se cae —la fila tiene monto y es una compra válida— pero el
+    usuario tiene que enterarse de que ese ajuste no se aplicó. Tratarlo como
+    cero en silencio es perder un dato sin que nadie lo note.
+    """
+
+    async def test_la_fila_entra_pero_el_ajuste_se_reporta(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        counts = await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(descuento="ver factura")],
+            costos={"base": "monto_sin_ajustes"},
+        )
+
+        # La compra entró, con el monto sin ajustar: 12000 / 10.
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1200.00")
+        assert counts.get("ajustes_ilegibles") == 1
+        avisos = counts.get("avisos") or []
+        assert any("descuento" in a.lower() for a in avisos), (
+            f"el aviso tiene que nombrar la columna; avisos={avisos}"
+        )
+        assert any("no se pudieron leer" in a for a in avisos)
+
+    async def test_una_celda_vacia_no_genera_ningun_aviso(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """La contracara: vacío significa «esta fila no tiene descuento», que es
+        un dato normal y no merece ruido."""
+        counts = await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(descuento="")],
+            costos={"base": "monto_sin_ajustes"},
+        )
+        assert counts.get("ajustes_ilegibles", 0) == 0
+        assert not [a for a in (counts.get("avisos") or []) if "no se pudieron leer" in a]

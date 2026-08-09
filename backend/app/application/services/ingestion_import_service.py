@@ -72,6 +72,15 @@ from app.domain.line_amount import (
     resolve_line_amount,
 )
 from app.domain.product_categories import normalize_product_category
+from app.domain.purchase_cost import CostLine, LineCost, build_line_costs
+from app.domain.purchase_cost_decision import (
+    AJUSTE_ILEGIBLE,
+    PurchaseCostDecision,
+    hojas_que_necesitan_aviso,
+    parse_ajuste,
+    texto_del_ajuste_ilegible,
+    texto_del_aviso,
+)
 from app.domain.purchase_shipping import ShippingLine, plan_shipping_charges
 from app.domain.text_norm import (
     normalize_barcode,
@@ -2364,6 +2373,77 @@ def _accumulate_expiry_date(
     return min(future) if future else max(candidates)
 
 
+def _planificar_costos_de_la_hoja(
+    ctx_id: str | None,
+    rows: list[dict[str, Any]],
+    cols: dict[str, str],
+    decisiones: dict[str, PurchaseCostDecision] | None = None,
+) -> tuple[dict[int, LineCost], dict[str, int]]:
+    """F-H6.c — qué costó realmente cada línea de esta hoja.
+
+    Corre ANTES del bucle de filas, no después: distribuir un costo compartido
+    exige ver el grupo entero, y el bucle necesita el resultado para escribir
+    el costo unitario de cada compra. Es la misma razón por la que
+    `_cobrar_envios_de_la_hoja` es una pasada aparte, sólo que al revés — aquél
+    puede correr al final porque no cambia ninguna fila.
+
+    Devuelve ``({row_index: LineCost}, {columna: celdas_ilegibles})``. El
+    segundo no es un detalle: una celda que no se pudo leer se cuenta y se
+    avisa, nunca se trata como «sin descuento» (ver `parse_ajuste`).
+    """
+    dec = (decisiones or {}).get(ctx_id or "") or PurchaseCostDecision(
+        context_id=ctx_id or ""
+    )
+    _desc_col = cols.get("discount")
+    _imp_col = cols.get("taxes")
+    _flete_col = cols.get("shipping_cost_line")
+    if not (_desc_col or _imp_col or _flete_col):
+        # Sin ninguna columna de ajuste no hay nada que calcular que el
+        # importador no supiera ya: se deja el camino de siempre intacto.
+        return {}, {}
+
+    _monto_col = cols.get("amount")
+    _qty_col = cols.get("quantity")
+    _ilegibles: dict[str, int] = {}
+
+    def _ajuste(row: dict[str, Any], col: str | None) -> Decimal:
+        if not col:
+            return Decimal("0")
+        val = parse_ajuste(row.get(col))
+        if val is AJUSTE_ILEGIBLE or isinstance(val, str):
+            _ilegibles[col] = _ilegibles.get(col, 0) + 1
+            return Decimal("0")
+        return val
+
+    lineas: list[CostLine] = []
+    for _idx, _row in enumerate(rows):
+        _monto = _parse_amount(_row.get(_monto_col)) if _monto_col else None
+        if _monto is None:
+            # Sin monto no hay base sobre la cual ajustar nada. La fila ya la
+            # resuelve (o captura) el camino normal.
+            continue
+        lineas.append(
+            CostLine(
+                row_index=_idx,
+                amount=_monto,
+                quantity=_parse_qty(_row.get(_qty_col)) if _qty_col else 0,
+                discount=_ajuste(_row, _desc_col),
+                taxes=_ajuste(_row, _imp_col),
+                shipping_line=_ajuste(_row, _flete_col),
+            )
+        )
+    if not lineas:
+        return {}, _ilegibles
+
+    plan = build_line_costs(
+        lineas,
+        shared_mode=dec.shared_shipping,
+        line_mode=dec.line_shipping,
+        basis=dec.base,
+    )
+    return plan.by_row(), _ilegibles
+
+
 def _parse_amount(raw: Any) -> Decimal | None:
     if raw is None:
         return None
@@ -2633,6 +2713,7 @@ async def insert_confirmed_data(
     inventory_effect: dict[str, str] | None = None,
     # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
     shipping_decisions: dict[str, str] | None = None,
+    purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
 ) -> dict[str, Any]:
     """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
 
@@ -2666,6 +2747,7 @@ async def insert_confirmed_data(
         stock_treatment=stock_treatment,
         inventory_effect=inventory_effect,
         shipping_decisions=shipping_decisions,
+        purchase_cost_decisions=purchase_cost_decisions,
     )
     await session.flush()
     await assign_orphan_sales_to_local(session, tenant_id)
@@ -2733,6 +2815,7 @@ async def _insert_confirmed_data_impl(
     inventory_effect: dict[str, str] | None = None,
     # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
     shipping_decisions: dict[str, str] | None = None,
+    purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -2929,6 +3012,7 @@ async def _insert_confirmed_data_impl(
                 product_cache=_product_cache,
                 stock_is_purchase_for=stock_is_purchase_for,
                 shipping_decisions=shipping_decisions,
+                purchase_cost_decisions=purchase_cost_decisions,
                 proyeccion=_proyeccion_recorder,
             )
             if seen_fp is not None and _preloaded_fp is not None:
@@ -3197,6 +3281,8 @@ async def _insert_confirmed_data_impl(
         # a Otros dos veces. Set aparte de _merch_purchase_rows: acá NO se aplicó
         # una compra (no se creó producto ni stock), solo se difirió a revisión.
         _captured_to_otros_rows: set[int] = set()
+        # F-H6.c: avisos sobre el costo, mismo criterio que en el multi-hoja.
+        _avisos_costo: list[str] = []
 
         # F-H3.d.3: mismos lectores para el gate y para la inserción. Repetirlos
         # sería suficiente para que el gate rechace una fila y se importe otra.
@@ -3307,6 +3393,20 @@ async def _insert_confirmed_data_impl(
                         cast("tuple[str, int]", r.key): r
                         for r in rows_without_stock_backing(_candidatas_planas, _saldos_planos)
                     }
+
+        # F-H6.c: misma pasada previa que en el camino multi-hoja. Va acá y no
+        # dentro del bucle porque repartir un costo compartido exige ver el grupo
+        # entero — y va en LOS DOS caminos porque el mismo archivo tiene que dar
+        # el mismo costo entre como tabla suelta o como solapa. Esa asimetría este
+        # importador ya la pagó dos veces.
+        _costos_por_fila: dict[int, LineCost] = {}
+        if wants_gastos:
+            _costos_por_fila, _celdas_ilegibles = _planificar_costos_de_la_hoja(
+                None, rows, target_to_col, purchase_cost_decisions
+            )
+            for _col, _cuantas in _celdas_ilegibles.items():
+                counts["ajustes_ilegibles"] = counts.get("ajustes_ilegibles", 0) + _cuantas
+                _avisos_costo.append(texto_del_ajuste_ilegible("", _col, _cuantas))
 
         for row_index, row in enumerate(rows):
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
@@ -3643,6 +3743,13 @@ async def _insert_confirmed_data_impl(
                         if exp_cost_col and exp_cost_col != gasto_col
                         else None
                     )
+                    # F-H6.c: si la hoja declaró ajustes, el costo de ESTA línea ya
+                    # se calculó con ellos y manda sobre el precio crudo de la
+                    # columna. `unit_cost_final` es None cuando la fila no trae
+                    # cantidad: sin divisor no se inventa un costo unitario.
+                    _costo_calculado = _costos_por_fila.get(row_index)
+                    if _costo_calculado is not None and _costo_calculado.unit_cost_final:
+                        exp_unit_cost = _costo_calculado.unit_cost_final
                     # Compra de mercadería = gasto COGS+caja Y alta/reposición de
                     # producto. Señal a nivel de fila: nombre de producto + cantidad>0
                     # (un libro de compras con esas columnas). Se CREA el producto
@@ -4526,6 +4633,7 @@ async def _insert_multisheet_data(
     # F-H6.b: `{context_id: "una_por_hoja"|"una_por_fila"}` — qué hacer con los
     # envíos sin comprobante de cada hoja. Sin entrada, no se cobran.
     shipping_decisions: dict[str, str] | None = None,
+    purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -4542,6 +4650,16 @@ async def _insert_multisheet_data(
     confirmed_fields = confirmed_fields or {}
     context_mappings = context_mappings or {}
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
+    # F-H6.c: avisos sobre el costo que la persona tiene que ver — celdas de
+    # ajuste ilegibles y columnas mapeadas que no movieron ningún número. Viajan
+    # en `counts` porque es lo que el confirm ya convierte en warnings visibles.
+    _avisos_costo: list[str] = []
+    #: `{context_id: label}` para que los avisos nombren la hoja como la ve el
+    #: usuario y no por su id interno.
+    _etiqueta_de_contexto: dict[str, str] = {
+        str(_c.get("context_id") or ""): str(_c.get("label") or _c.get("context_id") or "")
+        for _c in (summary.get("mapping_contexts") or [])
+    }
 
     # FASE 3: índice de catálogo para el LINK de ventas/gastos/compras (en memoria).
     _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
@@ -4991,6 +5109,7 @@ async def _insert_multisheet_data(
         cf_cols: dict[str, str],
         row_ref: str | None = None,
         context_id: str | None = None,
+        costo_calculado: LineCost | None = None,
     ) -> bool:
         """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
@@ -5148,6 +5267,12 @@ async def _insert_multisheet_data(
                 if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
                 else None
             )
+        # F-H6.c: si la hoja declaró ajustes, el costo de ESTA línea ya se calculó
+        # con ellos y manda sobre el precio crudo de la columna — es lo que el
+        # negocio pagó de verdad. `unit_cost_final` es None cuando la fila no trae
+        # cantidad: sin divisor no se inventa un costo unitario.
+        if costo_calculado is not None and costo_calculado.unit_cost_final:
+            unit_cost = costo_calculado.unit_cost_final
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
@@ -5887,6 +6012,23 @@ async def _insert_multisheet_data(
             # pasada ya corrieron cuando aparece la primera hoja de ventas.
             if entity == "sale" and _sin_respaldo is None:
                 _sin_respaldo = await _ventas_sin_stock_que_las_respalde()
+            # F-H6.c: el costo final de cada línea se calcula ANTES del bucle,
+            # porque repartir un costo compartido exige ver el grupo entero y el
+            # bucle necesita el resultado para escribir el costo de cada compra.
+            _costos_por_fila: dict[int, LineCost] = {}
+            if entity == "expense":
+                _costos_por_fila, _celdas_ilegibles = _planificar_costos_de_la_hoja(
+                    ctx_id, rows, cols, purchase_cost_decisions
+                )
+                for _col, _cuantas in _celdas_ilegibles.items():
+                    counts["ajustes_ilegibles"] = (
+                        counts.get("ajustes_ilegibles", 0) + _cuantas
+                    )
+                    _avisos_costo.append(
+                        texto_del_ajuste_ilegible(
+                            str(ctx.get("label") or ctx_id or ""), _col, _cuantas
+                        )
+                    )
             for _i, row in enumerate(rows):
                 # B1: idempotencia por (archivo, contexto, índice). Chequeo
                 # READ-ONLY; la huella se registra recién DESPUÉS y solo si la
@@ -5942,7 +6084,9 @@ async def _insert_multisheet_data(
                 elif entity == "sale":
                     _did_insert = await _add_sale(row, cols, cf_cols, _row_ref, ctx_id)
                 elif entity == "expense":
-                    _did_insert = await _add_expense(row, cols, cf_cols, _row_ref, ctx_id)
+                    _did_insert = await _add_expense(
+                        row, cols, cf_cols, _row_ref, ctx_id, _costos_por_fila.get(_i)
+                    )
                 else:
                     # F6-B2: la CREACIÓN de producto no fingerprintea (dedup por
                     # identidad/upsert), pero SÍ su CAPTURA a /otros (identidad
@@ -6078,6 +6222,23 @@ async def _insert_multisheet_data(
         )
 
     await session.flush()
+    # F-H6.c: el default seguro no puede ser mudo. Una columna de costo mapeada
+    # que no movió ningún número —porque el usuario no declaró la base— y una
+    # celda que no se pudo leer son las dos cosas que la persona necesita saber
+    # para decidir si vuelve a subir el archivo.
+    for _cid, _targets_ignorados in hojas_que_necesitan_aviso(
+        list((purchase_cost_decisions or {}).values()),
+        {
+            _c: _m
+            for _c, _m in (context_mappings or {}).items()
+            if _m
+        },
+    ).items():
+        _avisos_costo.append(
+            texto_del_aviso(_etiqueta_de_contexto.get(_cid, _cid), _targets_ignorados)
+        )
+    if _avisos_costo:
+        counts["avisos"] = _avisos_costo
     if return_details:
         if stamp_product_updated_at:
             await _stamp_updated_at_on_product_details(session, product_details)

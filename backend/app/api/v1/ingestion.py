@@ -2191,6 +2191,15 @@ async def confirm_file(
             # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
             # se cobran. El dict va tal cual: acá no hay default que resolver.
             shipping_decisions={d.context_id: d.action for d in body.shipping_decisions},
+            purchase_cost_decisions={
+                d.context_id: CostDecision(
+                    context_id=d.context_id,
+                    base=d.base,
+                    shared_shipping=d.shared_shipping,
+                    line_shipping=d.line_shipping,
+                )
+                for d in body.purchase_cost_decisions
+            },
             # Ledger de reversa: `products` no tiene columna de origen, así que
             # sin este detalle no hay forma de saber qué productos creó este
             # archivo — y borrarlo no podría deshacerlos.

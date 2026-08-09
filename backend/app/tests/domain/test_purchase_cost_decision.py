@@ -245,3 +245,74 @@ class TestUnAjusteVacioYUnoIlegibleNoSonLoMismo:
 
     def test_y_concuerda_en_singular(self) -> None:
         assert "1 celda que" in texto_del_ajuste_ilegible("Compras", "IVA", 1)
+
+
+class TestLaReconciliacionDelCosto:
+    """Paso 6 — la suma de las partes tiene que explicar el total aplicado.
+
+    Sin esto, un costo final es un número que hay que creer. Con esto, cualquiera
+    puede rehacer la cuenta con lo que el archivo trajo.
+    """
+
+    def test_base_mas_ajustes_mas_fletes_da_el_total_de_cada_linea(self) -> None:
+        from app.domain.purchase_cost import CostLine, build_line_costs
+
+        lineas = [
+            CostLine(
+                row_index=0,
+                amount=Decimal("12000"),
+                quantity=10,
+                discount=Decimal("2000"),
+                taxes=Decimal("500"),
+                shipping_line=Decimal("300"),
+            ),
+            CostLine(
+                row_index=1,
+                amount=Decimal("8000"),
+                quantity=4,
+                discount=Decimal("0"),
+                taxes=Decimal("0"),
+                shipping_line=Decimal("100"),
+            ),
+        ]
+        plan = build_line_costs(
+            lineas,
+            shared_shipping=Decimal("900"),
+            shared_mode=COMPARTIDO_SUBTOTAL,
+            line_mode=LINEA_AL_COSTO,
+            basis=BASE_APLICAR,
+        )
+
+        for original, calculada in zip(lineas, plan.lines, strict=True):
+            esperado = (
+                original.amount
+                - original.discount
+                + original.taxes
+                + original.shipping_line
+                + calculada.shipping_allocated
+            )
+            assert calculada.total == esperado, f"fila {original.row_index}"
+
+    def test_lo_repartido_suma_exactamente_la_cifra_compartida(self) -> None:
+        """Incluido el redondeo: tres líneas iguales sobre $10 dan 3,33 × 3 = 9,99,
+        y el centavo que falta tiene que estar en alguna línea, no perdido."""
+        from app.domain.purchase_cost import CostLine, build_line_costs
+
+        lineas = [
+            CostLine(row_index=i, amount=Decimal("100"), quantity=1) for i in range(3)
+        ]
+        plan = build_line_costs(
+            lineas, shared_shipping=Decimal("10"), shared_mode=COMPARTIDO_SUBTOTAL
+        )
+        assert sum(línea.shipping_allocated for línea in plan.lines) == Decimal("10")
+        assert plan.repartido == Decimal("10")
+        assert plan.sin_repartir == Decimal("0")
+
+    def test_el_costo_unitario_es_el_total_dividido_la_cantidad(self) -> None:
+        from app.domain.purchase_cost import CostLine, build_line_costs
+
+        plan = build_line_costs(
+            [CostLine(row_index=0, amount=Decimal("12000"), quantity=10)],
+        )
+        línea = plan.lines[0]
+        assert línea.unit_cost_final == (línea.total / 10).quantize(Decimal("0.01"))
