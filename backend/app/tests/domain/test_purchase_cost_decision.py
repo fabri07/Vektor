@@ -13,6 +13,8 @@ producto y no de implementación:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from app.domain.purchase_cost import (
     BASE_APLICAR,
     BASE_INCLUYE,
@@ -22,8 +24,11 @@ from app.domain.purchase_cost import (
     LINEA_GASTO,
 )
 from app.domain.purchase_cost_decision import (
+    AJUSTE_ILEGIBLE,
     PurchaseCostDecision,
     hojas_que_necesitan_aviso,
+    parse_ajuste,
+    texto_del_ajuste_ilegible,
     texto_del_aviso,
     validate_purchase_cost_decisions,
 )
@@ -196,3 +201,47 @@ class TestElDefaultSeguroNoPuedeSerMudo:
         assert "Compras marzo" in texto
         assert "Descuento de la línea" in texto
         assert "no modificaron el costo" in texto
+
+
+class TestUnAjusteVacioYUnoIlegibleNoSonLoMismo:
+    """La regla que `_parse_amount` no puede dar: acá el CERO es un valor válido.
+
+    Ese parser devuelve `None` para vacío, para ilegible y para todo lo que no sea
+    positivo, porque nació para montos de operación. Reusarlo convertiría una
+    celda con texto en «sin descuento», que es perder un dato sin que nadie se
+    entere.
+    """
+
+    def test_una_celda_vacia_es_cero(self) -> None:
+        assert parse_ajuste(None) == Decimal("0")
+        assert parse_ajuste("") == Decimal("0")
+        assert parse_ajuste("   ") == Decimal("0")
+
+    def test_un_cero_declarado_tambien_es_cero_y_es_valido(self) -> None:
+        assert parse_ajuste("0") == Decimal("0")
+        assert parse_ajuste(0) == Decimal("0")
+
+    def test_texto_ilegible_no_se_convierte_en_cero(self) -> None:
+        assert parse_ajuste("ver factura") == AJUSTE_ILEGIBLE
+        assert parse_ajuste("s/d") == AJUSTE_ILEGIBLE
+        assert parse_ajuste("--") == AJUSTE_ILEGIBLE
+
+    def test_lee_el_formato_de_una_planilla_argentina(self) -> None:
+        assert parse_ajuste("$ 1.234,56") == Decimal("1234.56")
+        assert parse_ajuste("1,50") == Decimal("1.50")
+        assert parse_ajuste("2,000.75") == Decimal("2000.75")
+
+    def test_un_negativo_se_lee_tal_cual(self) -> None:
+        """No se decide acá si tiene sentido: eso lo resuelve la aritmética, que ya
+        reporta cuando el descuento se come el monto entero."""
+        assert parse_ajuste("-500") == Decimal("-500")
+
+    def test_el_aviso_dice_la_hoja_la_columna_y_cuantas_filas(self) -> None:
+        texto = texto_del_ajuste_ilegible("Compras marzo", "Bonificación", 3)
+        assert "Compras marzo" in texto
+        assert "Bonificación" in texto
+        assert "3 celdas" in texto
+        assert "SIN ese ajuste" in texto
+
+    def test_y_concuerda_en_singular(self) -> None:
+        assert "1 celda que" in texto_del_ajuste_ilegible("Compras", "IVA", 1)

@@ -22,7 +22,9 @@ mapeo efectivo, y devuelve mensajes en castellano.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from app.domain.purchase_cost import (
     BASE_INCLUYE,
@@ -206,6 +208,63 @@ def hojas_que_necesitan_aviso(
         if ignorados:
             aviso[context_id] = ignorados
     return aviso
+
+
+#: Lo que devuelve `parse_ajuste` cuando la celda tenía algo que no es un número.
+#:
+#: NO es `Decimal("0")` a propósito. Un ajuste vacío y un ajuste ilegible son
+#: cosas distintas: el primero significa «esta fila no tiene descuento» y el
+#: segundo «no sé qué dice esta celda». Colapsarlos en cero es exactamente la
+#: forma de perder un dato sin que nadie se entere — el patrón `or 0` que este
+#: proyecto prohíbe cuando el cero es un valor válido.
+AJUSTE_ILEGIBLE = "ilegible"
+
+
+def parse_ajuste(raw: object) -> Decimal | str:
+    """Lee un valor de descuento, impuesto o flete de línea.
+
+    Devuelve un `Decimal` o `AJUSTE_ILEGIBLE`. Tres casos, tres respuestas:
+
+    - columna ausente o celda vacía → ``Decimal("0")``: la fila no declara ajuste.
+    - un número, **incluido el cero y los negativos** → su valor.
+    - cualquier otra cosa → ``AJUSTE_ILEGIBLE``, para que el importador lo cuente
+      y lo avise en vez de tratarlo como «sin descuento».
+
+    No se puede reusar `_parse_amount` del importador: ése devuelve ``None`` para
+    vacío, para ilegible **y para todo lo que no sea positivo**, porque nació para
+    montos de operación, donde un cero no tiene sentido. Acá el cero es un valor
+    normal y perfectamente frecuente.
+
+    Acepta el mismo formato que el resto del importador —separadores de miles con
+    punto o coma, símbolo de peso, espacios— porque una planilla argentina escribe
+    «$ 1.234,56» y no es tarea del usuario normalizarla antes de subirla.
+    """
+    if raw is None:
+        return Decimal("0")
+    s = re.sub(r"[$\s]", "", str(raw).strip())
+    if not s:
+        return Decimal("0")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return Decimal(s)
+    except InvalidOperation:
+        return AJUSTE_ILEGIBLE
+
+
+def texto_del_ajuste_ilegible(etiqueta_hoja: str, columna: str, filas: int) -> str:
+    """El aviso de las celdas que no se pudieron leer, en castellano."""
+    plural = "s" if filas != 1 else ""
+    return (
+        f"En la hoja «{etiqueta_hoja}», la columna «{columna}» tiene {filas} celda{plural} "
+        f"que no se pudieron leer como número. Esas filas se importaron SIN ese ajuste: "
+        "revisá los valores y volvé a subir el archivo si hacía falta."
+    )
 
 
 def texto_del_aviso(etiqueta_hoja: str, targets: list[str]) -> str:
