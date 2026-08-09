@@ -19,7 +19,7 @@ import csv
 import io
 from typing import Any
 
-from app.application.services.column_mapping_service import _normalize_col, heuristic_target
+from app.application.services.column_mapping_service import _heuristic_match, _normalize_col
 from app.application.services.file_parsing import (
     _decode_text_bytes,
     _detect_header_row,
@@ -55,15 +55,14 @@ def _clean_str(raw: Any, *, maxlen: int) -> str | None:
 def _map_supplier_columns(headers: list[str]) -> dict[str, str]:
     """``{header: campo}`` para las columnas que mapean a un campo del proveedor.
 
-    Usa el reconocedor compartido (``column_mapping_service.heuristic_target``) en
-    vez de un matcher propio — un solo lugar define qué encabezado va a qué campo.
-    Un encabezado ambiguo no devuelve nada: acá no hay a quién preguntarle.
+    Usa el mapeo heurístico compartido (``column_mapping_service._heuristic_match``)
+    en vez de un matcher propio — un solo lugar define qué keyword mapea a qué campo.
     """
     mapping: dict[str, str] = {}
     for header in headers:
         if header is None:
             continue
-        field_name = heuristic_target(_normalize_col(str(header)), "supplier")
+        field_name = _heuristic_match(_normalize_col(str(header)), "supplier")
         # No pisar un mapeo ya encontrado (el primer header gana por campo).
         if field_name is not None and field_name not in mapping.values():
             mapping[header] = field_name

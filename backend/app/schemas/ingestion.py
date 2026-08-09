@@ -182,19 +182,9 @@ class ColumnMappingSuggestion(BaseModel):
     target_field: str | None
     confidence: float
     source: Literal["tenant_history", "heuristic", "fuzzy", "llm", "none"]
-    status: Literal["mapped", "unmapped", "ambiguo", "required_missing"]
+    status: Literal["mapped", "unmapped", "required_missing"]
     # Contexto al que pertenece la sugerencia (hoja/tabla). None = archivo de un solo contexto.
     context_id: str | None = None
-    # F-M. `ambiguo` = el reconocedor entendió el encabezado y, con eso entendido,
-    # sigue habiendo más de una lectura razonable. No es lo mismo que `unmapped`:
-    # ahí no se reconoció nada. Los candidatos van en `options` y el porqué en
-    # `duda`, para que la pantalla no tenga que reconstruir ninguno de los dos.
-    options: list[str] = []
-    # Por qué no alcanza, en castellano. Viaja también en `unmapped` cuando el
-    # concepto SÍ se reconoció pero esta hoja no tiene campo donde ponerlo:
-    # «no entiendo esto» y «entiendo qué es pero no tengo dónde ponerlo» son dos
-    # mensajes distintos para la persona, aunque para el importador sean lo mismo.
-    duda: str | None = None
 
 
 class FieldCatalogEntry(BaseModel):
