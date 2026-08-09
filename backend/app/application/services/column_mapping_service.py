@@ -1110,6 +1110,8 @@ class ColumnMappingService:
             target_field: str | None = None
             confidence: float = 0.0
             source: str = "none"
+            options: tuple[str, ...] = ()
+            duda: str | None = None
 
             # 1. Historial del tenant (prioridad máxima)
             if normalized in history:
@@ -1126,6 +1128,8 @@ class ColumnMappingService:
                     confidence = 0.75
                     source = "heuristic"
                 elif lectura.outcome == "ambiguo" or lectura.duda is not None:
+                    options = lectura.options
+                    duda = lectura.duda
                     # El reconocedor SÍ entendió el encabezado, y con eso puesto
                     # dijo que no alcanza para elegir. Las capas de abajo saben
                     # MENOS —fuzzy compara contra los keywords crudos, el LLM no
@@ -1144,6 +1148,10 @@ class ColumnMappingService:
             # Calcular status
             if target_field is not None and target_field != "ignore":
                 status = "mapped"
+            elif options:
+                # Se entendió el encabezado y aun así hay más de una lectura. Es
+                # un estado propio: `unmapped` diría que no se reconoció nada.
+                status = "ambiguo"
             else:
                 status = "unmapped"
 
@@ -1156,6 +1164,8 @@ class ColumnMappingService:
                     "confidence": round(confidence, 3),
                     "source": source,
                     "status": status,
+                    "options": list(options),
+                    "duda": duda,
                 }
             )
 
@@ -1265,6 +1275,12 @@ class ColumnMappingService:
                     s["confidence"] = round(conf, 3)
                     s["source"] = "llm"
                     s["status"] = "mapped"
+                    # Una columna resuelta no puede seguir explicando por qué no
+                    # se podía resolver. Hoy es inalcanzable —las que tienen duda
+                    # están en `skip`— pero el invariante «mapped ⇒ sin duda» se
+                    # sostiene acá, que es el único lugar que puede romperlo.
+                    s["options"] = []
+                    s["duda"] = None
                     overwritten = True
             decisions.append(
                 {

@@ -74,9 +74,32 @@ class TestUnAmbiguoNoSeResuelveSolo:
     @pytest.mark.asyncio
     async def test_no_llega_como_mapped_con_un_target_elegido_a_dedo(self) -> None:
         s = (await _sugerir("expense", ["Precio con IVA"]))["Precio con IVA"]
-        assert s["status"] == "unmapped"
+        assert s["status"] == "ambiguo"
         assert s["target_field"] is None
         assert s["confidence"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_viaja_con_los_candidatos_y_el_porque(self) -> None:
+        """`ambiguo` es un estado propio, no un `unmapped` con suerte: la pantalla
+        recibe los dos candidatos y la razón, sin tener que reconstruir ninguno."""
+        s = (await _sugerir("expense", ["Precio con IVA"]))["Precio con IVA"]
+        assert set(s["options"]) == {"amount", "unit_price"}
+        assert s["duda"]
+
+    @pytest.mark.asyncio
+    async def test_un_concepto_sin_campo_explica_pero_no_ofrece_candidatos(self) -> None:
+        """«Entiendo qué es y no tengo dónde ponerlo» no es una ambigüedad: no hay
+        entre qué elegir, así que queda `unmapped` — pero con la explicación."""
+        s = (await _sugerir("expense", ["Envío unitario"]))["Envío unitario"]
+        assert s["status"] == "unmapped"
+        assert s["options"] == []
+        assert s["duda"]
+
+    @pytest.mark.asyncio
+    async def test_lo_desconocido_no_inventa_una_explicacion(self) -> None:
+        s = (await _sugerir("sale", ["ColRara99"]))["ColRara99"]
+        assert s["duda"] is None
+        assert s["options"] == []
 
     @pytest.mark.asyncio
     async def test_tampoco_lo_desempata_el_llm(self) -> None:
@@ -98,6 +121,47 @@ class TestUnAmbiguoNoSeResuelveSolo:
 
         assert "Precio con IVA" not in vistas
         assert "ColRara99" in vistas, "el rescate del desconocido no se puede perder"
+
+
+class TestElInvarianteDelContrato:
+    """«`mapped` ⇒ sin duda», sostenido en el único lugar que puede romperlo.
+
+    Ojo con lo que este test es: el caller de hoy **no puede** producir el estado
+    que arma acá, porque las columnas con duda viajan en `skip` y nunca llegan al
+    LLM. Se prueba directo contra `_apply_llm_fallback` a propósito — el guard
+    existe para que el invariante no dependa de ese hecho, y sacar el `skip` en el
+    futuro no debería poder dejar una columna resuelta explicando por qué no se
+    podía resolver.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resolver_una_columna_le_saca_la_duda(self) -> None:
+        sugerencia = {
+            "source_column": "Precio con IVA",
+            "normalized_column": "precio_con_iva",
+            "sample_values": ["1500"],
+            "target_field": None,
+            "confidence": 0.0,
+            "source": "none",
+            "status": "ambiguo",
+            "options": ["amount", "unit_price"],
+            "duda": "¿es el precio de cada unidad, o el total de la línea?",
+        }
+
+        async def _fake_llm(
+            entity_type: str, columns: list[dict[str, Any]], valid_fields: dict[str, str]
+        ) -> dict[str, dict[str, Any]]:
+            return {"Precio con IVA": {"target_field": "amount", "confidence": 0.9}}
+
+        with unittest.mock.patch.object(
+            llm_column_mapper, "suggest_with_llm", side_effect=_fake_llm
+        ):
+            # Sin `skip`: es el escenario que el guard tiene que sostener.
+            await _svc()._apply_llm_fallback("expense", [sugerencia])
+
+        assert sugerencia["status"] == "mapped"
+        assert sugerencia["duda"] is None
+        assert sugerencia["options"] == []
 
 
 class TestLoQueNoSeReconocioSigueSuCamino:
