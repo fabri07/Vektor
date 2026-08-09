@@ -42,6 +42,12 @@ CONCEPTOS: dict[str, str] = {
     "nacimiento": "cumpleanos",
     "precio": "precio",
     "price": "precio",
+    # `costo` es un concepto propio y no un `precio` con calificador: en un
+    # catálogo nombra el costo de reposición y en un libro de compras el monto de
+    # la línea, y esa diferencia la resuelve la tabla de targets por entidad. Como
+    # `precio` con un calificador `de_costo` se perdía al mirar sólo el concepto.
+    "costo": "costo",
+    "cost": "costo",
     "envio": "envio",
     "flete": "envio",
     "shipping": "envio",
@@ -124,14 +130,6 @@ ESPECIALIZA: dict[str, str] = {
     "cumpleanos": "fecha",
 }
 
-#: El mismo token nombra cosas distintas según el tipo de hoja. «Costo» en un
-#: catálogo es un precio de referencia; en un libro de compras es el monto de la
-#: línea. Se resuelve acá y no en la tabla de targets para que el análisis ya
-#: salga con el concepto correcto.
-CONCEPTOS_POR_ENTIDAD: dict[str, dict[str, str]] = {
-    "product": {"costo": "precio", "cost": "precio"},
-}
-
 # ── Débiles: concepto si están solos, calificador si hay otro núcleo ─────────
 # Token → (concepto cuando es el único núcleo, calificador cuando acompaña).
 #
@@ -152,8 +150,6 @@ DEBILES: dict[str, tuple[str, str]] = {
     "compra": ("monto", "de_compra"),
     "venta": ("monto", "de_venta"),
     "pago": ("monto", "de_pago"),
-    "costo": ("monto", "de_costo"),
-    "cost": ("monto", "de_costo"),
     # Entidades: nunca identifican el concepto de la columna, sólo lo ubican.
     "producto": ("producto", "de_producto"),
     "articulo": ("producto", "de_producto"),
@@ -242,7 +238,7 @@ def analyze_header(normalized: str, entity_type: str = "") -> HeaderAnalysis:
        que la capa de arriba pregunte.
     """
     tokens = tokenize(normalized)
-    por_entidad = CONCEPTOS_POR_ENTIDAD.get(entity_type, {})
+    del entity_type  # el concepto no depende de la hoja; el TARGET sí (tabla de resolución)
 
     fuertes: list[str] = []
     debiles: list[str] = []
@@ -257,8 +253,7 @@ def analyze_header(normalized: str, entity_type: str = "") -> HeaderAnalysis:
             siguiente = tokens[i + 1] if i + 1 < len(tokens) else None
             if siguiente is not None:
                 concepto_seguido = (
-                    por_entidad.get(siguiente)
-                    or CONCEPTOS.get(siguiente)
+                    CONCEPTOS.get(siguiente)
                     or (DEBILES[siguiente][0] if siguiente in DEBILES else None)
                 )
                 if concepto_seguido is not None:
@@ -274,9 +269,7 @@ def analyze_header(normalized: str, entity_type: str = "") -> HeaderAnalysis:
             i += 2
             continue
 
-        if tok in por_entidad:
-            fuertes.append(por_entidad[tok])
-        elif tok in CONCEPTOS:
+        if tok in CONCEPTOS:
             fuertes.append(CONCEPTOS[tok])
         elif tok in DEBILES:
             debiles.append(tok)

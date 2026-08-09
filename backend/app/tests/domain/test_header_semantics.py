@@ -161,9 +161,20 @@ class TestBigramas:
         assert concepto == "sku"
 
 
-class TestElMismoTokenSegunLaHoja:
-    def test_costo_en_un_catalogo_es_un_precio(self) -> None:
-        assert _leer("Costo", "product")[0] == "precio"
+class TestElConceptoNoDependeDeLaHoja:
+    """`costo` nombra lo mismo en todos lados; lo que cambia es a qué campo va.
 
-    def test_costo_en_un_libro_de_compras_es_el_monto_de_la_linea(self) -> None:
-        assert _leer("Costo", "expense")[0] == "monto"
+    En un catálogo es el costo de reposición del producto y en un libro de compras
+    el monto de la línea, pero ésa es una decisión sobre el CATÁLOGO DE CAMPOS, no
+    sobre el idioma. Modelarla acá obligaba a que el análisis conociera la entidad
+    y a tener un `costo` que a veces era `precio` y a veces `monto` — y el matiz
+    «esto es un costo» se perdía en los dos casos.
+    """
+
+    def test_costo_es_su_propio_concepto(self) -> None:
+        assert _leer("Costo", "product")[0] == "costo"
+        assert _leer("Costo", "expense")[0] == "costo"
+
+    def test_un_costo_no_es_un_precio(self) -> None:
+        assert _leer("Precio de compra", "product")[0] == "precio"
+        assert _leer("Costo unitario", "product") == ("costo", {"unitario"}, ())
