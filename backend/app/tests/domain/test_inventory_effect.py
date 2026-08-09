@@ -60,38 +60,53 @@ class TestDefaults:
                 )
                 assert efecto in VALID_EFFECTS
 
-    def test_ventas_historicas_calculan_sin_tocar_stock(self) -> None:
-        assert default_effect_for(_hoja(entity="sale")) == INFORMATIONAL
-
-    def test_compras_historicas_calculan_sin_tocar_stock(self) -> None:
-        assert default_effect_for(_hoja(entity="expense")) == INFORMATIONAL
-
-    def test_catalogo_con_stock_declara_saldo_absoluto(self) -> None:
-        """Un catálogo es una FOTO del stock de hoy, no una secuencia."""
-        assert (
-            default_effect_for(_hoja(entity="product", campos=("name", "stock_units")))
-            == CURRENT_SNAPSHOT
-        )
-
-    def test_lista_de_precios_no_declara_saldo(self) -> None:
-        """Catálogo SIN cantidad: no dice cuánto hay, así que no toca inventario."""
-        assert (
-            default_effect_for(_hoja(entity="product", campos=("name", "sale_price_ars")))
-            == NO_INVENTORY
-        )
-
-    def test_venta_sin_producto_no_toca_inventario(self) -> None:
-        """Servicios, honorarios, resumen diario: hay monto, no hay unidades."""
-        assert (
-            default_effect_for(_hoja(entity="sale", campos=("amount", "transaction_date")))
-            == NO_INVENTORY
-        )
-
-    def test_venta_con_producto_pero_sin_cantidad_no_toca_inventario(self) -> None:
-        assert (
-            default_effect_for(_hoja(entity="sale", campos=("product_name", "amount")))
-            == NO_INVENTORY
-        )
+    @pytest.mark.parametrize(
+        ("entidad", "campos", "esperado"),
+        [
+            # Ventas y compras históricas: se calculan, pero no mueven el stock.
+            pytest.param(
+                "sale",
+                ("product_name", "quantity", "amount"),
+                INFORMATIONAL,
+                id="test_ventas_historicas_calculan_sin_tocar_stock",
+            ),
+            pytest.param(
+                "expense",
+                ("product_name", "quantity", "amount"),
+                INFORMATIONAL,
+                id="test_compras_historicas_calculan_sin_tocar_stock",
+            ),
+            # Un catálogo es una FOTO del stock de hoy, no una secuencia.
+            pytest.param(
+                "product",
+                ("name", "stock_units"),
+                CURRENT_SNAPSHOT,
+                id="test_catalogo_con_stock_declara_saldo_absoluto",
+            ),
+            # Catálogo SIN cantidad: no dice cuánto hay, así que no toca inventario.
+            pytest.param(
+                "product",
+                ("name", "sale_price_ars"),
+                NO_INVENTORY,
+                id="test_lista_de_precios_no_declara_saldo",
+            ),
+            # Servicios, honorarios, resumen diario: hay monto, no hay unidades.
+            pytest.param(
+                "sale",
+                ("amount", "transaction_date"),
+                NO_INVENTORY,
+                id="test_venta_sin_producto_no_toca_inventario",
+            ),
+            pytest.param(
+                "sale",
+                ("product_name", "amount"),
+                NO_INVENTORY,
+                id="test_venta_con_producto_pero_sin_cantidad_no_toca_inventario",
+            ),
+        ],
+    )
+    def test_default_por_hoja(self, entidad: str, campos: tuple[str, ...], esperado: str) -> None:
+        assert default_effect_for(_hoja(entity=entidad, campos=campos)) == esperado
 
     def test_los_maestros_no_tocan_inventario(self) -> None:
         for entidad in ("customer", "supplier"):
