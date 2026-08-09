@@ -27,8 +27,8 @@ from typing import Any
 
 from app.application.security.prompt_defense import wrap_user_input
 from app.application.services.column_mapping_service import (
-    _heuristic_match,
     _normalize_col,
+    heuristic_target,
 )
 from app.application.services.file_parsing import (
     IMAGE_MIMES,
@@ -94,6 +94,14 @@ _TARGET_PRODUCT_NAME = "name"
 _TARGET_SKU = "sku"
 _TARGET_QTY = "stock_units"
 _PRICE_TARGETS = frozenset({"unit_cost_ars", "sale_price_ars"})
+#: Un remito es un documento de LÍNEAS, no un catálogo: «Precio» a secas no tiene
+#: acá la ambigüedad de los tres precios de un producto. El costo es la lectura
+#: correcta —es lo que el proveedor está cobrando— y se declara para que la
+#: columna no se pierda por una duda que este documento ya responde.
+_PREFERENCIA_DE_PRECIO = ("unit_cost_ars", "sale_price_ars")
+#: En un remito la descripción de la línea ES el nombre del producto: no hay un
+#: campo «descripción» aparte que llenar.
+_DESCRIPTION_COMO_NOMBRE = "description"
 _TARGET_UNIT_PRICE = "unit_price"  # target sintético propio del remito
 
 # Keywords de envío/flete: una columna o fila con esto es el shipping_cost del remito,
@@ -104,8 +112,10 @@ _SHIPPING_KEYWORDS = {"envio", "envío", "flete", "shipping", "logistica", "log�
 def _map_columns(headers: list[str]) -> dict[str, str]:
     """Mapea headers → target de remito (product_name/sku/qty/unit_price/shipping).
 
-    Determinístico: reutiliza el ``_heuristic_match`` del ColumnMapper sobre
-    entity_type="product". Devuelve ``{header: target}`` solo para columnas mapeadas.
+    Determinístico: reutiliza el ``heuristic_target`` del ColumnMapper sobre
+    entity_type="product", declarando lo que este documento resuelve por su tipo
+    (ver `_PREFERENCIA_DE_PRECIO` y `_DESCRIPTION_COMO_NOMBRE`). Devuelve
+    ``{header: target}`` solo para columnas mapeadas.
     """
     mapping: dict[str, str] = {}
     for header in headers:
@@ -115,7 +125,9 @@ def _map_columns(headers: list[str]) -> dict[str, str]:
         if any(k in normalized for k in _SHIPPING_KEYWORDS):
             mapping[header] = "shipping"
             continue
-        target = _heuristic_match(normalized, "product")
+        target = heuristic_target(normalized, "product", prefer=_PREFERENCIA_DE_PRECIO)
+        if target == _DESCRIPTION_COMO_NOMBRE:
+            target = _TARGET_PRODUCT_NAME
         if target in _PRICE_TARGETS:
             mapping[header] = _TARGET_UNIT_PRICE
         elif target in (_TARGET_PRODUCT_NAME, _TARGET_SKU, _TARGET_QTY):
