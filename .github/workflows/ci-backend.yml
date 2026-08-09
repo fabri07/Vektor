@@ -155,7 +155,10 @@ jobs:
           SMTP_PASSWORD: ""
           SMTP_FROM_EMAIL: "test@vektor.app"
           ENABLE_EMAIL_VERIFICATION: "false"
-        run: pytest -m postgres --no-cov -v
+        # Acotado a app/tests/integration: los 10 archivos con el mark viven todos
+        # ahí; sin el path, pytest colectaba la suite entera (~3900 tests) para
+        # correr ~120.
+        run: pytest app/tests/integration -m postgres --no-cov -v
 
       # ── 7. Docker build (verify only, no push) ───────────────────────────────
       - name: Docker — verify build
