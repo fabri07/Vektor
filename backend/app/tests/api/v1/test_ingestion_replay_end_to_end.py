@@ -32,7 +32,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from openpyxl import Workbook
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.file_parsing import parse_uploaded_content
@@ -220,7 +220,21 @@ async def _replay(
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 class TestReplayEndToEnd:
+    """El ÚNICO e2e del pipeline completo de replay — no borrar ni bajar de capa.
+
+    Los otros invariantes (idempotencia, reversión por borrado, informational)
+    viven en capa servicio, donde el mismo assert corre en milisegundos:
+    - idempotencia → `test_inventory_replay_service.py::
+      test_aplicar_dos_veces_no_descuenta_dos_veces`
+    - reversión del replay al borrar → `test_inventory_replay_service.py::
+      TestBorrarElArchivoDeshaceElReplay` + ciclo DELETE completo en
+      `test_file_deletion_end_to_end.py`
+    - informational por hoja (V16) → `test_ingestion_stock_treatment_por_hoja.py::
+      test_informational_en_ventas_no_frena_la_apertura_ni_la_compra`
+    """
+
     async def test_apertura_mas_compra_menos_venta_da_once(
         self,
         client: AsyncClient,
@@ -264,96 +278,9 @@ class TestReplayEndToEnd:
             ("sale", -4),
         ]
 
-    async def test_aplicar_dos_veces_no_descuenta_dos_veces(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        db_session: AsyncSession,
-        sample_tenant: Tenant,
-        archivo: UploadedFile,
-    ) -> None:
-        """La idempotencia sale del índice único sobre `source_event_id`, no de un
-        flag: dos clicks en "aplicar" no pueden dejar el inventario en 7."""
-        await _confirmar(client, auth_headers, archivo, "historical_replay")
-        await _replay(client, auth_headers, archivo, dry_run=False)
-
-        segundo = await _replay(client, auth_headers, archivo, dry_run=False)
-
-        assert segundo["aplicadas"] == 0
-        assert segundo["ya_aplicadas"] == 1
-        assert await _stock(db_session, sample_tenant) == _STOCK_FINAL
-
-    async def test_borrar_el_archivo_revierte_todo_lo_que_creo(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        db_session: AsyncSession,
-        sample_tenant: Tenant,
-        archivo: UploadedFile,
-    ) -> None:
-        """El descuento del replay lleva `source_upload_id`, así que el borrado por
-        procedencia lo revierte con todo lo demás (**V15**). Sin producto de otra
-        fuente, el producto que el archivo creó también se va."""
-        await _confirmar(client, auth_headers, archivo, "historical_replay")
-        await _replay(client, auth_headers, archivo, dry_run=False)
-        assert await _stock(db_session, sample_tenant) == _STOCK_FINAL
-
-        # `confirm=true` porque el archivo importó datos: sin eso el DELETE rebota
-        # con 409 para que el usuario vea qué se va a llevar.
-        response = await client.delete(
-            f"/api/v1/ingestion/files/{archivo.id}?confirm=true", headers=auth_headers
-        )
-        assert response.status_code == 200, response.text
-        assert response.json()["fully_reverted"] is True
-
-        # Se cuenta con `count()` y no materializando entidades: los objetos que la
-        # sesión del test tiene cacheados quedaron obsoletos por lo que hizo el
-        # endpoint, y refrescarlos acá no aporta nada a lo que se está afirmando.
-        vivos = await db_session.scalar(
-            select(func.count())
-            .select_from(Product)
-            .where(
-                Product.tenant_id == sample_tenant.tenant_id,
-                Product.is_active.is_(True),
-            )
-        )
-        assert vivos == 0
-        movimientos_vivos = await db_session.scalar(
-            select(func.count())
-            .select_from(InventoryMovement)
-            .where(
-                InventoryMovement.tenant_id == sample_tenant.tenant_id,
-                InventoryMovement.voided_at.is_(None),
-            )
-        )
-        assert movimientos_vivos == 0
-
-    async def test_informational_no_descuenta_la_venta_pero_igual_proyecta_once(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        db_session: AsyncSession,
-        sample_tenant: Tenant,
-        archivo: UploadedFile,
-    ) -> None:
-        """El modo es de la HOJA DE VENTAS: la apertura y la compra sí tocaron el
-        stock. Decir "este archivo no modifica el inventario" sería falso."""
-        await _confirmar(client, auth_headers, archivo, "informational")
-
-        assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
-        assert await _movimientos(db_session, sample_tenant) == [
-            ("adjustment", 10),
-            ("purchase", 5),
-        ]
-
-        preview = await _replay(client, auth_headers, archivo, dry_run=True)
-        assert [(p["saldo_inicial"], p["saldo_final"]) for p in preview["impacto"]] == [
-            (_STOCK_TRAS_CONFIRMAR, _STOCK_FINAL)
-        ]
-        assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
-
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 class TestElApplyExigeElegirHojas:
     """El eje de inventario se declara POR HOJA: escribir sin decir sobre cuáles
     contradice esa declaración.
@@ -365,19 +292,32 @@ class TestElApplyExigeElegirHojas:
     pantalla descubre qué hojas ofrecer.
     """
 
-    async def test_aplicar_sin_hojas_es_422(
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({"dry_run": False}, id="test_aplicar_sin_hojas_es_422"),
+            # `[]` es "ninguna", no "todas": el default del contrato no puede
+            # colarse por una lista vacía.
+            pytest.param(
+                {"dry_run": False, "context_ids": []},
+                id="test_una_lista_vacia_tampoco_alcanza",
+            ),
+        ],
+    )
+    async def test_aplicar_sin_elegir_hojas_es_422(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
         archivo: UploadedFile,
         db_session: AsyncSession,
         sample_tenant: Tenant,
+        payload: dict[str, Any],
     ) -> None:
         await _confirmar(client, auth_headers, archivo, "historical_replay")
 
         respuesta = await client.post(
             f"/api/v1/ingestion/files/{archivo.id}/inventory-replay",
-            json={"dry_run": False},
+            json=payload,
             headers=auth_headers,
         )
         assert respuesta.status_code == 422
@@ -385,23 +325,6 @@ class TestElApplyExigeElegirHojas:
 
         # Y no escribió nada: el stock sigue como lo dejó el confirm.
         assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
-
-    async def test_una_lista_vacia_tampoco_alcanza(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        archivo: UploadedFile,
-    ) -> None:
-        """`[]` es "ninguna", no "todas": el default del contrato no puede
-        colarse por una lista vacía."""
-        await _confirmar(client, auth_headers, archivo, "historical_replay")
-
-        respuesta = await client.post(
-            f"/api/v1/ingestion/files/{archivo.id}/inventory-replay",
-            json={"dry_run": False, "context_ids": []},
-            headers=auth_headers,
-        )
-        assert respuesta.status_code == 422
 
     async def test_el_preview_sigue_viendo_todo_el_archivo(
         self,
