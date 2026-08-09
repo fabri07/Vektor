@@ -20,37 +20,40 @@ def _where_text(statement: object) -> str:
 
 
 class TestProvenanceDefaults:
-    def test_sale_entry_explicit_provenance_real(self) -> None:
+    @pytest.mark.parametrize(
+        ("modelo", "kwargs"),
+        [
+            pytest.param(
+                SaleEntry,
+                {
+                    "amount": Decimal("1000"),
+                    "quantity": 1,
+                    "transaction_date": date.today(),
+                    "payment_method": "cash",
+                },
+                id="test_sale_entry_explicit_provenance_real",
+            ),
+            pytest.param(
+                ExpenseEntry,
+                {
+                    "amount": Decimal("500"),
+                    "category": "test",
+                    "transaction_date": date.today(),
+                    "description": "test",
+                },
+                id="test_expense_entry_explicit_provenance_real",
+            ),
+            pytest.param(
+                Product,
+                {"name": "Test Product", "sale_price_ars": Decimal("1000")},
+                id="test_product_explicit_provenance_real",
+            ),
+        ],
+    )
+    def test_provenance_real_explicita(self, modelo: type, kwargs: dict) -> None:
         """Los inserts de datos reales deben pasar provenance='REAL' explícitamente."""
-        sale = SaleEntry(
-            tenant_id=uuid.uuid4(),
-            amount=Decimal("1000"),
-            quantity=1,
-            transaction_date=date.today(),
-            payment_method="cash",
-            provenance="REAL",
-        )
-        assert sale.provenance == "REAL"
-
-    def test_expense_entry_explicit_provenance_real(self) -> None:
-        expense = ExpenseEntry(
-            tenant_id=uuid.uuid4(),
-            amount=Decimal("500"),
-            category="test",
-            transaction_date=date.today(),
-            description="test",
-            provenance="REAL",
-        )
-        assert expense.provenance == "REAL"
-
-    def test_product_explicit_provenance_real(self) -> None:
-        product = Product(
-            tenant_id=uuid.uuid4(),
-            name="Test Product",
-            sale_price_ars=Decimal("1000"),
-            provenance="REAL",
-        )
-        assert product.provenance == "REAL"
+        entidad = modelo(tenant_id=uuid.uuid4(), provenance="REAL", **kwargs)
+        assert entidad.provenance == "REAL"
 
     def test_tenant_explicit_is_demo_false(self) -> None:
         tenant = Tenant(
@@ -62,68 +65,79 @@ class TestProvenanceDefaults:
 
 
 class TestProvenanceConfirmedData:
-    def test_confirmed_data_tiene_provenance_real(self) -> None:
-        sale = SaleEntry(
-            tenant_id=uuid.uuid4(),
-            amount=Decimal("10000"),
-            quantity=1,
-            transaction_date=date.today(),
-            payment_method="cash",
-            notes="Importado desde archivo",
-            provenance="REAL",
-        )
-        assert sale.provenance == "REAL"
-
-    def test_demo_seed_tiene_provenance_demo(self) -> None:
-        sale = SaleEntry(
-            tenant_id=uuid.uuid4(),
-            amount=Decimal("10700"),
-            quantity=1,
-            transaction_date=date.today(),
-            payment_method="cash",
-            notes="demo",
-            provenance="DEMO",
-        )
-        assert sale.provenance == "DEMO"
-
-    def test_expense_confirmada_provenance_real(self) -> None:
-        expense = ExpenseEntry(
-            tenant_id=uuid.uuid4(),
-            amount=Decimal("5000"),
-            category="importado",
-            transaction_date=date.today(),
-            description="Gasto importado",
-            payment_method="transfer",
-            provenance="REAL",
-        )
-        assert expense.provenance == "REAL"
-
-    def test_product_confirmado_provenance_real(self) -> None:
-        product = Product(
-            tenant_id=uuid.uuid4(),
-            name="Alfajor",
-            sale_price_ars=Decimal("350"),
-            provenance="REAL",
-        )
-        assert product.provenance == "REAL"
+    @pytest.mark.parametrize(
+        ("modelo", "kwargs", "esperado"),
+        [
+            pytest.param(
+                SaleEntry,
+                {
+                    "amount": Decimal("10000"),
+                    "quantity": 1,
+                    "transaction_date": date.today(),
+                    "payment_method": "cash",
+                    "notes": "Importado desde archivo",
+                },
+                "REAL",
+                id="test_confirmed_data_tiene_provenance_real",
+            ),
+            pytest.param(
+                SaleEntry,
+                {
+                    "amount": Decimal("10700"),
+                    "quantity": 1,
+                    "transaction_date": date.today(),
+                    "payment_method": "cash",
+                    "notes": "demo",
+                },
+                "DEMO",
+                id="test_demo_seed_tiene_provenance_demo",
+            ),
+            pytest.param(
+                ExpenseEntry,
+                {
+                    "amount": Decimal("5000"),
+                    "category": "importado",
+                    "transaction_date": date.today(),
+                    "description": "Gasto importado",
+                    "payment_method": "transfer",
+                },
+                "REAL",
+                id="test_expense_confirmada_provenance_real",
+            ),
+            pytest.param(
+                Product,
+                {"name": "Alfajor", "sale_price_ars": Decimal("350")},
+                "REAL",
+                id="test_product_confirmado_provenance_real",
+            ),
+        ],
+    )
+    def test_provenance_confirmada(self, modelo: type, kwargs: dict, esperado: str) -> None:
+        entidad = modelo(tenant_id=uuid.uuid4(), provenance=esperado, **kwargs)
+        assert entidad.provenance == esperado
 
 
 class TestDemoTenant:
-    def test_demo_tenant_is_demo_true(self) -> None:
-        tenant = Tenant(
-            legal_name="Kiosco San Martín SRL",
-            display_name="Kiosco San Martín",
-            is_demo=True,
-        )
-        assert tenant.is_demo is True
-
-    def test_real_tenant_is_demo_false(self) -> None:
-        tenant = Tenant(
-            legal_name="Mi Negocio SRL",
-            display_name="Mi Negocio",
-            is_demo=False,
-        )
-        assert tenant.is_demo is False
+    @pytest.mark.parametrize(
+        ("legal_name", "display_name", "is_demo"),
+        [
+            pytest.param(
+                "Kiosco San Martín SRL",
+                "Kiosco San Martín",
+                True,
+                id="test_demo_tenant_is_demo_true",
+            ),
+            pytest.param(
+                "Mi Negocio SRL",
+                "Mi Negocio",
+                False,
+                id="test_real_tenant_is_demo_false",
+            ),
+        ],
+    )
+    def test_is_demo(self, legal_name: str, display_name: str, is_demo: bool) -> None:
+        tenant = Tenant(legal_name=legal_name, display_name=display_name, is_demo=is_demo)
+        assert tenant.is_demo is is_demo
 
 
 class TestProvenanceDoesNotControlTenantReads:
