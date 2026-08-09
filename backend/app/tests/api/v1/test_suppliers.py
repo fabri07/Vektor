@@ -268,42 +268,8 @@ class TestBrandCollapsedSuppliers:
         assert resp.json()["is_active"] is True
 
 
-@pytest.mark.asyncio
-class TestSuppliersIdempotency:
-    @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger):
-        pass
-
-    async def test_post_without_header_works(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.post(
-            "/api/v1/suppliers", json={"name": "Sin Header"}, headers=auth_headers
-        )
-        assert resp.status_code == 201
-
-    async def test_replay_returns_409_and_no_duplicate(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        key = _key()
-        headers = {**auth_headers, "Idempotency-Key": key}
-
-        before = await client.get("/api/v1/suppliers", headers=auth_headers)
-        count_before = len(before.json())
-
-        first = await client.post(
-            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=headers
-        )
-        assert first.status_code == 201
-
-        second = await client.post(
-            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=headers
-        )
-        assert second.status_code == 409
-        assert second.json()["detail"] == {"code": "DUPLICATE_IDEMPOTENT"}
-
-        after = await client.get("/api/v1/suppliers", headers=auth_headers)
-        assert len(after.json()) == count_before + 1
+# La idempotencia HTTP (Idempotency-Key) vive parametrizada por endpoint en
+# test_idempotency.py — suppliers incluido. Acá solo lo específico de la entidad.
 
 
 @pytest.mark.asyncio

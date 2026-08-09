@@ -46,9 +46,6 @@ def _person(name: str, **extra: Any) -> dict[str, Any]:
     return base
 
 
-def _key() -> str:
-    return str(uuid.uuid4())
-
 
 @pytest.mark.asyncio
 class TestCustomersCRUD:
@@ -150,42 +147,8 @@ class TestCustomersCRUD:
         assert cid in {c["id"] for c in listed_all.json()}
 
 
-@pytest.mark.asyncio
-class TestCustomersIdempotency:
-    @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger):
-        pass
-
-    async def test_post_without_header_works(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.post(
-            "/api/v1/customers", json=_person("Sin Header"), headers=auth_headers
-        )
-        assert resp.status_code == 201
-
-    async def test_replay_returns_409_and_no_duplicate(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        key = _key()
-        headers = {**auth_headers, "Idempotency-Key": key}
-
-        before = await client.get("/api/v1/customers", headers=auth_headers)
-        count_before = len(before.json())
-
-        first = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=headers
-        )
-        assert first.status_code == 201
-
-        second = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=headers
-        )
-        assert second.status_code == 409
-        assert second.json()["detail"] == {"code": "DUPLICATE_IDEMPOTENT"}
-
-        after = await client.get("/api/v1/customers", headers=auth_headers)
-        assert len(after.json()) == count_before + 1
+# La idempotencia HTTP (Idempotency-Key) vive parametrizada por endpoint en
+# test_idempotency.py — customers incluido. Acá solo lo específico de la entidad.
 
 
 @pytest.mark.asyncio
