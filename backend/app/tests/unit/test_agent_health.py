@@ -114,48 +114,25 @@ def test_score_formula_correct():
     assert compute_health_score(components) == 100.0
 
 
-def test_score_weights():
-    """cash_score=100, resto=0 → health_score=35.0 (peso del cash es 0.35 en fórmula v1)."""
+@pytest.mark.parametrize(
+    ("cash", "stock", "supplier", "discipline", "esperado"),
+    [
+        # Un componente en 100 y el resto en 0 → el score ES el peso del componente.
+        pytest.param(100.0, 0.0, 0.0, 0.0, 35.0, id="test_score_weights"),
+        pytest.param(0.0, 100.0, 0.0, 0.0, 30.0, id="test_score_weight_stock"),
+        pytest.param(0.0, 0.0, 100.0, 0.0, 15.0, id="test_score_weight_supplier"),
+        pytest.param(0.0, 0.0, 0.0, 100.0, 20.0, id="test_score_weight_discipline"),
+    ],
+)
+def test_score_weights_v1(cash, stock, supplier, discipline, esperado):
+    """Fórmula v1: cash×0.35 + stock×0.30 + supplier×0.15 + discipline×0.20."""
     components = ComponentScores(
-        cash_score=100.0,
-        stock_score=0.0,
-        supplier_score=0.0,
-        discipline_score=0.0,
+        cash_score=cash,
+        stock_score=stock,
+        supplier_score=supplier,
+        discipline_score=discipline,
     )
-    assert compute_health_score(components) == pytest.approx(35.0, abs=0.001)
-
-
-def test_score_weight_stock():
-    """stock_score=100, resto=0 → health_score=30.0 (fórmula v1)."""
-    components = ComponentScores(
-        cash_score=0.0,
-        stock_score=100.0,
-        supplier_score=0.0,
-        discipline_score=0.0,
-    )
-    assert compute_health_score(components) == pytest.approx(30.0, abs=0.001)
-
-
-def test_score_weight_supplier():
-    """supplier_score=100, resto=0 → health_score=15.0 (fórmula v1)."""
-    components = ComponentScores(
-        cash_score=0.0,
-        stock_score=0.0,
-        supplier_score=100.0,
-        discipline_score=0.0,
-    )
-    assert compute_health_score(components) == pytest.approx(15.0, abs=0.001)
-
-
-def test_score_weight_discipline():
-    """discipline_score=100, resto=0 → health_score=20.0 (fórmula v1)."""
-    components = ComponentScores(
-        cash_score=0.0,
-        stock_score=0.0,
-        supplier_score=0.0,
-        discipline_score=100.0,
-    )
-    assert compute_health_score(components) == pytest.approx(20.0, abs=0.001)
+    assert compute_health_score(components) == pytest.approx(esperado, abs=0.001)
 
 
 def test_score_is_deterministic():
@@ -199,40 +176,49 @@ def test_cash_component_healthy_zone():
     assert 70.0 <= score < 100.0
 
 
-def test_stock_score_no_stockouts():
-    assert compute_stock_score(0, 0, 50) == 100.0
+@pytest.mark.parametrize(
+    ("stockout_count", "slow_moving_count", "total_products", "esperado"),
+    [
+        pytest.param(0, 0, 50, 100.0, id="test_stock_score_no_stockouts"),
+        pytest.param(3, 0, 50, 70.0, id="test_stock_score_with_stockouts"),
+        # sin catálogo no hay nada que puntuar → neutral, no 0
+        pytest.param(0, 0, 0, 50.0, id="test_stock_score_no_products"),
+    ],
+)
+def test_stock_score(stockout_count, slow_moving_count, total_products, esperado):
+    assert compute_stock_score(stockout_count, slow_moving_count, total_products) == pytest.approx(
+        esperado, abs=0.001
+    )
 
 
-def test_stock_score_with_stockouts():
-    assert compute_stock_score(3, 0, 50) == pytest.approx(70.0)
+@pytest.mark.parametrize(
+    ("active_suppliers", "overdue_orders", "esperado"),
+    [
+        pytest.param(3, 0, 100.0, id="test_supplier_score_all_ok"),
+        pytest.param(3, 2, 70.0, id="test_supplier_score_overdue"),
+        # sin proveedores cargados → neutral, no 0
+        pytest.param(0, 0, 50.0, id="test_supplier_score_no_suppliers"),
+    ],
+)
+def test_supplier_score(active_suppliers, overdue_orders, esperado):
+    assert compute_supplier_score(active_suppliers, overdue_orders) == pytest.approx(
+        esperado, abs=0.001
+    )
 
 
-def test_stock_score_no_products():
-    assert compute_stock_score(0, 0, 0) == 50.0
-
-
-def test_supplier_score_all_ok():
-    assert compute_supplier_score(3, 0) == 100.0
-
-
-def test_supplier_score_overdue():
-    assert compute_supplier_score(3, 2) == pytest.approx(70.0)
-
-
-def test_supplier_score_no_suppliers():
-    assert compute_supplier_score(0, 0) == 50.0
-
-
-def test_discipline_score_full():
-    assert compute_discipline_score(7, 7) == 100.0
-
-
-def test_discipline_score_partial():
-    assert compute_discipline_score(6, 7) == pytest.approx(85.71, abs=0.1)
-
-
-def test_discipline_score_no_days():
-    assert compute_discipline_score(0, 0) == 0.0
+@pytest.mark.parametrize(
+    ("days_with_data", "total_days", "esperado", "tolerancia"),
+    [
+        pytest.param(7, 7, 100.0, 0.001, id="test_discipline_score_full"),
+        pytest.param(6, 7, 85.71, 0.1, id="test_discipline_score_partial"),
+        # sin días de referencia la disciplina es 0, no neutral
+        pytest.param(0, 0, 0.0, 0.001, id="test_discipline_score_no_days"),
+    ],
+)
+def test_discipline_score(days_with_data, total_days, esperado, tolerancia):
+    assert compute_discipline_score(days_with_data, total_days) == pytest.approx(
+        esperado, abs=tolerancia
+    )
 
 
 # ── Tests de alertas v2 (_build_alerts con ComponentScoresV2) ────────────────
