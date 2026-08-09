@@ -123,13 +123,9 @@ class TestExpensesSummary:
     def patch_celery(self, mock_score_trigger):
         pass
 
-    async def test_summary_empty(self, client: AsyncClient, auth_headers: dict[str, Any]) -> None:
-        resp = await client.get("/api/v1/expenses/summary", headers=auth_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert float(data["total_ars"]) == 0.0
-        assert data["entry_count"] == 0
-        assert "period_covered" in data
+    # `test_summary_empty`, `test_date_range_empty`, `test_date_range_with_data` y
+    # `test_summary_isolates_tenants` viven parametrizados por entidad en
+    # test_transaction_summaries.py (eran clones exactos con sales).
 
     async def test_summary_counts_entries(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -152,26 +148,6 @@ class TestExpensesDateRange:
     def patch_celery(self, mock_score_trigger):
         pass
 
-    async def test_date_range_empty(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.get("/api/v1/expenses/date-range", headers=auth_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["min_date"] is None
-        assert data["max_date"] is None
-
-    async def test_date_range_with_data(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        old = {**_EXPENSE_PAYLOAD, "expense_date": "2024-02-10"}
-        recent = {**_EXPENSE_PAYLOAD, "expense_date": _TODAY}
-        await client.post("/api/v1/expenses", json=old, headers=auth_headers)
-        await client.post("/api/v1/expenses", json=recent, headers=auth_headers)
-        resp = await client.get("/api/v1/expenses/date-range", headers=auth_headers)
-        data = resp.json()
-        assert data["min_date"] == "2024-02-10"
-        assert data["max_date"] == _TODAY
 
 
 @pytest.mark.asyncio
@@ -205,17 +181,6 @@ class TestExpensesTenantIsolation:
         resp_b = await client.get("/api/v1/expenses", headers=second_auth_headers)
         assert resp_b.status_code == 200
         assert resp_b.json() == []
-
-    async def test_summary_isolates_tenants(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        second_auth_headers: dict[str, Any],
-    ) -> None:
-        await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
-
-        resp_b = await client.get("/api/v1/expenses/summary", headers=second_auth_headers)
-        assert resp_b.json()["entry_count"] == 0
 
     async def test_cannot_patch_other_tenant_expense(
         self,
