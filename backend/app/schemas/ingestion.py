@@ -240,6 +240,31 @@ class ShippingDecision(BaseModel):
     action: Literal["una_por_hoja", "una_por_fila"]
 
 
+class PurchaseCostDecisionIn(BaseModel):
+    """F-H6.c — cómo se calcula el costo de las líneas de UNA hoja de compras.
+
+    Tres ejes independientes y todos con default «no toques nada», igual que el
+    remito manual: distribuir, capitalizar o aplicar ajustes son decisiones
+    explícitas del usuario. Cambiar un default alteraría el costo de todos los
+    imports que ya existen.
+
+    Misma forma que `ShippingDecision` y `ColumnRiskDecision`: la pantalla ya sabe
+    mandar decisiones por contexto y el confirm ya sabe validarlas antes del lease.
+    """
+
+    context_id: str
+    #: `monto_incluye` (default): el monto de la fila ya trae descuento e impuestos
+    #: adentro. `monto_sin_ajustes`: es el bruto y hay que aplicárselos — restarle
+    #: un descuento a un total que ya lo tiene descontado lo contaría dos veces, y
+    #: eso no se adivina desde el encabezado.
+    base: Literal["monto_incluye", "monto_sin_ajustes"] = "monto_incluye"
+    #: Qué hacer con el envío que pertenece al comprobante ENTERO.
+    shared_shipping: Literal["no_distribuir", "por_subtotal"] = "no_distribuir"
+    #: Qué hacer con el envío que el archivo YA asignó a cada línea. No se reparte
+    #: nada: el reparto lo hizo quien armó la planilla.
+    line_shipping: Literal["gasto_aparte", "al_costo"] = "gasto_aparte"
+
+
 class InventoryEffectOption(BaseModel):
     """Un modo de inventario ofrecible, con su texto en castellano."""
 
@@ -417,6 +442,16 @@ class ConfirmIngestionRequest(BaseModel):
             "número de comprobante. Sin decisión no se cobran: una cifra repetida "
             "en varias filas es indistinguible de varios envíos iguales, y elegir "
             "por el usuario inventaría un dato contable. Vacío por default."
+        ),
+    )
+    purchase_cost_decisions: list[PurchaseCostDecisionIn] = Field(
+        default_factory=list,
+        description=(
+            "F-H6.c: cómo se calcula el costo de cada hoja de compras (base del "
+            "monto y tratamiento de los dos fletes). Vacío por default, y el "
+            "default de cada eje no cambia ningún número: sin decisión el monto de "
+            "la fila se toma como final y el confirm lo AVISA, para que una columna "
+            "de descuento mapeada no quede ignorada en silencio."
         ),
     )
 

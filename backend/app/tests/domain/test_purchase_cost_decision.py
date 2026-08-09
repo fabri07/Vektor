@@ -1,0 +1,198 @@
+"""F-H6.c — una decisión sobre el costo que no se puede honrar no se ignora.
+
+Lo que estos tests fijan es la diferencia entre las dos salidas, que es de
+producto y no de implementación:
+
+- **Error (422, antes del lease):** el usuario declaró un efecto que no va a
+  ocurrir. Se corta, porque cree haber resuelto algo sobre sus costos.
+- **Aviso (el import sigue):** el usuario NO declaró nada y mapeó una columna de
+  costo. El default no cambia números que nadie pidió cambiar, pero tampoco puede
+  callarse: mapear un descuento y que no pase nada, sin decirlo, es el no-op
+  silencioso que esta fase vino a eliminar.
+"""
+
+from __future__ import annotations
+
+from app.domain.purchase_cost import (
+    BASE_APLICAR,
+    BASE_INCLUYE,
+    COMPARTIDO_NO,
+    COMPARTIDO_SUBTOTAL,
+    LINEA_AL_COSTO,
+    LINEA_GASTO,
+)
+from app.domain.purchase_cost_decision import (
+    PurchaseCostDecision,
+    hojas_que_necesitan_aviso,
+    texto_del_aviso,
+    validate_purchase_cost_decisions,
+)
+
+_CTX = "sheet:Compras"
+
+_MAPEO_COMPLETO = {
+    "fecha": "expense_date",
+    "total": "amount",
+    "cantidad": "quantity",
+    "descuento": "discount",
+    "iva": "taxes",
+    "flete_linea": "shipping_cost_line",
+    "envio": "shipping_cost",
+}
+
+_MAPEO_PELADO = {"fecha": "expense_date", "total": "amount"}
+
+
+def _motivos(errores: list[tuple[str, str]]) -> list[str]:
+    return [m for m, _texto in errores]
+
+
+class TestLosDefaultsNoTocanNada:
+    def test_una_decision_por_default_es_honrable_sobre_cualquier_hoja(self) -> None:
+        """Los tres ejes arrancan en «no toques nada», igual que el remito manual."""
+        dec = PurchaseCostDecision(context_id=_CTX)
+        assert dec.base == BASE_INCLUYE
+        assert dec.shared_shipping == COMPARTIDO_NO
+        assert dec.line_shipping == LINEA_GASTO
+        assert validate_purchase_cost_decisions([dec], {_CTX: _MAPEO_PELADO}) == []
+
+    def test_sin_decisiones_no_hay_nada_que_validar(self) -> None:
+        assert validate_purchase_cost_decisions([], {_CTX: _MAPEO_COMPLETO}) == []
+
+
+class TestUnModoQueNoExisteCortaAntes:
+    def test_una_base_desconocida_se_rechaza(self) -> None:
+        errores = validate_purchase_cost_decisions(
+            [PurchaseCostDecision(context_id=_CTX, base="modo_que_no_existe")],
+            {_CTX: _MAPEO_COMPLETO},
+        )
+        assert _motivos(errores) == ["base_de_costo_desconocida"]
+
+    def test_y_los_dos_modos_de_envio_tambien(self) -> None:
+        errores = validate_purchase_cost_decisions(
+            [
+                PurchaseCostDecision(
+                    context_id=_CTX, shared_shipping="???", line_shipping="???"
+                )
+            ],
+            {_CTX: _MAPEO_COMPLETO},
+        )
+        assert set(_motivos(errores)) == {
+            "modo_de_envio_compartido_desconocido",
+            "modo_de_envio_de_linea_desconocido",
+        }
+
+    def test_un_modo_invalido_no_arrastra_mensajes_sobre_columnas(self) -> None:
+        """Con una decisión que no se entiende, hablar de qué columna le falta es
+        ruido sobre un error que el usuario ya tiene que corregir."""
+        errores = validate_purchase_cost_decisions(
+            [PurchaseCostDecision(context_id=_CTX, base="???")],
+            {_CTX: _MAPEO_PELADO},
+        )
+        assert _motivos(errores) == ["base_de_costo_desconocida"]
+
+
+class TestDeclararUnEfectoQueNoVaAOcurrir:
+    def test_aplicar_ajustes_sin_columna_de_descuento_ni_impuesto(self) -> None:
+        errores = validate_purchase_cost_decisions(
+            [PurchaseCostDecision(context_id=_CTX, base=BASE_APLICAR)],
+            {_CTX: _MAPEO_PELADO},
+        )
+        assert _motivos(errores) == ["base_sin_columnas_de_ajuste"]
+
+    def test_pero_alcanza_con_una_de_las_dos(self) -> None:
+        """Una planilla real puede traer descuento y no IVA."""
+        solo_descuento = {**_MAPEO_PELADO, "descuento": "discount"}
+        assert (
+            validate_purchase_cost_decisions(
+                [PurchaseCostDecision(context_id=_CTX, base=BASE_APLICAR)],
+                {_CTX: solo_descuento},
+            )
+            == []
+        )
+
+    def test_capitalizar_el_flete_de_linea_sin_esa_columna(self) -> None:
+        errores = validate_purchase_cost_decisions(
+            [PurchaseCostDecision(context_id=_CTX, line_shipping=LINEA_AL_COSTO)],
+            {_CTX: _MAPEO_PELADO},
+        )
+        assert _motivos(errores) == ["flete_de_linea_sin_columna"]
+
+    def test_repartir_el_flete_compartido_sin_esa_columna(self) -> None:
+        errores = validate_purchase_cost_decisions(
+            [PurchaseCostDecision(context_id=_CTX, shared_shipping=COMPARTIDO_SUBTOTAL)],
+            {_CTX: _MAPEO_PELADO},
+        )
+        assert _motivos(errores) == ["flete_compartido_sin_columna"]
+
+    def test_los_dos_fletes_se_exigen_por_separado(self) -> None:
+        """Semánticas opuestas: capitalizar el de línea no habilita repartir el
+        del comprobante, ni al revés."""
+        solo_linea = {**_MAPEO_PELADO, "flete_linea": "shipping_cost_line"}
+        errores = validate_purchase_cost_decisions(
+            [
+                PurchaseCostDecision(
+                    context_id=_CTX,
+                    line_shipping=LINEA_AL_COSTO,
+                    shared_shipping=COMPARTIDO_SUBTOTAL,
+                )
+            ],
+            {_CTX: solo_linea},
+        )
+        assert _motivos(errores) == ["flete_compartido_sin_columna"]
+
+    def test_una_decision_sobre_una_hoja_que_no_existe(self) -> None:
+        errores = validate_purchase_cost_decisions(
+            [PurchaseCostDecision(context_id="sheet:Fantasma", base=BASE_APLICAR)],
+            {_CTX: _MAPEO_COMPLETO},
+        )
+        assert _motivos(errores) == ["decision_de_costo_sin_hoja"]
+
+
+class TestElMensajeLoLeeUnaPersona:
+    def test_nombra_la_hoja_y_el_campo_en_castellano(self) -> None:
+        errores = validate_purchase_cost_decisions(
+            [PurchaseCostDecision(context_id=_CTX, base=BASE_APLICAR)],
+            {_CTX: _MAPEO_PELADO},
+            {_CTX: "Compras marzo"},
+        )
+        _motivo, texto = errores[0]
+        assert "Compras marzo" in texto
+        assert "Descuento de la línea" in texto, "no el nombre técnico del campo"
+        assert "discount" not in texto
+
+
+class TestElDefaultSeguroNoPuedeSerMudo:
+    def test_mapear_un_descuento_sin_declarar_la_base_avisa(self) -> None:
+        aviso = hojas_que_necesitan_aviso([], {_CTX: _MAPEO_COMPLETO})
+        assert "discount" in aviso[_CTX]
+        assert "taxes" in aviso[_CTX]
+
+    def test_el_flete_de_linea_sin_capitalizar_tambien(self) -> None:
+        aviso = hojas_que_necesitan_aviso([], {_CTX: _MAPEO_COMPLETO})
+        assert "shipping_cost_line" in aviso[_CTX]
+
+    def test_declarar_la_base_apaga_el_aviso_de_los_ajustes(self) -> None:
+        aviso = hojas_que_necesitan_aviso(
+            [PurchaseCostDecision(context_id=_CTX, base=BASE_APLICAR)],
+            {_CTX: _MAPEO_COMPLETO},
+        )
+        assert "discount" not in aviso.get(_CTX, [])
+        assert "taxes" not in aviso.get(_CTX, [])
+        # …pero no el del flete de línea, que es otro eje.
+        assert "shipping_cost_line" in aviso[_CTX]
+
+    def test_una_hoja_sin_columnas_de_costo_no_avisa_nada(self) -> None:
+        assert hojas_que_necesitan_aviso([], {_CTX: _MAPEO_PELADO}) == {}
+
+    def test_el_flete_del_comprobante_no_entra_en_este_aviso(self) -> None:
+        """`shipping_cost` SÍ tiene consumidor desde F-H6.b: se cobra como gasto
+        de logística aunque no se distribuya. No es un no-op."""
+        solo_envio = {**_MAPEO_PELADO, "envio": "shipping_cost"}
+        assert hojas_que_necesitan_aviso([], {_CTX: solo_envio}) == {}
+
+    def test_el_texto_dice_que_hacer(self) -> None:
+        texto = texto_del_aviso("Compras marzo", ["discount"])
+        assert "Compras marzo" in texto
+        assert "Descuento de la línea" in texto
+        assert "no modificaron el costo" in texto

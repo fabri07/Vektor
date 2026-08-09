@@ -341,3 +341,84 @@ class TestLosCostosDeCompraTambienSonEscalares:
         assert "Descuento de la línea" in detail, "el mensaje nombra el campo en castellano"
         for col in ("Bonificación", "Descuento"):
             assert col in detail
+
+
+@pytest.mark.asyncio
+class TestUnaDecisionDeCostoQueNoSePuedeHonrar:
+    """F-H6.c — se rechaza ANTES del lease, con el motivo en castellano.
+
+    Mismo criterio que la decisión de envíos: declarar un efecto sobre el costo
+    que no va a ocurrir no se ignora en silencio, porque el usuario cree haber
+    resuelto algo. Y un archivo que va a rebotar no debería tomar el lease.
+    """
+
+    async def test_aplicar_ajustes_sin_columna_de_descuento_rechaza(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        compra_file: UploadedFile,
+    ) -> None:
+        body = {
+            "column_mappings": [
+                {
+                    "source_column": c,
+                    "target_field": t,
+                    "context_id": "sheet:compras",
+                    "entity_type": "expense",
+                }
+                for c, t in [
+                    ("Fecha", "expense_date"),
+                    ("Monto", "amount"),
+                    ("Producto", "product_name"),
+                    ("Cantidad", "quantity"),
+                ]
+            ],
+            "confirmed_fields": {"gastos": True},
+            "context_confirmed": {"sheet:compras": True},
+            # Declara que el monto es bruto, pero no mapeó ninguna columna de
+            # descuento ni de impuestos: el ajuste no tendría de dónde salir.
+            "purchase_cost_decisions": [
+                {"context_id": "sheet:compras", "base": "monto_sin_ajustes"}
+            ],
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{compra_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "compras" in detail, "nombra la hoja"
+        assert "Descuento de la línea" in detail, "y el campo en castellano"
+        assert "discount" not in detail, "nunca el nombre técnico"
+
+    async def test_un_modo_inventado_rechaza_por_el_schema(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        compra_file: UploadedFile,
+    ) -> None:
+        """El `Literal` del schema es la primera barrera: un modo que no existe ni
+        siquiera llega a la validación de dominio."""
+        body = {
+            "column_mappings": [
+                {
+                    "source_column": "Fecha",
+                    "target_field": "expense_date",
+                    "context_id": "sheet:compras",
+                    "entity_type": "expense",
+                }
+            ],
+            "confirmed_fields": {"gastos": True},
+            "context_confirmed": {"sheet:compras": True},
+            "purchase_cost_decisions": [
+                {"context_id": "sheet:compras", "base": "modo_que_no_existe"}
+            ],
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{compra_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+        assert response.status_code == 422

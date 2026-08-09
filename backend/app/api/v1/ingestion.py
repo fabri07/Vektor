@@ -104,6 +104,12 @@ from app.domain.inventory_replay_gate import (
     MOTIVO_REPLAY_NO_GATEABLE,
     replay_no_gateable,
 )
+from app.domain.purchase_cost_decision import (
+    PurchaseCostDecision as CostDecision,
+)
+from app.domain.purchase_cost_decision import (
+    validate_purchase_cost_decisions,
+)
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
     process_image_ocr,
@@ -1718,6 +1724,40 @@ async def confirm_file(
                         "mapeada como envío."
                     ),
                 )
+
+    # ── F-H6.c: la decisión sobre el costo se puede honrar ──────────────────────
+    # Mismo criterio que la de envíos: una decisión que no se puede cumplir no se
+    # ignora en silencio, porque el usuario cree haber resuelto algo sobre sus
+    # costos que no va a pasar. Va antes del lease — un archivo que va a rebotar
+    # no debería haberlo tomado. La validación es pura y vive en el dominio, así
+    # que el confirm no reimplementa qué combinación es imposible.
+    if body.purchase_cost_decisions:
+        _errores_de_costo = validate_purchase_cost_decisions(
+            [
+                CostDecision(
+                    context_id=_d.context_id,
+                    base=_d.base,
+                    shared_shipping=_d.shared_shipping,
+                    line_shipping=_d.line_shipping,
+                )
+                for _d in body.purchase_cost_decisions
+            ],
+            {
+                _cid: {m.source_column: m.target_field for m in _ms}
+                for _cid, _ms in _mappings_por_contexto.items()
+            },
+            {_cid: _hoja(_cid) for _cid in _mappings_por_contexto},
+        )
+        if _errores_de_costo:
+            _motivo, _texto = _errores_de_costo[0]
+            await _emit_validation_reject(
+                _motivo,
+                {"errores": [m for m, _ in _errores_de_costo]},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=" ".join(texto for _m, texto in _errores_de_costo),
+            )
 
     # ── F6-A1: bloqueo por fecha faltante, ANTES del lease ──────────────────────
     # Una venta/gasto sin columna de fecha resoluble caía al fallback "hoy" (dato
