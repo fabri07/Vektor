@@ -27,8 +27,8 @@ from typing import Any
 
 from app.application.security.prompt_defense import wrap_user_input
 from app.application.services.column_mapping_service import (
-    _heuristic_match,
     _normalize_col,
+    heuristic_target,
 )
 from app.application.services.file_parsing import (
     IMAGE_MIMES,
@@ -104,8 +104,9 @@ _SHIPPING_KEYWORDS = {"envio", "envío", "flete", "shipping", "logistica", "log�
 def _map_columns(headers: list[str]) -> dict[str, str]:
     """Mapea headers → target de remito (product_name/sku/qty/unit_price/shipping).
 
-    Determinístico: reutiliza el ``_heuristic_match`` del ColumnMapper sobre
-    entity_type="product". Devuelve ``{header: target}`` solo para columnas mapeadas.
+    Determinístico: reutiliza el ``heuristic_target`` del ColumnMapper sobre
+    entity_type="product". Devuelve ``{header: target}`` solo para columnas mapeadas;
+    un encabezado ambiguo no mapea, igual que uno desconocido.
     """
     mapping: dict[str, str] = {}
     for header in headers:
@@ -115,7 +116,7 @@ def _map_columns(headers: list[str]) -> dict[str, str]:
         if any(k in normalized for k in _SHIPPING_KEYWORDS):
             mapping[header] = "shipping"
             continue
-        target = _heuristic_match(normalized, "product")
+        target = heuristic_target(normalized, "product")
         if target in _PRICE_TARGETS:
             mapping[header] = _TARGET_UNIT_PRICE
         elif target in (_TARGET_PRODUCT_NAME, _TARGET_SKU, _TARGET_QTY):

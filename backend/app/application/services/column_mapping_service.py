@@ -752,6 +752,22 @@ def read_header(normalized: str, entity_type: str) -> HeaderReading:
     return sin_campo
 
 
+def heuristic_target(normalized: str, entity_type: str) -> str | None:
+    """El target de un encabezado, o ``None`` si no se puede demostrar cuál es.
+
+    Para los consumidores SINCRÓNICOS —la extracción de remitos y la de
+    proveedores— que no tienen pantalla donde desambiguar: reciben un campo o
+    nada, como hasta ahora. Un `ambiguo` es, para ellos, lo mismo que un
+    desconocido: no hay a quién preguntarle.
+
+    Su comportamiento no empeora por esto. Ya descartaban lo que no reconocían, y
+    en los dos casos la extracción sólo SUGIERE: el usuario confirma antes de que
+    se persista nada.
+    """
+    lectura = read_header(normalized, entity_type)
+    return lectura.target if lectura.outcome == "unico" else None
+
+
 # ── Campos de valor único ────────────────────────────────────────────────────
 # Un campo escalar solo puede venir de UNA columna. Si dos apuntan al mismo, el
 # importador se quedaba con la primera del orden del archivo y descartaba el
@@ -1073,6 +1089,11 @@ class ColumnMappingService:
 
         required = set(REQUIRED_FIELDS.get(entity_type, []))
         suggestions: list[dict[str, Any]] = []
+        #: Índices de las columnas cuya lectura no se puede desempatar sin
+        #: inventar. Se lleva aparte y no como una clave más del dict porque el
+        #: dict se expande con ``**s`` en ``ColumnMappingSuggestion``: una clave
+        #: nueva sin declarar en el schema rompe el endpoint.
+        sin_desambiguar: set[int] = set()
 
         for header in headers:
             normalized = _normalize_col(header)
@@ -1097,19 +1118,28 @@ class ColumnMappingService:
                 confidence = min(0.99, 0.5 + rec.confirmed_count / 20.0)
                 source = "tenant_history"
 
-            # 2. Heurística global
-            elif (heuristic := _heuristic_match(normalized, entity_type)) is not None:
-                target_field = heuristic
-                confidence = 0.75
-                source = "heuristic"
-
-            # 3. Fuzzy matching
+            # 2. El reconocedor de encabezados (F-M)
             else:
-                fuzzy_target, fuzzy_ratio = _fuzzy_match(normalized, entity_type)
-                if fuzzy_target is not None:
-                    target_field = fuzzy_target
-                    confidence = fuzzy_ratio * 0.65  # escalar a rango 0–65%
-                    source = "fuzzy"
+                lectura = read_header(normalized, entity_type)
+                if lectura.outcome == "unico":
+                    target_field = lectura.target
+                    confidence = 0.75
+                    source = "heuristic"
+                elif lectura.outcome == "ambiguo" or lectura.duda is not None:
+                    # El reconocedor SÍ entendió el encabezado, y con eso puesto
+                    # dijo que no alcanza para elegir. Las capas de abajo saben
+                    # MENOS —fuzzy compara contra los keywords crudos, el LLM no
+                    # tiene canal para candidatos— así que dejarlas opinar es
+                    # cambiar una duda honesta por una respuesta arbitraria.
+                    sin_desambiguar.add(len(suggestions))
+
+                # 3. Fuzzy matching: sólo cuando no se reconoció NADA.
+                else:
+                    fuzzy_target, fuzzy_ratio = _fuzzy_match(normalized, entity_type)
+                    if fuzzy_target is not None:
+                        target_field = fuzzy_target
+                        confidence = fuzzy_ratio * 0.65  # escalar a rango 0–65%
+                        source = "fuzzy"
 
             # Calcular status
             if target_field is not None and target_field != "ignore":
@@ -1139,6 +1169,7 @@ class ColumnMappingService:
                 tenant_id=tenant_id,
                 trace_id=trace_id,
                 file_id=file_id,
+                skip=sin_desambiguar,
             )
 
         # Segunda pasada: detectar required_missing
@@ -1171,19 +1202,31 @@ class ColumnMappingService:
         tenant_id: uuid.UUID | None = None,
         trace_id: uuid.UUID | str | None = None,
         file_id: uuid.UUID | str | None = None,
+        skip: set[int] | None = None,
     ) -> None:
         """FASE 2: mejora las sugerencias de baja confianza con el LLM (in-place).
 
         Si `trace_id`/`file_id` están presentes, emite un pipeline_event con la
         traza antes/después de cada columna evaluada (qué decidió lo determinístico,
         qué decidió el LLM, y si lo pisó).
+
+        ``skip`` son los índices que el reconocedor ya leyó y declaró indecidibles
+        (F-M). Baja confianza y ambigüedad no son lo mismo: la primera dice «no sé»
+        y el LLM puede ayudar; la segunda dice «entendí, y con eso entendido sigue
+        habiendo dos lecturas». Una respuesta del LLM no es demostración de la
+        intención del usuario, que es lo único que la regla de la fase acepta.
         """
         from app.application.services.llm_column_mapper import (  # noqa: PLC0415
             LLM_MAPPING_THRESHOLD,
             suggest_with_llm,
         )
 
-        low_conf = [s for s in suggestions if s["confidence"] < LLM_MAPPING_THRESHOLD]
+        omitir = skip or set()
+        low_conf = [
+            s
+            for i, s in enumerate(suggestions)
+            if s["confidence"] < LLM_MAPPING_THRESHOLD and i not in omitir
+        ]
         if not low_conf:
             return
         valid_fields = CANONICAL_FIELDS.get(entity_type, {})
