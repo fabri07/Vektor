@@ -16,6 +16,7 @@ import {
   type ColumnRiskDecision,
   type ConfirmIngestionResult,
   type ContextualColumnRisk,
+  type FieldCatalogEntry,
   type InventoryImpactItem,
   type MappingContext,
   type MasterPreviewSummary,
@@ -154,6 +155,50 @@ function confidenceColor(confidence: number): string {
   return "text-vk-danger";
 }
 
+/**
+ * F-M: por qué una columna no se mapeó sola, y entre qué elegir.
+ *
+ * Vive en UN solo lugar porque el panel renderiza columnas en tres caminos
+ * distintos (multi-hoja, lista de revisión y tabla única) y este repo ya pagó
+ * el precio de que dos de ellos divergieran.
+ *
+ * `duda` viaja también sin `options`: son los casos donde Véktor entendió el
+ * encabezado y esta hoja no tiene campo donde ponerlo. Ahí no hay entre qué
+ * elegir, pero explicarlo es la diferencia entre un hueco y un hueco con motivo.
+ */
+function AmbiguityHint({
+  suggestion,
+  fields,
+  onPick,
+}: {
+  suggestion: ColumnMappingSuggestion;
+  fields: FieldCatalogEntry[];
+  onPick: (target: string) => void;
+}) {
+  if (!suggestion.duda) return null;
+  const options = suggestion.options ?? [];
+  const labelFor = (value: string) => fields.find((f) => f.value === value)?.label ?? value;
+  return (
+    <div className="rounded border border-vk-blue/30 bg-vk-blue/5 px-2 py-1.5">
+      <p className="text-[11px] leading-snug text-vk-text-secondary">{suggestion.duda}</p>
+      {options.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => onPick(option)}
+              className="rounded border border-vk-blue/40 bg-vk-bg-light px-2 py-0.5 text-[11px] text-vk-text-primary hover:border-vk-blue hover:bg-vk-blue/10"
+            >
+              {labelFor(option)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
 const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "gastos" | "productos" }> = [
   { value: "ventas", label: "Ventas", field: "ventas" },
@@ -164,6 +209,17 @@ const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "
 function StatusDot({ status }: { status: ColumnMappingSuggestion["status"] }) {
   if (status === "mapped") {
     return <span className="h-2 w-2 rounded-full bg-vk-success shrink-0" title="Mapeado" />;
+  }
+  // F-M: entender la columna y no poder decidir NO es lo mismo que no
+  // entenderla. Si cayera al punto de "Sin mapear" de abajo, la pantalla
+  // borraría justamente la distinción que el backend calcula.
+  if (status === "ambiguo") {
+    return (
+      <span
+        className="h-2 w-2 rounded-full bg-vk-blue shrink-0"
+        title="Necesita que elijas entre dos lecturas"
+      />
+    );
   }
   if (status === "required_missing") {
     return (
@@ -782,6 +838,11 @@ function SheetMapperSection({
                         </button>
                       </div>
                     )}
+                    <AmbiguityHint
+                      suggestion={s}
+                      fields={fields}
+                      onPick={(t) => selectTarget(s.source_column, t)}
+                    />
                     {/* A3: source + confidence (mismo criterio que el flujo single). */}
                     {eff === "mapped" && s.source !== "none" && (
                       <p className="text-[10px] text-vk-text-muted">
@@ -1588,12 +1649,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   // NO cubre un requerido, aunque el select lo muestre como mapeado.
 
   // A3: columnas que merecen revisión antes de confirmar — requeridas sin mapear,
-  // sin mapear, o mapeadas con baja confianza (<50%). Las ignoradas a propósito no.
+  // sin mapear, ambiguas, o mapeadas con baja confianza (<50%). Las ignoradas a
+  // propósito no. Dejar afuera las ambiguas era excluir de la lista de revisión
+  // justo la columna sobre la que el backend dice que hace falta una decisión.
   const needsAttention = suggestions.filter((s) => {
     const t = getMappingForColumn(s.source_column);
     if (t === "ignore") return false;
     const eff = computeEffectiveStatus(s, t);
-    if (eff === "required_missing" || eff === "unmapped") return true;
+    if (eff === "required_missing" || eff === "unmapped" || eff === "ambiguo") return true;
     return eff === "mapped" && s.confidence < 0.5;
   });
 
@@ -1830,6 +1893,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                             </option>
                           )}
                       </select>
+                      <AmbiguityHint
+                        suggestion={s}
+                        fields={fields}
+                        onPick={(t) => setMappingForColumn(s.source_column, t)}
+                      />
                     </div>
                   );
                 })}
@@ -1919,6 +1987,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                           <option value={currentTarget}>{currentTarget}</option>
                         )}
                       </select>
+                    </div>
+                    <div className="mt-1">
+                      <AmbiguityHint
+                        suggestion={s}
+                        fields={fields}
+                        onPick={(t) => setMappingForColumn(s.source_column, t)}
+                      />
                     </div>
                     {isMapped && s.source !== "none" && (
                       <p className="mt-0.5 pl-5 text-[10px] text-vk-text-muted">

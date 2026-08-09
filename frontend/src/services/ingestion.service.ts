@@ -261,8 +261,17 @@ export interface ColumnMappingSuggestion {
   confidence: number;
   // FASE 2 (A2): "llm" = la 4ª capa LLM desambiguó esta columna.
   source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none";
-  status: "mapped" | "unmapped" | "required_missing";
+  // F-M: `ambiguo` = Véktor entendió el encabezado y, con eso entendido, hay más
+  // de una lectura razonable. No es `unmapped`, que significa que no reconoció
+  // nada — y la pantalla las muestra distinto porque para la persona no son lo
+  // mismo. Espejo de `ColumnMappingSuggestion` en `schemas/ingestion.py`.
+  status: "mapped" | "unmapped" | "ambiguo" | "required_missing";
   context_id?: string | null;
+  // Candidatos entre los que elegir cuando `status === "ambiguo"`.
+  options?: string[];
+  // Por qué no alcanza, en castellano. Viaja también en `unmapped` cuando el
+  // concepto se reconoció pero esta hoja no tiene campo donde ponerlo.
+  duda?: string | null;
 }
 
 export interface ColumnMapping {

@@ -1192,3 +1192,131 @@ describe("ColumnMapperPanel — corregir una hoja mal clasificada", () => {
     expect(screen.getByText(/1187 filas/)).toBeInTheDocument();
   });
 });
+
+/**
+ * F-M — una columna que Véktor entendió y no pudo decidir.
+ *
+ * El backend distingue tres cosas donde antes había dos: resuelta, sin
+ * reconocer, y «entendí y sigue habiendo más de una lectura». La pantalla tiene
+ * que mostrar las dos últimas distinto, o la distinción no existe para nadie.
+ */
+describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["Precio de venta"] },
+      columns_at_risk: [],
+    });
+  });
+
+  const AMBIGUA = {
+    source_column: "Precio de venta",
+    normalized_column: "precio_de_venta",
+    sample_values: ["1500"],
+    target_field: null,
+    confidence: 0,
+    source: "none" as const,
+    status: "ambiguo" as const,
+    options: ["amount", "unit_price"],
+    duda: "¿es el precio de cada unidad, o el total de la línea?",
+  };
+
+  test("muestra la duda del backend, sin reescribirla", async () => {
+    mockGetColumnMappings.mockResolvedValue([AMBIGUA]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("¿es el precio de cada unidad, o el total de la línea?").length,
+      ).toBeGreaterThan(0);
+    });
+  });
+
+  test("entra en la lista de revisión previa al confirm", async () => {
+    mockGetColumnMappings.mockResolvedValue([AMBIGUA]);
+    renderPanel();
+
+    // Aparece DOS veces —en la tabla y en «Revisá antes de confirmar»— porque una
+    // columna ambigua es exactamente sobre la que el backend pide una decisión.
+    // Dejarla fuera de esa lista era el bug: se podía confirmar sin verla.
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("¿es el precio de cada unidad, o el total de la línea?"),
+      ).toHaveLength(2);
+    });
+  });
+
+  test("ofrece los candidatos con la etiqueta del catálogo, no el nombre técnico", async () => {
+    mockGetColumnMappings.mockResolvedValue([AMBIGUA]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Monto de venta" }).length).toBeGreaterThan(0);
+    });
+    expect(
+      screen.getAllByRole("button", { name: "Precio unitario vendido" }).length,
+    ).toBeGreaterThan(0);
+    // Y sólo los que el backend ofreció: la pantalla no agrega candidatos propios.
+    expect(screen.queryByRole("button", { name: "Cantidad" })).not.toBeInTheDocument();
+  });
+
+  test("elegir un candidato mapea la columna", async () => {
+    mockGetColumnMappings.mockResolvedValue([AMBIGUA]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Monto de venta" }).length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Monto de venta" })[0]);
+
+    await waitFor(() => {
+      const selects = screen.getAllByRole("combobox") as HTMLSelectElement[];
+      expect(selects.some((s) => s.value === "amount")).toBe(true);
+    });
+  });
+
+  test("un concepto sin campo en esta hoja se explica, y no inventa candidatos", async () => {
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        ...AMBIGUA,
+        source_column: "Flete",
+        normalized_column: "flete",
+        status: "unmapped" as const,
+        options: [],
+        duda: "Una hoja de ventas no tiene dónde poner un envío.",
+      },
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("Una hoja de ventas no tiene dónde poner un envío.").length,
+      ).toBeGreaterThan(0);
+    });
+    expect(screen.queryByRole("button", { name: "Monto de venta" })).not.toBeInTheDocument();
+  });
+
+  test("lo que no se reconoció no muestra ninguna explicación", async () => {
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        ...AMBIGUA,
+        source_column: "ColRara99",
+        normalized_column: "colrara99",
+        status: "unmapped" as const,
+        options: [],
+        duda: null,
+      },
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getAllByText("ColRara99").length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText(/¿es el precio/)).not.toBeInTheDocument();
+  });
+});
