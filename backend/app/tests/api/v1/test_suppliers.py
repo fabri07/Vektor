@@ -34,26 +34,8 @@ class TestSuppliersCRUD:
     def patch_celery(self, mock_score_trigger):
         pass
 
-    async def test_create_supplier(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.post(
-            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=auth_headers
-        )
-        assert resp.status_code == 201
-        body = resp.json()
-        assert body["name"] == "Proveedor Uno"
-        assert body["email"] == "uno@proveedor.com"
-        assert body["phone"] == "+54 11 1234-5678"
-        assert body["is_active"] is True
-        assert body["custom_fields"] == {}
-        assert "id" in body and "tenant_id" in body
-
-    async def test_create_requires_name(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.post("/api/v1/suppliers", json={"name": ""}, headers=auth_headers)
-        assert resp.status_code == 422
+    # El CRUD común (create/requires-name/list/get/404/patch/soft-delete) vive
+    # parametrizado por entidad en test_master_crud.py. Acá lo específico.
 
     async def test_is_provisional_false_by_default(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -85,74 +67,6 @@ class TestSuppliersCRUD:
         )
         assert resp.status_code == 201
         assert resp.json()["is_provisional"] is True
-
-    async def test_list_suppliers(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        await client.post("/api/v1/suppliers", json={"name": "A"}, headers=auth_headers)
-        await client.post("/api/v1/suppliers", json={"name": "B"}, headers=auth_headers)
-        resp = await client.get("/api/v1/suppliers", headers=auth_headers)
-        assert resp.status_code == 200
-        names = {s["name"] for s in resp.json()}
-        assert {"A", "B"} <= names
-
-    async def test_get_supplier(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        created = await client.post(
-            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=auth_headers
-        )
-        sid = created.json()["id"]
-        resp = await client.get(f"/api/v1/suppliers/{sid}", headers=auth_headers)
-        assert resp.status_code == 200
-        assert resp.json()["id"] == sid
-
-    async def test_get_supplier_404(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.get(f"/api/v1/suppliers/{uuid.uuid4()}", headers=auth_headers)
-        assert resp.status_code == 404
-
-    async def test_patch_supplier(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        created = await client.post(
-            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=auth_headers
-        )
-        sid = created.json()["id"]
-        resp = await client.patch(
-            f"/api/v1/suppliers/{sid}",
-            json={"name": "Proveedor Renombrado", "phone": "+54 11 9999-0000"},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["name"] == "Proveedor Renombrado"
-        assert body["phone"] == "+54 11 9999-0000"
-        # Campo no enviado queda intacto.
-        assert body["email"] == "uno@proveedor.com"
-
-    async def test_soft_delete_supplier(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        created = await client.post(
-            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=auth_headers
-        )
-        sid = created.json()["id"]
-        resp = await client.delete(f"/api/v1/suppliers/{sid}", headers=auth_headers)
-        assert resp.status_code == 200
-        assert resp.json()["message"] == "Supplier deactivated."
-        # El detalle del inactivo sigue siendo abrible (historial read-only + reactivar).
-        detail = await client.get(f"/api/v1/suppliers/{sid}", headers=auth_headers)
-        assert detail.status_code == 200
-        assert detail.json()["is_active"] is False
-        # La lista por defecto lo excluye; con include_inactive aparece.
-        listed = await client.get("/api/v1/suppliers", headers=auth_headers)
-        assert sid not in {s["id"] for s in listed.json()}
-        listed_all = await client.get(
-            "/api/v1/suppliers?include_inactive=true", headers=auth_headers
-        )
-        assert sid in {s["id"] for s in listed_all.json()}
 
 
 @pytest.mark.asyncio
@@ -270,34 +184,6 @@ class TestBrandCollapsedSuppliers:
 
 # La idempotencia HTTP (Idempotency-Key) vive parametrizada por endpoint en
 # test_idempotency.py — suppliers incluido. Acá solo lo específico de la entidad.
-
-
-@pytest.mark.asyncio
-class TestSuppliersTenantIsolation:
-    @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger):
-        pass
-
-    async def test_other_tenant_cannot_see_or_access(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        second_auth_headers: dict[str, Any],
-    ) -> None:
-        created = await client.post(
-            "/api/v1/suppliers", json=_SUPPLIER_PAYLOAD, headers=auth_headers
-        )
-        sid = created.json()["id"]
-
-        # El segundo tenant no lo ve en su listado…
-        other_list = await client.get("/api/v1/suppliers", headers=second_auth_headers)
-        assert sid not in {s["id"] for s in other_list.json()}
-
-        # …ni lo puede leer por id (404, no 403, para no filtrar existencia).
-        other_get = await client.get(
-            f"/api/v1/suppliers/{sid}", headers=second_auth_headers
-        )
-        assert other_get.status_code == 404
 
 
 @pytest.mark.asyncio
