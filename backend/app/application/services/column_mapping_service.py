@@ -5,12 +5,13 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.header_keys import match_key
+from app.domain.header_semantics import analyze_header
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -472,6 +473,283 @@ _HEURISTIC_KEYS: dict[str, dict[str, frozenset[str]]] = {
     }
     for entity, targets in _HEURISTICS.items()
 }
+
+
+# ── F-M: de (entidad, concepto, calificadores) al campo ──────────────────────
+#
+# La segunda mitad del reconocedor. `header_semantics` dice QUÉ es la columna en
+# castellano; esta tabla dice a qué campo va en ESTA entidad — y, cuando no
+# alcanza para decidir, cuáles son los candidatos y por qué no alcanza.
+#
+# Vive acá y no en el dominio porque nombra `target_field`s: el vocabulario del
+# idioma no tiene por qué conocer el catálogo de campos de la base.
+
+
+@dataclass(frozen=True)
+class ReglaDeTarget:
+    """Qué hacer con un concepto cuando aparecen ciertos calificadores.
+
+    Las reglas de un concepto se evalúan EN ORDEN y gana la primera cuyos
+    calificadores estén todos presentes. La última suele tener ``si`` vacío: es
+    el caso "sin nada que desempate".
+    """
+
+    si: frozenset[str] = frozenset()
+    #: Resultado inequívoco.
+    target: str | None = None
+    #: Dos o más candidatos: se le pregunta al usuario.
+    opciones: tuple[str, ...] = ()
+    #: Por qué no alcanza, en castellano. Obligatoria si no hay `target`.
+    duda: str | None = None
+
+
+def _r(*args: str, **kw: object) -> ReglaDeTarget:
+    """Azúcar: `_r("unitario", target="unit_price")`."""
+    return ReglaDeTarget(si=frozenset(args), **kw)  # type: ignore[arg-type]
+
+
+_PRECIO_LINEA_O_UNIDAD = "¿es el precio de cada unidad, o el total de la línea?"
+_SIN_CAMPO_DESCUENTO = (
+    "Es un descuento. Véktor todavía no tiene un campo propio para descuentos de "
+    "una compra; se puede guardar como campo propio."
+)
+_SIN_CAMPO_IMPUESTO = (
+    "Es un impuesto de la línea. Véktor todavía no tiene un campo propio para eso; "
+    "se puede guardar como campo propio."
+)
+_ENVIO_UNITARIO = (
+    "Es un costo de envío por unidad. Véktor sabe leer el envío del comprobante y "
+    "el que ya viene asignado a cada línea, pero no el de cada unidad."
+)
+_ENVIO_POR_LINEA = (
+    "Es el envío que le toca a esta línea, no el del comprobante entero. Los dos "
+    "se leen con reglas opuestas —uno se cobra una vez, el otro se suma— así que "
+    "no se pueden usar como si fueran el mismo campo."
+)
+_MONTO_DEL_COMPROBANTE = (
+    "Parece el total del comprobante, no el de esta línea. Importarlo como el monto "
+    "de la fila repetiría el total en cada línea del remito."
+)
+
+RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
+    "sale": {
+        "fecha": (_r(target="transaction_date"),),
+        "monto": (
+            _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
+            _r(target="amount"),
+        ),
+        "precio": (
+            _r("unitario", target="unit_price"),
+            _r(opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+        ),
+        "cantidad": (_r(target="quantity"),),
+        "producto": (_r(target="product_name"),),
+        "cliente": (_r(target="customer_name"),),
+        # `Nombre` a secas en una hoja de ventas ya era el del producto: es una
+        # decisión previa del proyecto, no un empate de longitud, así que se
+        # conserva.
+        "nombre": (
+            _r("de_cliente", target="customer_name"),
+            _r(target="product_name"),
+        ),
+        "dni": (_r(target="customer_dni"),),
+        "cuit": (_r(target="customer_cuit"),),
+        "email": (_r(target="customer_email"),),
+        "telefono": (_r(target="customer_phone"),),
+        "metodo_pago": (_r(target="payment_method"),),
+        "nota": (_r(target="notes"),),
+        "descripcion": (_r(target="notes"),),
+    },
+    "expense": {
+        "fecha": (_r(target="expense_date"),),
+        "monto": (
+            _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
+            _r(target="amount"),
+        ),
+        "precio": (
+            _r("unitario", target="unit_price"),
+            _r("de_compra", target="unit_price"),
+            _r(opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+        ),
+        "costo": (
+            _r("unitario", target="unit_price"),
+            _r("de_producto", opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+            _r("final", opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+            _r(target="amount"),
+        ),
+        "cantidad": (_r(target="quantity"),),
+        "categoria": (_r(target="category"),),
+        "metodo_pago": (_r(target="payment_method"),),
+        "recurrencia": (_r(target="is_recurring"),),
+        "proveedor": (_r(target="supplier_name"),),
+        "producto": (_r(target="product_name"),),
+        "nombre": (
+            _r("de_proveedor", target="supplier_name"),
+            _r("de_producto", target="product_name"),
+            _r(
+                opciones=("product_name", "supplier_name"),
+                duda="¿es el nombre del producto de la línea, o el del proveedor?",
+            ),
+        ),
+        "sku": (_r(target="sku"),),
+        "codigo": (_r(target="sku"),),
+        "barcode": (_r(target="barcode"),),
+        "comprobante": (_r(target="invoice_number"),),
+        "envio": (
+            _r("unitario", duda=_ENVIO_UNITARIO),
+            _r("por_linea", duda=_ENVIO_POR_LINEA),
+            _r(target="shipping_cost"),
+        ),
+        "descuento": (_r(duda=_SIN_CAMPO_DESCUENTO),),
+        "impuesto": (_r(duda=_SIN_CAMPO_IMPUESTO),),
+        "cuil": (_r(target="supplier_cuil"),),
+        "email": (_r(target="supplier_email"),),
+        "telefono": (_r(target="supplier_phone"),),
+        "nota": (_r(target="notes"),),
+        "descripcion": (_r(target="notes"),),
+    },
+    "product": {
+        "precio": (
+            _r("de_lista", target="list_price_ars"),
+            _r("de_compra", target="unit_cost_ars"),
+            _r("de_venta", target="sale_price_ars"),
+            _r("unitario", target="unit_cost_ars"),
+            _r(
+                opciones=("sale_price_ars", "unit_cost_ars", "list_price_ars"),
+                duda=(
+                    "Los tres precios de un producto son campos distintos y "
+                    "conviven: el de venta, el costo y el de lista. El encabezado "
+                    "no dice cuál es."
+                ),
+            ),
+        ),
+        "costo": (_r(target="unit_cost_ars"),),
+        "nombre": (_r(target="name"),),
+        "producto": (_r(target="name"),),
+        "sku": (_r(target="sku"),),
+        "codigo": (_r(target="sku"),),
+        "barcode": (_r(target="barcode"),),
+        "stock": (_r(target="stock_units"),),
+        "cantidad": (_r(target="stock_units"),),
+        "categoria": (_r(target="category"),),
+        "descripcion": (_r(target="description"),),
+        "vencimiento": (_r(target="expiry_date"),),
+        "fecha": (_r(target="acquired_at"),),
+        "marca": (
+            _r(
+                duda=(
+                    "Es la marca del producto. No es un campo del catálogo —una "
+                    "marca no es un proveedor, ver la Reforma de Proveedores—: se "
+                    "guarda como campo propio."
+                )
+            ),
+        ),
+    },
+    "customer": {
+        "nombre": (_r(target="name"),),
+        "apellido": (_r(target="last_name"),),
+        "dni": (_r(target="dni"),),
+        "cuit": (_r(target="cuit"),),
+        "email": (_r(target="email"),),
+        "telefono": (_r(target="phone"),),
+        "direccion": (_r(target="address"),),
+        "localidad": (_r(target="locality"),),
+        "provincia": (_r(target="province"),),
+        "codigo_postal": (_r(target="postal_code"),),
+        "cumpleanos": (_r(target="birthday"),),
+        "nota": (_r(target="notes"),),
+    },
+    "supplier": {
+        "nombre": (_r(target="name"),),
+        "apellido": (_r(target="last_name"),),
+        "cuil": (_r(target="cuil"),),
+        "email": (_r(target="email"),),
+        "telefono": (_r(target="phone"),),
+        "metodo_pago": (_r(target="payment_method"),),
+        "nota": (_r(target="notes"),),
+    },
+}
+
+
+@dataclass(frozen=True)
+class HeaderReading:
+    """Los tres resultados posibles de leer un encabezado.
+
+    - ``unico``: se puede demostrar qué campo es. Se propone.
+    - ``ambiguo``: hay más de una lectura razonable. Se ofrecen y se explica.
+    - ``sin_evidencia``: no alcanza. La columna se conserva y se pregunta.
+
+    Los dos últimos son lo mismo para el importador —la columna no se mapea
+    sola— y distintos para la persona: «no entiendo esto» y «entiendo qué es
+    pero no tengo dónde ponerlo» no se explican igual.
+    """
+
+    outcome: Literal["unico", "ambiguo", "sin_evidencia"]
+    target: str | None = None
+    options: tuple[str, ...] = ()
+    duda: str | None = None
+    concept: str | None = None
+    #: Lo que el encabezado decía ADEMÁS del concepto. No cambia la decisión —esa
+    #: ya la tomó la regla— pero es lo único que permite explicarla: sin esto,
+    #: «Envío unitario» y «Envío» son el mismo mensaje en pantalla.
+    qualifiers: frozenset[str] = frozenset()
+
+
+def read_header(normalized: str, entity_type: str) -> HeaderReading:
+    """Lee un encabezado y devuelve uno de los tres resultados.
+
+    Nunca elige entre dos lecturas razonables: si Véktor no puede demostrar qué
+    quiso decir el usuario, conserva el dato y pregunta. Transformarlo en silencio
+    en otro concepto contable es lo que convertía un flete en un precio de compra.
+    """
+    analisis = analyze_header(normalized)
+    quals = analisis.qualifiers
+    if analisis.concept is None:
+        if analisis.rivals:
+            return HeaderReading(
+                "sin_evidencia",
+                duda=(
+                    "El encabezado nombra dos cosas a la vez y ninguna manda sobre "
+                    "la otra."
+                ),
+                qualifiers=quals,
+            )
+        return HeaderReading("sin_evidencia", qualifiers=quals)
+
+    sin_campo = HeaderReading(
+        "sin_evidencia",
+        duda=f"Esta hoja no tiene un campo para eso ({analisis.concept}).",
+        concept=analisis.concept,
+        qualifiers=quals,
+    )
+    reglas = RESOLUCION.get(entity_type, {}).get(analisis.concept)
+    if reglas is None:
+        return sin_campo
+
+    for regla in reglas:
+        if regla.si <= quals:
+            if regla.target is not None:
+                return HeaderReading(
+                    "unico",
+                    target=regla.target,
+                    concept=analisis.concept,
+                    qualifiers=quals,
+                )
+            if regla.opciones:
+                return HeaderReading(
+                    "ambiguo",
+                    options=regla.opciones,
+                    duda=regla.duda,
+                    concept=analisis.concept,
+                    qualifiers=quals,
+                )
+            return HeaderReading(
+                "sin_evidencia",
+                duda=regla.duda,
+                concept=analisis.concept,
+                qualifiers=quals,
+            )
+    return sin_campo
 
 
 # ── Campos de valor único ────────────────────────────────────────────────────
