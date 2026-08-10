@@ -106,14 +106,23 @@ const CUSTOM_FIELD_PREFIX = "custom_field:";
  * (`commitCustom` no chequea contra las otras columnas de la hoja) da el OK en
  * pantalla y 422 al confirmar — exactamente la divergencia que este módulo
  * existe para evitar.
+ *
+ * El target y la clave se recortan igual que en `parse_target` del backend
+ * (`column_mapping_service.py`), donde este mismo bug ya está arreglado. Sin el
+ * recorte de la clave, `"custom_field: obs"` y `"custom_field:obs"` eran claves
+ * DISTINTAS y las dos columnas pasaban la pantalla para chocar contra el 422 del
+ * confirm, que sí las ve como la misma. Y sin el recorte del target,
+ * `" custom_field:obs"` ni entraba a esta rama: se iba con los canónicos y
+ * `scalarCollisions` lo evaluaba como si fuera un campo del catálogo.
  */
 export function customFieldCollisions(
   mappings: Record<string, string>,
 ): ScalarCollision[] {
   const porClave = new Map<string, string[]>();
   for (const [col, target] of Object.entries(mappings)) {
-    if (!target?.startsWith(CUSTOM_FIELD_PREFIX)) continue;
-    const clave = target.slice(CUSTOM_FIELD_PREFIX.length);
+    const valor = target?.trim() ?? "";
+    if (!valor.startsWith(CUSTOM_FIELD_PREFIX)) continue;
+    const clave = valor.slice(CUSTOM_FIELD_PREFIX.length).trim();
     porClave.set(clave, [...(porClave.get(clave) ?? []), col]);
   }
   return [...porClave.entries()]

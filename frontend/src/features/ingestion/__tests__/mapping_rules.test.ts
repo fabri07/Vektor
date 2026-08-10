@@ -237,4 +237,41 @@ describe("customFieldCollisions", () => {
   it("ignorar y sin mapear no compiten por ningún campo", () => {
     expect(customFieldCollisions({ a: "ignore", b: "ignore", c: "" })).toEqual([]);
   });
+
+  /**
+   * Los espacios los recorta `parse_target` en el backend, así que para el
+   * confirm todos estos son el MISMO campo. Si acá no se recortaran, la pantalla
+   * daría el OK y el confirm respondería 422 — la divergencia exacta que este
+   * módulo existe para evitar.
+   */
+  it("un espacio después de los dos puntos no crea un campo distinto", () => {
+    const colisiones = customFieldCollisions({
+      Observaciones: "custom_field: obs",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.label).toBe("obs");
+    expect(colisiones[0]?.columns.sort()).toEqual(["Obs.", "Observaciones"]);
+  });
+
+  it("un espacio al final de la clave tampoco", () => {
+    const colisiones = customFieldCollisions({
+      Observaciones: "custom_field:obs ",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.label).toBe("obs");
+  });
+
+  it("un espacio ANTES del prefijo sigue siendo un campo propio", () => {
+    // Sin recortar el target, este no entraba siquiera a la rama de campos
+    // propios: se iba con los canónicos y la colisión no se miraba nunca.
+    const colisiones = customFieldCollisions({
+      Observaciones: " custom_field:obs",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.target).toBe("custom_field:obs");
+    expect(colisiones[0]?.columns.sort()).toEqual(["Obs.", "Observaciones"]);
+  });
 });
