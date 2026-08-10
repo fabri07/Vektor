@@ -24,6 +24,7 @@ from app.application.services.file_deletion_service import (
     revert_file_data,
 )
 from app.domain.ingestion_version import INGESTION_VERSION
+from app.domain.purchase_cost_decision import PurchaseCostDecision
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
@@ -549,6 +550,103 @@ class TestRestauraLoQueElArchivoModifico:
         assert producto.sale_price_ars == Decimal("1500")
         assert contadores.get("productos_restaurados", 0) == 0
         assert contadores["productos_conservados"] == 1
+
+    async def test_una_compra_que_piso_el_costo_lo_devuelve(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El hueco que dejaban los dos niveles de test: importación REAL sobre un
+        producto PREEXISTENTE, y después borrado.
+
+        `product_details` sólo lo poblaba el camino de catálogo. Un producto
+        tocado únicamente por una hoja de COMPRAS quedaba con el costo pisado para
+        siempre y el DELETE respondía `fully_reverted: true` — no había item en el
+        ledger, así que no había nada que conservar ni que reportar.
+
+        Los tests de servicio fabricaban el ledger a mano (probando
+        `restore_from_before`, no al importador) y el único E2E real arranca con
+        el tenant vacío, sin nada que restaurar.
+        """
+        from app.application.services.ingestion_import_service import (
+            insert_confirmed_data,
+        )
+
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Vela de coco")
+        assert producto.unit_cost_ars == Decimal("60")
+
+        ctx = "sheet:Compras"
+        counts = await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            {
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "multi_sheet": True,
+                "mapping_contexts": [
+                    {
+                        "context_id": ctx,
+                        "label": "Compras",
+                        "entity_type": "expense",
+                        "source_kind": "sheet",
+                        "headers": ["fecha", "articulo", "cantidad", "total", "flete_linea"],
+                        "fields": None,
+                        "preview_rows": [],
+                        "row_count": 1,
+                    }
+                ],
+                "gastos_detectados": [
+                    {
+                        "fecha": "2024-03-05",
+                        "articulo": "Vela de coco",
+                        "cantidad": "10",
+                        "total": "1000",
+                        "flete_linea": "200",
+                        "__context__": ctx,
+                    }
+                ],
+                "ventas_detectadas": [],
+                "stock_detectado": [],
+            },
+            {"gastos": True},
+            return_details=True,
+            context_mappings={
+                ctx: {
+                    "fecha": "expense_date",
+                    "articulo": "product_name",
+                    "cantidad": "quantity",
+                    "total": "amount",
+                    "flete_linea": "shipping_cost_line",
+                }
+            },
+            context_confirmed={ctx: True},
+            uploaded_file_id=archivo.id,
+            purchase_cost_decisions={
+                ctx: PurchaseCostDecision(context_id=ctx, line_shipping="al_costo")
+            },
+        )
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        # La compra pisó el costo: (1000 + 200) / 10, con el flete adentro.
+        assert producto.unit_cost_ars == Decimal("120.00")
+        assert (producto.custom_fields or {}).get("_vektor_costo_base") == "con_flete"
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=counts.pop("product_details", []) or [],
+        )
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(producto)
+        assert producto.unit_cost_ars == Decimal("60")
+        # La procedencia vuelve con el costo: si no, el guard de V5 decidiría con
+        # un dato que ya no describe el número guardado.
+        assert "_vektor_costo_base" not in (producto.custom_fields or {})
+        assert contadores["productos_restaurados"] == 1
 
     async def test_no_pisa_una_edicion_posterior_del_usuario(
         self, db_session: AsyncSession, sample_tenant: Tenant

@@ -32,6 +32,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from app.domain.purchase_cost import COSTO_BASE_FIELD
+
 # Campos editables de un maestro que se serializan al snapshot y se restauran.
 MASTER_SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "customer": (
@@ -59,6 +61,16 @@ RESTORE_FIELDS: dict[str, tuple[str, ...]] = {
     "supplier": MASTER_SNAPSHOT_FIELDS["supplier"],
     "product": PRODUCT_RESTORE_FIELDS,
 }
+
+# Claves del snapshot que NO son columnas del modelo: viven dentro de
+# ``custom_fields`` y se restauran ahí, sin pisar el resto del dict (que puede
+# tener campos propios que cargó el usuario y no son de este archivo).
+#
+# Hoy hay una sola y no es un capricho: la procedencia del costo se ESCRIBE junto
+# con ``unit_cost_ars`` (F-H6.d), así que tiene que VOLVER junto con él. Restaurar
+# el costo y dejar la procedencia vieja deja al guard de V5 decidiendo con un dato
+# que ya no describe el número que está guardado.
+CUSTOM_FIELD_RESTORE_KEYS: frozenset[str] = frozenset({COSTO_BASE_FIELD})
 
 
 def snapshot_master(entity: Any, kind: str) -> dict[str, Any]:
@@ -112,6 +124,18 @@ def restore_from_before(entity: Any, kind: str, before: dict[str, Any]) -> list[
             continue
         setattr(entity, f, coerce_restore_value(f, before[f]))
         restaurados.append(f)
+    for clave in CUSTOM_FIELD_RESTORE_KEYS:
+        if clave not in before:
+            continue
+        cf = {**(getattr(entity, "custom_fields", None) or {})}
+        if before[clave] is None:
+            # Ausente antes del archivo: se saca, no se guarda un None que
+            # después se leería como una afirmación.
+            cf.pop(clave, None)
+        else:
+            cf[clave] = before[clave]
+        entity.custom_fields = cf
+        restaurados.append(clave)
     return restaurados
 
 
@@ -140,7 +164,9 @@ def capturo_updated_at(after: dict[str, Any] | None) -> bool:
 
 # Claves del snapshot que no son campos del modelo (metadatos del ledger) o cuya
 # reversa no pasa por `setattr` (`stock_units`, ver docstring del módulo).
-_NO_COMPARABLES: frozenset[str] = frozenset({"updated_at", "id", "kind", "stock_units"})
+_NO_COMPARABLES: frozenset[str] = frozenset(
+    {"updated_at", "id", "kind", "stock_units", *CUSTOM_FIELD_RESTORE_KEYS}
+)
 
 
 def fields_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> list[str]:

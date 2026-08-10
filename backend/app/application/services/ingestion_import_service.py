@@ -2052,6 +2052,7 @@ async def _apply_purchase_to_stock(
     source_row_ref: str | None = None,
     costo_final: Decimal | None = None,
     costo_incluye_flete: bool | None = None,
+    product_details: list[dict[str, Any]] | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
 
@@ -2102,15 +2103,47 @@ async def _apply_purchase_to_stock(
     # V5: una compra nueva no pisa un costo que incluía flete con uno que no lo
     # incluye. Si no se pisa el costo, TAMPOCO se pisa la procedencia: quedarían
     # describiendo cosas distintas.
+    _base_guardada = (product.custom_fields or {}).get(COSTO_BASE_FIELD)
     if _costo_de_referencia is not None and debe_pisar_costo_de_referencia(
         entrante_incluye_flete=costo_incluye_flete,
-        guardado_incluye_flete=(product.custom_fields or {}).get(COSTO_BASE_FIELD),
+        guardado_incluye_flete=_base_guardada,
         costo_guardado=(
             Decimal(str(product.unit_cost_ars))
             if product.unit_cost_ars is not None
             else None
         ),
     ):
+        # F11/h3: una compra que pisa el costo tiene que dejar cómo estaba antes.
+        # `product_details` sólo lo poblaba el camino de CATÁLOGO, así que un
+        # producto tocado únicamente por una hoja de compras quedaba con el costo
+        # pisado para siempre — y el DELETE respondía `fully_reverted: true`.
+        # Varios items del mismo archivo sobre el mismo producto no son un
+        # problema: la reversa restaura el `before` del PRIMERO (el estado previo
+        # al archivo) y compara el `after` del último.
+        if product_details is not None:
+            product_details.append(
+                {
+                    "action": "UPDATED",
+                    "product_id": str(product.id),
+                    "name": product.name,
+                    "before": {
+                        "unit_cost_ars": (
+                            str(product.unit_cost_ars)
+                            if product.unit_cost_ars is not None
+                            else None
+                        ),
+                        COSTO_BASE_FIELD: _base_guardada,
+                    },
+                    "after": {
+                        "unit_cost_ars": str(_costo_de_referencia),
+                        COSTO_BASE_FIELD: (
+                            (CON_FLETE if costo_incluye_flete else SIN_FLETE)
+                            if costo_incluye_flete is not None
+                            else _base_guardada
+                        ),
+                    },
+                }
+            )
         product.unit_cost_ars = _costo_de_referencia
         # F-H6.d: la procedencia se escribe en la MISMA operación que el costo.
         # Separarlas deja que un costo y su procedencia se desincronicen, y una
@@ -4042,6 +4075,9 @@ async def _insert_confirmed_data_impl(
                             source_row_ref=_source_row_ref(_row_anchor),
                             costo_final=_costo_final_fila,
                             costo_incluye_flete=_incluye_flete_fila,
+                            product_details=(
+                                product_details if return_details else None
+                            ),
                         )
                         # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
                         # stock (producto ligado + cantidad>0), marcarla para que el
@@ -5645,6 +5681,7 @@ async def _insert_multisheet_data(
             source_row_ref=row_ref,
             costo_final=_costo_final,
             costo_incluye_flete=_incluye_flete,
+            product_details=product_details if return_details else None,
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
