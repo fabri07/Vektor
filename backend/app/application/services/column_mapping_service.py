@@ -168,6 +168,108 @@ REQUIRED_ALTERNATIVES: dict[str, dict[str, frozenset[str]]] = {
     "expense": {"amount": frozenset({"unit_price", "quantity"})},
 }
 
+# F-C: POR QUÉ el importador necesita cada campo. Vive del lado del backend
+# porque es CONSECUENCIA de una regla del importador, no una opinión de la UI: si
+# mañana una fila sin fecha deja de ir a "Otros", el texto tiene que cambiar acá y
+# no en una pantalla.
+#
+# Dos reglas de redacción, y las dos nacen de la misma queja: la pantalla decía
+# «Campos requeridos sin mapear: transaction_date», que se lee como "esta columna
+# de tu planilla es obligatoria" cuando lo que pasa es al revés — Véktor necesita
+# que ALGUNA columna le diga la fecha, y le da lo mismo cómo se llame.
+#
+# 1. Se redacta como CONSECUENCIA, nunca como imperativo. "Véktor necesita saber
+#    qué columna contiene la fecha", no "la fecha es obligatoria".
+# 2. El motivo no puede afirmar lo que el importador no hace. Los destinos son
+#    tres y distintos, verificados contra `ingestion_import_service`:
+#      · venta sin monto/sin fecha y gasto sin fecha → van a "Otros" con el motivo
+#        (`_capture_unclassified`), o sea que la fila se puede rescatar;
+#      · gasto sin monto y producto sin nombre → se DESCARTAN, no queda rastro
+#        (`_add_expense`/`_add_product` devuelven `False`);
+#      · cliente/proveedor sin nombre → se saltea y se cuenta como inválido en el
+#        resumen del archivo (`customer_import_service._validate_record`).
+#    Prometer "Otros" donde el importador descarta es peor que no explicar nada.
+REQUIRED_REASONS: dict[str, dict[str, str]] = {
+    "sale": {
+        "amount": (
+            "Para registrar una venta, Véktor necesita saber cuánta plata entró. "
+            "La fila que no lo traiga —ni el precio unitario y la cantidad para "
+            "calcularlo— no se registra como venta: queda en «Otros» con el motivo, "
+            "para completarla desde ahí."
+        ),
+        "transaction_date": (
+            "Para importar ventas, Véktor necesita saber qué columna contiene la "
+            "fecha: es lo que ubica cada venta en su período. La fila con una fecha "
+            "que no se pueda leer queda en «Otros» — nunca se le pone la de hoy."
+        ),
+        "unit_price": (
+            "Reemplaza al monto junto con la cantidad: si la planilla no trae una "
+            "columna de total, Véktor lo calcula con estos dos. Con uno solo no hay "
+            "nada que calcular."
+        ),
+        "quantity": (
+            "Reemplaza al monto junto con el precio unitario: si la planilla no trae "
+            "una columna de total, Véktor lo calcula con estos dos. Con uno solo no "
+            "hay nada que calcular."
+        ),
+    },
+    "expense": {
+        "amount": (
+            "Para registrar un gasto o una compra, Véktor necesita saber cuánta plata "
+            "salió. La fila que no lo traiga —ni el precio unitario y la cantidad para "
+            "calcularlo— se descarta: no se registra el gasto y tampoco queda en "
+            "«Otros»."
+        ),
+        "expense_date": (
+            "Para importar gastos y compras, Véktor necesita saber qué columna "
+            "contiene la fecha: es lo que ubica cada gasto en su período. La fila con "
+            "una fecha que no se pueda leer queda en «Otros» — nunca se le pone la de "
+            "hoy."
+        ),
+        "unit_price": (
+            "Reemplaza al monto junto con la cantidad: si la planilla de compras no "
+            "trae el total de la línea, Véktor lo calcula con estos dos. Con uno solo "
+            "no hay nada que calcular."
+        ),
+        "quantity": (
+            "Reemplaza al monto junto con el precio unitario: si la planilla de "
+            "compras no trae el total de la línea, Véktor lo calcula con estos dos. "
+            "Con uno solo no hay nada que calcular."
+        ),
+    },
+    "product": {
+        "name": (
+            "Es con lo que Véktor identifica al artículo y lo cruza con las ventas y "
+            "las compras. La fila sin nombre no crea ni actualiza ningún producto y "
+            "tampoco queda en «Otros»: se descarta."
+        ),
+    },
+    "customer": {
+        "name": (
+            "Nombre o razón social: es con lo que el cliente aparece en Véktor y lo "
+            "que permite reconocerlo cuando vuelve a comprar. La fila sin nombre no se "
+            "importa y se cuenta como inválida en el resumen del archivo."
+        ),
+    },
+    "supplier": {
+        "name": (
+            "Nombre o razón social: es con lo que el proveedor aparece en Véktor y lo "
+            "que permite agrupar sus compras. La fila sin nombre no se importa y se "
+            "cuenta como inválida en el resumen del archivo."
+        ),
+    },
+}
+
+
+def required_reason(entity_type: str, field: str) -> str:
+    """Por qué el importador necesita ``field``, o ``""`` si no hay motivo escrito.
+
+    Cadena vacía y no ``None``: el catálogo lo sirve tal cual y un campo sin
+    motivo tiene que renderizar nada, no la palabra "None". Que un requerido se
+    quede sin motivo lo caza el test compuerta, no este helper.
+    """
+    return REQUIRED_REASONS.get(entity_type, {}).get(field, "")
+
 
 def missing_required_fields(entity_type: str, mapped: set[str]) -> set[str]:
     """Requeridos que ``mapped`` no cubre, ni directo ni por alternativa.
