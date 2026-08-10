@@ -41,6 +41,7 @@ import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 import {
   customFieldCollisions,
+  explainMissing,
   missingRequiredFields,
   scalarCollisions,
   type SheetIssues,
@@ -480,6 +481,7 @@ function SheetMapperSection({
   costoValue,
   onCostoChange,
   grupos,
+  resaltada,
 }: {
   fileId: string;
   context: MappingContext;
@@ -525,6 +527,9 @@ function SheetMapperSection({
   // cómo repartiría el envío. `undefined` mientras la consulta está en vuelo o
   // cuando la hoja no declara envío compartido.
   grupos?: SheetPurchaseGroups;
+  // El banner de faltantes mandó acá pero no pudo señalar una columna: se marca
+  // la tarjeta para que la persona sepa dónde aterrizó.
+  resaltada?: boolean;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -635,9 +640,12 @@ function SheetMapperSection({
 
   return (
     <div
+      // A dónde salta el banner de faltantes cuando NO puede señalar una columna
+      // concreta. Por atributo y no por `id`: el `context_id` es texto libre.
+      data-sheet-card={context.context_id}
       className={`rounded-lg border bg-vk-surface-w ${
         included ? "border-vk-border-w" : "border-vk-border-w/40 opacity-60"
-      }`}
+      } ${resaltada ? "ring-2 ring-vk-danger/60" : ""}`}
     >
       <div className="flex items-center justify-between gap-3 border-b border-vk-border-w bg-vk-bg-light px-3 py-2">
         <label className="flex cursor-pointer items-center gap-2">
@@ -823,6 +831,13 @@ function SheetMapperSection({
                     <select
                       value={customFor === s.source_column ? "__custom__" : target}
                       onChange={(e) => selectTarget(s.source_column, e.target.value)}
+                      // Por dónde entra el salto del banner de faltantes: dice a
+                      // qué hoja pertenece este select y qué campo SUGERÍA
+                      // Véktor para esta columna. Se busca por atributo y no por
+                      // `id` porque el nombre de la columna es texto libre del
+                      // archivo (espacios, acentos, comillas).
+                      data-sheet={context.context_id}
+                      data-suggests={s.target_field ?? ""}
                       // Deshabilitado —no vacío— mientras carga el catálogo: un
                       // select sin opciones es justamente el fallo que se está
                       // corrigiendo (mostraría "Sin mapear" sobre un target real).
@@ -1091,6 +1106,10 @@ function MultiContextMapper({
     [parserWarnings, contexts],
   );
 
+  // Mismo catálogo que usan las secciones (react-query dedupea por `queryKey`):
+  // acá alimenta el banner con el nombre y el motivo de cada requerido.
+  const { data: catalogoDeCampos } = useFieldCatalog();
+
   // Sección efectiva de una hoja: la que eligió el usuario, si no la que trajo
   // el backend, si no NINGUNA. Fuente única — antes cada lugar repetía el
   // `?? "sale"` y ese default silencioso es el bug que estamos cerrando.
@@ -1131,13 +1150,58 @@ function MultiContextMapper({
   const riesgoDobleConteo =
     hojasDeGasto.length > 0 && hojasMarcadasCompra.length > 0;
 
+  /**
+   * F-C: llevar a la persona al DESTINO del campo que falta.
+   *
+   * La regla es la misma que la de la corrección V10: se señala una columna sólo
+   * cuando NO hay ambigüedad. Si entre las sugerencias de la hoja hay
+   * exactamente UNA que apuntaba a ese campo, esa es la columna de la que salió
+   * el dato y ahí va el foco. Si hay varias —o ninguna— elegir una sería elegir
+   * al azar, así que se salta a la tarjeta de la hoja y se la resalta: la
+   * persona ve dónde tiene que mirar y decide ella cuál es.
+   *
+   * Se lee el DOM en vez de mantener un índice en estado porque lo que hay que
+   * enfocar es exactamente lo que está renderizado; un índice paralelo puede
+   * quedar viejo justo cuando la hoja acaba de cambiar de sección.
+   */
+  const [hojaResaltada, setHojaResaltada] = useState<string | null>(null);
+  const irAlDestino = useCallback((ctxId: string, target: string) => {
+    const candidatos = Array.from(
+      document.querySelectorAll<HTMLSelectElement>("select[data-sheet][data-suggests]"),
+    ).filter((el) => el.dataset.sheet === ctxId && el.dataset.suggests === target);
+    const unico = candidatos.length === 1 ? candidatos[0] : undefined;
+    if (unico) {
+      // `scrollIntoView` no existe en jsdom: el foco es lo que importa y no se
+      // puede perder por un salto de scroll que el entorno de test no implementa.
+      unico.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      unico.focus();
+      setHojaResaltada(null);
+      return;
+    }
+    const tarjeta = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-sheet-card]"),
+    ).find((el) => el.dataset.sheetCard === ctxId);
+    tarjeta?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setHojaResaltada(ctxId);
+  }, []);
+
   // Solo cuentan las hojas INCLUIDAS: una destildada no se importa, así que sus
   // problemas no pueden bloquear nada.
   const hojasConProblemas = contexts
     .filter((c) => included[c.context_id])
-    .map((c) => ({ label: c.label ?? c.context_id, issues: issuesByCtx[c.context_id] }))
+    .map((c) => ({
+      ctxId: c.context_id,
+      label: c.label ?? c.context_id,
+      issues: issuesByCtx[c.context_id],
+      // El motivo de cada requerido depende de la ENTIDAD de la hoja: la misma
+      // fecha se pierde distinto en una venta que en un gasto.
+      faltantes: explainMissing(
+        issuesByCtx[c.context_id]?.missingRequired ?? [],
+        catalogoDeCampos?.[entityFor(c)],
+      ),
+    }))
     .filter(
-      (h): h is { label: string; issues: SheetIssues } =>
+      (h): h is typeof h & { issues: SheetIssues } =>
         !!h.issues &&
         (h.issues.missingRequired.length > 0 || h.issues.collisions.length > 0),
     );
@@ -1481,6 +1545,7 @@ function MultiContextMapper({
             onEffectChange={handleEffectChange}
             shippingValue={shippingByCtx[ctx.context_id] ?? null}
             grupos={gruposByCtx[ctx.context_id]}
+            resaltada={hojaResaltada === ctx.context_id}
             costoValue={{
               base: costoByCtx[ctx.context_id]?.base ?? "monto_incluye",
               // El efectivo, no el crudo: el radio tiene que mostrar lo que
@@ -1541,18 +1606,57 @@ function MultiContextMapper({
           el usuario descubría el problema recién con un 422 que no decía cómo
           salir (incidente ASTERIA: tres confirms rechazados seguidos). */}
       {hojasConProblemas.length > 0 && (
-        <div className="mt-3 space-y-1">
-          {hojasConProblemas.map(({ label, issues }) => (
-            <p key={label} className="flex gap-1.5 text-xs text-vk-danger">
-              <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-              <span>
-                <strong>«{label}»</strong>:{" "}
-                {issues.missingRequired.length > 0
-                  ? "falta un dato obligatorio"
-                  : "hay dos columnas para el mismo campo"}
-                . Revisá la hoja más arriba.
-              </span>
-            </p>
+        <div className="mt-3 space-y-2">
+          {hojasConProblemas.map(({ ctxId, label, issues, faltantes }) => (
+            <div key={ctxId} className="text-xs text-vk-danger">
+              <p className="flex gap-1.5">
+                <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+                <span>
+                  <strong>«{label}»</strong>:{" "}
+                  {[
+                    faltantes.length === 1
+                      ? "falta un dato obligatorio"
+                      : faltantes.length > 1
+                        ? "faltan datos obligatorios"
+                        : null,
+                    // Las dos cosas pueden pasar a la vez y antes la segunda se
+                    // perdía: el mensaje era un o-lo-uno-o-lo-otro y la hoja
+                    // seguía bloqueada por algo que el banner no nombró.
+                    issues.collisions.length > 0
+                      ? "hay dos columnas para el mismo campo"
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" y ")}
+                  .{issues.collisions.length > 0 && " Revisá la hoja más arriba."}
+                </span>
+              </p>
+              {/* Cada faltante se nombra, se explica QUÉ SE PIERDE la persona si
+                  no lo mapea, y lleva al lugar donde se arregla. Antes esto
+                  decía «falta un dato obligatorio, revisá la hoja más arriba»:
+                  no decía cuál, no decía por qué, y dejaba el botón apagado sin
+                  una acción concreta. */}
+              {faltantes.length > 0 && (
+                <ul className="mt-1 space-y-1 pl-5">
+                  {faltantes.map((f) => (
+                    <li key={f.field}>
+                      <button
+                        type="button"
+                        onClick={() => irAlDestino(ctxId, f.field)}
+                        className="text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus:outline-none focus-visible:ring-1 focus-visible:ring-vk-danger"
+                      >
+                        <strong>{f.label}</strong> — ir a la hoja
+                      </button>
+                      {f.reason && (
+                        <span className="mt-0.5 block text-[11px] leading-snug text-vk-text-secondary">
+                          {f.reason}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -2316,16 +2420,34 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       {faltanRequeridos.length > 0 && (
         <div className="mb-2 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
           <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-          <span>
-            Falta un dato obligatorio:{" "}
-            <strong>
-              {faltanRequeridos
-                .map((r) => fields.find((f) => f.value === r)?.label ?? r)
-                .join(", ")}
-            </strong>
-            . Elegí ese campo en la columna que lo contiene. Un campo personalizado
-            guarda el dato pero no reemplaza al obligatorio.
-          </span>
+          <div>
+            <p>
+              {faltanRequeridos.length === 1
+                ? "Falta un dato obligatorio:"
+                : "Faltan datos obligatorios:"}
+            </p>
+            {/* Mismo criterio que el banner del mapeo por hoja: se nombra el
+                campo y se dice qué se pierde la persona si no lo mapea. Acá no
+                hay a dónde saltar —la misma columna aparece en dos selects, el
+                de "Revisá antes de confirmar" y el de la tabla—, y elegir uno
+                de los dos sería elegir al azar. */}
+            <ul className="mt-1 space-y-1">
+              {explainMissing(faltanRequeridos, catalog?.[entityType]).map((f) => (
+                <li key={f.field}>
+                  <strong>{f.label}</strong>
+                  {f.reason && (
+                    <span className="mt-0.5 block text-[11px] leading-snug text-vk-text-secondary">
+                      {f.reason}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1">
+              Elegí ese campo en la columna que lo contiene. Un campo personalizado
+              guarda el dato pero no reemplaza al obligatorio.
+            </p>
+          </div>
         </div>
       )}
 

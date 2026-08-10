@@ -7,7 +7,10 @@
  * chocar contra un 422 que la pantalla decía que no iba a pasar.
  */
 
-import type { FieldCatalogEntry } from "@/services/ingestion.service";
+import type {
+  EntityFieldCatalog,
+  FieldCatalogEntry,
+} from "@/services/ingestion.service";
 
 /** Lo que impide importar una hoja, con el detalle para poder explicarlo. */
 export type SheetIssues = {
@@ -61,6 +64,46 @@ export function missingRequiredFields(
       !cubiertos.has(r) &&
       !(alternatives[r]?.length && alternatives[r].every((c) => cubiertos.has(c))),
   );
+}
+
+/** Un requerido sin cubrir, listo para mostrarse: cómo se llama y qué se pierde. */
+export type MissingExplained = {
+  /** Nombre técnico. Sirve para enrutar el salto, NO para mostrar. */
+  field: string;
+  /** Cómo se llama el campo en la pantalla ("Fecha de venta"). */
+  label: string;
+  /** Qué pasa si no se mapea. Cadena vacía si el backend no escribió motivo. */
+  reason: string;
+};
+
+/**
+ * Traduce los requeridos sin cubrir a algo que se pueda leer y decidir.
+ *
+ * Función NUEVA y aparte a propósito: `missingRequiredFields` decide QUÉ falta y
+ * es lo que bloquea el confirm — su contrato ya está fijado por sus tests y no
+ * se toca. Ésta sólo describe lo que aquélla encontró.
+ *
+ * Existe porque «falta un dato obligatorio, revisá la hoja más arriba» no dice
+ * cuál, no dice por qué, y no lleva a ningún lado: la persona queda con el botón
+ * apagado y sin una acción concreta. El motivo lo escribe el backend
+ * (`required_reason`) porque es consecuencia de una regla del importador.
+ *
+ * Sin catálogo se devuelve el nombre técnico como label: es peor que el label,
+ * pero mucho mejor que no nombrar el campo. El caller no debería llamar acá
+ * mientras el catálogo carga (tampoco bloquea sin catálogo).
+ */
+export function explainMissing(
+  missing: string[],
+  catalog: EntityFieldCatalog | undefined,
+): MissingExplained[] {
+  return missing.map((field) => {
+    const entry = catalog?.fields.find((f) => f.value === field);
+    return {
+      field,
+      label: entry?.label ?? field,
+      reason: entry?.required_reason ?? "",
+    };
+  });
 }
 
 /**

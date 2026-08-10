@@ -63,8 +63,23 @@ const FIELD_CATALOG = {
   sale: {
     required: ["amount", "transaction_date"],
     fields: [
-      { value: "amount", label: "Monto de venta", single_value: true },
-      { value: "transaction_date", label: "Fecha de venta", single_value: true },
+      {
+        value: "amount",
+        label: "Monto de venta",
+        single_value: true,
+        // F-C: el motivo lo escribe el backend, como consecuencia de una regla
+        // del importador. Acá se espeja para poder verificar que la pantalla lo
+        // muestre en vez de un asterisco rojo.
+        required_reason:
+          "Véktor necesita saber cuánta plata entró. La fila que no lo traiga queda en «Otros».",
+      },
+      {
+        value: "transaction_date",
+        label: "Fecha de venta",
+        single_value: true,
+        required_reason:
+          "Es lo que ubica cada venta en su período. La fila con una fecha ilegible queda en «Otros» — nunca se le pone la de hoy.",
+      },
       { value: "quantity", label: "Cantidad", single_value: true },
       { value: "unit_price", label: "Precio unitario vendido", single_value: true },
       { value: "payment_method", label: "Método de pago", single_value: false },
@@ -1821,6 +1836,189 @@ describe("ColumnMapperPanel — F-H6.d: el preview ve la decisión de envío", (
       expect(ultima?.[1]?.shippingDecisions).toEqual([
         { context_id: "hoja1", action: "una_por_hoja" },
       ]);
+    });
+  });
+});
+
+/**
+ * F-C — el banner de faltantes explica y lleva al selector.
+ *
+ * Decía «falta un dato obligatorio. Revisá la hoja más arriba.»: no decía CUÁL,
+ * no decía POR QUÉ, y no llevaba a ningún lado. La persona quedaba con el botón
+ * apagado y sin una acción concreta — que es la misma queja que originó F-C del
+ * lado del 422.
+ */
+describe("ColumnMapperPanel — F-C: el banner de faltantes nombra, explica y lleva", () => {
+  function preview(headers: string[]) {
+    return {
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "mixed",
+        mapping_contexts: [
+          {
+            context_id: "hoja1",
+            label: "Ventas marzo",
+            source_kind: "sheet",
+            entity_type: "sale",
+            headers,
+            fields: null,
+            preview_rows: [],
+            row_count: 2,
+          },
+        ],
+      },
+      columns_at_risk: [],
+    };
+  }
+
+  function sugerencia(source_column: string, target_field: string | null) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["x"],
+      target_field,
+      confidence: 0.9,
+      source: target_field ? "heuristic" : "none",
+      status: target_field ? "mapped" : "unmapped",
+      context_id: "hoja1",
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+  });
+
+  test("nombra el campo con su etiqueta y dice qué se pierde si no lo mapea", async () => {
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+    ]);
+    renderPanel();
+
+    // Se desmapea la fecha a propósito: es la forma exacta del incidente ASTERIA
+    // (la columna existe, el usuario la manda a otro lado, el requerido queda
+    // descubierto y el confirm devuelve 422 sin decir cómo salir).
+    const selectFecha = await waitFor(() => {
+      const el = document.querySelector<HTMLSelectElement>(
+        'select[data-suggests="transaction_date"]',
+      );
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    fireEvent.change(selectFecha, { target: { value: "ignore" } });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Fecha de venta").length).toBeGreaterThan(0);
+    });
+    expect(screen.getByText(/nunca se le pone la de hoy/)).toBeInTheDocument();
+    // El nombre técnico nunca se le muestra a la persona.
+    expect(screen.queryByText(/transaction_date/)).not.toBeInTheDocument();
+  });
+
+  test("clickear el faltante enfoca el select de la columna que lo traía", async () => {
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+    ]);
+    renderPanel();
+
+    const selectFecha = await waitFor(() => {
+      const el = document.querySelector<HTMLSelectElement>(
+        'select[data-suggests="transaction_date"]',
+      );
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    fireEvent.change(selectFecha, { target: { value: "ignore" } });
+
+    const enlace = await screen.findByRole("button", { name: /Fecha de venta — ir a la hoja/ });
+    fireEvent.click(enlace);
+    // El salto va al DESTINO: la única columna cuya sugerencia apuntaba a ese
+    // campo. Enfocar cualquier otra sería elegir al azar.
+    expect(document.activeElement).toBe(selectFecha);
+  });
+
+  test("sin una columna que apunte al campo, resalta la hoja en vez de elegir al azar", async () => {
+    // Ninguna sugerencia apunta a `transaction_date`: no hay a qué columna
+    // mandar el foco, así que se señala la hoja y decide la persona.
+    mockGetPreview.mockResolvedValue(preview(["Monto", "Comentario"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Monto", "amount"),
+      sugerencia("Comentario", "notes"),
+    ]);
+    const { container } = renderPanel();
+
+    const enlace = await screen.findByRole("button", { name: /Fecha de venta — ir a la hoja/ });
+    fireEvent.click(enlace);
+
+    await waitFor(() => {
+      const tarjeta = container.querySelector('[data-sheet-card="hoja1"]');
+      expect(tarjeta?.className).toContain("ring-2");
+    });
+  });
+
+  test("con DOS columnas candidatas tampoco elige: resalta la hoja", async () => {
+    /**
+     * El caso que la regla existe para cubrir, y el que un `candidatos[0]` deja
+     * pasar. Dos columnas sugerían la fecha y la persona desmapeó las dos:
+     * enfocar la primera del orden del archivo es exactamente el defecto que
+     * arregló la corrección V10 —quedarse con la primera y decidir por el
+     * usuario— sólo que en el foco en vez de en el mapeo.
+     */
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Fecha alta", "Monto"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Fecha alta", "transaction_date"),
+      sugerencia("Monto", "amount"),
+    ]);
+    const { container } = renderPanel();
+
+    const candidatos = await waitFor(() => {
+      const els = Array.from(
+        document.querySelectorAll<HTMLSelectElement>(
+          'select[data-suggests="transaction_date"]',
+        ),
+      );
+      expect(els).toHaveLength(2);
+      return els;
+    });
+    for (const el of candidatos) fireEvent.change(el, { target: { value: "ignore" } });
+
+    const enlace = await screen.findByRole("button", {
+      name: /Fecha de venta — ir a la hoja/,
+    });
+    fireEvent.click(enlace);
+
+    await waitFor(() => {
+      const tarjeta = container.querySelector('[data-sheet-card="hoja1"]');
+      expect(tarjeta?.className).toContain("ring-2");
+    });
+    expect(candidatos).not.toContain(document.activeElement);
+  });
+
+  test("una hoja con las dos cosas rotas nombra las dos", async () => {
+    // Antes el mensaje era un o-lo-uno-o-lo-otro: con un requerido descubierto,
+    // la colisión no se nombraba y la hoja seguía bloqueada por algo invisible.
+    mockGetPreview.mockResolvedValue(preview(["Monto", "Importe", "Comentario"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Monto", "amount"),
+      sugerencia("Importe", "amount"),
+      sugerencia("Comentario", "notes"),
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/falta un dato obligatorio y hay dos columnas para el mismo campo/),
+      ).toBeInTheDocument();
     });
   });
 });
