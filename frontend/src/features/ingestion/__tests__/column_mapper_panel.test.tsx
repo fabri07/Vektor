@@ -1737,3 +1737,90 @@ describe("ColumnMapperPanel — F-H6.d: el envío compartido llega al confirm", 
     expect(screen.getByText(/se reparten \$250 \/ \$150 \/ \$100/)).toBeInTheDocument();
   });
 });
+
+/**
+ * F-H6.d — el preview del reparto tiene que ver lo MISMO que va a ver el import.
+ *
+ * La decisión de envío sin comprobante (F-H6.b) cambia si una hoja puede formar
+ * un grupo: sin mandarla, una hoja donde el usuario ya declaró «toda la hoja es
+ * una compra» se previsualizaría como no repartible, contradiciendo lo que
+ * acaba de elegir en la misma pantalla.
+ */
+describe("ColumnMapperPanel — F-H6.d: el preview ve la decisión de envío", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "mixed",
+        mapping_contexts: [
+          {
+            context_id: "hoja1",
+            label: "Compras",
+            source_kind: "sheet",
+            entity_type: "expense",
+            // Sin columna de comprobante: es el caso donde F-H6.b pregunta.
+            headers: ["Fecha", "Monto", "Envio"],
+            fields: null,
+            preview_rows: [],
+            row_count: 3,
+          },
+        ],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-05"],
+        target_field: "expense_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["5000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+      {
+        source_column: "Envio",
+        normalized_column: "envio",
+        sample_values: ["500"],
+        target_field: "shipping_cost",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+    ]);
+  });
+
+  test("declarar «es un solo envío» se le pregunta también al preview", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Es un solo envío/ })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Es un solo envío/ }));
+
+    await waitFor(() => {
+      const ultima = mockPurchaseGroups.mock.calls.at(-1);
+      expect(ultima?.[1]?.shippingDecisions).toEqual([
+        { context_id: "hoja1", action: "una_por_hoja" },
+      ]);
+    });
+  });
+});

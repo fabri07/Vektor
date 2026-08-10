@@ -1244,18 +1244,44 @@ function MultiContextMapper({
         })),
     [costoByCtx, included],
   );
-  const costoDraftKey = useMemo(() => JSON.stringify(costoDraft), [costoDraft]);
+  /**
+   * F-H6.b: sólo las hojas donde el usuario eligió. Sin entrada, sus envíos sin
+   * comprobante no se registran — que es el default seguro.
+   *
+   * Se calcula acá y no adentro del confirm porque el PREVIEW del reparto
+   * también depende de esto: una hoja sin número de comprobante puede formar un
+   * grupo si el usuario declaró «toda la hoja es una compra», y mostrarla como
+   * no repartible sería contradecir lo que ya eligió.
+   */
+  const envioPayload = useMemo(
+    () =>
+      Object.entries(shippingByCtx)
+        .filter(([ctxId, action]) => action !== null && included[ctxId])
+        .map(([ctxId, action]) => ({
+          context_id: ctxId,
+          action: action as ShippingAction,
+        })),
+    [shippingByCtx, included],
+  );
+  const draftKey = useMemo(
+    () => JSON.stringify([costoDraft, envioPayload]),
+    [costoDraft, envioPayload],
+  );
   // Sin ninguna columna de envío compartido no hay reparto posible: se evita una
   // consulta por archivo que no la necesita.
   const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
     (m) => m.target_field === "shipping_cost",
   );
   const { data: purchaseGroups = [] } = useQuery({
-    queryKey: ["purchase-groups", fileId, riskRecomputeKey, costoDraftKey],
+    queryKey: ["purchase-groups", fileId, riskRecomputeKey, draftKey],
     queryFn: ({ signal }) =>
       ingestionService.fetchPurchaseGroups(
         fileId,
-        { ...riskRecomputeInput, purchaseCostDecisions: costoDraft },
+        {
+          ...riskRecomputeInput,
+          shippingDecisions: envioPayload,
+          purchaseCostDecisions: costoDraft,
+        },
         signal,
       ),
     enabled: hayEnvioCompartido,
@@ -1343,12 +1369,6 @@ function MultiContextMapper({
           shared_shipping: compartidoDe(ctxId),
           line_shipping: d.line,
         }));
-      const shippingPayload = Object.entries(shippingByCtx)
-        .filter(([ctxId, action]) => action !== null && included[ctxId])
-        .map(([ctxId, action]) => ({
-          context_id: ctxId,
-          action: action as ShippingAction,
-        }));
       return ingestionService.confirmFile(
         fileId,
         {},
@@ -1362,7 +1382,7 @@ function MultiContextMapper({
         Object.keys(inventoryEffectPayload).length > 0
           ? inventoryEffectPayload
           : undefined,
-        shippingPayload,
+        envioPayload,
         costoPayload,
       );
     },
@@ -1714,7 +1734,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     queryFn: ({ signal }) =>
       ingestionService.fetchPurchaseGroups(
         fileId,
-        { ...riskRecomputeInput, purchaseCostDecisions: costoDraft },
+        {
+          ...riskRecomputeInput,
+          // Este camino no ofrece la decisión de envío sin comprobante (F-H6.b
+          // vive en el mapeo por hoja), así que no hay ninguna que declarar.
+          shippingDecisions: [],
+          purchaseCostDecisions: costoDraft,
+        },
         signal,
       ),
     enabled: hayEnvioCompartido,

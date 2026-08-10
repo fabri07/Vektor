@@ -306,6 +306,17 @@ export interface FieldCatalogEntry {
   label: string;
   /** Solo UNA columna puede apuntarle: dos no se pueden desempatar sin inventar. */
   single_value: boolean;
+  /**
+   * F-C: POR QUÉ el importador necesita este campo, redactado como consecuencia
+   * ("la fila que no lo traiga queda en «Otros»"), no como imperativo. Lo escribe
+   * el backend porque es consecuencia de una regla del IMPORTADOR: si mañana una
+   * fila sin fecha deja de ir a «Otros», el texto tiene que cambiar allá y no en
+   * una pantalla.
+   *
+   * Cadena vacía cuando no hay motivo escrito. Opcional para que un backend
+   * anterior a F-C siga deserializando sin romper la pantalla.
+   */
+  required_reason?: string;
 }
 
 export interface EntityFieldCatalog {
@@ -675,9 +686,11 @@ export const ingestionService = {
    * repartiría el envío compartido, con el mapeo y las decisiones borrador.
    * Read-only.
    *
-   * Las decisiones de costo van en el cuerpo porque el reparto DEPENDE de ellas:
-   * mostrar la división mientras el usuario tiene elegido "no distribuir" sería
-   * mostrarle algo que no va a pasar.
+   * Las DOS decisiones van en el cuerpo porque las dos cambian el resultado: la
+   * de costo decide si el envío se reparte o queda como gasto aparte, y la de
+   * envío (F-H6.b) decide si una hoja sin número de comprobante puede formar un
+   * grupo. Sin ellas el preview mostraría el reparto de una configuración que el
+   * usuario no eligió.
    */
   async fetchPurchaseGroups(
     fileId: string,
@@ -686,6 +699,7 @@ export const ingestionService = {
       contextEntity: Record<string, string>;
       confirmedFields: Record<string, boolean>;
       contextConfirmed: Record<string, boolean>;
+      shippingDecisions: ShippingDecision[];
       purchaseCostDecisions: PurchaseCostDecision[];
     },
     signal?: AbortSignal,
@@ -697,6 +711,7 @@ export const ingestionService = {
         context_entity: body.contextEntity,
         confirmed_fields: body.confirmedFields,
         context_confirmed: body.contextConfirmed,
+        shipping_decisions: body.shippingDecisions,
         purchase_cost_decisions: body.purchaseCostDecisions,
       },
       { signal },

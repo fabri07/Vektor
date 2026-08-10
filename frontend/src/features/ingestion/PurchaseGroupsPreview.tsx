@@ -26,10 +26,16 @@ import type {
 /**
  * Por qué un comprobante no se puede repartir, en castellano llano.
  *
- * El backend manda un código cerrado; la traducción vive acá igual que el mapa
- * de motivos de borrado en `DeleteFileModal`. Un código desconocido se muestra
- * crudo en vez de tragarse el aviso: que aparezca un texto feo es mucho menos
- * grave que ocultar que hubo un motivo.
+ * Hoy el endpoint ya traduce los motivos del dominio antes de mandarlos, así
+ * que lo normal es que este mapa no se use y el texto pase de largo. Está
+ * igual, con el código crudo como clave, porque los motivos SON un set cerrado
+ * del dominio (`purchase_group.py`) y quién los redacta es una decisión que
+ * puede cambiar de lado: si algún día viajan como código, la pantalla no
+ * empieza a mostrar `sin_identidad_de_comprobante` en la cara del usuario.
+ *
+ * Lo que nunca hace es tragarse el aviso: un valor que no esté en el mapa se
+ * muestra tal cual. Que aparezca un texto feo es mucho menos grave que ocultar
+ * que el servidor dijo que algo no se pudo repartir.
  */
 const MOTIVOS: Record<string, string> = {
   sin_identidad_de_comprobante:
