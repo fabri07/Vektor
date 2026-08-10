@@ -466,6 +466,90 @@ class TestRestauraLoQueElArchivoModifico:
         # Modificar no es crear: el producto sigue vivo.
         assert producto.is_active is True
 
+    async def test_un_snapshot_sin_updated_at_igual_restaura(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El bug que hacía mentir al borrado en TODO import real.
+
+        El confirm de ingestión no sella `updated_at` en el `after` —sólo lo hace
+        la relectura, que pasa `stamp_product_updated_at`—, así que la clave falta
+        en todo `UPDATE_PRODUCT` que venga de un import normal. La comparación
+        cruda daba `None != "2026-…"` → siempre "cambió", y el borrado marcaba
+        todos los productos modificados como edición manual posterior: no
+        restauraba ninguno y respondía `fully_reverted: false` diciendo algo falso.
+
+        Los demás tests de esta clase no lo veían porque arman el ledger a mano
+        CON el timestamp puesto — una forma que el confirm real no produce.
+        """
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Vela de citronela")
+
+        producto.sale_price_ars = Decimal("999")
+        producto.unit_cost_ars = Decimal("500")
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"sale_price_ars": "100", "unit_cost_ars": "60"},
+                    # SIN `updated_at`: exactamente lo que deja el confirm real.
+                    "after": {"sale_price_ars": "999", "unit_cost_ars": "500"},
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(producto)
+        assert producto.sale_price_ars == Decimal("100")
+        assert producto.unit_cost_ars == Decimal("60")
+        assert contadores["productos_restaurados"] == 1
+        assert contadores.get("productos_conservados", 0) == 0
+
+    async def test_sin_updated_at_una_edicion_posterior_igual_frena(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Control: sin la señal del reloj queda la de los VALORES, que es
+        evidencia directa. Si esto no frenara, el fix habría apagado el guard."""
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Difusor mimbre")
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"sale_price_ars": "100"},
+                    "after": {"sale_price_ars": "999"},
+                }
+            ],
+        )
+        # Alguien lo tocó después: el valor de hoy no es el que dejó el import.
+        producto.sale_price_ars = Decimal("1500")
+        await db_session.flush()
+
+        contadores = await revert_file_data(
+            db_session, archivo.id, sample_tenant.tenant_id
+        )
+
+        await db_session.refresh(producto)
+        assert producto.sale_price_ars == Decimal("1500")
+        assert contadores.get("productos_restaurados", 0) == 0
+        assert contadores["productos_conservados"] == 1
+
     async def test_no_pisa_una_edicion_posterior_del_usuario(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:

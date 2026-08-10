@@ -120,6 +120,24 @@ def captured_updated_at(after: dict[str, Any] | None) -> str | None:
     return (after or {}).get("updated_at")
 
 
+def capturo_updated_at(after: dict[str, Any] | None) -> bool:
+    """¿El snapshot llegó a registrar el timestamp?
+
+    «No capturado» y «capturado como ``None``» son cosas distintas y colapsarlas
+    fue un bug en producción: el confirm de ingestión no sella ``updated_at`` en
+    el ``after`` (sólo lo hace la relectura, que pasa ``stamp_product_updated_at``),
+    así que la clave FALTA en todo `UPDATE_PRODUCT` que venga de un import normal.
+    Con la comparación cruda eso daba ``None != "2026-…"`` → siempre "cambió", y
+    el borrado del archivo marcaba TODOS los productos modificados como edición
+    manual posterior: no restauraba ninguno y respondía ``fully_reverted: false``
+    diciendo algo falso.
+
+    Es el mismo criterio que ``restore_from_before`` ya respeta con ``if f not in
+    before: continue`` — una clave ausente no autoriza a suponer nada.
+    """
+    return "updated_at" in (after or {})
+
+
 # Claves del snapshot que no son campos del modelo (metadatos del ledger) o cuya
 # reversa no pasa por `setattr` (`stock_units`, ver docstring del módulo).
 _NO_COMPARABLES: frozenset[str] = frozenset({"updated_at", "id", "kind", "stock_units"})
@@ -167,11 +185,19 @@ def entity_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> bo
     Ninguna de las dos sola alcanza: la primera no ve cambios en campos fuera del
     snapshot, y la segunda no ve nada si las dos escrituras caen en el mismo tick.
 
+    Pero la señal 2 sólo se puede usar **si el ledger la capturó**. Cuando el
+    snapshot no trae ``updated_at`` la señal no está disponible, y tratarla como
+    "cambió" no es conservador: prende el guard SIEMPRE y deja la reversa sin
+    poder restaurar nada (ver ``capturo_updated_at``). En ese caso decide la
+    señal 1 sola, que es evidencia directa y no depende del reloj.
+
     **El caller debe refrescar la entidad antes de llamar**: ``updated_at`` tiene
     ``onupdate`` server-side y puede quedar expirado tras flushes previos de la
     misma transacción (mismo patrón MissingGreenlet del resto del servicio).
     """
     if fields_changed_since_ledger(entity, after):
         return True
+    if not capturo_updated_at(after):
+        return False
     actual = entity.updated_at.isoformat() if entity.updated_at else None
     return captured_updated_at(after) != actual
