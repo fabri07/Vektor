@@ -39,6 +39,8 @@ import { PurchaseGroupsPreview } from "./PurchaseGroupsPreview";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
+import { MappingOriginHint } from "./MappingOriginHint";
+import { TargetSelect } from "./TargetSelect";
 import {
   customFieldCollisions,
   explainMissing,
@@ -112,14 +114,6 @@ const ENTITY_OPTIONS_TEXTO = [
 // decidiera.
 const ENTITY_UNSET = "";
 
-const SOURCE_LABELS: Record<string, string> = {
-  tenant_history: "Historial",
-  heuristic: "Heurística",
-  fuzzy: "Similar",
-  llm: "IA",
-  none: "—",
-};
-
 // F4: un error de confirm que NO es de mapeo — 409 (confirm concurrente / archivo
 // ya importado o importándose) o timeout del cliente (el import sigue en curso en
 // el backend). No debe pintar el banner rojo de "revisá los campos".
@@ -167,13 +161,6 @@ function handleTransientConfirmError(
     return true;
   }
   return false;
-}
-
-// FASE 2 (A2)/A3: color de la confianza del mapeo (verde alto / ámbar medio / rojo bajo).
-function confidenceColor(confidence: number): string {
-  if (confidence >= 0.75) return "text-vk-success";
-  if (confidence >= 0.5) return "text-vk-warning";
-  return "text-vk-danger";
 }
 
 /**
@@ -876,16 +863,6 @@ function SheetMapperSection({
             {suggestions.map((s) => {
               const target = mappings[s.source_column] ?? "";
               const eff = effectiveStatus(s, target);
-              const isCustom = target.startsWith("custom_field:");
-              // El target del estado no existe entre las opciones: sin una
-              // `<option>` propia el DOM caería a la primera («Sin mapear») y la
-              // pantalla mostraría algo distinto de lo que se va a enviar.
-              const isUnknown =
-                !!target &&
-                target !== "ignore" &&
-                !isCustom &&
-                fields.length > 0 &&
-                !fields.some((f) => f.value === target);
               return (
                 <div
                   key={s.source_column}
@@ -903,35 +880,18 @@ function SheetMapperSection({
                     </span>
                   </div>
                   <div className="flex flex-col gap-1">
-                    <select
-                      value={customFor === s.source_column ? "__custom__" : target}
-                      onChange={(e) => selectTarget(s.source_column, e.target.value)}
-                      // Por dónde entra el salto del banner de faltantes: dice a
-                      // qué hoja pertenece este select y qué campo SUGERÍA
-                      // Véktor para esta columna. Se busca por atributo y no por
-                      // `id` porque el nombre de la columna es texto libre del
-                      // archivo (espacios, acentos, comillas).
-                      data-sheet={context.context_id}
-                      data-suggests={s.target_field ?? ""}
-                      // Deshabilitado —no vacío— mientras carga el catálogo: un
-                      // select sin opciones es justamente el fallo que se está
-                      // corrigiendo (mostraría "Sin mapear" sobre un target real).
+                    <TargetSelect
+                      target={target}
+                      editingCustom={customFor === s.source_column}
+                      onChange={(value) => selectTarget(s.source_column, value)}
+                      fields={fields}
+                      dataSheet={context.context_id}
+                      dataSuggests={s.target_field ?? ""}
                       disabled={loadingCatalog}
+                      showCustomFieldOption
+                      unknownTarget="custom-always"
                       className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
-                    >
-                      <option value="">Sin mapear</option>
-                      <option value="ignore">— Ignorar —</option>
-                      {fields.map((f) => (
-                        <option key={f.value} value={f.value}>
-                          {f.label}
-                        </option>
-                      ))}
-                      {isCustom && <option value={target}>{target}</option>}
-                      {isUnknown && (
-                        <option value={target}>{target} (campo desconocido)</option>
-                      )}
-                      <option value="__custom__">+ Campo personalizado…</option>
-                    </select>
+                    />
                     {customFor === s.source_column && (
                       <div className="flex gap-1">
                         <input
@@ -961,14 +921,7 @@ function SheetMapperSection({
                       onPick={(t) => selectTarget(s.source_column, t)}
                     />
                     {/* A3: source + confidence (mismo criterio que el flujo single). */}
-                    {eff === "mapped" && s.source !== "none" && (
-                      <p className="text-[10px] text-vk-text-muted">
-                        {SOURCE_LABELS[s.source] ?? s.source} ·{" "}
-                        <span className={confidenceColor(s.confidence)}>
-                          {Math.round(s.confidence * 100)}%
-                        </span>
-                      </p>
-                    )}
+                    <MappingOriginHint suggestion={s} mapped={eff === "mapped"} />
                   </div>
                 </div>
               );
@@ -2296,32 +2249,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                       >
                         {s.source_column}
                       </span>
-                      <select
-                        value={target}
-                        onChange={(e) => setMappingForColumn(s.source_column, e.target.value)}
+                      <TargetSelect
+                        target={target}
+                        onChange={(value) => setMappingForColumn(s.source_column, value)}
+                        fields={fields}
                         disabled={loadingCatalog}
+                        unknownTarget="catalog-guarded"
                         className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
-                      >
-                        <option value="">Sin mapear</option>
-                        <option value="ignore">— Ignorar —</option>
-                        {fields.map((f) => (
-                          <option key={f.value} value={f.value}>
-                            {f.label}
-                          </option>
-                        ))}
-                        {/* Sin esta opción el DOM cae a la primera y la pantalla
-                            muestra "Sin mapear" sobre un target real. */}
-                        {target &&
-                          target !== "ignore" &&
-                          fields.length > 0 &&
-                          !fields.some((f) => f.value === target) && (
-                            <option value={target}>
-                              {target.startsWith("custom_field:")
-                                ? target
-                                : `${target} (campo desconocido)`}
-                            </option>
-                          )}
-                      </select>
+                      />
                       <AmbiguityHint
                         suggestion={s}
                         fields={fields}
@@ -2400,22 +2335,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                       {(isMapped || isIgnored) && !isCustom && (
                         <ArrowRight className="h-3 w-3 shrink-0 text-vk-text-muted" />
                       )}
-                      <select
-                        value={currentTarget}
-                        onChange={(e) => setMappingForColumn(s.source_column, e.target.value)}
+                      <TargetSelect
+                        target={currentTarget}
+                        onChange={(value) => setMappingForColumn(s.source_column, value)}
+                        fields={fields}
+                        ignoreLabel="— Ignorar columna —"
+                        unknownTarget="custom-only"
                         className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"
-                      >
-                        <option value="">Sin mapear</option>
-                        <option value="ignore">— Ignorar columna —</option>
-                        {fields.map((f) => (
-                          <option key={f.value} value={f.value}>
-                            {f.label}
-                          </option>
-                        ))}
-                        {isCustom && (
-                          <option value={currentTarget}>{currentTarget}</option>
-                        )}
-                      </select>
+                      />
                     </div>
                     <div className="mt-1">
                       <AmbiguityHint
@@ -2424,14 +2351,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         onPick={(t) => setMappingForColumn(s.source_column, t)}
                       />
                     </div>
-                    {isMapped && s.source !== "none" && (
-                      <p className="mt-0.5 pl-5 text-[10px] text-vk-text-muted">
-                        {SOURCE_LABELS[s.source] ?? s.source} ·{" "}
-                        <span className={confidenceColor(s.confidence)}>
-                          {Math.round(s.confidence * 100)}%
-                        </span>
-                      </p>
-                    )}
+                    <MappingOriginHint
+                      suggestion={s}
+                      mapped={isMapped}
+                      className="mt-0.5 pl-5"
+                    />
                   </div>
                 </div>
               );
