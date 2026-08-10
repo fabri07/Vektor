@@ -9,29 +9,43 @@ pendiente en vez de anularse.
 
 from __future__ import annotations
 
+import math
+import os
 import unittest.mock
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import Table, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.application.services.inventory_movement_origin import SOURCE_HISTORICAL_REPLAY
 from app.application.services.inventory_replay_service import (
+    CLAVES_CHUNK_SIZE,
     CONTEXTO_DESCONOCIDO,
+    _ya_descontadas,
     run_inventory_replay,
 )
 from app.application.services.stock_service import sale_source_event_id
 from app.domain.inventory_effect import IMPORT_CONTEXT_FIELD
+from app.persistence.db.base import Base
+from app.persistence.models.file import UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
+from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.user import User
 
 _HOJA = "sheet:ventas"
+
+_TEST_PG_DSN = os.environ.get("TEST_PG_DSN")
+# Clave arbitraria y estable para serializar el CREATE entre workers xdist.
+_DDL_ADVISORY_KEY = 0x5645_4B54_4F52_0D04  # "VEKTOR" + F-H3.d.4
 
 
 @pytest.fixture(autouse=True)
@@ -377,7 +391,7 @@ class TestBorrarElArchivoDeshaceElReplay:
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
         from app.application.services.file_deletion_service import revert_file_data
-        from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
+        from app.persistence.models.file import PROCESSING_STATUS_DONE
 
         archivo = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
@@ -409,3 +423,101 @@ class TestBorrarElArchivoDeshaceElReplay:
 
         assert producto.stock_units == 10
         assert await _movimientos(db_session) == []
+
+
+class TestClavesPorLotes:
+    """El archivo no tiene tope de filas; el statement sí tiene tope de binds.
+
+    ``_ya_descontadas`` arma una clave por venta. Con una sola query eso es un bind
+    por venta, y Postgres corta en 65.535 por statement: un archivo de esa escala
+    reventaba en pleno apply de inventario, después de que el confirm ya había
+    escrito los libros. El chunking es lo que evita ese borde.
+    """
+
+    async def test_una_query_por_lote_y_encuentra_las_de_cualquier_lote(
+        self, db_session: AsyncSession, sample_tenant: Tenant, monkeypatch
+    ) -> None:
+        """Compuerta barata del chunking, en SQLite.
+
+        Cuenta queries en vez de contar binds a propósito: el límite que se está
+        respetando es de Postgres, y SQLite (que es donde corre la suite) tiene
+        otro (``SQLITE_MAX_VARIABLE_NUMBER``), así que acá el bug no se manifiesta
+        solo. Lo que sí es idéntico en los dos motores es cuántas veces se
+        consulta. La segunda mitad del test evita que "una query por lote" se
+        cumpla perdiendo resultados: la clave buscada está en el ÚLTIMO lote.
+        """
+        total = CLAVES_CHUNK_SIZE * 2 + 1
+        ventas = [
+            SaleEntry(id=uuid.uuid4(), tenant_id=sample_tenant.tenant_id)
+            for _ in range(total)
+        ]
+        db_session.add(
+            InventoryMovement(
+                tenant_id=sample_tenant.tenant_id,
+                product_id=(await _producto(db_session, sample_tenant, stock=10)).id,
+                movement_type="sale",
+                qty=-1,
+                source_event_id=sale_source_event_id(ventas[-1].id),
+            )
+        )
+        await db_session.flush()
+
+        llamadas = 0
+        original = db_session.execute
+
+        async def contando(*args, **kwargs):
+            nonlocal llamadas
+            llamadas += 1
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(db_session, "execute", contando)
+        encontradas = await _ya_descontadas(db_session, sample_tenant.tenant_id, ventas)
+
+        assert llamadas == math.ceil(total / CLAVES_CHUNK_SIZE) == 3
+        assert encontradas == {sale_source_event_id(ventas[-1].id)}
+
+    async def test_sin_ventas_no_consulta(
+        self, db_session: AsyncSession, sample_tenant: Tenant, monkeypatch
+    ) -> None:
+        llamadas = 0
+        original = db_session.execute
+
+        async def contando(*args, **kwargs):
+            nonlocal llamadas
+            llamadas += 1
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(db_session, "execute", contando)
+
+        assert await _ya_descontadas(db_session, sample_tenant.tenant_id, []) == set()
+        assert llamadas == 0
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _TEST_PG_DSN, reason="requiere PostgreSQL real (TEST_PG_DSN)")
+async def test_mas_claves_que_binds_de_postgres() -> None:
+    """El bug tal cual pasa en producción, contra un Postgres real.
+
+    Con más de 65.535 claves, la versión de una sola query muere en el driver
+    (``asyncpg``) antes de llegar a la base. SQLite no lo reproduce: tiene otro
+    límite y otro mensaje, así que un test sin este marker no probaría nada del
+    bug. Ver ``[[feedback_sqlite_masks_postgres]]``.
+
+    No inserta ni una fila: lo que se ejercita es que el statement se pueda
+    ejecutar, y para eso alcanza con que la tabla exista.
+    """
+    assert _TEST_PG_DSN is not None
+    engine = create_async_engine(_TEST_PG_DSN, poolclass=NullPool)
+    tablas: list[Table] = [
+        cast("Table", m.__table__)
+        for m in (Tenant, User, Product, Supplier, UploadedFile, InventoryMovement)
+    ]
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _DDL_ADVISORY_KEY})
+            await conn.run_sync(Base.metadata.create_all, tables=tablas, checkfirst=True)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            ventas = [SaleEntry(id=uuid.uuid4()) for _ in range(70_000)]
+            assert await _ya_descontadas(session, uuid.uuid4(), ventas) == set()
+    finally:
+        await engine.dispose()
