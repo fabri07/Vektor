@@ -92,6 +92,7 @@ from app.application.services.llm_file_type_detector import maybe_detect_file_ty
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
+from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
@@ -853,6 +854,18 @@ _MOTIVO_EN_CASTELLANO: dict[str, str] = {
     ),
 }
 
+#: Qué se le dice a un tenant que todavía no tiene el motor de costos de compra.
+#: UN solo texto para los DOS puntos de control (el preview y el confirm): son la
+#: misma limitación, y dos redacciones se leerían como dos problemas distintos.
+#: No nombra la variable de entorno ni la allowlist — eso es de la operación, no
+#: del negocio del usuario.
+_MOTOR_DE_COSTOS_DESHABILITADO = (
+    "El cálculo de costos de compra —repartir el envío del comprobante entre sus "
+    "líneas y aplicar descuentos e impuestos al costo— todavía no está habilitado "
+    "en esta cuenta. Se está activando de a poco. Mientras tanto el import toma el "
+    "monto de cada fila como costo final; si necesitás el reparto, escribinos."
+)
+
 #: Cuando la hoja no forma NINGÚN grupo. No es lo mismo que un grupo que no puede
 #: repartir: acá no hay nada que agrupar todavía.
 _SIN_GRUPOS = (
@@ -901,6 +914,16 @@ async def compute_purchase_groups(
     misma entrada (el mapeo borrador) y la misma regla sobre de dónde salen los
     campos — del mapeo QUE MANDÓ EL CLIENTE, no de las sugerencias derivadas.
     """
+    # La compuerta va PRIMERO, antes de tocar el archivo: no depende de él, y un
+    # tenant sin el motor habilitado no tiene por qué recibir un 404 o un 409
+    # sobre una pantalla que no puede usar. Se valida acá y no sólo en el
+    # frontend: esconder el control no impide que alguien llame la API.
+    if not purchase_cost_enabled_for(tenant.tenant_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_MOTOR_DE_COSTOS_DESHABILITADO,
+        )
+
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:
@@ -1595,6 +1618,7 @@ async def confirm_file(
     _flat_mappings = [m for m in body.column_mappings if m.context_id is None]
     _ctx_mappings = [m for m in body.column_mappings if m.context_id is not None]
 
+
     # Etiqueta legible de una hoja para los mensajes de error. `context_id` es un
     # identificador interno ("sheet:precios y stock ") — mostrárselo al usuario,
     # con su espacio final incluido, no lo ayuda a encontrar la hoja.
@@ -2069,6 +2093,25 @@ async def confirm_file(
     # costos que no va a pasar. Va antes del lease — un archivo que va a rebotar
     # no debería haberlo tomado. La validación es pura y vive en el dominio, así
     # que el confirm no reimplementa qué combinación es imposible.
+    if body.purchase_cost_decisions and not purchase_cost_enabled_for(tenant.tenant_id):
+        # Segundo punto de control de la compuerta, y el que de verdad protege los
+        # números: sin esto, un cliente que arma el body a mano —o una pantalla
+        # vieja cacheada— movería el costo de los productos de un tenant que no
+        # tiene el motor habilitado. Ocultar el control en el frontend no alcanza.
+        #
+        # 422 y no un descarte silencioso: el usuario cree haber resuelto algo
+        # sobre sus costos, y dejarlo confirmar como si nada le daría un import
+        # que no hizo lo que pidió (mismo criterio que la decisión de envío que
+        # no se puede honrar). Va pre-lease, con traza.
+        await _emit_validation_reject(
+            "motor_de_costos_no_habilitado",
+            {"contextos": sorted({d.context_id for d in body.purchase_cost_decisions})},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_MOTOR_DE_COSTOS_DESHABILITADO,
+        )
+
     if body.purchase_cost_decisions:
         _errores_de_costo = validate_purchase_cost_decisions(
             [
