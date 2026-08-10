@@ -37,6 +37,26 @@ Salieron de leer el código, no del enunciado:
 | **V17** | `decrement_stock` clampea (`stock_units = max(0, …)`) pero `void_movement` revierte `movement.qty` **exacto** y no clampea. Un descuento clampeado + su reversa **infla** el stock. Hoy es inerte porque las ventas en vivo validan antes; un replay histórico lo vuelve real. | `stock_service.py:211` vs `:401` |
 | **V18** | **No existe link persistido venta → hoja.** `source_row_ref` es el `sha256` del ancla, irreversible. Aplicar por hoja exige estampar el `context_id` (entra en `sales_entries.custom_fields`, sin migración). | `_source_row_ref:951` |
 
+### Hallazgos del relevamiento de F-H6.d (2026-08-09)
+
+Seis, y los tres peores no estaban en la lista de sospechas: aparecieron al ir a
+verificar los otros. Todos leídos en el código, no inferidos.
+
+| # | Hallazgo | Estado |
+|---|---|---|
+| **V22** | `build_line_costs` reparte sólo si `shared_mode == por_subtotal` **y** `shared_shipping > 0`. El único caller pasaba el primero y nunca el segundo → **elegir «repartir por subtotal» validaba, devolvía 200 y no repartía un centavo**. Y `validate_purchase_cost_decisions` lo ACEPTABA: la validación afirmaba que la decisión se podía honrar y después no se honraba. | ✅ cerrado (F-H6.d) |
+| **V23** | `shipping_cost_line` no generaba `ExpenseEntry` en NINGUNO de sus dos modos. Con `al_costo` subía `unit_cost_ars` y el dinero no salía de ningún lado; con `gasto_aparte` (el default) era un no-op puro pese al nombre. El aviso decía «declarálo para que se apliquen» y al declararlo tampoco pasaba. | ✅ cerrado (F-H6.e) |
+| **V24** | El camino plano **descarta toda decisión de costo que venga de la API**: llama al planificador con `ctx_id=None` → busca la clave `""`, y el endpoint arma el dict con el `context_id` real. Los tests lo enmascaraban porque invocan el servicio a mano con `context_id=""`, una forma que la API nunca produce. | ⚠️ rechazado pre-lease; arreglo real en **F-H6.f** |
+| **V25** | `_cobrar_envios_de_la_hoja` es un closure anidado dentro de `_insert_multisheet_data`: **estructuralmente inalcanzable** desde el camino plano. Una tabla suelta con `shipping_cost` no cobra nada. Idem `_avisos_costo`, que nunca se vuelca a `counts` en el plano. | ⚠️ rechazado pre-lease; **F-H6.f** |
+| **V26** | `product_details` se poblaba en 4 puntos, **todos del camino de catálogo**. Un producto tocado sólo por una hoja de compras quedaba con el costo pisado para siempre y el DELETE respondía `fully_reverted: true`. | ✅ cerrado |
+| **V27** | `entity_changed_since_ledger` evaluaba el `updated_at` aunque el ledger no lo hubiera capturado, y el confirm de ingestión no lo captura (sólo la relectura pasa `stamp_product_updated_at`). `None != "2026-…"` → siempre «cambió»: **el DELETE marcaba TODOS los productos modificados como edición manual posterior**. Bug vivo en producción, no de esta rama. | ✅ cerrado |
+
+Y cuatro del code-review del 2026-08-07, todos cerrados: el `IN (...)` sin chunking
+de `_ya_descontadas` (65.535 binds de PG) · `customFieldCollisions` sin `strip`,
+que hacía divergir la pantalla del confirm · `InventoryImpactPanel` sin invalidar
+el cache de TanStack tras mover stock · los targets cruzados que `_resolve_target_cols`
+descartaba **en silencio** (ahora se reportan; escribirlos es F-D).
+
 **Conclusión de V1+V2:** la jerarquía no falla por falta de regla, falla por **orden y visibilidad**. Ordenar por entidad (product → expense → sale) resuelve la **identidad** —y sólo eso: no convierte a la compra del 20/03 en justificación de la venta del 10/03, porque eso se decide comparando fechas, no por el orden en que se aplicó (F-H2). El orden **cronológico** es otra cosa y sirve para otra: reproducir cuántas unidades había, que recién importa cuando las ventas mueven stock (F-H3.0).
 
 ---
@@ -47,15 +67,28 @@ Salieron de leer el código, no del enunciado:
 F-0  contrato e invariantes (sin cambio de comportamiento)          ✅ entregado
 F-H1 jerarquía: la identidad existe antes de que alguien la busque  ✅ entregado
 F-H2 identidad ≠ validez temporal (la evidencia se juzga por fecha) ✅ entregado
-F-H3 efecto de inventario por hoja + cola cronológica  ← corrige datos
+F-H3 efecto de inventario por hoja + cola cronológica (a→e)         ✅ entregado
 F-H4 precio unitario × cantidad = monto                             ✅ entregado
-F-H6 costos de compra agrupados (envío, costo final)
+F-M  reconocimiento de encabezados en dos capas                     ✅ entregado
+F-H6 costos de compra agrupados (envío, costo final)  a·b·c·d       ✅ entregado
+F-H6.e el flete de línea genera su gasto                            ✅ entregado
+F-C  obligatorios explicados                                        ✅ entregado
 F-A  nombre original + preservación de edición
 F-B  claridad visual + extracción del monolito
-F-C  obligatorios explicados
 F-D  ruteo cross-sección
 F-E  simetría cliente/proveedor (paralelo desde F-0; no se activa hasta cerrar defaults)
+F-H6.f el camino plano cobra el envío y honra las decisiones de costo
 ```
+
+**F-M** se insertó a mitad de F-H6.c y no estaba en el plan original: su plan propio
+vive en `docs/plans/header-recognition-fm.md`.
+
+**F-H6.d sale detrás de una compuerta por tenant.** `PURCHASE_COST_ROLLOUT_TENANT_IDS`
+(csv de UUIDs, default vacío = nadie) habilita el motor de costos —el reparto y los
+ajustes de descuento/IVA/flete, o sea F-H6.c + F-H6.d—. Es la superficie que mueve
+plata **sin que el usuario opte**: mapear una columna de descuento ya altera el costo.
+F-H6.a (targets nuevos, inertes si nadie los mapea) y F-H6.b (no cobra nada sin
+decisión explícita) salen globales. Ver `docs/runbooks/purchase_cost_rollout.md`.
 
 ### Alcance de migraciones — declaración explícita
 
