@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -27,6 +28,13 @@ from app.persistence.models.tenant import Tenant
 
 _CONTEXT = "sheet:catalogo"
 _HEADERS = ["Productos", "Precio de venta final", "Observaciones", "Obs."]
+
+
+@pytest.fixture(autouse=True)
+def _sin_broker(mock_score_trigger: Any) -> None:
+    """Sin broker en tests, el trigger de score post-confirm paga ~5s de
+    reintentos de kombu por llamada (fail-safe: el error se traga igual).
+    Mismo patrón que `test_reread_file.py`."""
 
 
 def _catalog_summary() -> dict[str, Any]:
