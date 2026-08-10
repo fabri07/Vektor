@@ -48,7 +48,6 @@ async def _make_pending_record(
     return record
 
 
-@pytest.mark.asyncio
 class TestReclassifyAsContact:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

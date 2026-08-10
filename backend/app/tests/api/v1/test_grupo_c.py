@@ -31,7 +31,6 @@ _EXPENSE_PAYLOAD = {
 # ── GET /insights/cash-breakdown ──────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestCashBreakdown:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -103,7 +102,6 @@ class TestCashBreakdown:
 # ── GET /health-scores/margin-history ─────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestMarginHistory:
     async def test_empty_when_no_snapshots(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -205,7 +203,6 @@ async def _create_snapshot(db_session, tenant_id, score_growth=70) -> "HealthSco
     return snap
 
 
-@pytest.mark.asyncio
 class TestExportHealthReport:
     async def test_export_pdf_success(
         self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session

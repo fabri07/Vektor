@@ -4,7 +4,6 @@ import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,7 +82,6 @@ async def seeded(db_session: AsyncSession) -> uuid.UUID:
     return tid
 
 
-@pytest.mark.asyncio
 async def test_ticket_promedio(db_session, seeded):
     agent = AgentIncome(db=db_session)
     resp = await agent.process(
@@ -93,7 +91,6 @@ async def test_ticket_promedio(db_session, seeded):
     assert resp.result["summary"] == "analizar_ticket_promedio"
 
 
-@pytest.mark.asyncio
 async def test_rentabilidad(db_session, seeded):
     agent = AgentIncome(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("analizar_rentabilidad_ventas"))
@@ -101,21 +98,18 @@ async def test_rentabilidad(db_session, seeded):
     assert resp.result["structured_data"]["by_product"]
 
 
-@pytest.mark.asyncio
 async def test_productos_estrella(db_session, seeded):
     agent = AgentIncome(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("detectar_productos_estrella"))
     assert resp.status == "success"
 
 
-@pytest.mark.asyncio
 async def test_descuentos_pide_campo(db_session, seeded):
     agent = AgentIncome(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("analizar_descuentos"))
     assert resp.result["summary"] == "descuentos_sin_datos"
 
 
-@pytest.mark.asyncio
 async def test_analyze_file_sin_adjunto(db_session, seeded):
     agent = AgentIncome(db=db_session)
     task = AgentTask(
@@ -127,7 +121,6 @@ async def test_analyze_file_sin_adjunto(db_session, seeded):
     assert resp.status == "requires_clarification"
 
 
-@pytest.mark.asyncio
 async def test_importar_archivo_productos_genera_import(db_session, seeded):
     """importar_archivo_productos → AgentIncome → IMPORT_TABULAR_FILE con productos=true."""
     from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
@@ -167,7 +160,6 @@ async def test_importar_archivo_productos_genera_import(db_session, seeded):
     assert resp.result["structured_data"]["confirmed_fields"]["productos"] is True
 
 
-@pytest.mark.asyncio
 async def test_normalizar_archivo_con_columnas_riesgosas(db_session, seeded):
     from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 

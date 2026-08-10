@@ -63,7 +63,6 @@ def _make_action(tenant_id: uuid.UUID, payload: dict[str, object]) -> PendingAct
     return action
 
 
-@pytest.mark.asyncio
 async def test_reclassify_to_reventa_creates_product_and_cogs(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -115,7 +114,6 @@ async def test_reclassify_to_reventa_creates_product_and_cogs(
     assert data["after"]["expense_type"] == "COGS"
 
 
-@pytest.mark.asyncio
 async def test_reclassify_to_insumo_does_not_create_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -154,7 +152,6 @@ async def test_reclassify_to_insumo_does_not_create_product(
     assert len(products_after) == len(products_before)
 
 
-@pytest.mark.asyncio
 async def test_reclassify_by_amount_and_date_fallback(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -179,7 +176,6 @@ async def test_reclassify_by_amount_and_date_fallback(
     assert expense.expense_type == "OPEX"
 
 
-@pytest.mark.asyncio
 async def test_reclassify_nonexistent_raises_visible_error(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -201,7 +197,6 @@ async def test_reclassify_nonexistent_raises_visible_error(
     assert "encontr" in ReclassifyExpenseError.user_message.lower()
 
 
-@pytest.mark.asyncio
 async def test_reclassify_massive_expense_ids(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -232,7 +227,6 @@ async def test_reclassify_massive_expense_ids(
 # ── Búsqueda asistida + reclasificación masiva (Workstream C3) ────────────────
 
 
-@pytest.mark.asyncio
 async def test_search_reclassify_with_clear_target_builds_massive_pending(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -264,7 +258,6 @@ async def test_search_reclassify_with_clear_target_builds_massive_pending(
     assert sd["target"] == "insumo"
 
 
-@pytest.mark.asyncio
 async def test_search_reclassify_no_matches_asks_clarification(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

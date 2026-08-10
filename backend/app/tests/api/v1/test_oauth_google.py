@@ -184,7 +184,6 @@ def google_login_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.usefixtures("google_login_disabled")
-@pytest.mark.asyncio
 class TestFeatureFlagGuard:
     """Todos los endpoints devuelven 404 cuando ENABLE_GOOGLE_LOGIN=False."""
 
@@ -218,7 +217,6 @@ class TestFeatureFlagGuard:
 # ── Start ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOAuthStart:
     async def test_returns_authorization_url(
         self, client_with_google: tuple[AsyncClient, AsyncMock]
@@ -252,7 +250,6 @@ class TestOAuthStart:
 # ── Callback: inválido/expirado ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOAuthCallbackInvalid:
     async def test_invalid_state_redirects_with_error(
         self, client_with_google: tuple[AsyncClient, AsyncMock]
@@ -317,7 +314,6 @@ class TestOAuthCallbackInvalid:
 # ── Exchange: sesión inválida ─────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOAuthExchangeInvalid:
     async def test_invalid_session_id_returns_400(
         self, client_with_google: tuple[AsyncClient, AsyncMock]
@@ -370,7 +366,6 @@ class TestOAuthExchangeInvalid:
 # ── Email desconocido → solicitud de acceso ───────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOAuthEmailDesconocido:
     """El alta social murió: un email nuevo abre una SOLICITUD, no una cuenta.
 
@@ -508,7 +503,6 @@ class TestOAuthEmailDesconocido:
 # ── Identidad ya vinculada ────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOAuthExistingIdentity:
     async def test_existing_identity_login_direct(
         self,
@@ -595,7 +589,6 @@ class TestOAuthExistingIdentity:
 # ── link_required ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOAuthLinkRequired:
     async def _trigger_link_required(
         self,
@@ -812,7 +805,6 @@ class TestOAuthLinkRequired:
 # ── email_verified=False fail-closed ─────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOAuthEmailNotVerified:
     async def test_email_not_verified_redirects_with_error(
         self,

@@ -11,7 +11,6 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +37,6 @@ async def _make_product(
     return product
 
 
-@pytest.mark.asyncio
 async def test_token_match_links_unique_candidate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -64,7 +62,6 @@ async def test_token_match_links_unique_candidate(
     assert sale.product_id == product.id
 
 
-@pytest.mark.asyncio
 async def test_token_match_ambiguous_leaves_none(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -88,7 +85,6 @@ async def test_token_match_ambiguous_leaves_none(
     assert sale.product_id is None  # ambiguo → no se inventa
 
 
-@pytest.mark.asyncio
 async def test_exact_sku_wins_over_tokens(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -120,7 +116,6 @@ async def test_exact_sku_wins_over_tokens(
     assert sale.product_id == by_sku_product.id
 
 
-@pytest.mark.asyncio
 async def test_no_catalog_leaves_none(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

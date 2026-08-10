@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.header_keys import match_key
+from app.domain.header_semantics import analyze_header
+
+# F-C.c3: los conjuntos que definen "esta hoja mueve unidades" ya viven en el
+# dominio y se importan, incluido el guión bajo. Copiarlos acá para no importar un
+# privado sería el peor de los dos males: dos definiciones de la misma regla que
+# nadie obliga a moverse juntas, que es exactamente lo que pasó con el catálogo de
+# campos duplicado en el frontend (incidente ASTERIA). El test
+# `test_conditional_requirements.py` clava la IDENTIDAD de los objetos, así que una
+# copia futura pone la suite en rojo.
+from app.domain.inventory_effect import (
+    _PRODUCT_FIELDS,
+    _QUANTITY_FIELDS,
+    SheetInventoryProfile,
+)
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,6 +60,41 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "is_recurring": "Recurrente",
         "supplier_name": "Proveedor",
         "notes": "Notas",
+        # F-H6.a: una planilla de compras no podía mapear cantidad ni precio
+        # unitario, y ésa es la causa de que el costo entre mal — el importador
+        # los leía sólo por heurística de headers o no los leía. Con el target
+        # explícito, un libro de compras declara qué columna es cada cosa, igual
+        # que una hoja de ventas.
+        "quantity": "Cantidad",
+        # Precio de cada unidad EN ESTA COMPRA. No es el costo de referencia del
+        # producto (`unit_cost_ars`) ni el precio de lista: vive en el movimiento
+        # (`inventory_movements.unit_cost`) y los dos coexisten.
+        "unit_price": "Precio unitario de compra",
+        # Identifican el producto de la línea. Sin ellos la compra no se puede
+        # vincular ni dar de alta con identidad propia.
+        "product_name": "Nombre del producto",
+        "sku": "Código (SKU)",
+        "barcode": "Código de barras (EAN/UPC)",
+        # F-H6.b: identidad de la OPERACIÓN, no del producto. Es lo que permite
+        # afirmar que varias filas pertenecen al mismo remito y, por lo tanto,
+        # que comparten un envío. Sin esto no se puede agrupar nada.
+        "invoice_number": "Número de comprobante / factura",
+        # Costo compartido de la operación. Se cobra UNA vez por comprobante:
+        # una planilla repite el mismo flete en cada línea del remito.
+        "shipping_cost": "Envío / flete",
+        # F-M.7: el flete que el ARCHIVO ya asignó a cada línea. Semántica OPUESTA
+        # a `shipping_cost` y por eso es un campo distinto: aquél se cobra una vez
+        # por comprobante (la cifra repetida se colapsa), éste se SUMA, porque el
+        # reparto lo hizo quien armó la planilla. Fusionarlos obligaría a repartir
+        # algo que ya venía repartido — ver `plan_line_shipping` en
+        # `domain/purchase_shipping.py`.
+        "shipping_cost_line": "Envío ya asignado a esta línea",
+        # Los dos ajustan el costo de la línea. Que se apliquen o no lo decide el
+        # usuario (`BASE_INCLUYE` / `BASE_APLICAR` en `domain/purchase_cost.py`):
+        # restarle un descuento a un total que ya lo tiene descontado lo cuenta
+        # dos veces, y eso no se adivina desde el encabezado.
+        "discount": "Descuento de la línea",
+        "taxes": "Impuestos de la línea",
         # F7a: campos de referencia al proveedor (aditivo, ver nota de sale arriba).
         # Ver la nota de los campos de cliente: mismo criterio de agrupación.
         "supplier_cuil": "Proveedor — CUIL",
@@ -107,6 +157,288 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
     "customer": ["name"],
     "supplier": ["name"],
 }
+
+# F-H4: qué OTRO conjunto de campos cubre un requerido. `amount OR (unit_price
+# AND quantity)`: si el archivo trae el precio unitario y la cantidad, el total
+# es una cuenta y exigir la columna obligaba a reescribir la planilla antes de
+# subirla — la queja que originó este programa.
+#
+# La alternativa tiene que ser COMPLETA: con sólo el precio o sólo la cantidad no
+# hay nada que calcular. Y sólo cuenta lo mapeado a campos CANÓNICOS, por la
+# misma razón que el requerido: un `custom_field:` guarda el dato pero no lo
+# vuelve un precio unitario para el importador.
+#
+# Vive acá, al lado de `REQUIRED_FIELDS`, y la sirve el catálogo
+# (`GET /ingestion/field-catalog`): el frontend NO puede tener su propia copia.
+# La copia que existía divergió una vez y la pantalla terminó mostrando una cosa
+# y mandando otra (incidente ASTERIA).
+REQUIRED_ALTERNATIVES: dict[str, dict[str, frozenset[str]]] = {
+    "sale": {"amount": frozenset({"unit_price", "quantity"})},
+    # F-H6.a: la misma regla para compras. F-H4 dejó `expense` afuera porque no
+    # tenía `unit_price` ni `quantity` en su catálogo —derivar desde columnas
+    # autodetectadas es lo que F10 prohíbe—; ahora los tiene y una línea de compra
+    # con precio y cantidad tampoco necesita que le escriban el total.
+    "expense": {"amount": frozenset({"unit_price", "quantity"})},
+}
+
+# F-C: POR QUÉ el importador necesita cada campo. Vive del lado del backend
+# porque es CONSECUENCIA de una regla del importador, no una opinión de la UI: si
+# mañana una fila sin fecha deja de ir a "Otros", el texto tiene que cambiar acá y
+# no en una pantalla.
+#
+# Dos reglas de redacción, y las dos nacen de la misma queja: la pantalla decía
+# «Campos requeridos sin mapear: transaction_date», que se lee como "esta columna
+# de tu planilla es obligatoria" cuando lo que pasa es al revés — Véktor necesita
+# que ALGUNA columna le diga la fecha, y le da lo mismo cómo se llame.
+#
+# 1. Se redacta como CONSECUENCIA, nunca como imperativo. "Véktor necesita saber
+#    qué columna contiene la fecha", no "la fecha es obligatoria".
+# 2. El motivo no puede afirmar lo que el importador no hace. Los destinos son
+#    tres y distintos, verificados contra `ingestion_import_service`:
+#      · venta sin monto/sin fecha y gasto sin fecha → van a "Otros" con el motivo
+#        (`_capture_unclassified`), o sea que la fila se puede rescatar;
+#      · gasto sin monto y producto sin nombre → se DESCARTAN, no queda rastro
+#        (`_add_expense`/`_add_product` devuelven `False`);
+#      · cliente/proveedor sin nombre → se saltea y se cuenta como inválido en el
+#        resumen del archivo (`customer_import_service._validate_record`).
+#    Prometer "Otros" donde el importador descarta es peor que no explicar nada.
+REQUIRED_REASONS: dict[str, dict[str, str]] = {
+    "sale": {
+        "amount": (
+            "Para registrar una venta, Véktor necesita saber cuánta plata entró. "
+            "La fila que no lo traiga —ni el precio unitario y la cantidad para "
+            "calcularlo— no se registra como venta: queda en «Otros» con el motivo, "
+            "para completarla desde ahí."
+        ),
+        "transaction_date": (
+            "Para importar ventas, Véktor necesita saber qué columna contiene la "
+            "fecha: es lo que ubica cada venta en su período. La fila con una fecha "
+            "que no se pueda leer queda en «Otros» — nunca se le pone la de hoy."
+        ),
+        "unit_price": (
+            "Reemplaza al monto junto con la cantidad: si la planilla no trae una "
+            "columna de total, Véktor lo calcula con estos dos. Con uno solo no hay "
+            "nada que calcular."
+        ),
+        "quantity": (
+            "Reemplaza al monto junto con el precio unitario: si la planilla no trae "
+            "una columna de total, Véktor lo calcula con estos dos. Con uno solo no "
+            "hay nada que calcular."
+        ),
+    },
+    "expense": {
+        "amount": (
+            "Para registrar un gasto o una compra, Véktor necesita saber cuánta plata "
+            "salió. La fila que no lo traiga —ni el precio unitario y la cantidad para "
+            "calcularlo— se descarta: no se registra el gasto y tampoco queda en "
+            "«Otros»."
+        ),
+        "expense_date": (
+            "Para importar gastos y compras, Véktor necesita saber qué columna "
+            "contiene la fecha: es lo que ubica cada gasto en su período. La fila con "
+            "una fecha que no se pueda leer queda en «Otros» — nunca se le pone la de "
+            "hoy."
+        ),
+        "unit_price": (
+            "Reemplaza al monto junto con la cantidad: si la planilla de compras no "
+            "trae el total de la línea, Véktor lo calcula con estos dos. Con uno solo "
+            "no hay nada que calcular."
+        ),
+        "quantity": (
+            "Reemplaza al monto junto con el precio unitario: si la planilla de "
+            "compras no trae el total de la línea, Véktor lo calcula con estos dos. "
+            "Con uno solo no hay nada que calcular."
+        ),
+    },
+    "product": {
+        "name": (
+            "Es con lo que Véktor identifica al artículo y lo cruza con las ventas y "
+            "las compras. La fila sin nombre no crea ni actualiza ningún producto y "
+            "tampoco queda en «Otros»: se descarta."
+        ),
+    },
+    "customer": {
+        "name": (
+            "Nombre o razón social: es con lo que el cliente aparece en Véktor y lo "
+            "que permite reconocerlo cuando vuelve a comprar. La fila sin nombre no se "
+            "importa y se cuenta como inválida en el resumen del archivo."
+        ),
+    },
+    "supplier": {
+        "name": (
+            "Nombre o razón social: es con lo que el proveedor aparece en Véktor y lo "
+            "que permite agrupar sus compras. La fila sin nombre no se importa y se "
+            "cuenta como inválida en el resumen del archivo."
+        ),
+    },
+}
+
+
+def required_reason(entity_type: str, field: str) -> str:
+    """Por qué el importador necesita ``field``, o ``""`` si no hay motivo escrito.
+
+    Cadena vacía y no ``None``: el catálogo lo sirve tal cual y un campo sin
+    motivo tiene que renderizar nada, no la palabra "None". Que un requerido se
+    quede sin motivo lo caza el test compuerta, no este helper.
+    """
+    return REQUIRED_REASONS.get(entity_type, {}).get(field, "")
+
+
+def missing_required_fields(entity_type: str, mapped: set[str]) -> set[str]:
+    """Requeridos que ``mapped`` no cubre, ni directo ni por alternativa.
+
+    ``mapped`` son los targets CANÓNICOS mapeados (el caller filtra los
+    ``custom_field:`` y los cruzados). Fuente única: la validación del confirm y
+    el catálogo que consume la UI llaman acá, así que no pueden discrepar sobre
+    si una hoja se puede importar.
+    """
+    alternativas = REQUIRED_ALTERNATIVES.get(entity_type, {})
+    return {
+        campo
+        for campo in REQUIRED_FIELDS.get(entity_type, [])
+        if campo not in mapped
+        and not (campo in alternativas and alternativas[campo] <= mapped)
+    }
+
+
+# ── F-C.c3: "obligatorio" es contextual ──────────────────────────────────────
+# `required: bool` contesta una pregunta sola para todos los archivos, y por eso
+# contesta mal en los dos sentidos: dice que el monto de una venta es obligatorio
+# cuando la planilla trae precio × cantidad, y no dice nada del producto en una
+# hoja que sí mueve inventario.
+#
+# Esto lo DESCRIBE, no lo cambia. El booleano queda igual, `REQUIRED_FIELDS` no
+# crece y `missing_required_fields` —lo que el confirm valida de verdad— no se
+# toca. Volver bloqueante "producto si la venta es inventariable" rechazaría con
+# 422 toda planilla de servicios u honorarios que hoy entra bien; la UI puede
+# explicar la regla sin que el importador la imponga.
+RequirementCondition = Literal["covered_by_alternative", "sheet_moves_units"]
+
+#: El campo no hace falta si OTRO conjunto de campos lo cubre. Cuál es ese
+#: conjunto NO se escribe acá: vive en `REQUIRED_ALTERNATIVES` y lo evalúa
+#: `missing_required_fields`. Una tercera copia de `{unit_price, quantity}` sería
+#: una tercera cosa para mantener sincronizada.
+COVERED_BY_ALTERNATIVE: RequirementCondition = "covered_by_alternative"
+#: El campo sólo hace falta si las filas de la hoja mueven unidades de un producto
+#: identificable. La definición es `SheetInventoryProfile.moves_units`.
+SHEET_MOVES_UNITS: RequirementCondition = "sheet_moves_units"
+
+
+@dataclass(frozen=True)
+class ConditionalRequirement:
+    """Por qué un campo puede hacer falta en una hoja y no en la de al lado."""
+
+    condition: RequirementCondition
+    #: Copy en castellano, para el catálogo y el banner de faltantes.
+    explanation: str
+    #: Conjuntos de campos que gobiernan la condición, para que la pantalla pueda
+    #: nombrar las columnas involucradas. Son LOS MISMOS OBJETOS del dominio, no
+    #: copias — y nadie los evalúa acá: la autoridad sigue siendo `moves_units`.
+    #: Vacío en `covered_by_alternative`, donde la fuente es `REQUIRED_ALTERNATIVES`.
+    signals: tuple[frozenset[str], ...] = ()
+
+
+CONDITIONAL_REQUIREMENTS: dict[str, dict[str, ConditionalRequirement]] = {
+    "sale": {
+        "amount": ConditionalRequirement(
+            condition=COVERED_BY_ALTERNATIVE,
+            explanation=(
+                "Sólo hace falta si la planilla no trae el precio unitario y la "
+                "cantidad: con esos dos, Véktor calcula el total de cada línea."
+            ),
+        ),
+        "product_name": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto. Sin una "
+                "columna que lo identifique, la venta se registra igual, pero Véktor "
+                "no puede decir qué se vendió ni proyectar el impacto en el "
+                "inventario. Una venta de servicios u honorarios no identifica "
+                "ningún artículo y no necesita esta columna."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+        "quantity": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto: es lo "
+                "que dice cuántas. Una hoja que identifica el artículo pero no trae "
+                "cantidades no puede decir nada del inventario."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+    },
+    "expense": {
+        "amount": ConditionalRequirement(
+            condition=COVERED_BY_ALTERNATIVE,
+            explanation=(
+                "Sólo hace falta si la planilla de compras no trae el precio unitario "
+                "y la cantidad: con esos dos, Véktor calcula el total de cada línea."
+            ),
+        ),
+        # Las mismas dos reglas valen para una hoja de compras: el dominio no
+        # distingue —`default_effect_for` trata `sale` y `expense` igual— y una
+        # compra de mercadería sin nombre no da de alta el producto ni suma
+        # unidades (`_is_merch_purchase` pide nombre Y cantidad > 0).
+        "product_name": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto. Sin una "
+                "columna que lo identifique, el gasto se registra igual, pero la "
+                "compra no da de alta el artículo ni le suma stock. Un alquiler o un "
+                "servicio no necesitan esta columna."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+        "quantity": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto: es lo "
+                "que dice cuántas entraron. Una compra sin cantidad se registra como "
+                "gasto y no toca el inventario."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+    },
+}
+
+
+def conditional_requirement(entity_type: str, field: str) -> ConditionalRequirement | None:
+    """La regla contextual de ``field``, o ``None`` si el campo no tiene ninguna."""
+    return CONDITIONAL_REQUIREMENTS.get(entity_type, {}).get(field)
+
+
+def requirement_applies(entity_type: str, field: str, mapped: set[str]) -> bool:
+    """¿Este campo hace falta en una hoja que ya mapeó ``mapped``?
+
+    **Es DESCRIPTIVO.** No lo llama la validación del confirm: eso sigue siendo
+    `missing_required_fields`, que sólo mira `REQUIRED_FIELDS`. Cablearlo a un 422
+    convertiría "producto en una hoja inventariable" en un rechazo nuevo, que es
+    justo lo que F-C decidió no hacer.
+    """
+    req = conditional_requirement(entity_type, field)
+    if req is None:
+        return field in REQUIRED_FIELDS.get(entity_type, [])
+    if req.condition == COVERED_BY_ALTERNATIVE:
+        # Sin reimplementar la alternativa: se le pregunta a la misma función que
+        # valida el confirm, sacando el campo de lo mapeado para que la respuesta
+        # sea "¿lo necesita?" y no "¿ya lo tiene?".
+        return field in missing_required_fields(entity_type, mapped - {field})
+    # `moves_units` es "identifica un producto Y trae cantidad". La conjunción no
+    # se reescribe acá: se le pregunta dos veces al dominio. El campo hace falta
+    # cuando la hoja todavía no mueve unidades y mapearlo alcanzaría para que sí
+    # —o sea, cuando es la mitad que falta—. En una hoja de servicios ninguna de
+    # las dos mitades alcanza sola, así que ninguna se pide.
+    return not _sheet_moves_units(entity_type, mapped) and _sheet_moves_units(
+        entity_type, mapped | {field}
+    )
+
+
+def _sheet_moves_units(entity_type: str, mapped: set[str]) -> bool:
+    return SheetInventoryProfile(
+        context_id="", entity=entity_type, mapped_fields=frozenset(mapped)
+    ).moves_units
+
 
 # ── Heurísticas: entity_type → target_field → keywords (substring match) ─────
 _HEURISTICS: dict[str, dict[str, set[str]]] = {
@@ -192,6 +524,59 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "supplier",
         },
         "notes": {"notas", "observaciones", "descripcion", "detalle", "obs"},
+        # F-H6.a: los alias tienen que ser INEQUÍVOCOS dentro de `expense`. Un
+        # keyword que empata en longitud con otro de esta misma entidad lo decide
+        # el orden del dict — que es el incidente ASTERIA, donde "precio" y
+        # "compra" empataban sobre `precio_de_compra` y ganaba el costo como
+        # precio de venta. Los largos SÍ ganan (`_match_key` colapsa las
+        # preposiciones y desempata por longitud): "precio_compra" (13) le gana a
+        # "compra" (6) de `amount`, que es lo que hace que un libro de compras
+        # deje de leer el precio unitario como el total de la línea.
+        "unit_price": {
+            "precio_unitario",
+            "precio_unit",
+            "p_unitario",
+            "unitario",
+            "precio_compra",
+            "precio_costo",
+            "costo_unitario",
+            "p_costo",
+        },
+        "quantity": {"cantidad", "qty", "unidades", "cant", "items", "unidad"},
+        # F-H6.b. "numero" y "comprobante" a secas quedan fuera: en un libro de
+        # compras "número" puede ser el de orden de la fila.
+        "invoice_number": {
+            "numero_comprobante",
+            "nro_comprobante",
+            "comprobante_numero",
+            "numero_factura",
+            "nro_factura",
+            "factura_numero",
+            "n_factura",
+            "remito",
+            "nro_remito",
+            "numero_remito",
+        },
+        "shipping_cost": {"envio", "flete", "shipping", "costo_envio", "gastos_envio"},
+        # Deliberadamente SIN "descripcion", "detalle", "concepto" ni "nombre":
+        # los tres primeros ya son de `notes`/`category` con la misma longitud
+        # (empate → orden del dict), y un "nombre" suelto en una planilla de
+        # compras es tan probable que sea el del proveedor. Sugerir mal es peor
+        # que no sugerir: el usuario mapea a mano y sigue.
+        "product_name": {"producto", "articulo", "mercaderia", "item"},
+        # Igual criterio: "codigo" a secas en una compra suele ser el número de
+        # comprobante, no el SKU.
+        "sku": {"sku", "codigo_producto", "cod_producto"},
+        "barcode": {
+            "barcode",
+            "ean",
+            "upc",
+            "gtin",
+            "barras",
+            "codigo_de_barras",
+            "cod_barra",
+            "codigo_barra",
+        },
         # F7a: referencia al proveedor (aditivo). "supplier_name" ya existía arriba
         # (no se duplica); acá solo se suman los campos que faltaban.
         "supplier_cuil": {"cuil_proveedor", "proveedor_cuil", "cuil"},
@@ -358,6 +743,353 @@ _HEURISTIC_KEYS: dict[str, dict[str, frozenset[str]]] = {
 }
 
 
+# ── F-M: de (entidad, concepto, calificadores) al campo ──────────────────────
+#
+# La segunda mitad del reconocedor. `header_semantics` dice QUÉ es la columna en
+# castellano; esta tabla dice a qué campo va en ESTA entidad — y, cuando no
+# alcanza para decidir, cuáles son los candidatos y por qué no alcanza.
+#
+# Vive acá y no en el dominio porque nombra `target_field`s: el vocabulario del
+# idioma no tiene por qué conocer el catálogo de campos de la base.
+
+
+@dataclass(frozen=True)
+class ReglaDeTarget:
+    """Qué hacer con un concepto cuando aparecen ciertos calificadores.
+
+    Las reglas de un concepto se evalúan EN ORDEN y gana la primera cuyos
+    calificadores estén todos presentes. La última suele tener ``si`` vacío: es
+    el caso "sin nada que desempate".
+    """
+
+    si: frozenset[str] = frozenset()
+    #: Resultado inequívoco.
+    target: str | None = None
+    #: Dos o más candidatos: se le pregunta al usuario.
+    opciones: tuple[str, ...] = ()
+    #: Por qué no alcanza, en castellano. Obligatoria si no hay `target`.
+    duda: str | None = None
+
+
+def _r(*args: str, **kw: object) -> ReglaDeTarget:
+    """Azúcar: `_r("unitario", target="unit_price")`."""
+    return ReglaDeTarget(si=frozenset(args), **kw)  # type: ignore[arg-type]
+
+
+_PRECIO_LINEA_O_UNIDAD = "¿es el precio de cada unidad, o el total de la línea?"
+_SIN_CAMPO_DESCUENTO = (
+    "Es un descuento. Véktor todavía no tiene un campo propio para descuentos de "
+    "una compra; se puede guardar como campo propio."
+)
+_SIN_CAMPO_IMPUESTO = (
+    "Es un impuesto de la línea. Véktor todavía no tiene un campo propio para eso; "
+    "se puede guardar como campo propio."
+)
+_ENVIO_UNITARIO = (
+    "Es un costo de envío por unidad. Véktor sabe leer el envío del comprobante y "
+    "el que ya viene asignado a cada línea, pero no el de cada unidad."
+)
+_ENVIO_POR_LINEA = (
+    "Es el envío que le toca a esta línea, no el del comprobante entero. Los dos "
+    "se leen con reglas opuestas —uno se cobra una vez, el otro se suma— así que "
+    "no se pueden usar como si fueran el mismo campo."
+)
+_MONTO_DEL_COMPROBANTE = (
+    "Parece el total del comprobante, no el de esta línea. Importarlo como el monto "
+    "de la fila repetiría el total en cada línea del remito."
+)
+
+RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
+    "sale": {
+        "fecha": (_r(target="transaction_date"),),
+        "monto": (
+            _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
+            _r(
+                "de_pago",
+                opciones=("amount", "payment_method"),
+                duda="¿es cuánto se pagó, o con qué se pagó?",
+            ),
+            _r(target="amount"),
+        ),
+        "precio": (
+            _r("unitario", target="unit_price"),
+            _r(opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+        ),
+        "cantidad": (_r(target="quantity"),),
+        "producto": (_r(target="product_name"),),
+        "cliente": (_r(target="customer_name"),),
+        # `Nombre` a secas en una hoja de ventas ya era el del producto: es una
+        # decisión previa del proyecto, no un empate de longitud, así que se
+        # conserva.
+        "nombre": (
+            _r("de_cliente", target="customer_name"),
+            _r(target="product_name"),
+        ),
+        "dni": (_r(target="customer_dni"),),
+        "cuit": (_r(target="customer_cuit"),),
+        "email": (_r(target="customer_email"),),
+        "telefono": (_r(target="customer_phone"),),
+        "metodo_pago": (_r(target="payment_method"),),
+        "nota": (_r(target="notes"),),
+        "descripcion": (_r(target="product_name"),),
+    },
+    "expense": {
+        "fecha": (_r(target="expense_date"),),
+        "monto": (
+            _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
+            _r(target="amount"),
+        ),
+        "precio": (
+            _r("unitario", target="unit_price"),
+            _r("de_compra", target="unit_price"),
+            _r(opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+        ),
+        "costo": (
+            _r("unitario", target="unit_price"),
+            # «Precio costo» es el costo POR UNIDAD, no el total de la línea: es
+            # como una planilla de compras nombra el costo unitario.
+            _r("de_precio", target="unit_price"),
+            _r("de_producto", opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+            _r("final", opciones=("unit_price", "amount"), duda=_PRECIO_LINEA_O_UNIDAD),
+            _r(target="amount"),
+        ),
+        "cantidad": (_r(target="quantity"),),
+        "categoria": (_r(target="category"),),
+        "metodo_pago": (_r(target="payment_method"),),
+        "recurrencia": (_r(target="is_recurring"),),
+        "proveedor": (_r(target="supplier_name"),),
+        "producto": (_r(target="product_name"),),
+        "nombre": (
+            _r("de_proveedor", target="supplier_name"),
+            _r("de_producto", target="product_name"),
+            _r(
+                opciones=("product_name", "supplier_name"),
+                duda="¿es el nombre del producto de la línea, o el del proveedor?",
+            ),
+        ),
+        "sku": (_r(target="sku"),),
+        "codigo": (_r(target="sku"),),
+        "barcode": (_r(target="barcode"),),
+        "comprobante": (_r(target="invoice_number"),),
+        "envio": (
+            # Sigue sin haber campo para el flete POR UNIDAD: Véktor lee el del
+            # comprobante y el ya asignado a la línea, no una tercera granularidad.
+            _r("unitario", duda=_ENVIO_UNITARIO),
+            _r("por_linea", target="shipping_cost_line"),
+            # `Envío` a secas resuelve al del comprobante y NO se vuelve ambiguo:
+            # F-H6.b ya le pregunta al usuario la granularidad (`una_por_hoja` vs
+            # `una_por_fila`) cuando la hoja no trae comprobante, y esa pregunta se
+            # hace donde el número está a la vista. Preguntarlo dos veces es
+            # fricción en el encabezado más común de un remito. Límite declarado:
+            # un archivo con flete por línea Y comprobante entra como si fuera del
+            # comprobante, salvo que el usuario mapee la columna a mano.
+            _r(target="shipping_cost"),
+        ),
+        "descuento": (_r(target="discount"),),
+        "impuesto": (_r(target="taxes"),),
+        "cuil": (_r(target="supplier_cuil"),),
+        "email": (_r(target="supplier_email"),),
+        "telefono": (_r(target="supplier_phone"),),
+        "nota": (_r(target="notes"),),
+        "descripcion": (_r(target="notes"),),
+    },
+    "product": {
+        "precio": (
+            _r("de_lista", target="list_price_ars"),
+            _r("de_compra", target="unit_cost_ars"),
+            _r("de_venta", target="sale_price_ars"),
+            _r("unitario", target="unit_cost_ars"),
+            _r("final", target="sale_price_ars"),
+            _r(
+                opciones=("sale_price_ars", "unit_cost_ars", "list_price_ars"),
+                duda=(
+                    "Los tres precios de un producto son campos distintos y "
+                    "conviven: el de venta, el costo y el de lista. El encabezado "
+                    "no dice cuál es."
+                ),
+            ),
+        ),
+        "costo": (_r(target="unit_cost_ars"),),
+        # «Compra» y «Venta» a secas, en un catálogo, dicen cuál de los tres
+        # precios es la columna. Sin calificador NO hay regla: un «Monto» pelado
+        # en un catálogo no dice cuál de los tres es, y adivinarlo es el bug que
+        # F10 cerró.
+        "monto": (
+            _r("de_compra", target="unit_cost_ars"),
+            _r("de_venta", target="sale_price_ars"),
+        ),
+        "nombre": (_r(target="name"),),
+        "producto": (_r(target="name"),),
+        "sku": (_r(target="sku"),),
+        "codigo": (_r(target="sku"),),
+        "barcode": (_r(target="barcode"),),
+        "stock": (_r(target="stock_units"),),
+        "cantidad": (_r(target="stock_units"),),
+        "categoria": (_r(target="category"),),
+        "descripcion": (_r(target="description"),),
+        "vencimiento": (_r(target="expiry_date"),),
+        "fecha": (_r(target="acquired_at"),),
+        "marca": (
+            _r(
+                duda=(
+                    "Es la marca del producto. No es un campo del catálogo —una "
+                    "marca no es un proveedor, ver la Reforma de Proveedores—: se "
+                    "guarda como campo propio."
+                )
+            ),
+        ),
+    },
+    "customer": {
+        # Una columna «Cliente» en un padrón de clientes ES el nombre; «Tipo
+        # cliente» es su clasificación. Sin estas dos reglas el encabezado más
+        # canónico del import de clientes no mapeaba, y `name` es requerido.
+        "cliente": (
+            _r("clasificador", target="customer_type"),
+            _r(target="name"),
+        ),
+        # «IVA», «Condición IVA», «Situación IVA»: acá el impuesto no es un monto,
+        # es la categoría fiscal de la persona.
+        "impuesto": (_r(target="iva_condition"),),
+        "nombre": (_r(target="name"),),
+        "apellido": (_r(target="last_name"),),
+        "dni": (_r(target="dni"),),
+        "cuit": (_r(target="cuit"),),
+        "email": (_r(target="email"),),
+        "telefono": (_r(target="phone"),),
+        "direccion": (_r(target="address"),),
+        "localidad": (_r(target="locality"),),
+        "provincia": (_r(target="province"),),
+        "codigo_postal": (_r(target="postal_code"),),
+        "cumpleanos": (_r(target="birthday"),),
+        "nota": (_r(target="notes"),),
+    },
+    "supplier": {
+        # Espejo de `cliente` en customer: «Proveedor» en un padrón de
+        # proveedores es el nombre, y `name` es requerido.
+        "proveedor": (_r(target="name"),),
+        "nombre": (_r(target="name"),),
+        "apellido": (_r(target="last_name"),),
+        "cuil": (_r(target="cuil"),),
+        "email": (_r(target="email"),),
+        "telefono": (_r(target="phone"),),
+        "metodo_pago": (_r(target="payment_method"),),
+        "nota": (_r(target="notes"),),
+    },
+}
+
+
+@dataclass(frozen=True)
+class HeaderReading:
+    """Los tres resultados posibles de leer un encabezado.
+
+    - ``unico``: se puede demostrar qué campo es. Se propone.
+    - ``ambiguo``: hay más de una lectura razonable. Se ofrecen y se explica.
+    - ``sin_evidencia``: no alcanza. La columna se conserva y se pregunta.
+
+    Los dos últimos son lo mismo para el importador —la columna no se mapea
+    sola— y distintos para la persona: «no entiendo esto» y «entiendo qué es
+    pero no tengo dónde ponerlo» no se explican igual.
+    """
+
+    outcome: Literal["unico", "ambiguo", "sin_evidencia"]
+    target: str | None = None
+    options: tuple[str, ...] = ()
+    duda: str | None = None
+    concept: str | None = None
+    #: Lo que el encabezado decía ADEMÁS del concepto. No cambia la decisión —esa
+    #: ya la tomó la regla— pero es lo único que permite explicarla: sin esto,
+    #: «Envío unitario» y «Envío» son el mismo mensaje en pantalla.
+    qualifiers: frozenset[str] = frozenset()
+
+
+def read_header(normalized: str, entity_type: str) -> HeaderReading:
+    """Lee un encabezado y devuelve uno de los tres resultados.
+
+    Nunca elige entre dos lecturas razonables: si Véktor no puede demostrar qué
+    quiso decir el usuario, conserva el dato y pregunta. Transformarlo en silencio
+    en otro concepto contable es lo que convertía un flete en un precio de compra.
+    """
+    analisis = analyze_header(normalized)
+    quals = analisis.qualifiers
+    if analisis.concept is None:
+        if analisis.rivals:
+            return HeaderReading(
+                "sin_evidencia",
+                duda=(
+                    "El encabezado nombra dos cosas a la vez y ninguna manda sobre "
+                    "la otra."
+                ),
+                qualifiers=quals,
+            )
+        return HeaderReading("sin_evidencia", qualifiers=quals)
+
+    sin_campo = HeaderReading(
+        "sin_evidencia",
+        duda=f"Esta hoja no tiene un campo para eso ({analisis.concept}).",
+        concept=analisis.concept,
+        qualifiers=quals,
+    )
+    reglas = RESOLUCION.get(entity_type, {}).get(analisis.concept)
+    if reglas is None:
+        return sin_campo
+
+    for regla in reglas:
+        if regla.si <= quals:
+            if regla.target is not None:
+                return HeaderReading(
+                    "unico",
+                    target=regla.target,
+                    concept=analisis.concept,
+                    qualifiers=quals,
+                )
+            if regla.opciones:
+                return HeaderReading(
+                    "ambiguo",
+                    options=regla.opciones,
+                    duda=regla.duda,
+                    concept=analisis.concept,
+                    qualifiers=quals,
+                )
+            return HeaderReading(
+                "sin_evidencia",
+                duda=regla.duda,
+                concept=analisis.concept,
+                qualifiers=quals,
+            )
+    return sin_campo
+
+
+def heuristic_target(
+    normalized: str, entity_type: str, *, prefer: tuple[str, ...] = ()
+) -> str | None:
+    """El target de un encabezado, o ``None`` si no se puede demostrar cuál es.
+
+    Para los consumidores SINCRÓNICOS —la extracción de remitos y la de
+    proveedores— que no tienen pantalla donde desambiguar.
+
+    ``prefer`` es cómo el llamador aporta el contexto que a esta función le falta.
+    Una ambigüedad puede ser real en general y estar resuelta por el TIPO DE
+    DOCUMENTO: «Precio» en un catálogo no dice cuál de los tres es, pero en un
+    remito —que es un documento de líneas, no un catálogo— es el precio de esa
+    línea. El que sabe eso es quien lee el remito, no el reconocedor, así que lo
+    declara en vez de que nadie lo decida.
+
+    Sin ``prefer`` un `ambiguo` es lo mismo que un desconocido: no hay a quién
+    preguntarle. Y eso NO es gratis — se midió: un remito con columnas
+    «Producto | Cantidad | Precio | Total | Código» se quedaba sin ninguna columna
+    de precio. Un llamador sin pantalla que además no declare su preferencia
+    pierde el dato en silencio.
+    """
+    lectura = read_header(normalized, entity_type)
+    if lectura.outcome == "unico":
+        return lectura.target
+    if lectura.outcome == "ambiguo" and prefer:
+        for candidato in prefer:
+            if candidato in lectura.options:
+                return candidato
+    return None
+
+
 # ── Campos de valor único ────────────────────────────────────────────────────
 # Un campo escalar solo puede venir de UNA columna. Si dos apuntan al mismo, el
 # importador se quedaba con la primera del orden del archivo y descartaba el
@@ -388,13 +1120,151 @@ MASTER_REFERENCE_TARGETS: frozenset[str] = frozenset(
 
 SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
     "sale": frozenset({"amount", "quantity", "transaction_date", "unit_price"}),
-    "expense": frozenset({"amount", "expense_date"}),
+    # F-H6.a: los nuevos son escalares por la misma razón que en `sale` — dos
+    # columnas al mismo destino no se pueden desempatar sin inventar, y hasta F-0
+    # `_resolve_target_cols` se quedaba con la primera del orden del Excel.
+    "expense": frozenset(
+        {
+            "amount",
+            "expense_date",
+            "quantity",
+            "unit_price",
+            # F-M.7: escalares por el mismo motivo. Dos columnas de descuento
+            # sobre la misma línea no se suman solas ni se elige una.
+            "shipping_cost_line",
+            "discount",
+            "taxes",
+        }
+    ),
     "product": frozenset(
         {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}
     ),
     "customer": frozenset(),
     "supplier": frozenset(),
 }
+
+
+# ── F-0: gramática de un ``target_field`` ────────────────────────────────────
+# Un target puede ser cuatro cosas y hasta acá cada consumidor las distinguía
+# con su propio ``startswith("custom_field:")``. Seis copias de la misma regla
+# son seis oportunidades de que una quede vieja — y la próxima forma de target
+# (``{entidad}:{campo}``, ruteo entre secciones) usa el MISMO separador que los
+# campos propios, así que una copia desactualizada empezaría a leer
+# ``custom_field:marca`` como "entidad custom_field, campo marca".
+
+#: Entidades que pueden aparecer como prefijo de un target cruzado. Es lo que
+#: distingue ``customer:dni`` (cruzado) de ``custom_field:marca`` (campo propio)
+#: sin depender del orden en que aparezcan los dos puntos.
+CROSS_ENTITY_PREFIXES: frozenset[str] = frozenset(CANONICAL_FIELDS)
+
+_CUSTOM_FIELD_PREFIX = "custom_field:"
+
+
+@dataclass(frozen=True)
+class ParsedTarget:
+    """Qué es un ``target_field``, resuelto en un solo lugar.
+
+    ``kind``:
+      - ``none``      — sin mapear (nadie lo miró todavía)
+      - ``ignore``    — el usuario decidió explícitamente dejarla afuera
+      - ``canonical`` — campo de la entidad de la propia hoja
+      - ``custom``    — campo propio del tenant; ``field`` es la clave sin prefijo
+      - ``cross``     — campo de OTRA entidad; ``entity`` dice cuál
+
+    ``none`` e ``ignore`` no se colapsan a propósito: uno es una columna sin
+    revisar y el otro una decisión tomada. Tratarlos igual deja que una columna
+    que nadie miró se descarte como si alguien lo hubiera querido.
+    """
+
+    kind: str
+    entity: str | None
+    field: str
+
+
+def parse_target(target: str | None) -> ParsedTarget:
+    """Fuente ÚNICA de verdad sobre qué representa un ``target_field``.
+
+    Nadie más debería hacer ``startswith("custom_field:")`` a mano.
+    """
+    if target is None or not target.strip():
+        return ParsedTarget(kind="none", entity=None, field="")
+    value = target.strip()
+    if value == "ignore":
+        return ParsedTarget(kind="ignore", entity=None, field="")
+    if value.startswith(_CUSTOM_FIELD_PREFIX):
+        # La clave se normaliza igual que el resto del string: sin esto,
+        # "custom_field:obs " y "custom_field:obs" eran la misma clave (el strip
+        # de afuera la alcanzaba) pero "custom_field: obs" era OTRA, así que dos
+        # columnas podían compartir campo sin que la colisión se detectara.
+        return ParsedTarget(
+            kind="custom", entity=None, field=value[len(_CUSTOM_FIELD_PREFIX) :].strip()
+        )
+    prefix, sep, rest = value.partition(":")
+    if sep and prefix in CROSS_ENTITY_PREFIXES and rest:
+        return ParsedTarget(kind="cross", entity=prefix, field=rest)
+    # Prefijo desconocido: NO se inventa una entidad. Queda como canónico, que es
+    # la forma que el confirm ya sabe rechazar cuando el campo no existe.
+    return ParsedTarget(kind="canonical", entity=None, field=value)
+
+
+#: Rutas de escritura entre secciones habilitadas, explícitas por par
+#: (entidad de la hoja → entidad destino → campos). NO es un producto
+#: cartesiano: cada par se habilita a mano porque cada uno tiene una semántica
+#: distinta de identidad y de escritura.
+#:
+#: REGLA que gobierna qué entra (la testea ``test_ningun_cruzado_duplica_una_
+#: referencia_canonica``): una ruta cruzada existe para alcanzar campos que la
+#: entidad de la hoja NO puede expresar. Si el campo ya tiene contraparte
+#: canónica en la hoja de origen —convención ``{entidad}_{campo}``:
+#: ``customer_dni``, ``supplier_name``, ``product_name``— queda FUERA, porque
+#: dos rutas para la misma columna con semánticas de creación distintas es un
+#: bug esperando: la canónica pasa por el resolvedor de referencias (cuya
+#: creación gobierna ``*_REFERENCE_CREATION_MODE``) y la cruzada escribiría el
+#: maestro directo, sin arbitraje entre las dos.
+#:
+#: Fuera a propósito, además de lo que saca la regla:
+#:  - ``product:stock_units`` desde cualquier hoja — es la proyección de un
+#:    ledger de movimientos, no un campo que se setea desde una columna.
+#:  - ``product → supplier:*`` — un catálogo de productos NO crea proveedores:
+#:    la columna "Tienda"/"Proveedor" de un catálogo es la MARCA, y va a
+#:    ``Product.custom_fields["marca"]``. Habilitar esta ruta recrearía
+#:    exactamente las filas marca-como-proveedor que hubo que limpiar con
+#:    ``deactivate_brand_suppliers.py`` + el flag ``_brand_collapsed``. Si F-D
+#:    la quiere, primero tiene que definir que solo VINCULE a un proveedor
+#:    existente y nunca cree.
+#:  - ``notes`` — no es escalar, así que dos columnas podrían apuntarle y habría
+#:    que inventar cómo concatenarlas.
+CROSS_ENTITY_TARGETS: dict[str, dict[str, frozenset[str]]] = {
+    "sale": {
+        # name/dni/cuit/email/phone quedan fuera: ya son customer_* canónicos
+        # de la venta y los consume `_customer_reference_record`.
+        "customer": frozenset(
+            {
+                "last_name",
+                "address",
+                "locality",
+                "province",
+                "postal_code",
+                "customer_type",
+                "iva_condition",
+            }
+        ),
+    },
+    "expense": {
+        "product": frozenset({"sku", "barcode", "unit_cost_ars", "category"}),
+        # name/cuil/email/phone quedan fuera: ya son supplier_* canónicos del
+        # gasto y los consume `_supplier_reference_record`.
+        "supplier": frozenset({"last_name", "payment_method"}),
+    },
+    "product": {},
+    "customer": {},
+    "supplier": {},
+}
+
+#: Campos que ninguna ruta cruzada puede escribir, pase lo que pase. Es defensa
+#: en profundidad sobre ``CROSS_ENTITY_TARGETS``: la allowlist ya no los tiene,
+#: y este guard rechaza igual si alguien los agrega por error.
+CROSS_ENTITY_FORBIDDEN_FIELDS: frozenset[str] = frozenset({"stock_units"})
 
 
 # Targets canónicos que representan la fecha de negocio de una fila.
@@ -551,6 +1421,11 @@ class ColumnMappingService:
 
         required = set(REQUIRED_FIELDS.get(entity_type, []))
         suggestions: list[dict[str, Any]] = []
+        #: Índices de las columnas cuya lectura no se puede desempatar sin
+        #: inventar. Se lleva aparte y no como una clave más del dict porque el
+        #: dict se expande con ``**s`` en ``ColumnMappingSuggestion``: una clave
+        #: nueva sin declarar en el schema rompe el endpoint.
+        sin_desambiguar: set[int] = set()
 
         for header in headers:
             normalized = _normalize_col(header)
@@ -567,6 +1442,8 @@ class ColumnMappingService:
             target_field: str | None = None
             confidence: float = 0.0
             source: str = "none"
+            options: tuple[str, ...] = ()
+            duda: str | None = None
 
             # 1. Historial del tenant (prioridad máxima)
             if normalized in history:
@@ -575,23 +1452,38 @@ class ColumnMappingService:
                 confidence = min(0.99, 0.5 + rec.confirmed_count / 20.0)
                 source = "tenant_history"
 
-            # 2. Heurística global
-            elif (heuristic := _heuristic_match(normalized, entity_type)) is not None:
-                target_field = heuristic
-                confidence = 0.75
-                source = "heuristic"
-
-            # 3. Fuzzy matching
+            # 2. El reconocedor de encabezados (F-M)
             else:
-                fuzzy_target, fuzzy_ratio = _fuzzy_match(normalized, entity_type)
-                if fuzzy_target is not None:
-                    target_field = fuzzy_target
-                    confidence = fuzzy_ratio * 0.65  # escalar a rango 0–65%
-                    source = "fuzzy"
+                lectura = read_header(normalized, entity_type)
+                if lectura.outcome == "unico":
+                    target_field = lectura.target
+                    confidence = 0.75
+                    source = "heuristic"
+                elif lectura.outcome == "ambiguo" or lectura.duda is not None:
+                    options = lectura.options
+                    duda = lectura.duda
+                    # El reconocedor SÍ entendió el encabezado, y con eso puesto
+                    # dijo que no alcanza para elegir. Las capas de abajo saben
+                    # MENOS —fuzzy compara contra los keywords crudos, el LLM no
+                    # tiene canal para candidatos— así que dejarlas opinar es
+                    # cambiar una duda honesta por una respuesta arbitraria.
+                    sin_desambiguar.add(len(suggestions))
+
+                # 3. Fuzzy matching: sólo cuando no se reconoció NADA.
+                else:
+                    fuzzy_target, fuzzy_ratio = _fuzzy_match(normalized, entity_type)
+                    if fuzzy_target is not None:
+                        target_field = fuzzy_target
+                        confidence = fuzzy_ratio * 0.65  # escalar a rango 0–65%
+                        source = "fuzzy"
 
             # Calcular status
             if target_field is not None and target_field != "ignore":
                 status = "mapped"
+            elif options:
+                # Se entendió el encabezado y aun así hay más de una lectura. Es
+                # un estado propio: `unmapped` diría que no se reconoció nada.
+                status = "ambiguo"
             else:
                 status = "unmapped"
 
@@ -604,6 +1496,8 @@ class ColumnMappingService:
                     "confidence": round(confidence, 3),
                     "source": source,
                     "status": status,
+                    "options": list(options),
+                    "duda": duda,
                 }
             )
 
@@ -617,6 +1511,7 @@ class ColumnMappingService:
                 tenant_id=tenant_id,
                 trace_id=trace_id,
                 file_id=file_id,
+                skip=sin_desambiguar,
             )
 
         # Segunda pasada: detectar required_missing
@@ -649,19 +1544,31 @@ class ColumnMappingService:
         tenant_id: uuid.UUID | None = None,
         trace_id: uuid.UUID | str | None = None,
         file_id: uuid.UUID | str | None = None,
+        skip: set[int] | None = None,
     ) -> None:
         """FASE 2: mejora las sugerencias de baja confianza con el LLM (in-place).
 
         Si `trace_id`/`file_id` están presentes, emite un pipeline_event con la
         traza antes/después de cada columna evaluada (qué decidió lo determinístico,
         qué decidió el LLM, y si lo pisó).
+
+        ``skip`` son los índices que el reconocedor ya leyó y declaró indecidibles
+        (F-M). Baja confianza y ambigüedad no son lo mismo: la primera dice «no sé»
+        y el LLM puede ayudar; la segunda dice «entendí, y con eso entendido sigue
+        habiendo dos lecturas». Una respuesta del LLM no es demostración de la
+        intención del usuario, que es lo único que la regla de la fase acepta.
         """
         from app.application.services.llm_column_mapper import (  # noqa: PLC0415
             LLM_MAPPING_THRESHOLD,
             suggest_with_llm,
         )
 
-        low_conf = [s for s in suggestions if s["confidence"] < LLM_MAPPING_THRESHOLD]
+        omitir = skip or set()
+        low_conf = [
+            s
+            for i, s in enumerate(suggestions)
+            if s["confidence"] < LLM_MAPPING_THRESHOLD and i not in omitir
+        ]
         if not low_conf:
             return
         valid_fields = CANONICAL_FIELDS.get(entity_type, {})
@@ -700,6 +1607,12 @@ class ColumnMappingService:
                     s["confidence"] = round(conf, 3)
                     s["source"] = "llm"
                     s["status"] = "mapped"
+                    # Una columna resuelta no puede seguir explicando por qué no
+                    # se podía resolver. Hoy es inalcanzable —las que tienen duda
+                    # están en `skip`— pero el invariante «mapped ⇒ sin duda» se
+                    # sostiene acá, que es el único lugar que puede romperlo.
+                    s["options"] = []
+                    s["duda"] = None
                     overwritten = True
             decisions.append(
                 {
@@ -778,7 +1691,7 @@ class ColumnMappingService:
             target = mapping["target_field"]
 
             # No aprendemos "ignore" ni custom_fields
-            if target == "ignore" or target.startswith("custom_field:"):
+            if parse_target(target).kind in ("ignore", "none", "custom"):
                 continue
 
             result = await self.db.execute(

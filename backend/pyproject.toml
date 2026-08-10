@@ -49,21 +49,21 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = [
-    "--cov=app",
-    "--cov-report=term-missing",
-    "--cov-report=html:htmlcov",
-    "--cov-fail-under=50",
+    # Sin coverage por defecto: el gate de cobertura vive en el CI (paso pytest
+    # con --cov-fail-under=60 explícito) y en `make test-cov`. Correr cov+html
+    # en cada run local costaba ~1 min y 600 archivos de htmlcov que nadie lee.
     # Paralelizar por defecto (pytest-xdist): cada worker tiene su propia DB
-    # in-memory. Para debuggear secuencial: pytest -p no:xdist (o -n 0).
+    # in-memory. Para debuggear secuencial: pytest -n 0 (-p no:xdist NO
+    # funciona: deja el "-n auto" de addopts huérfano y pytest corta).
     "-n", "auto",
 ]
 asyncio_default_fixture_loop_scope = "session"
+# Solo markers que se USAN. `unit`/`integration`/`redis`/`celery` estuvieron
+# declarados sin un solo uso en 266 archivos — un marker muerto invita a creer
+# que filtra algo.
 markers = [
-    "unit: tests rápidos, sin infraestructura externa",
-    "integration: tests con SQLite + FakeRedis",
     "postgres: requiere PostgreSQL real (docker)",
-    "redis: requiere Redis real (docker)",
-    "celery: requiere Celery worker activo",
+    "slow: e2e pesados (>15s); excluibles en local con -m 'not slow'",
 ]
 
 [tool.coverage.run]

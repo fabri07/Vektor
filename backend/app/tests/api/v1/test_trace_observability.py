@@ -20,7 +20,6 @@ from app.persistence.models.communication_log import CommunicationLog
 from app.persistence.models.external_operation_log import ExternalOperationLog
 
 
-@pytest.mark.asyncio
 class TestTraceId:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -51,7 +50,6 @@ class TestTraceId:
         assert len(rows) >= 1
 
 
-@pytest.mark.asyncio
 class TestCommunicationExternalOps:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -133,7 +131,6 @@ class TestCommunicationExternalOps:
         assert "resend down" in (ext[0].error_message or "")
 
 
-@pytest.mark.asyncio
 async def test_record_external_operation_redacts_secrets(db_session, sample_tenant) -> None:
     log = await record_external_operation(
         db_session,

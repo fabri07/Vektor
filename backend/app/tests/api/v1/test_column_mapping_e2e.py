@@ -106,7 +106,6 @@ async def product_file(db_session: AsyncSession, sample_tenant: Tenant) -> Uploa
 # ── Tests: GET /column-mappings ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestGetColumnMappings:
     async def test_returns_suggestion_per_header(
         self,
@@ -198,7 +197,6 @@ def mock_score_trigger_e2e():
         yield mock
 
 
-@pytest.mark.asyncio
 class TestConfirmWithColumnMappings:
     async def test_explicit_mappings_import_with_correct_date(
         self,
@@ -396,7 +394,6 @@ class TestConfirmWithColumnMappings:
 # ── Tests: GET/DELETE /ingestion/column-mappings ──────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestLearnedMappings:
     async def test_list_returns_empty_initially(
         self,
@@ -584,7 +581,6 @@ async def multisheet_file(db_session: AsyncSession, sample_tenant: Tenant) -> Up
     return record
 
 
-@pytest.mark.asyncio
 class TestConfirmWithContextMappings:
     async def test_get_mappings_by_context_uses_sheet_headers_and_entity(
         self,
@@ -814,3 +810,89 @@ class TestConfirmWithContextMappings:
         by_entity = {(m.entity_type, m.source_column): m.target_field for m in learned}
         assert by_entity.get(("sale", "valor")) == "amount"
         assert by_entity.get(("expense", "importe")) == "amount"
+
+
+# ── F-M: los cuatro estados de una columna, sobre HTTP ────────────────────────
+
+
+@pytest_asyncio.fixture
+async def ambiguous_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    """Un archivo con un encabezado de cada tipo, para ver los cuatro estados.
+
+    - `Fecha` resuelve sola.
+    - `Precio de venta` admite dos lecturas (el precio de cada unidad o el total).
+    - `Flete` se entiende perfecto, pero una hoja de VENTAS no tiene dónde ponerlo.
+    - `ColRara99` no se parece a nada.
+    """
+    record = _make_file(
+        sample_tenant.tenant_id,
+        headers=["Fecha", "Precio de venta", "Flete", "ColRara99"],
+        rows=[
+            {
+                "Fecha": "2024-01-15", "Precio de venta": "1500",
+                "Flete": "300", "ColRara99": "x",
+            },
+        ],
+    )
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+class TestUnaColumnaIndecidibleNoLlegaMapeada:
+    """La regla rectora de F-M, verificada donde el usuario la ve: sobre el HTTP.
+
+    Los tests del panel mockean el servicio entero, así que verifican el argumento
+    del componente y no lo que viaja por el cable — que es exactamente donde se
+    escondió el agujero de F-H3.e.
+    """
+
+    async def _pedir(
+        self, client: AsyncClient, auth_headers: dict[str, Any], f: UploadedFile
+    ) -> dict[str, Any]:
+        response = await client.get(
+            f"/api/v1/ingestion/files/{f.id}/column-mappings?entity_type=sale",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        return {s["source_column"]: s for s in response.json()}
+
+    async def test_el_ambiguo_viaja_con_sus_candidatos_y_su_duda(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["Precio de venta"]
+        assert s["status"] == "ambiguo"
+        assert s["target_field"] is None, "no se elige uno de los dos por el usuario"
+        assert set(s["options"]) == {"amount", "unit_price"}
+        assert s["duda"], "sin la duda, la pantalla muestra dos opciones sin decir por qué"
+
+    async def test_un_concepto_sin_campo_en_esta_hoja_explica_el_hueco(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["Flete"]
+        assert s["status"] == "unmapped"
+        assert s["options"] == [], "no hay candidatos: el campo no existe acá"
+        assert s["duda"]
+
+    async def test_lo_que_no_se_reconocio_no_inventa_una_explicacion(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["ColRara99"]
+        assert s["duda"] is None
+        assert s["options"] == []
+
+    async def test_lo_que_resuelve_sigue_resolviendo_y_sin_duda(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["Fecha"]
+        assert s["status"] == "mapped"
+        assert s["target_field"] == "transaction_date"
+        assert s["duda"] is None, "una columna resuelta no explica por qué no se podía"
+
+    async def test_ninguna_columna_mapeada_arrastra_una_duda(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        """El invariante del contrato: `mapped` y `duda` no pueden convivir."""
+        for s in (await self._pedir(client, auth_headers, ambiguous_file)).values():
+            if s["status"] == "mapped":
+                assert s["duda"] is None and s["options"] == [], s["source_column"]

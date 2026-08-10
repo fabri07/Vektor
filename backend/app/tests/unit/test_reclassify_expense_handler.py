@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from app.application.agents.expense.agent import AgentExpense
 from app.application.agents.shared.schemas import (
     ActionType,
@@ -46,7 +44,6 @@ def _task(entities: dict[str, Any] | None = None) -> AgentTask:
 # ── Asesoría (read-only, sin DB → vertical inyectado por el test) ─────────────
 
 
-@pytest.mark.asyncio
 async def test_advice_golosinas_is_reventa_in_kiosco():
     """Golosinas en kiosco → reventa (mercadería / INVENTORY)."""
     agent = _agent()
@@ -62,7 +59,6 @@ async def test_advice_golosinas_is_reventa_in_kiosco():
     assert res.result["structured_data"]["recommended_target"] == "reventa"
 
 
-@pytest.mark.asyncio
 async def test_advice_bolsas_is_insumo():
     """Bolsas / artículos de uso interno → insumo (OPEX / SUPPLIES)."""
     agent = _agent()
@@ -76,7 +72,6 @@ async def test_advice_bolsas_is_insumo():
     assert res.result["structured_data"]["recommended_target"] == "insumo"
 
 
-@pytest.mark.asyncio
 async def test_advice_alquiler_is_other_category():
     """Alquiler → no es reventa ni insumo: categoría operativa."""
     agent = _agent()
@@ -93,7 +88,6 @@ async def test_advice_alquiler_is_other_category():
 # ── Escritura: pending action MEDIUM ──────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_write_reventa_builds_medium_pending_action():
     agent = _agent()
     res = await agent.process(
@@ -117,7 +111,6 @@ async def test_write_reventa_builds_medium_pending_action():
     assert sd["expense_id"] == "11111111-1111-1111-1111-111111111111"
 
 
-@pytest.mark.asyncio
 async def test_write_insumo_builds_medium_pending_action():
     agent = _agent()
     res = await agent.process(
@@ -137,7 +130,6 @@ async def test_write_insumo_builds_medium_pending_action():
     assert sd["category"] == "SUPPLIES"
 
 
-@pytest.mark.asyncio
 async def test_write_categoria_normalizes_code():
     agent = _agent()
     res = await agent.process(
@@ -156,7 +148,6 @@ async def test_write_categoria_normalizes_code():
     assert sd["category"] == "TAXES"
 
 
-@pytest.mark.asyncio
 async def test_no_identification_falls_to_advice():
     """Target sin identificación de gasto → asesoría, no escritura."""
     agent = _agent()

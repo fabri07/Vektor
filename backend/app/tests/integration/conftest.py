@@ -2,7 +2,10 @@
 Fixtures compartidas para la suite de integración de Véktor.
 
 Usa SQLite in-memory + FakeRedis — sin infraestructura externa.
-Cada test obtiene un engine y sesión frescos (scope=function).
+La `session` es un alias del `db_session` del conftest raíz (engine
+scope="session" + savepoint rollback): el schema se crea UNA vez por worker,
+no una vez por test como hacía la versión vieja (create_all + drop_all de
+~60 tablas por test, ~1-2s cada uno sobre ~116 tests).
 """
 
 from __future__ import annotations
@@ -17,15 +20,9 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import create_app
-from app.persistence.db.base import Base
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile, MomentumProfile
@@ -33,9 +30,6 @@ from app.persistence.models.score import HealthScoreSnapshot
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.utils.security import create_access_token, hash_password
-
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
 
 # ── FakeRedis ─────────────────────────────────────────────────────────────────
 
@@ -107,24 +101,15 @@ class FakeRedis:
 
 
 # ── DB fixtures ───────────────────────────────────────────────────────────────
+# `session` delega en el `db_session` del conftest raíz: transacción externa
+# sobre el engine compartido de la sesión de pytest, commits como SAVEPOINTs,
+# rollback al final deja la DB prístina. Un test que necesite commits REALES
+# sobre un engine propio usa `isolated_db_engine` (también del raíz).
 
 
 @pytest_asyncio.fixture
-async def engine() -> AsyncGenerator[AsyncEngine, None]:
-    eng = create_async_engine(TEST_DATABASE_URL, echo=False)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield eng
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await eng.dispose()
-
-
-@pytest_asyncio.fixture
-async def session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as s:
-        yield s
+async def session(db_session: AsyncSession) -> AsyncSession:
+    return db_session
 
 
 @pytest.fixture

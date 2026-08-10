@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
 from app.application.services import maintenance_lock_service, stock_service
+from app.application.services._import_projection import ImportProjectionRecorder
 from app.application.services._savepoint import (
     SavepointConflictError,
     guarded_savepoint,
@@ -52,7 +53,56 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
 )
+from app.domain.inventory_effect import (
+    HISTORICAL_REPLAY,
+    IMPORT_CONTEXT_FIELD,
+    INFORMATIONAL,
+)
+from app.domain.inventory_replay_gate import (
+    MOTIVO_REPLAY_NO_GATEABLE,
+    ReplayRow,
+    UnbackedRow,
+    replay_no_gateable,
+    rows_without_stock_backing,
+)
+from app.domain.line_amount import (
+    AMOUNT_ORIGINAL_FIELD,
+    AMOUNT_SOURCE_FIELD,
+    LineAmount,
+    resolve_line_amount,
+)
 from app.domain.product_categories import normalize_product_category
+from app.domain.purchase_cost import (
+    ATRIBUIDO_A_INVENTARIO_FIELD,
+    COMPARTIDO_SUBTOTAL,
+    CON_FLETE,
+    COSTO_BASE_FIELD,
+    LINEA_AL_COSTO,
+    SIN_FLETE,
+    CostLine,
+    LineCost,
+    build_line_costs,
+    debe_pisar_costo_de_referencia,
+)
+from app.domain.purchase_cost_decision import (
+    AJUSTE_ILEGIBLE,
+    PurchaseCostDecision,
+    hojas_que_necesitan_aviso,
+    parse_ajuste,
+    texto_del_ajuste_ilegible,
+    texto_del_aviso,
+)
+from app.domain.purchase_group import (
+    GroupLine,
+    PurchaseGroupPlan,
+    build_purchase_groups,
+)
+from app.domain.purchase_shipping import (
+    ShippingCharge,
+    ShippingLine,
+    plan_line_shipping,
+    plan_shipping_charges,
+)
 from app.domain.text_norm import (
     normalize_barcode,
     normalize_brand,
@@ -652,7 +702,7 @@ async def _import_master_entities(
         mapping = (context_mappings or {}).get(ctx_id) or (
             column_mappings if ctx_id == "table" else None
         ) or {}
-        target_to_col, _ = _resolve_target_cols(mapping)
+        target_to_col, _, _ = _resolve_target_cols(mapping)
         if not target_to_col:
             continue  # sin mapeo explícito: no se adivina el shape de la fila
 
@@ -959,6 +1009,44 @@ def _source_row_ref(anchor: str | None) -> str | None:
     return hashlib.sha256(anchor.encode()).hexdigest()
 
 
+def _registrar_monto_derivado(
+    cf: dict[str, str], linea: LineAmount, counts: dict[str, Any]
+) -> None:
+    """F-H4: deja en la fila y en los contadores de dónde salió el monto.
+
+    Sólo cuando el monto NO lo trajo el archivo: marcar cada venta normal con
+    ``source=file`` sería ruido en el 99 % de las filas. El monto original de una
+    discrepancia se conserva acá porque la columna ``amount`` ya guarda el
+    calculado — sin esto, la única forma de saber qué decía la planilla sería
+    volver a abrirla.
+    """
+    origen = linea.source
+    if origen is None or origen == "file":
+        return
+    cf[AMOUNT_SOURCE_FIELD] = origen
+    if origen == "calculated":
+        counts["montos_calculados"] = counts.get("montos_calculados", 0) + 1
+    if linea.original is not None:
+        cf[AMOUNT_ORIGINAL_FIELD] = str(linea.original)
+        counts["montos_discrepantes"] = counts.get("montos_discrepantes", 0) + 1
+
+
+def _fila_con_contenido(row: dict[str, Any]) -> bool:
+    """¿La fila dice algo, o son celdas vacías con forma de fila?
+
+    F-H4: una fila que no produjo nada se manda a "Otros" en vez de desaparecer
+    en silencio — pero las planillas traen filas de relleno al final de la hoja
+    (todas las celdas en blanco) y mandarlas a la bandeja la llenaría de ruido
+    que nadie puede clasificar. Distinguir "no pude" de "no había nada" es el
+    mismo criterio que ya rige en el resto del importador.
+    """
+    return any(
+        str(v).strip().lower() not in {"", "none", "nan"}
+        for k, v in row.items()
+        if k != "__context__" and v is not None
+    )
+
+
 def _capture_unclassified(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -978,11 +1066,22 @@ def _capture_unclassified(
 
     F2-T2: ``match_candidates`` (solo para filas de producto ambiguas o en
     conflicto de identidad) — forma ``{id, matched_by, name, sku, barcode}``.
+
+    La procedencia se NORMALIZA contra el set de la CHECK: el importador recibe
+    ``source`` libre y la relectura se nombra ``"reread"``, que la columna no
+    acepta. Sin esto, capturar una fila durante una relectura levantaba
+    `IntegrityError` y abortaba el apply entero.
     """
     from app.persistence.models.unclassified_record import (  # noqa: PLC0415
         UnclassifiedRecord,
+        normalize_unclassified_source,
     )
 
+    _source = normalize_unclassified_source(source)
+    if _source != source:
+        logger.debug(
+            "ingestion.otros.source_normalizado", recibido=source, guardado=_source
+        )
     count = 0
     for row in rows:
         row_data = {k: v for k, v in row.items() if k != "__context__"}
@@ -992,7 +1091,7 @@ def _capture_unclassified(
             UnclassifiedRecord(
                 tenant_id=tenant_id,
                 uploaded_file_id=uploaded_file_id,
-                source=source,
+                source=_source,
                 context_label=(context_label or None),
                 headers=list(headers) if headers else None,
                 row_data={k: ("" if v is None else str(v)) for k, v in row_data.items()},
@@ -1951,6 +2050,9 @@ async def _apply_purchase_to_stock(
     product_cache: dict[uuid.UUID, Any] | None = None,
     source_type: str = SOURCE_PURCHASE_IMPORT,
     source_row_ref: str | None = None,
+    costo_final: Decimal | None = None,
+    costo_incluye_flete: bool | None = None,
+    product_details: list[dict[str, Any]] | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
 
@@ -1985,13 +2087,83 @@ async def _apply_purchase_to_stock(
     elif product.tenant_id != tenant_id:
         return
     product.stock_units += qty
-    if unit_cost is not None:
-        product.unit_cost_ars = unit_cost
+    # F-H6.d: son DOS preguntas distintas y hasta acá se respondían con el mismo
+    # número. `unit_cost` es lo que FACTURÓ el proveedor y queda en el movimiento
+    # (abajo); `costo_final` es lo que la mercadería costó de verdad una vez
+    # aplicados descuento, impuestos y el flete que se haya repartido, y es lo
+    # que corresponde como costo de referencia del producto. Pisar uno con otro
+    # perdía el precio facturado de esa compra, que no vive en ningún otro lado.
+    #
+    # Cada lado prefiere su propia verdad y cae al otro si el archivo no la trae:
+    # una planilla que sólo declara el total y la cantidad no dice cuál fue el
+    # precio facturado, y dejar el movimiento en NULL perdería el único número
+    # que hay sobre esa compra.
+    _costo_de_referencia = costo_final if costo_final is not None else unit_cost
+    _costo_facturado = unit_cost if unit_cost is not None else costo_final
+    # V5: una compra nueva no pisa un costo que incluía flete con uno que no lo
+    # incluye. Si no se pisa el costo, TAMPOCO se pisa la procedencia: quedarían
+    # describiendo cosas distintas.
+    _base_guardada = (product.custom_fields or {}).get(COSTO_BASE_FIELD)
+    if _costo_de_referencia is not None and debe_pisar_costo_de_referencia(
+        entrante_incluye_flete=costo_incluye_flete,
+        guardado_incluye_flete=_base_guardada,
+        costo_guardado=(
+            Decimal(str(product.unit_cost_ars))
+            if product.unit_cost_ars is not None
+            else None
+        ),
+    ):
+        # F11/h3: una compra que pisa el costo tiene que dejar cómo estaba antes.
+        # `product_details` sólo lo poblaba el camino de CATÁLOGO, así que un
+        # producto tocado únicamente por una hoja de compras quedaba con el costo
+        # pisado para siempre — y el DELETE respondía `fully_reverted: true`.
+        # Varios items del mismo archivo sobre el mismo producto no son un
+        # problema: la reversa restaura el `before` del PRIMERO (el estado previo
+        # al archivo) y compara el `after` del último.
+        if product_details is not None:
+            product_details.append(
+                {
+                    "action": "UPDATED",
+                    "product_id": str(product.id),
+                    "name": product.name,
+                    "before": {
+                        "unit_cost_ars": (
+                            str(product.unit_cost_ars)
+                            if product.unit_cost_ars is not None
+                            else None
+                        ),
+                        COSTO_BASE_FIELD: _base_guardada,
+                    },
+                    "after": {
+                        "unit_cost_ars": str(_costo_de_referencia),
+                        COSTO_BASE_FIELD: (
+                            (CON_FLETE if costo_incluye_flete else SIN_FLETE)
+                            if costo_incluye_flete is not None
+                            else _base_guardada
+                        ),
+                    },
+                }
+            )
+        product.unit_cost_ars = _costo_de_referencia
+        # F-H6.d: la procedencia se escribe en la MISMA operación que el costo.
+        # Separarlas deja que un costo y su procedencia se desincronicen, y una
+        # procedencia que miente es peor que ninguna: el guard de V5 decide con
+        # ella si una compra nueva puede pisar el costo guardado.
+        if costo_incluye_flete is not None:
+            product.custom_fields = {
+                **(product.custom_fields or {}),
+                COSTO_BASE_FIELD: CON_FLETE if costo_incluye_flete else SIN_FLETE,
+            }
     # A2: identidad lógica estable de la fila de origen (idempotencia + reconciliación).
     _row_hash = compute_source_row_hash(
         product_key=product.name,
         qty=qty,
-        unit_cost=unit_cost,
+        # A propósito el costo de REFERENCIA y no el facturado: es el valor que
+        # esta huella viene usando desde que existe (los callers pisaban
+        # `unit_cost` con el final antes de llegar acá). Cambiarlo movería la
+        # identidad de filas ya importadas y los reconciliadores que la comparan
+        # dejarían de reconocerlas.
+        unit_cost=_costo_de_referencia,
         movement_date=getattr(expense, "transaction_date", None),
         supplier_key=(
             getattr(expense, "supplier_name", None)
@@ -2004,7 +2176,7 @@ async def _apply_purchase_to_stock(
         tenant_id,
         product.id,
         qty,
-        unit_cost,
+        _costo_facturado,
         "purchase",
         product.stock_units,
         balance_index=balance_index,
@@ -2295,6 +2467,133 @@ def _accumulate_expiry_date(
     return min(future) if future else max(candidates)
 
 
+def _planificar_costos_de_la_hoja(
+    ctx_id: str | None,
+    rows: list[dict[str, Any]],
+    cols: dict[str, str],
+    decisiones: dict[str, PurchaseCostDecision] | None = None,
+    *,
+    sin_comprobante: str | None = None,
+) -> tuple[dict[int, LineCost], dict[str, int], PurchaseGroupPlan]:
+    """F-H6.c/d — qué costó realmente cada línea de esta hoja.
+
+    Corre ANTES del bucle de filas, no después: distribuir un costo compartido
+    exige ver el grupo entero, y el bucle necesita el resultado para escribir
+    el costo unitario de cada compra. Es la misma razón por la que
+    `_cobrar_envios_de_la_hoja` es una pasada aparte, sólo que al revés — aquél
+    puede correr al final porque no cambia ninguna fila.
+
+    **El reparto es por GRUPO, no por hoja** (F-H6.d). Una sola llamada a
+    `build_line_costs` con todas las filas le cargaría a una compra el flete de
+    otra — lo que el docstring de esa función ya prohíbe por escrito. Se arma un
+    grupo por comprobante y cada uno reparte lo suyo.
+
+    Devuelve ``({row_index: LineCost}, {columna: celdas_ilegibles},
+    PurchaseGroupPlan)``. El segundo no es un detalle: una celda que no se pudo
+    leer se cuenta y se avisa, nunca se trata como «sin descuento» (ver
+    `parse_ajuste`). El tercero lo necesita quien cobra el envío, para saber cuál
+    cargo terminó capitalizado en el costo y no contarlo dos veces.
+    """
+    dec = (decisiones or {}).get(ctx_id or "") or PurchaseCostDecision(
+        context_id=ctx_id or ""
+    )
+    _desc_col = cols.get("discount")
+    _imp_col = cols.get("taxes")
+    _flete_col = cols.get("shipping_cost_line")
+    _envio_col = cols.get("shipping_cost")
+    if not (_desc_col or _imp_col or _flete_col or _envio_col):
+        # Sin ninguna columna de ajuste no hay nada que calcular que el
+        # importador no supiera ya: se deja el camino de siempre intacto.
+        #
+        # `shipping_cost` entra a este guard desde F-H6.d: antes, una hoja que
+        # sólo mapeaba el envío del comprobante ni siquiera llegaba acá, así que
+        # elegir «repartir por subtotal» no tenía dónde ocurrir.
+        return {}, {}, PurchaseGroupPlan()
+
+    _monto_col = cols.get("amount")
+    _qty_col = cols.get("quantity")
+    _ilegibles: dict[str, int] = {}
+
+    def _ajuste(row: dict[str, Any], col: str | None) -> Decimal:
+        if not col:
+            return Decimal("0")
+        val = parse_ajuste(row.get(col))
+        if val is AJUSTE_ILEGIBLE or isinstance(val, str):
+            _ilegibles[col] = _ilegibles.get(col, 0) + 1
+            return Decimal("0")
+        return val
+
+    _comp_col = cols.get("invoice_number")
+    _prov_col = cols.get("supplier_name")
+
+    def _clave(row: dict[str, Any], col: str | None) -> str:
+        # Misma normalización que `_cobrar_envios_de_la_hoja`: la clave del
+        # comprobante tiene que ser insensible a mayúsculas y espacios, y las dos
+        # pasadas TIENEN que agrupar igual o el preview miente sobre el import.
+        return (_clean_str(row.get(col), 199) or "").strip().lower() if col else ""
+
+    lineas: list[CostLine] = []
+    del_grupo: list[GroupLine] = []
+    for _idx, _row in enumerate(rows):
+        _monto = _parse_amount(_row.get(_monto_col)) if _monto_col else None
+        # El grupo se arma con TODAS las filas, tengan monto o no: el envío del
+        # comprobante se reparte entre todas sus líneas, y una fila sin monto
+        # igual puede ser la que trae la cifra de envío.
+        del_grupo.append(
+            GroupLine(
+                row_index=_idx,
+                supplier=_clave(_row, _prov_col),
+                invoice=_clave(_row, _comp_col),
+                subtotal=_monto or Decimal("0"),
+                shipping=(
+                    _parse_amount(_row.get(_envio_col)) or Decimal("0")
+                    if _envio_col
+                    else Decimal("0")
+                ),
+            )
+        )
+        if _monto is None:
+            # Sin monto no hay base sobre la cual ajustar nada. La fila ya la
+            # resuelve (o captura) el camino normal.
+            continue
+        lineas.append(
+            CostLine(
+                row_index=_idx,
+                amount=_monto,
+                quantity=_parse_qty(_row.get(_qty_col)) if _qty_col else 0,
+                discount=_ajuste(_row, _desc_col),
+                taxes=_ajuste(_row, _imp_col),
+                shipping_line=_ajuste(_row, _flete_col),
+            )
+        )
+    grupos = build_purchase_groups(del_grupo, sin_comprobante=sin_comprobante)
+    if not lineas:
+        return {}, _ilegibles, grupos
+
+    por_fila: dict[int, CostLine] = {line.row_index: line for line in lineas}
+    resultado: dict[int, LineCost] = {}
+    for grupo in grupos.groups:
+        del_grupo_lineas = [
+            por_fila[row] for row in grupo.row_indexes if row in por_fila
+        ]
+        if not del_grupo_lineas:
+            continue
+        plan = build_line_costs(
+            del_grupo_lineas,
+            # Sin `shared_shipping=` esto era un no-op: `build_line_costs` exige
+            # que la cifra sea > 0 para repartir, y el default es 0. Elegir
+            # «por subtotal» validaba, devolvía 200 y no repartía un centavo.
+            shared_shipping=(
+                grupo.shared_shipping if grupo.distribuible else Decimal("0")
+            ),
+            shared_mode=dec.shared_shipping,
+            line_mode=dec.line_shipping,
+            basis=dec.base,
+        )
+        resultado.update(plan.by_row())
+    return resultado, _ilegibles, grupos
+
+
 def _parse_amount(raw: Any) -> Decimal | None:
     if raw is None:
         return None
@@ -2449,7 +2748,11 @@ def _row_val_categoria(row: dict[str, Any]) -> Any:
     return None
 
 
-def _row_val(row: dict[str, Any], keywords: set[str] | tuple[str, ...]) -> Any:
+def _row_val(
+    row: dict[str, Any],
+    keywords: set[str] | tuple[str, ...],
+    skip: set[str] | None = None,
+) -> Any:
     """Devuelve el valor de la primera columna de *esta* fila cuyo nombre matchea.
 
     A diferencia de `_find_col` (que resuelve una columna fija para todo el
@@ -2459,37 +2762,81 @@ def _row_val(row: dict[str, Any], keywords: set[str] | tuple[str, ...]) -> Any:
     en silencio porque la columna detectada no existía en sus keys.
 
     Con tupla, el orden de keywords es prioridad (ver `_find_col`).
+
+    ``skip`` excluye columnas que el usuario ya declaró para OTRO campo. Una
+    heurística no puede releer una columna mapeada a mano: ``_VENTA_AMOUNT_COLS``
+    contiene ``"precio_unitario"``, así que en el archivo que F-H4 vino a
+    soportar —precio y cantidad mapeados, sin columna de total— el monto "del
+    archivo" salía de la misma columna del precio.
     """
     if isinstance(keywords, tuple):
         for k in keywords:
             for key, val in row.items():
+                if skip and key in skip:
+                    continue
                 if k in key.lower().strip().replace(" ", "_"):
                     return val
         return None
     for key, val in row.items():
+        if skip and key in skip:
+            continue
         norm = key.lower().strip().replace(" ", "_")
         if any(k in norm for k in keywords):
             return val
     return None
 
 
-def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+def _resolve_target_cols(
+    mapping: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """Desde un mapeo explícito source_col→target, resuelve columnas por target canónico.
 
-    Devuelve (target_to_col, custom_field_cols): el primero mapea campo canónico
-    (amount, transaction_date, name, sale_price_ars, ...) → source_col; el segundo
-    mapea cf_key → source_col para los targets `custom_field:{key}`. Ignora "ignore".
+    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados)``: el
+    primero mapea campo canónico (amount, transaction_date, name, ...) →
+    source_col; el segundo mapea cf_key → source_col para los targets
+    `custom_field:{key}`; el tercero, source_col → target, son los targets
+    CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe escribir.
+    Ignora "ignore".
+
+    Los cruzados se descartan porque F-D no está entregada, pero hasta acá se
+    evaporaban: `parse_target` puede devolver ``kind="cross"`` y no había rama
+    para ese caso, así que la columna que el usuario mapeó a mano simplemente no
+    se importaba y nadie se enteraba — ni él ni el operador. Es la clase exacta
+    del incidente ASTERIA: un valor que desaparece y una heurística que lo
+    reemplaza con otra cosa (ver el fallback de `unit_cost_ars` en el camino
+    plano). No se rechaza —hay imports vivos que dependen de ese fallback— pero
+    deja de ser silencioso.
     """
+    from app.application.services.column_mapping_service import (  # noqa: PLC0415
+        parse_target,
+    )
+
     target_to_col: dict[str, str] = {}
     custom_field_cols: dict[str, str] = {}
+    cruzados: dict[str, str] = {}
     for src_col, target in mapping.items():
-        if target == "ignore":
+        parsed = parse_target(target)
+        if parsed.kind in ("ignore", "none"):
             continue
-        if target.startswith("custom_field:"):
-            custom_field_cols[target[len("custom_field:"):]] = src_col
-        elif target not in target_to_col:
+        if parsed.kind == "custom":
+            # F-0: first-wins, igual que la rama canónica. Antes esta rama no
+            # tenía guard: dos columnas que colapsaran al mismo campo propio
+            # hacían que la SEGUNDA pisara a la primera en silencio, así que el
+            # valor guardado dependía del orden de las columnas del Excel
+            # (el incidente ASTERIA, en versión campo propio).
+            if parsed.field not in custom_field_cols:
+                custom_field_cols[parsed.field] = src_col
+        elif parsed.kind == "canonical" and target not in target_to_col:
             target_to_col[target] = src_col
-    return target_to_col, custom_field_cols
+        elif parsed.kind == "cross":
+            cruzados[src_col] = target
+    if cruzados:
+        logger.warning(
+            "ingestion.cross_entity_targets_descartados",
+            columnas=sorted(cruzados),
+            targets=sorted(set(cruzados.values())),
+        )
+    return target_to_col, custom_field_cols, cruzados
 
 
 def _resolve_stock_treatment(
@@ -2533,6 +2880,13 @@ async def insert_confirmed_data(
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
     stock_treatment: str | dict[str, str] | None = None,
+    # F-H3.a: efecto de inventario RESUELTO por hoja (`{context_id: modo}`).
+    # Eje separado de `stock_treatment`, que es contable. None = cada hoja cae
+    # a `informational`: se calcula el impacto y no se toca stock.
+    inventory_effect: dict[str, str] | None = None,
+    # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
+    shipping_decisions: dict[str, str] | None = None,
+    purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
 ) -> dict[str, Any]:
     """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
 
@@ -2564,6 +2918,9 @@ async def insert_confirmed_data(
         source=source,
         uploaded_file_id=uploaded_file_id,
         stock_treatment=stock_treatment,
+        inventory_effect=inventory_effect,
+        shipping_decisions=shipping_decisions,
+        purchase_cost_decisions=purchase_cost_decisions,
     )
     await session.flush()
     await assign_orphan_sales_to_local(session, tenant_id)
@@ -2628,6 +2985,10 @@ async def _insert_confirmed_data_impl(
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
     stock_treatment: str | dict[str, str] | None = None,
+    inventory_effect: dict[str, str] | None = None,
+    # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
+    shipping_decisions: dict[str, str] | None = None,
+    purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -2698,6 +3059,42 @@ async def _insert_confirmed_data_impl(
         "compras_proveedor_identificado": 0,
         "compras_proveedor_anonimo": 0,
         "compras_proveedor_no_resuelto": 0,
+        # F-H2: vender no prueba que hubiera stock. Cuando la ÚNICA evidencia del
+        # producto la aporta este mismo archivo, se compara su fecha contra la de
+        # la venta. Dos casos, que no significan lo mismo y por eso no se suman:
+        #   historial_insuficiente → la evidencia es POSTERIOR a la venta (una
+        #     compra del 20/03 no justifica una venta del 10/03). Se nombra el
+        #     producto: es un dato concreto que el usuario puede revisar.
+        #   historial_sin_fecha    → el producto se declaró sin fecha (un catálogo
+        #     sin columna de adquisición, que es el caso más común). Alcanza para
+        #     la identidad, no para afirmar disponibilidad. Una sola línea
+        #     agregada — advertir por fila sería ruido en cada import.
+        # Ninguno de los dos bloquea: un negocio que arranca con mercadería y sin
+        # las facturas viejas tiene que poder importar su historia.
+        #
+        # Vocabulario del plan (`docs/plans/ingestion-mapping-overhaul.md`, F-H2),
+        # que F-H3 hereda cuando la cola cronológica reproduzca las cantidades:
+        #   identity_resolved     true/false  → false va a /otros, no cuenta acá
+        #   temporally_available  true        → sin contador (no hay nada que avisar)
+        #                         false       → historial_insuficiente
+        #                         unknown     → historial_sin_fecha
+        # "unknown" es NO SE PUDO EVALUAR, que no es "no había": colapsarlo con
+        # `false` sería inventar un juicio que los datos no sostienen.
+        "historial_insuficiente": 0,
+        "historial_sin_fecha": 0,
+        "historial_insuficiente_productos": [],
+        # F-H4: el monto de la línea salió de una cuenta y no del archivo.
+        #   montos_calculados   → el archivo no traía total; es precio × cantidad.
+        #   montos_discrepantes → traía total, difería más de un centavo del
+        #     cálculo y se usó el cálculo. Casi siempre significa que la planilla
+        #     tiene un descuento, un impuesto o una cantidad que mide otra cosa:
+        #     por eso se avisa con el original a la vista, no se corrige callado.
+        #   filas_sin_monto     → ni monto ni pareja precio×cantidad. La fila no
+        #     se descarta: va a "Otros" (y ya suma en `otros`; este contador
+        #     existe para poder decir POR QUÉ está ahí).
+        "montos_calculados": 0,
+        "montos_discrepantes": 0,
+        "filas_sin_monto": 0,
     }
     product_details: list[dict[str, Any]] = []
     file_type = summary.get("file_type", "spreadsheet")
@@ -2733,6 +3130,35 @@ async def _insert_confirmed_data_impl(
     # fila al aplicar stock, y para que con autoflush=False los productos recién
     # creados reciban su stock (session.get no ve pendientes sin flush).
     _product_cache: dict[uuid.UUID, Any] = {}
+    # F-H3.b: uno solo para toda la corrida, compartido por el camino multi-hoja
+    # y el de una sola hoja. Registra lo que el archivo declara sobre el stock;
+    # no aplica nada.
+    _proyeccion_recorder = ImportProjectionRecorder(
+        session, tenant_id, _product_cache, inventory_effect
+    )
+    # F-H3.d.2: el camino de una sola tabla no recorre contextos —no tiene por qué,
+    # hay uno solo—, pero el archivo IGUAL tiene su hoja y el usuario igual pudo
+    # declararle un efecto. Sin esto, un `.xlsx` plano quedaba clavado en el default
+    # aunque hubiera elegido otra cosa, y las ventas no sabrían a qué hoja pertenecen.
+    # Se exige que haya exactamente UNA: con cero no hay nada que declarar, y con
+    # varias este camino no es el que corresponde (esas van por `_insert_multisheet_data`).
+    _ctx_inline: str | None = (
+        next(iter(inventory_effect)) if inventory_effect and len(inventory_effect) == 1 else None
+    )
+
+    def _volcar_impacto_de_inventario() -> None:
+        """Deja el impacto proyectado en ``counts``.
+
+        Se llama en los DOS puntos de salida —el multi-hoja retorna temprano— y
+        no en cada camino de inserción: si sólo estuviera en uno, el archivo se
+        importaría igual y el aviso no aparecería, que es la clase de falla que
+        nadie reporta porque no rompe nada visible.
+        """
+        _proyeccion_recorder.volcar_en(counts)
+        # Cuántas hojas van a aplicar la historia. Sale del registrador, no del
+        # `inventory_effect` que entró: si el respaldo de F-H3.d.6 degradó una hoja,
+        # contarla acá diría que hubo un replay que justamente no va a haber.
+        counts["hojas_con_replay"] = _proyeccion_recorder.hojas_con_replay()
 
     if file_type == "spreadsheet":
         inferred_type = summary.get("inferred_type", "general")
@@ -2758,12 +3184,29 @@ async def _insert_confirmed_data_impl(
                 seen_fp=seen_fp,
                 product_cache=_product_cache,
                 stock_is_purchase_for=stock_is_purchase_for,
+                shipping_decisions=shipping_decisions,
+                purchase_cost_decisions=purchase_cost_decisions,
+                proyeccion=_proyeccion_recorder,
             )
             if seen_fp is not None and _preloaded_fp is not None:
                 await _persist_import_fingerprints(
                     session, tenant_id, seen_fp - _preloaded_fp
                 )
+            _volcar_impacto_de_inventario()
             return counts
+
+        # F-H3.d.6: el archivo de UNA sola tabla también tiene su hoja, y la UI
+        # manda los mapeos cualificados por ella (`file_parsing` arma un contexto
+        # aunque haya uno solo). Sin esto, acá `column_mappings` llegaba vacío y
+        # todo lo que existe SÓLO por mapeo explícito —`quantity`, `unit_price`,
+        # `payment_method`, `category`, los campos personalizados— se perdía: las
+        # columnas con autodetección (fecha, monto, nombre) seguían andando y las
+        # otras no, así que la falla no se veía en el conteo de filas importadas.
+        # El gate de `historical_replay` lo destapó: sin `quantity` toda venta
+        # valía 1 unidad y el respaldo se evaluaba contra una cantidad inventada.
+        # Sólo con UN contexto: con varios, el camino correcto es el multi-hoja.
+        if not column_mappings and context_mappings and len(context_mappings) == 1:
+            column_mappings = next(iter(context_mappings.values()))
 
         # Índice de identidad de clientes para resolver la referencia por fila en
         # ventas (F7c). Incluye los clientes recién creados por el paso maestro de
@@ -2857,15 +3300,17 @@ async def _insert_confirmed_data_impl(
 
         if column_mappings:
             # Construir lookup: target_field → primer source_col que lo mapee
-            for src_col, target in column_mappings.items():
-                if target == "ignore":
-                    continue
-                if target.startswith("custom_field:"):
-                    cf_key = target[len("custom_field:"):]
-                    custom_field_cols[cf_key] = src_col
-                else:
-                    if target not in target_to_col:
-                        target_to_col[target] = src_col
+            # Misma resolución que `_resolve_target_cols` (incluido el first-wins
+            # de la rama custom): son el mismo contrato en dos caminos distintos.
+            _canon, _custom, _cruzados = _resolve_target_cols(column_mappings)
+            target_to_col.update(_canon)
+            custom_field_cols.update(_custom)
+            if _cruzados:
+                # Se descartan (F-D no está entregada) pero el usuario tiene
+                # que enterarse: mapeó una columna a mano y no se importó.
+                counts["targets_cruzados_descartados"] = counts.get(
+                    "targets_cruzados_descartados", 0
+                ) + len(_cruzados)
 
             # Remapear columnas de fecha y monto usando el mapeo explícito
             fecha_col = (
@@ -2876,6 +3321,26 @@ async def _insert_confirmed_data_impl(
             if inferred_type != "stock" and "amount" in target_to_col:
                 venta_col = target_to_col["amount"]
                 gasto_col = target_to_col["amount"]
+            elif inferred_type != "stock":
+                # Gemelo del `skip` de `_add_sale`: sin monto mapeado, la columna
+                # que eligió la heurística no puede ser una que el usuario declaró
+                # para otro campo. `_VENTA_AMOUNT_COLS` contiene "precio_unitario",
+                # así que en la planilla de precio × cantidad —el archivo que F-H4
+                # vino a soportar— `venta_col` caía sobre la columna del precio y
+                # cada fila con cantidad > 1 quedaba reportada como discrepancia
+                # contra un total que el archivo nunca trajo.
+                # Se RESUELVE DE NUEVO sobre las columnas libres, no se dropea: si
+                # el archivo trae además un "total" que nadie mapeó, ese sigue
+                # siendo el monto (y si no cuadra con precio × cantidad, la
+                # discrepancia es real y hay que reportarla). `_find_col` con un
+                # set devuelve la primera columna en orden de archivo, así que
+                # "precio_unitario" le ganaba a "total" por estar antes.
+                _reservadas = set(target_to_col.values()) | set(custom_field_cols.values())
+                _libres = [h for h in headers if h not in _reservadas]
+                if venta_col in _reservadas:
+                    venta_col = _find_col(_libres, _VENTA_AMOUNT_COLS)
+                if gasto_col in _reservadas:
+                    gasto_col = _find_col(_libres, _GASTO_AMOUNT_COLS)
             nombre_col = (
                 target_to_col.get("product_name")
                 or target_to_col.get("name")
@@ -2922,7 +3387,11 @@ async def _insert_confirmed_data_impl(
             inferred_type != "stock"
             and confirmed_fields.get("ventas")
             and (summary.get("has_venta") or inferred_type in ("ventas", "general"))
-            and venta_col
+            # F-H4: sin columna de monto la hoja igual se importa si el usuario
+            # mapeó precio unitario Y cantidad — el total es una cuenta. Sin esta
+            # compuerta la derivación quedaría escrita pero inalcanzable: la hoja
+            # entera se saltearía antes de llegar a la primera fila.
+            and (venta_col or (unit_price_col and qty_col))
         )
         wants_gastos = bool(
             inferred_type != "stock"
@@ -2991,6 +3460,137 @@ async def _insert_confirmed_data_impl(
         # a Otros dos veces. Set aparte de _merch_purchase_rows: acá NO se aplicó
         # una compra (no se creó producto ni stock), solo se difirió a revisión.
         _captured_to_otros_rows: set[int] = set()
+        # F-H6.c: avisos sobre el costo, mismo criterio que en el multi-hoja.
+        _avisos_costo: list[str] = []
+
+        # F-H3.d.3: mismos lectores para el gate y para la inserción. Repetirlos
+        # sería suficiente para que el gate rechace una fila y se importe otra.
+        def _venta_cantidad_plana(row: dict[str, Any]) -> int:
+            # Mismo contrato que `_venta_cantidad` del camino multi-hoja: columna
+            # mapeada primero, heurística de headers después, y piso en 1. Sin la
+            # heurística, una hoja con "cantidad" sin mapear hacía que el gate
+            # validara cada venta como 1 unidad; sin el piso, una cantidad 0 o
+            # negativa se saltaba el gate (`qty <= 0` → `continue`) y entraba así,
+            # cuando por la otra rama del importador habría quedado en 1.
+            qty_raw = row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
+            if qty_raw in (None, "", "None", "nan"):
+                return 1
+            try:
+                return max(1, int(float(str(qty_raw))))
+            except (ValueError, TypeError):
+                return 1
+
+        # F-H4: gemelos de `_venta_cantidad_cruda`/`_venta_precio_unitario` del
+        # camino multi-hoja. SIN piso en 1 y SIN heurística de headers: derivar el
+        # monto lo habilita lo que el usuario mapeó, no una columna que se llama
+        # parecido, y con el piso una celda de cantidad vacía inventaría
+        # `precio × 1` en cada fila.
+        def _venta_cantidad_cruda_plana(row: dict[str, Any]) -> int | None:
+            return (_parse_qty(row.get(qty_col)) or None) if qty_col else None
+
+        def _venta_precio_unitario_plano(row: dict[str, Any]) -> Decimal | None:
+            return _parse_amount(row.get(unit_price_col)) if unit_price_col else None
+
+        def _venta_producto_id_plana(row: dict[str, Any]) -> uuid.UUID | None:
+            return _resolve_product(
+                _by_sku,
+                _by_name,
+                row.get(nombre_col) if nombre_col else None,
+                row.get(sku_col) if sku_col else None,
+                _by_token,
+                by_barcode=_identity_indexes.by_barcode,
+                barcode=row.get(barcode_col) if barcode_col else None,
+            )
+
+        # F-H3.d.3 — el gate en el archivo de una sola tabla.
+        #
+        # Corre ANTES del recorrido porque acá no hay pasadas separadas: una misma
+        # fila puede dar venta, gasto y producto en la misma vuelta. Cuando el
+        # archivo también da de alta productos no hay saldo contra el cual evaluar
+        # —lo carga el propio archivo—, y ese caso el confirm ya lo rechaza antes
+        # de tomar el lease (F-H3.d.6).
+        #
+        # Esto es el RESPALDO de aquel rechazo, para la divergencia posible entre
+        # los dos: el confirm mira el mapeo declarado y acá las columnas ya están
+        # resueltas, incluidas las autodetectadas sin mapeo. Si igual llega, la
+        # hoja se degrada a `informational` y queda contado. No levanta excepción:
+        # a esta altura el lease está tomado y la operación en curso: se preserva
+        # el import, pero NUNCA se reporta como un replay que se validó.
+        _sin_respaldo_plano: dict[tuple[str, int], UnbackedRow] = {}
+        if (
+            wants_ventas
+            and _ctx_inline
+            and _proyeccion_recorder.effect_for(_ctx_inline) == HISTORICAL_REPLAY
+        ):
+            if replay_no_gateable(
+                hoja_unica=True,
+                pide_replay=True,
+                da_de_alta_productos=wants_productos,
+                trae_ventas=True,
+                # El gate se calcula ACÁ, antes del bucle, con el stock previo al
+                # archivo; las compras de este mismo archivo lo suman recién
+                # adentro del bucle (`_apply_purchase_to_stock`). Gatear igual
+                # mandaría a "Otros" ventas que las compras de la fila de abajo
+                # respaldan — y el mismo libro partido en hojas importa bien.
+                trae_compras=wants_gastos,
+            ):
+                counts["replay_degradado"] = counts.get("replay_degradado", 0) + 1
+                _proyeccion_recorder.degradar_a_informational(_ctx_inline)
+                logger.warning(
+                    "ingestion.replay.degradado_a_informational",
+                    motivo=MOTIVO_REPLAY_NO_GATEABLE,
+                    context_id=_ctx_inline,
+                    uploaded_file_id=str(uploaded_file_id) if uploaded_file_id else None,
+                )
+            else:
+                _candidatas_planas: list[ReplayRow] = []
+                for _idx, _row in enumerate(rows):
+                    _raw_fecha = _row.get(fecha_col) if fecha_col else None
+                    _fecha = _parse_date(_raw_fecha) if _raw_fecha is not None else None
+                    _pid = _venta_producto_id_plana(_row)
+                    if _pid is None or _fecha is None:
+                        continue
+                    _candidatas_planas.append(
+                        ReplayRow(
+                            key=(_ctx_inline, _idx),
+                            product_id=_pid,
+                            day=_fecha.date(),
+                            qty=_venta_cantidad_plana(_row),
+                        )
+                    )
+                if _candidatas_planas:
+                    _saldos_planos: dict[uuid.UUID, int] = {}
+                    for _pid in {c.product_id for c in _candidatas_planas}:
+                        _prod = _product_cache.get(_pid) or await session.get(Product, _pid)
+                        if _prod is not None and _prod.tenant_id == tenant_id:
+                            _saldos_planos[_pid] = int(_prod.stock_units)
+                    # `ReplayRow.key` es `Hashable` porque el gate lo usan dos
+                    # momentos distintos (acá una tupla hoja+fila, en el apply el
+                    # id de la venta). Acá sabemos cuál de los dos es: lo pusimos
+                    # nosotros tres líneas arriba.
+                    _sin_respaldo_plano = {
+                        cast("tuple[str, int]", r.key): r
+                        for r in rows_without_stock_backing(_candidatas_planas, _saldos_planos)
+                    }
+
+        # F-H6.c: misma pasada previa que en el camino multi-hoja. Va acá y no
+        # dentro del bucle porque repartir un costo compartido exige ver el grupo
+        # entero — y va en LOS DOS caminos porque el mismo archivo tiene que dar
+        # el mismo costo entre como tabla suelta o como solapa. Esa asimetría este
+        # importador ya la pagó dos veces.
+        _costos_por_fila: dict[int, LineCost] = {}
+        _grupos_de_compra = PurchaseGroupPlan()
+        if wants_gastos:
+            (
+                _costos_por_fila,
+                _celdas_ilegibles,
+                _grupos_de_compra,
+            ) = _planificar_costos_de_la_hoja(
+                None, rows, target_to_col, purchase_cost_decisions
+            )
+            for _col, _cuantas in _celdas_ilegibles.items():
+                counts["ajustes_ilegibles"] = counts.get("ajustes_ilegibles", 0) + _cuantas
+                _avisos_costo.append(texto_del_ajuste_ilegible("", _col, _cuantas))
 
         for row_index, row in enumerate(rows):
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
@@ -3023,8 +3623,21 @@ async def _insert_confirmed_data_impl(
             # puro, que no necesita fecha) NO se rutean: tx_date=None nunca llega a
             # un registro porque el `if amount:` interno de cada bloque lo protege.
             if tx_date is None:
+                # F-H4: el monto de una venta puede ser una CUENTA, así que acá hay
+                # que resolverlo igual que abajo. Leer sólo la columna rompe el
+                # invariante que este bloque declara: en una hoja de precio ×
+                # cantidad no hay columna de monto, la fila no se rutea, y después
+                # el bloque de ventas SÍ calcula un monto → se arma un `SaleEntry`
+                # con `transaction_date=None` y el import muere con un NOT NULL.
+                # De paso, la sugerencia de "Otros" dice venta y no gasto.
                 _venta_amount = (
-                    _parse_amount(row.get(venta_col)) if (wants_ventas and venta_col) else None
+                    resolve_line_amount(
+                        amount=_parse_amount(row.get(venta_col)) if venta_col else None,
+                        unit_price=_venta_precio_unitario_plano(row),
+                        quantity=_venta_cantidad_cruda_plana(row),
+                    ).amount
+                    if wants_ventas
+                    else None
                 )
                 _gasto_amount = (
                     _parse_amount(row.get(gasto_col)) if (wants_gastos and gasto_col) else None
@@ -3051,18 +3664,40 @@ async def _insert_confirmed_data_impl(
                         row_index=row_index,
                     )
 
+            _falta_stock = _sin_respaldo_plano.get((_ctx_inline or "", row_index))
+            if wants_ventas and not _captured_to_otros and _falta_stock is not None:
+                # F-H3.d.3: la hoja pidió aplicar su historia y esta venta no tiene
+                # unidades que la respalden → "Otros", no `sales_entries`. Ver el
+                # bloque equivalente del camino multi-hoja.
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=(
+                        "Venta sin stock que la respalde: al "
+                        f"{_falta_stock.day.strftime('%d/%m/%Y')} quedaban "
+                        f"{_falta_stock.disponible} unidades y la venta es de "
+                        f"{_falta_stock.qty}"
+                    ),
+                    suggested_entity="sale",
+                )
+                counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
+                _captured_to_otros_rows.add(row_index)
+                _captured_to_otros = True
             if wants_ventas and not _captured_to_otros:
-                assert venta_col is not None  # wants_ventas implica venta_col presente
-                amount = _parse_amount(row.get(venta_col))
+                # F-H4: el monto lo trae el archivo o sale de precio × cantidad.
+                # `venta_col` puede ser None: la hoja entró por la pareja mapeada.
+                _linea = resolve_line_amount(
+                    amount=_parse_amount(row.get(venta_col)) if venta_col else None,
+                    unit_price=_venta_precio_unitario_plano(row),
+                    quantity=_venta_cantidad_cruda_plana(row),
+                )
+                amount = _linea.amount
                 if amount:
-                    # Cantidad
-                    qty_raw = row.get(qty_col) if qty_col else None
-                    qty: int = 1
-                    if qty_raw not in (None, "", "None", "nan"):
-                        try:
-                            qty = int(float(str(qty_raw)))
-                        except (ValueError, TypeError):
-                            qty = 1
+                    qty = _venta_cantidad_plana(row)
 
                     # Notas
                     notes_raw = row.get(notes_col) if notes_col else None
@@ -3087,14 +3722,13 @@ async def _insert_confirmed_data_impl(
                         for k, v in custom_field_cols.items()
                         if row.get(v) is not None
                     }
+                    _registrar_monto_derivado(cf, _linea, counts)
 
                     entry = SaleEntry(
                         tenant_id=tenant_id,
                         amount=amount,
                         quantity=qty,
-                        unit_price=(
-                            _parse_amount(row.get(unit_price_col)) if unit_price_col else None
-                        ),
+                        unit_price=_venta_precio_unitario_plano(row),
                         transaction_date=tx_date,
                         payment_method=pay_str,
                         notes=notes_str,
@@ -3111,6 +3745,14 @@ async def _insert_confirmed_data_impl(
                         by_barcode=_identity_indexes.by_barcode,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
+                    # F-H3.b: la venta entra a la proyección. NO descuenta stock —
+                    # bajo el default (`informational`) sólo se calcula qué pasaría.
+                    # Una fila sin fecha ya se fue a /otros más arriba y nunca llega
+                    # acá; el guard lo hace explícito en vez de darlo por sabido.
+                    if tx_date is not None:
+                        await _proyeccion_recorder.registrar_venta(
+                            entry.product_id, tx_date.date(), qty, _ctx_inline
+                        )
                     # F7c: resolución de cliente por fila — matched/anonymous/
                     # unresolved. Nunca crea: solo vincula contra un cliente
                     # existente (maestro importado arriba o ya en la DB) o cae al
@@ -3131,6 +3773,10 @@ async def _insert_confirmed_data_impl(
                         if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                             cf["_customer_reference_raw"] = _cust_ref.raw_value
                     _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+                    # F-H3.d.2: de qué hoja vino, para que el replay se pueda aplicar
+                    # por hoja y no al archivo entero (ver IMPORT_CONTEXT_FIELD).
+                    if _ctx_inline:
+                        cf[IMPORT_CONTEXT_FIELD] = _ctx_inline
                     if cf:
                         entry.custom_fields = cf
                     # Mejora D: trazabilidad import → fila origen.
@@ -3264,16 +3910,38 @@ async def _insert_confirmed_data_impl(
                     # Costo unitario: solo de una columna inequívoca y DISTINTA
                     # de la del monto — "costo" suele ser el total de la línea y
                     # escribirlo como unit_cost corrompería el margen.
-                    exp_cost_col = (
-                        target_to_col.get("unit_cost_ars")
-                        if column_mappings
-                        else _find_col(headers, _COSTO_UNITARIO_COLS)
+                    # El mapeo explícito gana, la heurística RELLENA — no es un
+                    # switch todo-o-nada. `unit_cost_ars` no existe en el catálogo
+                    # de `expense` (es cross-entity y `_resolve_target_cols`
+                    # descarta los cross), así que acá `target_to_col` nunca lo
+                    # trae: con el switch viejo, cualquier archivo que llegara con
+                    # mapeos perdía el costo unitario de TODAS sus compras y el
+                    # margen quedaba en cero. Su gemelo multi-hoja siempre usó el
+                    # `or` (ver `_uc_col`); el mismo archivo daba resultados
+                    # distintos según viniera como hoja suelta o como solapa.
+                    exp_cost_col = target_to_col.get("unit_cost_ars") or _find_col(
+                        headers, _COSTO_UNITARIO_COLS
                     )
                     exp_unit_cost = (
                         _parse_amount(row.get(exp_cost_col))
                         if exp_cost_col and exp_cost_col != gasto_col
                         else None
                     )
+                    # F-H6.c/d: si la hoja declaró ajustes o se repartió un costo
+                    # compartido, el costo FINAL de la línea va al PRODUCTO, pero
+                    # NO pisa el precio facturado, que es lo que registra el
+                    # movimiento. `unit_cost_final` es None cuando la fila no trae
+                    # cantidad: sin divisor no se inventa un costo unitario.
+                    _costo_calculado = _costos_por_fila.get(row_index)
+                    _costo_final_fila: Decimal | None = None
+                    _incluye_flete_fila: bool | None = None
+                    if _costo_calculado is not None:
+                        _incluye_flete_fila = bool(
+                            _costo_calculado.shipping_allocated
+                            or _costo_calculado.shipping_line_applied
+                        )
+                        if _costo_calculado.unit_cost_final:
+                            _costo_final_fila = _costo_calculado.unit_cost_final
                     # Compra de mercadería = gasto COGS+caja Y alta/reposición de
                     # producto. Señal a nivel de fila: nombre de producto + cantidad>0
                     # (un libro de compras con esas columnas). Se CREA el producto
@@ -3294,7 +3962,13 @@ async def _insert_confirmed_data_impl(
                             sku=_exp_sku,
                             brand=None,
                             barcode=_exp_barcode,
-                            unit_cost=exp_unit_cost,
+                            # Un producto que nace de esta compra arranca con el
+                            # costo FINAL: es su costo de adquisición real.
+                            unit_cost=(
+                                _costo_final_fila
+                                if _costo_final_fila is not None
+                                else exp_unit_cost
+                            ),
                             indexes=_identity_indexes,
                             cache=products_by_identity_key,
                             product_cache=_product_cache,
@@ -3378,6 +4052,18 @@ async def _insert_confirmed_data_impl(
                             _bump_reference_counts(counts, "compras_proveedor", "matched")
                         if cf:
                             expense.custom_fields = cf
+                        # F-H3.b: ANTES de `_apply_purchase_to_stock`, que hace
+                        # `stock_units += qty`. Registrar después leería un saldo
+                        # que ya incluye esta compra y la contaría dos veces.
+                        # Sin fecha la fila ya se fue a /otros (ver el mismo guard
+                        # en la venta).
+                        if tx_date is not None:
+                            await _proyeccion_recorder.registrar_compra(
+                                expense.product_id,
+                                tx_date.date(),
+                                _parse_qty(exp_qty_raw),
+                                _ctx_inline,
+                            )
                         await _apply_purchase_to_stock(
                             session,
                             tenant_id,
@@ -3387,6 +4073,11 @@ async def _insert_confirmed_data_impl(
                             balance_index=_balance_index,
                             product_cache=_product_cache,
                             source_row_ref=_source_row_ref(_row_anchor),
+                            costo_final=_costo_final_fila,
+                            costo_incluye_flete=_incluye_flete_fila,
+                            product_details=(
+                                product_details if return_details else None
+                            ),
                         )
                         # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
                         # stock (producto ligado + cantidad>0), marcarla para que el
@@ -3399,6 +4090,46 @@ async def _insert_confirmed_data_impl(
                             expense.source_row_ref = _source_row_ref(_row_anchor)
                         session.add(expense)
                         counts["gastos"] += 1
+
+            # F-H4: validación final de la fila. Si no produjo NADA —ni venta, ni
+            # gasto, ni captura— y no es una fila de relleno, se va a "Otros" con el
+            # motivo en vez de desaparecer en silencio, que es lo que pasaba hasta
+            # acá con toda fila sin monto parseable.
+            #
+            # Va DESPUÉS de las dos ramas, no dentro de la de ventas: una fila sin
+            # monto de venta puede ser un gasto perfectamente válido, y capturarla
+            # antes la sacaría de la rama de gastos (`not _captured_to_otros`).
+            #
+            # `wants_productos` la excluye a propósito: en este camino el bucle de
+            # productos recorre las MISMAS filas más abajo, así que en un archivo
+            # "general" una fila de catálogo pasa primero por acá sin monto y recién
+            # después se convierte en Product. Capturarla la mandaría a la bandeja Y
+            # —vía `_captured_to_otros_rows`— haría que el bucle de productos la
+            # saltee: el catálogo entero terminaría en "Otros" sin crear un producto.
+            if (
+                (wants_ventas or wants_gastos)
+                and not wants_productos
+                and not _captured_to_otros
+                and counts["ventas"] + counts["gastos"] == _inserted_before
+                and _fila_con_contenido(row)
+            ):
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=(
+                        "Fila sin monto: no se pudo registrar. Mapeá la columna "
+                        "del monto, o las del precio unitario y la cantidad para "
+                        "que Véktor lo calcule"
+                    ),
+                    suggested_entity="sale" if wants_ventas else "expense",
+                )
+                counts["filas_sin_monto"] += 1
+                _captured_to_otros_rows.add(row_index)
+                _captured_to_otros = True
 
             # B1: registrar la huella si la fila produjo output (venta/gasto O
             # captura a Otros — review F2 #6: una captura a Otros es un resultado
@@ -3642,6 +4373,11 @@ async def _insert_confirmed_data_impl(
                         existing.list_price_ars = list_price
                     if stock_val > 0:
                         _delta = stock_val - existing.stock_units
+                        # F-H3.b: el catálogo declara un ABSOLUTO (pisa la apertura,
+                        # no se le suma). Antes del `=`, que ya cambia el previo.
+                        _proyeccion_recorder.declarar_catalogo(
+                            existing.id, name, int(existing.stock_units), stock_val
+                        )
                         existing.stock_units = stock_val
                         # FASE 3 + A2/A5: audit del cambio de stock + sync de balance;
                         # y si entró stock real (_delta>0) con costo, su COGS.
@@ -3856,6 +4592,10 @@ async def _insert_confirmed_data_impl(
                     _register_product_identity_cache(
                         products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
                     )
+                    # F-H3.b: producto NUEVO → el saldo previo al archivo es 0.
+                    _proyeccion_recorder.declarar_catalogo(
+                        new_product_id, name, 0, stock_val
+                    )
                     # FASE 3 + A2/A5: audit del ingreso inicial de stock + balance +,
                     # si trae stock con costo, su COGS (stock inicial = compra real).
                     await _apply_catalog_stock(
@@ -4020,6 +4760,8 @@ async def _insert_confirmed_data_impl(
                 for text_row in summary.get("gastos_detectados", []):
                     _add_text_expense(text_row)
 
+    _volcar_impacto_de_inventario()
+
     await session.flush()
     # Persistir en lote (idempotente) las huellas nuevas del camino batch.
     if seen_fp is not None and _preloaded_fp is not None:
@@ -4088,6 +4830,13 @@ async def _insert_multisheet_data(
     product_cache: dict[uuid.UUID, Any] | None = None,
     # Resuelve el tratamiento POR HOJA (ver `stock_is_purchase_for` en el caller).
     stock_is_purchase_for: Callable[[str | None], bool] = lambda _ctx: False,
+    # F-H3.b: registrador del impacto sobre el stock. Compartido con el camino
+    # de una sola hoja para que la proyección salga igual por los dos.
+    proyeccion: ImportProjectionRecorder | None = None,
+    # F-H6.b: `{context_id: "una_por_hoja"|"una_por_fila"}` — qué hacer con los
+    # envíos sin comprobante de cada hoja. Sin entrada, no se cobran.
+    shipping_decisions: dict[str, str] | None = None,
+    purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -4104,6 +4853,16 @@ async def _insert_multisheet_data(
     confirmed_fields = confirmed_fields or {}
     context_mappings = context_mappings or {}
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
+    # F-H6.c: avisos sobre el costo que la persona tiene que ver — celdas de
+    # ajuste ilegibles y columnas mapeadas que no movieron ningún número. Viajan
+    # en `counts` porque es lo que el confirm ya convierte en warnings visibles.
+    _avisos_costo: list[str] = []
+    #: `{context_id: label}` para que los avisos nombren la hoja como la ve el
+    #: usuario y no por su id interno.
+    _etiqueta_de_contexto: dict[str, str] = {
+        str(_c.get("context_id") or ""): str(_c.get("label") or _c.get("context_id") or "")
+        for _c in (summary.get("mapping_contexts") or [])
+    }
 
     # FASE 3: índice de catálogo para el LINK de ventas/gastos/compras (en memoria).
     _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
@@ -4154,6 +4913,58 @@ async def _insert_multisheet_data(
     # F2-T2: índices de identidad pre-cargados UNA vez para esta corrida (no un
     # SELECT por fila) — alimentan el motor de resolución en _add_product.
     _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
+    # F-H2: desde cuándo ESTE archivo puede probar que el producto existía.
+    # Solo los productos que el archivo DECLARA (catálogo o compra de mercadería).
+    # Un producto que ya estaba en la base queda afuera a propósito: tiene su
+    # propia historia y este import no es la autoridad sobre ella.
+    _evidencia_de_producto: dict[uuid.UUID, datetime | None] = {}
+
+    def _declarar_evidencia(
+        product_id: uuid.UUID | None,
+        fecha: datetime | None,
+        *,
+        solo_si_conocido: bool = False,
+    ) -> None:
+        """Registra que este archivo declara el producto, y desde cuándo.
+
+        ``None`` significa "declarado sin fecha" y es ABSORBENTE: si alguna fila
+        declaró el producto sin fecha, no se puede afirmar disponibilidad para
+        ninguna venta, y una fecha posterior de otra fila no arregla eso. Entre
+        fechas gana la más temprana, que es la que puede justificar más ventas.
+
+        ``solo_si_conocido`` es para las filas que VINCULAN sin declarar (la
+        segunda compra del mismo producto): adelantan la fecha si el archivo ya
+        lo había declarado, pero no meten acá un producto preexistente. Esa
+        distinción es la que evita el falso positivo obvio — un producto con
+        años de historia propia no queda "sin justificar" porque este archivo
+        traiga una compra reciente.
+        """
+        if product_id is None:
+            return
+        if product_id not in _evidencia_de_producto:
+            if not solo_si_conocido:
+                _evidencia_de_producto[product_id] = fecha
+            return
+        previa = _evidencia_de_producto[product_id]
+        if previa is None or fecha is None:
+            _evidencia_de_producto[product_id] = None
+        else:
+            _evidencia_de_producto[product_id] = min(previa, fecha)
+
+    def _evaluar_historial(
+        product_id: uuid.UUID | None, tx_date: datetime, nombre: str | None
+    ) -> None:
+        """¿Este archivo puede sostener que el producto existía al vender?"""
+        if product_id is None or product_id not in _evidencia_de_producto:
+            return
+        evidencia = _evidencia_de_producto[product_id]
+        if evidencia is None:
+            counts["historial_sin_fecha"] += 1
+        elif evidencia.date() > tx_date.date():
+            counts["historial_insuficiente"] += 1
+            _productos = counts["historial_insuficiente_productos"]
+            if nombre and nombre not in _productos:
+                _productos.append(nombre)
 
     def _val(row: dict[str, Any], col: str | None, keywords: set[str] | tuple[str, ...]) -> Any:
         # Columna explícita (mapeo) si existe; si no, detección por keyword.
@@ -4169,24 +4980,116 @@ async def _insert_multisheet_data(
                 out[cf_key] = str(v)
         return out
 
+    # F-H3.d.3: los tres datos que el gate de replay y la inserción TIENEN que leer
+    # igual. Extraídos en vez de repetidos: si el gate resolviera el producto o la
+    # fecha con su propia copia, alcanzaría con que una divergiera para que rechace
+    # una fila y se importe otra — el defecto que F-0 vino a cerrar.
+    def _venta_fecha(row: dict[str, Any], cols: dict[str, str]) -> datetime | None:
+        raw = _val(row, cols.get("transaction_date") or cols.get("expense_date"), _FECHA_COLS)
+        return _parse_date(raw) if raw is not None else None
+
+    def _venta_cantidad(row: dict[str, Any], cols: dict[str, str]) -> int:
+        qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
+        if qty_raw in (None, "", "None", "nan"):
+            return 1
+        try:
+            return max(1, int(float(str(qty_raw))))
+        except (ValueError, TypeError):
+            return 1
+
+    # F-H4: los dos datos que habilitan calcular el monto. Sólo por MAPEO
+    # EXPLÍCITO —nada de `_val`, que cae a la heurística de headers—: derivar el
+    # total es seguro porque el usuario declaró qué columna es el precio unitario
+    # y cuál la cantidad. Adivinarlo por el nombre del header es exactamente lo
+    # que rompió el import de ASTERIA (ver `domain/line_amount.py` y F10).
+    def _venta_cantidad_cruda(row: dict[str, Any], cols: dict[str, str]) -> int | None:
+        """Cantidad tal como la declaró el archivo, sin el piso en 1.
+
+        `_venta_cantidad` pone piso en 1 para que el gate y la inserción no
+        salteen filas; usar ESA para derivar le inventaría `precio × 1` a cada
+        fila con la celda de cantidad vacía. `_parse_qty` ya devuelve 0 para
+        vacía, ilegible o negativa; el `or None` lo vuelve "no hay cantidad".
+        """
+        col = cols.get("quantity")
+        return (_parse_qty(row.get(col)) or None) if col else None
+
+    def _venta_precio_unitario(
+        row: dict[str, Any], cols: dict[str, str]
+    ) -> Decimal | None:
+        col = cols.get("unit_price")
+        return _parse_amount(row.get(col)) if col else None
+
+    def _venta_nombre_producto(row: dict[str, Any], cols: dict[str, str]) -> Any:
+        return _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
+
+    def _venta_producto_id(row: dict[str, Any], cols: dict[str, str]) -> uuid.UUID | None:
+        return _resolve_product(
+            _by_sku,
+            _by_name,
+            _venta_nombre_producto(row, cols),
+            _val(row, cols.get("sku"), _SKU_COLS),
+            _by_token,
+            by_barcode=_identity_indexes.by_barcode,
+            barcode=_val(row, cols.get("barcode"), _BARCODE_COLS),
+        )
+
     async def _add_sale(
         row: dict[str, Any],
         cols: dict[str, str],
         cf_cols: dict[str, str],
         row_ref: str | None = None,
+        context_id: str | None = None,
     ) -> bool:
-        """Inserta una venta. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
+        """Inserta una venta. Devuelve ``True`` si produjo output persistido."""
         amount_col = cols.get("amount")
+        # Sin columna de monto mapeada, la heurística NO puede releer una columna
+        # que el usuario declaró para otro campo: `_VENTA_AMOUNT_COLS` contiene
+        # "precio_unitario", así que en una planilla de precio × cantidad el
+        # "monto del archivo" salía de la columna del precio y toda fila con
+        # cantidad > 1 se reportaba como discrepancia contra un total que nadie
+        # escribió.
+        _mapeadas = set(cols.values())
         amount = (
             _parse_amount(row.get(amount_col))
             if amount_col
-            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))
-            or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
+            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS, skip=_mapeadas))
+            or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS, skip=_mapeadas))
         )
-        if not amount:
-            return False
-        raw_date = _val(row, cols.get("transaction_date") or cols.get("expense_date"), _FECHA_COLS)
-        tx_date = _parse_date(raw_date) if raw_date is not None else None
+        # F-H4: si el archivo no trae el total pero sí el precio unitario y la
+        # cantidad, el total es una cuenta. Y si los trae todos y no cuadran, manda
+        # el cálculo: el unitario es el dato y el monto su consecuencia.
+        _unit_price = _venta_precio_unitario(row, cols)
+        _linea = resolve_line_amount(
+            amount=amount,
+            unit_price=_unit_price,
+            quantity=_venta_cantidad_cruda(row, cols),
+        )
+        if _linea.amount is None:
+            # Validación final de la fila: sin monto y sin la pareja que lo calcule
+            # no hay venta que registrar, pero tampoco puede desaparecer sin dejar
+            # rastro. Va a "Otros" con el motivo, salvo que sea una fila de relleno
+            # (ahí devuelve False: no hay output, no se quema la huella y una
+            # relectura corregida puede reintentarla).
+            if not _fila_con_contenido(row):
+                return False
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,  # sin headers de hoja en este scope
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=(
+                    "Fila sin monto: no se pudo registrar la venta. Mapeá la "
+                    "columna del monto, o las del precio unitario y la cantidad "
+                    "para que Véktor lo calcule"
+                ),
+                suggested_entity="sale",
+            )
+            counts["filas_sin_monto"] += 1
+            return True
+        amount = _linea.amount
+        tx_date = _venta_fecha(row, cols)
         if tx_date is None:
             # F6-A2: sin fecha reconocible la venta va a /otros — no se inventa "hoy"
             # (invariante 2d). Devuelve True: la captura es output PERSISTIDO, así el
@@ -4202,27 +5105,20 @@ async def _insert_multisheet_data(
                 suggested_entity="sale",
             )
             return True
-        qty: int = 1
-        qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
-        if qty_raw not in (None, "", "None", "nan"):
-            try:
-                qty = max(1, int(float(str(qty_raw))))
-            except (ValueError, TypeError):
-                qty = 1
+        qty = _venta_cantidad(row, cols)
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         notes = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
         # Canónico: antes se guardaba el texto crudo del archivo ("efectivo",
         # "mercadopago") y filtros/arqueo quedaban inconsistentes.
         pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
         pay = normalize_payment_method(pay_raw) if pay_raw else "cash"
-        # Precio realmente vendido: solo por mapeo explícito, nunca derivado de
-        # amount/quantity (ver models/transaction.py).
-        _up_col = cols.get("unit_price")
         entry = SaleEntry(
             tenant_id=tenant_id,
             amount=amount,
             quantity=qty,
-            unit_price=_parse_amount(row.get(_up_col)) if _up_col else None,
+            # Precio realmente vendido: solo por mapeo explícito, nunca derivado de
+            # amount/quantity (ver models/transaction.py).
+            unit_price=_unit_price,
             transaction_date=tx_date,
             payment_method=pay,
             notes=notes or "Importado desde archivo",
@@ -4230,16 +5126,21 @@ async def _insert_multisheet_data(
             source_upload_id=uploaded_file_id,
         )
         cf = _custom_fields(row, cf_cols)
+        _registrar_monto_derivado(cf, _linea, counts)
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
-        entry.product_id = _resolve_product(
-            _by_sku,
-            _by_name,
-            _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS),
-            _val(row, cols.get("sku"), _SKU_COLS),
-            _by_token,
-            by_barcode=_identity_indexes.by_barcode,
-            barcode=_val(row, cols.get("barcode"), _BARCODE_COLS),
-        )
+        _venta_producto = _venta_nombre_producto(row, cols)
+        entry.product_id = _venta_producto_id(row, cols)
+        # F-H2: la venta se vincula igual; lo que NO se afirma es que hubiera
+        # stock. Vincular es identidad, no disponibilidad.
+        _evaluar_historial(entry.product_id, tx_date, _clean_str(_venta_producto, 299))
+        # F-H3.b: la venta entra a la proyección. NO descuenta stock — bajo el
+        # default (`informational`) sólo se calcula qué pasaría. Si el producto
+        # no está registrado todavía es porque nada de este archivo lo tocó, así
+        # que su stock actual ES el previo.
+        if proyeccion is not None:
+            await proyeccion.registrar_venta(
+                entry.product_id, tx_date.date(), qty, context_id
+            )
         # F7c: resolución de cliente por fila — matched/anonymous/unresolved.
         # Nunca crea: solo vincula (maestro importado arriba o ya en la DB) o cae
         # al sentinela "Local" con traza si la referencia no matchea.
@@ -4259,6 +5160,9 @@ async def _insert_multisheet_data(
             if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                 cf["_customer_reference_raw"] = _cust_ref.raw_value
         _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+        # F-H3.d.2: de qué hoja vino (ver IMPORT_CONTEXT_FIELD).
+        if context_id:
+            cf[IMPORT_CONTEXT_FIELD] = context_id
         if cf:
             entry.custom_fields = cf
         if row_ref is not None:
@@ -4267,20 +5171,255 @@ async def _insert_multisheet_data(
         counts["ventas"] += 1
         return True
 
+    async def _cobrar_envios_de_la_hoja(
+        ctx_id: str | None,
+        rows: list[dict[str, Any]],
+        cols: dict[str, str],
+        grupos: PurchaseGroupPlan | None = None,
+    ) -> None:
+        """F-H6.b: crea UN gasto de logística por envío declarado en la hoja.
+
+        Una planilla de compras repite el mismo flete en cada línea del remito;
+        importarlo fila por fila multiplica el costo de logística por la cantidad
+        de artículos. La agrupación es por comprobante —proveedor + número—, que
+        es lo único que permite AFIRMAR que dos filas comparten un envío.
+
+        Sin esa identidad no se cobra nada y se reporta: un 2.000 repetido diez
+        veces es indistinguible de diez envíos de 2.000, y elegir uno de los dos
+        sería inventar un dato contable (regla no-invention).
+
+        El gasto es OPEX ``LOGISTICS``, sin producto ni stock — mismo tratamiento
+        que ya le da el remito manual (``supplier_receipt``), para que el mismo
+        hecho de negocio no quede clasificado de dos formas según por dónde entró.
+        """
+        _envio_col = cols.get("shipping_cost")
+        _flete_linea_col = cols.get("shipping_cost_line")
+        if not _envio_col and not _flete_linea_col:
+            return
+        _comp_col = cols.get("invoice_number")
+        _prov_col = cols.get("supplier_name")
+
+        def _leer_envios(col: str) -> list[ShippingLine]:
+            leidas: list[ShippingLine] = []
+            for _idx, _row in enumerate(rows):
+                _monto = _parse_amount(_row.get(col))
+                if _monto is None:
+                    continue
+                leidas.append(
+                    ShippingLine(
+                        row_index=_idx,
+                        # Se normalizan acá porque la clave de agrupación tiene que ser
+                        # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
+                        # el mismo comprobante.
+                        supplier=(_clean_str(_row.get(_prov_col), 199) or "")
+                        .strip()
+                        .lower()
+                        if _prov_col
+                        else "",
+                        invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
+                        if _comp_col
+                        else "",
+                        amount=_monto,
+                    )
+                )
+            return leidas
+
+        async def _emitir_cargo(
+            _cargo: ShippingCharge,
+            *,
+            namespace: str,
+            descripcion: str,
+            atribuido_a_inventario: bool,
+        ) -> bool:
+            """Crea el gasto de logística de UN cargo. Devuelve si lo creó."""
+            # Idempotencia con namespace propio: la clave es el CARGO (comprobante
+            # + cifra), no la fila. Re-confirmar el archivo no puede volver a
+            # cobrar el mismo flete, y usar el ancla de la fila lo ataría a una
+            # línea arbitraria del grupo. El namespace separa los dos fletes: son
+            # cargos distintos y uno no puede tapar al otro.
+            _anchor = (
+                _import_row_anchor(
+                    tenant_id,
+                    uploaded_file_id,
+                    f"{namespace}:{ctx_id or ''}:{_cargo.invoice}"
+                    + (f":fila{_cargo.row_indexes[0]}" if not _cargo.invoice else ""),
+                    int(_cargo.amount * 100),
+                )
+                if uploaded_file_id is not None
+                else None
+            )
+            if _anchor is not None and await _import_row_seen(
+                session, tenant_id, _anchor, seen_fp
+            ):
+                return False
+
+            _fila = rows[_cargo.row_indexes[0]]
+            _raw_fecha = _val(
+                _fila, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS
+            )
+            _fecha = _parse_date(_raw_fecha) if _raw_fecha is not None else None
+            if _fecha is None:
+                # Sin fecha no se inventa "hoy" (invariante 2d). El envío queda sin
+                # cobrar y se cuenta: el resto de la hoja entra igual.
+                counts["envios_sin_fecha"] = counts.get("envios_sin_fecha", 0) + 1
+                return False
+
+            _sup_id: uuid.UUID | None = None
+            _sup_nombre = _clean_str(_fila.get(_prov_col), 199) if _prov_col else None
+            if _sup_nombre and _supplier_ref_mode != "link_only":
+                _sup_id, _sup_nombre = await _resolve_or_create_supplier(
+                    session,
+                    tenant_id,
+                    _sup_nombre,
+                    _supplier_index,
+                    counts.setdefault("proveedores_creados_ids", []),
+                )
+
+            session.add(
+                ExpenseEntry(
+                    tenant_id=tenant_id,
+                    amount=_cargo.amount.quantize(Decimal("0.01")),
+                    category="LOGISTICS",
+                    expense_type="OPEX",
+                    transaction_date=_fecha,
+                    description=descripcion[:500],
+                    is_recurring=False,
+                    payment_method="transfer",
+                    provenance="REAL",
+                    supplier_id=_sup_id,
+                    supplier_name=_sup_nombre,
+                    product_id=None,
+                    source_upload_id=uploaded_file_id,
+                    # El flete que se capitalizó en el costo del stock sigue siendo
+                    # una salida de caja y se registra igual, pero los agregados de
+                    # RESULTADO no pueden contarlo otra vez: ya está adentro del
+                    # valor del inventario. La marca es el hecho consumado, no la
+                    # intención — se pone sólo si el costo efectivamente lo comió.
+                    custom_fields=(
+                        {ATRIBUIDO_A_INVENTARIO_FIELD: True}
+                        if atribuido_a_inventario
+                        else None
+                    ),
+                )
+            )
+            if _anchor is not None:
+                await _register_import_row_fingerprint(session, tenant_id, _anchor, seen_fp)
+            return True
+
+        if _envio_col:
+            _lineas = _leer_envios(_envio_col)
+            if _lineas:
+                # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
+                # cobra lo que no tiene comprobante — no hay default, a propósito.
+                plan = plan_shipping_charges(
+                    _lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
+                )
+                if plan.sin_identidad:
+                    counts["envios_sin_comprobante"] = counts.get(
+                        "envios_sin_comprobante", 0
+                    ) + len(plan.sin_identidad)
+                if plan.cifras_distintas:
+                    counts["envios_cifras_distintas"] = counts.get(
+                        "envios_cifras_distintas", 0
+                    ) + len(plan.cifras_distintas)
+                _dec_hoja = (purchase_cost_decisions or {}).get(
+                    ctx_id or ""
+                ) or PurchaseCostDecision(context_id=ctx_id or "")
+                _repartidos: set[tuple[str, str]] = (
+                    {
+                        (g.key[0], g.key[1])
+                        for g in (grupos.groups if grupos else [])
+                        if g.distribuible and g.key is not None
+                    }
+                    if _dec_hoja.shared_shipping == COMPARTIDO_SUBTOTAL
+                    else set()
+                )
+                for _cargo in plan.charges:
+                    if not await _emitir_cargo(
+                        _cargo,
+                        namespace="envio",
+                        descripcion=(
+                            f"Envío — comprobante {_cargo.invoice}"
+                            if _cargo.invoice
+                            else "Envío (sin comprobante en el archivo)"
+                        ),
+                        # El envío que SÍ se repartió quedó adentro del costo de
+                        # los productos: se marca por el HECHO CONSUMADO (el grupo
+                        # repartió), no por la intención (el usuario pidió
+                        # repartir). Un grupo no distribuible pidió reparto y no
+                        # lo tuvo: ese flete sigue siendo gasto del período.
+                        atribuido_a_inventario=(
+                            (_cargo.supplier, _cargo.invoice) in _repartidos
+                        ),
+                    ):
+                        continue
+                    counts["envios"] = counts.get("envios", 0) + 1
+                    if _cargo.repetido_en > 1:
+                        counts["envios_repetidos_colapsados"] = (
+                            counts.get("envios_repetidos_colapsados", 0) + 1
+                        )
+
+        if _flete_linea_col:
+            # F-H6.e: el flete que el archivo ya asignó a cada línea NUNCA generaba
+            # un gasto, en ninguno de sus dos modos. Con `al_costo` subía el valor
+            # del stock y el dinero no salía de ningún lado —un asiento que no
+            # cierra—, y con `gasto_aparte` (el default) era un no-op puro pese a
+            # que el nombre del modo prometía un gasto.
+            _lineas_propias = _leer_envios(_flete_linea_col)
+            if _lineas_propias:
+                _dec = (purchase_cost_decisions or {}).get(
+                    ctx_id or ""
+                ) or PurchaseCostDecision(context_id=ctx_id or "")
+                _al_costo = _dec.line_shipping == LINEA_AL_COSTO
+                for _cargo in plan_line_shipping(_lineas_propias).charges:
+                    if await _emitir_cargo(
+                        _cargo,
+                        namespace="envio_linea",
+                        descripcion=(
+                            f"Envío de las líneas — comprobante {_cargo.invoice}"
+                            if _cargo.invoice
+                            else "Envío de las líneas (sin comprobante en el archivo)"
+                        ),
+                        atribuido_a_inventario=_al_costo,
+                    ):
+                        counts["envios_de_linea"] = counts.get("envios_de_linea", 0) + 1
+
     async def _add_expense(
         row: dict[str, Any],
         cols: dict[str, str],
         cf_cols: dict[str, str],
         row_ref: str | None = None,
+        context_id: str | None = None,
+        costo_calculado: LineCost | None = None,
     ) -> bool:
         """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
+        # Mismo criterio que en ventas: una columna declarada para otro campo no
+        # puede releerse como el monto. Con `unit_price` en el catálogo de
+        # `expense`, "precio_compra" es ahora un target explícito y la heurística
+        # del monto ("compra", "costo") se lo llevaría puesto.
+        _mapeadas_gasto = set(cols.values())
         amount = (
             _parse_amount(row.get(amount_col))
             if amount_col
-            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))  # "total" también en compras
-            or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
+            else _parse_amount(_row_val(row, _VENTA_TOTAL_COLS, skip=_mapeadas_gasto))
+            or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS, skip=_mapeadas_gasto))
         )
+        # F-H6.a: con `unit_price` y `quantity` en el catálogo de `expense`, una
+        # línea de compra que trae precio y cantidad ya no necesita el total —
+        # F-H4 dejó las compras afuera justamente porque esos campos no existían.
+        # Misma función y mismas reglas que en ventas: el unitario nunca sale del
+        # total, la cantidad es la cruda (sin piso en 1) y sólo por mapeo explícito.
+        _linea_gasto = resolve_line_amount(
+            amount=amount,
+            unit_price=_parse_amount(row.get(cols["unit_price"]))
+            if cols.get("unit_price")
+            else None,
+            quantity=(_parse_qty(row.get(cols["quantity"])) or None)
+            if cols.get("quantity")
+            else None,
+        )
+        amount = _linea_gasto.amount
         if not amount:
             return False
         raw_date = _val(row, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS)
@@ -4324,6 +5463,7 @@ async def _insert_multisheet_data(
             source_upload_id=uploaded_file_id,
         )
         cf = _custom_fields(row, cf_cols)
+        _registrar_monto_derivado(cf, _linea_gasto, counts)
         if cat_label:
             cf = {**cf, "category_label": cat_label}
         # Capturar proveedor real si la fila/mapeo lo trae. F7c: gobernado por
@@ -4391,13 +5531,40 @@ async def _insert_multisheet_data(
             or _row_col(row, _VENTA_TOTAL_COLS)
             or _row_col(row, _GASTO_AMOUNT_COLS)
         )
-        _uc_col = cols.get("unit_cost_ars") or _row_col(row, _COSTO_UNITARIO_COLS)
-        # Mejora C: nunca tomar una columna de "costo total" como costo unitario.
-        unit_cost = (
-            _parse_amount(row.get(_uc_col))
-            if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
-            else None
-        )
+        # F-H6.a: `unit_price` es el target PROPIO de `expense` (antes esta entidad
+        # no tenía dónde declarar el precio unitario de una compra y el costo se
+        # adivinaba). Un mapeo explícito gana sin guardas: los dos filtros de abajo
+        # existen para la HEURÍSTICA —evitar que una columna de total entre como
+        # unitario—, y aplicarlos a lo que el usuario declaró sería descartar su
+        # decisión por el nombre de la columna.
+        _up_col = cols.get("unit_price")
+        if _up_col:
+            unit_cost = _parse_amount(row.get(_up_col))
+        else:
+            _uc_col = cols.get("unit_cost_ars") or _row_col(row, _COSTO_UNITARIO_COLS)
+            # Mejora C: nunca tomar una columna de "costo total" como costo unitario.
+            unit_cost = (
+                _parse_amount(row.get(_uc_col))
+                if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
+                else None
+            )
+        # F-H6.c/d: si la hoja declaró ajustes o se repartió un costo compartido,
+        # el costo FINAL de la línea es lo que el negocio pagó de verdad. Va al
+        # PRODUCTO como costo de referencia, pero NO pisa `unit_cost`, que es lo
+        # que facturó el proveedor y es lo único que registra el movimiento.
+        # `unit_cost_final` es None cuando la fila no trae cantidad: sin divisor
+        # no se inventa un costo unitario.
+        _costo_final: Decimal | None = None
+        _incluye_flete: bool | None = None
+        if costo_calculado is not None:
+            # Sin plan de costos no se declara procedencia: la ausencia de la
+            # clave significa «no sé», que no es lo mismo que «sin flete».
+            _incluye_flete = bool(
+                costo_calculado.shipping_allocated
+                or costo_calculado.shipping_line_applied
+            )
+            if costo_calculado.unit_cost_final:
+                _costo_final = costo_calculado.unit_cost_final
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
@@ -4416,7 +5583,9 @@ async def _insert_multisheet_data(
                 sku=_exp_sku,
                 brand=None,
                 barcode=_exp_barcode,
-                unit_cost=unit_cost,
+                # Un producto que nace de esta compra arranca con el costo FINAL:
+                # es su costo de adquisición real, no el renglón de la factura.
+                unit_cost=_costo_final if _costo_final is not None else unit_cost,
                 indexes=_identity_indexes,
                 cache=products_by_identity_key,
                 product_cache=product_cache,
@@ -4444,12 +5613,28 @@ async def _insert_multisheet_data(
             # Review F2 #3: solo "created" creó un producto incompleto.
             if _action == "created":
                 counts["sin_producto"] += 1
+                # F-H2: la compra que crea el producto es la evidencia más
+                # temprana que este archivo tiene de él.
+                _declarar_evidencia(_pid, tx_date)
             # Review F2 #2: registrar en los índices transaccionales para que
             # ventas/gastos POSTERIORES del mismo archivo puedan vincularlo.
             if _pid is not None:
                 _register_product_transaction_indexes(
                     _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token
                 )
+        # F-H2: una compra posterior de un producto que este archivo ya declaró
+        # no lo "re-declara", pero si viene con fecha más temprana la adelanta.
+        # Sin `solo_si_conocido` un producto preexistente entraría acá y sus
+        # ventas viejas quedarían marcadas como no justificadas.
+        if _has_qty:
+            _declarar_evidencia(expense.product_id, tx_date, solo_si_conocido=True)
+        # F-H3.b: la compra entra a la proyección ANTES de `_apply_purchase_to_stock`,
+        # que hace `stock_units += qty`. Registrarla después leería un saldo que ya
+        # incluye esta misma compra y la contaría dos veces.
+        if proyeccion is not None:
+            await proyeccion.registrar_compra(
+                expense.product_id, tx_date.date(), _parse_qty(exp_qty_raw), context_id
+            )
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
@@ -4494,6 +5679,9 @@ async def _insert_multisheet_data(
             balance_index=_balance_index,
             product_cache=product_cache,
             source_row_ref=row_ref,
+            costo_final=_costo_final,
+            costo_incluye_flete=_incluye_flete,
+            product_details=product_details if return_details else None,
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
@@ -4676,6 +5864,14 @@ async def _insert_multisheet_data(
                 existing.list_price_ars = list_price
             if stock_val > 0:
                 _delta = stock_val - existing.stock_units
+                # F-H3.b: un catálogo declara un ABSOLUTO, no un movimiento. Es la
+                # apertura del replay y pisa el saldo previo en vez de sumarse: leer
+                # "tengo 10 en góndola" como "entraron 10" inventa una compra sobre
+                # un producto que ya existía. Antes del `=`, que ya lo cambia.
+                if proyeccion is not None:
+                    proyeccion.declarar_catalogo(
+                        existing.id, name, int(existing.stock_units), stock_val
+                    )
                 existing.stock_units = stock_val
                 # A2/A5: movimiento estampado catalog_initial_stock + COGS del delta.
                 await _apply_catalog_stock(
@@ -4861,6 +6057,25 @@ async def _insert_multisheet_data(
             _register_product_identity_cache(
                 products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
             )
+            # F-H1: además de la caché de identidad, los índices TRANSACCIONALES
+            # que consulta `_resolve_product`. Sin esto, un producto creado por
+            # una hoja de catálogo es invisible para las ventas del MISMO
+            # archivo: la caché de identidad la usa el upsert de productos, no el
+            # link de ventas. La ruta de compras ya lo hacía (review F2 #2); la
+            # de catálogo no, así que una venta nunca vinculaba contra el
+            # catálogo que venía adjunto, sin importar el orden de las solapas.
+            _register_product_transaction_indexes(
+                _new_id, name, sku, _by_sku, _by_name, _by_token
+            )
+            # F-H2: el catálogo declara el producto. Su fecha es la de adquisición
+            # SI la trae; un catálogo sin esa columna —el caso común— declara
+            # identidad sin fecha, que alcanza para vincular una venta pero no
+            # para sostener que el producto ya estaba ese día.
+            _declarar_evidencia(_new_id, _acquired)
+            # F-H3.b: producto NUEVO → el saldo previo al archivo es 0, y el
+            # catálogo declara el absoluto (ver el caso análogo en _merge_into_existing).
+            if proyeccion is not None:
+                proyeccion.declarar_catalogo(_new_id, name, 0, stock_val)
             # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
             # = compra real, si trae costo).
             await _apply_catalog_stock(
@@ -4929,7 +6144,139 @@ async def _insert_multisheet_data(
     contexts = summary.get("mapping_contexts")
     if contexts:
         # ── Path por contexto (hoja/grupo) ──────────────────────────────────────
-        for ctx in contexts:
+        # F-H2 (paso 1/2): primero las hojas que DECLARAN identidades —catálogos y
+        # saldos de apertura—, después las que registran movimientos. El recorrido
+        # iba en el orden del archivo, así que un libro con la solapa de Ventas
+        # antes que la de Productos resolvía sus ventas contra un catálogo que
+        # todavía no existía: el mismo archivo daba resultados distintos según cómo
+        # el usuario hubiera ordenado las solapas.
+        #
+        # Los maestros (customer/supplier) ya vienen importados desde
+        # `_import_master_entities`, antes de esta función.
+        #
+        # F-H2 (paso 2/2): las compras van antes que las ventas por la MISMA razón
+        # —una compra de mercadería declara el producto que compra—, no porque una
+        # compra "justifique" una venta. Justificar es un juicio sobre FECHAS y se
+        # resuelve aparte, comparando la evidencia contra la fecha de la venta
+        # (`_evaluar_historial`): una compra del 20/03 declara el producto y aun así
+        # deja marcada como no validable la venta del 10/03.
+        #
+        # Ordenar la aplicación de los movimientos por fecha recién tiene efecto
+        # observable cuando las ventas consuman stock (F-H3, hoy no lo hacen:
+        # `stock_service.py:538-540`). Hacerlo antes sería mover la venta delante
+        # de la compra que le da identidad para no ganar nada.
+        #
+        # `sorted` es estable: entre hojas del mismo grupo se conserva el orden del
+        # archivo, que es el desempate final cuando no hay fecha.
+        _prioridad_de_pasada = {"product": 0, "expense": 1, "sale": 2}
+
+        def _entidad_de(ctx: dict[str, Any]) -> str | None:
+            """Override del usuario → entidad del summary. UNA definición para todos."""
+            return (context_entity or {}).get(ctx.get("context_id") or "") or ctx.get(
+                "entity_type"
+            )
+
+        def _orden_de_pasada(ctx: dict[str, Any]) -> int:
+            return _prioridad_de_pasada.get(_entidad_de(ctx) or "", 3)
+
+        def _filas_y_mapeo(
+            ctx: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
+            """Filas de esta hoja + su mapeo resuelto.
+
+            Compartido con el gate de replay (F-H3.d.3) para que la fila que el gate
+            evalúa sea exactamente la que el loop importa: si cada uno filtrara el
+            bucket por su cuenta, un desacuerdo mandaría a "Otros" una fila distinta
+            de la que se quedó sin stock.
+            """
+            _cid = ctx.get("context_id")
+            # Las filas viven en el bucket del tipo ORIGINAL de la hoja (o en
+            # otros_detectados si era no clasificada y fue reasignada). Se usa
+            # ENTITY_BUCKET —el mapa completo, con maestros— y no `entity_bucket`:
+            # una hoja que el parser mandó a Clientes y el usuario reasignó a
+            # Ventas tiene sus filas en `clientes_detectados`, y con el mapa
+            # recortado caía a `otros_detectados` y no se importaba nada.
+            _bucket_key = ENTITY_BUCKET.get(ctx.get("entity_type") or "", "otros_detectados")
+            _bucket = summary.get(_bucket_key, [])
+            _rows = [r for r in _bucket if r.get("__context__") == _cid]
+            _mapping = context_mappings.get(_cid or "", {})
+            _cols, _cf_cols, _cruzados = (
+                _resolve_target_cols(_mapping) if _mapping else ({}, {}, {})
+            )
+            if _cruzados:
+                counts["targets_cruzados_descartados"] = counts.get(
+                    "targets_cruzados_descartados", 0
+                ) + len(_cruzados)
+            return _rows, _cols, _cf_cols
+
+        def _hoja_incluida(ctx: dict[str, Any]) -> bool:
+            """Inclusión: por contexto si vino ``context_confirmed``; si no, por tipo."""
+            _ent = _entidad_de(ctx)
+            if context_confirmed:
+                return bool(context_confirmed.get(str(ctx.get("context_id") or "")))
+            return bool(confirmed_fields.get(entity_confirm_key.get(_ent or "", "")))
+
+        async def _ventas_sin_stock_que_las_respalde() -> dict[tuple[str, int], UnbackedRow]:
+            """F-H3.d.3 — qué filas de venta no se pueden importar por falta de stock.
+
+            Corre UNA vez para todo el archivo, no por hoja: con dos hojas de ventas
+            del mismo producto, evaluarlas por separado dejaría que cada una consuma
+            el stock entero y entre las dos lo excedan.
+
+            Sólo mira las hojas marcadas ``historical_replay``. Con el default el
+            archivo entra completo y esto ni se ejecuta.
+
+            El saldo de partida es el ``stock_units`` de AHORA, que en este punto ya
+            tiene adentro los catálogos y las compras del archivo (**V16**: las
+            compras sí suman al confirmar). O sea: lo que el archivo dice que hay
+            antes de sus propias ventas.
+            """
+            _candidatas: list[ReplayRow] = []
+            for _rank, _ctx in enumerate(contexts):
+                if _entidad_de(_ctx) != "sale" or not _hoja_incluida(_ctx):
+                    continue
+                _cid = str(_ctx.get("context_id") or "")
+                if (proyeccion.effect_for(_cid) if proyeccion else INFORMATIONAL) != (
+                    HISTORICAL_REPLAY
+                ):
+                    continue
+                _rows, _cols, _ = _filas_y_mapeo(_ctx)
+                for _idx, _row in enumerate(_rows):
+                    _pid = _venta_producto_id(_row, _cols)
+                    _fecha = _venta_fecha(_row, _cols)
+                    if _pid is None or _fecha is None:
+                        # Sin producto o sin fecha la fila ya tiene su propio destino
+                        # (identidad ambigua / F6-A2 → "Otros"). No es asunto del gate.
+                        continue
+                    _candidatas.append(
+                        ReplayRow(
+                            key=(_cid, _idx),
+                            product_id=_pid,
+                            day=_fecha.date(),
+                            qty=_venta_cantidad(_row, _cols),
+                            sheet_rank=_rank,
+                        )
+                    )
+            if not _candidatas:
+                return {}
+            _saldos: dict[uuid.UUID, int] = {}
+            for _pid in {c.product_id for c in _candidatas}:
+                _prod = (product_cache or {}).get(_pid) or await session.get(Product, _pid)
+                if _prod is not None and _prod.tenant_id == tenant_id:
+                    _saldos[_pid] = int(_prod.stock_units)
+            # `key` es `Hashable` en el gate (dos callers la arman distinto); acá
+            # es la tupla (hoja, índice de fila) que armamos más arriba.
+            return {
+                cast("tuple[str, int]", r.key): r
+                for r in rows_without_stock_backing(_candidatas, _saldos)
+            }
+
+        #: ``None`` = todavía no se calculó. Se calcula al llegar a la primera hoja de
+        #: ventas, que por el orden de pasada es después de catálogos y compras — antes
+        #: de eso los productos que declara el archivo no existen y su stock tampoco.
+        _sin_respaldo: dict[tuple[str, int], UnbackedRow] | None = None
+
+        for ctx in sorted(contexts, key=_orden_de_pasada):
             ctx_id = ctx.get("context_id")
             base_entity = ctx.get("entity_type")
             # FASE F: el usuario puede reasignar una hoja no clasificada a un
@@ -4958,24 +6305,46 @@ async def _insert_multisheet_data(
                     )
                 continue
             # Inclusión: por contexto si vino context_confirmed; si no, por tipo (legacy)
-            if context_confirmed:
-                if not context_confirmed.get(ctx_id):
-                    continue
-            elif not confirmed_fields.get(entity_confirm_key[entity]):
+            if not _hoja_incluida(ctx):
                 continue
-            # Las filas viven en el bucket del tipo ORIGINAL de la hoja (o en
-            # otros_detectados si era no clasificada y fue reasignada). Se usa
-            # ENTITY_BUCKET —el mapa completo, con maestros— y no `entity_bucket`:
-            # una hoja que el parser mandó a Clientes y el usuario reasignó a
-            # Ventas tiene sus filas en `clientes_detectados`, y con el mapa
-            # recortado caía a `otros_detectados` y no se importaba nada.
-            bucket_key = ENTITY_BUCKET.get(base_entity or "", "otros_detectados")
-            bucket = summary.get(bucket_key, [])
-            rows = [r for r in bucket if r.get("__context__") == ctx_id]
+            rows, cols, cf_cols = _filas_y_mapeo(ctx)
             if not rows:
                 continue
-            mapping = context_mappings.get(ctx_id or "", {})
-            cols, cf_cols = _resolve_target_cols(mapping) if mapping else ({}, {})
+            # F-H3.d.3: recién acá, no antes del loop — los productos que el archivo
+            # declara los crean las hojas de catálogo y compras, que por el orden de
+            # pasada ya corrieron cuando aparece la primera hoja de ventas.
+            if entity == "sale" and _sin_respaldo is None:
+                _sin_respaldo = await _ventas_sin_stock_que_las_respalde()
+            # F-H6.c: el costo final de cada línea se calcula ANTES del bucle,
+            # porque repartir un costo compartido exige ver el grupo entero y el
+            # bucle necesita el resultado para escribir el costo de cada compra.
+            _costos_por_fila: dict[int, LineCost] = {}
+            _grupos_de_compra = PurchaseGroupPlan()
+            if entity == "expense":
+                (
+                    _costos_por_fila,
+                    _celdas_ilegibles,
+                    _grupos_de_compra,
+                ) = _planificar_costos_de_la_hoja(
+                    ctx_id,
+                    rows,
+                    cols,
+                    purchase_cost_decisions,
+                    # La MISMA decisión del usuario que gobierna el cobro del
+                    # flete gobierna si se puede repartir sobre filas sin
+                    # comprobante. Leerla de dos lados distintos las dejaría
+                    # divergir.
+                    sin_comprobante=(shipping_decisions or {}).get(ctx_id or ""),
+                )
+                for _col, _cuantas in _celdas_ilegibles.items():
+                    counts["ajustes_ilegibles"] = (
+                        counts.get("ajustes_ilegibles", 0) + _cuantas
+                    )
+                    _avisos_costo.append(
+                        texto_del_ajuste_ilegible(
+                            str(ctx.get("label") or ctx_id or ""), _col, _cuantas
+                        )
+                    )
             for _i, row in enumerate(rows):
                 # B1: idempotencia por (archivo, contexto, índice). Chequeo
                 # READ-ONLY; la huella se registra recién DESPUÉS y solo si la
@@ -5000,10 +6369,40 @@ async def _insert_multisheet_data(
                     if uploaded_file_id is not None
                     else None
                 )
-                if entity == "sale":
-                    _did_insert = await _add_sale(row, cols, cf_cols, _row_ref)
+                if entity == "sale" and _sin_respaldo and (
+                    (str(ctx_id or ""), _i) in _sin_respaldo
+                ):
+                    # F-H3.d.3: la hoja pidió aplicar su historia y esta venta no
+                    # tiene unidades que la respalden. No entra como venta —cargarla
+                    # y descontar igual dejaría el inventario en negativo o el
+                    # movimiento diciendo una cosa y el stock otra—: va a "Otros"
+                    # para que el usuario cargue el inventario que falta y la
+                    # registre desde ahí. `_did_insert=True` porque la captura ES
+                    # output persistido: sin eso, re-confirmar la duplicaría en la
+                    # bandeja.
+                    _falta = _sin_respaldo[(str(ctx_id or ""), _i)]
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        rows=[row],
+                        headers=ctx.get("headers"),
+                        source=source,
+                        uploaded_file_id=uploaded_file_id,
+                        context_label=(
+                            "Venta sin stock que la respalde: al "
+                            f"{_falta.day.strftime('%d/%m/%Y')} quedaban "
+                            f"{_falta.disponible} unidades y la venta es de {_falta.qty}"
+                        ),
+                        suggested_entity="sale",
+                    )
+                    counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
+                    _did_insert = True
+                elif entity == "sale":
+                    _did_insert = await _add_sale(row, cols, cf_cols, _row_ref, ctx_id)
                 elif entity == "expense":
-                    _did_insert = await _add_expense(row, cols, cf_cols, _row_ref)
+                    _did_insert = await _add_expense(
+                        row, cols, cf_cols, _row_ref, ctx_id, _costos_por_fila.get(_i)
+                    )
                 else:
                     # F6-B2: la CREACIÓN de producto no fingerprintea (dedup por
                     # identidad/upsert), pero SÍ su CAPTURA a /otros (identidad
@@ -5034,6 +6433,13 @@ async def _insert_multisheet_data(
                     )
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
+
+            # F-H6.b: el envío de un comprobante se cobra UNA vez, después de las
+            # líneas. Va acá y no por fila porque la decisión necesita ver la hoja
+            # entera: la misma cifra repetida en diez filas del mismo remito es un
+            # flete, no diez.
+            if entity == "expense":
+                await _cobrar_envios_de_la_hoja(ctx_id, rows, cols, _grupos_de_compra)
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
         if confirmed_fields.get("ventas"):
@@ -5132,6 +6538,23 @@ async def _insert_multisheet_data(
         )
 
     await session.flush()
+    # F-H6.c: el default seguro no puede ser mudo. Una columna de costo mapeada
+    # que no movió ningún número —porque el usuario no declaró la base— y una
+    # celda que no se pudo leer son las dos cosas que la persona necesita saber
+    # para decidir si vuelve a subir el archivo.
+    for _cid, _targets_ignorados in hojas_que_necesitan_aviso(
+        list((purchase_cost_decisions or {}).values()),
+        {
+            _c: _m
+            for _c, _m in (context_mappings or {}).items()
+            if _m
+        },
+    ).items():
+        _avisos_costo.append(
+            texto_del_aviso(_etiqueta_de_contexto.get(_cid, _cid), _targets_ignorados)
+        )
+    if _avisos_costo:
+        counts["avisos"] = _avisos_costo
     if return_details:
         if stamp_product_updated_at:
             await _stamp_updated_at_on_product_details(session, product_details)

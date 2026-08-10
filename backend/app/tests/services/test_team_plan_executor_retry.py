@@ -5,8 +5,6 @@ from __future__ import annotations
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -60,7 +58,6 @@ class TestExternalActionTypes:
 
 
 class TestRetryOnExternalTask:
-    @pytest.mark.asyncio
     async def test_external_task_retries_on_exception(self) -> None:
         """Task externa falla en intento 1 y tiene éxito en intento 2."""
         executor = TeamPlanExecutor(
@@ -100,7 +97,6 @@ class TestRetryOnExternalTask:
         assert resp.status == "success"
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_internal_task_does_not_retry(self) -> None:
         """Task interna (REGISTER_SALE) no reintenta — falla directo."""
         executor = TeamPlanExecutor(
@@ -138,7 +134,6 @@ class TestRetryOnExternalTask:
         assert resp.status == "error"
         assert call_count == 1  # sin retry
 
-    @pytest.mark.asyncio
     async def test_external_task_exhausted_returns_error(self) -> None:
         """Task externa falla en ambos intentos → status=error."""
         executor = TeamPlanExecutor(

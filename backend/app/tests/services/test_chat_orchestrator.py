@@ -119,7 +119,6 @@ def _make_ceo_plan_response(
     )
 
 
-@pytest.mark.asyncio
 async def test_orchestrator_returns_rich_message(mock_db, mock_redis):
     """El orchestrator no debe devolver 'Listo.' sino texto rico generado por AgentChat."""
     rich_text = "Registré la venta de $80.000. Tu caja del día suma $130.000. ¡Buen ritmo!"
@@ -164,7 +163,6 @@ async def test_orchestrator_returns_rich_message(mock_db, mock_redis):
     assert len(response.message or "") > 20
 
 
-@pytest.mark.asyncio
 async def test_orchestrator_skips_llm_for_approval(mock_db, mock_redis):
     """requires_approval no debe llamar al LLM final."""
     request = _make_request()
@@ -198,7 +196,6 @@ async def test_orchestrator_skips_llm_for_approval(mock_db, mock_redis):
     assert response.message == "¿Confirmás la venta de $80.000?"
 
 
-@pytest.mark.asyncio
 async def test_orchestrator_passes_agent_task_from_plan(mock_db, mock_redis):
     """El orchestrator reconstruye AgentTask desde result['plan'] y lo pasa al sub-agente."""
     request = _make_request()
@@ -278,7 +275,6 @@ async def test_orchestrator_passes_agent_task_from_plan(mock_db, mock_redis):
     assert response.result["plan"] == ceo_resp.result["plan"]
 
 
-@pytest.mark.asyncio
 async def test_orchestrator_loads_conversation_context(mock_db, mock_redis):
     """El orchestrator llama a ConversationService.get_context cuando hay conversation_id."""
     conv_id = str(uuid.uuid4())
@@ -320,7 +316,6 @@ async def test_orchestrator_loads_conversation_context(mock_db, mock_redis):
     conv_svc_instance.get_context.assert_called_once_with(conv_id)
 
 
-@pytest.mark.asyncio
 async def test_orchestrator_saves_turn_after_success(mock_db, mock_redis):
     """El orchestrator guarda el turno tras una respuesta exitosa."""
     conv_id = str(uuid.uuid4())
@@ -369,7 +364,6 @@ async def test_orchestrator_saves_turn_after_success(mock_db, mock_redis):
     conv_svc_instance.persist.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_orchestrator_config_error_preserves_metadata_and_saves_turn(
     mock_db,
     mock_redis,
@@ -420,7 +414,6 @@ async def test_orchestrator_config_error_preserves_metadata_and_saves_turn(
     conv_svc_instance.persist.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_load_file_context_prioritizes_current_attachments():
     """Los adjuntos del request aparecen primero y los archivos viejos quedan como fallback."""
     tenant_id = uuid.uuid4()

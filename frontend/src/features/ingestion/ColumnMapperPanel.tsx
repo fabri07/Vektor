@@ -14,16 +14,34 @@ import {
   type ColumnMapping,
   type ColumnMappingSuggestion,
   type ColumnRiskDecision,
+  type ConfirmIngestionResult,
   type ContextualColumnRisk,
+  type FieldCatalogEntry,
+  type InventoryImpactItem,
   type MappingContext,
   type MasterPreviewSummary,
   type StockTreatment,
+  type SheetInventoryEffect,
+  type ShippingAction,
+  type PurchaseCostBase,
+  type PurchaseCostDecision,
+  type PurchaseLineShipping,
+  type PurchaseSharedShipping,
+  type SheetPurchaseGroups,
 } from "@/services/ingestion.service";
+import { Button } from "@/components/ui/Button";
+import { InventoryImpactPanel } from "./InventoryImpactPanel";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
+import { InventoryEffectChoice } from "./InventoryEffectChoice";
+import { ShippingDecisionChoice } from "./ShippingDecisionChoice";
+import { PurchaseCostChoice } from "./PurchaseCostChoice";
+import { PurchaseGroupsPreview } from "./PurchaseGroupsPreview";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 import {
+  customFieldCollisions,
+  explainMissing,
   missingRequiredFields,
   scalarCollisions,
   type SheetIssues,
@@ -110,6 +128,19 @@ function isTransientConfirmError(error: unknown): boolean {
   return e?.response?.status === 409 || e?.code === "ECONNABORTED";
 }
 
+/**
+ * F-H6.d: el tenant no tiene habilitado el motor de costos de compra.
+ *
+ * `/purchase-groups` responde 403 y eso NO es un error que haya que mostrar: es
+ * la compuerta de rollout, y la degradación correcta es que el tercer eje y la
+ * vista previa del reparto simplemente no aparezcan. Lo que sí hay que evitar es
+ * seguir preguntando: la clave de la consulta cambia con cada edición del mapeo,
+ * así que sin este freno un tenant fuera de la lista se come un 403 por tecla.
+ */
+function esMotorDeCostosDeshabilitado(error: unknown): boolean {
+  return (error as { response?: { status?: number } } | null)?.response?.status === 403;
+}
+
 // Maneja el error transitorio del confirm: avisa amable y refresca la lista.
 // Devuelve true si lo manejó (para no caer en el banner de error de mapeo).
 function handleTransientConfirmError(
@@ -145,6 +176,50 @@ function confidenceColor(confidence: number): string {
   return "text-vk-danger";
 }
 
+/**
+ * F-M: por qué una columna no se mapeó sola, y entre qué elegir.
+ *
+ * Vive en UN solo lugar porque el panel renderiza columnas en tres caminos
+ * distintos (multi-hoja, lista de revisión y tabla única) y este repo ya pagó
+ * el precio de que dos de ellos divergieran.
+ *
+ * `duda` viaja también sin `options`: son los casos donde Véktor entendió el
+ * encabezado y esta hoja no tiene campo donde ponerlo. Ahí no hay entre qué
+ * elegir, pero explicarlo es la diferencia entre un hueco y un hueco con motivo.
+ */
+function AmbiguityHint({
+  suggestion,
+  fields,
+  onPick,
+}: {
+  suggestion: ColumnMappingSuggestion;
+  fields: FieldCatalogEntry[];
+  onPick: (target: string) => void;
+}) {
+  if (!suggestion.duda) return null;
+  const options = suggestion.options ?? [];
+  const labelFor = (value: string) => fields.find((f) => f.value === value)?.label ?? value;
+  return (
+    <div className="rounded border border-vk-blue/30 bg-vk-blue/5 px-2 py-1.5">
+      <p className="text-[11px] leading-snug text-vk-text-secondary">{suggestion.duda}</p>
+      {options.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => onPick(option)}
+              className="rounded border border-vk-blue/40 bg-vk-bg-light px-2 py-0.5 text-[11px] text-vk-text-primary hover:border-vk-blue hover:bg-vk-blue/10"
+            >
+              {labelFor(option)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
 const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "gastos" | "productos" }> = [
   { value: "ventas", label: "Ventas", field: "ventas" },
@@ -155,6 +230,17 @@ const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "
 function StatusDot({ status }: { status: ColumnMappingSuggestion["status"] }) {
   if (status === "mapped") {
     return <span className="h-2 w-2 rounded-full bg-vk-success shrink-0" title="Mapeado" />;
+  }
+  // F-M: entender la columna y no poder decidir NO es lo mismo que no
+  // entenderla. Si cayera al punto de "Sin mapear" de abajo, la pantalla
+  // borraría justamente la distinción que el backend calcula.
+  if (status === "ambiguo") {
+    return (
+      <span
+        className="h-2 w-2 rounded-full bg-vk-blue shrink-0"
+        title="Necesita que elijas entre dos lecturas"
+      />
+    );
   }
   if (status === "required_missing") {
     return (
@@ -303,6 +389,54 @@ function UnmappedModal({
  * matchea con ninguna hoja NO se descarta: vuelve como `general` y se muestra a
  * nivel archivo. Perder un aviso sería peor que mostrarlo en el lugar genérico.
  */
+/**
+ * F-H3.c — el impacto sobre el inventario después de confirmar.
+ *
+ * Vive en un hook porque este archivo tiene DOS flujos de confirmación
+ * (`MultiContextMapper` y `ColumnMapperPanel`) con el mismo `onSuccess`
+ * duplicado. F-B va a unificarlos; hasta entonces, esto evita que la próxima
+ * copia sea justo la que decide si el usuario ve o no lo que le pasaría al
+ * stock.
+ *
+ * Cuando hay impacto el panel NO se cierra: una tabla de saldo inicial →
+ * movimientos → saldo final no entra en un toast, y es exactamente lo que hay
+ * que mirar para decidir si aplicar esa historia.
+ */
+function useImpactoPostConfirm(onDone: () => void, fileId: string) {
+  const [impacto, setImpacto] = useState<InventoryImpactItem[]>([]);
+  const [impactoTotal, setImpactoTotal] = useState(0);
+
+  /** `true` si hay algo que mostrar (y por lo tanto NO hay que cerrar). */
+  function registrar(result: ConfirmIngestionResult): boolean {
+    const items = result.inventory_impact ?? [];
+    if (items.length === 0) return false;
+    setImpacto(items);
+    setImpactoTotal(result.inventory_impact_total ?? items.length);
+    return true;
+  }
+
+  const vista =
+    impacto.length > 0 ? (
+      <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
+        <p className="text-sm font-semibold text-vk-text-primary">
+          Datos importados
+        </p>
+        <InventoryImpactPanel
+          items={impacto}
+          total={impactoTotal}
+          fileId={fileId}
+        />
+        <div className="mt-3">
+          <Button size="sm" onClick={onDone}>
+            Listo
+          </Button>
+        </div>
+      </div>
+    ) : null;
+
+  return { registrar, vista };
+}
+
 export function splitWarningsByContext(
   warnings: string[],
   contexts: MappingContext[],
@@ -352,6 +486,15 @@ function SheetMapperSection({
   onIssuesChange,
   stockTreatment,
   onStockTreatmentChange,
+  inventoryEffect,
+  effectValue,
+  onEffectChange,
+  shippingValue,
+  onShippingChange,
+  costoValue,
+  onCostoChange,
+  grupos,
+  resaltada,
 }: {
   fileId: string;
   context: MappingContext;
@@ -371,6 +514,35 @@ function SheetMapperSection({
   // Origen del stock de ESTA hoja (solo se pregunta si es de productos).
   stockTreatment: StockTreatment;
   onStockTreatmentChange: (ctxId: string, value: StockTreatment) => void;
+  // F-H3.e: qué le hace al inventario ESTA hoja. Lo sirve el backend con el
+  // mapeo borrador; `undefined` mientras la consulta está en vuelo.
+  inventoryEffect?: SheetInventoryEffect;
+  effectValue: string;
+  onEffectChange: (ctxId: string, value: string) => void;
+  // F-H6.b: decisión sobre los envíos sin comprobante de ESTA hoja.
+  // `null` = todavía no eligió → no se registran.
+  shippingValue: ShippingAction | null;
+  onShippingChange: (ctxId: string, value: ShippingAction | null) => void;
+  costoValue: {
+    base: PurchaseCostBase;
+    shared: PurchaseSharedShipping;
+    line: PurchaseLineShipping;
+  };
+  onCostoChange: (
+    ctxId: string,
+    patch: {
+      base?: PurchaseCostBase;
+      shared?: PurchaseSharedShipping;
+      line?: PurchaseLineShipping;
+    },
+  ) => void;
+  // F-H6.d: cómo agrupa el servidor las líneas de ESTA hoja por comprobante y
+  // cómo repartiría el envío. `undefined` mientras la consulta está en vuelo o
+  // cuando la hoja no declara envío compartido.
+  grupos?: SheetPurchaseGroups;
+  // El banner de faltantes mandó acá pero no pudo señalar una columna: se marca
+  // la tarjeta para que la persona sepa dónde aterrizó.
+  resaltada?: boolean;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -443,8 +615,16 @@ function SheetMapperSection({
   const faltanRequeridos = missingRequiredFields(
     catalog?.[entity]?.required ?? [],
     mappings,
+    catalog?.[entity]?.required_alternatives ?? {},
   );
-  const colisiones = scalarCollisions(fields, mappings);
+  // Las dos ramas del mapeo colisionan igual: un escalar canónico y un campo
+  // propio guardan un valor por fila, así que de dos columnas al mismo destino
+  // sobrevive una sola. Se muestran juntas porque para el usuario son el mismo
+  // problema y la salida es la misma.
+  const colisiones = [
+    ...scalarCollisions(fields, mappings),
+    ...customFieldCollisions(mappings),
+  ];
   const reqMissing = faltanRequeridos.length > 0;
 
   // `faltanRequeridos`/`colisiones` se recomputan en cada render (arrays nuevos),
@@ -473,9 +653,12 @@ function SheetMapperSection({
 
   return (
     <div
+      // A dónde salta el banner de faltantes cuando NO puede señalar una columna
+      // concreta. Por atributo y no por `id`: el `context_id` es texto libre.
+      data-sheet-card={context.context_id}
       className={`rounded-lg border bg-vk-surface-w ${
         included ? "border-vk-border-w" : "border-vk-border-w/40 opacity-60"
-      }`}
+      } ${resaltada ? "ring-2 ring-vk-danger/60" : ""}`}
     >
       <div className="flex items-center justify-between gap-3 border-b border-vk-border-w bg-vk-bg-light px-3 py-2">
         <label className="flex cursor-pointer items-center gap-2">
@@ -661,6 +844,13 @@ function SheetMapperSection({
                     <select
                       value={customFor === s.source_column ? "__custom__" : target}
                       onChange={(e) => selectTarget(s.source_column, e.target.value)}
+                      // Por dónde entra el salto del banner de faltantes: dice a
+                      // qué hoja pertenece este select y qué campo SUGERÍA
+                      // Véktor para esta columna. Se busca por atributo y no por
+                      // `id` porque el nombre de la columna es texto libre del
+                      // archivo (espacios, acentos, comillas).
+                      data-sheet={context.context_id}
+                      data-suggests={s.target_field ?? ""}
                       // Deshabilitado —no vacío— mientras carga el catálogo: un
                       // select sin opciones es justamente el fallo que se está
                       // corrigiendo (mostraría "Sin mapear" sobre un target real).
@@ -703,6 +893,11 @@ function SheetMapperSection({
                         </button>
                       </div>
                     )}
+                    <AmbiguityHint
+                      suggestion={s}
+                      fields={fields}
+                      onPick={(t) => selectTarget(s.source_column, t)}
+                    />
                     {/* A3: source + confidence (mismo criterio que el flujo single). */}
                     {eff === "mapped" && s.source !== "none" && (
                       <p className="text-[10px] text-vk-text-muted">
@@ -726,6 +921,70 @@ function SheetMapperSection({
         <StockTreatmentChoice
           value={stockTreatment}
           onChange={(v) => onStockTreatmentChange(context.context_id, v)}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
+
+      {/* F-H3.e: eje SEPARADO del de arriba. Aquel decide si el stock inicial
+          del catálogo genera un gasto (contable); éste, qué pasa con las
+          unidades. Sin este control, `historical_replay` sólo se alcanzaba por
+          API y el archivo entraba siempre con el default de cada hoja. */}
+      {/* F-H6.b: sólo cuando la hoja declara envío y NO declara comprobante.
+          Con comprobante, Véktor agrupa solo y no hay nada que preguntar. */}
+      {included &&
+        Object.values(mappings).includes("shipping_cost") &&
+        !Object.values(mappings).includes("invoice_number") && (
+          <ShippingDecisionChoice
+            value={shippingValue}
+            onChange={(v) => onShippingChange(context.context_id, v)}
+            className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+          />
+        )}
+
+      {/* F-H6.c: aparece sólo si la hoja mapea alguna columna que ajusta el
+          costo. Sin esas columnas no hay nada que preguntar. */}
+      {included && (
+        <PurchaseCostChoice
+          base={costoValue.base}
+          sharedShipping={costoValue.shared}
+          lineShipping={costoValue.line}
+          onBaseChange={(v) => onCostoChange(context.context_id, { base: v })}
+          onSharedShippingChange={(v) =>
+            onCostoChange(context.context_id, { shared: v })
+          }
+          onLineShippingChange={(v) => onCostoChange(context.context_id, { line: v })}
+          mostrarAjustes={
+            Object.values(mappings).includes("discount") ||
+            Object.values(mappings).includes("taxes")
+          }
+          // F-H6.d: mapear el envío es condición necesaria pero no suficiente —
+          // quien decide si un reparto es posible es el servidor. Ofrecerlo por
+          // el solo hecho de tener la columna dejaría al usuario eligiendo algo
+          // que el importador no va a hacer.
+          mostrarEnvioCompartido={
+            Object.values(mappings).includes("shipping_cost") &&
+            grupos?.puede_distribuir === true
+          }
+          mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
+
+      {/* F-H6.d: el reparto es la parte del costo que no se puede auditar después
+          —el envío queda adentro del costo unitario—, así que se muestra antes
+          de confirmar, con los números que devolvió el servidor. */}
+      {included && grupos && (
+        <PurchaseGroupsPreview
+          hoja={grupos}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
+
+      {included && inventoryEffect && (
+        <InventoryEffectChoice
+          hoja={inventoryEffect}
+          value={effectValue}
+          onChange={(v) => onEffectChange(context.context_id, v)}
           className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
         />
       )}
@@ -774,6 +1033,40 @@ function MultiContextMapper({
   const handleStockTreatmentChange = useCallback(
     (ctxId: string, value: StockTreatment) =>
       setStockTreatmentByCtx((prev) => ({ ...prev, [ctxId]: value })),
+    [],
+  );
+  // F-H3.e: efecto de inventario ELEGIDO por hoja. Sólo lo que el usuario tocó;
+  // el default lo pone el backend y se aplica al render (`efectoDe`), no
+  // copiándolo acá: los defaults cambian mientras se mapea, y un estado
+  // inicializado una vez quedaría mostrando un modo que ya no corresponde.
+  const [effectByCtx, setEffectByCtx] = useState<Record<string, string>>({});
+  const handleEffectChange = useCallback(
+    (ctxId: string, value: string) =>
+      setEffectByCtx((prev) => ({ ...prev, [ctxId]: value })),
+    [],
+  );
+  // F-H6.b: decisión de envío por hoja. Sólo lo que el usuario eligió: la
+  // ausencia ES la decisión por default (no registrar), así que no se
+  // inicializa con nada.
+  // F-H6.c: la decisión de costo de cada hoja. Sólo se manda la de las hojas que
+  // se apartaron de un default — mandar los defaults sería ruido, y el backend ya
+  // los aplica igual.
+  const [costoByCtx, setCostoByCtx] = useState<
+    Record<
+      string,
+      {
+        base: PurchaseCostBase;
+        shared: PurchaseSharedShipping;
+        line: PurchaseLineShipping;
+      }
+    >
+  >({});
+  const [shippingByCtx, setShippingByCtx] = useState<
+    Record<string, ShippingAction | null>
+  >({});
+  const handleShippingChange = useCallback(
+    (ctxId: string, value: ShippingAction | null) =>
+      setShippingByCtx((prev) => ({ ...prev, [ctxId]: value })),
     [],
   );
   const mappingsRef = useRef<Record<string, Record<string, string>>>({});
@@ -826,6 +1119,10 @@ function MultiContextMapper({
     [parserWarnings, contexts],
   );
 
+  // Mismo catálogo que usan las secciones (react-query dedupea por `queryKey`):
+  // acá alimenta el banner con el nombre y el motivo de cada requerido.
+  const { data: catalogoDeCampos } = useFieldCatalog();
+
   // Sección efectiva de una hoja: la que eligió el usuario, si no la que trajo
   // el backend, si no NINGUNA. Fuente única — antes cada lugar repetía el
   // `?? "sale"` y ese default silencioso es el bug que estamos cerrando.
@@ -866,13 +1163,58 @@ function MultiContextMapper({
   const riesgoDobleConteo =
     hojasDeGasto.length > 0 && hojasMarcadasCompra.length > 0;
 
+  /**
+   * F-C: llevar a la persona al DESTINO del campo que falta.
+   *
+   * La regla es la misma que la de la corrección V10: se señala una columna sólo
+   * cuando NO hay ambigüedad. Si entre las sugerencias de la hoja hay
+   * exactamente UNA que apuntaba a ese campo, esa es la columna de la que salió
+   * el dato y ahí va el foco. Si hay varias —o ninguna— elegir una sería elegir
+   * al azar, así que se salta a la tarjeta de la hoja y se la resalta: la
+   * persona ve dónde tiene que mirar y decide ella cuál es.
+   *
+   * Se lee el DOM en vez de mantener un índice en estado porque lo que hay que
+   * enfocar es exactamente lo que está renderizado; un índice paralelo puede
+   * quedar viejo justo cuando la hoja acaba de cambiar de sección.
+   */
+  const [hojaResaltada, setHojaResaltada] = useState<string | null>(null);
+  const irAlDestino = useCallback((ctxId: string, target: string) => {
+    const candidatos = Array.from(
+      document.querySelectorAll<HTMLSelectElement>("select[data-sheet][data-suggests]"),
+    ).filter((el) => el.dataset.sheet === ctxId && el.dataset.suggests === target);
+    const unico = candidatos.length === 1 ? candidatos[0] : undefined;
+    if (unico) {
+      // `scrollIntoView` no existe en jsdom: el foco es lo que importa y no se
+      // puede perder por un salto de scroll que el entorno de test no implementa.
+      unico.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      unico.focus();
+      setHojaResaltada(null);
+      return;
+    }
+    const tarjeta = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-sheet-card]"),
+    ).find((el) => el.dataset.sheetCard === ctxId);
+    tarjeta?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setHojaResaltada(ctxId);
+  }, []);
+
   // Solo cuentan las hojas INCLUIDAS: una destildada no se importa, así que sus
   // problemas no pueden bloquear nada.
   const hojasConProblemas = contexts
     .filter((c) => included[c.context_id])
-    .map((c) => ({ label: c.label ?? c.context_id, issues: issuesByCtx[c.context_id] }))
+    .map((c) => ({
+      ctxId: c.context_id,
+      label: c.label ?? c.context_id,
+      issues: issuesByCtx[c.context_id],
+      // El motivo de cada requerido depende de la ENTIDAD de la hoja: la misma
+      // fecha se pierde distinto en una venta que en un gasto.
+      faltantes: explainMissing(
+        issuesByCtx[c.context_id]?.missingRequired ?? [],
+        catalogoDeCampos?.[entityFor(c)],
+      ),
+    }))
     .filter(
-      (h): h is { label: string; issues: SheetIssues } =>
+      (h): h is typeof h & { issues: SheetIssues } =>
         !!h.issues &&
         (h.issues.missingRequired.length > 0 || h.issues.collisions.length > 0),
     );
@@ -923,6 +1265,137 @@ function MultiContextMapper({
     [fileId, riskRecomputeInput],
   );
 
+  // F-H3.e: se re-consulta cuando cambia el mapeo — mapear `cantidad` es lo que
+  // habilita que una hoja pueda aplicar su historia al stock.
+  const { data: inventoryEffects = [] } = useQuery({
+    queryKey: ["inventory-effects", fileId, riskRecomputeKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchInventoryEffects(fileId, riskRecomputeInput, signal),
+    // La clave incluye el mapeo, así que cambia con cada edición. Sin conservar
+    // lo anterior, el selector DESAPARECE en cada recálculo —y el confirm que
+    // caiga en esa ventana viaja sin efecto declarado, que es peor que el
+    // parpadeo—. Lo que se muestra mientras tanto es el modo de un mapeo
+    // ligeramente viejo; la respuesta nueva lo corrige apenas llega.
+    placeholderData: (prev) => prev,
+  });
+  const effectsByCtx = useMemo(
+    () => Object.fromEntries(inventoryEffects.map((h) => [h.context_id, h])),
+    [inventoryEffects],
+  );
+  /**
+   * Modo EFECTIVO de una hoja: lo que eligió el usuario si sigue estando entre
+   * las opciones, y si no el default de Véktor. La comprobación importa: sacar
+   * la columna de cantidad puede dejar a la hoja sin poder mover inventario, y
+   * mandar el modo viejo sería mandar algo que el backend ya no ofrece.
+   */
+  const efectoDe = useCallback(
+    (ctxId: string): string => {
+      const hoja = effectsByCtx[ctxId];
+      if (!hoja) return "";
+      const elegido = effectByCtx[ctxId];
+      return elegido && hoja.options.some((o) => o.value === elegido)
+        ? elegido
+        : hoja.default;
+    },
+    [effectsByCtx, effectByCtx],
+  );
+
+  /**
+   * F-H6.d: las decisiones de costo tal como las eligió el usuario, para PEDIR
+   * el reparto.
+   *
+   * Se manda el estado CRUDO y no el efectivo a propósito: el efectivo depende
+   * de `puede_distribuir`, que es justo lo que devuelve esta consulta. Derivarlo
+   * antes de preguntar cerraría el círculo sobre sí mismo. El confirm sí manda
+   * el efectivo — ahí ya se sabe qué puede hacer el importador.
+   */
+  const costoDraft = useMemo(
+    () =>
+      Object.entries(costoByCtx)
+        .filter(([ctxId]) => included[ctxId])
+        .map(([ctxId, d]) => ({
+          context_id: ctxId,
+          base: d.base,
+          shared_shipping: d.shared,
+          line_shipping: d.line,
+        })),
+    [costoByCtx, included],
+  );
+  /**
+   * F-H6.b: sólo las hojas donde el usuario eligió. Sin entrada, sus envíos sin
+   * comprobante no se registran — que es el default seguro.
+   *
+   * Se calcula acá y no adentro del confirm porque el PREVIEW del reparto
+   * también depende de esto: una hoja sin número de comprobante puede formar un
+   * grupo si el usuario declaró «toda la hoja es una compra», y mostrarla como
+   * no repartible sería contradecir lo que ya eligió.
+   */
+  const envioPayload = useMemo(
+    () =>
+      Object.entries(shippingByCtx)
+        .filter(([ctxId, action]) => action !== null && included[ctxId])
+        .map(([ctxId, action]) => ({
+          context_id: ctxId,
+          action: action as ShippingAction,
+        })),
+    [shippingByCtx, included],
+  );
+  const draftKey = useMemo(
+    () => JSON.stringify([costoDraft, envioPayload]),
+    [costoDraft, envioPayload],
+  );
+  // Sin ninguna columna de envío compartido no hay reparto posible: se evita una
+  // consulta por archivo que no la necesita.
+  const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
+    (m) => m.target_field === "shipping_cost",
+  );
+  // Se recuerda aunque cambie la clave: `error` de react-query vuelve a `null`
+  // con cada clave nueva, y la compuerta es del TENANT, no del mapeo.
+  const [sinMotor, setSinMotor] = useState(false);
+  const { data: purchaseGroups = [], error: errorGrupos } = useQuery({
+    queryKey: ["purchase-groups", fileId, riskRecomputeKey, draftKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchPurchaseGroups(
+        fileId,
+        {
+          ...riskRecomputeInput,
+          shippingDecisions: envioPayload,
+          purchaseCostDecisions: costoDraft,
+        },
+        signal,
+      ),
+    enabled: hayEnvioCompartido && !sinMotor,
+    // Mismo motivo que en `/inventory-effects`: la clave cambia con cada edición
+    // del mapeo, y sin conservar lo anterior el selector del tercer eje
+    // desaparecería en cada recálculo.
+    placeholderData: (prev) => prev,
+    retry: false,
+  });
+  useEffect(() => {
+    if (esMotorDeCostosDeshabilitado(errorGrupos)) setSinMotor(true);
+  }, [errorGrupos]);
+  const gruposByCtx = useMemo(
+    () => Object.fromEntries(purchaseGroups.map((h) => [h.context_id, h])),
+    [purchaseGroups],
+  );
+  /**
+   * Reparto EFECTIVO de una hoja: lo que eligió el usuario sólo si el servidor
+   * dice que esa hoja se puede repartir; si no, el default que no toca ningún
+   * costo. Mismo criterio que `efectoDe`: mandar un modo que el backend ya no
+   * ofrece sería mandar algo que no va a pasar.
+   */
+  const compartidoDe = useCallback(
+    (ctxId: string): PurchaseSharedShipping =>
+      costoByCtx[ctxId]?.shared === "por_subtotal" &&
+      gruposByCtx[ctxId]?.puede_distribuir
+        ? "por_subtotal"
+        : "no_distribuir",
+    [costoByCtx, gruposByCtx],
+  );
+
+  const { registrar: registrarImpacto, vista: vistaImpacto } =
+    useImpactoPostConfirm(onDone, fileId);
+
   const confirmMutation = useMutation({
     mutationFn: () => {
       const columnMappings: ColumnMapping[] = [];
@@ -950,6 +1423,35 @@ function MultiContextMapper({
           });
         }
       }
+      // F-H3.e: el efecto SÓLO de las hojas que viajan. Mandar el de una hoja
+      // excluida da 422 ("apunta a una hoja que no está en el archivo"), porque
+      // el backend arma los perfiles con los mapeos recibidos.
+      const inventoryEffectPayload: Record<string, string> = {};
+      for (const ctxId of Object.keys(contextEntity)) {
+        const modo = efectoDe(ctxId);
+        if (modo) inventoryEffectPayload[ctxId] = modo;
+      }
+      // F-H6.b: sólo las hojas donde el usuario eligió. Sin entrada, sus envíos
+      // sin comprobante no se registran — que es el default seguro.
+      // F-H6.c: se manda sólo lo que el usuario cambió. Una hoja con los dos ejes
+      // en su default se comporta igual mandándola o no, y omitirla deja claro en
+      // la traza que no hubo decisión.
+      const costoPayload: PurchaseCostDecision[] = Object.entries(costoByCtx)
+        .filter(
+          ([ctxId, d]) =>
+            included[ctxId] &&
+            (d.base !== "monto_incluye" ||
+              compartidoDe(ctxId) !== "no_distribuir" ||
+              d.line !== "gasto_aparte"),
+        )
+        .map(([ctxId, d]) => ({
+          context_id: ctxId,
+          base: d.base,
+          // Efectivo, no lo crudo: si el servidor dice que esta hoja no se puede
+          // repartir, declarar `por_subtotal` sería pedir algo imposible.
+          shared_shipping: compartidoDe(ctxId),
+          line_shipping: d.line,
+        }));
       return ingestionService.confirmFile(
         fileId,
         {},
@@ -960,6 +1462,11 @@ function MultiContextMapper({
         // INCLUIDAS; `undefined` si no hay ninguna (el backend asume apertura).
         stockTreatmentPayload,
         riskDecisions,
+        Object.keys(inventoryEffectPayload).length > 0
+          ? inventoryEffectPayload
+          : undefined,
+        envioPayload,
+        costoPayload,
       );
     },
     onSuccess: (result) => {
@@ -968,6 +1475,9 @@ function MultiContextMapper({
       // Avisos human-in-the-loop: el panel se cierra en onDone(), así que van como
       // toasts (compras sin proveedor/producto, filas a "Otros").
       for (const w of result.warnings ?? []) toast(w, "warning");
+      // F-H3.c: con impacto sobre el inventario el panel queda abierto para
+      // mostrarlo; sin impacto se cierra como siempre.
+      if (registrarImpacto(result)) return;
       onDone();
     },
     onError: (error) => {
@@ -991,6 +1501,9 @@ function MultiContextMapper({
   const errDetail = (
     confirmMutation.error as { response?: { data?: { detail?: string } } } | null
   )?.response?.data?.detail;
+
+  // F-H3.c: importado y con impacto sobre el stock → mostrarlo en vez del mapeo.
+  if (vistaImpacto) return vistaImpacto;
 
   return (
     <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
@@ -1046,6 +1559,31 @@ function MultiContextMapper({
             onIssuesChange={handleIssuesChange}
             stockTreatment={stockTreatmentByCtx[ctx.context_id] ?? "opening_balance"}
             onStockTreatmentChange={handleStockTreatmentChange}
+            inventoryEffect={effectsByCtx[ctx.context_id]}
+            effectValue={efectoDe(ctx.context_id)}
+            onEffectChange={handleEffectChange}
+            shippingValue={shippingByCtx[ctx.context_id] ?? null}
+            grupos={gruposByCtx[ctx.context_id]}
+            resaltada={hojaResaltada === ctx.context_id}
+            costoValue={{
+              base: costoByCtx[ctx.context_id]?.base ?? "monto_incluye",
+              // El efectivo, no el crudo: el radio tiene que mostrar lo que
+              // realmente se va a mandar, no una elección que el servidor ya
+              // dijo que no puede honrar.
+              shared: compartidoDe(ctx.context_id),
+              line: costoByCtx[ctx.context_id]?.line ?? "gasto_aparte",
+            }}
+            onCostoChange={(ctxId, patch) =>
+              setCostoByCtx((prev) => ({
+                ...prev,
+                [ctxId]: {
+                  base: patch.base ?? prev[ctxId]?.base ?? "monto_incluye",
+                  shared: patch.shared ?? prev[ctxId]?.shared ?? "no_distribuir",
+                  line: patch.line ?? prev[ctxId]?.line ?? "gasto_aparte",
+                },
+              }))
+            }
+            onShippingChange={handleShippingChange}
           />
         ))}
       </div>
@@ -1087,18 +1625,57 @@ function MultiContextMapper({
           el usuario descubría el problema recién con un 422 que no decía cómo
           salir (incidente ASTERIA: tres confirms rechazados seguidos). */}
       {hojasConProblemas.length > 0 && (
-        <div className="mt-3 space-y-1">
-          {hojasConProblemas.map(({ label, issues }) => (
-            <p key={label} className="flex gap-1.5 text-xs text-vk-danger">
-              <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-              <span>
-                <strong>«{label}»</strong>:{" "}
-                {issues.missingRequired.length > 0
-                  ? "falta un dato obligatorio"
-                  : "hay dos columnas para el mismo campo"}
-                . Revisá la hoja más arriba.
-              </span>
-            </p>
+        <div className="mt-3 space-y-2">
+          {hojasConProblemas.map(({ ctxId, label, issues, faltantes }) => (
+            <div key={ctxId} className="text-xs text-vk-danger">
+              <p className="flex gap-1.5">
+                <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+                <span>
+                  <strong>«{label}»</strong>:{" "}
+                  {[
+                    faltantes.length === 1
+                      ? "falta un dato obligatorio"
+                      : faltantes.length > 1
+                        ? "faltan datos obligatorios"
+                        : null,
+                    // Las dos cosas pueden pasar a la vez y antes la segunda se
+                    // perdía: el mensaje era un o-lo-uno-o-lo-otro y la hoja
+                    // seguía bloqueada por algo que el banner no nombró.
+                    issues.collisions.length > 0
+                      ? "hay dos columnas para el mismo campo"
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" y ")}
+                  .{issues.collisions.length > 0 && " Revisá la hoja más arriba."}
+                </span>
+              </p>
+              {/* Cada faltante se nombra, se explica QUÉ SE PIERDE la persona si
+                  no lo mapea, y lleva al lugar donde se arregla. Antes esto
+                  decía «falta un dato obligatorio, revisá la hoja más arriba»:
+                  no decía cuál, no decía por qué, y dejaba el botón apagado sin
+                  una acción concreta. */}
+              {faltantes.length > 0 && (
+                <ul className="mt-1 space-y-1 pl-5">
+                  {faltantes.map((f) => (
+                    <li key={f.field}>
+                      <button
+                        type="button"
+                        onClick={() => irAlDestino(ctxId, f.field)}
+                        className="text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus:outline-none focus-visible:ring-1 focus-visible:ring-vk-danger"
+                      >
+                        <strong>{f.label}</strong> — ir a la hoja
+                      </button>
+                      {f.reason && (
+                        <span className="mt-0.5 block text-[11px] leading-snug text-vk-text-secondary">
+                          {f.reason}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -1233,6 +1810,60 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     [fileId, riskRecomputeInput],
   );
 
+  // F-H3.e: mismo contrato que en el camino multi-hoja. Este camino manda sus
+  // mapeos con `context_id: "table"`, así que también tiene una hoja a la que
+  // declararle un efecto — sin esto, un archivo de una sola tabla entraba
+  // siempre con el default y nunca podía aplicar su historia.
+  const { data: inventoryEffects = [] } = useQuery({
+    queryKey: ["inventory-effects", fileId, riskRecomputeKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchInventoryEffects(fileId, riskRecomputeInput, signal),
+    // La clave incluye el mapeo, así que cambia con cada edición. Sin conservar
+    // lo anterior, el selector DESAPARECE en cada recálculo —y el confirm que
+    // caiga en esa ventana viaja sin efecto declarado, que es peor que el
+    // parpadeo—. Lo que se muestra mientras tanto es el modo de un mapeo
+    // ligeramente viejo; la respuesta nueva lo corrige apenas llega.
+    placeholderData: (prev) => prev,
+  });
+  const hojaEfecto = inventoryEffects[0];
+  const [effectElegido, setEffectElegido] = useState<string | null>(null);
+  /**
+   * Este camino NO puede traer costos de compra, y por eso no los ofrece.
+   *
+   * El importador plano no cobra el envío ni aplica las decisiones de costo —el
+   * cobro vive en un closure del camino multi-hoja y la decisión se busca bajo
+   * otra clave—, así que el confirm rechaza el archivo con 422 en cuanto ve una
+   * columna de envío mapeada O una decisión de costo declarada. Arreglar el
+   * camino plano de verdad es otra fase.
+   *
+   * Mientras tanto, lo que la pantalla NO puede hacer es ofrecer los tres ejes
+   * acá: cada decisión que tomara terminaría en un rechazo, y antes de ese guard
+   * terminaba en algo peor —el import aceptaba el archivo y la ignoraba en
+   * silencio, dejando el costo más bajo que el real y el margen inflado—. Se
+   * nombra el problema y se dicen las dos salidas, que son las mismas del 422.
+   *
+   * El predicado del backend (`_plano`) es más AMPLIO que este `!isMultiContext`,
+   * así que todo lo que la pantalla manda por acá cae adentro de su rechazo: no
+   * hay archivo que la UI deje pasar y el confirm frene por sorpresa.
+   */
+  const columnasDeCostoEnTablaUnica = [
+    ...new Set(
+      riskRecomputeInput.columnMappings
+        .filter(
+          (m) =>
+            m.target_field === "shipping_cost" ||
+            m.target_field === "shipping_cost_line",
+        )
+        .map((m) => m.source_column),
+    ),
+  ];
+  // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
+  // cantidad puede dejar a la hoja sin poder mover inventario.
+  const efectoActual =
+    effectElegido && hojaEfecto?.options.some((o) => o.value === effectElegido)
+      ? effectElegido
+      : (hojaEfecto?.default ?? "");
+
   function choosePurpose(value: string) {
     setPurpose(value);
     const opt = PURPOSE_OPTIONS.find((o) => o.value === value);
@@ -1263,6 +1894,15 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const isMultiContext =
     contexts.length > 1 ||
     (contexts.length === 1 && contexts[0]?.source_kind !== "table");
+  /**
+   * La hoja de una tabla única. El parser la genera como `"table"`, pero se lee
+   * del summary y no se hardcodea: mandar decisiones contra una hoja que el
+   * archivo no tiene da 422 ("apunta a una hoja que no está en el archivo").
+   *
+   * `undefined` en summaries viejos sin `mapping_contexts`: ahí no hay hoja a la
+   * cual referirse y el envío sigue siendo plano, como hasta ahora.
+   */
+  const hojaPlana = contexts[0]?.context_id;
 
   const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
 
@@ -1284,6 +1924,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     setInitialized(true);
   }
 
+  const { registrar: registrarImpacto, vista: vistaImpacto } =
+    useImpactoPostConfirm(onDone, fileId);
+
   const confirmMutation = useMutation({
     mutationFn: (columnMappings: ColumnMapping[]) =>
       ingestionService.confirmFile(
@@ -1294,6 +1937,15 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         undefined,
         hasStock ? stockTreatment : undefined,
         riskDecisions,
+        hojaEfecto && efectoActual
+          ? { [hojaEfecto.context_id]: efectoActual }
+          : undefined,
+        undefined,
+        // Nunca. El importador plano no aplica las decisiones de costo, y el
+        // confirm rechaza el archivo con 422 en cuanto ve una: mandar algo acá
+        // sólo puede terminar en un rechazo. Ver el comentario de
+        // `columnasDeCostoEnTablaUnica`.
+        undefined,
       ),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
@@ -1301,6 +1953,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       // Avisos human-in-the-loop: el panel se cierra en onDone(), así que van como
       // toasts (compras sin proveedor/producto, filas a "Otros").
       for (const w of result.warnings ?? []) toast(w, "warning");
+      // F-H3.c: con impacto sobre el inventario el panel queda abierto para
+      // mostrarlo; sin impacto se cierra como siempre.
+      if (registrarImpacto(result)) return;
       onDone();
     },
     onError: (error) => {
@@ -1352,12 +2007,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   // NO cubre un requerido, aunque el select lo muestre como mapeado.
 
   // A3: columnas que merecen revisión antes de confirmar — requeridas sin mapear,
-  // sin mapear, o mapeadas con baja confianza (<50%). Las ignoradas a propósito no.
+  // sin mapear, ambiguas, o mapeadas con baja confianza (<50%). Las ignoradas a
+  // propósito no. Dejar afuera las ambiguas era excluir de la lista de revisión
+  // justo la columna sobre la que el backend dice que hace falta una decisión.
   const needsAttention = suggestions.filter((s) => {
     const t = getMappingForColumn(s.source_column);
     if (t === "ignore") return false;
     const eff = computeEffectiveStatus(s, t);
-    if (eff === "required_missing" || eff === "unmapped") return true;
+    if (eff === "required_missing" || eff === "unmapped" || eff === "ambiguo") return true;
     return eff === "mapped" && s.confidence < 0.5;
   });
 
@@ -1398,6 +2055,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         // F8c: mismo touched-set que el recompute — user_selected solo si el
         // usuario cambió el mapeo a mano (no si vino de una sugerencia).
         user_selected: touchedRef.current.has(riskKey("table", src)),
+        // F-H3.e: la columna dice a qué hoja pertenece. Sin esto el confirm
+        // entra por la rama de mapeos planos, donde el efecto de inventario no
+        // se puede resolver contra ninguna hoja y el backend lo rechaza con 422
+        // (antes se descartaba en silencio: el usuario elegía reconstruir su
+        // inventario y no pasaba nada). El resto del payload —las decisiones de
+        // riesgo, el recálculo en vivo— ya viajaba calificado así.
+        ...(hojaPlana ? { context_id: hojaPlana, entity_type: entityType } : {}),
       }));
     confirmMutation.mutate(columnMappings);
   }
@@ -1411,8 +2075,16 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const faltanRequeridos = missingRequiredFields(
     catalog?.[entityType]?.required ?? [],
     mappings,
+    catalog?.[entityType]?.required_alternatives ?? {},
   );
-  const colisiones = scalarCollisions(fields, mappings);
+  // Las dos ramas del mapeo colisionan igual: un escalar canónico y un campo
+  // propio guardan un valor por fila, así que de dos columnas al mismo destino
+  // sobrevive una sola. Se muestran juntas porque para el usuario son el mismo
+  // problema y la salida es la misma.
+  const colisiones = [
+    ...scalarCollisions(fields, mappings),
+    ...customFieldCollisions(mappings),
+  ];
 
   // Preview rows para la tabla secundaria
   const previewRows = (
@@ -1436,6 +2108,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       />
     );
   }
+
+  // F-H3.c: ídem para el archivo de un solo contexto.
+  if (vistaImpacto) return vistaImpacto;
 
   return (
     <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
@@ -1576,6 +2251,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                             </option>
                           )}
                       </select>
+                      <AmbiguityHint
+                        suggestion={s}
+                        fields={fields}
+                        onPick={(t) => setMappingForColumn(s.source_column, t)}
+                      />
                     </div>
                   );
                 })}
@@ -1666,6 +2346,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         )}
                       </select>
                     </div>
+                    <div className="mt-1">
+                      <AmbiguityHint
+                        suggestion={s}
+                        fields={fields}
+                        onPick={(t) => setMappingForColumn(s.source_column, t)}
+                      />
+                    </div>
                     {isMapped && s.source !== "none" && (
                       <p className="mt-0.5 pl-5 text-[10px] text-vk-text-muted">
                         {SOURCE_LABELS[s.source] ?? s.source} ·{" "}
@@ -1722,16 +2409,34 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       {faltanRequeridos.length > 0 && (
         <div className="mb-2 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
           <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-          <span>
-            Falta un dato obligatorio:{" "}
-            <strong>
-              {faltanRequeridos
-                .map((r) => fields.find((f) => f.value === r)?.label ?? r)
-                .join(", ")}
-            </strong>
-            . Elegí ese campo en la columna que lo contiene. Un campo personalizado
-            guarda el dato pero no reemplaza al obligatorio.
-          </span>
+          <div>
+            <p>
+              {faltanRequeridos.length === 1
+                ? "Falta un dato obligatorio:"
+                : "Faltan datos obligatorios:"}
+            </p>
+            {/* Mismo criterio que el banner del mapeo por hoja: se nombra el
+                campo y se dice qué se pierde la persona si no lo mapea. Acá no
+                hay a dónde saltar —la misma columna aparece en dos selects, el
+                de "Revisá antes de confirmar" y el de la tabla—, y elegir uno
+                de los dos sería elegir al azar. */}
+            <ul className="mt-1 space-y-1">
+              {explainMissing(faltanRequeridos, catalog?.[entityType]).map((f) => (
+                <li key={f.field}>
+                  <strong>{f.label}</strong>
+                  {f.reason && (
+                    <span className="mt-0.5 block text-[11px] leading-snug text-vk-text-secondary">
+                      {f.reason}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1">
+              Elegí ese campo en la columna que lo contiene. Un campo personalizado
+              guarda el dato pero no reemplaza al obligatorio.
+            </p>
+          </div>
         </div>
       )}
 
@@ -1761,6 +2466,46 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         />
       )}
 
+      {/* F-H3.e: qué le hace al inventario esta tabla. Eje separado del de
+          arriba: aquel decide si el stock inicial genera un gasto, éste qué
+          pasa con las unidades. */}
+      {hojaEfecto && !needsPurpose && (
+        <InventoryEffectChoice
+          hoja={hojaEfecto}
+          value={efectoActual}
+          onChange={setEffectElegido}
+          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
+        />
+      )}
+
+      {/* Un archivo de una sola tabla no puede traer costos de compra: el
+          importador plano no cobra el envío y el confirm lo rechaza. Se dice
+          acá, con las dos salidas, en vez de ofrecer tres ejes cuyo único
+          desenlace posible es un 422. */}
+      {!needsPurpose && columnasDeCostoEnTablaUnica.length > 0 && (
+        <div className="mb-3 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
+          <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+          <div>
+            <p>
+              Este archivo es una sola tabla y trae{" "}
+              {columnasDeCostoEnTablaUnica.length === 1 ? "una columna" : "columnas"}{" "}
+              de envío (
+              <span className="font-mono">
+                {columnasDeCostoEnTablaUnica.join(", ")}
+              </span>
+              ). Véktor todavía no sabe cobrar ni repartir el envío en este
+              formato: si lo importara, la compra quedaría con un costo más bajo
+              que el real y el margen inflado.
+            </p>
+            <p className="mt-1 text-vk-text-secondary">
+              Dos salidas: subilo como libro con hojas separadas (una por
+              sección), o sacá esas columnas del mapeo —marcalas «Ignorar»— y
+              cargá ese envío como un gasto aparte.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Error de API (excluye 409/timeout: los maneja el toast, no el banner) */}
       {confirmMutation.isError &&
         !isTransientConfirmError(confirmMutation.error) && (
@@ -1779,6 +2524,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             !Object.values(confirmedFields).some(Boolean) ||
             faltanRequeridos.length > 0 ||
             colisiones.length > 0 ||
+            // El confirm lo va a rechazar igual: descubrirlo con un 422 después
+            // de apretar es exactamente lo que este panel existe para evitar.
+            columnasDeCostoEnTablaUnica.length > 0 ||
             needsPurpose
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.repositories._expense_scope import gasto_de_resultado
 
 
 def _as_date(value: datetime | date | None) -> date | None:
@@ -532,6 +533,9 @@ class ExpenseRepository:
         q = select(func.sum(ExpenseEntry.amount)).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
+            # El flete ya capitalizado en el stock no se cuenta otra vez acá:
+            # este total convive con el valor del inventario. Ver `_expense_scope`.
+            gasto_de_resultado(ExpenseEntry.custom_fields),
         )
         if from_date:
             q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
@@ -566,6 +570,9 @@ class ExpenseRepository:
         q = select(ExpenseEntry.category, func.sum(ExpenseEntry.amount).label("total")).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
+            # El flete ya capitalizado en el stock no se cuenta otra vez acá:
+            # este total convive con el valor del inventario. Ver `_expense_scope`.
+            gasto_de_resultado(ExpenseEntry.custom_fields),
         )
         if from_date:
             q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
@@ -600,6 +607,9 @@ class ExpenseRepository:
         ).where(
             ExpenseEntry.tenant_id == tenant_id,
             ExpenseEntry.voided_at.is_(None),
+            # El flete ya capitalizado en el stock no se cuenta otra vez acá:
+            # este total convive con el valor del inventario. Ver `_expense_scope`.
+            gasto_de_resultado(ExpenseEntry.custom_fields),
         )
         if from_date:
             q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)

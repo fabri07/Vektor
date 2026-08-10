@@ -27,7 +27,6 @@ def _mock_llm_response(entities: dict[str, Any]) -> MagicMock:
     return response
 
 
-@pytest.mark.asyncio
 async def test_stockout_detected():
     """stock=0 con threshold=0 → detect_stockout devuelve True."""
     with unittest.mock.patch("app.application.agents.stock.agent.anthropic.AsyncAnthropic"):
@@ -39,7 +38,6 @@ async def test_stockout_detected():
     assert result is True
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("vertical", [Vertical.KIOSCO_ALMACEN, Vertical.DECORACION_HOGAR])
 async def test_overstock_usa_el_umbral_del_rubro(vertical: Vertical) -> None:
     """Sobrestock = más del doble del techo de rotación del rubro.
@@ -77,7 +75,6 @@ def _mock_intent_response(intent: str) -> MagicMock:
     return response
 
 
-@pytest.mark.asyncio
 async def test_stock_loss_is_high_risk():
     """Mensaje con 'merma' → risk_level=HIGH, requires_approval=True."""
     mock_entities = {
@@ -111,7 +108,6 @@ async def test_stock_loss_is_high_risk():
     assert result.result["action_type"] == "REGISTER_STOCK_LOSS"
 
 
-@pytest.mark.asyncio
 async def test_stock_adjustment_is_medium_risk():
     """Mensaje con 'ajuste' → risk_level=MEDIUM, requires_approval=True."""
     mock_entities = {
@@ -145,7 +141,6 @@ async def test_stock_adjustment_is_medium_risk():
     assert result.result["action_type"] == "UPDATE_STOCK"
 
 
-@pytest.mark.asyncio
 async def test_extraction_returns_negative_qty_for_loss():
     """LLM retorna qty_change=-5 → se preserva el valor negativo en structured_data."""
     mock_entities = {

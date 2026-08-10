@@ -12,7 +12,6 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,7 +68,6 @@ def _expense(tid: uuid.UUID, amount: str, days_ago: int) -> ExpenseEntry:
     )
 
 
-@pytest.mark.asyncio
 async def test_revenue_series_zero_fill_and_order(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
@@ -92,7 +90,6 @@ async def test_revenue_series_zero_fill_and_order(
     assert series[2] == 0.0
 
 
-@pytest.mark.asyncio
 async def test_revenue_series_excludes_voided(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
@@ -109,7 +106,6 @@ async def test_revenue_series_excludes_voided(
     assert series[5] == 100.0
 
 
-@pytest.mark.asyncio
 async def test_revenue_series_same_day_summed(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
@@ -120,7 +116,6 @@ async def test_revenue_series_same_day_summed(
     assert series[3] == 150.0  # 7 días → idx 3 = hace 3 días
 
 
-@pytest.mark.asyncio
 async def test_expense_series_zero_fill(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
@@ -134,7 +129,6 @@ async def test_expense_series_zero_fill(
     assert series[3] == 0.0
 
 
-@pytest.mark.asyncio
 async def test_net_series_aligned(db_session: AsyncSession, tenant_id: uuid.UUID) -> None:
     # hoy: venta 100, gasto 30 → neto 70 (idx 6)
     # ayer: solo gasto 50 → neto -50 (idx 5)
@@ -154,7 +148,6 @@ async def test_net_series_aligned(db_session: AsyncSession, tenant_id: uuid.UUID
     assert series[0] == 0.0
 
 
-@pytest.mark.asyncio
 async def test_empty_series_all_zeros(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:

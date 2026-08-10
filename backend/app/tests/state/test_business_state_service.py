@@ -77,7 +77,6 @@ async def kiosco_profile(
 # ── Test 1: onboarding-only data ─────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_compute_business_state_from_onboarding_only(
     db_session: AsyncSession,
     sample_tenant,
@@ -136,7 +135,6 @@ async def test_compute_business_state_from_onboarding_only(
 # ── Montos del onboarding sin contestar ──────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_montos_sin_contestar_no_se_leen_como_cero(
     db_session: AsyncSession,
     sample_tenant,
@@ -169,7 +167,6 @@ async def test_montos_sin_contestar_no_se_leen_como_cero(
     assert state.cash_source in ("flujo", "desconocido")
 
 
-@pytest.mark.asyncio
 async def test_cero_declarado_si_es_el_estimado_del_onboarding(
     db_session: AsyncSession,
     sample_tenant,
@@ -197,7 +194,6 @@ async def test_cero_declarado_si_es_el_estimado_del_onboarding(
 # ── Test 2: completeness increases with ≥5 active products ───────────────────
 
 
-@pytest.mark.asyncio
 async def test_completeness_increases_with_products(
     db_session: AsyncSession,
     sample_tenant,
@@ -241,7 +237,6 @@ async def test_completeness_increases_with_products(
 # ── Test 3: cache is used when no new inputs ─────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_cache_is_used_when_no_new_inputs(
     db_session: AsyncSession,
     sample_tenant,
@@ -272,7 +267,6 @@ async def test_cache_is_used_when_no_new_inputs(
 # ── Test 4: cache invalidates when new sale is added ─────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_cache_invalidates_when_new_sale_added(
     db_session: AsyncSession,
     sample_tenant,
@@ -314,7 +308,6 @@ async def test_cache_invalidates_when_new_sale_added(
     assert state2.monthly_sales_est == Decimal("150000.000")
 
 
-@pytest.mark.asyncio
 async def test_blend_sales_few_transactions(
     db_session: AsyncSession,
     sample_tenant,
@@ -343,7 +336,6 @@ async def test_blend_sales_few_transactions(
     assert state.monthly_sales_est == Decimal("114000.000")
 
 
-@pytest.mark.asyncio
 async def test_blend_sales_many_transactions(
     db_session: AsyncSession,
     sample_tenant,
@@ -371,7 +363,6 @@ async def test_blend_sales_many_transactions(
     assert state.monthly_sales_est == Decimal("6000.00")
 
 
-@pytest.mark.asyncio
 async def test_product_summaries_include_30_day_rotation_units(
     db_session: AsyncSession,
     sample_tenant,
@@ -483,7 +474,6 @@ def test_un_vertical_desconocido_en_la_cache_no_pasa_silencioso() -> None:
 # el dashboard mostraba un score seguro de un negocio del que no se sabe nada.
 
 
-@pytest.mark.asyncio
 async def test_solo_encuesta_no_alcanza_la_compuerta_de_no_invencion(
     db_session: AsyncSession,
     sample_tenant,
@@ -519,7 +509,6 @@ async def _cargar_ventas(
     await db_session.commit()
 
 
-@pytest.mark.asyncio
 async def test_ventas_reales_valen_mas_que_la_estimacion_declarada(
     db_session: AsyncSession,
     sample_tenant,
@@ -543,7 +532,6 @@ async def test_ventas_reales_valen_mas_que_la_estimacion_declarada(
     assert con_ventas.data_completeness_score > solo_encuesta.data_completeness_score
 
 
-@pytest.mark.asyncio
 async def test_una_venta_suelta_no_abre_la_compuerta(
     db_session: AsyncSession,
     sample_tenant,
@@ -594,7 +582,6 @@ async def _cargar_compra_de_mercaderia(
     await db_session.commit()
 
 
-@pytest.mark.asyncio
 async def test_la_compra_de_mercaderia_real_le_gana_a_la_estimacion(
     db_session: AsyncSession,
     sample_tenant,
@@ -624,7 +611,6 @@ async def test_la_compra_de_mercaderia_real_le_gana_a_la_estimacion(
     assert state.data_completeness_score == pytest.approx(48.0)
 
 
-@pytest.mark.asyncio
 async def test_compra_de_mercaderia_legacy_sin_backfill_tambien_cuenta(
     db_session: AsyncSession,
     sample_tenant,
@@ -648,7 +634,6 @@ async def test_compra_de_mercaderia_legacy_sin_backfill_tambien_cuenta(
     assert state.monthly_inventory_cost_est == Decimal("30000.00")
 
 
-@pytest.mark.asyncio
 async def test_un_gasto_operativo_no_cuenta_como_mercaderia(
     db_session: AsyncSession,
     sample_tenant,
@@ -670,7 +655,6 @@ async def test_un_gasto_operativo_no_cuenta_como_mercaderia(
     assert state.monthly_inventory_cost_est == Decimal("90000.00")
 
 
-@pytest.mark.asyncio
 async def test_la_caja_observada_no_depende_del_calendario(
     db_session: AsyncSession,
     sample_tenant,

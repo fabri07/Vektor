@@ -32,6 +32,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from app.domain.purchase_cost import COSTO_BASE_FIELD
+
 # Campos editables de un maestro que se serializan al snapshot y se restauran.
 MASTER_SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "customer": (
@@ -59,6 +61,16 @@ RESTORE_FIELDS: dict[str, tuple[str, ...]] = {
     "supplier": MASTER_SNAPSHOT_FIELDS["supplier"],
     "product": PRODUCT_RESTORE_FIELDS,
 }
+
+# Claves del snapshot que NO son columnas del modelo: viven dentro de
+# ``custom_fields`` y se restauran ahí, sin pisar el resto del dict (que puede
+# tener campos propios que cargó el usuario y no son de este archivo).
+#
+# Hoy hay una sola y no es un capricho: la procedencia del costo se ESCRIBE junto
+# con ``unit_cost_ars`` (F-H6.d), así que tiene que VOLVER junto con él. Restaurar
+# el costo y dejar la procedencia vieja deja al guard de V5 decidiendo con un dato
+# que ya no describe el número que está guardado.
+CUSTOM_FIELD_RESTORE_KEYS: frozenset[str] = frozenset({COSTO_BASE_FIELD})
 
 
 def snapshot_master(entity: Any, kind: str) -> dict[str, Any]:
@@ -112,6 +124,18 @@ def restore_from_before(entity: Any, kind: str, before: dict[str, Any]) -> list[
             continue
         setattr(entity, f, coerce_restore_value(f, before[f]))
         restaurados.append(f)
+    for clave in CUSTOM_FIELD_RESTORE_KEYS:
+        if clave not in before:
+            continue
+        cf = {**(getattr(entity, "custom_fields", None) or {})}
+        if before[clave] is None:
+            # Ausente antes del archivo: se saca, no se guarda un None que
+            # después se leería como una afirmación.
+            cf.pop(clave, None)
+        else:
+            cf[clave] = before[clave]
+        entity.custom_fields = cf
+        restaurados.append(clave)
     return restaurados
 
 
@@ -120,9 +144,29 @@ def captured_updated_at(after: dict[str, Any] | None) -> str | None:
     return (after or {}).get("updated_at")
 
 
+def capturo_updated_at(after: dict[str, Any] | None) -> bool:
+    """¿El snapshot llegó a registrar el timestamp?
+
+    «No capturado» y «capturado como ``None``» son cosas distintas y colapsarlas
+    fue un bug en producción: el confirm de ingestión no sella ``updated_at`` en
+    el ``after`` (sólo lo hace la relectura, que pasa ``stamp_product_updated_at``),
+    así que la clave FALTA en todo `UPDATE_PRODUCT` que venga de un import normal.
+    Con la comparación cruda eso daba ``None != "2026-…"`` → siempre "cambió", y
+    el borrado del archivo marcaba TODOS los productos modificados como edición
+    manual posterior: no restauraba ninguno y respondía ``fully_reverted: false``
+    diciendo algo falso.
+
+    Es el mismo criterio que ``restore_from_before`` ya respeta con ``if f not in
+    before: continue`` — una clave ausente no autoriza a suponer nada.
+    """
+    return "updated_at" in (after or {})
+
+
 # Claves del snapshot que no son campos del modelo (metadatos del ledger) o cuya
 # reversa no pasa por `setattr` (`stock_units`, ver docstring del módulo).
-_NO_COMPARABLES: frozenset[str] = frozenset({"updated_at", "id", "kind", "stock_units"})
+_NO_COMPARABLES: frozenset[str] = frozenset(
+    {"updated_at", "id", "kind", "stock_units", *CUSTOM_FIELD_RESTORE_KEYS}
+)
 
 
 def fields_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> list[str]:
@@ -167,11 +211,19 @@ def entity_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> bo
     Ninguna de las dos sola alcanza: la primera no ve cambios en campos fuera del
     snapshot, y la segunda no ve nada si las dos escrituras caen en el mismo tick.
 
+    Pero la señal 2 sólo se puede usar **si el ledger la capturó**. Cuando el
+    snapshot no trae ``updated_at`` la señal no está disponible, y tratarla como
+    "cambió" no es conservador: prende el guard SIEMPRE y deja la reversa sin
+    poder restaurar nada (ver ``capturo_updated_at``). En ese caso decide la
+    señal 1 sola, que es evidencia directa y no depende del reloj.
+
     **El caller debe refrescar la entidad antes de llamar**: ``updated_at`` tiene
     ``onupdate`` server-side y puede quedar expirado tras flushes previos de la
     misma transacción (mismo patrón MissingGreenlet del resto del servicio).
     """
     if fields_changed_since_ledger(entity, after):
         return True
+    if not capturo_updated_at(after):
+        return False
     actual = entity.updated_at.isoformat() if entity.updated_at else None
     return captured_updated_at(after) != actual

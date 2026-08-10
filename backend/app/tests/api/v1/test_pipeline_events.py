@@ -15,7 +15,6 @@ import unittest.mock
 import uuid
 from typing import Any
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +40,6 @@ async def _events_for(session: AsyncSession, tenant_id: uuid.UUID) -> list[Pipel
     return list(result.scalars().all())
 
 
-@pytest.mark.asyncio
 class TestUploadEmitsEvent:
     async def test_upload_emits_upload_event_with_trace(
         self,
@@ -89,7 +87,6 @@ class TestUploadEmitsEvent:
         assert record.content_hash == ev.detail["content_hash"]
 
 
-@pytest.mark.asyncio
 class TestReuploadDedup:
     async def test_reupload_of_imported_file_warns(
         self,
@@ -139,7 +136,6 @@ class TestReuploadDedup:
         assert data["warning"] and "importado" in data["warning"].lower()
 
 
-@pytest.mark.asyncio
 class TestConfirmEmitsEvent:
     async def test_confirm_emits_confirm_event_with_counts(
         self,
@@ -190,7 +186,6 @@ class TestConfirmEmitsEvent:
         assert detail["imported_counts"]["ventas"] == 1
 
 
-@pytest.mark.asyncio
 class TestSoftDeletePreservesRaw:
     async def test_delete_is_soft_and_does_not_touch_s3(
         self,
@@ -245,7 +240,6 @@ class TestSoftDeletePreservesRaw:
         assert str(file_id) not in listed_ids
 
 
-@pytest.mark.asyncio
 class TestPipelineEventService:
     async def test_get_trace_returns_ordered_events(
         self,

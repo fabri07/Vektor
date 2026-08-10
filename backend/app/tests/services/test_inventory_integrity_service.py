@@ -19,6 +19,7 @@ from app.application.services.inventory_movement_origin import (
     SOURCE_MANUAL_ADJUSTMENT,
     SOURCE_RECONCILIATION,
 )
+from app.application.services.stock_service import sale_source_event_id
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -338,3 +339,83 @@ async def test_small_diff_within_threshold_is_not_reported(
     result = await check_tenant_inventory_integrity(db_session, tid)
 
     assert result["divergences"] == []
+
+
+# --- F-H3.d.1: no toda venta descuenta stock ---------------------------------
+#
+# La fórmula restaba TODAS las ventas vivas, asumiendo que cada una había movido
+# inventario. Para una venta importada eso es falso por diseño: el default de
+# `inventory_effect` (`informational`) trae la historia sin tocar el stock, y el
+# descuento recién ocurre si el usuario aplica el replay de esa hoja. Sobre un
+# tenant con historia importada, esa suposición daba una divergencia falsa por
+# producto.
+
+
+def _imported_sale(
+    tid: uuid.UUID, pid: uuid.UUID, qty: int, upload_id: uuid.UUID
+) -> SaleEntry:
+    sale = _sale(tid, pid, qty)
+    sale.source_upload_id = upload_id
+    return sale
+
+
+async def test_imported_sale_without_its_movement_does_not_count(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Historia importada que nunca descontó: el stock intacto NO es divergencia."""
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=50, name="Historia sin aplicar")
+    db_session.add(_movement(tid, product.id, 50, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_imported_sale(tid, product.id, 30, uuid.uuid4()))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["checked"] == 1
+    assert result["divergences"] == []
+
+
+async def test_imported_sale_with_its_movement_does_count(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Replay aplicado: la venta sí cuenta, y el stock ya descontado cuadra.
+
+    Es el control que impide "arreglar" el caso anterior ignorando SIEMPRE las
+    ventas importadas: con esa mutación el esperado quedaría en 50 contra un
+    stock de 20 y este test se pone rojo.
+    """
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=20, name="Replay aplicado")
+    venta = _imported_sale(tid, product.id, 30, uuid.uuid4())
+    db_session.add(venta)
+    await db_session.flush()
+    db_session.add(_movement(tid, product.id, 50, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    movimiento = _movement(tid, product.id, -30, "sale", None)
+    movimiento.source_event_id = sale_source_event_id(venta.id)
+    db_session.add(movimiento)
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert result["divergences"] == []
+
+
+async def test_live_sale_without_its_movement_still_diverges(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Control: una venta EN VIVO sin su descuento sigue siendo divergencia.
+
+    Es exactamente lo que este chequeo existe para encontrar; si el fix de la
+    venta importada se llevara puesto este caso, dejaría de detectar el bug real.
+    """
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=50, name="Venta en vivo sin ledger")
+    db_session.add(_movement(tid, product.id, 50, "adjustment", SOURCE_CATALOG_INITIAL_STOCK))
+    db_session.add(_sale(tid, product.id, 30))
+    await db_session.flush()
+
+    result = await check_tenant_inventory_integrity(db_session, tid)
+
+    assert len(result["divergences"]) == 1
+    assert result["divergences"][0]["sales_qty"] == 30
+    assert result["divergences"][0]["stock_esperado"] == 20

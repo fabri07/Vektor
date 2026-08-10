@@ -93,6 +93,173 @@ export interface FilePreview {
   master_previews: MasterPreviewSummary[];
 }
 
+/**
+ * F-H3: qué le PASARÍA al stock de un producto si se aplicara la historia del
+ * archivo. Nada de esto se aplicó — el import calcula y reporta; aplicar la
+ * historia es una decisión aparte, hoja por hoja.
+ */
+export interface InventoryImpactItem {
+  product_id: string;
+  product_name: string;
+  /** Saldo ANTES del archivo (o el absoluto que declara un catálogo). */
+  saldo_inicial: number;
+  /** Saldo tras reproducir compras y ventas por fecha. */
+  saldo_final: number;
+  compradas: number;
+  vendidas: number;
+  /** Menor saldo alcanzado durante la secuencia, y cuándo (ISO). */
+  minimo: number;
+  minimo_en?: string | null;
+  /**
+   * Primer día en que el saldo se fue abajo de cero. `null` = nunca.
+   * Tocar negativo NO es lo mismo que quedar negativo (`saldo_final < 0`): un
+   * final sano con un pozo en el medio significa que faltan compras viejas.
+   */
+  primer_negativo_en?: string | null;
+}
+
+/**
+ * F-H3.d.4 — una venta cuyo descuento no se pudo aplicar por falta de stock.
+ *
+ * NO se anula: la venta ya está en los libros y anularla cambiaría facturación
+ * confirmada. Queda pendiente hasta que el usuario cargue el inventario que falta.
+ */
+export interface PendingSaleItem {
+  sale_id: string;
+  product_id: string;
+  product_name: string;
+  quantity: number;
+  /** Unidades que había cuando le tocó el turno. Siempre menor que `quantity`. */
+  disponible: number;
+}
+
+/**
+ * F-H3.d.4 — resultado de aplicar la historia de ventas del archivo al inventario.
+ *
+ * Los números son los RECALCULADOS en esa corrida, no los que devolvió el confirm:
+ * entre confirmar y aplicar el stock pudo cambiar.
+ */
+export interface InventoryReplayResult {
+  file_id: string;
+  dry_run: boolean;
+  aplicadas: number;
+  /** Ya estaban descontadas (aplicar de nuevo, o descontadas en vivo). No es error. */
+  ya_aplicadas: number;
+  sin_stock: PendingSaleItem[];
+  impacto: InventoryImpactItem[];
+  hojas: string[];
+  /** `false` = alguna venta no tiene registrada su hoja; el alcance fue el archivo. */
+  alcance_por_hoja: boolean;
+  warnings: string[];
+}
+
+/**
+ * F-H3.e — qué le hace al INVENTARIO cada hoja, y entre qué puede elegir el
+ * usuario. Lo calcula el backend a partir del mapeo borrador: el default y las
+ * opciones dependen de la entidad de la hoja y de los campos que el mapeo cubre
+ * (sin `cantidad` mapeada, la hoja no mueve unidades). Una tabla fija acá sería
+ * una copia de una regla de dominio — el defecto que rompió el mapeo de columnas.
+ */
+export interface InventoryEffectOption {
+  value: string;
+  /** Describe QUÉ le pasa al stock, no el nombre técnico del modo. */
+  label: string;
+}
+
+export interface SheetInventoryEffect {
+  context_id: string;
+  /** Nombre legible de la hoja, nunca el `context_id` crudo. */
+  label: string;
+  default: string;
+  /** Siempre incluye `default`. Con un solo elemento no hay nada que elegir. */
+  options: InventoryEffectOption[];
+}
+
+/**
+ * F-H6.b — qué hacer con los envíos de una hoja que NO traen número de
+ * comprobante. Sin decisión no se cobran: una cifra repetida en varias filas es
+ * indistinguible de varios envíos iguales, y elegir por el usuario inventaría un
+ * dato contable.
+ */
+export type ShippingAction = "una_por_hoja" | "una_por_fila";
+
+// F-H6.c: cómo se calcula el costo de las líneas de una hoja de compras. Los
+// defaults no cambian ningún número — aplicar ajustes o capitalizar el flete de
+// línea son decisiones explícitas del usuario, igual que en el remito manual.
+export type PurchaseCostBase = "monto_incluye" | "monto_sin_ajustes";
+export type PurchaseSharedShipping = "no_distribuir" | "por_subtotal";
+export type PurchaseLineShipping = "gasto_aparte" | "al_costo";
+
+export interface PurchaseCostDecision {
+  context_id: string;
+  base?: PurchaseCostBase;
+  shared_shipping?: PurchaseSharedShipping;
+  line_shipping?: PurchaseLineShipping;
+}
+
+export interface ShippingDecision {
+  context_id: string;
+  action: ShippingAction;
+}
+
+/**
+ * F-H6.d — cómo queda repartido el envío de cada comprobante, **según el
+ * servidor**.
+ *
+ * Todos los montos llegan como string decimal y se muestran tal cual: el
+ * frontend NO recalcula el reparto. Si lo hiciera podría mostrar una división
+ * distinta de la que se va a persistir, y el usuario estaría aprobando una
+ * pantalla que no es lo que pasó — el mismo defecto que el catálogo de campos
+ * duplicado.
+ */
+export type PurchaseGroupBlockReason =
+  | "sin_identidad_de_comprobante"
+  | "cifras_distintas_de_envio"
+  | "sin_envio_compartido";
+
+export interface PurchaseGroupLine {
+  row_index: number;
+  producto: string | null;
+  subtotal: string;
+  envio_asignado: string;
+  costo_total: string;
+  /** `null` cuando la línea no trae cantidad: sin unidades no hay costo unitario. */
+  costo_unitario_final: string | null;
+}
+
+export interface PurchaseGroupItem {
+  comprobante: string | null;
+  proveedor: string | null;
+  subtotal: string;
+  envio_compartido: string;
+  repartido: string;
+  sin_repartir: string;
+  distribuible: boolean;
+  /** Código de `PurchaseGroupBlockReason`; la UI lo traduce a castellano llano. */
+  motivo_no_distribuible: string | null;
+  lineas: PurchaseGroupLine[];
+}
+
+export interface SheetPurchaseGroups {
+  context_id: string;
+  /** Nombre legible de la hoja, nunca el `context_id` crudo. */
+  label: string;
+  puede_distribuir: boolean;
+  motivo: string | null;
+  /**
+   * Total REAL de comprobantes. `grupos` puede venir ACOTADO: comparar contra
+   * esto antes de decir "estos son todos" — truncar sin avisar se lee como que
+   * lo mostrado es todo el archivo.
+   */
+  grupos_total: number;
+  grupos: PurchaseGroupItem[];
+  filas_sin_comprobante: number;
+}
+
+export interface PurchaseGroupsResponse {
+  sheets: SheetPurchaseGroups[];
+}
+
 export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
@@ -100,6 +267,11 @@ export interface ConfirmIngestionResult {
   // Avisos human-in-the-loop tras confirmar (compras sin proveedor/producto, filas a
   // "Otros"). No bloquean; se muestran en un banner para que el usuario los revise.
   warnings?: string[];
+  // F-H3.c: impacto proyectado sobre el inventario, para mostrarlo. Ordenado con
+  // los productos que se van a negativo primero, y ACOTADO: comparar contra
+  // `inventory_impact_total` antes de decir "estos son todos".
+  inventory_impact?: InventoryImpactItem[];
+  inventory_impact_total?: number;
 }
 
 /**
@@ -134,11 +306,31 @@ export interface FieldCatalogEntry {
   label: string;
   /** Solo UNA columna puede apuntarle: dos no se pueden desempatar sin inventar. */
   single_value: boolean;
+  /**
+   * F-C: POR QUÉ el importador necesita este campo, redactado como consecuencia
+   * ("la fila que no lo traiga queda en «Otros»"), no como imperativo. Lo escribe
+   * el backend porque es consecuencia de una regla del IMPORTADOR: si mañana una
+   * fila sin fecha deja de ir a «Otros», el texto tiene que cambiar allá y no en
+   * una pantalla.
+   *
+   * Cadena vacía cuando no hay motivo escrito. Opcional para que un backend
+   * anterior a F-C siga deserializando sin romper la pantalla.
+   */
+  required_reason?: string;
 }
 
 export interface EntityFieldCatalog {
   /** Un `custom_field:` NO cubre un requerido (misma regla que el confirm). */
   required: string[];
+  /**
+   * Qué otro conjunto COMPLETO de campos cubre un requerido (F-H4):
+   * `{ amount: ["unit_price", "quantity"] }` — si la planilla trae el precio
+   * unitario y la cantidad, el total es una cuenta y no hace falta la columna.
+   *
+   * Viene del backend por la misma razón que `fields`: con una copia acá, la
+   * pantalla bloquearía un archivo que el confirm acepta.
+   */
+  required_alternatives: Record<string, string[]>;
   fields: FieldCatalogEntry[];
 }
 
@@ -152,8 +344,17 @@ export interface ColumnMappingSuggestion {
   confidence: number;
   // FASE 2 (A2): "llm" = la 4ª capa LLM desambiguó esta columna.
   source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none";
-  status: "mapped" | "unmapped" | "required_missing";
+  // F-M: `ambiguo` = Véktor entendió el encabezado y, con eso entendido, hay más
+  // de una lectura razonable. No es `unmapped`, que significa que no reconoció
+  // nada — y la pantalla las muestra distinto porque para la persona no son lo
+  // mismo. Espejo de `ColumnMappingSuggestion` en `schemas/ingestion.py`.
+  status: "mapped" | "unmapped" | "ambiguo" | "required_missing";
   context_id?: string | null;
+  // Candidatos entre los que elegir cuando `status === "ambiguo"`.
+  options?: string[];
+  // Por qué no alcanza, en castellano. Viaja también en `unmapped` cuando el
+  // concepto se reconoció pero esta hoja no tiene campo donde ponerlo.
+  duda?: string | null;
 }
 
 export interface ColumnMapping {
@@ -423,6 +624,18 @@ export const ingestionService = {
     stockTreatment?: StockTreatment | Record<string, StockTreatment>,
     // F8c: decisiones del usuario sobre columnas riesgosas (drop / enrutar a Otros).
     columnRiskDecisions?: ColumnRiskDecision[],
+    // F-H3.e: qué le hace al inventario cada hoja, `{context_id: modo}`. Sin esto
+    // el backend aplica el default de cada hoja y `historical_replay` —el único
+    // modo que escribe stock— era inalcanzable desde la pantalla.
+    inventoryEffect?: Record<string, string>,
+    // F-H6.b: qué hacer con los envíos sin comprobante, por hoja. Sin entrada
+    // para una hoja, sus envíos sin comprobante no se registran.
+    shippingDecisions?: ShippingDecision[],
+    // F-H6.c: cómo se calcula el costo de cada hoja de compras. Sin entrada para
+    // una hoja, sus columnas de ajuste no mueven ningún número — y el backend lo
+    // AVISA en la respuesta, para que un descuento mapeado no quede ignorado en
+    // silencio.
+    purchaseCostDecisions?: PurchaseCostDecision[],
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
@@ -433,10 +646,77 @@ export const ingestionService = {
         context_entity: contextEntity ?? {},
         stock_treatment: stockTreatment ?? null,
         column_risk_decisions: columnRiskDecisions ?? [],
+        // `null` y no `{}`: un dict vacío y "no mandé nada" significan lo mismo
+        // para el backend (cada hoja toma su default), pero mandar null lo dice.
+        inventory_effect: inventoryEffect ?? null,
+        shipping_decisions: shippingDecisions ?? [],
+        purchase_cost_decisions: purchaseCostDecisions ?? [],
       },
       { timeout: CONFIRM_TIMEOUT_MS },
     );
     return res.data;
+  },
+
+  /**
+   * F-H3.e: qué propone Véktor para el inventario de cada hoja, con el mapeo
+   * borrador. Read-only. Se vuelve a pedir cuando el mapeo cambia: mapear
+   * `cantidad` es lo que habilita que una hoja pueda aplicar su historia.
+   */
+  async fetchInventoryEffects(
+    fileId: string,
+    body: {
+      columnMappings: ColumnMapping[];
+      contextEntity: Record<string, string>;
+    },
+    signal?: AbortSignal,
+  ): Promise<SheetInventoryEffect[]> {
+    const res = await api.post<SheetInventoryEffect[]>(
+      `/ingestion/files/${fileId}/inventory-effects`,
+      {
+        column_mappings: body.columnMappings,
+        context_entity: body.contextEntity,
+      },
+      { signal },
+    );
+    return res.data;
+  },
+
+  /**
+   * F-H6.d: cómo agruparía Véktor las líneas de compra por comprobante y cómo
+   * repartiría el envío compartido, con el mapeo y las decisiones borrador.
+   * Read-only.
+   *
+   * Las DOS decisiones van en el cuerpo porque las dos cambian el resultado: la
+   * de costo decide si el envío se reparte o queda como gasto aparte, y la de
+   * envío (F-H6.b) decide si una hoja sin número de comprobante puede formar un
+   * grupo. Sin ellas el preview mostraría el reparto de una configuración que el
+   * usuario no eligió.
+   */
+  async fetchPurchaseGroups(
+    fileId: string,
+    body: {
+      columnMappings: ColumnMapping[];
+      contextEntity: Record<string, string>;
+      confirmedFields: Record<string, boolean>;
+      contextConfirmed: Record<string, boolean>;
+      shippingDecisions: ShippingDecision[];
+      purchaseCostDecisions: PurchaseCostDecision[];
+    },
+    signal?: AbortSignal,
+  ): Promise<SheetPurchaseGroups[]> {
+    const res = await api.post<PurchaseGroupsResponse>(
+      `/ingestion/files/${fileId}/purchase-groups`,
+      {
+        column_mappings: body.columnMappings,
+        context_entity: body.contextEntity,
+        confirmed_fields: body.confirmedFields,
+        context_confirmed: body.contextConfirmed,
+        shipping_decisions: body.shippingDecisions,
+        purchase_cost_decisions: body.purchaseCostDecisions,
+      },
+      { signal },
+    );
+    return res.data.sheets;
   },
 
   // F8c: recalcula el riesgo contextual de columnas en vivo (p. ej. tras
@@ -525,6 +805,28 @@ export const ingestionService = {
   ): Promise<RereadRunStatusResponse> {
     const res = await api.get<RereadRunStatusResponse>(
       `/ingestion/files/${fileId}/reread/runs/${runId}`,
+    );
+    return res.data;
+  },
+
+  /**
+   * F-H3.d.4 — aplica al inventario la historia de ventas del archivo.
+   *
+   * `dryRun` corre el MISMO cálculo sin escribir. Sin `contextIds` aplica todas
+   * las hojas del archivo. El descuento es idempotente: reintentarlo después de
+   * cargar el stock que faltaba sólo aplica lo que había quedado pendiente.
+   */
+  async applyInventoryReplay(
+    fileId: string,
+    options?: { contextIds?: string[]; dryRun?: boolean },
+  ): Promise<InventoryReplayResult> {
+    const res = await api.post<InventoryReplayResult>(
+      `/ingestion/files/${fileId}/inventory-replay`,
+      {
+        context_ids: options?.contextIds ?? null,
+        dry_run: options?.dryRun ?? false,
+      },
+      { timeout: CONFIRM_TIMEOUT_MS },
     );
     return res.data;
   },

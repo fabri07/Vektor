@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,7 +58,6 @@ def test_merchandise_csv_parsed_as_stock() -> None:
     assert summary["inferred_type"] == "stock"
 
 
-@pytest.mark.asyncio
 async def test_merchandise_import_creates_products_not_expenses(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -98,7 +96,6 @@ async def test_merchandise_import_creates_products_not_expenses(
     assert {m.movement_type for m in movements} == {"adjustment"}
 
 
-@pytest.mark.asyncio
 async def test_merchandise_import_as_purchase_creates_cogs(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

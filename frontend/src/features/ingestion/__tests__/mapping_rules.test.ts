@@ -7,10 +7,15 @@
 
 import {
   coversRequired,
+  customFieldCollisions,
+  explainMissing,
   missingRequiredFields,
   scalarCollisions,
 } from "../mappingRules";
-import type { FieldCatalogEntry } from "@/services/ingestion.service";
+import type {
+  EntityFieldCatalog,
+  FieldCatalogEntry,
+} from "@/services/ingestion.service";
 
 const CAMPOS_PRODUCTO: FieldCatalogEntry[] = [
   { value: "name", label: "Nombre", single_value: false },
@@ -39,36 +44,106 @@ describe("coversRequired", () => {
 });
 
 describe("missingRequiredFields", () => {
+  // La alternativa del catálogo para ventas (F-H4). Las entidades sin
+  // alternativa la reciben vacía, que es lo que manda el backend.
+  const SIN_ALTERNATIVA: Record<string, string[]> = {};
+  const ALT_VENTA: Record<string, string[]> = {
+    amount: ["quantity", "unit_price"],
+  };
+
   it("detecta el requerido que quedó en un campo personalizado", () => {
-    const faltan = missingRequiredFields(["name"], {
-      Productos: "custom_field:nombre_del_producto",
-      "Precio de venta final": "sale_price_ars",
-    });
+    const faltan = missingRequiredFields(
+      ["name"],
+      {
+        Productos: "custom_field:nombre_del_producto",
+        "Precio de venta final": "sale_price_ars",
+      },
+      SIN_ALTERNATIVA,
+    );
     expect(faltan).toEqual(["name"]);
   });
 
   it("no reporta nada cuando el requerido está en su campo canónico", () => {
     expect(
-      missingRequiredFields(["name"], {
-        Productos: "name",
-        "Precio de compra": "unit_cost_ars",
-      }),
+      missingRequiredFields(
+        ["name"],
+        { Productos: "name", "Precio de compra": "unit_cost_ars" },
+        SIN_ALTERNATIVA,
+      ),
     ).toEqual([]);
   });
 
   it("alcanza con que UNA columna cubra el requerido", () => {
     expect(
-      missingRequiredFields(["name"], {
-        Alias: "custom_field:alias",
-        Productos: "name",
-      }),
+      missingRequiredFields(
+        ["name"],
+        { Alias: "custom_field:alias", Productos: "name" },
+        SIN_ALTERNATIVA,
+      ),
     ).toEqual([]);
   });
 
   it("reporta varios requeridos faltantes a la vez", () => {
     expect(
-      missingRequiredFields(["amount", "transaction_date"], { detalle: "notes" }),
+      missingRequiredFields(
+        ["amount", "transaction_date"],
+        { detalle: "notes" },
+        SIN_ALTERNATIVA,
+      ),
     ).toEqual(["amount", "transaction_date"]);
+  });
+
+  // F-H4: `amount OR (unit_price AND quantity)`.
+  it("el precio unitario y la cantidad cubren el monto", () => {
+    expect(
+      missingRequiredFields(
+        ["amount", "transaction_date"],
+        { Fecha: "transaction_date", "P. unit": "unit_price", Cant: "quantity" },
+        ALT_VENTA,
+      ),
+    ).toEqual([]);
+  });
+
+  it("la alternativa INCOMPLETA no cubre nada", () => {
+    // Con el precio pero sin la cantidad no hay total que calcular: bloquear acá
+    // es lo mismo que hace el confirm.
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        { Fecha: "transaction_date", "P. unit": "unit_price" },
+        ALT_VENTA,
+      ),
+    ).toEqual(["amount"]);
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        { Fecha: "transaction_date", Cant: "quantity" },
+        ALT_VENTA,
+      ),
+    ).toEqual(["amount"]);
+  });
+
+  it("un campo personalizado tampoco cubre por alternativa", () => {
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        {
+          "P. unit": "custom_field:unit_price",
+          Cant: "custom_field:quantity",
+        },
+        ALT_VENTA,
+      ),
+    ).toEqual(["amount"]);
+  });
+
+  it("sin alternativa declarada, el requerido sigue siendo requerido", () => {
+    expect(
+      missingRequiredFields(
+        ["amount"],
+        { "P. unit": "unit_price", Cant: "quantity" },
+        SIN_ALTERNATIVA,
+      ),
+    ).toEqual(["amount"]);
   });
 });
 
@@ -134,5 +209,142 @@ describe("scalarCollisions", () => {
       "sale_price_ars",
       "stock_units",
     ]);
+  });
+});
+
+describe("customFieldCollisions", () => {
+  it("dos columnas con el mismo nombre de campo propio colisionan", () => {
+    const colisiones = customFieldCollisions({
+      Observaciones: "custom_field:obs",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.label).toBe("obs");
+    expect(colisiones[0]?.columns.sort()).toEqual(["Obs.", "Observaciones"]);
+  });
+
+  it("nombres distintos no colisionan", () => {
+    expect(
+      customFieldCollisions({
+        Observaciones: "custom_field:observaciones",
+        "Obs.": "custom_field:obs",
+      }),
+    ).toEqual([]);
+  });
+
+  it("no confunde un campo canónico con uno propio", () => {
+    expect(
+      customFieldCollisions({ a: "sale_price_ars", b: "sale_price_ars" }),
+    ).toEqual([]);
+  });
+
+  it("ignorar y sin mapear no compiten por ningún campo", () => {
+    expect(customFieldCollisions({ a: "ignore", b: "ignore", c: "" })).toEqual([]);
+  });
+
+  /**
+   * Los espacios los recorta `parse_target` en el backend, así que para el
+   * confirm todos estos son el MISMO campo. Si acá no se recortaran, la pantalla
+   * daría el OK y el confirm respondería 422 — la divergencia exacta que este
+   * módulo existe para evitar.
+   */
+  it("un espacio después de los dos puntos no crea un campo distinto", () => {
+    const colisiones = customFieldCollisions({
+      Observaciones: "custom_field: obs",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.label).toBe("obs");
+    expect(colisiones[0]?.columns.sort()).toEqual(["Obs.", "Observaciones"]);
+  });
+
+  it("un espacio al final de la clave tampoco", () => {
+    const colisiones = customFieldCollisions({
+      Observaciones: "custom_field:obs ",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.label).toBe("obs");
+  });
+
+  it("un espacio ANTES del prefijo sigue siendo un campo propio", () => {
+    // Sin recortar el target, este no entraba siquiera a la rama de campos
+    // propios: se iba con los canónicos y la colisión no se miraba nunca.
+    const colisiones = customFieldCollisions({
+      Observaciones: " custom_field:obs",
+      "Obs.": "custom_field:obs",
+    });
+    expect(colisiones).toHaveLength(1);
+    expect(colisiones[0]?.target).toBe("custom_field:obs");
+    expect(colisiones[0]?.columns.sort()).toEqual(["Obs.", "Observaciones"]);
+  });
+});
+
+/**
+ * F-C — describir lo que falta.
+ *
+ * `explainMissing` es una función NUEVA y aparte: `missingRequiredFields` decide
+ * QUÉ falta y es lo que bloquea el confirm, así que su contrato queda intacto.
+ * Ésta sólo traduce ese resultado a algo que una persona pueda leer y decidir.
+ */
+const CATALOGO_VENTA: EntityFieldCatalog = {
+  required: ["amount", "transaction_date"],
+  required_alternatives: { amount: ["unit_price", "quantity"] },
+  fields: [
+    {
+      value: "amount",
+      label: "Monto de venta",
+      single_value: true,
+      required_reason:
+        "Para registrar una venta, Véktor necesita saber cuánta plata entró. " +
+        "La fila que no lo traiga queda en «Otros».",
+    },
+    {
+      value: "transaction_date",
+      label: "Fecha de venta",
+      single_value: true,
+      required_reason:
+        "Es lo que ubica cada venta en su período. La fila con una fecha que no " +
+        "se pueda leer queda en «Otros» — nunca se le pone la de hoy.",
+    },
+    { value: "notes", label: "Notas", single_value: false },
+  ],
+};
+
+describe("explainMissing", () => {
+  it("devuelve el nombre de pantalla y el motivo, no el nombre técnico", () => {
+    // «Campos requeridos sin mapear: transaction_date» se lee como "esta columna
+    // de tu planilla es obligatoria", que es al revés de lo que pasa.
+    const [faltante] = explainMissing(["transaction_date"], CATALOGO_VENTA);
+    expect(faltante?.label).toBe("Fecha de venta");
+    expect(faltante?.label).not.toBe("transaction_date");
+    expect(faltante?.reason).toMatch(/nunca se le pone la de hoy/);
+  });
+
+  it("conserva el nombre técnico aparte, que es con lo que se enruta el salto", () => {
+    const [faltante] = explainMissing(["amount"], CATALOGO_VENTA);
+    expect(faltante?.field).toBe("amount");
+  });
+
+  it("respeta el orden de lo que le pasaron", () => {
+    const explicados = explainMissing(["transaction_date", "amount"], CATALOGO_VENTA);
+    expect(explicados.map((f) => f.field)).toEqual(["transaction_date", "amount"]);
+  });
+
+  it("un campo sin motivo escrito no inventa uno", () => {
+    // El motivo lo escribe el backend. Rellenarlo acá sería afirmar una
+    // consecuencia que el importador puede no tener.
+    const [faltante] = explainMissing(["notes"], CATALOGO_VENTA);
+    expect(faltante?.label).toBe("Notas");
+    expect(faltante?.reason).toBe("");
+  });
+
+  it("sin catálogo cae al nombre técnico en vez de no nombrar nada", () => {
+    const [faltante] = explainMissing(["amount"], undefined);
+    expect(faltante).toEqual({ field: "amount", label: "amount", reason: "" });
+  });
+
+  it("sin faltantes no devuelve nada", () => {
+    expect(explainMissing([], CATALOGO_VENTA)).toEqual([]);
   });
 });

@@ -6,8 +6,6 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.application.agents.shared.schemas import AgentRequest, RiskLevel
 
 
@@ -35,7 +33,6 @@ def _mock_llm_entities_response(entities: dict[str, Any]) -> MagicMock:
     return response
 
 
-@pytest.mark.asyncio
 async def test_stock_loss_intent_classified_correctly():
     """Mock Haiku devuelve STOCK_LOSS para 'se cayó una caja de vino' → _handle_stock_loss."""
     from app.application.agents.stock.agent import AgentStock
@@ -70,7 +67,6 @@ async def test_stock_loss_intent_classified_correctly():
     assert result.result["structured_data"]["product_name"] == "Vino"
 
 
-@pytest.mark.asyncio
 async def test_stock_adjustment_intent_classified_correctly():
     """Mock Haiku devuelve STOCK_ADJUSTMENT → _handle_stock_adjustment (risk MEDIUM)."""
     from app.application.agents.stock.agent import AgentStock
@@ -102,7 +98,6 @@ async def test_stock_adjustment_intent_classified_correctly():
     assert result.result["action_type"] == "UPDATE_STOCK"
 
 
-@pytest.mark.asyncio
 async def test_stock_query_fallback_on_llm_error():
     """Si el LLM falla, el fallback por keywords devuelve STOCK_QUERY para mensaje neutro."""
     from app.application.agents.stock.agent import AgentStock
@@ -122,7 +117,6 @@ async def test_stock_query_fallback_on_llm_error():
     assert result.requires_approval is False
 
 
-@pytest.mark.asyncio
 async def test_stock_loss_fallback_keywords():
     """Si el LLM falla, el fallback detecta 'merma' por keywords → STOCK_LOSS."""
     from app.application.agents.stock.agent import AgentStock
@@ -160,7 +154,6 @@ async def test_stock_loss_fallback_keywords():
     assert result.result["action_type"] == "REGISTER_STOCK_LOSS"
 
 
-@pytest.mark.asyncio
 async def test_stock_loss_invalid_intent_falls_to_query():
     """Si el LLM devuelve un intent inválido, se normaliza a STOCK_QUERY."""
     from app.application.agents.stock.agent import AgentStock

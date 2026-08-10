@@ -13,7 +13,6 @@ import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,7 +151,6 @@ async def seeded_customers(db_session: AsyncSession) -> uuid.UUID:
     return tid
 
 
-@pytest.mark.asyncio
 async def test_analizar_clientes_general(db_session, seeded_customers):
     agent = AgentClient(db=db_session)
     resp = await agent.process(_req(seeded_customers), task=_task("analizar_clientes"))
@@ -168,7 +166,6 @@ async def test_analizar_clientes_general(db_session, seeded_customers):
     assert top[0]["avg_ticket"] == 5000.0
 
 
-@pytest.mark.asyncio
 async def test_cuentas_por_cobrar(db_session, seeded_customers):
     agent = AgentClient(db=db_session)
     resp = await agent.process(
@@ -181,7 +178,6 @@ async def test_cuentas_por_cobrar(db_session, seeded_customers):
     assert "Beto" in resp.message
 
 
-@pytest.mark.asyncio
 async def test_priorizar_cobranza(db_session, seeded_customers):
     agent = AgentClient(db=db_session)
     resp = await agent.process(_req(seeded_customers), task=_task("priorizar_cobranza"))
@@ -190,7 +186,6 @@ async def test_priorizar_cobranza(db_session, seeded_customers):
     assert "Beto" in resp.message
 
 
-@pytest.mark.asyncio
 async def test_clientes_inactivos(db_session, seeded_customers):
     agent = AgentClient(db=db_session)
     resp = await agent.process(
@@ -205,7 +200,6 @@ async def test_clientes_inactivos(db_session, seeded_customers):
     assert "Carlos Inactivo" in inactive_names
 
 
-@pytest.mark.asyncio
 async def test_clientes_sin_clientes_cargados(db_session):
     tid = await _mk_tenant(db_session)
     agent = AgentClient(db=db_session)
@@ -214,7 +208,6 @@ async def test_clientes_sin_clientes_cargados(db_session):
     assert resp.result["summary"] == "clientes_sin_datos"
 
 
-@pytest.mark.asyncio
 async def test_clientes_cargados_sin_ventas(db_session):
     tid = await _mk_tenant(db_session)
     db_session.add(Customer(tenant_id=tid, name="Sin Compras"))
@@ -225,7 +218,6 @@ async def test_clientes_cargados_sin_ventas(db_session):
     assert resp.result["summary"] == "clientes_sin_ventas"
 
 
-@pytest.mark.asyncio
 async def test_clientes_sin_db():
     """Sin DB → mensaje claro, sin crash (no-invention)."""
     agent = AgentClient(db=None)

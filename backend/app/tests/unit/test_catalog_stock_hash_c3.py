@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +40,6 @@ async def _import_catalog(
     )
 
 
-@pytest.mark.asyncio
 async def test_hash_de_catalogo_no_depende_del_dia_de_import(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

@@ -17,7 +17,6 @@ from httpx import AsyncClient
 _TODAY = str(date.today())
 
 
-@pytest.mark.asyncio
 class TestCrossTenantLinkRejected:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -96,7 +95,6 @@ class TestCrossTenantLinkRejected:
         assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 class TestSupplierLinkBehaviour:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

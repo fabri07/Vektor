@@ -21,6 +21,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.settings import get_settings
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -93,7 +94,6 @@ def _mapping(source: str, target: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 class TestColisionDeCampoEscalar:
     async def test_tres_columnas_al_mismo_precio_rechaza_con_422(
         self,
@@ -227,3 +227,210 @@ class TestColisionDeCampoEscalar:
         )
 
         assert response.status_code == 200, response.text
+
+
+# Con fecha y monto: los requeridos se validan ANTES que la colisión escalar, así
+# que una hoja incompleta rebotaría por el otro motivo y este test no probaría nada.
+_HEADERS_COMPRA = [
+    "Fecha",
+    "Monto",
+    "Producto",
+    "Cantidad",
+    "Bonificación",
+    "Descuento",
+]
+
+
+def _compra_summary() -> dict[str, Any]:
+    rows = [
+        {
+            "Fecha": "2026-03-10",
+            "Monto": "5000",
+            "Producto": "Vela aromática 200g",
+            "Cantidad": "10",
+            "Bonificación": "150",
+            "Descuento": "80",
+            "__context__": "sheet:compras",
+        }
+    ]
+    return {
+        "confidence": "HIGH",
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "row_count": 1,
+        "gastos_detectados": rows,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:compras",
+                "label": "compras",
+                "source_kind": "sheet",
+                "entity_type": "expense",
+                "headers": _HEADERS_COMPRA,
+                "fields": None,
+                "preview_rows": rows,
+                "row_count": 1,
+            }
+        ],
+    }
+
+
+@pytest_asyncio.fixture
+async def compra_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    record = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="compras.xlsx",
+        s3_key="uploads/test/uuid/compras.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=2048,
+        purpose="gastos",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json=_compra_summary(),
+    )
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+class TestLosCostosDeCompraTambienSonEscalares:
+    """F-M.7 — `discount`, `taxes` y `shipping_cost_line` son escalares.
+
+    Una planilla real trae «Bonificación» y «Descuento» como columnas separadas y
+    las dos son descuentos. Sumarlas sola sería inventar una cuenta que nadie
+    pidió; quedarse con la primera del orden del Excel es el incidente ASTERIA
+    otra vez, ahora sobre el costo de una compra en vez del precio de un producto.
+    """
+
+    async def test_dos_columnas_de_descuento_rechazan_con_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        compra_file: UploadedFile,
+    ) -> None:
+        body = {
+            "column_mappings": [
+                {
+                    "source_column": c,
+                    "target_field": t,
+                    "context_id": "sheet:compras",
+                    "entity_type": "expense",
+                }
+                for c, t in [
+                    ("Fecha", "expense_date"),
+                    ("Monto", "amount"),
+                    ("Producto", "product_name"),
+                    ("Cantidad", "quantity"),
+                    ("Bonificación", "discount"),
+                    ("Descuento", "discount"),
+                ]
+            ],
+            "confirmed_fields": {"gastos": True},
+            "context_confirmed": {"sheet:compras": True},
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{compra_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "Descuento de la línea" in detail, "el mensaje nombra el campo en castellano"
+        for col in ("Bonificación", "Descuento"):
+            assert col in detail
+
+
+class TestUnaDecisionDeCostoQueNoSePuedeHonrar:
+    """F-H6.c — se rechaza ANTES del lease, con el motivo en castellano.
+
+    Mismo criterio que la decisión de envíos: declarar un efecto sobre el costo
+    que no va a ocurrir no se ignora en silencio, porque el usuario cree haber
+    resuelto algo. Y un archivo que va a rebotar no debería tomar el lease.
+
+    El tenant se habilita a mano en la compuerta de rollout (F-H6.d): sin eso el
+    confirm rebota antes con «el motor de costos no está habilitado» y este test
+    mediría el gate en vez de la validación que le importa.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _con_motor_de_costos(
+        self, monkeypatch: pytest.MonkeyPatch, sample_tenant: Tenant
+    ) -> None:
+        monkeypatch.setattr(
+            get_settings(),
+            "PURCHASE_COST_ROLLOUT_TENANT_IDS",
+            [str(sample_tenant.tenant_id)],
+        )
+
+    async def test_aplicar_ajustes_sin_columna_de_descuento_rechaza(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        compra_file: UploadedFile,
+    ) -> None:
+        body = {
+            "column_mappings": [
+                {
+                    "source_column": c,
+                    "target_field": t,
+                    "context_id": "sheet:compras",
+                    "entity_type": "expense",
+                }
+                for c, t in [
+                    ("Fecha", "expense_date"),
+                    ("Monto", "amount"),
+                    ("Producto", "product_name"),
+                    ("Cantidad", "quantity"),
+                ]
+            ],
+            "confirmed_fields": {"gastos": True},
+            "context_confirmed": {"sheet:compras": True},
+            # Declara que el monto es bruto, pero no mapeó ninguna columna de
+            # descuento ni de impuestos: el ajuste no tendría de dónde salir.
+            "purchase_cost_decisions": [
+                {"context_id": "sheet:compras", "base": "monto_sin_ajustes"}
+            ],
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{compra_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "compras" in detail, "nombra la hoja"
+        assert "Descuento de la línea" in detail, "y el campo en castellano"
+        assert "discount" not in detail, "nunca el nombre técnico"
+
+    async def test_un_modo_inventado_rechaza_por_el_schema(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        compra_file: UploadedFile,
+    ) -> None:
+        """El `Literal` del schema es la primera barrera: un modo que no existe ni
+        siquiera llega a la validación de dominio."""
+        body = {
+            "column_mappings": [
+                {
+                    "source_column": "Fecha",
+                    "target_field": "expense_date",
+                    "context_id": "sheet:compras",
+                    "entity_type": "expense",
+                }
+            ],
+            "confirmed_fields": {"gastos": True},
+            "context_confirmed": {"sheet:compras": True},
+            "purchase_cost_decisions": [
+                {"context_id": "sheet:compras", "base": "modo_que_no_existe"}
+            ],
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{compra_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+        assert response.status_code == 422

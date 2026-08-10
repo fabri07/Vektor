@@ -10,7 +10,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +31,6 @@ def _record(
     )
 
 
-@pytest.mark.asyncio
 async def test_bulk_import_sales_and_expenses(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -91,7 +89,6 @@ async def test_bulk_import_sales_and_expenses(
     assert by_status == {"IMPORTED": 2, "PENDING": 2}
 
 
-@pytest.mark.asyncio
 async def test_bulk_import_entity_filter(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -125,7 +122,6 @@ async def test_bulk_import_entity_filter(
     assert pending[0].suggested_entity == "expense"
 
 
-@pytest.mark.asyncio
 async def test_bulk_import_distingue_ya_importado_de_needs_manual(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

@@ -8,8 +8,6 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.application.services.data_repair_service import (
     _extract_price_set,
     _extract_product_rows,
@@ -141,7 +139,6 @@ def test_parse_quantity_from_chat_sale_notes():
     assert parsed == (3, "coca colas")
 
 
-@pytest.mark.asyncio
 async def test_detect_chat_sale_quality_issue_unique_product():
     from app.application.services.data_repair_service import detect_chat_sale_quality_issues
 
@@ -200,7 +197,6 @@ def _mock_db_session(execute_side_effects: list[Any]) -> MagicMock:
     return mock_db
 
 
-@pytest.mark.asyncio
 async def test_dry_run_does_not_void_sales():
     """dry_run=True → DataRepairRun creado, SaleEntry.voided_at NO se toca."""
     from app.application.services.data_repair_service import apply_repair
@@ -272,7 +268,6 @@ async def test_dry_run_does_not_void_sales():
     assert mock_sale.voided_at is None
 
 
-@pytest.mark.asyncio
 async def test_apply_voids_sales_and_creates_run():
     """dry_run=False → SaleEntry.voided_at se setea, run con COMPLETED."""
     from app.application.services.data_repair_service import apply_repair
@@ -353,7 +348,6 @@ async def test_apply_voids_sales_and_creates_run():
     assert result.products_created == 1
 
 
-@pytest.mark.asyncio
 async def test_no_touch_sale_with_product_id():
     """SaleEntry con product_id → no es candidata (ya tiene FK correcta)."""
     from app.application.services.data_repair_service import detect_misclassified_product_imports
@@ -388,7 +382,6 @@ async def test_no_touch_sale_with_product_id():
     assert len(candidates) == 0
 
 
-@pytest.mark.asyncio
 async def test_no_touch_non_import_sales():
     """CSV de ventas reales (fecha+monto+descripcion) → no genera candidatos."""
     from app.application.services.data_repair_service import detect_misclassified_product_imports
@@ -419,7 +412,6 @@ async def test_no_touch_non_import_sales():
     assert len(candidates) == 0
 
 
-@pytest.mark.asyncio
 async def test_dry_run_idempotent_already_voided():
     """SaleEntry con voided_at ya seteado no aparece en candidatos."""
     from app.application.services.data_repair_service import detect_misclassified_product_imports

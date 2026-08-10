@@ -96,7 +96,6 @@ def test_estimate_cost_unknown_model() -> None:
 # ── RBAC ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_owner_forbidden(client: AsyncClient, auth_headers: dict[str, Any]) -> None:
     resp = await client.get(_USAGE, headers=auth_headers)
     assert resp.status_code == 403
@@ -105,7 +104,6 @@ async def test_owner_forbidden(client: AsyncClient, auth_headers: dict[str, Any]
 # ── Agregados ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_usage_aggregates(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -185,7 +183,6 @@ async def test_usage_aggregates(
     assert data["by_tenant"][0]["cost_usd"] == pytest.approx(24.0)
 
 
-@pytest.mark.asyncio
 async def test_usage_filtered_by_tenant(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -226,7 +223,6 @@ async def test_usage_filtered_by_tenant(
     assert data["by_tenant"][0]["tenant_id"] == str(sample_tenant.tenant_id)
 
 
-@pytest.mark.asyncio
 async def test_by_agent_uses_call_source_not_sub_agent(
     client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -269,7 +265,6 @@ async def test_by_agent_uses_call_source_not_sub_agent(
     assert "agent_ceo" not in agents
 
 
-@pytest.mark.asyncio
 async def test_unpriced_tokens_surfaced(
     client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -327,7 +322,6 @@ async def test_unpriced_tokens_surfaced(
     assert by_model["modelo-futuro-sin-precio"]["priced"] is False
 
 
-@pytest.mark.asyncio
 async def test_usage_empty(
     client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

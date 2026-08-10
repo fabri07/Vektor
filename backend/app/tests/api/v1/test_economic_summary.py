@@ -6,7 +6,6 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,7 +61,6 @@ async def _add_product(
     )
 
 
-@pytest.mark.asyncio
 async def test_empty_range_has_no_data(
     client: AsyncClient, auth_headers: dict[str, Any]
 ) -> None:
@@ -80,7 +78,6 @@ async def test_empty_range_has_no_data(
     assert data["stock_value_ars"] == 0
 
 
-@pytest.mark.asyncio
 async def test_complete_data_summary(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -109,7 +106,6 @@ async def test_complete_data_summary(
     assert data["missing_cost_stock_units"] == 0
 
 
-@pytest.mark.asyncio
 async def test_products_without_cost_reported_not_valued(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -133,7 +129,6 @@ async def test_products_without_cost_reported_not_valued(
     assert data["has_data"] is True
 
 
-@pytest.mark.asyncio
 async def test_product_without_cost_and_zero_stock_is_ignored(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -156,7 +151,6 @@ async def test_product_without_cost_and_zero_stock_is_ignored(
     assert data["has_data"] is False
 
 
-@pytest.mark.asyncio
 async def test_from_after_to_returns_422(
     client: AsyncClient, auth_headers: dict[str, Any]
 ) -> None:
@@ -168,7 +162,6 @@ async def test_from_after_to_returns_422(
     assert resp.status_code == 422
 
 
-@pytest.mark.asyncio
 async def test_requires_auth(client: AsyncClient) -> None:
     resp = await client.get(
         "/api/v1/economic-summary",

@@ -42,7 +42,6 @@ async def _superadmin_headers(db: AsyncSession, tenant: Tenant) -> dict[str, str
     return {"Authorization": f"Bearer {token}"}
 
 
-@pytest.mark.asyncio
 async def test_requires_superadmin(
     client: AsyncClient, auth_headers: dict[str, Any]
 ) -> None:
@@ -51,7 +50,6 @@ async def test_requires_superadmin(
     assert resp.status_code == 403
 
 
-@pytest.mark.asyncio
 async def test_flag_off_reports_disabled(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -72,7 +70,6 @@ async def test_flag_off_reports_disabled(
     assert flag_check["severity"] == "error"
 
 
-@pytest.mark.asyncio
 async def test_all_checks_pass_when_configured(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -106,7 +103,6 @@ async def test_all_checks_pass_when_configured(
     assert all(c["ok"] for c in data["checks"] if c["severity"] == "error")
 
 
-@pytest.mark.asyncio
 async def test_empty_secret_is_error(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -142,7 +138,6 @@ async def test_empty_secret_is_error(
     assert data["overall_ok"] is False
 
 
-@pytest.mark.asyncio
 async def test_secret_mismatch_reported(
     client: AsyncClient,
     db_session: AsyncSession,

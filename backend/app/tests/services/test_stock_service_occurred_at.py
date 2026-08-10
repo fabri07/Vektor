@@ -17,7 +17,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,7 +50,6 @@ async def _make_product(
     return product
 
 
-@pytest.mark.asyncio
 async def test_decrement_stock_persists_explicit_occurred_at_aware(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -68,7 +66,6 @@ async def test_decrement_stock_persists_explicit_occurred_at_aware(
     assert movement.occurred_at.replace(tzinfo=None) == sale_date.replace(tzinfo=None)
 
 
-@pytest.mark.asyncio
 async def test_decrement_stock_persists_explicit_occurred_at_naive(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -87,7 +84,6 @@ async def test_decrement_stock_persists_explicit_occurred_at_naive(
     assert movement.occurred_at.replace(tzinfo=None) == sale_date_naive
 
 
-@pytest.mark.asyncio
 async def test_decrement_stock_without_occurred_at_falls_back_to_now(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -106,7 +102,6 @@ async def test_decrement_stock_without_occurred_at_falls_back_to_now(
     assert before <= occurred <= after
 
 
-@pytest.mark.asyncio
 async def test_increment_stock_persists_explicit_occurred_at(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -129,7 +124,6 @@ async def test_increment_stock_persists_explicit_occurred_at(
     assert movement.occurred_at.replace(tzinfo=None) == purchase_date.replace(tzinfo=None)
 
 
-@pytest.mark.asyncio
 async def test_increment_stock_without_occurred_at_falls_back_to_now(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -150,7 +144,6 @@ async def test_increment_stock_without_occurred_at_falls_back_to_now(
     assert before <= occurred <= after
 
 
-@pytest.mark.asyncio
 async def test_register_stock_loss_sets_occurred_at_to_now(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -169,7 +162,6 @@ async def test_register_stock_loss_sets_occurred_at_to_now(
     assert before <= occurred <= after
 
 
-@pytest.mark.asyncio
 async def test_on_sale_recorded_stamps_movement_with_sale_transaction_date(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -207,7 +199,6 @@ async def test_on_sale_recorded_stamps_movement_with_sale_transaction_date(
     assert movement.occurred_at.replace(tzinfo=None) == backdated
 
 
-@pytest.mark.asyncio
 async def test_void_and_unvoid_do_not_modify_occurred_at(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

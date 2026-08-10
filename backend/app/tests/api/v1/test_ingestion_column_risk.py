@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,7 +71,6 @@ async def sale_file_with_risk(
     return record
 
 
-@pytest.mark.asyncio
 class TestContextualColumnRisk:
     async def test_preview_incluye_riesgo_contextual_de_fecha(
         self,
@@ -233,7 +231,6 @@ async def customer_file_with_risk(
     return record
 
 
-@pytest.mark.asyncio
 class TestMasterColumnRisk:
     """F8a fix: customer/supplier participan del protocolo (no solo transaccionales)."""
 

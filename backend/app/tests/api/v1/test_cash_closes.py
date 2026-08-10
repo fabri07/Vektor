@@ -13,7 +13,6 @@ from app.persistence.models.business import BusinessProfile
 _TODAY = str(date.today())
 
 
-@pytest.mark.asyncio
 class TestCashClosePreview:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -101,7 +100,6 @@ class TestCashClosePreview:
         assert resp.json()["fiscal_condition"] == "monotributo"
 
 
-@pytest.mark.asyncio
 class TestCashCloseCreate:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

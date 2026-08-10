@@ -115,7 +115,6 @@ def mock_redis() -> AsyncMock:
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_attachment_meta_available_to_ceo(mock_db: AsyncMock, mock_redis: AsyncMock) -> None:
     """attachment_meta está en request.context cuando el CEO lo recibe.
 
@@ -167,7 +166,6 @@ async def test_attachment_meta_available_to_ceo(mock_db: AsyncMock, mock_redis: 
     )
 
 
-@pytest.mark.asyncio
 async def test_end_to_end_single_task_success(mock_db: AsyncMock, mock_redis: AsyncMock) -> None:
     """Flujo feliz single-task: resultado idéntico al pre-parallelización."""
     request = _make_request()
@@ -216,7 +214,6 @@ async def test_end_to_end_single_task_success(mock_db: AsyncMock, mock_redis: As
     assert response.result.get("target_agent") == "agent_income"
 
 
-@pytest.mark.asyncio
 async def test_ceo_exception_returns_fallback_no_crash(
     mock_db: AsyncMock, mock_redis: AsyncMock
 ) -> None:
@@ -258,7 +255,6 @@ async def test_ceo_exception_returns_fallback_no_crash(
     mock_executor_instance.execute.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_ceo_task_is_always_awaited_on_ceo_failure(
     mock_db: AsyncMock, mock_redis: AsyncMock
 ) -> None:
@@ -307,7 +303,6 @@ async def test_ceo_task_is_always_awaited_on_ceo_failure(
     await asyncio.sleep(0)
 
 
-@pytest.mark.asyncio
 async def test_no_attachment_meta_has_attachment_false(
     mock_db: AsyncMock, mock_redis: AsyncMock
 ) -> None:

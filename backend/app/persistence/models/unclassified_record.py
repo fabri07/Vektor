@@ -22,6 +22,31 @@ UNCLASSIFIED_STATUS_DISMISSED = "DISMISSED"
 
 UNCLASSIFIED_SOURCES = ("ingestion", "chat", "reanalysis")
 
+#: Procedencias que los callers nombran con otra palabra. La relectura se
+#: identifica a sí misma como ``"reread"`` (``insert_confirmed_data(...,
+#: source="reread")``) y ese valor NO está en la CHECK: cualquier fila capturada
+#: durante una relectura reventaba con `ck_unclassified_records_source` y se
+#: llevaba puesta la transacción entera del apply. Una relectura ES un
+#: reanálisis del mismo archivo, así que se guarda como tal.
+_SOURCE_ALIASES = {"reread": "reanalysis"}
+
+
+def normalize_unclassified_source(source: str) -> str:
+    """Procedencia válida para la columna, resolviendo alias conocidos.
+
+    Un valor desconocido cae a ``"ingestion"`` en vez de propagar el
+    `IntegrityError`: la fila capturada es el ÚNICO rastro de un dato que no se
+    pudo importar, y perderla —además de abortar una operación que ya escribió—
+    es peor que guardarla con una procedencia genérica. El caller que mande algo
+    fuera del set queda registrado en el log.
+    """
+    if source in UNCLASSIFIED_SOURCES:
+        return source
+    alias = _SOURCE_ALIASES.get(source)
+    if alias is not None:
+        return alias
+    return "ingestion"
+
 
 class UnclassifiedRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "unclassified_records"

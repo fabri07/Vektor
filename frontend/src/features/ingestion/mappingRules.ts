@@ -7,7 +7,10 @@
  * chocar contra un 422 que la pantalla decía que no iba a pasar.
  */
 
-import type { FieldCatalogEntry } from "@/services/ingestion.service";
+import type {
+  EntityFieldCatalog,
+  FieldCatalogEntry,
+} from "@/services/ingestion.service";
 
 /** Lo que impide importar una hoja, con el detalle para poder explicarlo. */
 export type SheetIssues = {
@@ -42,14 +45,65 @@ export const coversRequired = (target: string): boolean =>
  * `if _ctx_mappings:`). Sin mapeo explícito el importador resuelve las columnas
  * por heurística de headers, así que bloquear acá inventaría un problema que el
  * backend no tiene y trabaría el flujo más común: aceptar el mapeo tal como vino.
+ *
+ * `alternatives` (F-H4) llega del catálogo y es obligatorio a propósito: un
+ * default silencioso haría que un call site nuevo bloqueara archivos que el
+ * confirm acepta, sin que nada avise. Un requerido se cubre por alternativa solo
+ * si están mapeados TODOS sus campos — con el precio unitario pero sin la
+ * cantidad no hay total que calcular.
  */
 export function missingRequiredFields(
   required: string[],
   mappings: Record<string, string>,
+  alternatives: Record<string, string[]>,
 ): string[] {
   if (Object.keys(mappings).length === 0) return [];
   const cubiertos = new Set(Object.values(mappings).filter(coversRequired));
-  return required.filter((r) => !cubiertos.has(r));
+  return required.filter(
+    (r) =>
+      !cubiertos.has(r) &&
+      !(alternatives[r]?.length && alternatives[r].every((c) => cubiertos.has(c))),
+  );
+}
+
+/** Un requerido sin cubrir, listo para mostrarse: cómo se llama y qué se pierde. */
+export type MissingExplained = {
+  /** Nombre técnico. Sirve para enrutar el salto, NO para mostrar. */
+  field: string;
+  /** Cómo se llama el campo en la pantalla ("Fecha de venta"). */
+  label: string;
+  /** Qué pasa si no se mapea. Cadena vacía si el backend no escribió motivo. */
+  reason: string;
+};
+
+/**
+ * Traduce los requeridos sin cubrir a algo que se pueda leer y decidir.
+ *
+ * Función NUEVA y aparte a propósito: `missingRequiredFields` decide QUÉ falta y
+ * es lo que bloquea el confirm — su contrato ya está fijado por sus tests y no
+ * se toca. Ésta sólo describe lo que aquélla encontró.
+ *
+ * Existe porque «falta un dato obligatorio, revisá la hoja más arriba» no dice
+ * cuál, no dice por qué, y no lleva a ningún lado: la persona queda con el botón
+ * apagado y sin una acción concreta. El motivo lo escribe el backend
+ * (`required_reason`) porque es consecuencia de una regla del importador.
+ *
+ * Sin catálogo se devuelve el nombre técnico como label: es peor que el label,
+ * pero mucho mejor que no nombrar el campo. El caller no debería llamar acá
+ * mientras el catálogo carga (tampoco bloquea sin catálogo).
+ */
+export function explainMissing(
+  missing: string[],
+  catalog: EntityFieldCatalog | undefined,
+): MissingExplained[] {
+  return missing.map((field) => {
+    const entry = catalog?.fields.find((f) => f.value === field);
+    return {
+      field,
+      label: entry?.label ?? field,
+      reason: entry?.required_reason ?? "",
+    };
+  });
 }
 
 /**
@@ -77,6 +131,48 @@ export function scalarCollisions(
     .map(([target, columns]) => ({
       target,
       label: escalares.get(target) ?? target,
+      columns,
+    }));
+}
+
+const CUSTOM_FIELD_PREFIX = "custom_field:";
+
+/**
+ * Campos PROPIOS con más de una columna apuntándoles.
+ *
+ * Misma forma que `scalarCollisions` porque es el mismo problema en la otra
+ * rama del mapeo: un campo propio guarda un valor por fila, así que de dos
+ * columnas al mismo destino sobrevive una sola. Espeja
+ * `_colliding_custom_fields` del confirm.
+ *
+ * Sin esto, escribir dos veces el mismo nombre de campo personalizado
+ * (`commitCustom` no chequea contra las otras columnas de la hoja) da el OK en
+ * pantalla y 422 al confirmar — exactamente la divergencia que este módulo
+ * existe para evitar.
+ *
+ * El target y la clave se recortan igual que en `parse_target` del backend
+ * (`column_mapping_service.py`), donde este mismo bug ya está arreglado. Sin el
+ * recorte de la clave, `"custom_field: obs"` y `"custom_field:obs"` eran claves
+ * DISTINTAS y las dos columnas pasaban la pantalla para chocar contra el 422 del
+ * confirm, que sí las ve como la misma. Y sin el recorte del target,
+ * `" custom_field:obs"` ni entraba a esta rama: se iba con los canónicos y
+ * `scalarCollisions` lo evaluaba como si fuera un campo del catálogo.
+ */
+export function customFieldCollisions(
+  mappings: Record<string, string>,
+): ScalarCollision[] {
+  const porClave = new Map<string, string[]>();
+  for (const [col, target] of Object.entries(mappings)) {
+    const valor = target?.trim() ?? "";
+    if (!valor.startsWith(CUSTOM_FIELD_PREFIX)) continue;
+    const clave = valor.slice(CUSTOM_FIELD_PREFIX.length).trim();
+    porClave.set(clave, [...(porClave.get(clave) ?? []), col]);
+  }
+  return [...porClave.entries()]
+    .filter(([, cols]) => cols.length > 1)
+    .map(([clave, columns]) => ({
+      target: `${CUSTOM_FIELD_PREFIX}${clave}`,
+      label: clave,
       columns,
     }));
 }

@@ -10,7 +10,6 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -30,7 +29,6 @@ def _stock_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-@pytest.mark.asyncio
 async def test_complete_product_not_flagged(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -44,7 +42,6 @@ async def test_complete_product_not_flagged(
     assert product.requires_completion is False
 
 
-@pytest.mark.asyncio
 async def test_autocreated_without_cost_is_flagged(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -56,7 +53,6 @@ async def test_autocreated_without_cost_is_flagged(
     assert product.requires_completion is True  # falta unit_cost
 
 
-@pytest.mark.asyncio
 async def test_autocreated_without_price_is_flagged(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -71,7 +67,6 @@ async def test_autocreated_without_price_is_flagged(
     # (test_patch_completing_data_clears_requires_completion).
 
 
-@pytest.mark.asyncio
 async def test_purchase_book_without_category_creates_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -112,7 +107,6 @@ async def test_purchase_book_without_category_creates_product(
     )
 
 
-@pytest.mark.asyncio
 async def test_catalog_stock_purchase_sets_occurred_at_from_tx_date(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -141,7 +135,6 @@ async def test_catalog_stock_purchase_sets_occurred_at_from_tx_date(
     assert movement.occurred_at.replace(tzinfo=None) == expense.transaction_date
 
 
-@pytest.mark.asyncio
 async def test_purchase_new_product_gets_stock_without_autoflush(
     isolated_db_engine: AsyncEngine,
 ) -> None:

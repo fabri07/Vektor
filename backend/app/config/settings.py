@@ -12,6 +12,8 @@ from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, EnvSettingsSource, SettingsConfigDict
 
+from app.config.purchase_cost_rollout import parse_rollout_tenant_ids
+
 
 class _LenientEnvSource(EnvSettingsSource):
     """EnvSettingsSource that falls back to the raw string when JSON decoding fails.
@@ -274,6 +276,25 @@ class Settings(BaseSettings):
     # matchea). Default "legacy": F7c es aditivo/seguro, el comportamiento de
     # compras no cambia hasta que el usuario active "link_only".
     SUPPLIER_REFERENCE_CREATION_MODE: Literal["legacy", "link_only"] = "legacy"
+    # F-H6.c/d: compuerta de rollout POR TENANT del motor de costos de compra
+    # (reparto de las cifras compartidas del comprobante + ajustes de descuento /
+    # IVA / flete sobre el costo de cada línea). UUIDs de tenant habilitados, en
+    # csv o JSON array — el mismo molde que CORS_ORIGINS.
+    #
+    # **Default vacío = nadie habilitado**, que es exactamente el comportamiento
+    # anterior a F-H6.c. Este repo no tiene staging: el rollout por tenant ES el
+    # staging de un motor que cambia plata sin que el usuario opte (mapear una
+    # columna de descuento ya altera el costo del producto). Se despliega con la
+    # lista vacía y se enciende un tenant por vez.
+    #
+    # El parseo vive en app/config/purchase_cost_rollout.py junto al único lector
+    # de la compuerta, y descarta lo que no sea UUID sin tumbar el arranque.
+    PURCHASE_COST_ROLLOUT_TENANT_IDS: list[str] = Field(default_factory=list)
+
+    @field_validator("PURCHASE_COST_ROLLOUT_TENANT_IDS", mode="before")
+    @classmethod
+    def parse_purchase_cost_rollout_tenant_ids(cls, v: object) -> list[str]:
+        return parse_rollout_tenant_ids(v)
 
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False

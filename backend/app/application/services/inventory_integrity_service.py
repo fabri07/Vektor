@@ -20,10 +20,26 @@ La fórmula suma, además del ancla y las compras:
 - `loss` (merma): viene de `stock_service.register_stock_loss`, auditado, y su `qty`
   ya es negativa en el ledger.
 
-Los movimientos `sale` del ledger se IGNORAN (no saltean el producto): las ventas se
-cuentan desde `sales_entries.quantity` — la fuente de verdad —, así que sumar también el
-movimiento del ledger duplicaría. Ignorarlos (en vez de saltear) deja a los productos
-vendidos EN VIVO evaluables por el chequeo.
+Los movimientos `sale` del ledger se IGNORAN como SUMANDO (no saltean el producto): la
+MAGNITUD de lo vendido se cuenta desde `sales_entries.quantity` — la fuente de verdad —,
+así que sumar también el movimiento del ledger duplicaría. Ignorarlos (en vez de saltear)
+deja a los productos vendidos EN VIVO evaluables por el chequeo.
+
+**Pero no toda venta descuenta stock, y la fórmula no puede asumir que sí** (F-H3.d.1).
+Una venta importada sólo mueve inventario si el usuario aplicó el replay de esa hoja: el
+default (`informational`) importa la historia sin tocar el stock, a propósito. Restar esas
+ventas reportaría como divergencia una decisión deliberada — y sobre un tenant con
+historia importada (10.931 ventas en el caso real que originó esto) sería una divergencia
+falsa por producto. Entonces se resta:
+
+- toda venta **en vivo** (`source_upload_id IS NULL`): siempre debió descontar, y si su
+  movimiento no está, eso ES la divergencia que este chequeo existe para encontrar;
+- las **importadas cuyo descuento se aplicó**, identificadas por su movimiento `sale` vivo
+  (`source_event_id = "sale:{id}"`).
+
+El ledger decide **si** la venta cuenta; `sales_entries.quantity` sigue decidiendo
+**cuánto**. Un movimiento aplicado con una cantidad distinta a la de la venta sigue
+saliendo como divergencia, que es lo correcto.
 
 Se sigue salteando (`skipped_complex_ledger`) cualquier producto con: `return` en el
 ledger, o un `adjustment` sin `source_type` tagueado (dato legacy previo al CHECK, no
@@ -56,6 +72,7 @@ from app.application.services.inventory_movement_origin import (
 from app.application.services.inventory_temporal_service import (
     check_products_temporal_divergence,
 )
+from app.application.services.stock_service import sale_source_event_id
 
 _UUID_PARAM = PG_UUID(as_uuid=True)
 
@@ -63,6 +80,65 @@ _UUID_PARAM = PG_UUID(as_uuid=True)
 # en productos de bajo stock donde 1-2 unidades de diferencia son normales).
 _DEFAULT_ABSOLUTE_FLOOR_UNITS = 5
 _DEFAULT_RELATIVE_THRESHOLD_PCT = 0.10
+
+
+def _as_uuid(raw: Any) -> uuid.UUID:
+    """SQLite devuelve el UUID de un ``text()`` como hex plano; Postgres, como ``UUID``."""
+    return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+
+
+async def _applied_sales_qty(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_id: uuid.UUID,
+) -> int:
+    """Unidades vendidas que DEBEN estar reflejadas en ``stock_units`` (F-H3.d.1).
+
+    Ver el criterio en el docstring del módulo: las ventas en vivo cuentan siempre,
+    las importadas sólo si su descuento se aplicó.
+
+    El cruce se hace en Python y no en SQL a propósito. La clave es el texto
+    ``"sale:{id}"``, y armarla en SQL exigiría concatenar el id casteado a texto: en
+    Postgres eso da el UUID con guiones y en SQLite el hex plano, así que el mismo
+    ``EXISTS`` daría distinto según el motor — y el que miente es el de los tests.
+    La segunda query sólo se paga si el producto tiene ventas importadas.
+    """
+    ventas = (
+        await session.execute(
+            text(
+                "SELECT id, quantity, source_upload_id FROM sales_entries "
+                "WHERE tenant_id = :tid AND product_id = :pid AND voided_at IS NULL"
+            ).bindparams(
+                bindparam("tid", type_=_UUID_PARAM), bindparam("pid", type_=_UUID_PARAM)
+            ),
+            {"tid": tenant_id, "pid": product_id},
+        )
+    ).mappings().all()
+
+    en_vivo = [v for v in ventas if v["source_upload_id"] is None]
+    importadas = [v for v in ventas if v["source_upload_id"] is not None]
+    total = sum(int(v["quantity"] or 0) for v in en_vivo)
+    if not importadas:
+        return total
+
+    aplicados = {
+        row[0]
+        for row in await session.execute(
+            text(
+                "SELECT source_event_id FROM inventory_movements "
+                "WHERE tenant_id = :tid AND product_id = :pid "
+                "AND movement_type = 'sale' AND voided_at IS NULL "
+                "AND source_event_id IS NOT NULL"
+            ).bindparams(
+                bindparam("tid", type_=_UUID_PARAM), bindparam("pid", type_=_UUID_PARAM)
+            ),
+            {"tid": tenant_id, "pid": product_id},
+        )
+    }
+    for venta in importadas:
+        if sale_source_event_id(_as_uuid(venta["id"])) in aplicados:
+            total += int(venta["quantity"] or 0)
+    return total
 
 
 async def check_tenant_inventory_integrity(
@@ -109,8 +185,7 @@ async def check_tenant_inventory_integrity(
     for prod in candidates:
         # SQLite (tests) devuelve el UUID de una query text() como hex plano (sin
         # guiones), no como uuid.UUID — normalizar antes de volver a bindearlo.
-        raw_pid = prod["id"]
-        pid = raw_pid if isinstance(raw_pid, uuid.UUID) else uuid.UUID(str(raw_pid))
+        pid = _as_uuid(prod["id"])
         by_type = (
             await session.execute(
                 text(
@@ -154,18 +229,7 @@ async def check_tenant_inventory_integrity(
             skipped_complex_ledger += 1
             continue
 
-        sales = (
-            await session.execute(
-                text(
-                    "SELECT COALESCE(SUM(quantity), 0) AS total_qty "
-                    "FROM sales_entries "
-                    "WHERE tenant_id = :tid AND product_id = :pid AND voided_at IS NULL"
-                ).bindparams(
-                    bindparam("tid", type_=_UUID_PARAM), bindparam("pid", type_=_UUID_PARAM)
-                ),
-                {"tid": tenant_id, "pid": pid},
-            )
-        ).scalar_one()
+        sales = await _applied_sales_qty(session, tenant_id, pid)
 
         stock_esperado = anchor_qty + purchase_qty + tagged_adjustment_qty + loss_qty - int(sales)
         stock_units = int(prod["stock_units"])

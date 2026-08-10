@@ -73,8 +73,15 @@ _DEFAULT_ABSOLUTE_FLOOR_UNITS = 5
 
 
 @dataclass(frozen=True)
-class _Event:
-    """Un evento datado de la línea de tiempo. ``delta`` +crédito / −débito."""
+class TimelineEvent:
+    """Un evento datado de la línea de tiempo. ``delta`` +crédito / −débito.
+
+    Público desde F-H3.b: ``replay_timeline`` tiene un segundo consumidor (la
+    proyección del impacto de un import), y el momento en que un tipo cruza el
+    módulo es el momento en que deja de ser privado. Los ``kind_rank`` son los
+    de acá y no se re-inventan del otro lado: 0 compra · 1 ajuste · 2 merma ·
+    3 venta. Dos convenciones distintas darían dos órdenes distintos para el
+    mismo día."""
 
     day: date
     delta: int
@@ -141,7 +148,7 @@ class TemporalScanResult:
         return [d.as_dict() for d in self.divergences]
 
 
-def replay_timeline(*, opening_anchor_qty: int, events: Sequence[_Event]) -> ReplayResult:
+def replay_timeline(*, opening_anchor_qty: int, events: Sequence[TimelineEvent]) -> ReplayResult:
     """Corre el balance desde ``opening_anchor_qty`` aplicando los eventos por día.
 
     Orden: por día; MISMO día → créditos (``delta >= 0``) antes que débitos, luego
@@ -252,7 +259,7 @@ async def check_products_temporal_divergence(
         total_purchases = 0
         total_tagged_adjustments = 0
         total_loss = 0
-        events: list[_Event] = []
+        events: list[TimelineEvent] = []
         complex_ledger = False
         for movement_type, source_type, qty, occurred_at, created_at in mov_rows:
             qty = int(qty)
@@ -264,16 +271,16 @@ async def check_products_temporal_divergence(
             movement_class = classify_stock_movement(movement_type, source_type)
             if movement_class == MOVEMENT_CLASS_PURCHASE:
                 total_purchases += qty
-                events.append(_Event(business_day, qty, kind_rank=0))
+                events.append(TimelineEvent(business_day, qty, kind_rank=0))
             elif movement_class == MOVEMENT_CLASS_ANCHOR:
                 # Ancla: stock inicial conocido → opening, IGNORANDO su fecha.
                 opening += qty
             elif movement_class == MOVEMENT_CLASS_TAGGED_ADJUSTMENT:
                 total_tagged_adjustments += qty
-                events.append(_Event(business_day, qty, kind_rank=1))
+                events.append(TimelineEvent(business_day, qty, kind_rank=1))
             elif movement_class == MOVEMENT_CLASS_LOSS:
                 total_loss += qty  # ya viene negativo en el ledger
-                events.append(_Event(business_day, qty, kind_rank=2))
+                events.append(TimelineEvent(business_day, qty, kind_rank=2))
             elif movement_class == MOVEMENT_CLASS_COMPLEX:
                 complex_ledger = True
             # MOVEMENT_CLASS_IGNORE_SALE: dedup, la venta se cuenta desde sales_entries.
@@ -295,7 +302,7 @@ async def check_products_temporal_divergence(
         for quantity, transaction_date in sale_rows:
             quantity = int(quantity)
             total_sales += quantity
-            events.append(_Event(transaction_date.date(), -quantity, kind_rank=3))
+            events.append(TimelineEvent(transaction_date.date(), -quantity, kind_rank=3))
 
         result = replay_timeline(opening_anchor_qty=opening, events=events)
 

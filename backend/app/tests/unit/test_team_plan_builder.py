@@ -45,6 +45,42 @@ def test_no_extra_mappings_vs_catalog():
     assert set(INTENT_TO_ACTION_TYPE.keys()) == catalog_set
 
 
+@pytest.mark.parametrize(
+    ("intent", "expected_agent", "expected_action_type"),
+    [
+        pytest.param(
+            "analizar_marketing",
+            "agent_marketing",
+            ActionType.ANALYZE_MARKETING_DATA,
+            id="test_analizar_marketing_three_maps_consistent",
+        ),
+        pytest.param(
+            "consulta_libre",
+            # agent_helper es el fallback: el dominio real lo resuelve build_plan
+            "agent_helper",
+            ActionType.ANSWER_DATA_QUERY,
+            id="test_consulta_libre_three_maps_consistent",
+        ),
+        pytest.param(
+            "pedir_consejo",
+            "agent_helper",
+            # reusa ANSWER_DATA_QUERY (LOW, read-only) — sin ActionType nuevo
+            ActionType.ANSWER_DATA_QUERY,
+            id="test_pedir_consejo_three_maps_consistent",
+        ),
+    ],
+)
+def test_intent_three_maps_consistent(intent, expected_agent, expected_action_type):
+    """Los 3 mapas (catálogo, agente, action_type) deben tener la misma entrada
+    — misma regla de consistencia que el resto del catálogo (comentario :35).
+    Se asserta el VALOR de cada mapa, no sólo la pertenencia: un intent ruteado
+    al agente equivocado también está en los tres mapas."""
+    assert intent in INTENT_CATALOG
+    assert len(INTENT_CATALOG[intent]["triggers"]) > 0
+    assert INTENT_TO_AGENT[intent] == expected_agent
+    assert INTENT_TO_ACTION_TYPE[intent] == expected_action_type
+
+
 # ── build_plan — correctness ──────────────────────────────────────────────────
 
 
@@ -273,22 +309,6 @@ def test_tool_broker_importable():
 # ── v4 Fase 4: analizar_marketing ────────────────────────────────────────────
 
 
-def test_analizar_marketing_in_intent_catalog():
-    """analizar_marketing está en INTENT_CATALOG con sus triggers."""
-    assert "analizar_marketing" in INTENT_CATALOG
-    assert len(INTENT_CATALOG["analizar_marketing"]["triggers"]) > 0
-
-
-def test_analizar_marketing_to_agent_mapping():
-    """analizar_marketing rutea a agent_marketing."""
-    assert INTENT_TO_AGENT["analizar_marketing"] == "agent_marketing"
-
-
-def test_analizar_marketing_to_action_type_mapping():
-    """analizar_marketing usa ANALYZE_MARKETING_DATA."""
-    assert INTENT_TO_ACTION_TYPE["analizar_marketing"] == ActionType.ANALYZE_MARKETING_DATA
-
-
 def test_analyze_marketing_data_in_risk_engine_low():
     """ANALYZE_MARKETING_DATA está en RiskEngine como LOW, sin aprobación."""
     from app.application.agents.shared.risk_engine import ACTION_RISK_MAP, RiskEngine
@@ -352,45 +372,9 @@ def test_answer_data_query_in_intent_aware_action_types():
     assert ActionType.ANSWER_DATA_QUERY in _INTENT_AWARE_ACTION_TYPES
 
 
-def test_consulta_libre_in_intent_catalog():
-    """consulta_libre está en INTENT_CATALOG con triggers."""
-    assert "consulta_libre" in INTENT_CATALOG
-    assert len(INTENT_CATALOG["consulta_libre"]["triggers"]) > 0
-
-
-def test_consulta_libre_to_action_type():
-    """consulta_libre usa ANSWER_DATA_QUERY."""
-    assert INTENT_TO_ACTION_TYPE["consulta_libre"] == ActionType.ANSWER_DATA_QUERY
-
-
-def test_consulta_libre_to_agent_fallback():
-    """consulta_libre apunta a agent_helper como fallback en INTENT_TO_AGENT."""
-    assert INTENT_TO_AGENT["consulta_libre"] == "agent_helper"
-
-
 # ── Advisory (F1+F3): pedir_consejo ────────────────────────────────────────────
-
-
-def test_pedir_consejo_in_intent_catalog():
-    assert "pedir_consejo" in INTENT_CATALOG
-    assert len(INTENT_CATALOG["pedir_consejo"]["triggers"]) > 0
-
-
-def test_pedir_consejo_to_action_type():
-    """pedir_consejo reusa ANSWER_DATA_QUERY (LOW, read-only) — sin ActionType nuevo."""
-    assert INTENT_TO_ACTION_TYPE["pedir_consejo"] == ActionType.ANSWER_DATA_QUERY
-
-
-def test_pedir_consejo_to_agent_fallback():
-    assert INTENT_TO_AGENT["pedir_consejo"] == "agent_helper"
-
-
-def test_pedir_consejo_three_maps_consistent():
-    """Los 3 mapas (catálogo, action_type, agent) deben tener la misma entrada
-    — misma regla de consistencia que el resto del catálogo (comentario :35)."""
-    assert "pedir_consejo" in INTENT_CATALOG
-    assert "pedir_consejo" in INTENT_TO_ACTION_TYPE
-    assert "pedir_consejo" in INTENT_TO_AGENT
+# (la consistencia de los 3 mapas se verifica arriba, en
+# test_intent_three_maps_consistent)
 
 
 @pytest.mark.parametrize(

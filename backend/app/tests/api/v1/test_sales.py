@@ -33,7 +33,6 @@ _SINGLE_PAYLOAD = {
 }
 
 
-@pytest.mark.asyncio
 class TestSalesBulk:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -76,19 +75,14 @@ class TestSalesBulk:
         assert resp.status_code == 401
 
 
-@pytest.mark.asyncio
 class TestSalesSummary:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
         pass
 
-    async def test_summary_empty(self, client: AsyncClient, auth_headers: dict[str, Any]) -> None:
-        resp = await client.get("/api/v1/sales/summary", headers=auth_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert float(data["total_ars"]) == 0.0
-        assert data["entry_count"] == 0
-        assert "period_covered" in data
+    # `test_summary_empty`, `test_date_range_empty`, `test_date_range_with_data` y
+    # `test_summary_isolates_tenants` viven parametrizados por entidad en
+    # test_transaction_summaries.py (eran clones exactos con expenses).
 
     async def test_summary_counts_entries(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -104,32 +98,10 @@ class TestSalesSummary:
         assert float(data["total_ars"]) == pytest.approx(53000.0)
 
 
-@pytest.mark.asyncio
 class TestSalesDateRange:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
         pass
-
-    async def test_date_range_empty(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.get("/api/v1/sales/date-range", headers=auth_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["min_date"] is None
-        assert data["max_date"] is None
-
-    async def test_date_range_with_data(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        old = {**_SINGLE_PAYLOAD, "transaction_date": "2024-01-15"}
-        recent = {**_SINGLE_PAYLOAD, "transaction_date": _TODAY}
-        await client.post("/api/v1/sales", json=old, headers=auth_headers)
-        await client.post("/api/v1/sales", json=recent, headers=auth_headers)
-        resp = await client.get("/api/v1/sales/date-range", headers=auth_headers)
-        data = resp.json()
-        assert data["min_date"] == "2024-01-15"
-        assert data["max_date"] == _TODAY
 
     async def test_afternoon_sale_included_in_same_day_range(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -162,7 +134,6 @@ class TestSalesDateRange:
         assert resp.status_code == 200
 
 
-@pytest.mark.asyncio
 class TestSalesTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -195,18 +166,6 @@ class TestSalesTenantIsolation:
         assert resp_b.status_code == 200
         assert resp_b.json() == []
 
-    async def test_summary_isolates_tenants(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        second_auth_headers: dict[str, Any],
-    ) -> None:
-        await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=auth_headers)
-
-        # Tenant B sees zero
-        resp_b = await client.get("/api/v1/sales/summary", headers=second_auth_headers)
-        assert resp_b.json()["entry_count"] == 0
-
     async def test_cannot_delete_other_tenant_sale(
         self,
         client: AsyncClient,
@@ -220,7 +179,6 @@ class TestSalesTenantIsolation:
         assert resp.status_code == 404
 
 
-@pytest.mark.asyncio
 class TestSalesRBAC:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -262,7 +220,6 @@ async def _create_product(
     return str(resp.json()["id"])
 
 
-@pytest.mark.asyncio
 class TestManualBatchSale:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -352,7 +309,6 @@ class TestManualBatchSale:
         assert r1.json()["stock_units"] == 10
 
 
-@pytest.mark.asyncio
 class TestLiveSaleStockDecrement:
     """POST /sales y su ciclo de vida descuentan/reponen stock (antes solo manual-batch)."""
 

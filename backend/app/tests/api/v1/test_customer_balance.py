@@ -105,7 +105,6 @@ async def customer_with_sales(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestCashInflowLinksCustomer:
     async def test_with_customer_id(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -142,7 +141,6 @@ class TestCashInflowLinksCustomer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestGetBalanceByCustomer:
     async def test_balance_correct(
         self,
@@ -213,7 +211,6 @@ class TestGetBalanceByCustomer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestGetBalancesByCustomer:
     async def test_ranking_ordered_by_balance_desc(
         self,
@@ -284,7 +281,6 @@ class TestGetBalancesByCustomer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestCustomerBalanceEndpoint:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger: Any) -> None:
@@ -431,7 +427,6 @@ class TestCustomerBalanceEndpoint:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestBalanceCrossTenant:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger: Any) -> None:

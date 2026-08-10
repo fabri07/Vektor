@@ -55,7 +55,6 @@ def _registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── Register ──────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestRegister:
     async def test_register_success(self, client: AsyncClient) -> None:
         """Register creates tenant + user + subscription + business_profile + momentum_profile."""
@@ -133,7 +132,6 @@ class TestRegister:
 # ── Login ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestLogin:
     async def test_login_success(self, client: AsyncClient) -> None:
         """Register then login — must return access_token and user payload."""
@@ -168,7 +166,6 @@ class TestLogin:
 # ── Me ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestMe:
     async def test_me_with_valid_token(self, client: AsyncClient) -> None:
         """GET /auth/me with a valid token returns user + subscription + onboarding_completed."""
@@ -211,7 +208,6 @@ class TestMe:
 # ── Forgot / Reset password ──────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestForgotResetPassword:
     async def test_forgot_password_unknown_email_returns_200(self, client: AsyncClient) -> None:
         response = await client.post(
@@ -321,7 +317,6 @@ class TestForgotResetPassword:
 # ── Demo tenant login guard ───────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestDemoTenantLoginGuard:
     """Un tenant is_demo solo puede autenticarse en entornos local/demo, nunca en prod."""
 

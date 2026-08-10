@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,7 +44,6 @@ async def _make_tenant(db_session: AsyncSession) -> Tenant:
     return t
 
 
-@pytest.mark.asyncio
 async def test_merch_purchase_without_supplier_uses_sentinel(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -70,7 +68,6 @@ async def test_merch_purchase_without_supplier_uses_sentinel(
     assert expense.product_id is not None
 
 
-@pytest.mark.asyncio
 async def test_import_surfaces_warning_counters(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -86,7 +83,6 @@ async def test_import_surfaces_warning_counters(
     assert counts["sin_producto"] == 1
 
 
-@pytest.mark.asyncio
 async def test_two_imports_without_supplier_reuse_one_sentinel(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -111,7 +107,6 @@ async def test_two_imports_without_supplier_reuse_one_sentinel(
     assert len(sentinels) == 1  # un único sentinela reusado
 
 
-@pytest.mark.asyncio
 async def test_sentinel_is_per_tenant(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -140,7 +135,6 @@ async def test_sentinel_is_per_tenant(
     assert {s.tenant_id for s in sentinels} == {sample_tenant.tenant_id, other.tenant_id}
 
 
-@pytest.mark.asyncio
 async def test_genuine_supplier_creates_real_not_sentinel(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -168,7 +162,6 @@ async def test_genuine_supplier_creates_real_not_sentinel(
     assert expense.supplier_id == suppliers[0].id
 
 
-@pytest.mark.asyncio
 async def test_opex_without_supplier_does_not_use_sentinel(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

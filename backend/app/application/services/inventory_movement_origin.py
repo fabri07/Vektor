@@ -31,6 +31,11 @@ SOURCE_MANUAL_ADJUSTMENT = "manual_adjustment"      # ajuste manual de stock
 # 20260728_0001) ya lo exige a nivel DB para movement_type='adjustment'.
 SOURCE_RECEIPT = "receipt"                          # remito de proveedor
 SOURCE_RECONCILIATION = "reconciliation"            # reparación/reconciliación de datos
+# F-H3.d.4: descuento de una venta IMPORTADA, aplicado cuando el usuario pide el
+# replay de esa hoja. Distinto del descuento de una venta en vivo (que no tiene
+# source_type ni archivo): sirve para saber, mirando el ledger, qué parte del
+# inventario se movió por una decisión sobre historia y cuál por operación diaria.
+SOURCE_HISTORICAL_REPLAY = "historical_replay"
 
 SOURCE_TYPES: frozenset[str] = frozenset(
     {
@@ -39,6 +44,7 @@ SOURCE_TYPES: frozenset[str] = frozenset(
         SOURCE_MANUAL_ADJUSTMENT,
         SOURCE_RECEIPT,
         SOURCE_RECONCILIATION,
+        SOURCE_HISTORICAL_REPLAY,
     }
 )
 

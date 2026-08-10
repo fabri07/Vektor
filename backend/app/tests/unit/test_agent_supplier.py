@@ -2,8 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
-
 from app.application.agents.shared.schemas import ActionType, AgentRequest, RiskLevel
 from app.application.agents.supplier.agent import AgentSupplier
 
@@ -12,7 +10,6 @@ def _req(message: str) -> AgentRequest:
     return AgentRequest(user_id="u1", business_id="t1", message=message)
 
 
-@pytest.mark.asyncio
 async def test_draft_intent_returns_create_draft():
     agent = AgentSupplier()
     with patch.object(
@@ -35,7 +32,6 @@ async def test_draft_intent_returns_create_draft():
     assert resp.risk_level == RiskLevel.MEDIUM
 
 
-@pytest.mark.asyncio
 async def test_inbox_intent_returns_classify():
     agent = AgentSupplier()
     resp = await agent.process(_req("revisar gmail de proveedores"))
@@ -43,7 +39,6 @@ async def test_inbox_intent_returns_classify():
     assert resp.status == "requires_approval"
 
 
-@pytest.mark.asyncio
 async def test_purchase_intent_returns_register():
     agent = AgentSupplier()
     with patch.object(
@@ -68,7 +63,6 @@ async def test_purchase_intent_returns_register():
     assert resp.requires_approval is True
 
 
-@pytest.mark.asyncio
 async def test_ambiguous_message_routes_to_query():
     # Mensaje ambiguo → cae en _handle_query (sin session → SIN_DATOS)
     agent = AgentSupplier()
@@ -77,7 +71,6 @@ async def test_ambiguous_message_routes_to_query():
     assert resp.result.get("summary") == "SIN_DATOS"
 
 
-@pytest.mark.asyncio
 async def test_mode_informational_without_gateway():
     agent = AgentSupplier(gateway=None)
     with patch.object(

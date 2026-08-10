@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.forecast_service import get_forecast
@@ -55,7 +54,6 @@ async def _seed_daily_cashflow(
     await session.commit()
 
 
-@pytest.mark.asyncio
 async def test_forecast_tier_0_with_less_than_14_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 7)
 
@@ -66,7 +64,6 @@ async def test_forecast_tier_0_with_less_than_14_days(db_session, sample_tenant)
     assert result.points == []
 
 
-@pytest.mark.asyncio
 async def test_forecast_tier_1_between_14_and_30_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 20)
 
@@ -78,7 +75,6 @@ async def test_forecast_tier_1_between_14_and_30_days(db_session, sample_tenant)
     assert len(result.points) == 14
 
 
-@pytest.mark.asyncio
 async def test_forecast_tier_2_between_30_and_90_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 45)
 
@@ -90,7 +86,6 @@ async def test_forecast_tier_2_between_30_and_90_days(db_session, sample_tenant)
     assert len(result.points) == 30
 
 
-@pytest.mark.asyncio
 async def test_forecast_tier_3_after_90_days(db_session, sample_tenant) -> None:
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 120)
 
@@ -102,7 +97,6 @@ async def test_forecast_tier_3_after_90_days(db_session, sample_tenant) -> None:
     assert len(result.points) == 60
 
 
-@pytest.mark.asyncio
 async def test_forecast_marks_stale_data_as_low_confidence(db_session, sample_tenant) -> None:
     stale_end = date.today() - timedelta(days=10)
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 45, end_date=stale_end)

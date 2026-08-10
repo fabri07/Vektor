@@ -13,7 +13,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,7 +81,6 @@ def _multisheet_summary() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_context_mapping_applied_and_keyword_fallback(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -106,7 +104,6 @@ async def test_context_mapping_applied_and_keyword_fallback(
     assert expense.amount == Decimal("12000")
 
 
-@pytest.mark.asyncio
 async def test_context_confirmed_excludes_context(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -124,7 +121,6 @@ async def test_context_confirmed_excludes_context(
     assert (await db_session.execute(select(ExpenseEntry))).first() is None
 
 
-@pytest.mark.asyncio
 async def test_unmapped_unknown_column_is_skipped(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -139,7 +135,6 @@ async def test_unmapped_unknown_column_is_skipped(
     assert counts["ventas"] == 0
 
 
-@pytest.mark.asyncio
 async def test_context_custom_field_persisted(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -159,14 +154,21 @@ async def test_context_custom_field_persisted(
     )
     assert counts["ventas"] == 1
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
-    # F7c: toda venta lleva la traza de resolución de cliente por fila — acá
-    # "anonymous" porque la hoja no mapea ninguna columna customer_*.
-    assert sale.custom_fields == {"vendedor": "Juan", "_customer_resolution": "anonymous"}
+    # La igualdad es exacta a propósito: lo que se guarda acá es lo que después lee
+    # el resto del sistema, así que una clave nueva tiene que pasar por este test.
+    # Además del valor mapeado van dos marcas internas: la traza de resolución de
+    # cliente por fila (F7c — "anonymous" porque la hoja no mapea ninguna columna
+    # customer_*) y la hoja de origen (F-H3.d.2, lo que permite aplicar el replay
+    # por hoja en vez de al archivo entero).
+    assert sale.custom_fields == {
+        "vendedor": "Juan",
+        "_customer_resolution": "anonymous",
+        "_import_context": "sheet:Ventas",
+    }
     # El marcador interno nunca se filtra a custom_fields.
     assert "__context__" not in sale.custom_fields
 
 
-@pytest.mark.asyncio
 async def test_multisheet_reimport_is_idempotent(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -213,7 +215,6 @@ async def test_multisheet_reimport_is_idempotent(
     assert expenses[0].source_upload_id == uploaded.id
 
 
-@pytest.mark.asyncio
 async def test_multisheet_invalid_row_not_burned_reimport_corrected(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -344,7 +345,6 @@ def _text_summary() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_multisheet_venta_sin_fecha_va_a_otros_no_duplica_al_reimportar(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -409,7 +409,6 @@ async def test_multisheet_venta_sin_fecha_va_a_otros_no_duplica_al_reimportar(
     assert len((await db_session.execute(select(UnclassifiedRecord))).scalars().all()) == 1
 
 
-@pytest.mark.asyncio
 async def test_multisheet_venta_con_fecha_valida_conserva_la_fecha(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -450,7 +449,6 @@ async def test_multisheet_venta_con_fecha_valida_conserva_la_fecha(
     assert sale.transaction_date.date() == _date(2024, 3, 5)
 
 
-@pytest.mark.asyncio
 async def test_text_contexts_van_a_otros_sin_inventar_fecha(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -473,7 +471,6 @@ async def test_text_contexts_van_a_otros_sin_inventar_fecha(
     assert {r.suggested_entity for r in records} == {"sale", "expense"}
 
 
-@pytest.mark.asyncio
 async def test_text_context_entity_override_va_a_otros_con_sugerencia(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

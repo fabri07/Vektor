@@ -46,7 +46,6 @@ def test_parse_garbage_returns_empty() -> None:
 # ── suggest_with_llm: flag gating ─────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_llm_disabled_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     # Flag apagado (default) → no llama al LLM.
     cols = [{"header": "X", "sample_values": ["1"]}]
@@ -54,7 +53,6 @@ async def test_llm_disabled_returns_empty(monkeypatch: pytest.MonkeyPatch) -> No
     assert out == {}
 
 
-@pytest.mark.asyncio
 async def test_llm_no_columns_returns_empty() -> None:
     assert await suggest_with_llm("sale", [], {"amount": "Monto"}) == {}
 
@@ -62,7 +60,6 @@ async def test_llm_no_columns_returns_empty() -> None:
 # ── Integración: suggest_mappings usa el LLM solo en columnas dudosas ─────────
 
 
-@pytest.mark.asyncio
 async def test_suggest_mappings_applies_llm_to_low_confidence() -> None:
     db = AsyncMock()
     mock_result = MagicMock()
@@ -97,7 +94,6 @@ async def test_suggest_mappings_applies_llm_to_low_confidence() -> None:
     assert rara["confidence"] == 0.88
 
 
-@pytest.mark.asyncio
 async def test_llm_ignore_does_not_override() -> None:
     db = AsyncMock()
     mock_result = MagicMock()
@@ -123,7 +119,6 @@ async def test_llm_ignore_does_not_override() -> None:
 # ── FASE 2 (A2): traza de la decisión LLM en pipeline_events ──────────────────
 
 
-@pytest.mark.asyncio
 async def test_emits_mapping_event_when_trace_present() -> None:
     db = AsyncMock()
     mock_result = MagicMock()
@@ -165,7 +160,6 @@ async def test_emits_mapping_event_when_trace_present() -> None:
     assert decision["llm_target"] == "amount"
 
 
-@pytest.mark.asyncio
 async def test_no_emission_when_trace_missing() -> None:
     db = AsyncMock()
     mock_result = MagicMock()
