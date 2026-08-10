@@ -471,6 +471,28 @@ function effectiveStatus(
   return s.status;
 }
 
+/**
+ * F-A: ¿el target que el usuario eligió a mano sigue teniendo sentido en la
+ * entidad nueva?
+ *
+ * «Sin mapear», «Ignorar» y los campos personalizados NO pertenecen a ningún
+ * schema, así que sobreviven a cualquier cambio de sección. Un campo canónico
+ * sobrevive sólo si el catálogo de la entidad nueva lo tiene: conservar
+ * `amount` en una hoja de Productos dejaría el `<select>` mostrando «(campo
+ * desconocido)» — exactamente el síntoma que cerró el catálogo de fuente única.
+ * Cuando no sigue siendo elegible, la columna cae a la sugerencia nueva; no se
+ * inventa ningún reemplazo.
+ */
+function targetSobreviveALaEntidad(
+  target: string,
+  fields: FieldCatalogEntry[],
+): boolean {
+  if (!target || target === "ignore" || target.startsWith("custom_field:")) {
+    return true;
+  }
+  return fields.some((f) => f.value === target);
+}
+
 // ── Mapeo multi-contexto (multi-hoja): una sección por hoja/grupo ──────────────
 
 function SheetMapperSection({
@@ -483,6 +505,7 @@ function SheetMapperSection({
   onMappingsChange,
   onEntityChange,
   onColumnTouched,
+  isColumnTouched,
   onIssuesChange,
   stockTreatment,
   onStockTreatmentChange,
@@ -507,6 +530,10 @@ function SheetMapperSection({
   onEntityChange: (ctxId: string, entity: string) => void;
   // F8c: se llama SOLO en cambios manuales de mapeo (marca user_selected).
   onColumnTouched?: (ctxId: string, col: string) => void;
+  // F-A: lectura del mismo touched-set que escribe `onColumnTouched`. Sin él la
+  // sección no puede distinguir lo que eligió el usuario de lo que quedó de una
+  // sugerencia, y al cambiar de sección pisaría las dos cosas por igual.
+  isColumnTouched?: (ctxId: string, col: string) => boolean;
   // Problemas que impiden importar ESTA hoja. El padre los junta para decidir si
   // habilita Confirmar — así el bloqueo usa las mismas reglas que el confirm del
   // backend en vez de descubrirse recién con un 422.
@@ -585,28 +612,63 @@ function SheetMapperSection({
     enabled: included && !isText && entityChosen,
   });
 
+  // El catálogo se lee ANTES de inicializar el mapeo: la inicialización necesita
+  // saber qué campos existen en la entidad nueva para no conservar un target que
+  // allá no existe (ver `targetSobreviveALaEntidad`).
+  const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
+  const fields = catalog?.[entity]?.fields ?? [];
+
   // Inicializar mapeos desde sugerencias, una vez POR SECCIÓN: si el usuario
   // reasigna la hoja (p. ej. de Ventas a Productos), las sugerencias vienen de
-  // otro schema y el mapeo viejo ya no aplica. Un flag booleano dejaba pegado el
-  // mapeo del schema anterior.
+  // otro schema. Un flag booleano dejaba pegado el mapeo del schema anterior.
+  //
+  // F-A: es un MERGE, no un reemplazo. Reemplazar todo borraba las columnas que
+  // la persona había mapeado a mano —veinte columnas de trabajo perdidas por
+  // corregir la sección de la hoja—, así que lo tocado manda sobre la sugerencia
+  // nueva y lo no tocado se recalcula, que es lo correcto: viene de otro schema.
   useEffect(() => {
-    if (suggestions.length > 0 && initializedFor !== entity) {
-      const initial: Record<string, string> = {};
+    if (suggestions.length === 0 || initializedFor === entity) return;
+    // Sin catálogo no se puede afirmar que un target tocado ya no es elegible, y
+    // asumirlo lo descartaría por no encontrarlo. Este efecto vuelve a correr
+    // cuando el catálogo llega.
+    if (loadingCatalog) return;
+    setMappings((prev) => {
+      const next: Record<string, string> = {};
       for (const s of suggestions) {
-        if (s.target_field) initial[s.source_column] = s.target_field;
+        const col = s.source_column;
+        const elegido = prev[col] ?? "";
+        if (
+          isColumnTouched?.(context.context_id, col) &&
+          targetSobreviveALaEntidad(elegido, fields)
+        ) {
+          // Incluye el caso de un «Sin mapear» explícito: si la persona sacó esa
+          // columna a propósito, cambiar de sección no es motivo para volver a
+          // meterla.
+          if (elegido) next[col] = elegido;
+          continue;
+        }
+        if (s.target_field) next[col] = s.target_field;
       }
-      setMappings(initial);
-      setInitializedFor(entity);
-    }
-  }, [suggestions, initializedFor, entity]);
+      return next;
+    });
+    setInitializedFor(entity);
+    // `fields` es un array nuevo en cada render: se depende de `catalog`, que sí
+    // es estable (react-query), y de `loadingCatalog` para reintentar al llegar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    suggestions,
+    initializedFor,
+    entity,
+    catalog,
+    loadingCatalog,
+    context.context_id,
+    isColumnTouched,
+  ]);
 
   // Reportar mapeos al padre cuando cambian (vacío en texto/imagen).
   useEffect(() => {
     onMappingsChange(context.context_id, mappings);
   }, [mappings, context.context_id, onMappingsChange]);
-
-  const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
-  const fields = catalog?.[entity]?.fields ?? [];
   // Requeridos REALES de la entidad: un requerido está cubierto solo si alguna
   // columna lo mapea a su campo canónico. Antes esto miraba el `status` que
   // mandó el backend por columna, así que mover la columna del nombre a un
@@ -1114,6 +1176,14 @@ function MultiContextMapper({
     setMappingsVersion((v) => v + 1);
   }, []);
 
+  // F-A: lado de LECTURA del mismo set. Que sea un ref —y por lo tanto no
+  // dispare re-render— está bien: se consulta dentro del efecto que re-inicializa
+  // el mapeo, que ya corre cuando cambian la sección o las sugerencias.
+  const isColumnTouched = useCallback(
+    (ctxId: string, col: string) => touchedRef.current.has(riskKey(ctxId, col)),
+    [],
+  );
+
   const { byContext: warningsByCtx, general: generalWarnings } = useMemo(
     () => splitWarningsByContext(parserWarnings, contexts),
     [parserWarnings, contexts],
@@ -1556,6 +1626,7 @@ function MultiContextMapper({
             onMappingsChange={handleMappingsChange}
             onEntityChange={handleEntityChange}
             onColumnTouched={handleColumnTouched}
+            isColumnTouched={isColumnTouched}
             onIssuesChange={handleIssuesChange}
             stockTreatment={stockTreatmentByCtx[ctx.context_id] ?? "opening_balance"}
             onStockTreatmentChange={handleStockTreatmentChange}

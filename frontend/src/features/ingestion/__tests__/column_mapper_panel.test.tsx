@@ -2083,3 +2083,170 @@ describe("ColumnMapperPanel — F-C: el banner de faltantes nombra, explica y ll
     });
   });
 });
+
+/**
+ * F-A — cambiar de sección no puede borrar lo que la persona ya mapeó.
+ *
+ * La inicialización del mapeo era un REEMPLAZO: al reasignar la hoja (Ventas →
+ * Gastos) el estado entero se pisaba con las sugerencias de la entidad nueva, y
+ * veinte columnas mapeadas a mano se perdían por corregir la sección.
+ *
+ * Ahora es un merge con una condición que no es obvia: lo tocado se conserva
+ * SÓLO si sigue siendo elegible en la entidad nueva. Preservar a ciegas un
+ * canónico que allá no existe reintroduce el «(campo desconocido)» que cerró el
+ * catálogo de fuente única.
+ */
+describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a mano", () => {
+  const PREVIEW = {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: {
+      inferred_type: "mixed",
+      mapping_contexts: [
+        {
+          context_id: "hoja1",
+          label: "Movimientos",
+          source_kind: "sheet",
+          entity_type: "sale",
+          headers: ["Fecha", "Monto", "Detalle"],
+          fields: null,
+          preview_rows: [],
+          row_count: 12,
+        },
+      ],
+    },
+    columns_at_risk: [],
+  };
+
+  function sugerencia(source_column: string, target_field: string | null) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["x"],
+      target_field,
+      confidence: 0.9,
+      source: target_field ? "heuristic" : "none",
+      status: target_field ? "mapped" : "unmapped",
+      context_id: "hoja1",
+    };
+  }
+
+  // Las sugerencias de cada sección salen de schemas distintos: la misma columna
+  // «Fecha» es `transaction_date` en Ventas y `expense_date` en Gastos. Eso es
+  // justo lo que SÍ tiene que recalcularse al cambiar de sección.
+  const POR_ENTIDAD: Record<string, ReturnType<typeof sugerencia>[]> = {
+    sale: [
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "notes"),
+    ],
+    expense: [
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "category"),
+    ],
+  };
+
+  /** El `<select>` de una columna, ubicado por el nombre de la columna. */
+  function selectDe(columna: string): HTMLSelectElement {
+    const fila = screen.getByTitle(columna).closest(".grid");
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  function cambiarSeccion(a: string) {
+    fireEvent.change(screen.getByLabelText("Sección de la hoja Movimientos"), {
+      target: { value: a },
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue(PREVIEW);
+    mockGetColumnMappings.mockImplementation((_fileId: string, entity: string) =>
+      Promise.resolve(POR_ENTIDAD[entity] ?? []),
+    );
+  });
+
+  test("lo elegido a mano sobrevive; lo no tocado se recalcula", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `payment_method` existe en Ventas y en Gastos: sigue siendo elegible.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "payment_method" } });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      // La columna que nadie tocó adopta la sugerencia del schema nuevo.
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Y la que la persona eligió a mano queda como la dejó.
+    expect(selectDe("Detalle").value).toBe("payment_method");
+  });
+
+  test("un target que la sección nueva no tiene NO se conserva", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `product_name` sólo existe en Ventas.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "product_name" } });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Conservarlo dejaría el select en «(campo desconocido)»: cae a la
+    // sugerencia de Gastos, sin inventar ningún reemplazo.
+    expect(selectDe("Detalle").value).not.toBe("product_name");
+    expect(selectDe("Detalle").value).toBe("category");
+  });
+
+  test("un campo personalizado sobrevive: no pertenece a ningún schema", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    fireEvent.change(selectDe("Detalle"), { target: { value: "__custom__" } });
+    const entrada = screen.getByPlaceholderText("nombre_del_campo");
+    fireEvent.change(entrada, { target: { value: "obs libres" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("custom_field:obs_libres");
+    });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("custom_field:obs_libres");
+  });
+
+  test("sin tocar nada, todo se recalcula con el schema nuevo", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("transaction_date");
+    });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("category");
+    expect(selectDe("Monto").value).toBe("amount");
+  });
+});
