@@ -51,7 +51,6 @@ def _person(name: str, **extra: Any) -> dict[str, Any]:
 # test_master_crud.py y test_idempotency.py. Acá solo lo específico de clientes.
 
 
-@pytest.mark.asyncio
 class TestSaleCustomerLink:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -113,7 +112,6 @@ class TestSaleCustomerLink:
 _VALID_CUIT = "20-12345678-6"
 
 
-@pytest.mark.asyncio
 class TestCustomerFiscalValidation:
     """Validación fiscal del alta manual: identidad + documento + celular."""
 
@@ -196,7 +194,6 @@ class TestCustomerFiscalValidation:
         assert resp.status_code == 422
 
 
-@pytest.mark.asyncio
 class TestLocalSentinel:
     """Centinela "Local": get-or-create único, excluido de métricas, protegido."""
 
@@ -343,7 +340,6 @@ class TestLocalSentinel:
         assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 class TestFiadoRequiresRealCustomer:
     """Fiado (``payment_method='account'``) exige cliente real, nunca "Local"."""
 
@@ -417,7 +413,6 @@ class TestFiadoRequiresRealCustomer:
         assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 class TestCustomerRepositorySentinelExclusion:
     """El centinela no cuenta como cliente activo ni entra en "inactivos"."""
 

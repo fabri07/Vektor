@@ -112,7 +112,6 @@ async def _seed_pending_pointer(
 # ── _try_nl_confirmation ──────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_si_confirms_single_action(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
 ) -> None:
@@ -154,7 +153,6 @@ async def test_si_confirms_single_action(
     assert expense.category == "SUPPLIES"
 
 
-@pytest.mark.asyncio
 async def test_si_without_pending_does_not_execute(
     db_session: AsyncSession, sample_user: User
 ) -> None:
@@ -166,7 +164,6 @@ async def test_si_without_pending_does_not_execute(
     assert resp is None  # sin puntero → sigue flujo normal (no ejecuta)
 
 
-@pytest.mark.asyncio
 async def test_non_affirmation_returns_none(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
 ) -> None:
@@ -185,7 +182,6 @@ async def test_non_affirmation_returns_none(
     assert resp is None  # mensaje no es afirmación/negación pura
 
 
-@pytest.mark.asyncio
 async def test_si_confirms_group(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
 ) -> None:
@@ -224,7 +220,6 @@ async def test_si_confirms_group(
     assert a1.status == "APPROVED"
 
 
-@pytest.mark.asyncio
 async def test_viewer_cannot_confirm_by_text(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -258,7 +253,6 @@ async def test_viewer_cannot_confirm_by_text(
     assert action.status == "PENDING"  # NO se ejecutó
 
 
-@pytest.mark.asyncio
 async def test_expired_action_not_executed_by_text(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
 ) -> None:
@@ -282,7 +276,6 @@ async def test_expired_action_not_executed_by_text(
     assert resp.result["nl_confirmation"] == "expired"
 
 
-@pytest.mark.asyncio
 async def test_no_cancels_single_action(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
 ) -> None:

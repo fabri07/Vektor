@@ -16,7 +16,6 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +28,6 @@ from app.persistence.models.transaction import ExpenseEntry
 # ── (a) Compras con SKUs NUEVOS → crea productos + stock + COGS + caja ─────────
 
 
-@pytest.mark.asyncio
 async def test_purchase_new_skus_creates_products_stock_cogs_and_cash(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -102,7 +100,6 @@ async def test_purchase_new_skus_creates_products_stock_cogs_and_cash(
 # ── (b) Gastos NO-mercadería → NO crea productos ──────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_service_expenses_do_not_create_products(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -138,7 +135,6 @@ async def test_service_expenses_do_not_create_products(
     assert movements == []
 
 
-@pytest.mark.asyncio
 async def test_merchandise_without_quantity_does_not_create_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -168,7 +164,6 @@ async def test_merchandise_without_quantity_does_not_create_product(
 # ── (c) Compras con SKUs EXISTENTES → no duplica, incrementa stock ────────────
 
 
-@pytest.mark.asyncio
 async def test_purchase_existing_sku_does_not_duplicate_increments_stock(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -210,7 +205,6 @@ async def test_purchase_existing_sku_does_not_duplicate_increments_stock(
     assert expense.expense_type == "COGS"
 
 
-@pytest.mark.asyncio
 async def test_repeated_new_sku_in_same_file_creates_one_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -242,7 +236,6 @@ async def test_repeated_new_sku_in_same_file_creates_one_product(
 # ── Variante multisheet: _add_expense por contexto ────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_multisheet_purchase_new_sku_creates_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -293,7 +286,6 @@ async def test_multisheet_purchase_new_sku_creates_product(
     assert movement.movement_type == "purchase"
 
 
-@pytest.mark.asyncio
 async def test_multisheet_service_expense_does_not_create_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

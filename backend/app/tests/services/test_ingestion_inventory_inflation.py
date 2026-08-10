@@ -14,7 +14,6 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -32,7 +31,6 @@ from app.tests.conftest import add_business_profile
 # ── A5: stock inicial de catálogo genera COGS ─────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_catalog_initial_stock_creates_cogs_and_stamps_movement(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -75,7 +73,6 @@ async def test_catalog_initial_stock_creates_cogs_and_stamps_movement(
     assert mv.source_row_ref  # traza a la fila de origen
 
 
-@pytest.mark.asyncio
 async def test_catalog_without_cost_creates_no_cogs(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -100,7 +97,6 @@ async def test_catalog_without_cost_creates_no_cogs(
     assert mv.source_type == "catalog_initial_stock"
 
 
-@pytest.mark.asyncio
 async def test_catalog_restock_only_charges_delta_cogs(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -161,7 +157,6 @@ def _dual_bucket_summary() -> dict[str, object]:
     }
 
 
-@pytest.mark.asyncio
 async def test_rc2_dual_bucket_no_duplicate_product_preexisting(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -206,7 +201,6 @@ async def test_rc2_dual_bucket_no_duplicate_product_preexisting(
     assert expenses[0].expense_type == "COGS"
 
 
-@pytest.mark.asyncio
 async def test_rc2_dual_bucket_no_duplicate_product_autoflush_off(
     isolated_db_engine: AsyncEngine,
 ) -> None:

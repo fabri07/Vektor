@@ -4,7 +4,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +37,6 @@ async def _create_notification(
     return n
 
 
-@pytest.mark.asyncio
 class TestNotificationCreatedOnMilestone:
     """Test that notifications are created (simulating what update_momentum does)."""
 
@@ -103,7 +101,6 @@ class TestNotificationCreatedOnMilestone:
         assert data["notifications"][0]["action_url"] == "/dashboard?focus=health"
 
 
-@pytest.mark.asyncio
 class TestUnreadCountDecreasesAfterRead:
     async def test_unread_count_decreases_after_read(
         self,

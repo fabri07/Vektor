@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,7 +94,6 @@ async def _make_import_sale(
 # ── Test: dry-run persiste run pero no modifica SaleEntry ─────────────────────
 
 
-@pytest.mark.asyncio
 async def test_dry_run_persists_run_without_voiding(session: AsyncSession, tenant, user) -> None:
     now = datetime.now(UTC)
     product_summary = {
@@ -147,7 +145,6 @@ async def test_dry_run_persists_run_without_voiding(session: AsyncSession, tenan
 # ── Test: apply anula ventas y crea productos ─────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_apply_voids_sales_and_creates_products(session: AsyncSession, tenant, user) -> None:
     now = datetime.now(UTC)
     product_summary = {
@@ -196,7 +193,6 @@ async def test_apply_voids_sales_and_creates_products(session: AsyncSession, ten
 # ── Test: list_by_tenant no devuelve ventas anuladas ─────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_voided_sales_excluded_from_list(session: AsyncSession, tenant, user) -> None:
     """SaleEntry con voided_at seteado no debe aparecer en SaleRepository.list_by_tenant."""
     now = datetime.now(UTC)
@@ -248,7 +244,6 @@ async def test_voided_sales_excluded_from_list(session: AsyncSession, tenant, us
 # ── Test: source_run_id aplica exactamente el plan del dry-run ───────────────
 
 
-@pytest.mark.asyncio
 async def test_apply_with_source_run_id_marks_dry_run_applied(
     session: AsyncSession, tenant, user
 ) -> None:
@@ -304,7 +299,6 @@ async def test_apply_with_source_run_id_marks_dry_run_applied(
 # ── Test: normalización bidireccional evita duplicados ───────────────────────
 
 
-@pytest.mark.asyncio
 async def test_normalization_prevents_duplicate_with_hyphen_variant(
     session: AsyncSession, tenant, user
 ) -> None:
@@ -364,7 +358,6 @@ async def test_normalization_prevents_duplicate_with_hyphen_variant(
 # ── Test: run idempotente ─────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_apply_twice_is_idempotent(session: AsyncSession, tenant, user) -> None:
     """Correr apply dos veces no duplica productos ni anula dos veces."""
     now = datetime.now(UTC)
@@ -470,7 +463,6 @@ async def _make_sale_with_source(
     return s
 
 
-@pytest.mark.asyncio
 async def test_30_legit_identical_sales_not_voided(session: AsyncSession, tenant, user) -> None:
     """BLOQUEANTE: 30 ventas idénticas legítimas (sin señal de import) NO se anulan."""
     from app.application.services.data_repair_service import detect_duplicate_imports
@@ -486,7 +478,6 @@ async def test_30_legit_identical_sales_not_voided(session: AsyncSession, tenant
     assert groups == []  # sin señal de origen-import → no son duplicados
 
 
-@pytest.mark.asyncio
 async def test_import_duplicate_sales_voided_reversibly(
     session: AsyncSession, tenant, user
 ) -> None:
@@ -545,7 +536,6 @@ async def test_import_duplicate_sales_voided_reversibly(
     assert items[0].before_json.get("amount") == "999"
 
 
-@pytest.mark.asyncio
 async def test_opex_merchandise_reclassified_to_cogs(session: AsyncSession, tenant, user) -> None:
     """Gasto OPEX 'Bebidas' (mercadería del vertical kiosco) → INVENTORY/COGS."""
     from app.application.services.data_repair_service import (

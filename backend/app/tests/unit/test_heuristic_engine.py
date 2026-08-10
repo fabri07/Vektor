@@ -174,7 +174,6 @@ def test_json_incompleto_levanta(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 # ── Test asíncrono con override en BD ────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_async_override_applies(sqlite_session: AsyncSession) -> None:
     """
     Insertar override margin.net_expected_min=0.30 para un tenant,

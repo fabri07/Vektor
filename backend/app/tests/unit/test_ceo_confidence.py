@@ -11,8 +11,6 @@ import unittest.mock
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.agents.shared.schemas import AgentRequest, Confidence, LLMCall
 
 
@@ -82,7 +80,6 @@ def test_confidence_from_float_low():
 
 # ── Tests de classify_intent — parseo de campos de confianza ─────────────────
 
-@pytest.mark.asyncio
 async def test_classify_intent_confidence_present():
     """Cuando el LLM devuelve confidence=0.9, el dict lo incluye correctamente."""
     with unittest.mock.patch(
@@ -111,7 +108,6 @@ async def test_classify_intent_confidence_present():
     assert isinstance(llm_call, LLMCall)
 
 
-@pytest.mark.asyncio
 async def test_classify_intent_confidence_absent_defaults_to_0_5():
     """Cuando el LLM omite 'confidence', el dict usa 0.5 como default defensivo."""
     with unittest.mock.patch(
@@ -133,7 +129,6 @@ async def test_classify_intent_confidence_absent_defaults_to_0_5():
     assert result["confidence"] == 0.5
 
 
-@pytest.mark.asyncio
 async def test_classify_intent_confidence_out_of_range_defaults_to_0_5():
     """Cuando confidence está fuera de [0,1] (>1), usar 0.5."""
     with unittest.mock.patch(
@@ -157,7 +152,6 @@ async def test_classify_intent_confidence_out_of_range_defaults_to_0_5():
     assert result["confidence"] == 0.5
 
 
-@pytest.mark.asyncio
 async def test_classify_intent_confidence_negative_clamps_to_0_5():
     """Cuando confidence es negativa (e.g. -0.5), debe defaultear a 0.5."""
     with unittest.mock.patch(
@@ -181,7 +175,6 @@ async def test_classify_intent_confidence_negative_clamps_to_0_5():
     assert result["confidence"] == 0.5
 
 
-@pytest.mark.asyncio
 async def test_classify_intent_reasoning_absent_defaults_empty():
     """Cuando reasoning está ausente, default ''."""
     with unittest.mock.patch(
@@ -202,7 +195,6 @@ async def test_classify_intent_reasoning_absent_defaults_empty():
     assert result["reasoning"] == ""
 
 
-@pytest.mark.asyncio
 async def test_classify_intent_ambiguous_with_absent_defaults_empty_list():
     """Cuando ambiguous_with está ausente, default []."""
     with unittest.mock.patch(
@@ -225,7 +217,6 @@ async def test_classify_intent_ambiguous_with_absent_defaults_empty_list():
 
 # ── Tests de process() — campos en result y enum de confianza ─────────────────
 
-@pytest.mark.asyncio
 async def test_process_result_includes_confidence_float():
     """process() incluye confidence_float en el result."""
     with unittest.mock.patch(
@@ -254,7 +245,6 @@ async def test_process_result_includes_confidence_float():
     assert "ambiguous_with" in response.result
 
 
-@pytest.mark.asyncio
 async def test_process_sets_confidence_high_from_float():
     """confidence >= 0.85 → Confidence.HIGH en el AgentResponse."""
     with unittest.mock.patch(
@@ -275,7 +265,6 @@ async def test_process_sets_confidence_high_from_float():
     assert response.confidence == Confidence.HIGH
 
 
-@pytest.mark.asyncio
 async def test_process_sets_confidence_medium_from_float():
     """confidence en [0.72, 0.85) → Confidence.MEDIUM."""
     with unittest.mock.patch(
@@ -296,7 +285,6 @@ async def test_process_sets_confidence_medium_from_float():
     assert response.confidence == Confidence.MEDIUM
 
 
-@pytest.mark.asyncio
 async def test_process_sets_confidence_low_from_float():
     """confidence < 0.72 → Confidence.LOW."""
     with unittest.mock.patch(
@@ -317,7 +305,6 @@ async def test_process_sets_confidence_low_from_float():
     assert response.confidence == Confidence.LOW
 
 
-@pytest.mark.asyncio
 async def test_process_no_longer_hardcodes_high():
     """El CEO ya no hardcodea Confidence.HIGH — usa el float del LLM."""
     with unittest.mock.patch(
@@ -340,7 +327,6 @@ async def test_process_no_longer_hardcodes_high():
     assert response.confidence != Confidence.HIGH
 
 
-@pytest.mark.asyncio
 async def test_process_max_tokens_is_1000():
     """max_tokens del classify_intent debe ser 1000 (subido de 800)."""
     captured_call: dict[str, Any] = {}

@@ -26,7 +26,6 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,7 +82,6 @@ def _summary_ventas() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 class TestFallbacksDelCaminoPlano:
     async def test_el_costo_unitario_sobrevive_a_un_mapeo_que_no_lo_nombra(
         self, db_session: AsyncSession, sample_tenant: Tenant

@@ -7,8 +7,6 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTask
 
 _TENANT = "00000000-0000-0000-0000-000000000001"
@@ -32,7 +30,6 @@ def _task(action_type: ActionType, entities: dict[str, Any] | None = None) -> Ag
 # ── AgentIncome — REGISTER_CASH_INFLOW ───────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_income_cash_inflow_with_amount_in_message():
     """Cobro con monto en el mensaje → requires_approval con REGISTER_CASH_INFLOW."""
     from app.application.agents.income.agent import AgentIncome
@@ -47,7 +44,6 @@ async def test_income_cash_inflow_with_amount_in_message():
     assert Decimal(result.result["structured_data"]["amount"]) > 0
 
 
-@pytest.mark.asyncio
 async def test_income_cash_inflow_from_task_entities():
     """Cobro con entities pre-provistas por el CEO → usa los datos del task."""
     from app.application.agents.income.agent import AgentIncome
@@ -69,7 +65,6 @@ async def test_income_cash_inflow_from_task_entities():
     assert data["amount"] == "8000"
 
 
-@pytest.mark.asyncio
 async def test_income_cash_inflow_resolves_customer_name_to_id(monkeypatch):
     """Regresión (review C5): el cobro con `cliente` (nombre, lo que extrae el CEO)
     resuelve el customer_id vía el repo y lo inyecta en structured_data.
@@ -95,7 +90,6 @@ async def test_income_cash_inflow_resolves_customer_name_to_id(monkeypatch):
     assert result.result["structured_data"]["customer_id"] == str(_cid)
 
 
-@pytest.mark.asyncio
 async def test_income_cash_inflow_unknown_customer_name_leaves_unlinked(monkeypatch):
     """Si el nombre no matchea ningún cliente, el cobro NO se bloquea y queda sin vincular."""
     from app.application.agents.income.agent import AgentIncome
@@ -114,7 +108,6 @@ async def test_income_cash_inflow_unknown_customer_name_leaves_unlinked(monkeypa
     assert "customer_id" not in result.result["structured_data"]
 
 
-@pytest.mark.asyncio
 async def test_income_cash_inflow_without_amount_asks_clarification():
     """Cobro sin monto en el mensaje ni en task → requires_clarification."""
     from app.application.agents.income.agent import AgentIncome
@@ -127,7 +120,6 @@ async def test_income_cash_inflow_without_amount_asks_clarification():
     assert "monto" in result.question.lower() or "cuánto" in result.question.lower()
 
 
-@pytest.mark.asyncio
 async def test_income_register_sale_with_entity_injection():
     """REGISTER_SALE con entities pre-provistas (amount + payment_method) → salta el LLM."""
     from app.application.agents.income.agent import AgentIncome
@@ -154,7 +146,6 @@ async def test_income_register_sale_with_entity_injection():
 # ── AgentExpense — REGISTER_CASH_OUTFLOW ─────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_expense_cash_outflow_with_amount_in_message():
     """Pago salida con monto en mensaje → requires_approval con REGISTER_CASH_OUTFLOW."""
     from app.application.agents.expense.agent import AgentExpense
@@ -171,7 +162,6 @@ async def test_expense_cash_outflow_with_amount_in_message():
     assert Decimal(result.result["structured_data"]["amount"]) > 0
 
 
-@pytest.mark.asyncio
 async def test_expense_cash_outflow_from_task_entities():
     """Pago salida con entities del CEO → usa monto provisto."""
     from app.application.agents.expense.agent import AgentExpense
@@ -192,7 +182,6 @@ async def test_expense_cash_outflow_from_task_entities():
     assert result.result["structured_data"]["amount"] == "50000"
 
 
-@pytest.mark.asyncio
 async def test_expense_cash_outflow_without_amount_asks_clarification():
     """Pago salida sin monto → requires_clarification."""
     from app.application.agents.expense.agent import AgentExpense
@@ -205,7 +194,6 @@ async def test_expense_cash_outflow_without_amount_asks_clarification():
     assert "monto" in result.question.lower() or "pago" in result.question.lower()
 
 
-@pytest.mark.asyncio
 async def test_expense_register_expense_remains_default_branch():
     """REGISTER_EXPENSE sigue siendo el branch por defecto de AgentExpense."""
     from app.application.agents.expense.agent import AgentExpense
@@ -218,7 +206,6 @@ async def test_expense_register_expense_remains_default_branch():
     assert result.result["auto_execute"] is True
 
 
-@pytest.mark.asyncio
 async def test_expense_outflow_is_requires_approval_not_auto_execute():
     """REGISTER_CASH_OUTFLOW requiere aprobación, a diferencia de REGISTER_EXPENSE."""
     from app.application.agents.expense.agent import AgentExpense
@@ -234,7 +221,6 @@ async def test_expense_outflow_is_requires_approval_not_auto_execute():
 # ── AgentGoogle — dispatch con task ──────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_google_no_gateway_returns_auth_required():
     """AgentGoogle sin gateway → requires_google_auth (calendar handler)."""
     from app.application.agents.google.agent import AgentGoogle
@@ -244,7 +230,6 @@ async def test_google_no_gateway_returns_auth_required():
     assert result.status == "requires_google_auth"
 
 
-@pytest.mark.asyncio
 async def test_google_with_calendar_task_no_gateway():
     """Con task CREATE_CALENDAR_EVENT y sin gateway → requires_google_auth."""
     from app.application.agents.google.agent import AgentGoogle
@@ -256,7 +241,6 @@ async def test_google_with_calendar_task_no_gateway():
     assert result.agent_name == "agent_google"
 
 
-@pytest.mark.asyncio
 async def test_google_without_task_defaults_to_sync_path():
     """Sin task (task=None), AgentGoogle defaultea al path de sync/Sheets."""
     from app.application.agents.google.agent import AgentGoogle

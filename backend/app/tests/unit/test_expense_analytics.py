@@ -4,7 +4,6 @@ import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,7 +82,6 @@ async def seeded(db_session: AsyncSession) -> uuid.UUID:
     return tid
 
 
-@pytest.mark.asyncio
 async def test_clasificar_gastos(db_session, seeded):
     agent = AgentExpense(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("clasificar_gastos"))
@@ -91,7 +89,6 @@ async def test_clasificar_gastos(db_session, seeded):
     assert resp.result["structured_data"]["by_category"]
 
 
-@pytest.mark.asyncio
 async def test_gastos_recurrentes(db_session, seeded):
     agent = AgentExpense(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("detectar_gastos_recurrentes"))
@@ -99,7 +96,6 @@ async def test_gastos_recurrentes(db_session, seeded):
     assert "Inmobiliaria" in resp.message
 
 
-@pytest.mark.asyncio
 async def test_gastos_anomalos(db_session, seeded):
     agent = AgentExpense(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("detectar_gastos_anomalos"))
@@ -108,7 +104,6 @@ async def test_gastos_anomalos(db_session, seeded):
     assert resp.result["summary"] in ("detectar_gastos_anomalos", "gastos_anomalos_ninguno")
 
 
-@pytest.mark.asyncio
 async def test_costos_fijos_variables(db_session, seeded):
     agent = AgentExpense(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("analizar_costos_fijos_variables"))
@@ -116,7 +111,6 @@ async def test_costos_fijos_variables(db_session, seeded):
     assert resp.result["structured_data"]["fijos"] > 0
 
 
-@pytest.mark.asyncio
 async def test_punto_equilibrio_sin_ventas(db_session, seeded):
     agent = AgentExpense(db=db_session)
     resp = await agent.process(_req(seeded), task=_task("calcular_punto_equilibrio"))
@@ -124,7 +118,6 @@ async def test_punto_equilibrio_sin_ventas(db_session, seeded):
     assert resp.result["summary"] == "equilibrio_sin_margen"
 
 
-@pytest.mark.asyncio
 async def test_empty(db_session):
     tid = uuid.uuid4()
     db_session.add(

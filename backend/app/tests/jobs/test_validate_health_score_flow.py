@@ -14,7 +14,6 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -204,7 +203,6 @@ def _make_run(session: AsyncSession, redis: FakeRedis):
 # ── Validation 1: Job persiste score en DB ────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_validate_job_persists_score(
     session: AsyncSession,
     tenant: Tenant,
@@ -236,7 +234,6 @@ async def test_validate_job_persists_score(
 # ── Validation 2: decision_audit_log tiene una entrada ────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_validate_decision_audit_log(
     session: AsyncSession,
     tenant: Tenant,
@@ -263,7 +260,6 @@ async def test_validate_decision_audit_log(
 # ── Validation 3: GET /health-scores/latest retorna score calculado ───────────
 
 
-@pytest.mark.asyncio
 async def test_validate_latest_endpoint(
     engine: AsyncEngine,
     session: AsyncSession,
@@ -332,7 +328,6 @@ async def test_validate_latest_endpoint(
 # ── Validation 4: Dos jobs simultáneos no crean dos snapshots ─────────────────
 
 
-@pytest.mark.asyncio
 async def test_validate_no_duplicate_snapshots(
     session: AsyncSession,
     tenant: Tenant,

@@ -78,7 +78,6 @@ def _gastos_summary() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_import_gastos_csv_sin_mapeo_manual(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -117,7 +116,6 @@ async def test_import_gastos_csv_sin_mapeo_manual(
     assert alquiler.transaction_date.date().isoformat() == "2026-04-06"
 
 
-@pytest.mark.asyncio
 async def test_import_gastos_categoria_desconocida_preserva_label(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -143,7 +141,6 @@ async def test_import_gastos_categoria_desconocida_preserva_label(
     assert (expense.custom_fields or {}).get("category_label") == "Donaciones del barrio"
 
 
-@pytest.mark.asyncio
 async def test_reimport_same_file_is_idempotent(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -194,7 +191,6 @@ async def test_reimport_same_file_is_idempotent(
     assert all(e.source_upload_id == uploaded.id for e in total)
 
 
-@pytest.mark.asyncio
 async def test_import_without_uploaded_file_id_not_deduped(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -209,7 +205,6 @@ async def test_import_without_uploaded_file_id_not_deduped(
     assert second["gastos"] == 4  # sin huella, ambos insertan
 
 
-@pytest.mark.asyncio
 async def test_fila_sin_monto_va_a_otros_y_no_se_reimporta(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

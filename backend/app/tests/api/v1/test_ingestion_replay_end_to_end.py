@@ -227,7 +227,6 @@ async def _replay(
     return dict(response.json())
 
 
-@pytest.mark.asyncio
 @pytest.mark.slow
 class TestReplayEndToEnd:
     """El ÚNICO e2e del pipeline completo de replay — no borrar ni bajar de capa.
@@ -287,7 +286,6 @@ class TestReplayEndToEnd:
         ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.slow
 class TestElApplyExigeElegirHojas:
     """El eje de inventario se declara POR HOJA: escribir sin decir sobre cuáles

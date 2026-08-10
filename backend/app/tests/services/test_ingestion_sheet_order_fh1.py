@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,7 +110,6 @@ async def _importar(
     )
 
 
-@pytest.mark.asyncio
 class TestOrdenDeHojas:
     async def test_venta_vincula_aunque_su_hoja_venga_primera(
         self, db_session: AsyncSession, sample_tenant: Tenant

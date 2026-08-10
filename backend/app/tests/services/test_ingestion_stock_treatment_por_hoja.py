@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,7 +78,6 @@ _MAPEO = {
 }
 
 
-@pytest.mark.asyncio
 async def test_cada_hoja_declara_su_propio_origen_de_stock(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -117,7 +115,6 @@ async def test_cada_hoja_declara_su_propio_origen_de_stock(
     assert len(gastos) == 1
 
 
-@pytest.mark.asyncio
 async def test_string_global_sigue_valiendo_para_todas_las_hojas(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -141,7 +138,6 @@ async def test_string_global_sigue_valiendo_para_todas_las_hojas(
     assert len(gastos) == 2
 
 
-@pytest.mark.asyncio
 async def test_sin_declarar_nada_el_default_sigue_siendo_apertura(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -163,7 +159,6 @@ async def test_sin_declarar_nada_el_default_sigue_siendo_apertura(
     assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
 
 
-@pytest.mark.asyncio
 async def test_informational_en_ventas_no_frena_la_apertura_ni_la_compra(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -291,7 +286,6 @@ async def test_informational_en_ventas_no_frena_la_apertura_ni_la_compra(
     assert len(ventas) == 1
 
 
-@pytest.mark.asyncio
 async def test_hoja_sin_declarar_cae_al_default_no_a_la_otra_hoja(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

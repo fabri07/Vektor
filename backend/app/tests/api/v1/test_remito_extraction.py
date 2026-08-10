@@ -77,7 +77,6 @@ def _mock_anthropic_factory(tool_input: dict[str, Any]) -> tuple[Any, unittest.m
 # ── Servicio determinístico ───────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestTabularExtraction:
     async def test_csv_extracts_lines(self) -> None:
         extraction, usage = await extract_remito(_csv_remito(), "remito.csv")
@@ -118,7 +117,6 @@ class TestTabularExtraction:
 # ── Servicio IA (foto / PDF) ──────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestAIExtraction:
     _TOOL_INPUT = {
         "lines": [
@@ -195,7 +193,6 @@ def mock_s3_upload():
         yield mock
 
 
-@pytest.mark.asyncio
 class TestExtractEndpoint:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

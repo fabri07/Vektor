@@ -7,8 +7,6 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
     REQUIRED_FIELDS,
@@ -213,7 +211,6 @@ def test_canonical_fields_all_entities() -> None:
     assert "supplier_cuil" in CANONICAL_FIELDS["expense"]
 
 
-@pytest.mark.asyncio
 async def test_suggest_mappings_heuristic() -> None:
     """suggest_mappings usa heurística cuando no hay historial."""
     db = AsyncMock()
@@ -241,7 +238,6 @@ async def test_suggest_mappings_heuristic() -> None:
     assert prod_sugg["target_field"] == "product_name"
 
 
-@pytest.mark.asyncio
 async def test_suggest_mappings_customer_master() -> None:
     """suggest_mappings resuelve columnas fiscales de un maestro de clientes."""
     db = AsyncMock()
@@ -264,7 +260,6 @@ async def test_suggest_mappings_customer_master() -> None:
     assert by_col["Email"]["target_field"] == "email"
 
 
-@pytest.mark.asyncio
 async def test_suggest_mappings_sale_with_customer_reference_column() -> None:
     """Una hoja de VENTAS con columna 'DNI' (referencia al cliente) la mapea a
     customer_dni — el contrato que habilita 7c, sin implementar la vinculación."""
@@ -284,7 +279,6 @@ async def test_suggest_mappings_sale_with_customer_reference_column() -> None:
     assert dni_sugg["status"] == "mapped"
 
 
-@pytest.mark.asyncio
 async def test_suggest_mappings_tenant_history_priority() -> None:
     """Historial del tenant tiene prioridad sobre heurística."""
     db = AsyncMock()
@@ -314,7 +308,6 @@ async def test_suggest_mappings_tenant_history_priority() -> None:
     assert s["confidence"] > 0.5
 
 
-@pytest.mark.asyncio
 async def test_suggest_mappings_unknown_header() -> None:
     """Header desconocido sin fuzzy match → status unmapped."""
     db = AsyncMock()
@@ -333,7 +326,6 @@ async def test_suggest_mappings_unknown_header() -> None:
     assert s["status"] == "unmapped"
 
 
-@pytest.mark.asyncio
 async def test_suggest_mappings_sample_values() -> None:
     """sample_values toma hasta 5 valores no-nulos."""
     db = AsyncMock()
@@ -355,7 +347,6 @@ async def test_suggest_mappings_sample_values() -> None:
     assert all(v is not None for v in s["sample_values"])
 
 
-@pytest.mark.asyncio
 async def test_save_mappings_skip_ignore() -> None:
     """save_mappings no persiste mappings de tipo 'ignore'."""
     db = AsyncMock()
@@ -381,7 +372,6 @@ async def test_save_mappings_skip_ignore() -> None:
     assert added.target_field == "transaction_date"
 
 
-@pytest.mark.asyncio
 async def test_save_mappings_increments_count_on_same_target() -> None:
     """Si el mapeo ya existe y el target es igual, incrementa confirmed_count."""
     db = AsyncMock()
@@ -404,7 +394,6 @@ async def test_save_mappings_increments_count_on_same_target() -> None:
     assert existing.confirmed_count == 4
 
 
-@pytest.mark.asyncio
 async def test_save_mappings_resets_count_on_changed_target() -> None:
     """Si el usuario cambió el target, confirmed_count se reinicia a 1."""
     db = AsyncMock()
@@ -428,7 +417,6 @@ async def test_save_mappings_resets_count_on_changed_target() -> None:
     assert existing.confirmed_count == 1
 
 
-@pytest.mark.asyncio
 async def test_delete_mapping_returns_false_when_not_found() -> None:
     """delete_mapping retorna False si el mapping no pertenece al tenant."""
     db = AsyncMock()
@@ -441,7 +429,6 @@ async def test_delete_mapping_returns_false_when_not_found() -> None:
     assert result is False
 
 
-@pytest.mark.asyncio
 async def test_delete_mapping_returns_true_when_found() -> None:
     """delete_mapping retorna True y borra el objeto cuando existe."""
     db = AsyncMock()

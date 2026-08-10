@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +29,6 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 
 
-@pytest.mark.asyncio
 async def test_los_tres_precios_de_producto_se_guardan_por_separado(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -75,7 +73,6 @@ async def test_los_tres_precios_de_producto_se_guardan_por_separado(
     assert prod.sale_price_ars > prod.unit_cost_ars
 
 
-@pytest.mark.asyncio
 async def test_precio_de_lista_sin_mapear_queda_null(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -109,7 +106,6 @@ async def test_precio_de_lista_sin_mapear_queda_null(
     assert prod.list_price_ars is None
 
 
-@pytest.mark.asyncio
 async def test_venta_guarda_el_precio_realmente_vendido(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -146,7 +142,6 @@ async def test_venta_guarda_el_precio_realmente_vendido(
     assert venta.unit_price == Decimal("2100.00")
 
 
-@pytest.mark.asyncio
 async def test_unit_price_nunca_se_deriva_de_amount_sobre_quantity(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

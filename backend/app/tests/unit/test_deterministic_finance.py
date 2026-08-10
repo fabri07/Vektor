@@ -4,8 +4,6 @@ import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
-import pytest
-
 from app.application.services.deterministic_finance import (
     calcular_flujo_neto_30d,
     calcular_margen_bruto,
@@ -27,7 +25,6 @@ def _fake_session(
 
 
 class TestFlujoNeto:
-    @pytest.mark.asyncio
     async def test_flujo_neto_con_datos_del_tenant(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -38,7 +35,6 @@ class TestFlujoNeto:
         assert result["flujo_neto"] == Decimal("60000")
         assert result["periodo_dias"] == 30
 
-    @pytest.mark.asyncio
     async def test_flujo_neto_sin_datos(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -46,7 +42,6 @@ class TestFlujoNeto:
         result = await calcular_flujo_neto_30d(tenant_id, session)
         assert result["flujo_neto"] == Decimal("0")
 
-    @pytest.mark.asyncio
     async def test_uses_decimal_not_float(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -58,7 +53,6 @@ class TestFlujoNeto:
 
 
 class TestMargenBruto:
-    @pytest.mark.asyncio
     async def test_margen_con_datos(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -67,7 +61,6 @@ class TestMargenBruto:
         assert not result.get("sin_datos")
         assert result["margen_pct"] == Decimal("30.00")
 
-    @pytest.mark.asyncio
     async def test_margen_con_ventas_cero(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -78,7 +71,6 @@ class TestMargenBruto:
 
 
 class TestTicketPromedio:
-    @pytest.mark.asyncio
     async def test_ticket_promedio_con_datos(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -88,7 +80,6 @@ class TestTicketPromedio:
         assert result["ticket_promedio"] == Decimal("15000.00")
         assert result["n_transacciones"] == 10
 
-    @pytest.mark.asyncio
     async def test_ticket_sin_transacciones(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -99,7 +90,6 @@ class TestTicketPromedio:
 
 
 class TestFinancialSummary:
-    @pytest.mark.asyncio
     async def test_sin_datos_retorna_estado_sin_datos(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -118,7 +108,6 @@ class TestFinancialSummary:
         assert result["estado"] == "SIN_DATOS"
         assert "mensaje" in result
 
-    @pytest.mark.asyncio
     async def test_flujo_neto_con_datos_del_tenant_retorna_ok(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()
@@ -136,7 +125,6 @@ class TestFinancialSummary:
         result = await get_financial_summary(tenant_id, session)
         assert result["estado"] == "OK"
 
-    @pytest.mark.asyncio
     async def test_no_filtra_por_provenance(self) -> None:
         """La visibilidad financiera depende del tenant actual, no de provenance."""
         tenant_id = uuid.uuid4()
@@ -155,7 +143,6 @@ class TestFinancialSummary:
         assert result["estado"] == "OK"
         assert "provenance" not in result
 
-    @pytest.mark.asyncio
     async def test_error_retorna_sin_datos(self) -> None:
         tenant_id = uuid.uuid4()
         session = AsyncMock()

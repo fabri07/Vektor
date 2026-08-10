@@ -3,7 +3,6 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +31,6 @@ async def kiosco_profile(
     return profile
 
 
-@pytest.mark.asyncio
 class TestHealthScoreService:
     async def test_recalculate_no_data_produces_low_score(
         self,

@@ -41,7 +41,6 @@ _ENTIDADES = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("mock_score_trigger")
 @pytest.mark.parametrize(("base", "payload", "fecha_vieja"), _ENTIDADES)
 class TestSummaryYDateRange:

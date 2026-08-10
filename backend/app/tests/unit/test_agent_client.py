@@ -12,8 +12,6 @@ Cubre (Brief F2b):
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -75,7 +73,6 @@ def test_registry_agent_client_returns_instance():
 # ── Sin DB → mensaje claro, no reventar ──────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sin_db_devuelve_mensaje_claro():
     """Sin DB → clientes_sin_datos, no reventar."""
     from app.application.agents.client.agent import AgentClient
@@ -91,7 +88,6 @@ async def test_sin_db_devuelve_mensaje_claro():
 # ── count_active == 0 → no-invention ─────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sin_clientes_cargados_no_inventa():
     """count_active==0 → "todavía no tenés clientes", confidence MEDIUM, sin cifras inventadas."""
     from app.application.agents.client.agent import AgentClient
@@ -121,7 +117,6 @@ async def test_sin_clientes_cargados_no_inventa():
 # ── analizar_clientes (general) con ventas → ranking ─────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_analizar_clientes_ranking_top():
     """Con ventas disponibles → ranking por facturación, Beto primero (10.000 > 3.000)."""
     from app.application.agents.client.agent import AgentClient
@@ -166,7 +161,6 @@ async def test_analizar_clientes_ranking_top():
 # ── analizar_cuentas_por_cobrar con fiado → total adeudado correcto ──────────
 
 
-@pytest.mark.asyncio
 async def test_analizar_cuentas_por_cobrar_total_correcto():
     """ANALYZE_SALES_DATA + analizar_cuentas_por_cobrar → total_owed = 2.000."""
     from app.application.agents.client.agent import AgentClient

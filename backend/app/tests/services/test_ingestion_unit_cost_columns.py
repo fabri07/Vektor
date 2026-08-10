@@ -8,7 +8,6 @@ producto nace ``unit_cost_ars=None`` + ``requires_completion=True``. Con
 
 from __future__ import annotations
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +16,6 @@ from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 
 
-@pytest.mark.asyncio
 async def test_costo_total_not_used_as_unit_cost(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -44,7 +42,6 @@ async def test_costo_total_not_used_as_unit_cost(
     assert product.requires_completion is True  # falta costo → completar
 
 
-@pytest.mark.asyncio
 async def test_costo_unitario_captured(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -73,7 +70,6 @@ async def test_costo_unitario_captured(
     assert product.requires_completion is False
 
 
-@pytest.mark.asyncio
 async def test_no_cost_column_leaves_none_and_requires_completion(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -94,7 +90,6 @@ async def test_no_cost_column_leaves_none_and_requires_completion(
     assert product.requires_completion is True
 
 
-@pytest.mark.asyncio
 async def test_asteria_precio_compra_venta_disambiguation(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

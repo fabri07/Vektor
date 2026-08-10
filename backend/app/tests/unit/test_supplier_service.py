@@ -4,7 +4,6 @@ Regresión del fix de review: get_supplier_by_email/get_approved_senders deben
 excluir proveedores desactivados (soft-delete), no solo derivar el status.
 """
 
-import pytest
 
 from app.application.services.supplier_service import (
     get_approved_senders,
@@ -14,7 +13,6 @@ from app.persistence.models.supplier import Supplier
 from app.persistence.repositories.supplier_repository import SupplierRepository
 
 
-@pytest.mark.asyncio
 async def test_get_supplier_by_email_and_approved_senders_exclude_deactivated(
     db_session, sample_tenant
 ) -> None:

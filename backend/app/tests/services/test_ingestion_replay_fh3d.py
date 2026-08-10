@@ -20,7 +20,6 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -89,7 +88,6 @@ async def _venta_unica(db: AsyncSession) -> SaleEntry:
     return ventas[0]
 
 
-@pytest.mark.asyncio
 class TestLaVentaGuardaSuHoja:
     async def test_multi_hoja_estampa_el_contexto(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -162,7 +160,6 @@ class TestLaVentaGuardaSuHoja:
         assert IMPORT_CONTEXT_FIELD not in (venta.custom_fields or {})
 
 
-@pytest.mark.asyncio
 class TestElEfectoDeclaradoLlegaALaProyeccion:
     async def test_una_sola_tabla_honra_no_inventory(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -293,7 +290,6 @@ async def _otros(db: AsyncSession) -> list[UnclassifiedRecord]:
     return list((await db.execute(select(UnclassifiedRecord))).scalars().all())
 
 
-@pytest.mark.asyncio
 class TestVentaSinRespaldoNoEntra:
     async def test_replay_manda_a_otros_la_que_no_se_puede_cubrir(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -458,7 +454,6 @@ class TestVentaSinRespaldoNoEntra:
         assert len((await db_session.execute(select(SaleEntry))).scalars().all()) == 1
 
 
-@pytest.mark.asyncio
 class TestElGateTambienCorreEnElArchivoPlano:
     """El camino de una sola tabla es el import más común que existe.
 

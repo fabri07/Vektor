@@ -11,8 +11,6 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.agents.shared.schemas import ActionType, AgentRequest, RiskLevel
 from app.domain.verticals import Vertical
 
@@ -68,7 +66,6 @@ def _db_with_vertical(*results: MagicMock, default: MagicMock | None = None) -> 
 # ── Tests de AgentIncome (lógica de ingresos) ─────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sale_extraction_with_amount():
     """'vendí 5000 pesos al contado' → amount=5000, status=requires_approval."""
     mock_entities = {
@@ -95,7 +92,6 @@ async def test_sale_extraction_with_amount():
     assert str(result.result["structured_data"]["amount"]) == "5000"
 
 
-@pytest.mark.asyncio
 async def test_unknown_payment_returns_clarification():
     """'vendí 5000' sin método de pago → requires_clarification."""
     mock_entities = {
@@ -122,7 +118,6 @@ async def test_unknown_payment_returns_clarification():
     assert "contado" in result.question.lower() or "corriente" in result.question.lower()
 
 
-@pytest.mark.asyncio
 async def test_paid_sale_returns_approval():
     """'vendí 5000 al contado' → requires_approval, risk=MEDIUM."""
     mock_entities = {
@@ -151,7 +146,6 @@ async def test_paid_sale_returns_approval():
     assert result.result["action_type"] == "REGISTER_SALE"
 
 
-@pytest.mark.asyncio
 async def test_sale_and_inflow_are_separate_actions():
     """REGISTER_SALE y REGISTER_CASH_INFLOW son ActionTypes distintos."""
     mock_entities = {
@@ -178,7 +172,6 @@ async def test_sale_and_inflow_are_separate_actions():
     assert ActionType.REGISTER_CASH_INFLOW != ActionType.REGISTER_SALE
 
 
-@pytest.mark.asyncio
 async def test_sale_with_quantity_looks_up_product_price():
     """'vendí 3 coca colas' sin monto + producto en catálogo → amount = precio × 3."""
     from app.application.agents.income.agent import AgentIncome
@@ -224,7 +217,6 @@ async def test_sale_with_quantity_looks_up_product_price():
     assert data["price_lookup_source"] == "products_db"
 
 
-@pytest.mark.asyncio
 async def test_sale_with_float_quantity_parsed_safely():
     """quantity='3.0' del LLM → se parsea como 3, no lanza ValueError."""
     mock_entities = {
@@ -252,7 +244,6 @@ async def test_sale_with_float_quantity_parsed_safely():
     assert result.result["structured_data"]["quantity"] == 3
 
 
-@pytest.mark.asyncio
 async def test_sale_product_not_in_catalog_asks_for_amount():
     """'vendí 3 coca colas' sin monto y producto no en catálogo → requires_clarification."""
     from app.application.agents.income.agent import AgentIncome
@@ -286,7 +277,6 @@ async def test_sale_product_not_in_catalog_asks_for_amount():
     assert "catálogo" in result.question or "importe" in result.question
 
 
-@pytest.mark.asyncio
 async def test_sale_with_explicit_amount_skips_product_lookup():
     """'vendí 3 coca colas a $1500' → registra directamente sin consultar DB."""
     from app.application.agents.income.agent import AgentIncome
@@ -318,7 +308,6 @@ async def test_sale_with_explicit_amount_skips_product_lookup():
     assert mock_db.execute.await_count == 1
 
 
-@pytest.mark.asyncio
 async def test_llm_invents_amount_but_message_has_no_monetary_signal_uses_catalog():
     """LLM devuelve amount=30000 pero el mensaje no tiene monto →
     ignora 30000, busca en catálogo."""
@@ -363,7 +352,6 @@ async def test_llm_invents_amount_but_message_has_no_monetary_signal_uses_catalo
     assert data["price_lookup_source"] == "products_db"
 
 
-@pytest.mark.asyncio
 async def test_llm_invents_amount_but_message_only_has_year_uses_catalog():
     """Un año en el mensaje no cuenta como monto explícito."""
     from app.application.agents.income.agent import AgentIncome
@@ -407,7 +395,6 @@ async def test_llm_invents_amount_but_message_only_has_year_uses_catalog():
     assert data["price_lookup_source"] == "products_db"
 
 
-@pytest.mark.asyncio
 async def test_product_ambiguous_returns_clarification_with_partial():
     """Producto ambiguo → requires_clarification con partial y lista de opciones."""
     from app.application.agents.income.agent import AgentIncome
@@ -449,7 +436,6 @@ async def test_product_ambiguous_returns_clarification_with_partial():
     assert "Coca-Cola 1.5L" in result.question
 
 
-@pytest.mark.asyncio
 async def test_missing_payment_method_returns_clarification_with_partial():
     """LLM no detecta medio de pago → requires_clarification con partial."""
     from app.application.agents.income.agent import AgentIncome
@@ -483,7 +469,6 @@ async def test_missing_payment_method_returns_clarification_with_partial():
 # ── Tests de AgentExpense (lógica de egresos) ─────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_expense_message_is_auto_executed_candidate():
     """Gasto operativo → action_type=REGISTER_EXPENSE, auto_execute=True."""
     from app.application.agents.expense.agent import AgentExpense
@@ -503,7 +488,6 @@ async def test_expense_message_is_auto_executed_candidate():
 # ── Tests del shim AgentCash ──────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_cash_shim_dispatches_expense_to_expense_agent():
     """AgentCash despacha mensajes de gasto a AgentExpense."""
     from app.application.agents.cash.agent import AgentCash
@@ -516,7 +500,6 @@ async def test_cash_shim_dispatches_expense_to_expense_agent():
     assert result.agent_name == "agent_cash"
 
 
-@pytest.mark.asyncio
 async def test_cash_shim_dispatches_sale_to_income_agent():
     """AgentCash despacha mensajes de venta a AgentIncome."""
     mock_entities = {
@@ -543,7 +526,6 @@ async def test_cash_shim_dispatches_sale_to_income_agent():
     assert result.agent_name == "agent_cash"  # preservado por el shim
 
 
-@pytest.mark.asyncio
 async def test_sale_emits_event_after_confirm():
     """on_confirmed_sale → EventBus emite SALE_RECORDED con la clave `tenant_id` (el
     task `events.sale_recorded` la lee así; emitir `business_id` dejaba el descuento
@@ -557,7 +539,6 @@ async def test_sale_emits_event_after_confirm():
     mock_emit.assert_any_call("SALE_RECORDED", {"sale_id": "sale-001", "tenant_id": "tenant-001"})
 
 
-@pytest.mark.asyncio
 async def test_google_sheet_import_returns_pending_action_without_llm():
     """Google Sheets import → lee filas, parsea ventas y requiere aprobación."""
     from app.application.agents.cash.agent import AgentCash

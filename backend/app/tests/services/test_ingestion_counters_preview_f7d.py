@@ -58,7 +58,6 @@ def _clientes_mixed_summary() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_import_maestro_clientes_desglosa_creado_needs_review_invalido(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -81,7 +80,6 @@ async def test_import_maestro_clientes_desglosa_creado_needs_review_invalido(
     assert customers[0].name == "Juan Perez"
 
 
-@pytest.mark.asyncio
 async def test_import_maestro_clientes_actualiza_existente(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -120,7 +118,6 @@ async def test_import_maestro_clientes_actualiza_existente(
     assert customers[0].name == "Juan Perez"  # actualizado
 
 
-@pytest.mark.asyncio
 async def test_import_maestro_proveedores_desglosa_creado_needs_review_invalido(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -156,7 +153,6 @@ async def test_import_maestro_proveedores_desglosa_creado_needs_review_invalido(
 # ── 2. Backward-compat: summary viejo sin los buckets/counts nuevos ────────────
 
 
-@pytest.mark.asyncio
 async def test_summary_legacy_sin_buckets_de_maestro_no_rompe(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -240,7 +236,6 @@ async def _make_reread_file(
     return f
 
 
-@pytest.mark.asyncio
 async def test_reread_maestro_actualiza_y_preserva_campo_no_provisto(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -289,7 +284,6 @@ async def test_reread_maestro_actualiza_y_preserva_campo_no_provisto(
     assert refreshed.phone == "1122334455"  # preservado (no mapeado por el archivo)
 
 
-@pytest.mark.asyncio
 async def test_reread_maestro_needs_review_no_mergea(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -320,7 +314,6 @@ async def test_reread_maestro_needs_review_no_mergea(
     assert len(customers) == 1  # sigue habiendo solo el original, nada se creó
 
 
-@pytest.mark.asyncio
 async def test_reread_maestro_conflicto_de_clave_no_mergea(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -380,7 +373,6 @@ async def test_reread_maestro_conflicto_de_clave_no_mergea(
     assert refreshed_b.name == "Cliente Dos"
 
 
-@pytest.mark.asyncio
 async def test_reread_sin_mapeo_guardado_no_reaplica_maestros(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -412,7 +404,6 @@ async def test_reread_sin_mapeo_guardado_no_reaplica_maestros(
 # ── 4. apply_import (F7d review) no pisa un campo existente con celda vacía ───
 
 
-@pytest.mark.asyncio
 async def test_customer_apply_import_no_pisa_email_existente_con_celda_vacia(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -446,7 +437,6 @@ async def test_customer_apply_import_no_pisa_email_existente_con_celda_vacia(
 # ── 5. compras_proveedor_identificado no cuenta compras que van a "Otros" ──────
 
 
-@pytest.mark.asyncio
 async def test_compra_matched_pero_producto_ambiguo_no_genera_conteo_fantasma(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:

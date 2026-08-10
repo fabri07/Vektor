@@ -187,7 +187,6 @@ async def _gastos(db: AsyncSession, tenant: Tenant) -> list[ExpenseEntry]:
     )
 
 
-@pytest.mark.asyncio
 class TestElDescuentoYLosImpuestosLleganAlCosto:
     async def test_un_descuento_declarado_baja_el_costo_final(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -228,7 +227,6 @@ class TestElDescuentoYLosImpuestosLleganAlCosto:
         )
 
 
-@pytest.mark.asyncio
 class TestLosDosFletesNoSonElMismoCargo:
     async def test_el_flete_de_linea_se_suma_a_cada_fila(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -286,7 +284,6 @@ class TestLosDosFletesNoSonElMismoCargo:
         assert Decimal(str(fletes[0].amount)) == Decimal("500")
 
 
-@pytest.mark.asyncio
 class TestUnValorInvalidoNoEscribeNada:
     async def test_un_modo_desconocido_no_deja_datos_a_medio_importar(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -332,7 +329,6 @@ def _summary_plano(filas: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 class TestElCaminoPlanoDaElMismoCosto:
     async def test_un_descuento_declarado_tambien_baja_el_costo_en_una_tabla_suelta(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -367,7 +363,6 @@ class TestElCaminoPlanoDaElMismoCosto:
         assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
 
 
-@pytest.mark.asyncio
 class TestUnaCeldaQueNoSePudoLeerSeCuentaYSeAvisa:
     """«ver factura» en la columna de descuento no es «sin descuento».
 

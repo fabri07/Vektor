@@ -33,7 +33,6 @@ _SINGLE_PAYLOAD = {
 }
 
 
-@pytest.mark.asyncio
 class TestSalesBulk:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -76,7 +75,6 @@ class TestSalesBulk:
         assert resp.status_code == 401
 
 
-@pytest.mark.asyncio
 class TestSalesSummary:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -100,7 +98,6 @@ class TestSalesSummary:
         assert float(data["total_ars"]) == pytest.approx(53000.0)
 
 
-@pytest.mark.asyncio
 class TestSalesDateRange:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -137,7 +134,6 @@ class TestSalesDateRange:
         assert resp.status_code == 200
 
 
-@pytest.mark.asyncio
 class TestSalesTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -183,7 +179,6 @@ class TestSalesTenantIsolation:
         assert resp.status_code == 404
 
 
-@pytest.mark.asyncio
 class TestSalesRBAC:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -225,7 +220,6 @@ async def _create_product(
     return str(resp.json()["id"])
 
 
-@pytest.mark.asyncio
 class TestManualBatchSale:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -315,7 +309,6 @@ class TestManualBatchSale:
         assert r1.json()["stock_units"] == 10
 
 
-@pytest.mark.asyncio
 class TestLiveSaleStockDecrement:
     """POST /sales y su ciclo de vida descuentan/reponen stock (antes solo manual-batch)."""
 

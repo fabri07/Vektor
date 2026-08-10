@@ -10,7 +10,6 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +28,6 @@ def _stock_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-@pytest.mark.asyncio
 async def test_new_product_import_records_movement(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -52,7 +50,6 @@ async def test_new_product_import_records_movement(
     assert product.stock_units == 10  # representación canónica intacta
 
 
-@pytest.mark.asyncio
 async def test_stock_update_records_delta_adjustment(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -83,7 +80,6 @@ async def test_stock_update_records_delta_adjustment(
     assert product.stock_units == 15
 
 
-@pytest.mark.asyncio
 async def test_product_without_stock_records_no_movement(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -101,7 +97,6 @@ async def test_product_without_stock_records_no_movement(
 # ── FASE 3 (B3): sincronización de InventoryBalance en el import ───────────────
 
 
-@pytest.mark.asyncio
 async def test_new_product_import_creates_balance(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -117,7 +112,6 @@ async def test_new_product_import_creates_balance(
     assert balance.tenant_id == sample_tenant.tenant_id
 
 
-@pytest.mark.asyncio
 async def test_reimport_sums_delta_into_balance(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -150,7 +144,6 @@ async def test_reimport_sums_delta_into_balance(
     assert product.stock_units == 14  # canónico consistente
 
 
-@pytest.mark.asyncio
 async def test_balance_isolated_by_tenant(
     db_session: AsyncSession, sample_tenant: Tenant, second_tenant: Tenant
 ) -> None:

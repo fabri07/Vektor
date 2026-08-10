@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -93,7 +92,6 @@ def _mapping(source: str, target: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 class TestColisionDeCampoEscalar:
     async def test_tres_columnas_al_mismo_precio_rechaza_con_422(
         self,
@@ -294,7 +292,6 @@ async def compra_file(db_session: AsyncSession, sample_tenant: Tenant) -> Upload
     return record
 
 
-@pytest.mark.asyncio
 class TestLosCostosDeCompraTambienSonEscalares:
     """F-M.7 — `discount`, `taxes` y `shipping_cost_line` son escalares.
 
@@ -343,7 +340,6 @@ class TestLosCostosDeCompraTambienSonEscalares:
             assert col in detail
 
 
-@pytest.mark.asyncio
 class TestUnaDecisionDeCostoQueNoSePuedeHonrar:
     """F-H6.c — se rechaza ANTES del lease, con el motivo en castellano.
 

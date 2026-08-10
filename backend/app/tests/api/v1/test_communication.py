@@ -44,7 +44,6 @@ async def _create_supplier(
     return str(resp.json()["id"])
 
 
-@pytest.mark.asyncio
 class TestCommunication:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

@@ -18,7 +18,6 @@ def redis_mock() -> AsyncMock:
     return redis
 
 
-@pytest.mark.asyncio
 async def test_record_persiste_en_db(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -39,7 +38,6 @@ async def test_record_persiste_en_db(
     assert log.entity_count == 2
 
 
-@pytest.mark.asyncio
 async def test_get_context_sin_historial(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -49,7 +47,6 @@ async def test_get_context_sin_historial(
     assert ctx["ultima_carga"] is None
 
 
-@pytest.mark.asyncio
 async def test_get_context_con_ultima_carga(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -70,7 +67,6 @@ async def test_get_context_con_ultima_carga(
     assert ctx["total_cargas_registradas"] == 1
 
 
-@pytest.mark.asyncio
 async def test_tenant_isolation(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -84,7 +80,6 @@ async def test_tenant_isolation(
     assert descriptions == ["Tenant A"]
 
 
-@pytest.mark.asyncio
 async def test_cache_redis_invalida_al_hacer_record(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -101,7 +96,6 @@ async def test_cache_redis_invalida_al_hacer_record(
     redis_mock.delete.assert_awaited_once_with(f"chat_ctx:{sample_tenant.tenant_id}")
 
 
-@pytest.mark.asyncio
 async def test_get_session_context_cached_usa_redis(
     db_session: AsyncSession,
     sample_tenant: Tenant,

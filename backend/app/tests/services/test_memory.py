@@ -44,7 +44,6 @@ def mock_db() -> AsyncMock:
 # ── BusinessMemoryService ─────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_memory_get_returns_empty_when_no_record(
     mock_redis: AsyncMock, mock_db: AsyncMock
 ) -> None:
@@ -54,7 +53,6 @@ async def test_memory_get_returns_empty_when_no_record(
     assert result["llm_context_summary"] is None
 
 
-@pytest.mark.asyncio
 async def test_memory_uses_redis_cache(mock_redis: AsyncMock, mock_db: AsyncMock) -> None:
     mock_redis.get = AsyncMock(
         return_value=json.dumps({"sales_today": 500.0, "llm_context_summary": "Buen día"})
@@ -65,7 +63,6 @@ async def test_memory_uses_redis_cache(mock_redis: AsyncMock, mock_db: AsyncMock
     mock_db.execute.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_memory_update_after_sale_creates_record(
     mock_redis: AsyncMock, mock_db: AsyncMock
 ) -> None:
@@ -76,7 +73,6 @@ async def test_memory_update_after_sale_creates_record(
     mock_redis.delete.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_memory_update_after_expense_creates_record(
     mock_redis: AsyncMock, mock_db: AsyncMock
 ) -> None:
@@ -86,7 +82,6 @@ async def test_memory_update_after_expense_creates_record(
     mock_db.flush.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_memory_update_increments_existing_record(
     mock_redis: AsyncMock, mock_db: AsyncMock
 ) -> None:
@@ -111,7 +106,6 @@ async def test_memory_update_increments_existing_record(
 # ── ConversationService ───────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_conversation_summarized_after_max_turns(
     mock_redis: AsyncMock, mock_db: AsyncMock
 ) -> None:
@@ -138,7 +132,6 @@ async def test_conversation_summarized_after_max_turns(
     assert result["summary"] == "Resumen del chat"
 
 
-@pytest.mark.asyncio
 async def test_conversation_no_summary_under_max_turns(
     mock_redis: AsyncMock, mock_db: AsyncMock
 ) -> None:

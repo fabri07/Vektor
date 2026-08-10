@@ -65,7 +65,6 @@ def test_parse_garbage_returns_none() -> None:
 # ── detect_file_type: flag gating ──────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_detect_disabled_returns_none() -> None:
     # Flag apagado (default) → no llama al LLM.
     detected, conf, model = await detect_file_type(["fecha", "monto"], [{"fecha": "x"}])
@@ -74,12 +73,10 @@ async def test_detect_disabled_returns_none() -> None:
     assert model  # el modelo configurable siempre vuelve
 
 
-@pytest.mark.asyncio
 async def test_detect_no_headers_returns_none() -> None:
     assert (await detect_file_type([], []))[0] is None
 
 
-@pytest.mark.asyncio
 async def test_detect_enabled_with_mocked_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(get_settings(), "ENABLE_LLM_FILE_TYPE_DETECTION", True)
 
@@ -103,7 +100,6 @@ async def test_detect_enabled_with_mocked_client(monkeypatch: pytest.MonkeyPatch
     mock_client.messages.create.assert_awaited_once()
 
 
-@pytest.mark.asyncio
 async def test_detect_failure_is_fail_silent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(get_settings(), "ENABLE_LLM_FILE_TYPE_DETECTION", True)
     with unittest.mock.patch(
@@ -117,7 +113,6 @@ async def test_detect_failure_is_fail_silent(monkeypatch: pytest.MonkeyPatch) ->
 # ── maybe_detect_file_type: orquestación + traza ──────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_maybe_detect_skips_non_general() -> None:
     summary = {"inferred_type": "ventas", "headers": ["a"], "preview_rows": [{"a": "1"}]}
     db = AsyncMock()
@@ -131,7 +126,6 @@ async def test_maybe_detect_skips_non_general() -> None:
     assert summary["inferred_type"] == "ventas"  # intacto
 
 
-@pytest.mark.asyncio
 async def test_maybe_detect_updates_and_emits() -> None:
     summary: dict[str, Any] = {
         "inferred_type": "general",
@@ -165,7 +159,6 @@ async def test_maybe_detect_updates_and_emits() -> None:
     assert kwargs["detail"]["detected_type"] == "ventas"
 
 
-@pytest.mark.asyncio
 async def test_maybe_detect_updates_entity_type_for_proveedores() -> None:
     """F7a: detected='proveedores' → entity_type del contexto único pasa a 'supplier'."""
     summary: dict[str, Any] = {
@@ -194,7 +187,6 @@ async def test_maybe_detect_updates_entity_type_for_proveedores() -> None:
     assert summary["mapping_contexts"][0]["entity_type"] == "supplier"
 
 
-@pytest.mark.asyncio
 async def test_maybe_detect_no_result_keeps_general_and_no_emit() -> None:
     summary: dict[str, Any] = {
         "inferred_type": "general",

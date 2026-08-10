@@ -15,7 +15,6 @@ import uuid
 from typing import Any
 
 import openpyxl
-import pytest
 
 from app.application.services.supplier_extraction_service import parse_supplier_records
 from app.application.services.supplier_import_service import apply_import, build_import_preview
@@ -126,7 +125,6 @@ class TestSupplierImportPreview:
         assert preview.to_update == 0
 
 
-@pytest.mark.asyncio
 class TestSupplierApplyImport:
     async def test_upsert_idempotent(self, db_session: Any, sample_tenant: Any) -> None:
         from app.persistence.repositories.supplier_repository import SupplierRepository

@@ -14,7 +14,6 @@ import asyncio
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import sqlalchemy.exc
 
 from app.application.agents.shared.schemas import (
@@ -159,7 +158,6 @@ class TestIsRetryable:
 class TestTimeoutBehavior:
     """Verifica que asyncio.wait_for acote cada llamada al agente."""
 
-    @pytest.mark.asyncio
     async def test_timeout_triggers_retry_and_second_succeeds(self) -> None:
         """Primer intento supera el timeout → reintento → segundo intento ok → success."""
         request = _make_request()
@@ -188,7 +186,6 @@ class TestTimeoutBehavior:
         assert resp.status == "success"
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_timeout_exhausted_returns_error_with_timeout_key(self) -> None:
         """Ambos intentos superan el timeout → status=error con result['error']='timeout'."""
         request = _make_request()
@@ -216,7 +213,6 @@ class TestTimeoutBehavior:
         assert resp.result.get("error") == "timeout"
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_timeout_does_not_hang_gather(self) -> None:
         """asyncio.gather NO cuelga si un agente interno hace timeout."""
         request = _make_request()
@@ -249,7 +245,6 @@ class TestTimeoutBehavior:
 
 
 class TestRetryableErrors:
-    @pytest.mark.asyncio
     async def test_operational_error_retries_once_then_succeeds(self) -> None:
         """OperationalError de SQLAlchemy → reintento → éxito. process llamado 2 veces."""
         request = _make_request()
@@ -277,7 +272,6 @@ class TestRetryableErrors:
         assert resp.status == "success"
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_value_error_not_retried(self) -> None:
         """ValueError (error de negocio) → sin reintento. process llamado 1 vez."""
         request = _make_request()
@@ -303,7 +297,6 @@ class TestRetryableErrors:
         assert resp.status == "error"
         assert call_count == 1  # sin retry
 
-    @pytest.mark.asyncio
     async def test_runtime_error_not_retried(self) -> None:
         """RuntimeError (error de negocio genérico) → sin reintento."""
         request = _make_request()
@@ -329,7 +322,6 @@ class TestRetryableErrors:
         assert resp.status == "error"
         assert call_count == 1
 
-    @pytest.mark.asyncio
     async def test_external_action_retries_on_connection_error(self) -> None:
         """Acción externa (MCP) reintenta con ConnectionError — comportamiento legacy."""
         request = _make_request()
@@ -366,7 +358,6 @@ class TestRetryableErrors:
         assert resp.status == "success"
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_transient_error_capped_at_two_attempts(self) -> None:
         """Errores transitorios siempre tienen máximo 2 intentos (1 retry), nunca más."""
         request = _make_request()

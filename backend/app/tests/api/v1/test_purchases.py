@@ -28,7 +28,6 @@ async def _create_product(
     return str(resp.json()["id"])
 
 
-@pytest.mark.asyncio
 class TestManualPurchase:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

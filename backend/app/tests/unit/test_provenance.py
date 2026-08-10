@@ -141,7 +141,6 @@ class TestDemoTenant:
 
 
 class TestProvenanceDoesNotControlTenantReads:
-    @pytest.mark.asyncio
     async def test_product_repository_list_does_not_filter_by_provenance(self) -> None:
         session = AsyncMock()
         result = MagicMock()
@@ -153,7 +152,6 @@ class TestProvenanceDoesNotControlTenantReads:
         statement = session.execute.call_args.args[0]
         assert "provenance" not in _where_text(statement)
 
-    @pytest.mark.asyncio
     async def test_sale_repository_list_filters_voided_but_not_provenance(self) -> None:
         session = AsyncMock()
         result = MagicMock()
@@ -167,7 +165,6 @@ class TestProvenanceDoesNotControlTenantReads:
         assert "voided_at" in compiled
         assert "provenance" not in compiled
 
-    @pytest.mark.asyncio
     async def test_expense_repository_list_filters_voided_but_not_provenance(self) -> None:
         session = AsyncMock()
         result = MagicMock()

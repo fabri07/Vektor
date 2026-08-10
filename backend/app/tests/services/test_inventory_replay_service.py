@@ -91,7 +91,6 @@ async def _movimientos(db: AsyncSession) -> list[InventoryMovement]:
     )
 
 
-@pytest.mark.asyncio
 class TestAplicarElReplay:
     async def test_descuenta_y_deja_el_movimiento_con_su_archivo(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -208,7 +207,6 @@ class TestAplicarElReplay:
         assert producto.stock_units == 16
 
 
-@pytest.mark.asyncio
 class TestCuandoYaNoAlcanzaElStock:
     async def test_la_venta_queda_pendiente_y_no_se_anula(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -271,7 +269,6 @@ class TestCuandoYaNoAlcanzaElStock:
         assert producto.stock_units == 0
 
 
-@pytest.mark.asyncio
 class TestAlcancePorHoja:
     async def test_solo_aplica_las_hojas_pedidas(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -368,7 +365,6 @@ class TestAlcancePorHoja:
         assert producto.stock_units == 10
 
 
-@pytest.mark.asyncio
 class TestBorrarElArchivoDeshaceElReplay:
     """La reversa por borrado ya voidea por archivo (V15) y esto lo comprueba.
 

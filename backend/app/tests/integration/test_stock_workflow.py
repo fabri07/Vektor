@@ -5,7 +5,6 @@ import uuid
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +42,6 @@ async def product(session: AsyncSession, tenant):
     return p
 
 
-@pytest.mark.asyncio
 async def test_sale_decrements_stock(session: AsyncSession, tenant, product) -> None:
     """decrement_stock → inventory_balances decrementado correctamente."""
     from app.application.services.stock_service import decrement_stock
@@ -71,7 +69,6 @@ async def test_sale_decrements_stock(session: AsyncSession, tenant, product) -> 
     assert movement.qty == -10
 
 
-@pytest.mark.asyncio
 async def test_stock_loss_creates_audit_entry(session: AsyncSession, tenant, product, user) -> None:
     """register_stock_loss → entrada en decision_audit_log con decision_type=STOCK_LOSS."""
     from app.application.services.stock_service import register_stock_loss
@@ -100,7 +97,6 @@ async def test_stock_loss_creates_audit_entry(session: AsyncSession, tenant, pro
     assert audit.decision_data["reason"] == "vencimiento"
 
 
-@pytest.mark.asyncio
 async def test_bulk_adjustment_requires_confirmation(tenant, product):
     """AgentStock.process con 'ajuste' → status=requires_approval."""
     import json

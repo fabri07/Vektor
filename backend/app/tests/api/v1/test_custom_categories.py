@@ -18,7 +18,6 @@ async def _business_profile(sample_business_profile: BusinessProfile) -> None:
     return None
 
 
-@pytest.mark.asyncio
 class TestExpenseCustomCategories:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -54,7 +53,6 @@ class TestExpenseCustomCategories:
         assert len(cats) == 1
 
 
-@pytest.mark.asyncio
 class TestProductCustomCategories:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

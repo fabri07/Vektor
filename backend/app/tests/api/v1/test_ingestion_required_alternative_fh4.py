@@ -14,7 +14,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -119,7 +118,6 @@ async def _motivo_del_rechazo(db_session: AsyncSession) -> dict[str, Any]:
     return detail
 
 
-@pytest.mark.asyncio
 class TestElMontoDejaDeSerObligatorio:
     async def test_precio_y_cantidad_alcanzan_para_confirmar(
         self,
@@ -174,7 +172,6 @@ class TestElMontoDejaDeSerObligatorio:
         assert "precio unitario × cantidad" in avisos
 
 
-@pytest.mark.asyncio
 class TestLaAlternativaIncompletaNoAlcanza:
     """Media alternativa no calcula nada, así que el monto sigue obligatorio."""
 
@@ -217,7 +214,6 @@ class TestLaAlternativaIncompletaNoAlcanza:
         assert "Monto de venta" in response.json()["detail"]
 
 
-@pytest.mark.asyncio
 class TestUnCampoPropioNoCubre:
     async def test_un_campo_propio_llamado_amount_no_cubre_el_monto(
         self,

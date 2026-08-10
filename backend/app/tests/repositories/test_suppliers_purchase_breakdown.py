@@ -18,7 +18,6 @@ from app.persistence.repositories.inventory_repository import InventoryRepositor
 from app.tests.repositories._helpers import _product, _purchase
 
 
-@pytest.mark.asyncio
 async def test_breakdown_groups_by_real_supplier_with_historical_amount(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -48,7 +47,6 @@ async def test_breakdown_groups_by_real_supplier_with_historical_amount(
     assert s.products[1].brand == "Sin marca"
 
 
-@pytest.mark.asyncio
 async def test_breakdown_null_supplier_is_unassigned_and_coverage_partial(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -69,7 +67,6 @@ async def test_breakdown_null_supplier_is_unassigned_and_coverage_partial(
     assert s.coverage_pct == 50.0
 
 
-@pytest.mark.asyncio
 async def test_null_and_sentinel_supplier_merge_into_one(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -101,7 +98,6 @@ async def test_null_and_sentinel_supplier_merge_into_one(
     assert s.products[0].total_qty == pytest.approx(8.0)
 
 
-@pytest.mark.asyncio
 async def test_breakdown_excludes_voided_movements(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -125,7 +121,6 @@ async def test_breakdown_excludes_voided_movements(
     assert s.products[0].total_qty == pytest.approx(10.0)
 
 
-@pytest.mark.asyncio
 async def test_products_purchased_excludes_voided_movements(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

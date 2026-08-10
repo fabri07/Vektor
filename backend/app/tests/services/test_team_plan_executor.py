@@ -141,7 +141,6 @@ def test_topological_levels_raises_on_unknown_dependency():
 # ── TeamPlanExecutor.execute ──────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_execute_returns_responses_in_plan_order():
     """list[AgentResponse] viene en el mismo orden que plan.tasks, incluso
     si la ejecución fue en paralelo."""
@@ -173,7 +172,6 @@ async def test_execute_returns_responses_in_plan_order():
     assert [r.result["summary"] for r in responses] == ["venta", "stock"]
 
 
-@pytest.mark.asyncio
 async def test_execute_parallel_level_uses_gather():
     """Tasks sin deps entre sí corren concurrentemente (asyncio.gather)."""
     request = _make_request()
@@ -215,7 +213,6 @@ async def test_execute_parallel_level_uses_gather():
     assert events[1].endswith("_start"), f"Esperaba paralelismo, got {events!r}"
 
 
-@pytest.mark.asyncio
 async def test_execute_sequential_respects_dependencies():
     """t2 depende de t1 → t1 termina antes de que t2 empiece."""
     request = _make_request()
@@ -255,7 +252,6 @@ async def test_execute_sequential_respects_dependencies():
     assert events == ["stock_start", "stock_end", "expense_start", "expense_end"]
 
 
-@pytest.mark.asyncio
 async def test_execute_skips_downstream_on_failure():
     """Si t1 falla, t2 (que depende de t1) se salta con upstream_failure."""
     request = _make_request()
@@ -292,7 +288,6 @@ async def test_execute_skips_downstream_on_failure():
     assert responses[1].result["upstream_task_id"] == "t1"
 
 
-@pytest.mark.asyncio
 async def test_execute_parallel_failure_doesnt_skip_siblings():
     """Tasks paralelas (sin depender entre sí): si una falla, la otra igual corre."""
     request = _make_request()
@@ -326,7 +321,6 @@ async def test_execute_parallel_failure_doesnt_skip_siblings():
     assert responses[1].status == "success"
 
 
-@pytest.mark.asyncio
 async def test_execute_propagates_context_to_dependents():
     """El nivel N+1 recibe en request.context["upstream_outputs"] los results del nivel N."""
     request = _make_request()
@@ -364,7 +358,6 @@ async def test_execute_propagates_context_to_dependents():
     assert upstream["t1"]["product_id"] == "abc123"
 
 
-@pytest.mark.asyncio
 async def test_execute_uses_isolated_session_per_task():
     """Cada task obtiene una sesión nueva via async_session_factory."""
     request = _make_request()
@@ -406,7 +399,6 @@ async def test_execute_uses_isolated_session_per_task():
     assert sessions_handed_out[0] is not sessions_handed_out[1]
 
 
-@pytest.mark.asyncio
 async def test_execute_agent_exception_in_parallel_marks_failed():
     """Exception en una task paralela queda capturada como AgentResponse(status=error)."""
     request = _make_request()
@@ -435,7 +427,6 @@ async def test_execute_agent_exception_in_parallel_marks_failed():
     assert responses[1].status == "success"
 
 
-@pytest.mark.asyncio
 async def test_execute_invalid_dag_returns_errors_without_running_agents():
     """Plan con ciclo → execute devuelve error por cada task y no llama a ningún agente."""
     request = _make_request()
@@ -457,7 +448,6 @@ async def test_execute_invalid_dag_returns_errors_without_running_agents():
     assert all(r.result.get("skipped_reason") == "invalid_plan_dag" for r in responses)
 
 
-@pytest.mark.asyncio
 async def test_execute_unknown_agent_returns_error_response():
     """get_sub_agent retornando None → AgentResponse error, no rompe el plan."""
     request = _make_request()

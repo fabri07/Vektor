@@ -288,7 +288,6 @@ def test_llm_not_called_for_score():
 # ── Tests de process() ────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_process_no_db_returns_error():
     """Sin DB → status=error."""
     from app.application.agents.health.agent import AgentHealth
@@ -298,7 +297,6 @@ async def test_process_no_db_returns_error():
     assert result.status == "error"
 
 
-@pytest.mark.asyncio
 async def test_process_low_confidence_returns_clarification():
     """BusinessState con confidence=LOW → requires_clarification, sin LLM."""
     from app.application.agents.health.agent import AgentHealth
@@ -327,7 +325,6 @@ async def test_process_low_confidence_returns_clarification():
     mock_client.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_el_gate_mira_el_benchmark_que_realmente_puntua():
     """Datos impecables medidos contra una vara sin fundamento → empty state.
 
@@ -378,7 +375,6 @@ async def test_el_gate_mira_el_benchmark_que_realmente_puntua():
     mock_client.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_el_benchmark_del_gate_es_el_mismo_que_recibe_el_calculo():
     """Una sola resolución del benchmark, compartida por el gate y el score.
 
@@ -429,7 +425,6 @@ async def test_el_benchmark_del_gate_es_el_mismo_que_recibe_el_calculo():
     assert mock_compute.call_args.kwargs["benchmark"] is override_del_tenant
 
 
-@pytest.mark.asyncio
 async def test_sin_override_el_calculo_recibe_el_benchmark_del_rubro():
     """Contrapeso: sin override, la vara resuelta es la del JSON del rubro.
 
@@ -472,7 +467,6 @@ async def test_sin_override_el_calculo_recibe_el_benchmark_del_rubro():
     assert mock_compute.call_args.kwargs["benchmark"] == esperado
 
 
-@pytest.mark.asyncio
 async def test_process_high_confidence_returns_success():
     """BusinessState con confidence=HIGH → status=success con narrativa LLM."""
     from app.application.agents.health.agent import AgentHealth
@@ -509,7 +503,6 @@ async def test_process_high_confidence_returns_success():
     mock_client.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_process_emits_event_on_success():
     """EventBus.emit se llama cuando el score se calcula con éxito."""
     from app.application.agents.health.agent import AgentHealth

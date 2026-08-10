@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from httpx import AsyncClient
 
 from app.application.services.column_mapping_service import (
@@ -24,7 +23,6 @@ from app.application.services.column_mapping_service import (
 )
 
 
-@pytest.mark.asyncio
 class TestFieldCatalog:
     async def test_devuelve_todas_las_entidades_con_requeridos_y_campos(
         self, client: AsyncClient, auth_headers: dict[str, Any]

@@ -69,7 +69,6 @@ def _patch_httpx(mock_resp: MagicMock):
     return patch("httpx.AsyncClient", return_value=mock_client)
 
 
-@pytest.mark.asyncio
 async def test_successful_tool_call():
     """Tool call exitoso retorna McpToolResult con is_error=False."""
     gateway = _make_gateway()
@@ -85,7 +84,6 @@ async def test_successful_tool_call():
     assert result.tool_name == "google.gmail.list_messages"
 
 
-@pytest.mark.asyncio
 async def test_auth_error_raises_mcp_auth_error():
     """Respuesta con errorCode=mcp_auth_required → McpToolAuthError."""
     gateway = _make_gateway()
@@ -101,7 +99,6 @@ async def test_auth_error_raises_mcp_auth_error():
         )
 
 
-@pytest.mark.asyncio
 async def test_allowlist_blocks_unauthorized_tool():
     """GoogleMcpService bloquea herramientas fuera de la allowlist del agente."""
     s = _make_settings()
@@ -121,7 +118,6 @@ async def test_allowlist_blocks_unauthorized_tool():
     mock_gateway.call_tool.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_disabled_flag_skips_gateway():
     """Con ENABLE_GOOGLE_MCP_TOOLS=False, GoogleMcpService no llama al gateway HTTP.
 
@@ -159,7 +155,6 @@ def _patch_httpx_raises(exc: Exception):
     return patch("httpx.AsyncClient", return_value=mock_client)
 
 
-@pytest.mark.asyncio
 async def test_call_tool_retries_three_times_on_timeout():
     """call_tool reintenta exactamente 3 veces en timeout y luego levanta McpToolTimeoutError."""
     gateway = _make_gateway()
@@ -185,7 +180,6 @@ async def test_call_tool_retries_three_times_on_timeout():
     assert attempt_count == 3, f"Esperaba 3 intentos, obtuvo {attempt_count}"
 
 
-@pytest.mark.asyncio
 async def test_call_tool_does_not_retry_auth_error():
     """Auth errors no se reintentan — asyncio.sleep no debe llamarse."""
     gateway = _make_gateway()
@@ -200,7 +194,6 @@ async def test_call_tool_does_not_retry_auth_error():
     mock_sleep.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_list_tools_raises_unavailable_on_connect_error():
     """list_tools levanta McpToolUnavailableError cuando el server no responde."""
     gateway = _make_gateway()
@@ -217,7 +210,6 @@ async def test_list_tools_raises_unavailable_on_connect_error():
         await gateway.list_tools()
 
 
-@pytest.mark.asyncio
 async def test_list_tools_raises_auth_error_on_401():
     """list_tools levanta McpToolAuthError cuando el server devuelve 401."""
     gateway = _make_gateway()
@@ -234,7 +226,6 @@ async def test_list_tools_raises_auth_error_on_401():
         await gateway.list_tools()
 
 
-@pytest.mark.asyncio
 async def test_get_auth_status_retries_before_unavailable():
     """get_auth_status reintenta errores de red antes de devolver mcp_unavailable."""
     gateway = _make_gateway()

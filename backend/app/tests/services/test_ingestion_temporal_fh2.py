@@ -32,7 +32,6 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -148,7 +147,6 @@ async def _contar(db: AsyncSession, modelo: Any) -> int:
     return int((await db.execute(select(func.count()).select_from(modelo))).scalar_one())
 
 
-@pytest.mark.asyncio
 class TestIdempotenciaDelImport:
     """Red de seguridad: reordenar el recorrido no puede duplicar filas.
 
@@ -225,7 +223,6 @@ class TestIdempotenciaDelImport:
         assert esperadas <= persistidas
 
 
-@pytest.mark.asyncio
 class TestIdentidadDesdeCompra:
     """Una compra declara un producto; la venta lo encuentra, venga como venga."""
 
@@ -264,7 +261,6 @@ class TestIdentidadDesdeCompra:
         assert venta.product_id == producto.id
 
 
-@pytest.mark.asyncio
 class TestInvarianteTemporal:
     """Vincular no es afirmar que había stock."""
 
@@ -299,7 +295,6 @@ class TestInvarianteTemporal:
         assert not counts.get("historial_insuficiente")
 
 
-@pytest.mark.asyncio
 class TestProyeccionDeInventario:
     """F-H3.b: el import calcula el impacto sobre el stock, y no lo aplica.
 
@@ -384,7 +379,6 @@ class TestProyeccionDeInventario:
         assert counts["impacto_inventario"] == []
 
 
-@pytest.mark.asyncio
 class TestProyeccionEnArchivoDeUnaSolaHoja:
     """El hueco que casi se escapa: la proyección vivía sólo en el multi-hoja.
 

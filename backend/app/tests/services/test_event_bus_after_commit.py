@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import unittest.mock
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 
 
-@pytest.mark.asyncio
 async def test_emit_after_commit_does_not_emit_immediately(
     db_session: AsyncSession,
 ) -> None:
@@ -27,7 +25,6 @@ async def test_emit_after_commit_does_not_emit_immediately(
         mock_emit.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_emit_after_commit_fires_on_commit(db_session: AsyncSession) -> None:
     """Al commitear la sesión, el listener dispara EventBus.emit exactamente una vez."""
     with unittest.mock.patch(

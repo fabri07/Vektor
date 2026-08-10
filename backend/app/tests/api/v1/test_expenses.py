@@ -16,7 +16,6 @@ _EXPENSE_PAYLOAD = {
 }
 
 
-@pytest.mark.asyncio
 class TestExpensesCRUD:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -117,7 +116,6 @@ class TestExpensesCRUD:
         assert len(resp.json()) >= 1
 
 
-@pytest.mark.asyncio
 class TestExpensesSummary:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -142,7 +140,6 @@ class TestExpensesSummary:
         assert float(data["total_ars"]) == pytest.approx(20000.0)
 
 
-@pytest.mark.asyncio
 class TestExpensesDateRange:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -150,7 +147,6 @@ class TestExpensesDateRange:
 
 
 
-@pytest.mark.asyncio
 class TestExpensesTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -201,7 +197,6 @@ class TestExpensesTenantIsolation:
         assert resp.status_code == 404
 
 
-@pytest.mark.asyncio
 class TestExpensesRBAC:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -227,7 +222,6 @@ class TestExpensesRBAC:
         assert resp.status_code == 403
 
 
-@pytest.mark.asyncio
 class TestExpenseCategoryLabel:
     """FASE 3.1: categoría 'Otro' (OTHER) con label personalizado editable."""
 

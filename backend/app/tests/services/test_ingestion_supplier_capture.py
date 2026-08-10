@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +19,6 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 
 
-@pytest.mark.asyncio
 async def test_expense_captures_and_creates_supplier(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -44,7 +42,6 @@ async def test_expense_captures_and_creates_supplier(
     assert expense.supplier_name == "Distribuidora Norte"
 
 
-@pytest.mark.asyncio
 async def test_same_supplier_different_casing_dedups_to_one(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -68,7 +65,6 @@ async def test_same_supplier_different_casing_dedups_to_one(
     assert all(e.supplier_id == suppliers[0].id for e in expenses)
 
 
-@pytest.mark.asyncio
 async def test_existing_supplier_linked_without_creating(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -97,7 +93,6 @@ async def test_existing_supplier_linked_without_creating(
     assert expense.supplier_id == existing.id
 
 
-@pytest.mark.asyncio
 async def test_empty_supplier_cell_leaves_null(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -120,7 +115,6 @@ async def test_empty_supplier_cell_leaves_null(
     assert expense.supplier_name is None
 
 
-@pytest.mark.asyncio
 async def test_deactivated_supplier_not_reused(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -169,7 +163,6 @@ async def test_deactivated_supplier_not_reused(
 # ``custom_fields["marca"]``.
 
 
-@pytest.mark.asyncio
 async def test_catalog_tienda_creates_no_supplier_stores_brand(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -199,7 +192,6 @@ async def test_catalog_tienda_creates_no_supplier_stores_brand(
     assert "proveedor" not in (by_name["Vela aromática"].custom_fields or {})
 
 
-@pytest.mark.asyncio
 async def test_catalog_tienda_never_creates_supplier_even_repeated(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -223,7 +215,6 @@ async def test_catalog_tienda_never_creates_supplier_even_repeated(
     assert len(products) == 2
 
 
-@pytest.mark.asyncio
 async def test_catalog_without_tienda_creates_no_supplier(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

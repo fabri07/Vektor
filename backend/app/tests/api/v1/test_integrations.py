@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +22,6 @@ from app.persistence.models.user import User
 # ── Tests: GET /integrations/google/status ────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_status_returns_disconnected_when_no_record(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -37,7 +35,6 @@ async def test_status_returns_disconnected_when_no_record(
     assert data["scopes_granted"] == []
 
 
-@pytest.mark.asyncio
 async def test_status_returns_real_state_from_db(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -64,7 +61,6 @@ async def test_status_returns_real_state_from_db(
     assert "gmail.readonly" in data["scopes_granted"]
 
 
-@pytest.mark.asyncio
 async def test_status_sheets_and_docs_are_independent_cards(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -98,7 +94,6 @@ async def test_status_sheets_and_docs_are_independent_cards(
     assert apps["docs"]["needs_reconnect"] is True
 
 
-@pytest.mark.asyncio
 async def test_status_promotes_mcp_callback_error_to_connection_error(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -154,7 +149,6 @@ async def test_status_promotes_mcp_callback_error_to_connection_error(
     assert conn.state_token is None
 
 
-@pytest.mark.asyncio
 async def test_status_expires_stale_connecting_connection(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -201,7 +195,6 @@ async def test_status_expires_stale_connecting_connection(
 # ── Tests: POST /integrations/google/connect/start ────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_connect_start_unavailable_when_mcp_disabled(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -222,7 +215,6 @@ async def test_connect_start_unavailable_when_mcp_disabled(
     assert resp.status_code == 503
 
 
-@pytest.mark.asyncio
 async def test_connect_start_creates_connection_record(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -283,7 +275,6 @@ async def test_connect_start_creates_connection_record(
 # ── Tests: POST /integrations/google/disconnect ───────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_disconnect_updates_status_to_disconnected(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -323,7 +314,6 @@ async def test_disconnect_updates_status_to_disconnected(
     assert conn.scopes_granted == []
 
 
-@pytest.mark.asyncio
 async def test_disconnect_without_existing_record(
     client: AsyncClient,
     auth_headers: dict[str, Any],

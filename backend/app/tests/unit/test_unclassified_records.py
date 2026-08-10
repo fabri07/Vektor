@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +34,6 @@ def _general_summary() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_general_sin_confirmacion_va_a_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -56,7 +54,6 @@ async def test_general_sin_confirmacion_va_a_otros(
     assert records[0].row_data["detalle"] in {"Pago Juan", "Cobro Ana"}
 
 
-@pytest.mark.asyncio
 async def test_general_confirmado_como_ventas_importa_normal(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -74,7 +71,6 @@ async def test_general_confirmado_como_ventas_importa_normal(
     assert len(sales) == 2
 
 
-@pytest.mark.asyncio
 async def test_multisheet_hoja_no_clasificada_va_a_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -120,7 +116,6 @@ async def test_multisheet_hoja_no_clasificada_va_a_otros(
     assert record.source == "chat"
 
 
-@pytest.mark.asyncio
 async def test_multisheet_hoja_reasignada_se_importa(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

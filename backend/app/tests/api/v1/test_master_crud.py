@@ -80,7 +80,6 @@ _MAESTROS = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("mock_score_trigger")
 @pytest.mark.parametrize("m", _MAESTROS)
 class TestMasterCRUD:

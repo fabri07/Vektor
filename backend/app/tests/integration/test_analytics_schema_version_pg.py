@@ -140,7 +140,6 @@ async def _sembrar(
             )
 
 
-@pytest.mark.asyncio
 async def test_los_percentiles_ignoran_las_filas_viejas(
     engine_pg: AsyncEngine, rubro_scratch: str
 ) -> None:
@@ -175,7 +174,6 @@ async def test_los_percentiles_ignoran_las_filas_viejas(
     assert observado.p75 <= max(_MARGENES_REALES)
 
 
-@pytest.mark.asyncio
 async def test_solo_filas_viejas_no_produce_distribucion(
     engine_pg: AsyncEngine, rubro_scratch: str
 ) -> None:
@@ -201,7 +199,6 @@ async def test_solo_filas_viejas_no_produce_distribucion(
     assert rubro_scratch not in verticales
 
 
-@pytest.mark.asyncio
 async def test_las_filas_preexistentes_quedan_marcadas_como_viejas(
     engine_pg: AsyncEngine, rubro_scratch: str
 ) -> None:

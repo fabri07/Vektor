@@ -87,7 +87,6 @@ async def _make_product(db: AsyncSession, tenant_id: uuid.UUID, stock_units: int
     return product
 
 
-@pytest.mark.asyncio
 class TestMaintenanceGuard423:
     """``ensure_tenant_not_under_maintenance`` — UX fast-fail, no la exclusión real."""
 
@@ -227,7 +226,6 @@ class TestMaintenanceGuard423:
         assert resp.status_code == 403
 
 
-@pytest.mark.asyncio
 class TestMaintenanceGuard423SalesPurchasesExpenses:
     """F3 review final: gap del guard 423 en venta/compra/gasto manual."""
 
@@ -362,7 +360,6 @@ class TestMaintenanceGuard423SalesPurchasesExpenses:
         assert resp.status_code == 201
 
 
-@pytest.mark.asyncio
 class TestMaintenanceGuardWiring:
     """``acquire_write_lock_shared`` se invoca en los write boundaries."""
 

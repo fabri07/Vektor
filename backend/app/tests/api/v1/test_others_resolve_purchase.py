@@ -85,7 +85,6 @@ def defer_events(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(EventBus, "emit_after_commit", lambda *_args, **_kwargs: None)
 
 
-@pytest.mark.asyncio
 async def test_resolve_purchase_creates_expense_movement_and_sentinel_once(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -146,7 +145,6 @@ async def test_resolve_purchase_creates_expense_movement_and_sentinel_once(
     ) == 1
 
 
-@pytest.mark.asyncio
 async def test_resolve_purchase_rejects_target_outside_candidates_without_effects(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -168,7 +166,6 @@ async def test_resolve_purchase_rejects_target_outside_candidates_without_effect
     assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
-@pytest.mark.asyncio
 async def test_resolve_purchase_rejects_candidate_from_other_tenant(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -197,7 +194,6 @@ async def test_resolve_purchase_rejects_candidate_from_other_tenant(
     assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
-@pytest.mark.asyncio
 async def test_resolve_purchase_rejects_zero_quantity(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -230,7 +226,6 @@ async def test_resolve_purchase_rejects_zero_quantity(
     assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
-@pytest.mark.asyncio
 async def test_resolve_purchase_honors_explicit_unit_cost_divergent_from_total(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -261,7 +256,6 @@ async def test_resolve_purchase_honors_explicit_unit_cost_divergent_from_total(
     assert target.stock_units == 7
 
 
-@pytest.mark.asyncio
 async def test_resolve_purchase_rejects_inactive_candidate(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -284,7 +278,6 @@ async def test_resolve_purchase_rejects_inactive_candidate(
     assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("suggested_entity", "candidates"), [("product", True), ("expense", False)]
 )

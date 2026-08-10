@@ -15,7 +15,6 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +40,6 @@ async def _make_product(
     return product
 
 
-@pytest.mark.asyncio
 async def test_void_reversal_is_exact_and_not_clamped(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -70,7 +68,6 @@ async def test_void_reversal_is_exact_and_not_clamped(
     assert mov.voided_at is not None
 
 
-@pytest.mark.asyncio
 async def test_void_without_balance_row_does_not_double_subtract(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -95,7 +92,6 @@ async def test_void_without_balance_row_does_not_double_subtract(
     assert balance.current_qty == 0  # sembrado desde 10, restado UNA sola vez
 
 
-@pytest.mark.asyncio
 async def test_void_is_idempotent(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -114,7 +110,6 @@ async def test_void_is_idempotent(
     assert product.stock_units == 0
 
 
-@pytest.mark.asyncio
 async def test_unvoid_restores_effect(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

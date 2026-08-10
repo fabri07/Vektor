@@ -28,7 +28,6 @@ def _key() -> str:
     return str(uuid.uuid4())
 
 
-@pytest.mark.asyncio
 class TestSuppliersCRUD:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -69,7 +68,6 @@ class TestSuppliersCRUD:
         assert resp.json()["is_provisional"] is True
 
 
-@pytest.mark.asyncio
 class TestBrandCollapsedSuppliers:
     """Marcas confundidas con proveedores y colapsadas: no se listan ni se reactivan.
 
@@ -186,7 +184,6 @@ class TestBrandCollapsedSuppliers:
 # test_idempotency.py — suppliers incluido. Acá solo lo específico de la entidad.
 
 
-@pytest.mark.asyncio
 class TestExpenseSupplierLink:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -242,7 +239,6 @@ class TestExpenseSupplierLink:
 # ── FASE 2: campos fiscales (persona/empresa, CUIL, forma de pago) ────────────
 
 
-@pytest.mark.asyncio
 class TestSupplierFiscalFields:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -348,7 +344,6 @@ _RECEIPT_PAYLOAD = {
 }
 
 
-@pytest.mark.asyncio
 class TestSupplierReceipts:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -492,7 +487,6 @@ class TestSupplierReceipts:
 # ── FASE 3: tabla de productos comprados a un proveedor ───────────────────────
 
 
-@pytest.mark.asyncio
 class TestSupplierProducts:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

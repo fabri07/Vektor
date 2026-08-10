@@ -87,7 +87,6 @@ async def _count(
     return len(resp.json())
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("mock_score_trigger")
 class TestIdempotency:
     @pytest.mark.parametrize(("endpoint", "payload", "summary_url"), _ENDPOINTS)

@@ -15,7 +15,6 @@ _PRODUCT_PAYLOAD = {
 }
 
 
-@pytest.mark.asyncio
 class TestProductsCRUD:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -224,7 +223,6 @@ class TestProductsCRUD:
         assert resp.json()["margin_pct"] is None
 
 
-@pytest.mark.asyncio
 class TestProductsTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -247,7 +245,6 @@ class TestProductsTenantIsolation:
         assert resp.status_code == 404
 
 
-@pytest.mark.asyncio
 class TestProductIdentityBarcodeExpiry:
     """F2-T2b: `barcode`/`expiry_date` en schemas + 409 por identidad duplicada."""
 

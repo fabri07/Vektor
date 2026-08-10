@@ -70,7 +70,6 @@ def test_resolve_schedule_keeps_explicit_zero():
     assert resolve_schedule(bp) == ([0], 0, 23)
 
 
-@pytest.mark.asyncio
 async def test_get_serves_defaults(db_session: AsyncSession):
     tid, _ = await _seed_profile(db_session)
     svc = WorkScheduleService(db_session)
@@ -81,7 +80,6 @@ async def test_get_serves_defaults(db_session: AsyncSession):
     assert resp.is_default is True
 
 
-@pytest.mark.asyncio
 async def test_update_persists_and_audits(db_session: AsyncSession):
     tid, uid = await _seed_profile(db_session)
     svc = WorkScheduleService(db_session)

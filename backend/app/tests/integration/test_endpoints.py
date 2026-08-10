@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, patch
 
 import anthropic
 import httpx
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -207,7 +206,6 @@ def _mock_anthropic_overload_error() -> anthropic.InternalServerError:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_medium_action_creates_pending_not_persists(
     auth_client, session: AsyncSession
 ) -> None:
@@ -260,7 +258,6 @@ async def test_medium_action_creates_pending_not_persists(
     assert sales.scalar_one_or_none() is None
 
 
-@pytest.mark.asyncio
 async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSession) -> None:
     """Un REGISTER_EXPENSE marcado para auto-ejecución debe persistirse sin pending visible."""
     ac, headers, tenant, user, _ = auth_client
@@ -326,7 +323,6 @@ async def test_expense_can_auto_execute_from_chat(auth_client, session: AsyncSes
     assert saved.category == "RENT"
 
 
-@pytest.mark.asyncio
 async def test_auto_execute_failure_returns_error_status(
     auth_client, session: AsyncSession
 ) -> None:
@@ -374,7 +370,6 @@ async def test_auto_execute_failure_returns_error_status(
     assert data["result"]["auto_executed"] is False
 
 
-@pytest.mark.asyncio
 async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSession) -> None:
     """Confirmar una pending_action → status=APPROVED, executed_at seteado."""
     ac, headers, tenant, user, _ = auth_client
@@ -406,7 +401,6 @@ async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSe
     assert action.executed_at is not None
 
 
-@pytest.mark.asyncio
 async def test_confirm_same_id_twice_fails(auth_client, session: AsyncSession) -> None:
     """Intentar confirmar la misma pending_action dos veces → 404 en el segundo intento."""
     ac, headers, tenant, user, _ = auth_client
@@ -430,7 +424,6 @@ async def test_confirm_same_id_twice_fails(auth_client, session: AsyncSession) -
     assert resp2.status_code == 404
 
 
-@pytest.mark.asyncio
 async def test_confirm_expired_fails(auth_client, session: AsyncSession) -> None:
     """Confirmar una pending_action vencida → 410 Gone."""
     ac, headers, tenant, user, _ = auth_client
@@ -453,7 +446,6 @@ async def test_confirm_expired_fails(auth_client, session: AsyncSession) -> None
     assert "venció" in resp.json()["detail"]
 
 
-@pytest.mark.asyncio
 async def test_confirm_external_action_requires_reconnect_on_mcp_auth_error(
     auth_client, session: AsyncSession
 ) -> None:
@@ -494,7 +486,6 @@ async def test_confirm_external_action_requires_reconnect_on_mcp_auth_error(
     assert action.failure_code == "not_connected"
 
 
-@pytest.mark.asyncio
 async def test_rate_limit_429(auth_client):
     """51 requests al chat → el 51° retorna 429."""
     ac, headers, tenant, user, fake_redis = auth_client
@@ -513,7 +504,6 @@ async def test_rate_limit_429(auth_client):
     assert "50 mensajes" in resp.json()["detail"]
 
 
-@pytest.mark.asyncio
 async def test_chat_error_response_does_not_increment_rate_limit(auth_client):
     """Errores controlados del orquestador no consumen cuota diaria."""
     ac, headers, tenant, user, fake_redis = auth_client
@@ -542,7 +532,6 @@ async def test_chat_error_response_does_not_increment_rate_limit(auth_client):
     assert await fake_redis.get(rate_key) is None
 
 
-@pytest.mark.asyncio
 async def test_chat_overloaded_provider_returns_safe_503(auth_client):
     """Un 529 de Anthropic debe degradar a 503 sin filtrar el error crudo."""
     ac, headers, tenant, user, _ = auth_client
@@ -566,7 +555,6 @@ async def test_chat_overloaded_provider_returns_safe_503(auth_client):
     assert "Overloaded" not in resp.text
 
 
-@pytest.mark.asyncio
 async def test_chat_stream_overloaded_provider_returns_safe_sse_error(auth_client):
     """El stream debe emitir un error seguro y finalizar cuando Anthropic devuelve 529."""
     ac, headers, tenant, user, _ = auth_client
@@ -593,7 +581,6 @@ async def test_chat_stream_overloaded_provider_returns_safe_sse_error(auth_clien
     assert "Overloaded" not in resp.text
 
 
-@pytest.mark.asyncio
 async def test_cross_tenant_pending_action_invisible(auth_client, session: AsyncSession) -> None:
     """Tenant B no puede confirmar ni cancelar una pending_action de Tenant A."""
     ac_a, headers_a, tenant_a, user_a, _ = auth_client
@@ -648,7 +635,6 @@ def _mock_clarification_response(request_id: str) -> AgentResponse:
     )
 
 
-@pytest.mark.asyncio
 async def test_wf02_requires_clarification_no_pending(auth_client, session: AsyncSession) -> None:
     """WF-02: requires_clarification no crea PendingAction en DB."""
     ac, headers, tenant, user, _ = auth_client
@@ -698,7 +684,6 @@ async def test_wf02_requires_clarification_no_pending(auth_client, session: Asyn
     assert result.scalar_one_or_none() is None
 
 
-@pytest.mark.asyncio
 async def test_cancel_succeeds(auth_client, session: AsyncSession) -> None:
     """Cancelar una pending_action → status=REJECTED."""
     ac, headers, tenant, user, _ = auth_client
@@ -749,7 +734,6 @@ def _make_group_action(
     )
 
 
-@pytest.mark.asyncio
 async def test_confirm_group_success_executes_all_in_order(
     auth_client, session: AsyncSession
 ) -> None:
@@ -805,7 +789,6 @@ async def test_confirm_group_success_executes_all_in_order(
     assert a2.group_execution_status == "SUCCEEDED"
 
 
-@pytest.mark.asyncio
 async def test_confirm_group_aborts_chain_after_first_failure(
     auth_client, session: AsyncSession
 ) -> None:
@@ -861,7 +844,6 @@ async def test_confirm_group_aborts_chain_after_first_failure(
     assert a2.group_execution_status == "PARTIAL_FAILED"
 
 
-@pytest.mark.asyncio
 async def test_cancel_group_rejects_all(auth_client, session: AsyncSession) -> None:
     """Cancelar grupo → todas las PAs PENDING quedan REJECTED."""
     ac, headers, tenant, user, _ = auth_client
@@ -895,7 +877,6 @@ async def test_cancel_group_rejects_all(auth_client, session: AsyncSession) -> N
     assert a2.status == "REJECTED"
 
 
-@pytest.mark.asyncio
 async def test_confirm_group_not_found_404(auth_client):
     """Grupo inexistente → 404."""
     ac, headers, _, _, _ = auth_client

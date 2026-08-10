@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -106,7 +105,6 @@ async def _detalle_unico(db_session: AsyncSession, stage: str) -> dict[str, Any]
     return detail
 
 
-@pytest.mark.asyncio
 class TestTrazaDelConfirm:
     async def test_requerido_en_campo_personalizado_deja_traza(
         self,

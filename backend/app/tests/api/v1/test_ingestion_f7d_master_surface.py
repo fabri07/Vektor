@@ -117,7 +117,6 @@ def _mixed_column_mappings() -> list[dict[str, Any]]:
     ]
 
 
-@pytest.mark.asyncio
 class TestConfirmMasterWarningsAndCounts:
     async def test_confirm_reporta_needs_review_invalido_no_resuelto_pero_no_anonimo(
         self,
@@ -329,7 +328,6 @@ class TestConfirmMasterWarningsAndCounts:
         assert event.rows_out == 3 + 1
 
 
-@pytest.mark.asyncio
 class TestMasterPreviewEndpoint:
     async def test_preview_expone_master_previews_con_pii_minimizada(
         self,

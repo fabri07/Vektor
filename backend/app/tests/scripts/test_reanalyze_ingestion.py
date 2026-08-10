@@ -310,7 +310,6 @@ async def _repair_run_count(session: AsyncSession) -> int:
 # ── selección de candidatos ─────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_select_candidate_files_filters_by_version_window(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -333,7 +332,6 @@ async def test_select_candidate_files_filters_by_version_window(
     assert file.id in {f.id for f in files}
 
 
-@pytest.mark.asyncio
 async def test_select_candidate_files_skip_scanned(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -383,7 +381,6 @@ async def test_select_candidate_files_skip_scanned(
 # ── dry-run puro: cero escrituras ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_dry_run_writes_nothing(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,7 +425,6 @@ async def test_dry_run_writes_nothing(
 # ── --record-scan: bookkeeping sí, negocio no ──────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_record_scan_persists_bookkeeping_only(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -458,7 +454,6 @@ async def test_record_scan_persists_bookkeeping_only(
     assert await _repair_run_count(db_session) == before_runs
 
 
-@pytest.mark.asyncio
 async def test_record_scan_eligible_not_applied_does_not_stamp_latest_preview(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -512,7 +507,6 @@ async def test_record_scan_eligible_not_applied_does_not_stamp_latest_preview(
 # ── --apply: solo REAPPLIED sin ediciones humanas ──────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_apply_reapplied_without_edits_applies_and_audits(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -549,7 +543,6 @@ async def test_apply_reapplied_without_edits_applies_and_audits(
     assert audit_row.triggered_by == mod.TRIGGERED_BY
 
 
-@pytest.mark.asyncio
 async def test_apply_forced_unverified_never_auto_applies(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -579,7 +572,6 @@ async def test_apply_forced_unverified_never_auto_applies(
     assert file.reread_summary["outcome"] == "FORCED_UNVERIFIED"
 
 
-@pytest.mark.asyncio
 async def test_apply_ambiguous_never_auto_applies(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -603,7 +595,6 @@ async def test_apply_ambiguous_never_auto_applies(
     assert await _audit_count(db_session, mod.DECISION_TYPE_AUTO_APPLY) == 0
 
 
-@pytest.mark.asyncio
 async def test_apply_with_user_edits_never_auto_applies(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -630,7 +621,6 @@ async def test_apply_with_user_edits_never_auto_applies(
 # ── atomicidad apply + auditoría (fix round post-review, hallazgo 1) ──────────
 
 
-@pytest.mark.asyncio
 async def test_apply_and_audit_are_atomic_rollback_on_audit_failure(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -684,7 +674,6 @@ async def test_apply_and_audit_are_atomic_rollback_on_audit_failure(
 # ── idempotencia ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_running_twice_does_not_duplicate_audit_or_runs(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -731,7 +720,6 @@ async def test_running_twice_does_not_duplicate_audit_or_runs(
 # ── aislamiento de errores por archivo (fix round post-review, hallazgo 1) ────
 
 
-@pytest.mark.asyncio
 async def test_run_scan_isolates_per_file_errors(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -791,7 +779,6 @@ async def test_run_scan_isolates_per_file_errors(
     await db_session.refresh(file_ok)
 
 
-@pytest.mark.asyncio
 async def test_run_scan_error_bucket_never_gets_bookkeeping(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -837,7 +824,6 @@ async def test_run_scan_error_bucket_never_gets_bookkeeping(
 # siguientes cubren exactamente eso.
 
 
-@pytest.mark.asyncio
 async def test_run_scan_isolates_per_file_errors_after_real_query(
     mod: ModuleType, db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -907,7 +893,6 @@ async def test_run_scan_isolates_per_file_errors_after_real_query(
     assert ok_entry.outcome == "FORCED_UNVERIFIED"
 
 
-@pytest.mark.asyncio
 async def test_run_scan_survives_without_expire_on_commit_false(
     mod: ModuleType,
     isolated_db_engine: AsyncEngine,
@@ -1016,7 +1001,6 @@ def _raise_reached_db(*args: Any, **kwargs: Any) -> Any:
     raise _ReachedDBConnectionError
 
 
-@pytest.mark.asyncio
 async def test_main_rejects_to_version_mismatch(
     mod: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1044,7 +1028,6 @@ async def test_main_rejects_to_version_mismatch(
     assert exc_info.value.code != 0
 
 
-@pytest.mark.asyncio
 async def test_main_rejects_from_version_not_less_than_to_version(
     mod: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1070,7 +1053,6 @@ async def test_main_rejects_from_version_not_less_than_to_version(
     assert exc_info.value.code != 0
 
 
-@pytest.mark.asyncio
 async def test_main_valid_version_arguments_pass_validation(
     mod: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1090,7 +1072,6 @@ async def test_main_valid_version_arguments_pass_validation(
         await mod.main()
 
 
-@pytest.mark.asyncio
 async def test_main_rejects_tenant_and_all_active_together(
     mod: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1110,7 +1091,6 @@ async def test_main_rejects_tenant_and_all_active_together(
     assert exc_info.value.code != 0
 
 
-@pytest.mark.asyncio
 async def test_main_rejects_neither_tenant_nor_all_active(
     mod: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

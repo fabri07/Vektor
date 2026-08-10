@@ -78,7 +78,6 @@ async def _make_active_product(
     return product
 
 
-@pytest.mark.asyncio
 class TestReclassifyAsProductLinkExisting:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -275,7 +274,6 @@ class TestReclassifyAsProductLinkExisting:
         assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
-@pytest.mark.asyncio
 class TestReclassifyAsProductCreateNewDuplicate409:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -306,7 +304,6 @@ class TestReclassifyAsProductCreateNewDuplicate409:
         assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
-@pytest.mark.asyncio
 class TestOthersExposesMatchCandidates:
     """F2-T2b (Finding 5): GET /others expone ``match_candidates`` para que el
     frontend ofrezca vincular a un producto existente en vez de crear duplicado."""

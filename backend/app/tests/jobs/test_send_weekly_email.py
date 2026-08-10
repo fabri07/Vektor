@@ -11,7 +11,6 @@ import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -158,7 +157,6 @@ async def momentum(session: AsyncSession, tenant: Tenant) -> MomentumProfile:
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestEmailContent:
     async def test_email_content_includes_score_and_risk(
         self,
@@ -343,7 +341,6 @@ class TestEmailContent:
         assert "+$ 150" in plain
 
 
-@pytest.mark.asyncio
 class TestSchedulerConfiguredCorrectly:
     async def test_scheduler_has_weekly_email_task(self) -> None:
         schedule = celery_app.conf.beat_schedule

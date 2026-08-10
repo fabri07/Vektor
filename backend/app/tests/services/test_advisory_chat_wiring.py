@@ -112,7 +112,6 @@ def _enter_common_patches(stack: ExitStack, ceo_intent: str, domain: str | None)
     stack.enter_context(patch(f"{ORCHESTRATOR}.AgentMemoryService"))
 
 
-@pytest.mark.asyncio
 async def test_missing_domain_asks_clarification_never_defaults(mock_db, mock_redis) -> None:
     """El crux: sin domain, NUNCA se despacha con default silencioso a 'ventas'."""
     request = _make_request("dame una idea")
@@ -137,7 +136,6 @@ async def test_missing_domain_asks_clarification_never_defaults(mock_db, mock_re
     assert await_args.kwargs["fallback_reason"] == "baja_confianza"
 
 
-@pytest.mark.asyncio
 async def test_unrecognized_domain_asks_clarification(mock_db, mock_redis) -> None:
     """Domain que no está en DOMAIN_TO_AGENT (typo/alucinación del CEO) → mismo gate."""
     request = _make_request("dame una idea para mejorar")
@@ -153,7 +151,6 @@ async def test_unrecognized_domain_asks_clarification(mock_db, mock_redis) -> No
     assert response.status == "requires_clarification"
 
 
-@pytest.mark.asyncio
 async def test_valid_domain_dispatches_to_agent(mock_db, mock_redis) -> None:
     """Domain reconocido → despacha normalmente (no interviene el gate) y el
     consejo del agente llega intacto en la respuesta final."""
@@ -199,7 +196,6 @@ async def test_valid_domain_dispatches_to_agent(mock_db, mock_redis) -> None:
 # ── Handler income: branch de consejo vs regresión de consulta normal ────────
 
 
-@pytest.mark.asyncio
 async def test_income_handler_routes_advisory_intent_to_handle_advice() -> None:
     from app.application.agents.income.agent import AgentIncome
     from app.application.agents.shared.schemas import AgentTask
@@ -245,7 +241,6 @@ async def test_income_handler_routes_advisory_intent_to_handle_advice() -> None:
     assert response.result["advisory"] is True
 
 
-@pytest.mark.asyncio
 async def test_income_handler_regular_query_does_not_use_advisory() -> None:
     """Sin el marcador _intent='consejo', el camino de consulta normal sigue
     intacto (regresión) — no debe llamar a handle_advice."""
