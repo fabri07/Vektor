@@ -140,13 +140,6 @@ class TestExpensesSummary:
         assert float(data["total_ars"]) == pytest.approx(20000.0)
 
 
-class TestExpensesDateRange:
-    @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger):
-        pass
-
-
-
 class TestExpensesTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
