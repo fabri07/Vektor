@@ -21,6 +21,13 @@ from app.persistence.models.business import BusinessProfile, BusinessSnapshot
 
 
 @pytest.fixture(autouse=True)
+def _sin_broker(mock_score_trigger) -> None:
+    """Sin broker en tests, el recálculo de score que dispara el onboarding paga
+    ~5s de reintentos de kombu por llamada (fail-safe: el error se traga igual).
+    Mismo patrón que `test_reread_file.py`."""
+
+
+@pytest.fixture(autouse=True)
 def _registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prende `ENABLE_OPEN_REGISTRATION` para todo este módulo.
 
