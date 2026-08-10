@@ -265,9 +265,15 @@ class TestLosDosFletesNoSonElMismoCargo:
     async def test_los_dos_fletes_conviven_sin_mezclarse(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """Semánticas opuestas en la misma hoja: el del comprobante se cobra una
-        vez y queda como gasto de logística; el de línea se capitaliza en el costo.
-        Fusionarlos repartiría algo que ya venía repartido."""
+        """Semánticas opuestas en la misma hoja: el del comprobante viene repetido
+        y se cobra UNA vez; el de línea es el pedazo de cada artículo y se suma.
+        Fusionarlos repartiría algo que ya venía repartido.
+
+        Desde F-H6.e los DOS dejan un gasto —el de línea también, que antes se
+        capitalizaba sin que la plata saliera de ningún lado— y por eso acá hay
+        dos cargos y no uno. Lo que sigue siendo cierto, y es lo que este test
+        cuida, es que no se mezclan: cada uno con su importe y su ancla.
+        """
         await _importar(
             db_session,
             sample_tenant,
@@ -275,13 +281,12 @@ class TestLosDosFletesNoSonElMismoCargo:
             costos={"line_shipping": "al_costo"},
         )
         assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
-        fletes = [
-            g
+        fletes = sorted(
+            Decimal(str(g.amount))
             for g in await _gastos(db_session, sample_tenant)
             if (g.category or "").upper() == "LOGISTICS"
-        ]
-        assert len(fletes) == 1
-        assert Decimal(str(fletes[0].amount)) == Decimal("500")
+        )
+        assert fletes == [Decimal("300"), Decimal("500")]
 
 
 class TestUnValorInvalidoNoEscribeNada:
@@ -428,6 +433,97 @@ async def _costos_por_producto(
 def _linea_de(articulo: str, total: str, **over: Any) -> dict[str, Any]:
     """Una línea de UNA unidad, para que el costo unitario sea el total."""
     return _fila(articulo=articulo, cantidad="1", precio_unitario=total, total=total, **over)
+
+
+class TestElFleteDeLineaSaleDeLaCaja:
+    """F-H6.e — el flete asignado a la línea nunca generaba un gasto.
+
+    Con `al_costo` subía `unit_cost_ars` y el dinero no salía de ningún lado: un
+    asiento que no cierra, con el activo inflado contra nada. Con `gasto_aparte`
+    —el default— era un no-op puro, aunque el nombre del modo prometiera un
+    gasto. Los dos targets de envío ahora tienen contrapartida.
+    """
+
+    async def test_al_costo_capitaliza_y_ademas_registra_la_salida(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(flete_linea="300")],
+            costos={"line_shipping": "al_costo"},
+        )
+
+        # Sigue entrando al costo: 12000 + 300 sobre 10 unidades.
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
+        # …y ahora también sale de la caja.
+        logistica = [
+            g for g in await _gastos(db_session, sample_tenant) if g.category == "LOGISTICS"
+        ]
+        assert len(logistica) == 1
+        assert Decimal(str(logistica[0].amount)) == Decimal("300.00")
+        # Marcado, para que los agregados de resultado no lo cuenten dos veces:
+        # ese importe ya está adentro del valor del stock.
+        assert (logistica[0].custom_fields or {}).get("attributed_to_inventory") is True
+
+    async def test_gasto_aparte_registra_el_gasto_y_no_toca_el_costo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El default. Antes no hacía ninguna de las dos cosas."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(flete_linea="300")],
+            costos={"line_shipping": "gasto_aparte"},
+        )
+
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1200.00")
+        logistica = [
+            g for g in await _gastos(db_session, sample_tenant) if g.category == "LOGISTICS"
+        ]
+        assert len(logistica) == 1
+        assert Decimal(str(logistica[0].amount)) == Decimal("300.00")
+        # No se capitalizó: el agregado de resultado SÍ tiene que verlo.
+        assert not (logistica[0].custom_fields or {}).get("attributed_to_inventory")
+
+    async def test_el_flete_de_linea_se_suma_entre_las_lineas_del_comprobante(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Es la diferencia con el envío del comprobante, y la razón de que sean
+        dos targets: aquél viene repetido y se colapsa; éste es el pedazo de cada
+        artículo y se suma. 200 + 150 son 350, no 200."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [
+                _linea_de("Vela aromatica", "100", flete_linea="200"),
+                _linea_de("Taza ceramica", "100", flete_linea="150"),
+            ],
+        )
+
+        logistica = [
+            g for g in await _gastos(db_session, sample_tenant) if g.category == "LOGISTICS"
+        ]
+        assert len(logistica) == 1
+        assert Decimal(str(logistica[0].amount)) == Decimal("350.00")
+
+    async def test_los_dos_fletes_conviven_sin_taparse(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Cada uno con su ancla de idempotencia: son cargos distintos del mismo
+        comprobante y uno no puede colapsar al otro."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(envio="500", flete_linea="300")],
+        )
+
+        logistica = sorted(
+            Decimal(str(g.amount))
+            for g in await _gastos(db_session, sample_tenant)
+            if g.category == "LOGISTICS"
+        )
+        assert logistica == [Decimal("300.00"), Decimal("500.00")]
 
 
 class TestElEnvioDelComprobanteSeReparteEntreSusLineas:

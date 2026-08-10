@@ -72,7 +72,13 @@ from app.domain.line_amount import (
     resolve_line_amount,
 )
 from app.domain.product_categories import normalize_product_category
-from app.domain.purchase_cost import CostLine, LineCost, build_line_costs
+from app.domain.purchase_cost import (
+    ATRIBUIDO_A_INVENTARIO_FIELD,
+    LINEA_AL_COSTO,
+    CostLine,
+    LineCost,
+    build_line_costs,
+)
 from app.domain.purchase_cost_decision import (
     AJUSTE_ILEGIBLE,
     PurchaseCostDecision,
@@ -86,7 +92,12 @@ from app.domain.purchase_group import (
     PurchaseGroupPlan,
     build_purchase_groups,
 )
-from app.domain.purchase_shipping import ShippingLine, plan_shipping_charges
+from app.domain.purchase_shipping import (
+    ShippingCharge,
+    ShippingLine,
+    plan_line_shipping,
+    plan_shipping_charges,
+)
 from app.domain.text_norm import (
     normalize_barcode,
     normalize_brand,
@@ -5055,58 +5066,55 @@ async def _insert_multisheet_data(
         hecho de negocio no quede clasificado de dos formas según por dónde entró.
         """
         _envio_col = cols.get("shipping_cost")
-        if not _envio_col:
+        _flete_linea_col = cols.get("shipping_cost_line")
+        if not _envio_col and not _flete_linea_col:
             return
         _comp_col = cols.get("invoice_number")
         _prov_col = cols.get("supplier_name")
 
-        lineas: list[ShippingLine] = []
-        for _idx, _row in enumerate(rows):
-            _monto = _parse_amount(_row.get(_envio_col))
-            if _monto is None:
-                continue
-            lineas.append(
-                ShippingLine(
-                    row_index=_idx,
-                    # Se normalizan acá porque la clave de agrupación tiene que ser
-                    # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
-                    # el mismo comprobante.
-                    supplier=(_clean_str(_row.get(_prov_col), 199) or "").strip().lower()
-                    if _prov_col
-                    else "",
-                    invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
-                    if _comp_col
-                    else "",
-                    amount=_monto,
+        def _leer_envios(col: str) -> list[ShippingLine]:
+            leidas: list[ShippingLine] = []
+            for _idx, _row in enumerate(rows):
+                _monto = _parse_amount(_row.get(col))
+                if _monto is None:
+                    continue
+                leidas.append(
+                    ShippingLine(
+                        row_index=_idx,
+                        # Se normalizan acá porque la clave de agrupación tiene que ser
+                        # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
+                        # el mismo comprobante.
+                        supplier=(_clean_str(_row.get(_prov_col), 199) or "")
+                        .strip()
+                        .lower()
+                        if _prov_col
+                        else "",
+                        invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
+                        if _comp_col
+                        else "",
+                        amount=_monto,
+                    )
                 )
-            )
-        if not lineas:
-            return
+            return leidas
 
-        # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
-        # cobra lo que no tiene comprobante — no hay default, a propósito.
-        plan = plan_shipping_charges(
-            lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
-        )
-        if plan.sin_identidad:
-            counts["envios_sin_comprobante"] = counts.get("envios_sin_comprobante", 0) + len(
-                plan.sin_identidad
-            )
-        if plan.cifras_distintas:
-            counts["envios_cifras_distintas"] = counts.get(
-                "envios_cifras_distintas", 0
-            ) + len(plan.cifras_distintas)
-
-        for _cargo in plan.charges:
+        async def _emitir_cargo(
+            _cargo: ShippingCharge,
+            *,
+            namespace: str,
+            descripcion: str,
+            atribuido_a_inventario: bool,
+        ) -> bool:
+            """Crea el gasto de logística de UN cargo. Devuelve si lo creó."""
             # Idempotencia con namespace propio: la clave es el CARGO (comprobante
             # + cifra), no la fila. Re-confirmar el archivo no puede volver a
             # cobrar el mismo flete, y usar el ancla de la fila lo ataría a una
-            # línea arbitraria del grupo.
+            # línea arbitraria del grupo. El namespace separa los dos fletes: son
+            # cargos distintos y uno no puede tapar al otro.
             _anchor = (
                 _import_row_anchor(
                     tenant_id,
                     uploaded_file_id,
-                    f"envio:{ctx_id or ''}:{_cargo.invoice}"
+                    f"{namespace}:{ctx_id or ''}:{_cargo.invoice}"
                     + (f":fila{_cargo.row_indexes[0]}" if not _cargo.invoice else ""),
                     int(_cargo.amount * 100),
                 )
@@ -5116,7 +5124,7 @@ async def _insert_multisheet_data(
             if _anchor is not None and await _import_row_seen(
                 session, tenant_id, _anchor, seen_fp
             ):
-                continue
+                return False
 
             _fila = rows[_cargo.row_indexes[0]]
             _raw_fecha = _val(
@@ -5127,7 +5135,7 @@ async def _insert_multisheet_data(
                 # Sin fecha no se inventa "hoy" (invariante 2d). El envío queda sin
                 # cobrar y se cuenta: el resto de la hoja entra igual.
                 counts["envios_sin_fecha"] = counts.get("envios_sin_fecha", 0) + 1
-                continue
+                return False
 
             _sup_id: uuid.UUID | None = None
             _sup_nombre = _clean_str(_fila.get(_prov_col), 199) if _prov_col else None
@@ -5147,11 +5155,7 @@ async def _insert_multisheet_data(
                     category="LOGISTICS",
                     expense_type="OPEX",
                     transaction_date=_fecha,
-                    description=(
-                        f"Envío — comprobante {_cargo.invoice}"
-                        if _cargo.invoice
-                        else "Envío (sin comprobante en el archivo)"
-                    )[:500],
+                    description=descripcion[:500],
                     is_recurring=False,
                     payment_method="transfer",
                     provenance="REAL",
@@ -5159,15 +5163,83 @@ async def _insert_multisheet_data(
                     supplier_name=_sup_nombre,
                     product_id=None,
                     source_upload_id=uploaded_file_id,
+                    # El flete que se capitalizó en el costo del stock sigue siendo
+                    # una salida de caja y se registra igual, pero los agregados de
+                    # RESULTADO no pueden contarlo otra vez: ya está adentro del
+                    # valor del inventario. La marca es el hecho consumado, no la
+                    # intención — se pone sólo si el costo efectivamente lo comió.
+                    custom_fields=(
+                        {ATRIBUIDO_A_INVENTARIO_FIELD: True}
+                        if atribuido_a_inventario
+                        else None
+                    ),
                 )
             )
-            counts["envios"] = counts.get("envios", 0) + 1
-            if _cargo.repetido_en > 1:
-                counts["envios_repetidos_colapsados"] = (
-                    counts.get("envios_repetidos_colapsados", 0) + 1
-                )
             if _anchor is not None:
                 await _register_import_row_fingerprint(session, tenant_id, _anchor, seen_fp)
+            return True
+
+        if _envio_col:
+            _lineas = _leer_envios(_envio_col)
+            if _lineas:
+                # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
+                # cobra lo que no tiene comprobante — no hay default, a propósito.
+                plan = plan_shipping_charges(
+                    _lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
+                )
+                if plan.sin_identidad:
+                    counts["envios_sin_comprobante"] = counts.get(
+                        "envios_sin_comprobante", 0
+                    ) + len(plan.sin_identidad)
+                if plan.cifras_distintas:
+                    counts["envios_cifras_distintas"] = counts.get(
+                        "envios_cifras_distintas", 0
+                    ) + len(plan.cifras_distintas)
+                for _cargo in plan.charges:
+                    if not await _emitir_cargo(
+                        _cargo,
+                        namespace="envio",
+                        descripcion=(
+                            f"Envío — comprobante {_cargo.invoice}"
+                            if _cargo.invoice
+                            else "Envío (sin comprobante en el archivo)"
+                        ),
+                        # El envío del comprobante que SÍ se repartió también queda
+                        # capitalizado y hay que marcarlo: lo cablea el commit del
+                        # doble conteo, que es donde entra además el lector.
+                        atribuido_a_inventario=False,
+                    ):
+                        continue
+                    counts["envios"] = counts.get("envios", 0) + 1
+                    if _cargo.repetido_en > 1:
+                        counts["envios_repetidos_colapsados"] = (
+                            counts.get("envios_repetidos_colapsados", 0) + 1
+                        )
+
+        if _flete_linea_col:
+            # F-H6.e: el flete que el archivo ya asignó a cada línea NUNCA generaba
+            # un gasto, en ninguno de sus dos modos. Con `al_costo` subía el valor
+            # del stock y el dinero no salía de ningún lado —un asiento que no
+            # cierra—, y con `gasto_aparte` (el default) era un no-op puro pese a
+            # que el nombre del modo prometía un gasto.
+            _lineas_propias = _leer_envios(_flete_linea_col)
+            if _lineas_propias:
+                _dec = (purchase_cost_decisions or {}).get(
+                    ctx_id or ""
+                ) or PurchaseCostDecision(context_id=ctx_id or "")
+                _al_costo = _dec.line_shipping == LINEA_AL_COSTO
+                for _cargo in plan_line_shipping(_lineas_propias).charges:
+                    if await _emitir_cargo(
+                        _cargo,
+                        namespace="envio_linea",
+                        descripcion=(
+                            f"Envío de las líneas — comprobante {_cargo.invoice}"
+                            if _cargo.invoice
+                            else "Envío de las líneas (sin comprobante en el archivo)"
+                        ),
+                        atribuido_a_inventario=_al_costo,
+                    ):
+                        counts["envios_de_linea"] = counts.get("envios_de_linea", 0) + 1
 
     async def _add_expense(
         row: dict[str, Any],

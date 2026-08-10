@@ -73,6 +73,14 @@ IMPUESTOS_FIELD = "_vektor_impuestos"
 ENVIO_ASIGNADO_FIELD = "_vektor_envio_asignado"
 COSTO_UNITARIO_FINAL_FIELD = "_vektor_costo_unitario_final"
 
+#: Marca en ``custom_fields`` del GASTO de flete cuyo importe ya entró al costo del
+#: stock. No lleva el prefijo ``_vektor_`` porque no es traza de una fila importada
+#: sino un hecho que los agregados tienen que leer: la plata salió de la caja (y el
+#: gasto se registra igual, si no la reversa del archivo no tendría qué revertir),
+#: pero descontarla del RESULTADO además de tenerla capitalizada en el inventario
+#: la contaría dos veces. Los agregados de caja NO lo filtran, a propósito.
+ATRIBUIDO_A_INVENTARIO_FIELD = "attributed_to_inventory"
+
 #: Por qué una cifra compartida no se pudo repartir aunque el usuario lo pidió.
 MOTIVO_SIN_BASE = "sin_base_para_repartir"
 

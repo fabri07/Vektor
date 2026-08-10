@@ -173,19 +173,19 @@ class TestElDefaultSeguroNoPuedeSerMudo:
         assert "discount" in aviso[_CTX]
         assert "taxes" in aviso[_CTX]
 
-    def test_el_flete_de_linea_sin_capitalizar_tambien(self) -> None:
-        aviso = hojas_que_necesitan_aviso([], {_CTX: _MAPEO_COMPLETO})
-        assert "shipping_cost_line" in aviso[_CTX]
+    def test_el_flete_de_linea_ya_no_entra_en_este_aviso(self) -> None:
+        """F-H6.e le dio consumidor en los DOS modos: con `al_costo` entra al
+        costo del producto y con `gasto_aparte` se registra como gasto de
+        logística. Deja de ser un no-op, igual que `shipping_cost` (abajo)."""
+        solo_linea = {**_MAPEO_PELADO, "flete_linea": "shipping_cost_line"}
+        assert hojas_que_necesitan_aviso([], {_CTX: solo_linea}) == {}
 
     def test_declarar_la_base_apaga_el_aviso_de_los_ajustes(self) -> None:
         aviso = hojas_que_necesitan_aviso(
             [PurchaseCostDecision(context_id=_CTX, base=BASE_APLICAR)],
             {_CTX: _MAPEO_COMPLETO},
         )
-        assert "discount" not in aviso.get(_CTX, [])
-        assert "taxes" not in aviso.get(_CTX, [])
-        # …pero no el del flete de línea, que es otro eje.
-        assert "shipping_cost_line" in aviso[_CTX]
+        assert aviso == {}
 
     def test_una_hoja_sin_columnas_de_costo_no_avisa_nada(self) -> None:
         assert hojas_que_necesitan_aviso([], {_CTX: _MAPEO_PELADO}) == {}
