@@ -151,12 +151,36 @@ async def _importar(
     return counts
 
 
-async def _costo_del_movimiento(db: AsyncSession, tenant: Tenant) -> Decimal:
-    """Lo que quedó registrado como costo unitario de ESTA compra.
+async def _costo_del_producto(db: AsyncSession, tenant: Tenant) -> Decimal:
+    """El costo de REFERENCIA con el que quedó el producto: lo que costó de verdad.
 
-    Es el observable correcto: `Product.unit_cost_ars` es el costo de referencia
-    vigente del producto y lo pisa la última compra (V5), mientras que el
-    movimiento dice qué costó esta operación en particular.
+    Desde F-H6.d los dos observables se separaron y cada test tiene que decir cuál
+    mira. Acá vive el costo final —monto ajustado por descuento e impuestos, más
+    el flete que se haya capitalizado o repartido—, que es lo que el negocio pagó
+    por la mercadería y contra lo que se calcula el margen.
+    """
+    prods = (
+        (
+            await db.execute(
+                select(Product).where(Product.tenant_id == tenant.tenant_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(prods) == 1, f"se esperaba 1 producto, hay {len(prods)}"
+    assert prods[0].unit_cost_ars is not None
+    return Decimal(str(prods[0].unit_cost_ars))
+
+
+async def _costo_del_movimiento(db: AsyncSession, tenant: Tenant) -> Decimal:
+    """Lo que FACTURÓ el proveedor en esta compra.
+
+    Antes de F-H6.d este helper devolvía el costo final, porque los callers
+    pisaban `unit_cost` con él antes de llegar al movimiento — y con eso se perdía
+    el precio de la factura, que no vive en ningún otro lado. Ahora el movimiento
+    guarda el renglón del comprobante y el producto guarda el costo real; el
+    fallback sólo aparece cuando el archivo no declara uno de los dos.
     """
     movs = (
         (
@@ -198,7 +222,9 @@ class TestElDescuentoYLosImpuestosLleganAlCosto:
             [_fila(descuento="2000")],
             costos={"base": "monto_sin_ajustes"},
         )
-        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1000.00")
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1000.00")
+        # …y el movimiento sigue diciendo lo que facturó el proveedor.
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1200.00")
 
     async def test_un_impuesto_declarado_sube_el_costo_final(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -210,7 +236,8 @@ class TestElDescuentoYLosImpuestosLleganAlCosto:
             [_fila(iva="500")],
             costos={"base": "monto_sin_ajustes"},
         )
-        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1250.00")
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1250.00")
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1200.00")
 
     async def test_sin_declarar_la_base_el_monto_se_toma_final_pero_se_avisa(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -238,7 +265,8 @@ class TestLosDosFletesNoSonElMismoCargo:
             [_fila(flete_linea="300")],
             costos={"line_shipping": "al_costo"},
         )
-        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1230.00")
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1200.00")
 
     async def test_el_flete_del_comprobante_se_cobra_una_sola_vez(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -280,7 +308,8 @@ class TestLosDosFletesNoSonElMismoCargo:
             [_fila(envio="500", flete_linea="300")],
             costos={"line_shipping": "al_costo"},
         )
-        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1230.00")
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1200.00")
         fletes = sorted(
             Decimal(str(g.amount))
             for g in await _gastos(db_session, sample_tenant)
@@ -365,6 +394,11 @@ class TestElCaminoPlanoDaElMismoCosto:
             },
         )
         await db_session.flush()
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1230.00")
+        # Acá los dos valen lo mismo, y es correcto: el camino plano lee el costo
+        # facturado de `unit_cost_ars`/heurística, no de `unit_price`, así que
+        # este archivo no declara un precio de factura. Sin ese dato el movimiento
+        # cae al costo final, que es el único número que hay sobre la compra.
         assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
 
 
@@ -455,7 +489,8 @@ class TestElFleteDeLineaSaleDeLaCaja:
         )
 
         # Sigue entrando al costo: 12000 + 300 sobre 10 unidades.
-        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1230.00")
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1230.00")
+        assert await _costo_del_movimiento(db_session, sample_tenant) == Decimal("1200.00")
         # …y ahora también sale de la caja.
         logistica = [
             g for g in await _gastos(db_session, sample_tenant) if g.category == "LOGISTICS"

@@ -2045,6 +2045,7 @@ async def _apply_purchase_to_stock(
     product_cache: dict[uuid.UUID, Any] | None = None,
     source_type: str = SOURCE_PURCHASE_IMPORT,
     source_row_ref: str | None = None,
+    costo_final: Decimal | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
 
@@ -2079,13 +2080,31 @@ async def _apply_purchase_to_stock(
     elif product.tenant_id != tenant_id:
         return
     product.stock_units += qty
-    if unit_cost is not None:
-        product.unit_cost_ars = unit_cost
+    # F-H6.d: son DOS preguntas distintas y hasta acá se respondían con el mismo
+    # número. `unit_cost` es lo que FACTURÓ el proveedor y queda en el movimiento
+    # (abajo); `costo_final` es lo que la mercadería costó de verdad una vez
+    # aplicados descuento, impuestos y el flete que se haya repartido, y es lo
+    # que corresponde como costo de referencia del producto. Pisar uno con otro
+    # perdía el precio facturado de esa compra, que no vive en ningún otro lado.
+    #
+    # Cada lado prefiere su propia verdad y cae al otro si el archivo no la trae:
+    # una planilla que sólo declara el total y la cantidad no dice cuál fue el
+    # precio facturado, y dejar el movimiento en NULL perdería el único número
+    # que hay sobre esa compra.
+    _costo_de_referencia = costo_final if costo_final is not None else unit_cost
+    _costo_facturado = unit_cost if unit_cost is not None else costo_final
+    if _costo_de_referencia is not None:
+        product.unit_cost_ars = _costo_de_referencia
     # A2: identidad lógica estable de la fila de origen (idempotencia + reconciliación).
     _row_hash = compute_source_row_hash(
         product_key=product.name,
         qty=qty,
-        unit_cost=unit_cost,
+        # A propósito el costo de REFERENCIA y no el facturado: es el valor que
+        # esta huella viene usando desde que existe (los callers pisaban
+        # `unit_cost` con el final antes de llegar acá). Cambiarlo movería la
+        # identidad de filas ya importadas y los reconciliadores que la comparan
+        # dejarían de reconocerlas.
+        unit_cost=_costo_de_referencia,
         movement_date=getattr(expense, "transaction_date", None),
         supplier_key=(
             getattr(expense, "supplier_name", None)
@@ -2098,7 +2117,7 @@ async def _apply_purchase_to_stock(
         tenant_id,
         product.id,
         qty,
-        unit_cost,
+        _costo_facturado,
         "purchase",
         product.stock_units,
         balance_index=balance_index,
@@ -3820,13 +3839,15 @@ async def _insert_confirmed_data_impl(
                         if exp_cost_col and exp_cost_col != gasto_col
                         else None
                     )
-                    # F-H6.c: si la hoja declaró ajustes, el costo de ESTA línea ya
-                    # se calculó con ellos y manda sobre el precio crudo de la
-                    # columna. `unit_cost_final` es None cuando la fila no trae
+                    # F-H6.c/d: si la hoja declaró ajustes o se repartió un costo
+                    # compartido, el costo FINAL de la línea va al PRODUCTO, pero
+                    # NO pisa el precio facturado, que es lo que registra el
+                    # movimiento. `unit_cost_final` es None cuando la fila no trae
                     # cantidad: sin divisor no se inventa un costo unitario.
                     _costo_calculado = _costos_por_fila.get(row_index)
+                    _costo_final_fila: Decimal | None = None
                     if _costo_calculado is not None and _costo_calculado.unit_cost_final:
-                        exp_unit_cost = _costo_calculado.unit_cost_final
+                        _costo_final_fila = _costo_calculado.unit_cost_final
                     # Compra de mercadería = gasto COGS+caja Y alta/reposición de
                     # producto. Señal a nivel de fila: nombre de producto + cantidad>0
                     # (un libro de compras con esas columnas). Se CREA el producto
@@ -3847,7 +3868,13 @@ async def _insert_confirmed_data_impl(
                             sku=_exp_sku,
                             brand=None,
                             barcode=_exp_barcode,
-                            unit_cost=exp_unit_cost,
+                            # Un producto que nace de esta compra arranca con el
+                            # costo FINAL: es su costo de adquisición real.
+                            unit_cost=(
+                                _costo_final_fila
+                                if _costo_final_fila is not None
+                                else exp_unit_cost
+                            ),
                             indexes=_identity_indexes,
                             cache=products_by_identity_key,
                             product_cache=_product_cache,
@@ -3952,6 +3979,7 @@ async def _insert_confirmed_data_impl(
                             balance_index=_balance_index,
                             product_cache=_product_cache,
                             source_row_ref=_source_row_ref(_row_anchor),
+                            costo_final=_costo_final_fila,
                         )
                         # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
                         # stock (producto ligado + cantidad>0), marcarla para que el
@@ -5405,12 +5433,15 @@ async def _insert_multisheet_data(
                 if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
                 else None
             )
-        # F-H6.c: si la hoja declaró ajustes, el costo de ESTA línea ya se calculó
-        # con ellos y manda sobre el precio crudo de la columna — es lo que el
-        # negocio pagó de verdad. `unit_cost_final` es None cuando la fila no trae
-        # cantidad: sin divisor no se inventa un costo unitario.
+        # F-H6.c/d: si la hoja declaró ajustes o se repartió un costo compartido,
+        # el costo FINAL de la línea es lo que el negocio pagó de verdad. Va al
+        # PRODUCTO como costo de referencia, pero NO pisa `unit_cost`, que es lo
+        # que facturó el proveedor y es lo único que registra el movimiento.
+        # `unit_cost_final` es None cuando la fila no trae cantidad: sin divisor
+        # no se inventa un costo unitario.
+        _costo_final: Decimal | None = None
         if costo_calculado is not None and costo_calculado.unit_cost_final:
-            unit_cost = costo_calculado.unit_cost_final
+            _costo_final = costo_calculado.unit_cost_final
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
@@ -5429,7 +5460,9 @@ async def _insert_multisheet_data(
                 sku=_exp_sku,
                 brand=None,
                 barcode=_exp_barcode,
-                unit_cost=unit_cost,
+                # Un producto que nace de esta compra arranca con el costo FINAL:
+                # es su costo de adquisición real, no el renglón de la factura.
+                unit_cost=_costo_final if _costo_final is not None else unit_cost,
                 indexes=_identity_indexes,
                 cache=products_by_identity_key,
                 product_cache=product_cache,
@@ -5523,6 +5556,7 @@ async def _insert_multisheet_data(
             balance_index=_balance_index,
             product_cache=product_cache,
             source_row_ref=row_ref,
+            costo_final=_costo_final,
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
