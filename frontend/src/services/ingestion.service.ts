@@ -202,6 +202,64 @@ export interface ShippingDecision {
   action: ShippingAction;
 }
 
+/**
+ * F-H6.d — cómo queda repartido el envío de cada comprobante, **según el
+ * servidor**.
+ *
+ * Todos los montos llegan como string decimal y se muestran tal cual: el
+ * frontend NO recalcula el reparto. Si lo hiciera podría mostrar una división
+ * distinta de la que se va a persistir, y el usuario estaría aprobando una
+ * pantalla que no es lo que pasó — el mismo defecto que el catálogo de campos
+ * duplicado.
+ */
+export type PurchaseGroupBlockReason =
+  | "sin_identidad_de_comprobante"
+  | "cifras_distintas_de_envio"
+  | "sin_envio_compartido";
+
+export interface PurchaseGroupLine {
+  row_index: number;
+  producto: string | null;
+  subtotal: string;
+  envio_asignado: string;
+  costo_total: string;
+  /** `null` cuando la línea no trae cantidad: sin unidades no hay costo unitario. */
+  costo_unitario_final: string | null;
+}
+
+export interface PurchaseGroupItem {
+  comprobante: string | null;
+  proveedor: string | null;
+  subtotal: string;
+  envio_compartido: string;
+  repartido: string;
+  sin_repartir: string;
+  distribuible: boolean;
+  /** Código de `PurchaseGroupBlockReason`; la UI lo traduce a castellano llano. */
+  motivo_no_distribuible: string | null;
+  lineas: PurchaseGroupLine[];
+}
+
+export interface SheetPurchaseGroups {
+  context_id: string;
+  /** Nombre legible de la hoja, nunca el `context_id` crudo. */
+  label: string;
+  puede_distribuir: boolean;
+  motivo: string | null;
+  /**
+   * Total REAL de comprobantes. `grupos` puede venir ACOTADO: comparar contra
+   * esto antes de decir "estos son todos" — truncar sin avisar se lee como que
+   * lo mostrado es todo el archivo.
+   */
+  grupos_total: number;
+  grupos: PurchaseGroupItem[];
+  filas_sin_comprobante: number;
+}
+
+export interface PurchaseGroupsResponse {
+  sheets: SheetPurchaseGroups[];
+}
+
 export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
@@ -610,6 +668,40 @@ export const ingestionService = {
       { signal },
     );
     return res.data;
+  },
+
+  /**
+   * F-H6.d: cómo agruparía Véktor las líneas de compra por comprobante y cómo
+   * repartiría el envío compartido, con el mapeo y las decisiones borrador.
+   * Read-only.
+   *
+   * Las decisiones de costo van en el cuerpo porque el reparto DEPENDE de ellas:
+   * mostrar la división mientras el usuario tiene elegido "no distribuir" sería
+   * mostrarle algo que no va a pasar.
+   */
+  async fetchPurchaseGroups(
+    fileId: string,
+    body: {
+      columnMappings: ColumnMapping[];
+      contextEntity: Record<string, string>;
+      confirmedFields: Record<string, boolean>;
+      contextConfirmed: Record<string, boolean>;
+      purchaseCostDecisions: PurchaseCostDecision[];
+    },
+    signal?: AbortSignal,
+  ): Promise<SheetPurchaseGroups[]> {
+    const res = await api.post<PurchaseGroupsResponse>(
+      `/ingestion/files/${fileId}/purchase-groups`,
+      {
+        column_mappings: body.columnMappings,
+        context_entity: body.contextEntity,
+        confirmed_fields: body.confirmedFields,
+        context_confirmed: body.contextConfirmed,
+        purchase_cost_decisions: body.purchaseCostDecisions,
+      },
+      { signal },
+    );
+    return res.data.sheets;
   },
 
   // F8c: recalcula el riesgo contextual de columnas en vivo (p. ej. tras

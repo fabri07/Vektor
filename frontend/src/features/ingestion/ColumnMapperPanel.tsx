@@ -26,6 +26,8 @@ import {
   type PurchaseCostBase,
   type PurchaseCostDecision,
   type PurchaseLineShipping,
+  type PurchaseSharedShipping,
+  type SheetPurchaseGroups,
 } from "@/services/ingestion.service";
 import { Button } from "@/components/ui/Button";
 import { InventoryImpactPanel } from "./InventoryImpactPanel";
@@ -33,6 +35,7 @@ import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { InventoryEffectChoice } from "./InventoryEffectChoice";
 import { ShippingDecisionChoice } from "./ShippingDecisionChoice";
 import { PurchaseCostChoice } from "./PurchaseCostChoice";
+import { PurchaseGroupsPreview } from "./PurchaseGroupsPreview";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
@@ -476,6 +479,7 @@ function SheetMapperSection({
   onShippingChange,
   costoValue,
   onCostoChange,
+  grupos,
 }: {
   fileId: string;
   context: MappingContext;
@@ -504,11 +508,23 @@ function SheetMapperSection({
   // `null` = todavía no eligió → no se registran.
   shippingValue: ShippingAction | null;
   onShippingChange: (ctxId: string, value: ShippingAction | null) => void;
-  costoValue: { base: PurchaseCostBase; line: PurchaseLineShipping };
+  costoValue: {
+    base: PurchaseCostBase;
+    shared: PurchaseSharedShipping;
+    line: PurchaseLineShipping;
+  };
   onCostoChange: (
     ctxId: string,
-    patch: { base?: PurchaseCostBase; line?: PurchaseLineShipping },
+    patch: {
+      base?: PurchaseCostBase;
+      shared?: PurchaseSharedShipping;
+      line?: PurchaseLineShipping;
+    },
   ) => void;
+  // F-H6.d: cómo agrupa el servidor las líneas de ESTA hoja por comprobante y
+  // cómo repartiría el envío. `undefined` mientras la consulta está en vuelo o
+  // cuando la hoja no declara envío compartido.
+  grupos?: SheetPurchaseGroups;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -902,14 +918,36 @@ function SheetMapperSection({
       {included && (
         <PurchaseCostChoice
           base={costoValue.base}
+          sharedShipping={costoValue.shared}
           lineShipping={costoValue.line}
           onBaseChange={(v) => onCostoChange(context.context_id, { base: v })}
+          onSharedShippingChange={(v) =>
+            onCostoChange(context.context_id, { shared: v })
+          }
           onLineShippingChange={(v) => onCostoChange(context.context_id, { line: v })}
           mostrarAjustes={
             Object.values(mappings).includes("discount") ||
             Object.values(mappings).includes("taxes")
           }
+          // F-H6.d: mapear el envío es condición necesaria pero no suficiente —
+          // quien decide si un reparto es posible es el servidor. Ofrecerlo por
+          // el solo hecho de tener la columna dejaría al usuario eligiendo algo
+          // que el importador no va a hacer.
+          mostrarEnvioCompartido={
+            Object.values(mappings).includes("shipping_cost") &&
+            grupos?.puede_distribuir === true
+          }
           mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
+
+      {/* F-H6.d: el reparto es la parte del costo que no se puede auditar después
+          —el envío queda adentro del costo unitario—, así que se muestra antes
+          de confirmar, con los números que devolvió el servidor. */}
+      {included && grupos && (
+        <PurchaseGroupsPreview
+          hoja={grupos}
           className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
         />
       )}
@@ -986,7 +1024,14 @@ function MultiContextMapper({
   // se apartaron de un default — mandar los defaults sería ruido, y el backend ya
   // los aplica igual.
   const [costoByCtx, setCostoByCtx] = useState<
-    Record<string, { base: PurchaseCostBase; line: PurchaseLineShipping }>
+    Record<
+      string,
+      {
+        base: PurchaseCostBase;
+        shared: PurchaseSharedShipping;
+        line: PurchaseLineShipping;
+      }
+    >
   >({});
   const [shippingByCtx, setShippingByCtx] = useState<
     Record<string, ShippingAction | null>
@@ -1178,6 +1223,67 @@ function MultiContextMapper({
     [effectsByCtx, effectByCtx],
   );
 
+  /**
+   * F-H6.d: las decisiones de costo tal como las eligió el usuario, para PEDIR
+   * el reparto.
+   *
+   * Se manda el estado CRUDO y no el efectivo a propósito: el efectivo depende
+   * de `puede_distribuir`, que es justo lo que devuelve esta consulta. Derivarlo
+   * antes de preguntar cerraría el círculo sobre sí mismo. El confirm sí manda
+   * el efectivo — ahí ya se sabe qué puede hacer el importador.
+   */
+  const costoDraft = useMemo(
+    () =>
+      Object.entries(costoByCtx)
+        .filter(([ctxId]) => included[ctxId])
+        .map(([ctxId, d]) => ({
+          context_id: ctxId,
+          base: d.base,
+          shared_shipping: d.shared,
+          line_shipping: d.line,
+        })),
+    [costoByCtx, included],
+  );
+  const costoDraftKey = useMemo(() => JSON.stringify(costoDraft), [costoDraft]);
+  // Sin ninguna columna de envío compartido no hay reparto posible: se evita una
+  // consulta por archivo que no la necesita.
+  const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
+    (m) => m.target_field === "shipping_cost",
+  );
+  const { data: purchaseGroups = [] } = useQuery({
+    queryKey: ["purchase-groups", fileId, riskRecomputeKey, costoDraftKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchPurchaseGroups(
+        fileId,
+        { ...riskRecomputeInput, purchaseCostDecisions: costoDraft },
+        signal,
+      ),
+    enabled: hayEnvioCompartido,
+    // Mismo motivo que en `/inventory-effects`: la clave cambia con cada edición
+    // del mapeo, y sin conservar lo anterior el selector del tercer eje
+    // desaparecería en cada recálculo.
+    placeholderData: (prev) => prev,
+    retry: false,
+  });
+  const gruposByCtx = useMemo(
+    () => Object.fromEntries(purchaseGroups.map((h) => [h.context_id, h])),
+    [purchaseGroups],
+  );
+  /**
+   * Reparto EFECTIVO de una hoja: lo que eligió el usuario sólo si el servidor
+   * dice que esa hoja se puede repartir; si no, el default que no toca ningún
+   * costo. Mismo criterio que `efectoDe`: mandar un modo que el backend ya no
+   * ofrece sería mandar algo que no va a pasar.
+   */
+  const compartidoDe = useCallback(
+    (ctxId: string): PurchaseSharedShipping =>
+      costoByCtx[ctxId]?.shared === "por_subtotal" &&
+      gruposByCtx[ctxId]?.puede_distribuir
+        ? "por_subtotal"
+        : "no_distribuir",
+    [costoByCtx, gruposByCtx],
+  );
+
   const { registrar: registrarImpacto, vista: vistaImpacto } =
     useImpactoPostConfirm(onDone, fileId);
 
@@ -1224,11 +1330,17 @@ function MultiContextMapper({
       const costoPayload: PurchaseCostDecision[] = Object.entries(costoByCtx)
         .filter(
           ([ctxId, d]) =>
-            included[ctxId] && (d.base !== "monto_incluye" || d.line !== "gasto_aparte"),
+            included[ctxId] &&
+            (d.base !== "monto_incluye" ||
+              compartidoDe(ctxId) !== "no_distribuir" ||
+              d.line !== "gasto_aparte"),
         )
         .map(([ctxId, d]) => ({
           context_id: ctxId,
           base: d.base,
+          // Efectivo, no lo crudo: si el servidor dice que esta hoja no se puede
+          // repartir, declarar `por_subtotal` sería pedir algo imposible.
+          shared_shipping: compartidoDe(ctxId),
           line_shipping: d.line,
         }));
       const shippingPayload = Object.entries(shippingByCtx)
@@ -1348,14 +1460,21 @@ function MultiContextMapper({
             effectValue={efectoDe(ctx.context_id)}
             onEffectChange={handleEffectChange}
             shippingValue={shippingByCtx[ctx.context_id] ?? null}
-            costoValue={
-              costoByCtx[ctx.context_id] ?? { base: "monto_incluye", line: "gasto_aparte" }
-            }
+            grupos={gruposByCtx[ctx.context_id]}
+            costoValue={{
+              base: costoByCtx[ctx.context_id]?.base ?? "monto_incluye",
+              // El efectivo, no el crudo: el radio tiene que mostrar lo que
+              // realmente se va a mandar, no una elección que el servidor ya
+              // dijo que no puede honrar.
+              shared: compartidoDe(ctx.context_id),
+              line: costoByCtx[ctx.context_id]?.line ?? "gasto_aparte",
+            }}
             onCostoChange={(ctxId, patch) =>
               setCostoByCtx((prev) => ({
                 ...prev,
                 [ctxId]: {
                   base: patch.base ?? prev[ctxId]?.base ?? "monto_incluye",
+                  shared: patch.shared ?? prev[ctxId]?.shared ?? "no_distribuir",
                   line: patch.line ?? prev[ctxId]?.line ?? "gasto_aparte",
                 },
               }))
@@ -1569,8 +1688,46 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   // que no tiene contextos. Default en «no toca nada», igual que allá.
   const [costoTablaUnica, setCostoTablaUnica] = useState<{
     base: PurchaseCostBase;
+    shared: PurchaseSharedShipping;
     line: PurchaseLineShipping;
-  }>({ base: "monto_incluye", line: "gasto_aparte" });
+  }>({ base: "monto_incluye", shared: "no_distribuir", line: "gasto_aparte" });
+  // F-H6.d: el mismo archivo tiene que dar el mismo costo venga como tabla o
+  // como solapa, así que el reparto también se consulta acá. Se manda el estado
+  // crudo (ver `costoDraft` del camino multi-hoja).
+  const costoDraft = useMemo(
+    () => [
+      {
+        context_id: "",
+        base: costoTablaUnica.base,
+        shared_shipping: costoTablaUnica.shared,
+        line_shipping: costoTablaUnica.line,
+      },
+    ],
+    [costoTablaUnica],
+  );
+  const costoDraftKey = useMemo(() => JSON.stringify(costoDraft), [costoDraft]);
+  const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
+    (m) => m.target_field === "shipping_cost",
+  );
+  const { data: purchaseGroups = [] } = useQuery({
+    queryKey: ["purchase-groups", fileId, riskRecomputeKey, costoDraftKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchPurchaseGroups(
+        fileId,
+        { ...riskRecomputeInput, purchaseCostDecisions: costoDraft },
+        signal,
+      ),
+    enabled: hayEnvioCompartido,
+    placeholderData: (prev) => prev,
+    retry: false,
+  });
+  const hojaGrupos = purchaseGroups[0];
+  // Lo elegido sólo vale mientras el servidor diga que esta hoja se puede
+  // repartir; si no, el default que no toca ningún costo.
+  const compartidoActual: PurchaseSharedShipping =
+    costoTablaUnica.shared === "por_subtotal" && hojaGrupos?.puede_distribuir
+      ? "por_subtotal"
+      : "no_distribuir";
   // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
   // cantidad puede dejar a la hoja sin poder mover inventario.
   const efectoActual =
@@ -1658,11 +1815,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         // F-H6.c: sólo si se apartó de un default. `context_id: ""` es la tabla
         // única — el backend la indexa así, igual que el resto de las decisiones
         // por contexto en este camino.
-        costoTablaUnica.base !== "monto_incluye" || costoTablaUnica.line !== "gasto_aparte"
+        costoTablaUnica.base !== "monto_incluye" ||
+        compartidoActual !== "no_distribuir" ||
+        costoTablaUnica.line !== "gasto_aparte"
           ? [
               {
                 context_id: "",
                 base: costoTablaUnica.base,
+                shared_shipping: compartidoActual,
                 line_shipping: costoTablaUnica.line,
               },
             ]
@@ -2189,14 +2349,30 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       {!needsPurpose && (
         <PurchaseCostChoice
           base={costoTablaUnica.base}
+          sharedShipping={compartidoActual}
           lineShipping={costoTablaUnica.line}
           onBaseChange={(v) => setCostoTablaUnica((p) => ({ ...p, base: v }))}
+          onSharedShippingChange={(v) =>
+            setCostoTablaUnica((p) => ({ ...p, shared: v }))
+          }
           onLineShippingChange={(v) => setCostoTablaUnica((p) => ({ ...p, line: v }))}
           mostrarAjustes={
             Object.values(mappings).includes("discount") ||
             Object.values(mappings).includes("taxes")
           }
+          mostrarEnvioCompartido={
+            Object.values(mappings).includes("shipping_cost") &&
+            hojaGrupos?.puede_distribuir === true
+          }
           mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
+          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
+        />
+      )}
+
+      {/* F-H6.d: el reparto que devolvió el servidor, antes de confirmar. */}
+      {!needsPurpose && hojaGrupos && (
+        <PurchaseGroupsPreview
+          hoja={hojaGrupos}
           className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
         />
       )}

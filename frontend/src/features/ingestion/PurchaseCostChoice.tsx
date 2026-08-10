@@ -1,6 +1,10 @@
 "use client";
 
-import type { PurchaseCostBase, PurchaseLineShipping } from "@/services/ingestion.service";
+import type {
+  PurchaseCostBase,
+  PurchaseLineShipping,
+  PurchaseSharedShipping,
+} from "@/services/ingestion.service";
 
 /**
  * F-H6.c — cómo se calcula el costo de las líneas de esta hoja de compras.
@@ -15,11 +19,18 @@ import type { PurchaseCostBase, PurchaseLineShipping } from "@/services/ingestio
  * backend NO hace es callarse: si mapeaste un descuento y no declarás nada, el
  * confirm avisa que ese valor no movió el costo.
  *
- * Son dos ejes independientes y se muestran separados a propósito. El primero
- * dice si al monto hay que aplicarle los ajustes; el segundo, si el flete que ya
- * viene asignado a la línea se capitaliza en la mercadería o queda como gasto.
- * Fusionarlos obligaría a elegir las dos cosas juntas cuando son preguntas
- * distintas.
+ * Son TRES ejes independientes y se muestran separados a propósito. El primero
+ * dice si al monto hay que aplicarle los ajustes; el segundo, qué hacer con el
+ * envío que el comprobante cobra UNA vez y hay que repartir entre sus líneas; el
+ * tercero, si el flete que YA viene asignado a cada línea se capitaliza en la
+ * mercadería o queda como gasto. Fusionarlos obligaría a elegir varias cosas
+ * juntas cuando son preguntas distintas: un mismo remito puede traer un envío
+ * global para repartir y además un flete por línea, y son dos plata distintas.
+ *
+ * El eje del envío compartido aparece sólo cuando el SERVIDOR dice que esa hoja
+ * se puede repartir (`puede_distribuir`). No hay una regla propia acá: si la
+ * pantalla ofreciera repartir donde el importador no puede, el usuario elegiría
+ * algo que no va a pasar.
  */
 
 const BASES: Array<{ value: PurchaseCostBase; title: string; desc: string }> = [
@@ -32,6 +43,25 @@ const BASES: Array<{ value: PurchaseCostBase; title: string; desc: string }> = [
     value: "monto_sin_ajustes",
     title: "El monto es el bruto",
     desc: "Al monto de cada fila se le resta el descuento y se le suman los impuestos para saber qué costó.",
+  },
+];
+
+// El default es `no_distribuir` y no se toca: cambiarlo movería el costo de
+// todos los imports que ya se hicieron con el comportamiento anterior.
+const COMPARTIDOS: Array<{
+  value: PurchaseSharedShipping;
+  title: string;
+  desc: string;
+}> = [
+  {
+    value: "no_distribuir",
+    title: "Queda como gasto aparte",
+    desc: "El envío del comprobante se registra como gasto y no cambia el costo de ningún producto.",
+  },
+  {
+    value: "por_subtotal",
+    title: "Se reparte entre los productos del comprobante",
+    desc: "El envío se divide entre las líneas en proporción a lo que costó cada una, y pasa a formar parte del costo de esa mercadería.",
   },
 ];
 
@@ -98,24 +128,35 @@ function Eje<T extends string>({
 
 export function PurchaseCostChoice({
   base,
+  sharedShipping,
   lineShipping,
   onBaseChange,
+  onSharedShippingChange,
   onLineShippingChange,
   mostrarAjustes,
+  mostrarEnvioCompartido,
   mostrarFleteDeLinea,
   className,
 }: {
   base: PurchaseCostBase;
+  sharedShipping: PurchaseSharedShipping;
   lineShipping: PurchaseLineShipping;
   onBaseChange: (v: PurchaseCostBase) => void;
+  onSharedShippingChange: (v: PurchaseSharedShipping) => void;
   onLineShippingChange: (v: PurchaseLineShipping) => void;
   /** La hoja mapea descuento o impuestos. */
   mostrarAjustes: boolean;
+  /**
+   * La hoja mapea el envío del comprobante Y el servidor dice que se puede
+   * repartir. Lo decide el padre con la respuesta de `/purchase-groups`: acá no
+   * hay ninguna regla propia sobre cuándo un reparto es posible.
+   */
+  mostrarEnvioCompartido: boolean;
   /** La hoja mapea el envío ya asignado a cada línea. */
   mostrarFleteDeLinea: boolean;
   className?: string;
 }) {
-  if (!mostrarAjustes && !mostrarFleteDeLinea) return null;
+  if (!mostrarAjustes && !mostrarEnvioCompartido && !mostrarFleteDeLinea) return null;
   return (
     <div className={className}>
       <div className="flex flex-col gap-3">
@@ -126,6 +167,15 @@ export function PurchaseCostChoice({
             opciones={BASES}
             value={base}
             onChange={onBaseChange}
+          />
+        )}
+        {mostrarEnvioCompartido && (
+          <Eje
+            titulo="El envío que el comprobante cobra una sola vez, ¿se reparte entre sus productos?"
+            ayuda="Es una decisión, no un dato del archivo: el mismo remito puede tratarse como gasto de logística o como parte de lo que costó la mercadería."
+            opciones={COMPARTIDOS}
+            value={sharedShipping}
+            onChange={onSharedShippingChange}
           />
         )}
         {mostrarFleteDeLinea && (

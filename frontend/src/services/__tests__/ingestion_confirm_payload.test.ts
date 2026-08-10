@@ -127,6 +127,40 @@ describe("F-H6.c — la decisión de costo viaja por la red", () => {
     ]);
   });
 
+  test("el tercer eje —el envío compartido— también viaja en el cuerpo", async () => {
+    // F-H6.d: el eje existía en el backend y en el tipo del servicio, pero el
+    // panel lo descartaba al armar el payload. Que el tipo lo tenga no prueba
+    // nada sobre lo que sale por la red — es el mismo agujero de F-H3.e, y por
+    // eso se verifica el cuerpo del POST y no la firma.
+    await ingestionService.confirmFile(
+      "f1",
+      {},
+      [],
+      {},
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          context_id: "sheet:Compras",
+          base: "monto_incluye",
+          shared_shipping: "por_subtotal",
+          line_shipping: "gasto_aparte",
+        },
+      ],
+    );
+    expect(bodyDelConfirm().purchase_cost_decisions).toEqual([
+      {
+        context_id: "sheet:Compras",
+        base: "monto_incluye",
+        shared_shipping: "por_subtotal",
+        line_shipping: "gasto_aparte",
+      },
+    ]);
+  });
+
   test("y va como lista vacía cuando no declaró nada", async () => {
     await ingestionService.confirmFile("f1", {}, [], {}, {});
     // Vacío, no `null`: el backend distingue «sin decisiones» de «no mandó el

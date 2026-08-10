@@ -26,6 +26,7 @@ jest.mock("@/services/ingestion.service", () => ({
     cancelFile: jest.fn(),
     recomputeColumnRisk: jest.fn(),
     fetchInventoryEffects: jest.fn(),
+    fetchPurchaseGroups: jest.fn(),
   },
 }));
 
@@ -35,6 +36,7 @@ const mockGetFieldCatalog = ingestionService.getFieldCatalog as jest.Mock;
 const mockConfirmFile = ingestionService.confirmFile as jest.Mock;
 const mockRecomputeColumnRisk = ingestionService.recomputeColumnRisk as jest.Mock;
 const mockInventoryEffects = ingestionService.fetchInventoryEffects as jest.Mock;
+const mockPurchaseGroups = ingestionService.fetchPurchaseGroups as jest.Mock;
 
 /**
  * F-H3.e — lo que el backend ofrece para una hoja de ventas con producto y
@@ -83,6 +85,13 @@ const FIELD_CATALOG = {
       { value: "category", label: "Categoría", single_value: false },
       { value: "payment_method", label: "Método de pago", single_value: false },
       { value: "is_recurring", label: "Recurrente", single_value: false },
+      { value: "invoice_number", label: "Número de comprobante", single_value: true },
+      { value: "shipping_cost", label: "Envío / flete", single_value: true },
+      {
+        value: "shipping_cost_line",
+        label: "Envío ya asignado a esta línea",
+        single_value: true,
+      },
       { value: "supplier_name", label: "Proveedor", single_value: false },
       { value: "notes", label: "Notas", single_value: false },
       { value: "supplier_cuil", label: "Proveedor — CUIL", single_value: false },
@@ -159,6 +168,7 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     mockRecomputeColumnRisk.mockResolvedValue([]);
     // Sin hojas: los tests que no miran el inventario no renderizan el selector.
     mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
   });
 
   test("archivo ambiguo (general) muestra el selector de propósito", async () => {
@@ -742,6 +752,7 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
       },
     ]);
     mockInventoryEffects.mockResolvedValue(EFECTOS_VENTAS);
+    mockPurchaseGroups.mockResolvedValue([]);
     mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
 
     renderPanel();
@@ -808,6 +819,7 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
       },
     ]);
     mockInventoryEffects.mockResolvedValue(EFECTOS_VENTAS);
+    mockPurchaseGroups.mockResolvedValue([]);
     mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
 
     renderPanel();
@@ -989,6 +1001,7 @@ describe("ColumnMapperPanel — hojas sin clasificar", () => {
     mockRecomputeColumnRisk.mockResolvedValue([]);
     // Sin hojas: los tests que no miran el inventario no renderizan el selector.
     mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
   });
 
   test("no arranca en Ventas: pide elegir la sección", async () => {
@@ -1137,6 +1150,7 @@ describe("ColumnMapperPanel — corregir una hoja mal clasificada", () => {
     mockRecomputeColumnRisk.mockResolvedValue([]);
     // Sin hojas: los tests que no miran el inventario no renderizan el selector.
     mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
   });
 
   test("la sección es un desplegable, no una chapita de sólo lectura", async () => {
@@ -1206,6 +1220,7 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -1336,6 +1351,7 @@ describe("ColumnMapperPanel — F-H6.c: la decisión de costo llega al confirm",
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
     mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
@@ -1395,7 +1411,12 @@ describe("ColumnMapperPanel — F-H6.c: la decisión de costo llega al confirm",
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
     const decisiones = mockConfirmFile.mock.calls[0]?.[9];
     expect(decisiones).toEqual([
-      { context_id: "", base: "monto_sin_ajustes", line_shipping: "gasto_aparte" },
+      {
+        context_id: "",
+        base: "monto_sin_ajustes",
+        shared_shipping: "no_distribuir",
+        line_shipping: "gasto_aparte",
+      },
     ]);
   });
 
@@ -1419,6 +1440,7 @@ describe("ColumnMapperPanel — F-H6.c multi-hoja: sólo viaja lo que el usuario
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
     mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
@@ -1497,7 +1519,12 @@ describe("ColumnMapperPanel — F-H6.c multi-hoja: sólo viaja lo que el usuario
 
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
     expect(mockConfirmFile.mock.calls[0]?.[9]).toEqual([
-      { context_id: "hoja1", base: "monto_sin_ajustes", line_shipping: "gasto_aparte" },
+      {
+        context_id: "hoja1",
+        base: "monto_sin_ajustes",
+        shared_shipping: "no_distribuir",
+        line_shipping: "gasto_aparte",
+      },
     ]);
   });
 
@@ -1519,5 +1546,194 @@ describe("ColumnMapperPanel — F-H6.c multi-hoja: sólo viaja lo que el usuario
 
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
     expect(mockConfirmFile.mock.calls[0]?.[9]).toEqual([]);
+  });
+});
+
+/**
+ * F-H6.d — el tercer eje del costo de compra, punta a punta desde la pantalla.
+ *
+ * El backend sabía repartir el envío de un comprobante entre sus líneas y el
+ * tipo del servicio ya tenía `shared_shipping`, pero el panel lo descartaba al
+ * armar el payload: la distribución era INALCANZABLE desde la app. Es el mismo
+ * agujero que F-H3.e, en otra fase.
+ */
+describe("ColumnMapperPanel — F-H6.d: el envío compartido llega al confirm", () => {
+  const GRUPOS_REPARTIBLES = [
+    {
+      context_id: "hoja1",
+      label: "Compras",
+      puede_distribuir: true,
+      motivo: null,
+      grupos_total: 1,
+      grupos: [
+        {
+          comprobante: "A-0001",
+          proveedor: "Distribuidora Sur",
+          subtotal: "10000.00",
+          envio_compartido: "500.00",
+          repartido: "500.00",
+          sin_repartir: "0.00",
+          distribuible: true,
+          motivo_no_distribuible: null,
+          lineas: [
+            {
+              row_index: 0,
+              producto: "Yerba",
+              subtotal: "5000.00",
+              envio_asignado: "250.00",
+              costo_total: "5250.00",
+              costo_unitario_final: "525.00",
+            },
+            {
+              row_index: 1,
+              producto: "Azúcar",
+              subtotal: "3000.00",
+              envio_asignado: "150.00",
+              costo_total: "3150.00",
+              costo_unitario_final: "315.00",
+            },
+            {
+              row_index: 2,
+              producto: "Fideos",
+              subtotal: "2000.00",
+              envio_asignado: "100.00",
+              costo_total: "2100.00",
+              costo_unitario_final: "210.00",
+            },
+          ],
+        },
+      ],
+      filas_sin_comprobante: 0,
+    },
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue(GRUPOS_REPARTIBLES);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "mixed",
+        mapping_contexts: [
+          {
+            context_id: "hoja1",
+            label: "Compras",
+            source_kind: "sheet",
+            entity_type: "expense",
+            headers: ["Fecha", "Monto", "Comprobante", "Envio"],
+            fields: null,
+            preview_rows: [],
+            row_count: 3,
+          },
+        ],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-05"],
+        target_field: "expense_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["5000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+      {
+        source_column: "Comprobante",
+        normalized_column: "comprobante",
+        sample_values: ["A-0001"],
+        target_field: "invoice_number",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+      {
+        source_column: "Envio",
+        normalized_column: "envio",
+        sample_values: ["500"],
+        target_field: "shipping_cost",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "hoja1",
+      },
+    ]);
+  });
+
+  test("el eje aparece porque la hoja mapea el envío y el servidor puede repartirlo", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/cobra una sola vez/i)).toBeInTheDocument();
+    });
+  });
+
+  test("no aparece si el servidor dice que esta hoja no se puede repartir", async () => {
+    // La columna está mapeada igual: la condición que falta es la del servidor.
+    // Ofrecer el reparto acá dejaría al usuario eligiendo algo que no va a pasar.
+    mockPurchaseGroups.mockResolvedValue([
+      {
+        ...GRUPOS_REPARTIBLES[0],
+        puede_distribuir: false,
+        motivo: "sin_identidad_de_comprobante",
+        grupos: [],
+        grupos_total: 0,
+      },
+    ]);
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/no se puede repartir/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/cobra una sola vez/i)).not.toBeInTheDocument();
+  });
+
+  test("elegir repartir hace que shared_shipping VIAJE en el confirm", async () => {
+    renderPanel();
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /Se reparte entre los productos/ }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("radio", { name: /Se reparte entre los productos/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    expect(mockConfirmFile.mock.calls[0]?.[9]).toEqual([
+      {
+        context_id: "hoja1",
+        base: "monto_incluye",
+        shared_shipping: "por_subtotal",
+        line_shipping: "gasto_aparte",
+      },
+    ]);
+  });
+
+  test("el reparto que se muestra es el que devolvió el servidor", async () => {
+    // Los importes salen tal cual de la respuesta: si el frontend los
+    // recalculara podría mostrar una división distinta de la que se persiste.
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/A-0001/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/se reparten \$250 \/ \$150 \/ \$100/)).toBeInTheDocument();
   });
 });
