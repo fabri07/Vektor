@@ -392,6 +392,101 @@ class TestElMargenSeReconoceYSeExplica:
         assert "de_costo" in r.qualifiers
 
 
+class TestUnaHoraNoEsUnMonto:
+    """El bug más grave de esta tanda: `Hora de venta` resolvía a `amount`.
+
+    Pasaba porque `hora` no estaba en el vocabulario: el encabezado se quedaba sin
+    núcleo y ganaba el débil `venta`, que solo dice de qué operación habla. Una
+    columna con `14:35` entraba al campo de DINERO de la venta — la misma clase de
+    bug que F10 cerró cuando el costo entraba como precio de venta.
+    """
+
+    @pytest.mark.parametrize("entidad", ["sale", "expense", "product"])
+    def test_la_hora_de_una_venta_no_es_el_monto_de_la_venta(self, entidad: str) -> None:
+        r = _leer("Hora de venta", entidad)
+        assert r.concept == "hora"
+        assert r.target is None
+        # Y en particular ninguno de los campos de dinero de ninguna hoja.
+        assert r.target not in ("amount", "unit_price", "sale_price_ars", "unit_cost_ars")
+
+    @pytest.mark.parametrize("header", ["Hora", "Horario", "Hora de cierre"])
+    def test_la_hora_se_reconoce_y_se_explica(self, header: str) -> None:
+        """Antes no se reconocía nada: la columna caía en silencio. Reconocerla sin
+        darle campo es honesto; prometer que se combina con la fecha no lo sería,
+        porque eso lo tendría que hacer el importador y todavía no lo hace."""
+        r = _leer(header, "sale")
+        assert r.outcome == "sin_evidencia"
+        assert r.concept == "hora"
+        assert r.duda
+        assert "hora" in r.duda.lower()
+
+    @pytest.mark.parametrize(
+        ("header", "entidad", "concepto"),
+        [
+            ("Precio hora", "expense", "precio"),
+            ("Precio por hora", "product", "precio"),
+            ("Costo hora", "expense", "costo"),
+        ],
+    )
+    def test_y_un_precio_por_hora_sigue_siendo_un_precio(
+        self, header: str, entidad: str, concepto: str
+    ) -> None:
+        """Acá la hora no es un momento sino la granularidad, igual que `unitario`
+        en «Envío unitario». Sin hacerla ceder, la regla de MAGNITUDES —que hace
+        ceder al dinero ante cualquier otro concepto— le daba el encabezado a la
+        hora y el precio desaparecía."""
+        assert _leer(header, entidad).concept == concepto
+
+    @pytest.mark.parametrize("header", ["Total hs", "Horas trabajadas"])
+    def test_una_cantidad_de_horas_no_es_una_hora(self, header: str) -> None:
+        """`hs`/`horas` en plural nombran cuántas horas, no qué hora. Se dejan sin
+        reconocer a propósito: darles el mensaje de la hora del movimiento sería
+        explicarle mal la columna al usuario."""
+        assert _leer(header, "expense").concept != "hora"
+
+    def test_pero_fecha_y_hora_juntas_siguen_siendo_la_fecha(self) -> None:
+        """`transaction_date` es DATETIME: una columna «Fecha y hora» ES la fecha.
+        Si la hora nueva le ganara, la hoja se quedaría sin columna de fecha."""
+        r = _leer("Fecha y hora", "sale")
+        assert r.target == "transaction_date"
+        # Y se conserva que el encabezado también nombraba la hora.
+        assert "de_hora" in r.qualifiers
+
+
+class TestUnMesEsUnPeriodoNoUnaFecha:
+    """`Mes` reclamaba el campo de fecha, y eso choca de dos maneras.
+
+    En la hoja real conviven «Mes» y «Fecha de Pago»: las dos resolvían a
+    `expense_date`, que es escalar, así que el confirm cortaba con un 422 y el
+    usuario tenía que mandar `Mes` a un campo propio a mano. Y de fondo: «Marzo»
+    no dice qué día, y completarlo es inventar el dato.
+    """
+
+    @pytest.mark.parametrize(
+        ("entidad", "campo_de_fecha"),
+        [("sale", "transaction_date"), ("expense", "expense_date"), ("product", "acquired_at")],
+    )
+    def test_el_mes_no_se_queda_con_el_campo_de_fecha(
+        self, entidad: str, campo_de_fecha: str
+    ) -> None:
+        r = _leer("Mes", entidad)
+        assert r.concept == "mes"
+        assert r.target != campo_de_fecha
+        assert r.target is None
+
+    def test_y_se_explica_que_un_mes_no_dice_el_dia(self) -> None:
+        r = _leer("Mes", "expense")
+        assert r.outcome == "sin_evidencia"
+        assert r.duda
+        assert "día" in r.duda
+
+    def test_el_mes_deja_de_disputarle_el_campo_a_la_fecha_real(self) -> None:
+        """La hoja `Gastos_Fijos` del archivo real. Dos columnas al mismo campo
+        escalar son un 422 en el confirm; ahora solo una lo reclama."""
+        targets = [_leer(h, "expense").target for h in ("Mes", "Fecha de Pago")]
+        assert targets == [None, "expense_date"]
+
+
 class TestElMargenNoLeRobaEncabezadosAlDinero:
     """No-regresión de colisiones: el concepto nuevo comparte familia semántica con
     precio, costo y monto, que son los encabezados más comunes que existen."""
@@ -425,3 +520,41 @@ class TestElMargenNoLeRobaEncabezadosAlDinero:
         r = _leer(header, "expense")
         assert r.concept == "impuesto"
         assert r.target == "taxes"
+
+
+class TestLaHoraYElMesNoLeRobanEncabezadosAlResto:
+    """No-regresión de los dos conceptos nuevos.
+
+    `hora` y `mes` entran en la familia de la fecha y de la operación, que son los
+    encabezados más comunes que existen. El caso caro es `venta`/`compra` a secas:
+    el arreglo de «Hora de venta» toca justo el débil que los resuelve.
+    """
+
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            # Fechas: ninguna se vuelve una hora ni un mes.
+            ("fecha", "sale", "transaction_date"),
+            ("fecha", "expense", "expense_date"),
+            ("fecha_de_venta", "sale", "transaction_date"),
+            ("fecha_de_pago", "expense", "expense_date"),
+            ("fecha_del_gasto", "expense", "expense_date"),
+            # Dinero.
+            ("total", "sale", "amount"),
+            ("total", "expense", "amount"),
+            ("importe", "sale", "amount"),
+            ("monto", "expense", "amount"),
+            ("precio_de_venta", "product", "sale_price_ars"),
+            ("precio_de_compra", "product", "unit_cost_ars"),
+            ("precio_de_compra", "expense", "unit_price"),
+            ("costo_unitario", "product", "unit_cost_ars"),
+            ("costo_unitario", "expense", "unit_price"),
+            # Los dos débiles que el arreglo de «Hora de venta» podía romper.
+            ("venta", "sale", "amount"),
+            ("venta", "product", "sale_price_ars"),
+            ("compra", "expense", "amount"),
+            ("compra", "product", "unit_cost_ars"),
+        ],
+    )
+    def test_el_header_sigue_en_su_campo(self, header: str, entidad: str, target: str) -> None:
+        assert _leer(header, entidad).target == target
