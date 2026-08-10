@@ -1083,9 +1083,12 @@ def _build_multisheet_with_unclassified() -> bytes:
     ventas.title = "Ventas"
     ventas.append(["fecha", "monto"])
     ventas.append(["2026-01-15", "50000"])
-    resumen = wb.create_sheet("Resumen")  # nombre + headers no clasificables
-    resumen.append(["Titulo", "Observaciones", "Estado"])
-    resumen.append(["Total mes", "sin novedad", "ok"])
+    # Nombre + headers no clasificables. No puede llamarse "Resumen": ese prefijo
+    # lo captura antes la regla de hojas derivadas, que es otro camino y otro
+    # mensaje — el test dejaría de probar lo que dice probar.
+    notas = wb.create_sheet("Notas Internas")
+    notas.append(["Titulo", "Observaciones", "Estado"])
+    notas.append(["Total mes", "sin novedad", "ok"])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1100,9 +1103,98 @@ def test_multisheet_unclassified_sheet_preserved_with_warning() -> None:
     # La hoja clasificable entra normal.
     assert by_label["Ventas"]["entity_type"] == "sale"
 
-    # La hoja "Resumen" NO se descarta: queda como contexto unclassified + warning.
-    assert "Resumen" in by_label
-    assert by_label["Resumen"]["entity_type"] is None
-    assert by_label["Resumen"]["unclassified"] is True
-    assert by_label["Resumen"]["row_count"] == 1
-    assert any("Resumen" in w for w in summary["warnings"])
+    # La hoja no clasificable NO se descarta: queda como contexto unclassified + warning.
+    assert "Notas Internas" in by_label
+    assert by_label["Notas Internas"]["entity_type"] is None
+    assert by_label["Notas Internas"]["unclassified"] is True
+    assert by_label["Notas Internas"]["row_count"] == 1
+    assert any(
+        "Notas Internas" in w and "no se pudo clasificar" in w for w in summary["warnings"]
+    )
+
+
+# ── Hojas derivadas: lo que Véktor calcula no se importa ────────────────────────
+
+
+def _build_ventas_mas_resumen_xlsx() -> bytes:
+    """Caso real: un archivo de ventas que además trae el resumen por medio de pago.
+
+    La hoja de resumen es un agregado de las MISMAS ventas de la hoja anterior
+    (incluida la fila "TOTAL", que vuelve a sumar las de arriba). No es un Libro
+    Diario: el archivo no tiene doble encabezado Dinero/Mercadería.
+    """
+    return _build_multisheet_xlsx(
+        {
+            "Ventas": [
+                ["fecha", "total", "cliente", "medio de pago"],
+                ["2026-03-02", "4500", "Juan Pérez", "Efectivo"],
+                ["2026-03-03", "7200", "Ana Gómez", "Débito"],
+            ],
+            "Resumen_Medios_Pago": [
+                ["Medio de Pago", "Total $", "Cantidad de Ventas", "% del Total"],
+                ["Débito", "7200", "1", "61.5"],
+                ["Efectivo", "4500", "1", "38.5"],
+                ["TOTAL", "11700", "2", None],
+            ],
+        }
+    )
+
+
+def test_hoja_resumen_no_se_importa_como_ventas_sin_libro_diario() -> None:
+    """Un resumen por medio de pago NO entra como ventas: duplicaría la facturación.
+
+    Antes, la regla de hojas derivadas vivía dentro de la rama del Libro Diario,
+    así que en un archivo común la hoja "Resumen_Medios_Pago" se clasificaba como
+    `sale` y sus 4 filas —incluida "TOTAL"— sumaban facturación fantasma encima de
+    las ventas reales del mismo archivo.
+    """
+    summary = parse_uploaded_content(
+        _build_ventas_mas_resumen_xlsx(), _XLSX_MIME, "distribuidora.xlsx"
+    )
+    by_label = {c["label"]: c for c in summary["mapping_contexts"]}
+
+    assert by_label["Resumen_Medios_Pago"]["entity_type"] is None
+    assert by_label["Resumen_Medios_Pago"]["unclassified"] is True
+    # Ninguna fila del resumen llegó al bucket de ventas.
+    assert all(
+        r.get("__context__") != "sheet:Resumen_Medios_Pago"
+        for r in summary["ventas_detectadas"]
+    )
+    # El motivo viaja con el nombre de la hoja (así lo rutea splitWarningsByContext).
+    assert any(
+        "Resumen_Medios_Pago" in w and "sumaría esos totales otra vez" in w
+        for w in summary["warnings"]
+    )
+
+
+def test_hoja_de_ventas_del_mismo_archivo_sigue_entrando() -> None:
+    """La regla apunta sólo a la hoja derivada: las ventas reales no se tocan."""
+    summary = parse_uploaded_content(
+        _build_ventas_mas_resumen_xlsx(), _XLSX_MIME, "distribuidora.xlsx"
+    )
+    by_label = {c["label"]: c for c in summary["mapping_contexts"]}
+
+    assert by_label["Ventas"]["entity_type"] == "sale"
+    assert by_label["Ventas"]["row_count"] == 2
+    assert len(summary["ventas_detectadas"]) == 2
+
+
+def test_hoja_con_nombre_no_derivado_se_sigue_clasificando() -> None:
+    """La regla mira el prefijo del nombre: "Ventas Marzo" no es un derivado."""
+    content = _build_multisheet_xlsx(
+        {
+            "Ventas Marzo": [
+                ["fecha", "total", "cliente"],
+                ["2026-03-02", "4500", "Juan Pérez"],
+            ],
+            "Gastos Fijos": [
+                ["fecha", "monto", "categoria", "descripcion"],
+                ["2026-03-02", "12000", "alquiler", "Alquiler local"],
+            ],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "normal.xlsx")
+    by_label = {c["label"]: c for c in summary["mapping_contexts"]}
+
+    assert by_label["Ventas Marzo"]["entity_type"] == "sale"
+    assert by_label["Gastos Fijos"]["entity_type"] == "expense"
