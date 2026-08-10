@@ -12,6 +12,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.header_keys import match_key
 from app.domain.header_semantics import analyze_header
+
+# F-C.c3: los conjuntos que definen "esta hoja mueve unidades" ya viven en el
+# dominio y se importan, incluido el guión bajo. Copiarlos acá para no importar un
+# privado sería el peor de los dos males: dos definiciones de la misma regla que
+# nadie obliga a moverse juntas, que es exactamente lo que pasó con el catálogo de
+# campos duplicado en el frontend (incidente ASTERIA). El test
+# `test_conditional_requirements.py` clava la IDENTIDAD de los objetos, así que una
+# copia futura pone la suite en rojo.
+from app.domain.inventory_effect import (
+    _PRODUCT_FIELDS,
+    _QUANTITY_FIELDS,
+    SheetInventoryProfile,
+)
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -286,6 +299,146 @@ def missing_required_fields(entity_type: str, mapped: set[str]) -> set[str]:
         if campo not in mapped
         and not (campo in alternativas and alternativas[campo] <= mapped)
     }
+
+
+# ── F-C.c3: "obligatorio" es contextual ──────────────────────────────────────
+# `required: bool` contesta una pregunta sola para todos los archivos, y por eso
+# contesta mal en los dos sentidos: dice que el monto de una venta es obligatorio
+# cuando la planilla trae precio × cantidad, y no dice nada del producto en una
+# hoja que sí mueve inventario.
+#
+# Esto lo DESCRIBE, no lo cambia. El booleano queda igual, `REQUIRED_FIELDS` no
+# crece y `missing_required_fields` —lo que el confirm valida de verdad— no se
+# toca. Volver bloqueante "producto si la venta es inventariable" rechazaría con
+# 422 toda planilla de servicios u honorarios que hoy entra bien; la UI puede
+# explicar la regla sin que el importador la imponga.
+RequirementCondition = Literal["covered_by_alternative", "sheet_moves_units"]
+
+#: El campo no hace falta si OTRO conjunto de campos lo cubre. Cuál es ese
+#: conjunto NO se escribe acá: vive en `REQUIRED_ALTERNATIVES` y lo evalúa
+#: `missing_required_fields`. Una tercera copia de `{unit_price, quantity}` sería
+#: una tercera cosa para mantener sincronizada.
+COVERED_BY_ALTERNATIVE: RequirementCondition = "covered_by_alternative"
+#: El campo sólo hace falta si las filas de la hoja mueven unidades de un producto
+#: identificable. La definición es `SheetInventoryProfile.moves_units`.
+SHEET_MOVES_UNITS: RequirementCondition = "sheet_moves_units"
+
+
+@dataclass(frozen=True)
+class ConditionalRequirement:
+    """Por qué un campo puede hacer falta en una hoja y no en la de al lado."""
+
+    condition: RequirementCondition
+    #: Copy en castellano, para el catálogo y el banner de faltantes.
+    explanation: str
+    #: Conjuntos de campos que gobiernan la condición, para que la pantalla pueda
+    #: nombrar las columnas involucradas. Son LOS MISMOS OBJETOS del dominio, no
+    #: copias — y nadie los evalúa acá: la autoridad sigue siendo `moves_units`.
+    #: Vacío en `covered_by_alternative`, donde la fuente es `REQUIRED_ALTERNATIVES`.
+    signals: tuple[frozenset[str], ...] = ()
+
+
+CONDITIONAL_REQUIREMENTS: dict[str, dict[str, ConditionalRequirement]] = {
+    "sale": {
+        "amount": ConditionalRequirement(
+            condition=COVERED_BY_ALTERNATIVE,
+            explanation=(
+                "Sólo hace falta si la planilla no trae el precio unitario y la "
+                "cantidad: con esos dos, Véktor calcula el total de cada línea."
+            ),
+        ),
+        "product_name": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto. Sin una "
+                "columna que lo identifique, la venta se registra igual, pero Véktor "
+                "no puede decir qué se vendió ni proyectar el impacto en el "
+                "inventario. Una venta de servicios u honorarios no identifica "
+                "ningún artículo y no necesita esta columna."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+        "quantity": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto: es lo "
+                "que dice cuántas. Una hoja que identifica el artículo pero no trae "
+                "cantidades no puede decir nada del inventario."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+    },
+    "expense": {
+        "amount": ConditionalRequirement(
+            condition=COVERED_BY_ALTERNATIVE,
+            explanation=(
+                "Sólo hace falta si la planilla de compras no trae el precio unitario "
+                "y la cantidad: con esos dos, Véktor calcula el total de cada línea."
+            ),
+        ),
+        # Las mismas dos reglas valen para una hoja de compras: el dominio no
+        # distingue —`default_effect_for` trata `sale` y `expense` igual— y una
+        # compra de mercadería sin nombre no da de alta el producto ni suma
+        # unidades (`_is_merch_purchase` pide nombre Y cantidad > 0).
+        "product_name": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto. Sin una "
+                "columna que lo identifique, el gasto se registra igual, pero la "
+                "compra no da de alta el artículo ni le suma stock. Un alquiler o un "
+                "servicio no necesitan esta columna."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+        "quantity": ConditionalRequirement(
+            condition=SHEET_MOVES_UNITS,
+            explanation=(
+                "Sólo hace falta si las filas mueven unidades de un producto: es lo "
+                "que dice cuántas entraron. Una compra sin cantidad se registra como "
+                "gasto y no toca el inventario."
+            ),
+            signals=(_PRODUCT_FIELDS, _QUANTITY_FIELDS),
+        ),
+    },
+}
+
+
+def conditional_requirement(entity_type: str, field: str) -> ConditionalRequirement | None:
+    """La regla contextual de ``field``, o ``None`` si el campo no tiene ninguna."""
+    return CONDITIONAL_REQUIREMENTS.get(entity_type, {}).get(field)
+
+
+def requirement_applies(entity_type: str, field: str, mapped: set[str]) -> bool:
+    """¿Este campo hace falta en una hoja que ya mapeó ``mapped``?
+
+    **Es DESCRIPTIVO.** No lo llama la validación del confirm: eso sigue siendo
+    `missing_required_fields`, que sólo mira `REQUIRED_FIELDS`. Cablearlo a un 422
+    convertiría "producto en una hoja inventariable" en un rechazo nuevo, que es
+    justo lo que F-C decidió no hacer.
+    """
+    req = conditional_requirement(entity_type, field)
+    if req is None:
+        return field in REQUIRED_FIELDS.get(entity_type, [])
+    if req.condition == COVERED_BY_ALTERNATIVE:
+        # Sin reimplementar la alternativa: se le pregunta a la misma función que
+        # valida el confirm, sacando el campo de lo mapeado para que la respuesta
+        # sea "¿lo necesita?" y no "¿ya lo tiene?".
+        return field in missing_required_fields(entity_type, mapped - {field})
+    # `moves_units` es "identifica un producto Y trae cantidad". La conjunción no
+    # se reescribe acá: se le pregunta dos veces al dominio. El campo hace falta
+    # cuando la hoja todavía no mueve unidades y mapearlo alcanzaría para que sí
+    # —o sea, cuando es la mitad que falta—. En una hoja de servicios ninguna de
+    # las dos mitades alcanza sola, así que ninguna se pide.
+    return not _sheet_moves_units(entity_type, mapped) and _sheet_moves_units(
+        entity_type, mapped | {field}
+    )
+
+
+def _sheet_moves_units(entity_type: str, mapped: set[str]) -> bool:
+    return SheetInventoryProfile(
+        context_id="", entity=entity_type, mapped_fields=frozenset(mapped)
+    ).moves_units
+
 
 # ── Heurísticas: entity_type → target_field → keywords (substring match) ─────
 _HEURISTICS: dict[str, dict[str, set[str]]] = {
