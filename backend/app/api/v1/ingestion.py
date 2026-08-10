@@ -1356,6 +1356,40 @@ async def confirm_file(
         """Etiqueta en castellano del campo, no su nombre técnico."""
         return CANONICAL_FIELDS.get(entity_type, {}).get(field, field)
 
+    def _motivos(entity_type: str, faltantes: list[str]) -> dict[str, str]:
+        """Por qué el importador necesita cada faltante, para la traza.
+
+        Va a ``pipeline_events`` junto al 422 para que el operador que diagnostica
+        después lea EXACTAMENTE lo que leyó la persona. Con sólo los nombres
+        técnicos, reconstruir qué decía la pantalla exigía saber de memoria qué
+        texto servía el deploy de ese día.
+        """
+        return {
+            campo: motivo
+            for campo in faltantes
+            if (motivo := required_reason(entity_type, campo))
+        }
+
+    def _detalle_faltantes(entity_type: str, faltantes: list[str]) -> str:
+        """«Monto de venta. Véktor necesita saber cuánta plata entró…».
+
+        La etiqueta sola dice QUÉ falta y nada más; quien no mapeó el monto no
+        sabe si su planilla no entra, si entra incompleta o si entra distinta — y
+        son tres destinos distintos según el campo (a «Otros» rescatable, o
+        descartada sin rastro). El motivo es lo único que le permite decidir si
+        arregla la planilla o sigue.
+
+        Mismo texto que sirve el catálogo (`REQUIRED_REASONS`): el banner de la
+        pantalla y el rechazo del backend no pueden explicar cosas distintas
+        sobre el mismo campo.
+        """
+        partes = []
+        for campo in faltantes:
+            etiqueta = _campo(entity_type, campo)
+            motivo = required_reason(entity_type, campo)
+            partes.append(f"{etiqueta}. {motivo}" if motivo else f"{etiqueta}.")
+        return " ".join(partes)
+
     # El trace_id se resuelve ACÁ, antes del primer guard: los rechazos de
     # validación ocurren ANTES del lease (a propósito — una request que va a
     # rebotar nunca lo toma) y hasta ahora no dejaban NI UNA fila en
@@ -1586,17 +1620,28 @@ async def confirm_file(
         if confirmed_entity:
             missing = _missing_required(_entity_type, _flat_mappings)
             if missing:
+                _faltantes = sorted(missing)
                 await _emit_validation_reject(
                     "requeridos_sin_mapear",
-                    {"entity_type": _entity_type, "faltantes": sorted(missing)},
+                    {
+                        "entity_type": _entity_type,
+                        "faltantes": _faltantes,
+                        "motivos": _motivos(_entity_type, _faltantes),
+                    },
                 )
-                _etiquetas = ", ".join(_campo(_entity_type, f) for f in sorted(missing))
+                _encabezado = (
+                    "Falta un dato obligatorio"
+                    if len(_faltantes) == 1
+                    else "Faltan datos obligatorios"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=(
-                        f"Falta un dato obligatorio: {_etiquetas}. Elegí ese campo "
-                        "en la columna que lo contiene. Un campo personalizado "
-                        "guarda el dato pero no reemplaza al obligatorio."
+                        f"{_encabezado}: "
+                        f"{_detalle_faltantes(_entity_type, _faltantes)} "
+                        "Elegí ese campo en la columna que lo contiene. Un campo "
+                        "personalizado guarda el dato pero no reemplaza al "
+                        "obligatorio."
                     ),
                 )
             if _colisiones := _colliding_scalars(_entity_type, _flat_mappings):
@@ -1625,22 +1670,29 @@ async def confirm_file(
             if _context_included(_cid, _ent):
                 missing = _missing_required(_ent, _ms)
                 if missing:
+                    _faltantes = sorted(missing)
                     await _emit_validation_reject(
                         "requeridos_sin_mapear",
                         {
                             "context_id": _cid,
                             "entity_type": _ent,
-                            "faltantes": sorted(missing),
+                            "faltantes": _faltantes,
+                            "motivos": _motivos(_ent, _faltantes),
                         },
                     )
-                    _etiquetas = ", ".join(_campo(_ent, f) for f in sorted(missing))
+                    _encabezado = (
+                        "falta un dato obligatorio"
+                        if len(_faltantes) == 1
+                        else "faltan datos obligatorios"
+                    )
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail=(
-                            f"En la hoja «{_hoja(_cid)}» falta un dato obligatorio: "
-                            f"{_etiquetas}. Elegí ese campo en la columna que lo "
-                            "contiene. Un campo personalizado guarda el dato pero no "
-                            "reemplaza al obligatorio."
+                            f"En la hoja «{_hoja(_cid)}» {_encabezado}: "
+                            f"{_detalle_faltantes(_ent, _faltantes)} "
+                            "Elegí ese campo en la columna que lo contiene. Un campo "
+                            "personalizado guarda el dato pero no reemplaza al "
+                            "obligatorio."
                         ),
                     )
                 if _colisiones := _colliding_scalars(_ent, _ms):
