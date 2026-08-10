@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.agents.shared.data_query_narrator import answer_data_query
 from app.application.agents.shared.schemas import LLMCall
 from app.application.security.prompt_defense import wrap_user_input
@@ -42,7 +40,6 @@ def _make_client(response: object | None = None) -> MagicMock:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_returns_text_and_llm_call() -> None:
     """answer_data_query devuelve (str, LLMCall) bien formado."""
     client = _make_client()
@@ -63,7 +60,6 @@ async def test_returns_text_and_llm_call() -> None:
     assert llm_call.output_tokens == 50
 
 
-@pytest.mark.asyncio
 async def test_structured_data_in_prompt() -> None:
     """structured_data aparece serializado en el mensaje enviado al cliente."""
     client = _make_client()
@@ -85,7 +81,6 @@ async def test_structured_data_in_prompt() -> None:
     assert "Mayorista Norte" in user_message, "nombre de proveedor no encontrado en el prompt"
 
 
-@pytest.mark.asyncio
 async def test_question_wrapped_with_user_input() -> None:
     """La pregunta del usuario pasa por wrap_user_input antes del LLM."""
     client = _make_client()
@@ -106,7 +101,6 @@ async def test_question_wrapped_with_user_input() -> None:
     )
 
 
-@pytest.mark.asyncio
 async def test_correct_model_and_max_tokens() -> None:
     """Se llama al modelo correcto con los parámetros esperados."""
     client = _make_client()
@@ -124,7 +118,6 @@ async def test_correct_model_and_max_tokens() -> None:
     assert call_kwargs.kwargs["max_tokens"] == 600
 
 
-@pytest.mark.asyncio
 async def test_business_name_in_prompt() -> None:
     """El nombre del negocio aparece en el prompt."""
     client = _make_client()
@@ -142,7 +135,6 @@ async def test_business_name_in_prompt() -> None:
     assert "Almacén Don Pedro" in user_message
 
 
-@pytest.mark.asyncio
 async def test_domain_in_prompt() -> None:
     """El domain aparece en el prompt enviado al cliente."""
     client = _make_client()

@@ -117,7 +117,6 @@ def mock_redis() -> AsyncMock:
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_business_memory_degraded_in_result(
     mock_db: AsyncMock, mock_redis: AsyncMock
 ) -> None:
@@ -171,7 +170,6 @@ async def test_business_memory_degraded_in_result(
     assert ctx_health["file_context"] == "ok"
 
 
-@pytest.mark.asyncio
 async def test_business_memory_degraded_sends_notice_to_agent_chat(
     mock_db: AsyncMock, mock_redis: AsyncMock
 ) -> None:
@@ -220,7 +218,6 @@ async def test_business_memory_degraded_sends_notice_to_agent_chat(
     )
 
 
-@pytest.mark.asyncio
 async def test_all_context_ok_no_degraded_notice(
     mock_db: AsyncMock, mock_redis: AsyncMock
 ) -> None:

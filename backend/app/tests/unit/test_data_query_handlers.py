@@ -70,7 +70,6 @@ def _make_client() -> MagicMock:
 # ── agent_client ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_client_con_datos_llama_narrador() -> None:
     """Con clientes y ventas → structured_data correcto, 1 LLMCall, message del narrador."""
     from app.application.agents.client.agent import AgentClient
@@ -137,7 +136,6 @@ async def test_client_con_datos_llama_narrador() -> None:
     mock_llm.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_client_concentration_excluye_sentinel() -> None:
     """La concentración de clientes EXCLUYE el centinela "Local" (walk-in anónimo).
 
@@ -196,7 +194,6 @@ async def test_client_concentration_excluye_sentinel() -> None:
     assert fl["local_pct"] == pytest.approx(96.8, abs=0.1)
 
 
-@pytest.mark.asyncio
 async def test_client_sin_clientes_no_llama_llm() -> None:
     """count_active==0 → no-invention, SIN llamar al LLM."""
     from app.application.agents.client.agent import AgentClient
@@ -222,7 +219,6 @@ async def test_client_sin_clientes_no_llama_llm() -> None:
     assert "clientes" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_client_sin_db_no_llama_llm() -> None:
     """Sin DB → no-invention sin llamar al LLM."""
     from app.application.agents.client.agent import AgentClient
@@ -238,7 +234,6 @@ async def test_client_sin_db_no_llama_llm() -> None:
     mock_llm.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_client_cross_tenant_isolation() -> None:
     """structured_data de tenant A no incluye datos de tenant B."""
     from app.application.agents.client.agent import AgentClient
@@ -285,7 +280,6 @@ async def test_client_cross_tenant_isolation() -> None:
 # ── agent_income ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_income_con_datos_llama_narrador() -> None:
     """Con ventas → structured_data con clientes y productos, 1 LLMCall."""
     from app.application.agents.income.agent import AgentIncome
@@ -351,7 +345,6 @@ async def test_income_con_datos_llama_narrador() -> None:
     mock_llm.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_income_sin_ventas_no_llama_llm() -> None:
     """Sin ventas → no-invention, SIN llamar al LLM."""
     from app.application.agents.income.agent import AgentIncome
@@ -386,7 +379,6 @@ async def test_income_sin_ventas_no_llama_llm() -> None:
     assert "ventas" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_income_sin_db_no_llama_llm() -> None:
     """Sin DB → no-invention sin llamar al LLM."""
     from app.application.agents.income.agent import AgentIncome
@@ -402,7 +394,6 @@ async def test_income_sin_db_no_llama_llm() -> None:
     mock_llm.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_income_cross_tenant_isolation() -> None:
     """structured_data de tenant A no incluye ventas de tenant B."""
     from app.application.agents.income.agent import AgentIncome
@@ -441,7 +432,6 @@ async def test_income_cross_tenant_isolation() -> None:
 # ── agent_expense ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_expense_con_datos_llama_narrador() -> None:
     """Con gastos → structured_data con categorías, total y anomalías, 1 LLMCall."""
     from app.application.agents.expense.agent import AgentExpense
@@ -490,7 +480,6 @@ async def test_expense_con_datos_llama_narrador() -> None:
     mock_llm.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_expense_sin_gastos_no_llama_llm() -> None:
     """Sin gastos → no-invention, SIN llamar al LLM."""
     from app.application.agents.expense.agent import AgentExpense
@@ -517,7 +506,6 @@ async def test_expense_sin_gastos_no_llama_llm() -> None:
     assert "gastos" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_expense_sin_db_no_llama_llm() -> None:
     """Sin DB → no-invention sin llamar al LLM."""
     from app.application.agents.expense.agent import AgentExpense
@@ -533,7 +521,6 @@ async def test_expense_sin_db_no_llama_llm() -> None:
     mock_llm.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_expense_cross_tenant_isolation() -> None:
     """structured_data de tenant A no incluye gastos de tenant B."""
     from app.application.agents.expense.agent import AgentExpense
@@ -567,7 +554,6 @@ async def test_expense_cross_tenant_isolation() -> None:
 # ── agent_supplier ────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_supplier_con_datos_llama_narrador() -> None:
     """Con proveedores y stock crítico → structured_data correcto, 1 LLMCall."""
     from app.application.agents.supplier.agent import AgentSupplier
@@ -629,7 +615,6 @@ async def test_supplier_con_datos_llama_narrador() -> None:
     mock_llm.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_supplier_sin_datos_no_llama_llm() -> None:
     """Sin proveedores ni stock crítico → no-invention, SIN llamar al LLM."""
     from app.application.agents.supplier.agent import AgentSupplier
@@ -653,7 +638,6 @@ async def test_supplier_sin_datos_no_llama_llm() -> None:
     assert "proveedor" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_supplier_sin_session_no_llama_llm() -> None:
     """Sin session → no-invention sin llamar al LLM."""
     from app.application.agents.supplier.agent import AgentSupplier
@@ -671,7 +655,6 @@ async def test_supplier_sin_session_no_llama_llm() -> None:
     mock_llm.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_supplier_cross_tenant_isolation() -> None:
     """structured_data de tenant A no incluye proveedores de tenant B."""
     from app.application.agents.supplier.agent import AgentSupplier
@@ -711,7 +694,6 @@ async def test_supplier_cross_tenant_isolation() -> None:
 # ── Regresión: json.dumps(structured_data) no falla con datetime.date ────────
 
 
-@pytest.mark.asyncio
 async def test_client_ranking_date_is_json_serializable() -> None:
     """last_sale_date como datetime.date → structured_data serializable con json.dumps.
 
@@ -780,7 +762,6 @@ async def test_client_ranking_date_is_json_serializable() -> None:
     assert beto["last_sale_date"] is None
 
 
-@pytest.mark.asyncio
 async def test_income_ranking_date_is_json_serializable() -> None:
     """last_sale_date como datetime.date en ranking_clientes → json.dumps no falla.
 
@@ -872,7 +853,6 @@ def _task_stock() -> AgentTask:
     return AgentTask(agent="agent_stock", action_type=ActionType.ANSWER_DATA_QUERY, entities={})
 
 
-@pytest.mark.asyncio
 async def test_stock_con_datos_llama_narrador() -> None:
     """Con productos → structured_data correcto, 1 LLMCall, message del narrador."""
     from app.application.agents.stock.agent import AgentStock
@@ -960,7 +940,6 @@ async def test_stock_con_datos_llama_narrador() -> None:
     mock_llm.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_stock_sin_productos_no_llama_llm() -> None:
     """Sin productos → no-invention, SIN llamar al LLM."""
     from app.application.agents.stock.agent import AgentStock
@@ -987,7 +966,6 @@ async def test_stock_sin_productos_no_llama_llm() -> None:
     assert "producto" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_stock_sin_db_no_llama_llm() -> None:
     """Sin DB → no-invention sin llamar al LLM."""
     from app.application.agents.stock.agent import AgentStock
@@ -1003,7 +981,6 @@ async def test_stock_sin_db_no_llama_llm() -> None:
     mock_llm.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_stock_cross_tenant_isolation() -> None:
     """structured_data de tenant A no incluye datos de tenant B."""
     from app.application.agents.stock.agent import AgentStock
@@ -1051,7 +1028,6 @@ async def test_stock_cross_tenant_isolation() -> None:
     pr.get_products_with_margin.assert_called_once_with(UUID(_TENANT_A))
 
 
-@pytest.mark.asyncio
 async def test_stock_structured_data_json_serializable() -> None:
     """structured_data de stock es JSON-serializable (sin Decimal ni date)."""
     from app.application.agents.stock.agent import AgentStock
@@ -1145,7 +1121,6 @@ def _make_marketing_dashboard(has_data: bool = True) -> MagicMock:
     return dashboard
 
 
-@pytest.mark.asyncio
 async def test_marketing_con_datos_llama_narrador() -> None:
     """Con métricas → structured_data correcto, 1 LLMCall, message del narrador."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -1193,7 +1168,6 @@ async def test_marketing_con_datos_llama_narrador() -> None:
     mock_llm.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_marketing_sin_datos_no_llama_llm() -> None:
     """Sin métricas (has_data=False) → no-invention, SIN llamar al LLM."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -1222,7 +1196,6 @@ async def test_marketing_sin_datos_no_llama_llm() -> None:
     assert "marketing" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_marketing_sin_db_no_llama_llm() -> None:
     """Sin DB → no-invention sin llamar al LLM."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -1238,7 +1211,6 @@ async def test_marketing_sin_db_no_llama_llm() -> None:
     mock_llm.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_marketing_cross_tenant_isolation() -> None:
     """El servicio se llamó con el tenant_id correcto de tenant A."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -1274,7 +1246,6 @@ def test_marketing_has_client_property() -> None:
     assert agent.client is mock
 
 
-@pytest.mark.asyncio
 async def test_marketing_ratio_decimal_serializable() -> None:
     """ratio_ads_ventas como Decimal → structured_data JSON-serializable sin TypeError.
 
@@ -1331,7 +1302,6 @@ def _task_health() -> AgentTask:
     return AgentTask(agent="agent_health", action_type=ActionType.ANSWER_DATA_QUERY, entities={})
 
 
-@pytest.mark.asyncio
 async def test_health_con_datos_llama_narrador() -> None:
     """Con datos financieros → structured_data correcto, 1 LLMCall, message del narrador."""
     from app.application.agents.health.agent import AgentHealth
@@ -1407,7 +1377,6 @@ async def test_health_con_datos_llama_narrador() -> None:
     mock_llm.messages.create.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_health_sin_datos_no_llama_llm() -> None:
     """Sin datos financieros (estado=SIN_DATOS) → no-invention, SIN llamar al LLM."""
     from app.application.agents.health.agent import AgentHealth
@@ -1434,7 +1403,6 @@ async def test_health_sin_datos_no_llama_llm() -> None:
     assert "30 días" in (resp.message or "") or "movimiento" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_health_sin_db_no_llama_llm() -> None:
     """Sin DB → no-invention sin llamar al LLM."""
     from app.application.agents.health.agent import AgentHealth
@@ -1450,7 +1418,6 @@ async def test_health_sin_db_no_llama_llm() -> None:
     mock_llm.messages.create.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_health_cross_tenant_isolation() -> None:
     """get_financial_summary se llamó con el UUID correcto del tenant A."""
     from app.application.agents.health.agent import AgentHealth
@@ -1496,7 +1463,6 @@ async def test_health_cross_tenant_isolation() -> None:
     mock_fs.assert_called_once_with(UUID(_TENANT_A), mock_db)
 
 
-@pytest.mark.asyncio
 async def test_health_structured_data_json_serializable() -> None:
     """structured_data de health es JSON-serializable (sin Decimal)."""
     from app.application.agents.health.agent import AgentHealth

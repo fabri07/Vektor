@@ -37,7 +37,6 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-import pytest
 import structlog
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -148,7 +147,6 @@ async def _create_products(
 # ── 1. Reproduce el bug (regresión) ────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_duplicate_product_name_no_500(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -184,7 +182,6 @@ async def test_single_sheet_duplicate_product_name_no_500(
         assert current.stock_units == original.stock_units
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_captura_ambigua_es_idempotente_en_relectura(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -224,7 +221,6 @@ async def test_single_sheet_captura_ambigua_es_idempotente_en_relectura(
     assert len(records) == 1
 
 
-@pytest.mark.asyncio
 async def test_legacy_multisheet_captura_ambigua_es_idempotente_en_relectura(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -267,7 +263,6 @@ async def test_legacy_multisheet_captura_ambigua_es_idempotente_en_relectura(
     assert len(records) == 1
 
 
-@pytest.mark.asyncio
 async def test_multisheet_duplicate_product_name_no_500(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -307,7 +302,6 @@ async def test_multisheet_duplicate_product_name_no_500(
 # ── 2. Caché intra-corrida (evita duplicar con autoflush=False, patrón prod) ──
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_two_rows_same_name_same_run_creates_one_product(
     isolated_db_engine: AsyncEngine,
 ) -> None:
@@ -355,7 +349,6 @@ async def test_single_sheet_two_rows_same_name_same_run_creates_one_product(
         assert products[0].stock_units == 3  # 2da fila actualizó el mismo producto
 
 
-@pytest.mark.asyncio
 async def test_multisheet_two_rows_same_name_same_run_creates_one_product(
     isolated_db_engine: AsyncEngine,
 ) -> None:
@@ -407,7 +400,6 @@ async def test_multisheet_two_rows_same_name_same_run_creates_one_product(
 # ── 3. count==0 crea / count==1 sigue actualizando (no debe romper con el helper) ──
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_count_one_still_updates(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -446,7 +438,6 @@ async def test_single_sheet_count_one_still_updates(
     assert products[0].stock_units == 20
 
 
-@pytest.mark.asyncio
 async def test_multisheet_new_product_created_when_no_match(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -478,7 +469,6 @@ async def test_multisheet_new_product_created_when_no_match(
 # ── FIX 1 (Alto): la fila ambigua queda persistida en "Otros" ─────────────────
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_ambiguous_row_captured_to_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -513,7 +503,6 @@ async def test_single_sheet_ambiguous_row_captured_to_otros(
     assert records[0].row_data["producto"] == "Coca Cola"
 
 
-@pytest.mark.asyncio
 async def test_multisheet_ambiguous_row_captured_to_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -548,7 +537,6 @@ async def test_multisheet_ambiguous_row_captured_to_otros(
     assert records[0].row_data["producto"] == "Coca Cola"
 
 
-@pytest.mark.asyncio
 async def test_confirm_endpoint_ambiguous_product_warns_via_otros(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -610,7 +598,6 @@ async def test_confirm_endpoint_ambiguous_product_warns_via_otros(
 # ── FIX 2 (Alto): fallback normalizado tolerante (índices pre-cargados) ───────
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_normalized_variant_updates_existing_no_duplicate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -643,7 +630,6 @@ async def test_single_sheet_normalized_variant_updates_existing_no_duplicate(
     assert products[0].stock_units == 50
 
 
-@pytest.mark.asyncio
 async def test_multisheet_normalized_variant_updates_existing_no_duplicate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -677,7 +663,6 @@ async def test_multisheet_normalized_variant_updates_existing_no_duplicate(
     assert products[0].sale_price_ars == Decimal("1500")
 
 
-@pytest.mark.asyncio
 async def test_two_normalized_variants_same_norm_is_ambiguous(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -716,7 +701,6 @@ async def test_two_normalized_variants_same_norm_is_ambiguous(
 # ── FIX 5.4/5.5: aislamiento entre tenants + productos inactivos ──────────────
 
 
-@pytest.mark.asyncio
 async def test_same_name_in_other_tenant_is_not_a_candidate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -762,7 +746,6 @@ async def test_same_name_in_other_tenant_is_not_a_candidate(
     assert products[0].sale_price_ars == Decimal("1500")
 
 
-@pytest.mark.asyncio
 async def test_inactive_product_does_not_cause_false_ambiguity(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -803,7 +786,6 @@ async def test_inactive_product_does_not_cause_false_ambiguity(
 # ── FIX 3 (Medio) / FIX 5.6: trazabilidad del log estructurado ────────────────
 
 
-@pytest.mark.asyncio
 async def test_ambiguous_log_includes_row_ref_candidate_ids_and_strategy(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -840,7 +822,6 @@ async def test_ambiguous_log_includes_row_ref_candidate_ids_and_strategy(
     assert "uploaded_file_id" in event
 
 
-@pytest.mark.asyncio
 async def test_load_product_identity_indexes_and_resolve_helper_unit(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

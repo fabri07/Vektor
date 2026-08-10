@@ -202,6 +202,64 @@ export interface ShippingDecision {
   action: ShippingAction;
 }
 
+/**
+ * F-H6.d — cómo queda repartido el envío de cada comprobante, **según el
+ * servidor**.
+ *
+ * Todos los montos llegan como string decimal y se muestran tal cual: el
+ * frontend NO recalcula el reparto. Si lo hiciera podría mostrar una división
+ * distinta de la que se va a persistir, y el usuario estaría aprobando una
+ * pantalla que no es lo que pasó — el mismo defecto que el catálogo de campos
+ * duplicado.
+ */
+export type PurchaseGroupBlockReason =
+  | "sin_identidad_de_comprobante"
+  | "cifras_distintas_de_envio"
+  | "sin_envio_compartido";
+
+export interface PurchaseGroupLine {
+  row_index: number;
+  producto: string | null;
+  subtotal: string;
+  envio_asignado: string;
+  costo_total: string;
+  /** `null` cuando la línea no trae cantidad: sin unidades no hay costo unitario. */
+  costo_unitario_final: string | null;
+}
+
+export interface PurchaseGroupItem {
+  comprobante: string | null;
+  proveedor: string | null;
+  subtotal: string;
+  envio_compartido: string;
+  repartido: string;
+  sin_repartir: string;
+  distribuible: boolean;
+  /** Código de `PurchaseGroupBlockReason`; la UI lo traduce a castellano llano. */
+  motivo_no_distribuible: string | null;
+  lineas: PurchaseGroupLine[];
+}
+
+export interface SheetPurchaseGroups {
+  context_id: string;
+  /** Nombre legible de la hoja, nunca el `context_id` crudo. */
+  label: string;
+  puede_distribuir: boolean;
+  motivo: string | null;
+  /**
+   * Total REAL de comprobantes. `grupos` puede venir ACOTADO: comparar contra
+   * esto antes de decir "estos son todos" — truncar sin avisar se lee como que
+   * lo mostrado es todo el archivo.
+   */
+  grupos_total: number;
+  grupos: PurchaseGroupItem[];
+  filas_sin_comprobante: number;
+}
+
+export interface PurchaseGroupsResponse {
+  sheets: SheetPurchaseGroups[];
+}
+
 export interface ConfirmIngestionResult {
   file_id: string;
   status: string;
@@ -248,6 +306,17 @@ export interface FieldCatalogEntry {
   label: string;
   /** Solo UNA columna puede apuntarle: dos no se pueden desempatar sin inventar. */
   single_value: boolean;
+  /**
+   * F-C: POR QUÉ el importador necesita este campo, redactado como consecuencia
+   * ("la fila que no lo traiga queda en «Otros»"), no como imperativo. Lo escribe
+   * el backend porque es consecuencia de una regla del IMPORTADOR: si mañana una
+   * fila sin fecha deja de ir a «Otros», el texto tiene que cambiar allá y no en
+   * una pantalla.
+   *
+   * Cadena vacía cuando no hay motivo escrito. Opcional para que un backend
+   * anterior a F-C siga deserializando sin romper la pantalla.
+   */
+  required_reason?: string;
 }
 
 export interface EntityFieldCatalog {
@@ -610,6 +679,44 @@ export const ingestionService = {
       { signal },
     );
     return res.data;
+  },
+
+  /**
+   * F-H6.d: cómo agruparía Véktor las líneas de compra por comprobante y cómo
+   * repartiría el envío compartido, con el mapeo y las decisiones borrador.
+   * Read-only.
+   *
+   * Las DOS decisiones van en el cuerpo porque las dos cambian el resultado: la
+   * de costo decide si el envío se reparte o queda como gasto aparte, y la de
+   * envío (F-H6.b) decide si una hoja sin número de comprobante puede formar un
+   * grupo. Sin ellas el preview mostraría el reparto de una configuración que el
+   * usuario no eligió.
+   */
+  async fetchPurchaseGroups(
+    fileId: string,
+    body: {
+      columnMappings: ColumnMapping[];
+      contextEntity: Record<string, string>;
+      confirmedFields: Record<string, boolean>;
+      contextConfirmed: Record<string, boolean>;
+      shippingDecisions: ShippingDecision[];
+      purchaseCostDecisions: PurchaseCostDecision[];
+    },
+    signal?: AbortSignal,
+  ): Promise<SheetPurchaseGroups[]> {
+    const res = await api.post<PurchaseGroupsResponse>(
+      `/ingestion/files/${fileId}/purchase-groups`,
+      {
+        column_mappings: body.columnMappings,
+        context_entity: body.contextEntity,
+        confirmed_fields: body.confirmedFields,
+        context_confirmed: body.contextConfirmed,
+        shipping_decisions: body.shippingDecisions,
+        purchase_cost_decisions: body.purchaseCostDecisions,
+      },
+      { signal },
+    );
+    return res.data.sheets;
   },
 
   // F8c: recalcula el riesgo contextual de columnas en vivo (p. ej. tras

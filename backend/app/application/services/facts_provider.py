@@ -40,6 +40,7 @@ from app.domain.business_time import AR_TZ
 from app.domain.verticals import Vertical
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.repositories._expense_scope import gasto_de_resultado
 
 
 def _naive_ar(value: datetime | None) -> datetime | None:
@@ -126,6 +127,9 @@ async def load_facts_frames(
         ExpenseEntry.voided_at.is_(None),
         func.date(ExpenseEntry.transaction_date) >= start,
         func.date(ExpenseEntry.transaction_date) <= end,
+        # Alimenta margen neto y gastos por categoría, que conviven con el
+        # valor del stock: el flete capitalizado no se cuenta dos veces.
+        gasto_de_resultado(ExpenseEntry.custom_fields),
     )
     expense_rows = (await session.execute(expenses_q)).all()
     expenses_df = pd.DataFrame(

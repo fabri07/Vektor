@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom";
 import React from "react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { InventoryImpactPanel } from "../InventoryImpactPanel";
 import { ingestionService } from "@/services/ingestion.service";
@@ -48,13 +49,29 @@ function resultado(over: Partial<InventoryReplayResult> = {}): InventoryReplayRe
   };
 }
 
+let queryClient: QueryClient;
+
 beforeEach(() => {
   applyMock.mockReset();
+  // El panel consume `useQueryClient` para invalidar el stock después de
+  // aplicar, así que necesita el provider. Cliente nuevo por test: uno
+  // compartido arrastraría el caché (y los espías) de un test al siguiente.
+  queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
 });
+
+function montar(props: React.ComponentProps<typeof InventoryImpactPanel>) {
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <InventoryImpactPanel {...props} />
+    </QueryClientProvider>,
+  );
+}
 
 describe("InventoryImpactPanel", () => {
   it("sin fileId no ofrece aplicar: el panel es sólo informativo", () => {
-    render(<InventoryImpactPanel items={CON_VENTAS} total={1} />);
+    montar({ items: CON_VENTAS, total: 1 });
 
     expect(screen.getByText(/no se modificó/i)).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
@@ -63,7 +80,7 @@ describe("InventoryImpactPanel", () => {
   it("no ofrece aplicar cuando el archivo no trae ventas", () => {
     // Sólo compras: ya subieron el stock al confirmar. Un botón acá prometería
     // una operación que no tiene nada que hacer.
-    render(<InventoryImpactPanel items={SOLO_COMPRAS} total={1} fileId="f1" />);
+    montar({ items: SOLO_COMPRAS, total: 1, fileId: "f1" });
 
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
@@ -87,7 +104,7 @@ describe("InventoryImpactPanel", () => {
     applyMock
       .mockResolvedValueOnce(resultado({ aplicadas: 0, dry_run: true }))
       .mockResolvedValueOnce(resultado({ aplicadas: 1 }));
-    render(<InventoryImpactPanel items={CON_VENTAS} total={1} fileId="f1" />);
+    montar({ items: CON_VENTAS, total: 1, fileId: "f1" });
 
     await elegirHojas();
     expect(applyMock).toHaveBeenNthCalledWith(1, "f1", { dryRun: true });
@@ -110,7 +127,7 @@ describe("InventoryImpactPanel", () => {
     applyMock.mockResolvedValueOnce(
       resultado({ dry_run: true, hojas: ["sheet:enero", "sheet:febrero"] }),
     );
-    render(<InventoryImpactPanel items={CON_VENTAS} total={1} fileId="f1" />);
+    montar({ items: CON_VENTAS, total: 1, fileId: "f1" });
 
     fireEvent.click(screen.getByRole("button", { name: /elegir qué ventas/i }));
     await waitFor(() =>
@@ -147,7 +164,7 @@ describe("InventoryImpactPanel", () => {
         ],
       }),
     );
-    render(<InventoryImpactPanel items={CON_VENTAS} total={1} fileId="f1" />);
+    montar({ items: CON_VENTAS, total: 1, fileId: "f1" });
 
     await elegirHojas();
     fireEvent.click(screen.getByRole("button", { name: /aplicar las ventas/i }));
@@ -158,5 +175,51 @@ describe("InventoryImpactPanel", () => {
     expect(
       screen.getByText(/se vendieron 4 y quedaban 1/i),
     ).toBeInTheDocument();
+  });
+
+  it("invalida el stock cacheado después de aplicar", async () => {
+    // Aplicar escribe movimientos y mueve `stock_units` del lado servidor. Sin
+    // invalidar, /products y el resto siguen mostrando el número de antes: la
+    // pantalla contradice a la operación que el propio panel acaba de hacer.
+    applyMock
+      .mockResolvedValueOnce(resultado({ aplicadas: 0, dry_run: true }))
+      .mockResolvedValueOnce(resultado({ aplicadas: 1 }));
+    const invalidar = jest.spyOn(queryClient, "invalidateQueries");
+    montar({ items: CON_VENTAS, total: 1, fileId: "f1" });
+
+    await elegirHojas();
+    fireEvent.click(screen.getByRole("button", { name: /aplicar las ventas/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/se descontó 1 venta/i)).toBeInTheDocument(),
+    );
+    const invalidadas = invalidar.mock.calls.map(([arg]) =>
+      JSON.stringify(arg?.queryKey),
+    );
+    for (const clave of [
+      ["products-list"],
+      ["products-all"],
+      ["inventory"],
+      ["inventory-effects"],
+      ["ingestion-files"],
+    ]) {
+      expect(invalidadas).toContain(JSON.stringify(clave));
+    }
+  });
+
+  it("no invalida nada si el apply falló", async () => {
+    // Nada cambió del lado servidor: refetchear acá haría parecer que la
+    // operación tuvo efecto y taparía el error con datos que ya estaban bien.
+    applyMock
+      .mockResolvedValueOnce(resultado({ aplicadas: 0, dry_run: true }))
+      .mockRejectedValueOnce(new Error("500"));
+    const invalidar = jest.spyOn(queryClient, "invalidateQueries");
+    montar({ items: CON_VENTAS, total: 1, fileId: "f1" });
+
+    await elegirHojas();
+    fireEvent.click(screen.getByRole("button", { name: /aplicar las ventas/i }));
+
+    await waitFor(() => expect(applyMock).toHaveBeenCalledTimes(2));
+    expect(invalidar).not.toHaveBeenCalled();
   });
 });

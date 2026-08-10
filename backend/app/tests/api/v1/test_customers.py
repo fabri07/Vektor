@@ -7,7 +7,6 @@ Cubre:
 - Venta vinculada a cliente: POST /sales con customer_id y GET /sales?customer_id.
 """
 
-import uuid
 from datetime import date
 from typing import Any
 
@@ -46,177 +45,12 @@ def _person(name: str, **extra: Any) -> dict[str, Any]:
     return base
 
 
-def _key() -> str:
-    return str(uuid.uuid4())
+
+# El CRUD común (create/requires-name/list/get/404/patch/soft-delete/aislamiento
+# de tenants) y la idempotencia HTTP viven parametrizados por entidad en
+# test_master_crud.py y test_idempotency.py. Acá solo lo específico de clientes.
 
 
-@pytest.mark.asyncio
-class TestCustomersCRUD:
-    @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger):
-        pass
-
-    async def test_create_customer(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=auth_headers
-        )
-        assert resp.status_code == 201
-        body = resp.json()
-        assert body["name"] == "Cliente Uno"
-        assert body["email"] == "uno@example.com"
-        assert body["telegram_username"] == "@cliente_uno"
-        assert body["is_active"] is True
-        assert body["custom_fields"] == {}
-        assert "id" in body and "tenant_id" in body
-
-    async def test_create_requires_name(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.post("/api/v1/customers", json={"name": ""}, headers=auth_headers)
-        assert resp.status_code == 422
-
-    async def test_list_customers(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        await client.post(
-            "/api/v1/customers", json=_person("A"), headers=auth_headers
-        )
-        await client.post(
-            "/api/v1/customers", json=_person("B"), headers=auth_headers
-        )
-        resp = await client.get("/api/v1/customers", headers=auth_headers)
-        assert resp.status_code == 200
-        names = {c["name"] for c in resp.json()}
-        assert {"A", "B"} <= names
-
-    async def test_get_customer(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        created = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=auth_headers
-        )
-        cid = created.json()["id"]
-        resp = await client.get(f"/api/v1/customers/{cid}", headers=auth_headers)
-        assert resp.status_code == 200
-        assert resp.json()["id"] == cid
-
-    async def test_get_customer_404(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.get(f"/api/v1/customers/{uuid.uuid4()}", headers=auth_headers)
-        assert resp.status_code == 404
-
-    async def test_patch_customer(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        created = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=auth_headers
-        )
-        cid = created.json()["id"]
-        resp = await client.patch(
-            f"/api/v1/customers/{cid}",
-            json={"name": "Cliente Renombrado", "phone": "+54 11 9999-0000"},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["name"] == "Cliente Renombrado"
-        assert body["phone"] == "+54 11 9999-0000"
-        # Campo no enviado queda intacto.
-        assert body["email"] == "uno@example.com"
-
-    async def test_soft_delete_customer(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        created = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=auth_headers
-        )
-        cid = created.json()["id"]
-        resp = await client.delete(f"/api/v1/customers/{cid}", headers=auth_headers)
-        assert resp.status_code == 200
-        assert resp.json()["message"] == "Customer deactivated."
-        # El detalle del inactivo sigue siendo abrible (historial read-only + reactivar).
-        detail = await client.get(f"/api/v1/customers/{cid}", headers=auth_headers)
-        assert detail.status_code == 200
-        assert detail.json()["is_active"] is False
-        # La lista por defecto lo excluye; con include_inactive aparece.
-        listed = await client.get("/api/v1/customers", headers=auth_headers)
-        assert cid not in {c["id"] for c in listed.json()}
-        listed_all = await client.get(
-            "/api/v1/customers?include_inactive=true", headers=auth_headers
-        )
-        assert cid in {c["id"] for c in listed_all.json()}
-
-
-@pytest.mark.asyncio
-class TestCustomersIdempotency:
-    @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger):
-        pass
-
-    async def test_post_without_header_works(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        resp = await client.post(
-            "/api/v1/customers", json=_person("Sin Header"), headers=auth_headers
-        )
-        assert resp.status_code == 201
-
-    async def test_replay_returns_409_and_no_duplicate(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        key = _key()
-        headers = {**auth_headers, "Idempotency-Key": key}
-
-        before = await client.get("/api/v1/customers", headers=auth_headers)
-        count_before = len(before.json())
-
-        first = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=headers
-        )
-        assert first.status_code == 201
-
-        second = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=headers
-        )
-        assert second.status_code == 409
-        assert second.json()["detail"] == {"code": "DUPLICATE_IDEMPOTENT"}
-
-        after = await client.get("/api/v1/customers", headers=auth_headers)
-        assert len(after.json()) == count_before + 1
-
-
-@pytest.mark.asyncio
-class TestCustomersTenantIsolation:
-    @pytest.fixture(autouse=True)
-    def patch_celery(self, mock_score_trigger):
-        pass
-
-    async def test_other_tenant_cannot_see_or_access(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        second_auth_headers: dict[str, Any],
-    ) -> None:
-        created = await client.post(
-            "/api/v1/customers", json=_CUSTOMER_PAYLOAD, headers=auth_headers
-        )
-        cid = created.json()["id"]
-
-        # El segundo tenant no lo ve en su listado…
-        other_list = await client.get("/api/v1/customers", headers=second_auth_headers)
-        assert cid not in {c["id"] for c in other_list.json()}
-
-        # …ni lo puede leer por id (404, no 403, para no filtrar existencia).
-        other_get = await client.get(
-            f"/api/v1/customers/{cid}", headers=second_auth_headers
-        )
-        assert other_get.status_code == 404
-
-
-@pytest.mark.asyncio
 class TestSaleCustomerLink:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -278,7 +112,6 @@ class TestSaleCustomerLink:
 _VALID_CUIT = "20-12345678-6"
 
 
-@pytest.mark.asyncio
 class TestCustomerFiscalValidation:
     """Validación fiscal del alta manual: identidad + documento + celular."""
 
@@ -361,7 +194,6 @@ class TestCustomerFiscalValidation:
         assert resp.status_code == 422
 
 
-@pytest.mark.asyncio
 class TestLocalSentinel:
     """Centinela "Local": get-or-create único, excluido de métricas, protegido."""
 
@@ -508,7 +340,6 @@ class TestLocalSentinel:
         assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 class TestFiadoRequiresRealCustomer:
     """Fiado (``payment_method='account'``) exige cliente real, nunca "Local"."""
 
@@ -582,7 +413,6 @@ class TestFiadoRequiresRealCustomer:
         assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 class TestCustomerRepositorySentinelExclusion:
     """El centinela no cuenta como cliente activo ni entra en "inactivos"."""
 

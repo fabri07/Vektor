@@ -14,7 +14,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -142,7 +141,6 @@ async def _otros(db_session: AsyncSession, tenant: Tenant) -> list[UnclassifiedR
     return list(result.scalars().all())
 
 
-@pytest.mark.asyncio
 class TestElMontoSeCalcula:
     async def test_multihoja_sin_columna_de_monto(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -223,7 +221,6 @@ def _fila_trampa() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 class TestLaHeuristicaNoSePisaConElMapeo:
     """Una columna declarada a mano no puede releerse como otra cosa.
 
@@ -340,7 +337,6 @@ class TestLaHeuristicaNoSePisaConElMapeo:
         assert (venta.custom_fields or {})[AMOUNT_ORIGINAL_FIELD] == "400"
 
 
-@pytest.mark.asyncio
 class TestDiscrepancia:
     async def test_el_monto_del_archivo_no_cuadra_gana_el_calculo(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -380,7 +376,6 @@ class TestDiscrepancia:
         assert AMOUNT_SOURCE_FIELD not in (venta.custom_fields or {})
 
 
-@pytest.mark.asyncio
 class TestLoQueNoHabilitaElCalculo:
     async def test_solo_precio_unitario_no_inventa_una_venta(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -443,7 +438,6 @@ class TestLoQueNoHabilitaElCalculo:
         assert cf["amount"] == "400"  # el dato se guarda igual, como campo propio
 
 
-@pytest.mark.asyncio
 class TestLaFilaQueNoSeResuelve:
     async def test_una_fila_incompleta_no_arrastra_a_las_demas(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -526,7 +520,6 @@ class TestLaFilaQueNoSeResuelve:
         ).lower()
 
 
-@pytest.mark.asyncio
 class TestF10Intacto:
     async def test_el_precio_unitario_nunca_sale_del_monto(
         self, db_session: AsyncSession, sample_tenant: Tenant

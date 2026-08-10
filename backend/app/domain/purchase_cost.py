@@ -68,13 +68,71 @@ COST_BASES: frozenset[str] = frozenset({BASE_INCLUYE, BASE_APLICAR})
 #: namespace con los campos propios que mapeó el usuario, cuyas claves salen de los
 #: headers y nunca arrancan con guión bajo.
 COSTO_BASE_FIELD = "_vektor_costo_base"
+
+#: Valores de ``COSTO_BASE_FIELD`` en el PRODUCTO. Sin esto, comparar dos costos
+#: es comparar cosas distintas sin saberlo: un costo de 110 con el flete adentro y
+#: uno de 100 facturado describen la misma compra, y el segundo no es más barato.
+#: La ausencia de la clave significa «no sé», que NO es lo mismo que ``SIN_FLETE``.
+CON_FLETE = "con_flete"
+SIN_FLETE = "sin_flete"
 DESCUENTO_FIELD = "_vektor_descuento"
 IMPUESTOS_FIELD = "_vektor_impuestos"
 ENVIO_ASIGNADO_FIELD = "_vektor_envio_asignado"
 COSTO_UNITARIO_FINAL_FIELD = "_vektor_costo_unitario_final"
 
+#: Marca en ``custom_fields`` del GASTO de flete cuyo importe ya entró al costo del
+#: stock. No lleva el prefijo ``_vektor_`` porque no es traza de una fila importada
+#: sino un hecho que los agregados tienen que leer: la plata salió de la caja (y el
+#: gasto se registra igual, si no la reversa del archivo no tendría qué revertir),
+#: pero descontarla del RESULTADO además de tenerla capitalizada en el inventario
+#: la contaría dos veces. Los agregados de caja NO lo filtran, a propósito.
+ATRIBUIDO_A_INVENTARIO_FIELD = "attributed_to_inventory"
+
 #: Por qué una cifra compartida no se pudo repartir aunque el usuario lo pidió.
 MOTIVO_SIN_BASE = "sin_base_para_repartir"
+
+
+def debe_pisar_costo_de_referencia(
+    *,
+    entrante_incluye_flete: bool | None,
+    guardado_incluye_flete: str | None,
+    costo_guardado: Decimal | None,
+) -> bool:
+    """¿Esta compra puede reemplazar el costo de referencia que ya tenía el producto?
+
+    **V5.** Hasta acá la respuesta era «siempre», y eso rompe el caso más común de
+    todos: el mismo producto entra una vez con el flete implícito en el precio
+    (110, porque el proveedor no lo desglosa) y después con el flete desglosado
+    (100 facturado + envío aparte). El costo "baja" de 110 a 100 sin que nada se
+    haya abaratado — cambió el formato de la planilla, nada más. Y el margen que
+    se calcula contra ese costo pasa a mentir.
+
+    La decisión NO se puede tomar mirando sólo la columna entrante: hay que saber
+    qué contiene el costo que ya está guardado. De ahí que la procedencia se
+    escriba junto con el costo (ver ``COSTO_BASE_FIELD``).
+
+    ===========================  ======================  ======
+    costo entrante               costo guardado          ¿pisa?
+    ===========================  ======================  ======
+    incluye flete                cualquiera              sí
+    sin flete / desconocido      ``con_flete``           no
+    sin flete / desconocido      ``sin_flete`` / no sé   sí
+    cualquiera                   sin costo               sí
+    ===========================  ======================  ======
+
+    La última fila es un control obligatorio, no una cortesía: sin ella el guard
+    apagaría la carga inicial de costos y el stock quedaría valuado en cero. Un
+    costo guardado de ``0`` cuenta como «sin costo» — no es un precio de compra
+    válido, es el placeholder de un producto incompleto.
+    """
+    if costo_guardado is None or costo_guardado <= 0:
+        return True
+    if entrante_incluye_flete:
+        return True
+    # El entrante no incluye flete (o no se sabe) y el guardado sí: pisarlo
+    # cambiaría el costo por uno que describe menos cosas. Ante la duda, se
+    # conserva — el precio facturado de esta compra igual queda en su movimiento.
+    return guardado_incluye_flete != CON_FLETE
 
 
 @dataclass(frozen=True)
@@ -104,6 +162,11 @@ class LineCost:
     base: Decimal
     #: Parte de la cifra COMPARTIDA que le tocó. ``0`` si no se distribuyó.
     shipping_allocated: Decimal
+    #: Envío propio de la línea que SE CAPITALIZÓ (``0`` con ``gasto_aparte``).
+    #: Se expone aparte de ``total`` porque el importador necesita poder afirmar
+    #: si el costo incluye flete, y desde el total no se puede reconstruir: un
+    #: `propio` de 0 y un modo `gasto_aparte` dan el mismo número.
+    shipping_line_applied: Decimal
     #: ``base`` + el envío de línea (si se capitaliza) + lo asignado.
     total: Decimal
     #: ``total / quantity``. ``None`` sin cantidad: no se inventa un divisor.
@@ -221,6 +284,7 @@ def build_line_costs(
                 row_index=row_index,
                 base=base,
                 shipping_allocated=asignado,
+                shipping_line_applied=propio,
                 total=total,
                 unit_cost_final=(
                     (total / line.quantity).quantize(CENTAVO, rounding=ROUND_HALF_UP)

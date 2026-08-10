@@ -9,30 +9,11 @@ from app.application.agents.shared.risk_engine import (  # type: ignore[attr-def
 from app.application.agents.shared.schemas import ActionType
 from app.domain.verticals import Vertical
 
-
-def test_all_agents_importable():
-    from app.application.agents.cash.agent import AgentCash
-    from app.application.agents.ceo.agent import AgentCEO
-    from app.application.agents.expense.agent import AgentExpense
-    from app.application.agents.google.agent import AgentGoogle
-    from app.application.agents.health.agent import AgentHealth
-    from app.application.agents.helper.agent import AgentHelper
-    from app.application.agents.income.agent import AgentIncome
-    from app.application.agents.stock.agent import AgentStock
-    from app.application.agents.supplier.agent import AgentSupplier
-
-    for cls in (
-        AgentCEO,
-        AgentCash,
-        AgentIncome,
-        AgentExpense,
-        AgentGoogle,
-        AgentStock,
-        AgentSupplier,
-        AgentHealth,
-        AgentHelper,
-    ):
-        assert cls.agent_name is not None
+# (El smoke de importabilidad de los 9 agentes se borró: cualquier test real de
+# cada agente ya falla si su import rompe, y el registry lo cubre en
+# test_agent_registry-style suites. Los tests de RiskEngine y presupuestos de
+# contexto de abajo NO son smoke — son el contrato que CLAUDE.md exige tocar
+# junto con ActionType.)
 
 
 def test_risk_engine_low_actions():

@@ -13,7 +13,6 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,7 +114,6 @@ async def _efectos(
     return {hoja["context_id"]: hoja for hoja in response.json()}
 
 
-@pytest.mark.asyncio
 class TestEfectoPropuestoPorHoja:
     async def test_cada_hoja_trae_su_default_y_sus_opciones(
         self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
@@ -203,7 +201,6 @@ class TestEfectoPropuestoPorHoja:
         assert response.status_code in (401, 403)
 
 
-@pytest.mark.asyncio
 class TestLaDecisionDeEnvioApuntaAUnaHojaConEnvio:
     """F-H6.b: una decisión que no se puede honrar no se ignora en silencio.
 

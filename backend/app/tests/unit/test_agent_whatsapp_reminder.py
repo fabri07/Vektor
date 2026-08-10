@@ -12,8 +12,6 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.application.agents.shared.schemas import (
     ActionType,
     AgentRequest,
@@ -50,7 +48,6 @@ def _mock_customer(*, name: str = "Juan", phone: str | None = _PHONE) -> MagicMo
 # ── Sin DB → amigable, no revienta ───────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sin_db_devuelve_mensaje_amigable():
     from app.application.agents.client.agent import AgentClient
 
@@ -65,7 +62,6 @@ async def test_sin_db_devuelve_mensaje_amigable():
 # ── Con deudor (balance>0, phone) → requires_approval ────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_con_deudor_emite_requires_approval():
     """El mayor deudor con phone → requires_approval con structured_data correcto."""
     from app.application.agents.client.agent import AgentClient
@@ -118,7 +114,6 @@ async def test_con_deudor_emite_requires_approval():
     )
 
 
-@pytest.mark.asyncio
 async def test_body_determinista_contiene_nombre_y_monto():
     """El cuerpo es determinístico: incluye nombre y saldo formateado AR."""
     from app.application.agents.client.agent import AgentClient
@@ -161,7 +156,6 @@ async def test_body_determinista_contiene_nombre_y_monto():
 # ── Cliente nombrado con balance = 0 → no-invention (Finding 2) ──────────────
 
 
-@pytest.mark.asyncio
 async def test_cliente_nombrado_con_balance_cero_no_crea_pending():
     """Cliente específico resuelto por id pero con balance=0 → success sin PendingAction.
 
@@ -208,7 +202,6 @@ async def test_cliente_nombrado_con_balance_cero_no_crea_pending():
 # ── Sin deudores → no-invention ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sin_deudores_no_invention():
     """Sin deudores → status success, mensaje claro, sin requires_approval."""
     from app.application.agents.client.agent import AgentClient
@@ -243,7 +236,6 @@ async def test_sin_deudores_no_invention():
     assert "pendiente" in (resp.message or "").lower()
 
 
-@pytest.mark.asyncio
 async def test_balances_vacios_no_invention():
     """Lista de balances vacía → no-invention, sin requires_approval."""
     from app.application.agents.client.agent import AgentClient
@@ -275,7 +267,6 @@ async def test_balances_vacios_no_invention():
 # ── Deudor sin phone → requires_clarification ────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_deudor_sin_phone_pide_completar_ficha():
     """Cliente con saldo pero sin phone → requires_clarification, no crea PA."""
     from app.application.agents.client.agent import AgentClient

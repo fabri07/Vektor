@@ -15,7 +15,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -121,7 +120,6 @@ _MAPEO = {
 }
 
 
-@pytest.mark.asyncio
 class TestElPrecioUnitarioDeclarado:
     async def test_el_costo_del_producto_sale_del_target_mapeado(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -197,7 +195,6 @@ class TestElPrecioUnitarioDeclarado:
         assert (await _producto(db_session, sample_tenant)).unit_cost_ars is None
 
 
-@pytest.mark.asyncio
 class TestElMontoDeUnaCompraTambienSeCalcula:
     """F-H4 para compras: existía la fórmula, faltaban los campos."""
 
@@ -314,7 +311,6 @@ async def _logistica(db: AsyncSession, tenant: Tenant) -> list[ExpenseEntry]:
     return list(filas)
 
 
-@pytest.mark.asyncio
 class TestElEnvioSeCobraUnaVez:
     async def test_diez_lineas_del_mismo_remito_son_un_solo_envio(
         self, db_session: AsyncSession, sample_tenant: Tenant
@@ -401,7 +397,6 @@ class TestElEnvioSeCobraUnaVez:
         assert len(await _logistica(db_session, sample_tenant)) == 1
 
 
-@pytest.mark.asyncio
 class TestLasDosSalidasSinComprobante:
     """Sin comprobante el usuario decide, y su decisión llega hasta los gastos.
 

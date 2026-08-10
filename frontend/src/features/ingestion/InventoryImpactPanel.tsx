@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/Button";
 import { useToastStore } from "@/stores/toastStore";
@@ -29,6 +30,23 @@ import { ingestionService } from "@/services/ingestion.service";
  * contra el stock del momento — no el de esta tabla, que puede haber quedado
  * vieja si entre el import y el clic pasó cualquier otra cosa.
  */
+
+/**
+ * Lo que deja de ser cierto cuando el replay descuenta las ventas.
+ *
+ * Aplicar escribe `InventoryMovement` y mueve `product.stock_units`, así que
+ * todo lo que muestre stock queda sirviendo un número que el servidor ya
+ * cambió. Mismo molde que `INVALIDATE_KEYS` en `useOfflineSubmit`: la lista se
+ * escribe explícita en vez de invalidar todo, para no tirar cachés que esta
+ * operación no toca.
+ */
+const CLAVES_A_INVALIDAR = [
+  ["products-list"],
+  ["products-all"],
+  ["inventory"],
+  ["inventory-effects"],
+  ["ingestion-files"],
+];
 
 function formatearFecha(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -61,6 +79,7 @@ export function InventoryImpactPanel({
   const [elegidas, setElegidas] = useState<string[]>([]);
   const [descubriendo, setDescubriendo] = useState(false);
   const addToast = useToastStore((s) => s.add);
+  const queryClient = useQueryClient();
 
   if (items.length === 0) return null;
 
@@ -103,6 +122,13 @@ export function InventoryImpactPanel({
         contextIds: elegidas,
       });
       setResultado(res);
+      // Se invalida ante cualquier respuesta buena, sin mirar `aplicadas`: una
+      // venta contada como `ya_aplicadas` pudo haberse descontado recién, en
+      // vivo, por la otra rama. Refetchear de más cuesta una request; mostrar un
+      // stock viejo después de una operación que lo movió es un número mal.
+      for (const queryKey of CLAVES_A_INVALIDAR) {
+        void queryClient.invalidateQueries({ queryKey });
+      }
       addToast(
         res.aplicadas === 1
           ? "Se aplicó 1 venta al inventario."

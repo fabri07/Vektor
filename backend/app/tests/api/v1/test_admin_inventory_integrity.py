@@ -7,7 +7,6 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +41,6 @@ async def _superadmin_headers(db: AsyncSession, tenant: Tenant) -> dict[str, str
     return {"Authorization": f"Bearer {token}"}
 
 
-@pytest.mark.asyncio
 async def test_owner_forbidden(
     client: AsyncClient, auth_headers: dict[str, str], sample_tenant: Tenant
 ) -> None:
@@ -50,7 +48,6 @@ async def test_owner_forbidden(
     assert resp.status_code == 403
 
 
-@pytest.mark.asyncio
 async def test_reports_divergence_shaped_like_real_incident(
     client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -106,7 +103,6 @@ async def test_reports_divergence_shaped_like_real_incident(
     assert div["diff"] == 180
 
 
-@pytest.mark.asyncio
 async def test_no_products_returns_empty(
     client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

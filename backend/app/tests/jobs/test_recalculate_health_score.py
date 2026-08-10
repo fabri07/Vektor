@@ -11,7 +11,6 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
@@ -222,7 +221,6 @@ def _make_run(session: AsyncSession, redis: FakeRedis):
 # ── Test 1: job persists HealthScoreSnapshot ──────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_job_persists_health_score_snapshot(
     session: AsyncSession,
     tenant: Tenant,
@@ -265,7 +263,6 @@ async def test_job_persists_health_score_snapshot(
 # ── Test 2: job creates DecisionAuditLog entry ────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_job_creates_decision_audit_log_entry(
     session: AsyncSession,
     tenant: Tenant,
@@ -302,7 +299,6 @@ async def test_job_creates_decision_audit_log_entry(
 # ── Test 3: job updates best_score_ever on improvement ───────────────────────
 
 
-@pytest.mark.asyncio
 async def test_job_updates_best_score_ever(
     session: AsyncSession,
     tenant: Tenant,
@@ -344,7 +340,6 @@ async def test_job_updates_best_score_ever(
 # ── Test 4: concurrent jobs don't duplicate (Redis lock) ─────────────────────
 
 
-@pytest.mark.asyncio
 async def test_concurrent_jobs_dont_duplicate(
     tenant: Tenant,
     kiosco_profile: BusinessProfile,

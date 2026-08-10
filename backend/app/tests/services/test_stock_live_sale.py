@@ -88,7 +88,6 @@ async def _count_live_sale_movements(db: AsyncSession, sale_id: uuid.UUID) -> in
     )
 
 
-@pytest.mark.asyncio
 async def test_decrement_for_sale_lowers_stock_and_creates_one_movement(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -107,7 +106,6 @@ async def test_decrement_for_sale_lowers_stock_and_creates_one_movement(
     assert await _count_live_sale_movements(db_session, sale.id) == 1
 
 
-@pytest.mark.asyncio
 async def test_decrement_for_sale_is_idempotent(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -125,7 +123,6 @@ async def test_decrement_for_sale_is_idempotent(
     assert await _count_live_sale_movements(db_session, sale.id) == 1
 
 
-@pytest.mark.asyncio
 async def test_decrement_for_sale_noop_without_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -135,7 +132,6 @@ async def test_decrement_for_sale_noop_without_product(
     assert await decrement_for_sale(sale, db_session) is None
 
 
-@pytest.mark.asyncio
 async def test_decrement_for_sale_noop_when_voided(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -150,7 +146,6 @@ async def test_decrement_for_sale_noop_when_voided(
     assert product.stock_units == 5
 
 
-@pytest.mark.asyncio
 async def test_revert_sale_stock_restores_and_returns_bool(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -170,7 +165,6 @@ async def test_revert_sale_stock_restores_and_returns_bool(
     assert product.stock_units == 10
 
 
-@pytest.mark.asyncio
 async def test_revert_returns_false_for_sale_without_movement(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -184,7 +178,6 @@ async def test_revert_returns_false_for_sale_without_movement(
     assert product.stock_units == 10  # intacto
 
 
-@pytest.mark.asyncio
 async def test_decrement_for_sale_rejects_when_insufficient_stock(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -201,7 +194,6 @@ async def test_decrement_for_sale_rejects_when_insufficient_stock(
     assert await _count_live_sale_movements(db_session, sale.id) == 0
 
 
-@pytest.mark.asyncio
 async def test_check_stock_available_passes_and_raises(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -217,7 +209,6 @@ async def test_check_stock_available_passes_and_raises(
     assert exc.value.requested == 6
 
 
-@pytest.mark.asyncio
 async def test_validate_sale_update_stock_incremental(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -237,7 +228,6 @@ async def test_validate_sale_update_stock_incremental(
     await validate_sale_update_stock(sale.id, tid, product.id, 3, None, 0, db_session)
 
 
-@pytest.mark.asyncio
 async def test_chat_register_sale_insufficient_stock_raises_and_creates_nothing(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -290,7 +280,6 @@ async def test_chat_register_sale_insufficient_stock_raises_and_creates_nothing(
     assert product.stock_units == 2  # intacto
 
 
-@pytest.mark.asyncio
 async def test_decrement_for_sale_no_se_traga_violaciones_ajenas(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

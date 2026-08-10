@@ -83,7 +83,6 @@ def _mixed_customer_sale_summary() -> dict[str, Any]:
 # ── 1. Orden maestro→transacción ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_venta_matchea_cliente_creado_por_otra_hoja_del_mismo_archivo(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -120,7 +119,6 @@ async def test_venta_matchea_cliente_creado_por_otra_hoja_del_mismo_archivo(
 # ── 2. Venta sin columna de cliente → anonymous, SIN warning ──────────────────
 
 
-@pytest.mark.asyncio
 async def test_venta_sin_columna_de_cliente_es_anonymous_sin_marcar_para_revision(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -153,7 +151,6 @@ async def test_venta_sin_columna_de_cliente_es_anonymous_sin_marcar_para_revisio
 # ── 3. Venta con doc de cliente inexistente → unresolved + traza + warning ────
 
 
-@pytest.mark.asyncio
 async def test_venta_con_documento_de_cliente_inexistente_es_unresolved(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -208,7 +205,6 @@ def _merch_purchase_summary(supplier_name: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_compra_modo_legacy_sigue_creando_proveedor_por_nombre(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -233,7 +229,6 @@ async def test_compra_modo_legacy_sigue_creando_proveedor_por_nombre(
     assert not (expense.custom_fields or {}).get("_supplier_resolution")
 
 
-@pytest.mark.asyncio
 async def test_compra_modo_link_only_nunca_crea_proveedor_cae_a_sentinela(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -259,7 +254,6 @@ async def test_compra_modo_link_only_nunca_crea_proveedor_cae_a_sentinela(
     assert expense.custom_fields["_supplier_reference_raw"] == "Distribuidora Fantasma"
 
 
-@pytest.mark.asyncio
 async def test_compra_modo_link_only_matchea_proveedor_existente_por_cuil(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,7 +301,6 @@ async def test_compra_modo_link_only_matchea_proveedor_existente_por_cuil(
     assert expense.custom_fields["_supplier_resolution"] == "matched"
 
 
-@pytest.mark.asyncio
 async def test_compra_link_only_opex_sin_referencia_no_usa_sentinela(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -333,7 +326,6 @@ async def test_compra_link_only_opex_sin_referencia_no_usa_sentinela(
 # ── 5. Rollback integral ────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_rollback_integral_si_falla_una_etapa_no_persiste_nada(
     db_session: AsyncSession,
     sample_tenant: Tenant,

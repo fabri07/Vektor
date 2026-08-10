@@ -8,7 +8,6 @@ import json
 import uuid
 from unittest.mock import AsyncMock, patch
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,7 +79,6 @@ async def tenant_with_product_file(db_session: AsyncSession) -> tuple[uuid.UUID,
     return tid, str(f.id)
 
 
-@pytest.mark.asyncio
 async def test_rescue_product_attachment_maps_to_lista_precios(
     db_session, tenant_with_product_file
 ):
@@ -97,7 +95,6 @@ async def test_rescue_product_attachment_maps_to_lista_precios(
     assert entities == {"analysis_type": "lista"}
 
 
-@pytest.mark.asyncio
 async def test_rescue_no_attachment_uses_text(db_session):
     tid = uuid.uuid4()
     orch = ChatOrchestrator.__new__(ChatOrchestrator)
@@ -112,7 +109,6 @@ async def test_rescue_no_attachment_uses_text(db_session):
     assert entities == {"analysis_type": "margenes"}
 
 
-@pytest.mark.asyncio
 async def test_rescue_off_topic_out_of_scope(db_session):
     tid = uuid.uuid4()
     orch = ChatOrchestrator.__new__(ChatOrchestrator)
@@ -155,7 +151,6 @@ def _ceo_unknown_response() -> AgentResponse:
     )
 
 
-@pytest.mark.asyncio
 async def test_handle_e2e_price_attachment_not_out_of_scope(db_session, tenant_with_product_file):
     """E2E del incidente: CEO falla con intent_desconocido + adjunto de precios →
     handle() debe rescatar a analizar_precios, NO cortar con out_of_scope."""
@@ -260,7 +255,6 @@ def test_can_reuse_pending_file_excludes_manual_register():
     assert reuse("cargá esto") is True
 
 
-@pytest.mark.asyncio
 async def test_recall_skips_already_imported_file(db_session, tenant_with_imported_file):
     """#1(a): _recall_pending_files filtra archivos que ya tienen imported_counts."""
     tid, file_id = tenant_with_imported_file
@@ -280,7 +274,6 @@ async def test_recall_skips_already_imported_file(db_session, tenant_with_import
     assert recalled == []
 
 
-@pytest.mark.asyncio
 async def test_handle_does_not_reimport_already_imported_file(
     db_session, tenant_with_imported_file
 ):
@@ -374,7 +367,6 @@ async def test_handle_does_not_reimport_already_imported_file(
     assert captured_request.attachments == []
 
 
-@pytest.mark.asyncio
 async def test_handle_reuses_pending_file_for_import_turn(db_session, tenant_with_product_file):
     tid, file_id = tenant_with_product_file
     conv_id = str(uuid.uuid4())
@@ -435,7 +427,6 @@ async def test_handle_reuses_pending_file_for_import_turn(db_session, tenant_wit
     assert captured_request.attachments == [{"file_id": file_id, "filename": "lista.xlsx"}]
 
 
-@pytest.mark.asyncio
 async def test_handle_does_not_reuse_pending_file_when_topic_changes(
     db_session,
     tenant_with_product_file,
@@ -525,7 +516,6 @@ async def test_handle_does_not_reuse_pending_file_when_topic_changes(
     assert captured_request.attachments == []
 
 
-@pytest.mark.asyncio
 async def test_handle_unknown_off_topic_does_not_offer_pending_file(
     db_session,
     tenant_with_product_file,

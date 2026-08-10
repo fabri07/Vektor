@@ -26,7 +26,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,7 +52,6 @@ async def perfil_sin_ventas(
     return profile
 
 
-@pytest.mark.asyncio
 async def test_sin_ventas_no_registra_un_margen_de_cero(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -70,7 +68,6 @@ async def test_sin_ventas_no_registra_un_margen_de_cero(
     assert eventos[0].cash_ratio is None
 
 
-@pytest.mark.asyncio
 async def test_con_ventas_si_registra_el_margen(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -98,7 +95,6 @@ async def test_con_ventas_si_registra_el_margen(
     assert evento.cash_ratio is not None
 
 
-@pytest.mark.asyncio
 async def test_el_evento_nace_marcado_con_la_version_vigente(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -144,7 +140,6 @@ async def _sembrar_eventos(
     await db_session.commit()
 
 
-@pytest.mark.asyncio
 async def test_un_rubro_con_solo_eventos_viejos_no_llega_a_la_vista(
     db_session: AsyncSession,
 ) -> None:
@@ -164,7 +159,6 @@ async def test_un_rubro_con_solo_eventos_viejos_no_llega_a_la_vista(
     assert "kiosco_almacen" not in await repo.get_distinct_verticals()
 
 
-@pytest.mark.asyncio
 async def test_un_rubro_con_eventos_nuevos_si_llega_a_la_vista(
     db_session: AsyncSession,
 ) -> None:
@@ -182,7 +176,6 @@ async def test_un_rubro_con_eventos_nuevos_si_llega_a_la_vista(
     assert "kiosco_almacen" in await AnalyticsRepository(db_session).get_distinct_verticals()
 
 
-@pytest.mark.asyncio
 async def test_el_servicio_de_analytics_no_expone_un_benchmark(
     db_session: AsyncSession,
 ) -> None:

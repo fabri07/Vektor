@@ -87,7 +87,6 @@ def registro_abierto(monkeypatch: pytest.MonkeyPatch) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s1_kiosco_saludable(session: AsyncSession, fake_redis: FakeRedis) -> None:
     # ── Setup ─────────────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Kiosco El Rápido")
@@ -136,7 +135,6 @@ async def test_s1_kiosco_saludable(session: AsyncSession, fake_redis: FakeRedis)
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedis) -> None:
     # ── Setup ─────────────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Kiosco Ajustado")
@@ -186,7 +184,6 @@ async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedi
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s3_deco_hogar_margen_bajo(session: AsyncSession, fake_redis: FakeRedis) -> None:
     # ── Setup ─────────────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Deco Hogar Sur")
@@ -228,7 +225,6 @@ async def test_s3_deco_hogar_margen_bajo(session: AsyncSession, fake_redis: Fake
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s4_proveedor_unico(session: AsyncSession, fake_redis: FakeRedis) -> None:
     # ── Setup ─────────────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Kiosco Un Solo Proveedor")
@@ -266,7 +262,6 @@ async def test_s4_proveedor_unico(session: AsyncSession, fake_redis: FakeRedis) 
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s5_tenant_isolation(
     session: AsyncSession,
     fake_redis: FakeRedis,
@@ -370,7 +365,6 @@ async def test_s5_tenant_isolation(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s6_end_to_end(
     session: AsyncSession,
     fake_redis: FakeRedis,
@@ -454,7 +448,6 @@ async def test_s6_end_to_end(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s7_momentum_dos_semanas(session: AsyncSession, fake_redis: FakeRedis) -> None:
     # ── Setup tenant ──────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Kiosco Momentum")
@@ -595,7 +588,6 @@ async def test_s7_momentum_dos_semanas(session: AsyncSession, fake_redis: FakeRe
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
 async def test_s8_celery_task_run() -> None:
     from unittest.mock import AsyncMock, MagicMock, patch
 

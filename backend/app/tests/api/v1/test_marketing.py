@@ -29,7 +29,6 @@ def _metric(platform: str, **fields: Any) -> dict[str, Any]:
     return payload
 
 
-@pytest.mark.asyncio
 class TestMarketingCRUD:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -134,7 +133,6 @@ class TestMarketingCRUD:
         assert patch_other.status_code == 404
 
 
-@pytest.mark.asyncio
 class TestMarketingDashboard:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

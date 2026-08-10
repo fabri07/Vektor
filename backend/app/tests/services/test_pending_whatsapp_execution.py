@@ -16,8 +16,6 @@ import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.application.agents.shared.schemas import ActionType
 from app.application.services.pending_action_service import execute_pending_action
 
@@ -52,7 +50,6 @@ def _make_customer(tenant_id: uuid.UUID, phone: str = "5491100001111") -> MagicM
 # ── Ejecución exitosa ─────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_execute_whatsapp_escribe_logs_y_url():
     """Ejecución correcta: CommunicationLog + ExternalOperationLog + url en payload."""
     recipient_id = uuid.uuid4()
@@ -114,7 +111,6 @@ async def test_execute_whatsapp_escribe_logs_y_url():
     assert result["channel"] == "whatsapp"
 
 
-@pytest.mark.asyncio
 async def test_url_contiene_telefono_y_cuerpo():
     """El link wa.me debe contener el teléfono normalizado y el cuerpo encodeado."""
     recipient_id = uuid.uuid4()
@@ -150,7 +146,6 @@ async def test_url_contiene_telefono_y_cuerpo():
 # ── Cross-tenant (OBLIGATORIO) ────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_cross_tenant_falla_sin_logs():
     """recipient_id de otro tenant → execution_status=FAILED, sin CommunicationLog, sin ExtOpLog.
 

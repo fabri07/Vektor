@@ -8,10 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
 
-
-@pytest.mark.asyncio
 async def test_wf05_unknown_sender_no_db_blocked() -> None:
     """Sender desconocido sin db ni label → GMAIL_SKIPPED (False)."""
     from app.application.agents.supplier.preflight import gmail_preflight_check
@@ -26,7 +23,6 @@ async def test_wf05_unknown_sender_no_db_blocked() -> None:
     assert result is False
 
 
-@pytest.mark.asyncio
 async def test_wf05_registered_sender_passes() -> None:
     """Sender registrado en DB → True (pasa el preflight)."""
     from app.application.agents.supplier.preflight import gmail_preflight_check
@@ -46,7 +42,6 @@ async def test_wf05_registered_sender_passes() -> None:
     assert result is True
 
 
-@pytest.mark.asyncio
 async def test_vektor_label_passes_without_db() -> None:
     """Email con label 'Véktor' pasa sin importar el sender ni la DB."""
     from app.application.agents.supplier.preflight import gmail_preflight_check
@@ -61,7 +56,6 @@ async def test_vektor_label_passes_without_db() -> None:
     assert result is True
 
 
-@pytest.mark.asyncio
 async def test_vektor_label_without_tilde_passes() -> None:
     """Label 'Vektor' (sin tilde) también pasa."""
     from app.application.agents.supplier.preflight import gmail_preflight_check
@@ -76,7 +70,6 @@ async def test_vektor_label_without_tilde_passes() -> None:
     assert result is True
 
 
-@pytest.mark.asyncio
 async def test_user_requested_passes() -> None:
     """user_requested=True pasa siempre, independientemente del sender."""
     from app.application.agents.supplier.preflight import gmail_preflight_check

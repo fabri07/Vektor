@@ -5,8 +5,6 @@ import unittest.mock
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTeamPlan, LLMCall
 
 
@@ -28,7 +26,6 @@ def _mock_llm_response(intent: str, entities: dict[str, Any] | None = None) -> M
     return response
 
 
-@pytest.mark.asyncio
 async def test_ceo_classifies_sale_intent():
     """'vendí 100 pesos' debe clasificar como ingresar_venta."""
     with unittest.mock.patch(
@@ -52,7 +49,6 @@ async def test_ceo_classifies_sale_intent():
     assert result.result["target_agent"] == "agent_income"
 
 
-@pytest.mark.asyncio
 async def test_ceo_routes_to_correct_agent():
     """ingresar_venta debe enrutar a agent_income."""
     with unittest.mock.patch(
@@ -71,7 +67,6 @@ async def test_ceo_routes_to_correct_agent():
     assert result.result["target_agent"] == "agent_income"
 
 
-@pytest.mark.asyncio
 async def test_ceo_unknown_intent_goes_to_helper():
     """Intent inválido del LLM debe caer en intent_desconocido → agent_helper."""
     with unittest.mock.patch(
@@ -93,7 +88,6 @@ async def test_ceo_unknown_intent_goes_to_helper():
     assert result.result["target_agent"] == "agent_helper"
 
 
-@pytest.mark.asyncio
 async def test_ceo_plan_is_single_task():
     """El CEO retorna un plan con una sola tarea en Stage 1."""
     with unittest.mock.patch(
@@ -119,7 +113,6 @@ async def test_ceo_plan_is_single_task():
     assert plan.intent == "ingresar_gasto"
 
 
-@pytest.mark.asyncio
 async def test_ceo_expense_routes_correctly():
     """ingresar_gasto → agent_expense con ActionType REGISTER_EXPENSE."""
     with unittest.mock.patch(
@@ -149,7 +142,6 @@ def test_ceo_forbidden_imports():
         assert f not in module_names, f"AgentCEO importó módulo prohibido: {f}"
 
 
-@pytest.mark.asyncio
 async def test_prompt_injection_wrapped():
     """El mensaje del usuario debe estar envuelto en <user_message>...</user_message>."""
     captured_call: dict[str, Any] = {}
@@ -183,7 +175,6 @@ async def test_prompt_injection_wrapped():
     assert "</user_message>" in user_content
 
 
-@pytest.mark.asyncio
 async def test_ceo_uses_sonnet_model():
     """CEO usa claude-sonnet-4-6 para clasificar (upgrade de Haiku a Sonnet)."""
     captured_call: dict[str, Any] = {}
@@ -213,7 +204,6 @@ async def test_ceo_uses_sonnet_model():
     assert captured_call.get("model") == "claude-sonnet-4-6"
 
 
-@pytest.mark.asyncio
 async def test_ceo_prompt_includes_attachment_context_for_import():
     captured_call: dict[str, Any] = {}
 
@@ -244,7 +234,6 @@ async def test_ceo_prompt_includes_attachment_context_for_import():
     assert "importar_archivo_productos" in system
 
 
-@pytest.mark.asyncio
 async def test_ceo_process_passes_attachment_meta_to_classifier():
     from app.application.agents.ceo.agent import AgentCEO
 

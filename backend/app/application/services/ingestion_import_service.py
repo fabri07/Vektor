@@ -72,7 +72,18 @@ from app.domain.line_amount import (
     resolve_line_amount,
 )
 from app.domain.product_categories import normalize_product_category
-from app.domain.purchase_cost import CostLine, LineCost, build_line_costs
+from app.domain.purchase_cost import (
+    ATRIBUIDO_A_INVENTARIO_FIELD,
+    COMPARTIDO_SUBTOTAL,
+    CON_FLETE,
+    COSTO_BASE_FIELD,
+    LINEA_AL_COSTO,
+    SIN_FLETE,
+    CostLine,
+    LineCost,
+    build_line_costs,
+    debe_pisar_costo_de_referencia,
+)
 from app.domain.purchase_cost_decision import (
     AJUSTE_ILEGIBLE,
     PurchaseCostDecision,
@@ -81,7 +92,17 @@ from app.domain.purchase_cost_decision import (
     texto_del_ajuste_ilegible,
     texto_del_aviso,
 )
-from app.domain.purchase_shipping import ShippingLine, plan_shipping_charges
+from app.domain.purchase_group import (
+    GroupLine,
+    PurchaseGroupPlan,
+    build_purchase_groups,
+)
+from app.domain.purchase_shipping import (
+    ShippingCharge,
+    ShippingLine,
+    plan_line_shipping,
+    plan_shipping_charges,
+)
 from app.domain.text_norm import (
     normalize_barcode,
     normalize_brand,
@@ -681,7 +702,7 @@ async def _import_master_entities(
         mapping = (context_mappings or {}).get(ctx_id) or (
             column_mappings if ctx_id == "table" else None
         ) or {}
-        target_to_col, _ = _resolve_target_cols(mapping)
+        target_to_col, _, _ = _resolve_target_cols(mapping)
         if not target_to_col:
             continue  # sin mapeo explícito: no se adivina el shape de la fila
 
@@ -2029,6 +2050,9 @@ async def _apply_purchase_to_stock(
     product_cache: dict[uuid.UUID, Any] | None = None,
     source_type: str = SOURCE_PURCHASE_IMPORT,
     source_row_ref: str | None = None,
+    costo_final: Decimal | None = None,
+    costo_incluye_flete: bool | None = None,
+    product_details: list[dict[str, Any]] | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
 
@@ -2063,13 +2087,83 @@ async def _apply_purchase_to_stock(
     elif product.tenant_id != tenant_id:
         return
     product.stock_units += qty
-    if unit_cost is not None:
-        product.unit_cost_ars = unit_cost
+    # F-H6.d: son DOS preguntas distintas y hasta acá se respondían con el mismo
+    # número. `unit_cost` es lo que FACTURÓ el proveedor y queda en el movimiento
+    # (abajo); `costo_final` es lo que la mercadería costó de verdad una vez
+    # aplicados descuento, impuestos y el flete que se haya repartido, y es lo
+    # que corresponde como costo de referencia del producto. Pisar uno con otro
+    # perdía el precio facturado de esa compra, que no vive en ningún otro lado.
+    #
+    # Cada lado prefiere su propia verdad y cae al otro si el archivo no la trae:
+    # una planilla que sólo declara el total y la cantidad no dice cuál fue el
+    # precio facturado, y dejar el movimiento en NULL perdería el único número
+    # que hay sobre esa compra.
+    _costo_de_referencia = costo_final if costo_final is not None else unit_cost
+    _costo_facturado = unit_cost if unit_cost is not None else costo_final
+    # V5: una compra nueva no pisa un costo que incluía flete con uno que no lo
+    # incluye. Si no se pisa el costo, TAMPOCO se pisa la procedencia: quedarían
+    # describiendo cosas distintas.
+    _base_guardada = (product.custom_fields or {}).get(COSTO_BASE_FIELD)
+    if _costo_de_referencia is not None and debe_pisar_costo_de_referencia(
+        entrante_incluye_flete=costo_incluye_flete,
+        guardado_incluye_flete=_base_guardada,
+        costo_guardado=(
+            Decimal(str(product.unit_cost_ars))
+            if product.unit_cost_ars is not None
+            else None
+        ),
+    ):
+        # F11/h3: una compra que pisa el costo tiene que dejar cómo estaba antes.
+        # `product_details` sólo lo poblaba el camino de CATÁLOGO, así que un
+        # producto tocado únicamente por una hoja de compras quedaba con el costo
+        # pisado para siempre — y el DELETE respondía `fully_reverted: true`.
+        # Varios items del mismo archivo sobre el mismo producto no son un
+        # problema: la reversa restaura el `before` del PRIMERO (el estado previo
+        # al archivo) y compara el `after` del último.
+        if product_details is not None:
+            product_details.append(
+                {
+                    "action": "UPDATED",
+                    "product_id": str(product.id),
+                    "name": product.name,
+                    "before": {
+                        "unit_cost_ars": (
+                            str(product.unit_cost_ars)
+                            if product.unit_cost_ars is not None
+                            else None
+                        ),
+                        COSTO_BASE_FIELD: _base_guardada,
+                    },
+                    "after": {
+                        "unit_cost_ars": str(_costo_de_referencia),
+                        COSTO_BASE_FIELD: (
+                            (CON_FLETE if costo_incluye_flete else SIN_FLETE)
+                            if costo_incluye_flete is not None
+                            else _base_guardada
+                        ),
+                    },
+                }
+            )
+        product.unit_cost_ars = _costo_de_referencia
+        # F-H6.d: la procedencia se escribe en la MISMA operación que el costo.
+        # Separarlas deja que un costo y su procedencia se desincronicen, y una
+        # procedencia que miente es peor que ninguna: el guard de V5 decide con
+        # ella si una compra nueva puede pisar el costo guardado.
+        if costo_incluye_flete is not None:
+            product.custom_fields = {
+                **(product.custom_fields or {}),
+                COSTO_BASE_FIELD: CON_FLETE if costo_incluye_flete else SIN_FLETE,
+            }
     # A2: identidad lógica estable de la fila de origen (idempotencia + reconciliación).
     _row_hash = compute_source_row_hash(
         product_key=product.name,
         qty=qty,
-        unit_cost=unit_cost,
+        # A propósito el costo de REFERENCIA y no el facturado: es el valor que
+        # esta huella viene usando desde que existe (los callers pisaban
+        # `unit_cost` con el final antes de llegar acá). Cambiarlo movería la
+        # identidad de filas ya importadas y los reconciliadores que la comparan
+        # dejarían de reconocerlas.
+        unit_cost=_costo_de_referencia,
         movement_date=getattr(expense, "transaction_date", None),
         supplier_key=(
             getattr(expense, "supplier_name", None)
@@ -2082,7 +2176,7 @@ async def _apply_purchase_to_stock(
         tenant_id,
         product.id,
         qty,
-        unit_cost,
+        _costo_facturado,
         "purchase",
         product.stock_units,
         balance_index=balance_index,
@@ -2378,8 +2472,10 @@ def _planificar_costos_de_la_hoja(
     rows: list[dict[str, Any]],
     cols: dict[str, str],
     decisiones: dict[str, PurchaseCostDecision] | None = None,
-) -> tuple[dict[int, LineCost], dict[str, int]]:
-    """F-H6.c — qué costó realmente cada línea de esta hoja.
+    *,
+    sin_comprobante: str | None = None,
+) -> tuple[dict[int, LineCost], dict[str, int], PurchaseGroupPlan]:
+    """F-H6.c/d — qué costó realmente cada línea de esta hoja.
 
     Corre ANTES del bucle de filas, no después: distribuir un costo compartido
     exige ver el grupo entero, y el bucle necesita el resultado para escribir
@@ -2387,9 +2483,16 @@ def _planificar_costos_de_la_hoja(
     `_cobrar_envios_de_la_hoja` es una pasada aparte, sólo que al revés — aquél
     puede correr al final porque no cambia ninguna fila.
 
-    Devuelve ``({row_index: LineCost}, {columna: celdas_ilegibles})``. El
-    segundo no es un detalle: una celda que no se pudo leer se cuenta y se
-    avisa, nunca se trata como «sin descuento» (ver `parse_ajuste`).
+    **El reparto es por GRUPO, no por hoja** (F-H6.d). Una sola llamada a
+    `build_line_costs` con todas las filas le cargaría a una compra el flete de
+    otra — lo que el docstring de esa función ya prohíbe por escrito. Se arma un
+    grupo por comprobante y cada uno reparte lo suyo.
+
+    Devuelve ``({row_index: LineCost}, {columna: celdas_ilegibles},
+    PurchaseGroupPlan)``. El segundo no es un detalle: una celda que no se pudo
+    leer se cuenta y se avisa, nunca se trata como «sin descuento» (ver
+    `parse_ajuste`). El tercero lo necesita quien cobra el envío, para saber cuál
+    cargo terminó capitalizado en el costo y no contarlo dos veces.
     """
     dec = (decisiones or {}).get(ctx_id or "") or PurchaseCostDecision(
         context_id=ctx_id or ""
@@ -2397,10 +2500,15 @@ def _planificar_costos_de_la_hoja(
     _desc_col = cols.get("discount")
     _imp_col = cols.get("taxes")
     _flete_col = cols.get("shipping_cost_line")
-    if not (_desc_col or _imp_col or _flete_col):
+    _envio_col = cols.get("shipping_cost")
+    if not (_desc_col or _imp_col or _flete_col or _envio_col):
         # Sin ninguna columna de ajuste no hay nada que calcular que el
         # importador no supiera ya: se deja el camino de siempre intacto.
-        return {}, {}
+        #
+        # `shipping_cost` entra a este guard desde F-H6.d: antes, una hoja que
+        # sólo mapeaba el envío del comprobante ni siquiera llegaba acá, así que
+        # elegir «repartir por subtotal» no tenía dónde ocurrir.
+        return {}, {}, PurchaseGroupPlan()
 
     _monto_col = cols.get("amount")
     _qty_col = cols.get("quantity")
@@ -2415,9 +2523,35 @@ def _planificar_costos_de_la_hoja(
             return Decimal("0")
         return val
 
+    _comp_col = cols.get("invoice_number")
+    _prov_col = cols.get("supplier_name")
+
+    def _clave(row: dict[str, Any], col: str | None) -> str:
+        # Misma normalización que `_cobrar_envios_de_la_hoja`: la clave del
+        # comprobante tiene que ser insensible a mayúsculas y espacios, y las dos
+        # pasadas TIENEN que agrupar igual o el preview miente sobre el import.
+        return (_clean_str(row.get(col), 199) or "").strip().lower() if col else ""
+
     lineas: list[CostLine] = []
+    del_grupo: list[GroupLine] = []
     for _idx, _row in enumerate(rows):
         _monto = _parse_amount(_row.get(_monto_col)) if _monto_col else None
+        # El grupo se arma con TODAS las filas, tengan monto o no: el envío del
+        # comprobante se reparte entre todas sus líneas, y una fila sin monto
+        # igual puede ser la que trae la cifra de envío.
+        del_grupo.append(
+            GroupLine(
+                row_index=_idx,
+                supplier=_clave(_row, _prov_col),
+                invoice=_clave(_row, _comp_col),
+                subtotal=_monto or Decimal("0"),
+                shipping=(
+                    _parse_amount(_row.get(_envio_col)) or Decimal("0")
+                    if _envio_col
+                    else Decimal("0")
+                ),
+            )
+        )
         if _monto is None:
             # Sin monto no hay base sobre la cual ajustar nada. La fila ya la
             # resuelve (o captura) el camino normal.
@@ -2432,16 +2566,32 @@ def _planificar_costos_de_la_hoja(
                 shipping_line=_ajuste(_row, _flete_col),
             )
         )
+    grupos = build_purchase_groups(del_grupo, sin_comprobante=sin_comprobante)
     if not lineas:
-        return {}, _ilegibles
+        return {}, _ilegibles, grupos
 
-    plan = build_line_costs(
-        lineas,
-        shared_mode=dec.shared_shipping,
-        line_mode=dec.line_shipping,
-        basis=dec.base,
-    )
-    return plan.by_row(), _ilegibles
+    por_fila: dict[int, CostLine] = {line.row_index: line for line in lineas}
+    resultado: dict[int, LineCost] = {}
+    for grupo in grupos.groups:
+        del_grupo_lineas = [
+            por_fila[row] for row in grupo.row_indexes if row in por_fila
+        ]
+        if not del_grupo_lineas:
+            continue
+        plan = build_line_costs(
+            del_grupo_lineas,
+            # Sin `shared_shipping=` esto era un no-op: `build_line_costs` exige
+            # que la cifra sea > 0 para repartir, y el default es 0. Elegir
+            # «por subtotal» validaba, devolvía 200 y no repartía un centavo.
+            shared_shipping=(
+                grupo.shared_shipping if grupo.distribuible else Decimal("0")
+            ),
+            shared_mode=dec.shared_shipping,
+            line_mode=dec.line_shipping,
+            basis=dec.base,
+        )
+        resultado.update(plan.by_row())
+    return resultado, _ilegibles, grupos
 
 
 def _parse_amount(raw: Any) -> Decimal | None:
@@ -2636,12 +2786,26 @@ def _row_val(
     return None
 
 
-def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+def _resolve_target_cols(
+    mapping: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """Desde un mapeo explícito source_col→target, resuelve columnas por target canónico.
 
-    Devuelve (target_to_col, custom_field_cols): el primero mapea campo canónico
-    (amount, transaction_date, name, sale_price_ars, ...) → source_col; el segundo
-    mapea cf_key → source_col para los targets `custom_field:{key}`. Ignora "ignore".
+    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados)``: el
+    primero mapea campo canónico (amount, transaction_date, name, ...) →
+    source_col; el segundo mapea cf_key → source_col para los targets
+    `custom_field:{key}`; el tercero, source_col → target, son los targets
+    CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe escribir.
+    Ignora "ignore".
+
+    Los cruzados se descartan porque F-D no está entregada, pero hasta acá se
+    evaporaban: `parse_target` puede devolver ``kind="cross"`` y no había rama
+    para ese caso, así que la columna que el usuario mapeó a mano simplemente no
+    se importaba y nadie se enteraba — ni él ni el operador. Es la clase exacta
+    del incidente ASTERIA: un valor que desaparece y una heurística que lo
+    reemplaza con otra cosa (ver el fallback de `unit_cost_ars` en el camino
+    plano). No se rechaza —hay imports vivos que dependen de ese fallback— pero
+    deja de ser silencioso.
     """
     from app.application.services.column_mapping_service import (  # noqa: PLC0415
         parse_target,
@@ -2649,6 +2813,7 @@ def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[
 
     target_to_col: dict[str, str] = {}
     custom_field_cols: dict[str, str] = {}
+    cruzados: dict[str, str] = {}
     for src_col, target in mapping.items():
         parsed = parse_target(target)
         if parsed.kind in ("ignore", "none"):
@@ -2663,7 +2828,15 @@ def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[
                 custom_field_cols[parsed.field] = src_col
         elif parsed.kind == "canonical" and target not in target_to_col:
             target_to_col[target] = src_col
-    return target_to_col, custom_field_cols
+        elif parsed.kind == "cross":
+            cruzados[src_col] = target
+    if cruzados:
+        logger.warning(
+            "ingestion.cross_entity_targets_descartados",
+            columnas=sorted(cruzados),
+            targets=sorted(set(cruzados.values())),
+        )
+    return target_to_col, custom_field_cols, cruzados
 
 
 def _resolve_stock_treatment(
@@ -3129,9 +3302,15 @@ async def _insert_confirmed_data_impl(
             # Construir lookup: target_field → primer source_col que lo mapee
             # Misma resolución que `_resolve_target_cols` (incluido el first-wins
             # de la rama custom): son el mismo contrato en dos caminos distintos.
-            _canon, _custom = _resolve_target_cols(column_mappings)
+            _canon, _custom, _cruzados = _resolve_target_cols(column_mappings)
             target_to_col.update(_canon)
             custom_field_cols.update(_custom)
+            if _cruzados:
+                # Se descartan (F-D no está entregada) pero el usuario tiene
+                # que enterarse: mapeó una columna a mano y no se importó.
+                counts["targets_cruzados_descartados"] = counts.get(
+                    "targets_cruzados_descartados", 0
+                ) + len(_cruzados)
 
             # Remapear columnas de fecha y monto usando el mapeo explícito
             fecha_col = (
@@ -3400,8 +3579,13 @@ async def _insert_confirmed_data_impl(
         # el mismo costo entre como tabla suelta o como solapa. Esa asimetría este
         # importador ya la pagó dos veces.
         _costos_por_fila: dict[int, LineCost] = {}
+        _grupos_de_compra = PurchaseGroupPlan()
         if wants_gastos:
-            _costos_por_fila, _celdas_ilegibles = _planificar_costos_de_la_hoja(
+            (
+                _costos_por_fila,
+                _celdas_ilegibles,
+                _grupos_de_compra,
+            ) = _planificar_costos_de_la_hoja(
                 None, rows, target_to_col, purchase_cost_decisions
             )
             for _col, _cuantas in _celdas_ilegibles.items():
@@ -3743,13 +3927,21 @@ async def _insert_confirmed_data_impl(
                         if exp_cost_col and exp_cost_col != gasto_col
                         else None
                     )
-                    # F-H6.c: si la hoja declaró ajustes, el costo de ESTA línea ya
-                    # se calculó con ellos y manda sobre el precio crudo de la
-                    # columna. `unit_cost_final` es None cuando la fila no trae
+                    # F-H6.c/d: si la hoja declaró ajustes o se repartió un costo
+                    # compartido, el costo FINAL de la línea va al PRODUCTO, pero
+                    # NO pisa el precio facturado, que es lo que registra el
+                    # movimiento. `unit_cost_final` es None cuando la fila no trae
                     # cantidad: sin divisor no se inventa un costo unitario.
                     _costo_calculado = _costos_por_fila.get(row_index)
-                    if _costo_calculado is not None and _costo_calculado.unit_cost_final:
-                        exp_unit_cost = _costo_calculado.unit_cost_final
+                    _costo_final_fila: Decimal | None = None
+                    _incluye_flete_fila: bool | None = None
+                    if _costo_calculado is not None:
+                        _incluye_flete_fila = bool(
+                            _costo_calculado.shipping_allocated
+                            or _costo_calculado.shipping_line_applied
+                        )
+                        if _costo_calculado.unit_cost_final:
+                            _costo_final_fila = _costo_calculado.unit_cost_final
                     # Compra de mercadería = gasto COGS+caja Y alta/reposición de
                     # producto. Señal a nivel de fila: nombre de producto + cantidad>0
                     # (un libro de compras con esas columnas). Se CREA el producto
@@ -3770,7 +3962,13 @@ async def _insert_confirmed_data_impl(
                             sku=_exp_sku,
                             brand=None,
                             barcode=_exp_barcode,
-                            unit_cost=exp_unit_cost,
+                            # Un producto que nace de esta compra arranca con el
+                            # costo FINAL: es su costo de adquisición real.
+                            unit_cost=(
+                                _costo_final_fila
+                                if _costo_final_fila is not None
+                                else exp_unit_cost
+                            ),
                             indexes=_identity_indexes,
                             cache=products_by_identity_key,
                             product_cache=_product_cache,
@@ -3875,6 +4073,11 @@ async def _insert_confirmed_data_impl(
                             balance_index=_balance_index,
                             product_cache=_product_cache,
                             source_row_ref=_source_row_ref(_row_anchor),
+                            costo_final=_costo_final_fila,
+                            costo_incluye_flete=_incluye_flete_fila,
+                            product_details=(
+                                product_details if return_details else None
+                            ),
                         )
                         # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
                         # stock (producto ligado + cantidad>0), marcarla para que el
@@ -4972,6 +5175,7 @@ async def _insert_multisheet_data(
         ctx_id: str | None,
         rows: list[dict[str, Any]],
         cols: dict[str, str],
+        grupos: PurchaseGroupPlan | None = None,
     ) -> None:
         """F-H6.b: crea UN gasto de logística por envío declarado en la hoja.
 
@@ -4989,58 +5193,55 @@ async def _insert_multisheet_data(
         hecho de negocio no quede clasificado de dos formas según por dónde entró.
         """
         _envio_col = cols.get("shipping_cost")
-        if not _envio_col:
+        _flete_linea_col = cols.get("shipping_cost_line")
+        if not _envio_col and not _flete_linea_col:
             return
         _comp_col = cols.get("invoice_number")
         _prov_col = cols.get("supplier_name")
 
-        lineas: list[ShippingLine] = []
-        for _idx, _row in enumerate(rows):
-            _monto = _parse_amount(_row.get(_envio_col))
-            if _monto is None:
-                continue
-            lineas.append(
-                ShippingLine(
-                    row_index=_idx,
-                    # Se normalizan acá porque la clave de agrupación tiene que ser
-                    # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
-                    # el mismo comprobante.
-                    supplier=(_clean_str(_row.get(_prov_col), 199) or "").strip().lower()
-                    if _prov_col
-                    else "",
-                    invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
-                    if _comp_col
-                    else "",
-                    amount=_monto,
+        def _leer_envios(col: str) -> list[ShippingLine]:
+            leidas: list[ShippingLine] = []
+            for _idx, _row in enumerate(rows):
+                _monto = _parse_amount(_row.get(col))
+                if _monto is None:
+                    continue
+                leidas.append(
+                    ShippingLine(
+                        row_index=_idx,
+                        # Se normalizan acá porque la clave de agrupación tiene que ser
+                        # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
+                        # el mismo comprobante.
+                        supplier=(_clean_str(_row.get(_prov_col), 199) or "")
+                        .strip()
+                        .lower()
+                        if _prov_col
+                        else "",
+                        invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
+                        if _comp_col
+                        else "",
+                        amount=_monto,
+                    )
                 )
-            )
-        if not lineas:
-            return
+            return leidas
 
-        # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
-        # cobra lo que no tiene comprobante — no hay default, a propósito.
-        plan = plan_shipping_charges(
-            lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
-        )
-        if plan.sin_identidad:
-            counts["envios_sin_comprobante"] = counts.get("envios_sin_comprobante", 0) + len(
-                plan.sin_identidad
-            )
-        if plan.cifras_distintas:
-            counts["envios_cifras_distintas"] = counts.get(
-                "envios_cifras_distintas", 0
-            ) + len(plan.cifras_distintas)
-
-        for _cargo in plan.charges:
+        async def _emitir_cargo(
+            _cargo: ShippingCharge,
+            *,
+            namespace: str,
+            descripcion: str,
+            atribuido_a_inventario: bool,
+        ) -> bool:
+            """Crea el gasto de logística de UN cargo. Devuelve si lo creó."""
             # Idempotencia con namespace propio: la clave es el CARGO (comprobante
             # + cifra), no la fila. Re-confirmar el archivo no puede volver a
             # cobrar el mismo flete, y usar el ancla de la fila lo ataría a una
-            # línea arbitraria del grupo.
+            # línea arbitraria del grupo. El namespace separa los dos fletes: son
+            # cargos distintos y uno no puede tapar al otro.
             _anchor = (
                 _import_row_anchor(
                     tenant_id,
                     uploaded_file_id,
-                    f"envio:{ctx_id or ''}:{_cargo.invoice}"
+                    f"{namespace}:{ctx_id or ''}:{_cargo.invoice}"
                     + (f":fila{_cargo.row_indexes[0]}" if not _cargo.invoice else ""),
                     int(_cargo.amount * 100),
                 )
@@ -5050,7 +5251,7 @@ async def _insert_multisheet_data(
             if _anchor is not None and await _import_row_seen(
                 session, tenant_id, _anchor, seen_fp
             ):
-                continue
+                return False
 
             _fila = rows[_cargo.row_indexes[0]]
             _raw_fecha = _val(
@@ -5061,7 +5262,7 @@ async def _insert_multisheet_data(
                 # Sin fecha no se inventa "hoy" (invariante 2d). El envío queda sin
                 # cobrar y se cuenta: el resto de la hoja entra igual.
                 counts["envios_sin_fecha"] = counts.get("envios_sin_fecha", 0) + 1
-                continue
+                return False
 
             _sup_id: uuid.UUID | None = None
             _sup_nombre = _clean_str(_fila.get(_prov_col), 199) if _prov_col else None
@@ -5081,11 +5282,7 @@ async def _insert_multisheet_data(
                     category="LOGISTICS",
                     expense_type="OPEX",
                     transaction_date=_fecha,
-                    description=(
-                        f"Envío — comprobante {_cargo.invoice}"
-                        if _cargo.invoice
-                        else "Envío (sin comprobante en el archivo)"
-                    )[:500],
+                    description=descripcion[:500],
                     is_recurring=False,
                     payment_method="transfer",
                     provenance="REAL",
@@ -5093,15 +5290,99 @@ async def _insert_multisheet_data(
                     supplier_name=_sup_nombre,
                     product_id=None,
                     source_upload_id=uploaded_file_id,
+                    # El flete que se capitalizó en el costo del stock sigue siendo
+                    # una salida de caja y se registra igual, pero los agregados de
+                    # RESULTADO no pueden contarlo otra vez: ya está adentro del
+                    # valor del inventario. La marca es el hecho consumado, no la
+                    # intención — se pone sólo si el costo efectivamente lo comió.
+                    custom_fields=(
+                        {ATRIBUIDO_A_INVENTARIO_FIELD: True}
+                        if atribuido_a_inventario
+                        else None
+                    ),
                 )
             )
-            counts["envios"] = counts.get("envios", 0) + 1
-            if _cargo.repetido_en > 1:
-                counts["envios_repetidos_colapsados"] = (
-                    counts.get("envios_repetidos_colapsados", 0) + 1
-                )
             if _anchor is not None:
                 await _register_import_row_fingerprint(session, tenant_id, _anchor, seen_fp)
+            return True
+
+        if _envio_col:
+            _lineas = _leer_envios(_envio_col)
+            if _lineas:
+                # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
+                # cobra lo que no tiene comprobante — no hay default, a propósito.
+                plan = plan_shipping_charges(
+                    _lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
+                )
+                if plan.sin_identidad:
+                    counts["envios_sin_comprobante"] = counts.get(
+                        "envios_sin_comprobante", 0
+                    ) + len(plan.sin_identidad)
+                if plan.cifras_distintas:
+                    counts["envios_cifras_distintas"] = counts.get(
+                        "envios_cifras_distintas", 0
+                    ) + len(plan.cifras_distintas)
+                _dec_hoja = (purchase_cost_decisions or {}).get(
+                    ctx_id or ""
+                ) or PurchaseCostDecision(context_id=ctx_id or "")
+                _repartidos: set[tuple[str, str]] = (
+                    {
+                        (g.key[0], g.key[1])
+                        for g in (grupos.groups if grupos else [])
+                        if g.distribuible and g.key is not None
+                    }
+                    if _dec_hoja.shared_shipping == COMPARTIDO_SUBTOTAL
+                    else set()
+                )
+                for _cargo in plan.charges:
+                    if not await _emitir_cargo(
+                        _cargo,
+                        namespace="envio",
+                        descripcion=(
+                            f"Envío — comprobante {_cargo.invoice}"
+                            if _cargo.invoice
+                            else "Envío (sin comprobante en el archivo)"
+                        ),
+                        # El envío que SÍ se repartió quedó adentro del costo de
+                        # los productos: se marca por el HECHO CONSUMADO (el grupo
+                        # repartió), no por la intención (el usuario pidió
+                        # repartir). Un grupo no distribuible pidió reparto y no
+                        # lo tuvo: ese flete sigue siendo gasto del período.
+                        atribuido_a_inventario=(
+                            (_cargo.supplier, _cargo.invoice) in _repartidos
+                        ),
+                    ):
+                        continue
+                    counts["envios"] = counts.get("envios", 0) + 1
+                    if _cargo.repetido_en > 1:
+                        counts["envios_repetidos_colapsados"] = (
+                            counts.get("envios_repetidos_colapsados", 0) + 1
+                        )
+
+        if _flete_linea_col:
+            # F-H6.e: el flete que el archivo ya asignó a cada línea NUNCA generaba
+            # un gasto, en ninguno de sus dos modos. Con `al_costo` subía el valor
+            # del stock y el dinero no salía de ningún lado —un asiento que no
+            # cierra—, y con `gasto_aparte` (el default) era un no-op puro pese a
+            # que el nombre del modo prometía un gasto.
+            _lineas_propias = _leer_envios(_flete_linea_col)
+            if _lineas_propias:
+                _dec = (purchase_cost_decisions or {}).get(
+                    ctx_id or ""
+                ) or PurchaseCostDecision(context_id=ctx_id or "")
+                _al_costo = _dec.line_shipping == LINEA_AL_COSTO
+                for _cargo in plan_line_shipping(_lineas_propias).charges:
+                    if await _emitir_cargo(
+                        _cargo,
+                        namespace="envio_linea",
+                        descripcion=(
+                            f"Envío de las líneas — comprobante {_cargo.invoice}"
+                            if _cargo.invoice
+                            else "Envío de las líneas (sin comprobante en el archivo)"
+                        ),
+                        atribuido_a_inventario=_al_costo,
+                    ):
+                        counts["envios_de_linea"] = counts.get("envios_de_linea", 0) + 1
 
     async def _add_expense(
         row: dict[str, Any],
@@ -5267,12 +5548,23 @@ async def _insert_multisheet_data(
                 if _uc_col and _uc_col != _amount_src and not _is_total_cost_col(_uc_col)
                 else None
             )
-        # F-H6.c: si la hoja declaró ajustes, el costo de ESTA línea ya se calculó
-        # con ellos y manda sobre el precio crudo de la columna — es lo que el
-        # negocio pagó de verdad. `unit_cost_final` es None cuando la fila no trae
-        # cantidad: sin divisor no se inventa un costo unitario.
-        if costo_calculado is not None and costo_calculado.unit_cost_final:
-            unit_cost = costo_calculado.unit_cost_final
+        # F-H6.c/d: si la hoja declaró ajustes o se repartió un costo compartido,
+        # el costo FINAL de la línea es lo que el negocio pagó de verdad. Va al
+        # PRODUCTO como costo de referencia, pero NO pisa `unit_cost`, que es lo
+        # que facturó el proveedor y es lo único que registra el movimiento.
+        # `unit_cost_final` es None cuando la fila no trae cantidad: sin divisor
+        # no se inventa un costo unitario.
+        _costo_final: Decimal | None = None
+        _incluye_flete: bool | None = None
+        if costo_calculado is not None:
+            # Sin plan de costos no se declara procedencia: la ausencia de la
+            # clave significa «no sé», que no es lo mismo que «sin flete».
+            _incluye_flete = bool(
+                costo_calculado.shipping_allocated
+                or costo_calculado.shipping_line_applied
+            )
+            if costo_calculado.unit_cost_final:
+                _costo_final = costo_calculado.unit_cost_final
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
@@ -5291,7 +5583,9 @@ async def _insert_multisheet_data(
                 sku=_exp_sku,
                 brand=None,
                 barcode=_exp_barcode,
-                unit_cost=unit_cost,
+                # Un producto que nace de esta compra arranca con el costo FINAL:
+                # es su costo de adquisición real, no el renglón de la factura.
+                unit_cost=_costo_final if _costo_final is not None else unit_cost,
                 indexes=_identity_indexes,
                 cache=products_by_identity_key,
                 product_cache=product_cache,
@@ -5385,6 +5679,9 @@ async def _insert_multisheet_data(
             balance_index=_balance_index,
             product_cache=product_cache,
             source_row_ref=row_ref,
+            costo_final=_costo_final,
+            costo_incluye_flete=_incluye_flete,
+            product_details=product_details if return_details else None,
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
@@ -5903,7 +6200,13 @@ async def _insert_multisheet_data(
             _bucket = summary.get(_bucket_key, [])
             _rows = [r for r in _bucket if r.get("__context__") == _cid]
             _mapping = context_mappings.get(_cid or "", {})
-            _cols, _cf_cols = _resolve_target_cols(_mapping) if _mapping else ({}, {})
+            _cols, _cf_cols, _cruzados = (
+                _resolve_target_cols(_mapping) if _mapping else ({}, {}, {})
+            )
+            if _cruzados:
+                counts["targets_cruzados_descartados"] = counts.get(
+                    "targets_cruzados_descartados", 0
+                ) + len(_cruzados)
             return _rows, _cols, _cf_cols
 
         def _hoja_incluida(ctx: dict[str, Any]) -> bool:
@@ -6016,9 +6319,22 @@ async def _insert_multisheet_data(
             # porque repartir un costo compartido exige ver el grupo entero y el
             # bucle necesita el resultado para escribir el costo de cada compra.
             _costos_por_fila: dict[int, LineCost] = {}
+            _grupos_de_compra = PurchaseGroupPlan()
             if entity == "expense":
-                _costos_por_fila, _celdas_ilegibles = _planificar_costos_de_la_hoja(
-                    ctx_id, rows, cols, purchase_cost_decisions
+                (
+                    _costos_por_fila,
+                    _celdas_ilegibles,
+                    _grupos_de_compra,
+                ) = _planificar_costos_de_la_hoja(
+                    ctx_id,
+                    rows,
+                    cols,
+                    purchase_cost_decisions,
+                    # La MISMA decisión del usuario que gobierna el cobro del
+                    # flete gobierna si se puede repartir sobre filas sin
+                    # comprobante. Leerla de dos lados distintos las dejaría
+                    # divergir.
+                    sin_comprobante=(shipping_decisions or {}).get(ctx_id or ""),
                 )
                 for _col, _cuantas in _celdas_ilegibles.items():
                     counts["ajustes_ilegibles"] = (
@@ -6123,7 +6439,7 @@ async def _insert_multisheet_data(
             # entera: la misma cifra repetida en diez filas del mismo remito es un
             # flete, no diez.
             if entity == "expense":
-                await _cobrar_envios_de_la_hoja(ctx_id, rows, cols)
+                await _cobrar_envios_de_la_hoja(ctx_id, rows, cols, _grupos_de_compra)
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
         if confirmed_fields.get("ventas"):

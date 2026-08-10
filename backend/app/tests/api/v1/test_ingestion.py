@@ -158,7 +158,6 @@ async def confirmed_file(
 # ── Upload tests ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestUploadEndpoint:
     async def test_upload_xlsx_returns_processing(
         self,
@@ -448,7 +447,6 @@ class TestUploadEndpoint:
 # ── List files tests ──────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestListFilesEndpoint:
     async def test_list_files_empty(
         self,
@@ -529,7 +527,6 @@ def _archivo(tenant_id: Any, nombre: str, *, status: str = "PENDING") -> Uploade
     )
 
 
-@pytest.mark.asyncio
 class TestGetFileEndpoint:
     async def test_encuentra_un_archivo_fuera_de_la_primera_pagina(
         self,
@@ -598,7 +595,6 @@ class TestGetFileEndpoint:
 # ── Preview tests ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestPreviewEndpoint:
     async def test_preview_returns_summary(
         self,
@@ -657,7 +653,6 @@ class TestPreviewEndpoint:
 # ── Confirm tests ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestConfirmEndpoint:
     async def test_confirm_needs_confirmation_returns_200(
         self,
@@ -1424,7 +1419,6 @@ def test_parse_amount_logs_non_positive_discard(monkeypatch: pytest.MonkeyPatch)
     ]
 
 
-@pytest.mark.asyncio
 async def test_fila_con_fecha_ilegible_va_a_otros_no_inventa_hoy(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -1468,7 +1462,6 @@ async def test_fila_con_fecha_ilegible_va_a_otros_no_inventa_hoy(
     ]
 
 
-@pytest.mark.asyncio
 async def test_multisheet_heterogeneous_schemas_no_silent_drop(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -1508,7 +1501,6 @@ async def test_multisheet_heterogeneous_schemas_no_silent_drop(
     assert amounts == [Decimal("3500"), Decimal("12000")]
 
 
-@pytest.mark.asyncio
 async def test_multisheet_compras_inserted_as_products(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -1585,7 +1577,6 @@ def test_sale_response_serializes_amount_as_number() -> None:
 # ── Worker unit tests ─────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestIngestionWorkers:
     async def test_process_image_ocr_handles_missing_pytesseract(
         self,
@@ -1678,7 +1669,6 @@ def _importing_file_kwargs(tenant_id: uuid.UUID, *, started_at: datetime) -> dic
     }
 
 
-@pytest.mark.asyncio
 class TestConfirmLeaseF4:
     async def test_confirm_success_clears_lease(
         self,
@@ -2126,7 +2116,6 @@ class TestConfirmLeaseF4:
         assert refreshed.deleted_at is not None
 
 
-@pytest.mark.asyncio
 class TestConfirmColumnRiskF8b:
     """F8b (Task 4): aplicación de las decisiones de riesgo DENTRO del confirm.
 
@@ -2709,7 +2698,6 @@ class TestConfirmColumnRiskF8b:
         ]
 
 
-@pytest.mark.asyncio
 class TestConfirmColumnRiskAllRoutedF8c:
     """F8c — Minor 1 de F8b: un archivo cuyo confirm rutea TODAS sus filas a
     "Otros" (``total_inserted == 0``) hoy daba 422 y no rescataba nada, porque
@@ -3143,7 +3131,6 @@ class TestConfirmColumnRiskAllRoutedF8c:
         assert len(others_after) == 1
 
 
-@pytest.mark.asyncio
 class TestOthersHidesRiskRef:
     """F8c — Minor 3 de F8b: la clave interna `__risk_ref__` (correlación
     PII-free de F8b Task 5) NUNCA debe llegar en el payload servido por
@@ -3254,7 +3241,6 @@ class TestRereadApplyEnqueueEndpoint:
         mock_delay.assert_called_once()
 
 
-@pytest.mark.asyncio
 class TestEfectoDeInventarioPorHoja:
     """F-H3.a: el contrato del efecto de inventario, en el confirm.
 
@@ -3456,7 +3442,6 @@ class TestEfectoDeInventarioPorHoja:
         assert response.status_code == 422
 
 
-@pytest.mark.asyncio
 class TestImpactoDeInventarioEnLaRespuesta:
     """F-H3.c: el confirm devuelve el impacto proyectado para mostrarlo."""
 
@@ -3615,7 +3600,6 @@ class TestImpactoDeInventarioEnLaRespuesta:
 # ── F-H3.d.4: aplicar el replay de inventario ─────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestInventoryReplayEndpoint:
     """El segundo paso de "confirmar → revisar → aplicar" (F-H3.c)."""
 

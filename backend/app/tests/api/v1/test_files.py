@@ -27,7 +27,6 @@ def mock_s3_upload():
         yield mock
 
 
-@pytest.mark.asyncio
 class TestFilesUploadEndpoint:
     @pytest.mark.parametrize(
         ("filename", "fixture_name", "expected_file_type", "expected_source_format"),

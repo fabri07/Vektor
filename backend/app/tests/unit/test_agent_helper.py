@@ -5,8 +5,6 @@ import unittest.mock
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.agents.helper.agent import FALLBACK_RESPONSE
 from app.application.agents.shared.json_parse import parse_llm_json
 from app.application.agents.shared.schemas import AgentRequest, Confidence, RiskLevel
@@ -28,7 +26,6 @@ def _mock_llm_response(payload: dict[str, Any]) -> MagicMock:
     return response
 
 
-@pytest.mark.asyncio
 async def test_known_question_how_to_load_sale():
     """'¿cómo cargo una venta?' → respuesta con pasos, status=success, confidence HIGH/MEDIUM."""
     mock_payload = {
@@ -57,7 +54,6 @@ async def test_known_question_how_to_load_sale():
     assert result.result.get("action_type") == "ANSWER_HELP_REQUEST"
 
 
-@pytest.mark.asyncio
 async def test_unknown_question_returns_fallback():
     """'¿cuánto vale el dólar?' → FALLBACK_RESPONSE sin inventar."""
     mock_payload = {
@@ -84,7 +80,6 @@ async def test_unknown_question_returns_fallback():
     assert result.confidence == Confidence.LOW
 
 
-@pytest.mark.asyncio
 async def test_non_platform_question_redirects():
     """'¿cuánto vendí ayer?' → redirige al chat, no responde con datos."""
     mock_payload = {
@@ -112,7 +107,6 @@ async def test_non_platform_question_redirects():
     assert result.result["summary"] != FALLBACK_RESPONSE
 
 
-@pytest.mark.asyncio
 async def test_never_invents_features():
     """Pregunta sobre función no documentada → fallback o 'no disponible', NUNCA inventar."""
     mock_payload = {
@@ -139,7 +133,6 @@ async def test_never_invents_features():
     assert result.confidence == Confidence.LOW
 
 
-@pytest.mark.asyncio
 async def test_low_confidence_uses_fallback():
     """LLM retorna confidence=LOW → FALLBACK_RESPONSE, NUNCA la respuesta inventada."""
     mock_payload = {
@@ -165,7 +158,6 @@ async def test_low_confidence_uses_fallback():
     assert result.confidence == Confidence.LOW
 
 
-@pytest.mark.asyncio
 async def test_answer_does_not_modify_data():
     """process() nunca llama a servicios de escritura — solo LLM."""
     mock_payload = {
@@ -202,7 +194,6 @@ async def test_answer_does_not_modify_data():
     assert mock_client.messages.create.call_count == 1
 
 
-@pytest.mark.asyncio
 async def test_related_module_included_when_available():
     """Respuesta sobre inventario → related_module='Inventario' incluido en el summary."""
     mock_payload = {

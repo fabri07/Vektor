@@ -122,7 +122,6 @@ _IMPORTERS = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_importar_catalogo_puebla_fechas_de_producto(
     db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
@@ -136,7 +135,6 @@ async def test_importar_catalogo_puebla_fechas_de_producto(
     assert prod.acquired_at.date() == date(2026, 3, 1)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_catalogo_sin_marca_persiste_custom_fields_vacio_no_null(
     db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
@@ -153,7 +151,6 @@ async def test_catalogo_sin_marca_persiste_custom_fields_vacio_no_null(
     assert prod.custom_fields is not None
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_reimportar_acumula_acquired_mas_antigua(
     db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
@@ -168,7 +165,6 @@ async def test_reimportar_acumula_acquired_mas_antigua(
     assert prod.acquired_at.date() == date(2026, 1, 1)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_has_user_edits_protege_las_fechas(
     db_session: AsyncSession, sample_tenant: Tenant, do_import: Any
@@ -193,7 +189,6 @@ async def test_has_user_edits_protege_las_fechas(
     assert prod2.expiry_date == date(2027, 12, 1)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("do_import", _IMPORTERS)
 async def test_fecha_mapeada_a_mano_ilegible_va_a_otros_sin_crear_producto(
     db_session: AsyncSession, sample_tenant: Tenant, do_import: Any

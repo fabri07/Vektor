@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,7 +63,6 @@ def _hoja_de_clientes_clasificada_como_productos() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_hoja_de_clientes_mal_clasificada_se_importa_como_clientes(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -90,7 +88,6 @@ async def test_hoja_de_clientes_mal_clasificada_se_importa_como_clientes(
     assert (await db_session.execute(select(Product))).scalars().all() == []
 
 
-@pytest.mark.asyncio
 async def test_sin_override_la_hoja_sigue_yendo_a_productos(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -108,7 +105,6 @@ async def test_sin_override_la_hoja_sigue_yendo_a_productos(
     assert (await db_session.execute(select(Customer))).scalars().all() == []
 
 
-@pytest.mark.asyncio
 async def test_hoja_de_proveedores_mal_clasificada_se_importa_como_proveedores(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -165,7 +161,6 @@ async def test_hoja_de_proveedores_mal_clasificada_se_importa_como_proveedores(
     assert (await db_session.execute(select(Product))).scalars().all() == []
 
 
-@pytest.mark.asyncio
 async def test_hoja_de_clientes_reasignada_a_ventas_encuentra_sus_filas(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

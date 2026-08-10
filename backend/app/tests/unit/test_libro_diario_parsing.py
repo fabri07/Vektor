@@ -181,7 +181,6 @@ def test_csv_libro_diario_detected() -> None:
     assert summary["gastos_detectados"][0]["categoria"] == "Mercadería"
 
 
-@pytest.mark.asyncio
 async def test_libro_diario_insert_end_to_end(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

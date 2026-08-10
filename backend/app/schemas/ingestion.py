@@ -197,6 +197,31 @@ class ColumnMappingSuggestion(BaseModel):
     duda: str | None = None
 
 
+class ConditionalRequirement(BaseModel):
+    """F-C.c3 — por qué un campo puede hacer falta en una hoja y no en la de al lado.
+
+    Espeja `column_mapping_service.ConditionalRequirement`, que es la fuente. Viaja
+    en el catálogo porque `required: bool` contesta una sola pregunta para todos
+    los archivos y por eso contesta mal en los dos sentidos: dice que el monto de
+    una venta es obligatorio cuando la planilla trae precio × cantidad, y no dice
+    nada del producto en una hoja que sí mueve inventario.
+
+    **Describe, no bloquea.** `required` no cambia y la validación del confirm no
+    lo mira: volver bloqueante "producto si la venta es inventariable" rechazaría
+    con 422 toda planilla de servicios u honorarios que hoy entra bien.
+    """
+
+    #: `covered_by_alternative` | `sheet_moves_units`. Set cerrado en el dominio;
+    #: acá viaja como str para que sumar una condición no rompa un cliente viejo.
+    condition: str
+    #: Copy en castellano, listo para mostrar.
+    explanation: str
+    #: Conjuntos de campos que gobiernan la condición, para que la pantalla pueda
+    #: nombrar las columnas involucradas. Ordenados: la UI los muestra tal cual y
+    #: un orden que cambia entre requests se lee como si cambiara la regla.
+    signals: list[list[str]] = Field(default_factory=list)
+
+
 class FieldCatalogEntry(BaseModel):
     """Un campo canónico al que se puede mapear una columna."""
 
@@ -206,6 +231,19 @@ class FieldCatalogEntry(BaseModel):
     # se pueden desempatar sin inventar, así que el confirm las rechaza y la UI
     # bloquea. Ver SINGLE_VALUE_FIELDS en column_mapping_service.
     single_value: bool = False
+    # F-C.c2: POR QUÉ el importador necesita este campo, en castellano y como
+    # consecuencia ("Véktor necesita saber cuánta plata entró"), no como imperativo
+    # ("el monto es obligatorio"). Un asterisco rojo dice que falta algo; no dice
+    # qué se pierde la persona si no lo mapea, que es lo único que le permite
+    # decidir. Fuente única: `REQUIRED_REASONS` en `column_mapping_service`.
+    #
+    # Cadena vacía —no `null`— cuando no hay motivo escrito: la UI renderiza nada
+    # sin tener que distinguir dos ausencias. Y con default, para que un cliente
+    # viejo que no conoce el campo siga deserializando.
+    required_reason: str = ""
+    # F-C.c3b: la regla CONTEXTUAL del campo, cuando tiene una. `None` = el campo
+    # hace falta siempre o no hace falta nunca, y `required` ya lo dice.
+    required_when: ConditionalRequirement | None = None
 
 
 class EntityFieldCatalog(BaseModel):
@@ -320,6 +358,108 @@ class ColumnRiskRequest(BaseModel):
     )
     confirmed_fields: dict[str, bool] = Field(default_factory=dict)
     context_confirmed: dict[str, bool] = Field(default_factory=dict)
+
+
+class PurchaseGroupsRequest(ColumnRiskRequest):
+    """Body de ``POST /files/{id}/purchase-groups``: el mapeo borrador MÁS las
+    decisiones de costo y de envío que el usuario tiene puestas en la pantalla.
+
+    Hereda de `ColumnRiskRequest` por lo mismo que `/inventory-effects`: la
+    entrada es exactamente el mapeo borrador con su entidad efectiva por hoja, y
+    un schema gemelo sería otra copia que puede divergir.
+
+    Las dos decisiones viajan porque CAMBIAN el resultado: `sin_comprobante`
+    decide si una hoja sin número de remito puede repartir algo, y el eje de
+    costo decide si el envío compartido se reparte o queda como gasto aparte.
+    Sin ellas el preview mostraría el reparto de una configuración que el usuario
+    no eligió.
+    """
+
+    shipping_decisions: list[ShippingDecision] = Field(default_factory=list)
+    purchase_cost_decisions: list[PurchaseCostDecisionIn] = Field(default_factory=list)
+
+
+class PurchaseGroupLine(BaseModel):
+    """Una línea de compra dentro de su grupo, con lo que le tocó del costo compartido.
+
+    Todos los montos son **strings decimales** ya redondeados al centavo, como los
+    calculó el dominio: mandarlos como float dejaría que el navegador re-redondee
+    y la pantalla mostraría un centavo distinto del que se va a guardar.
+    """
+
+    row_index: int
+    #: Nombre del producto según la columna MAPEADA. `None` si el usuario todavía
+    #: no mapeó ninguna: el preview no adivina por keyword lo que la persona no
+    #: declaró, aunque el importador después sí tenga ese fallback.
+    producto: str | None = None
+    subtotal: str
+    #: Lo que esta línea recibió del envío del comprobante. `"0.00"` con el
+    #: default (`no_distribuir`), que es justamente lo que hay que poder ver antes
+    #: de decidir.
+    envio_asignado: str
+    costo_total: str
+    #: `None` cuando la fila no declara cantidad: sin unidades no hay costo
+    #: unitario, y devolver el total en su lugar sería inventarlo.
+    costo_unitario_final: str | None = None
+
+
+class PurchaseGroupItem(BaseModel):
+    """Las líneas de UNA compra y el costo compartido que les corresponde."""
+
+    #: `None` cuando el archivo no permite formar la clave del comprobante. Esas
+    #: filas siguen siendo un grupo —hay que poder contarlas y mostrarlas— pero no
+    #: reparten nada.
+    comprobante: str | None = None
+    proveedor: str | None = None
+    subtotal: str
+    #: La cifra del comprobante YA COLAPSADA: repetida en diez filas, llega acá
+    #: una vez.
+    envio_compartido: str
+    #: Cuánto de esa cifra terminó adentro del costo de las líneas...
+    repartido: str
+    #: ...y cuánto quedó afuera. Con el default los dos números dicen la verdad
+    #: incómoda: todo el envío queda sin repartir.
+    sin_repartir: str
+    distribuible: bool
+    #: Por qué no se puede repartir, en castellano. Deriva de los motivos del
+    #: dominio (`purchase_group`), no es una segunda lista de reglas.
+    motivo_no_distribuible: str | None = None
+    lineas: list[PurchaseGroupLine] = Field(default_factory=list)
+
+
+class SheetPurchaseGroups(BaseModel):
+    """Cómo quedan agrupadas las compras de UNA hoja."""
+
+    context_id: str
+    #: Nombre legible de la hoja (nunca el `context_id` crudo).
+    label: str
+    puede_distribuir: bool
+    #: Por qué la hoja entera no puede repartir. `None` cuando sí puede.
+    motivo: str | None = None
+    #: Total REAL de grupos, aunque `grupos` venga truncado. Un libro con 800
+    #: comprobantes no entra en una respuesta, y truncar sin decirlo se lee como
+    #: "esto es todo" (mismo criterio que `inventory_impact`).
+    grupos_total: int = 0
+    grupos: list[PurchaseGroupItem] = Field(default_factory=list)
+    #: Filas que no permiten formar la clave del comprobante. No son un error: son
+    #: el dato que decide si tiene sentido ofrecer «toda la hoja es una compra».
+    filas_sin_comprobante: int = 0
+
+
+class PurchaseGroupsResponse(BaseModel):
+    """F-H6.d — qué líneas componen cada compra y cuánto costo compartido tienen.
+
+    READ-ONLY y por hoja de GASTOS. Existe para que el usuario vea el reparto
+    ANTES de confirmar: elegir «repartir por subtotal» sin ver el resultado es
+    aceptar a ciegas un cambio en el costo de cada producto.
+
+    Los números salen del MISMO planificador que usa el import
+    (`_planificar_costos_de_la_hoja`), no de un cálculo propio: si el preview y el
+    importador agruparan distinto, la pantalla ofrecería repartir un costo entre
+    líneas que después no se van a agrupar.
+    """
+
+    sheets: list[SheetPurchaseGroups] = Field(default_factory=list)
 
 
 class TenantColumnMappingResponse(BaseModel):

@@ -1,11 +1,9 @@
-import pytest
 from httpx import ASGITransport, AsyncClient
 
 import app.main as main_module
 from app.main import create_app
 
 
-@pytest.mark.asyncio
 async def test_request_id_in_response_headers():
     app = create_app()
 
@@ -19,7 +17,6 @@ async def test_request_id_in_response_headers():
     assert response.headers["X-Request-ID"] == "req-test-123"
 
 
-@pytest.mark.asyncio
 async def test_unhandled_exception_is_generic_outside_development(monkeypatch):
     monkeypatch.setattr(main_module.settings, "ENVIRONMENT", "production")
     monkeypatch.setattr(main_module.settings, "DEBUG", False)
@@ -41,7 +38,6 @@ async def test_unhandled_exception_is_generic_outside_development(monkeypatch):
     assert response.json() == {"detail": "Internal Server Error"}
 
 
-@pytest.mark.asyncio
 async def test_unhandled_exception_is_detailed_in_development(monkeypatch):
     monkeypatch.setattr(main_module.settings, "ENVIRONMENT", "development")
     monkeypatch.setattr(main_module.settings, "DEBUG", True)

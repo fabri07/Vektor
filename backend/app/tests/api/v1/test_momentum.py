@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +12,6 @@ from app.persistence.models.business import MomentumProfile
 from app.persistence.models.tenant import Tenant
 
 
-@pytest.mark.asyncio
 class TestMomentumProfileEndpoint:
     async def test_profile_saltea_milestone_sin_code_en_vez_de_500(
         self,

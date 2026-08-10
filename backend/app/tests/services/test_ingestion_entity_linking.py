@@ -9,7 +9,6 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,7 +35,6 @@ async def _make_product(
     return product
 
 
-@pytest.mark.asyncio
 async def test_sale_linked_to_product_by_name(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -58,7 +56,6 @@ async def test_sale_linked_to_product_by_name(
     assert sale.product_id == product.id  # match por nombre normalizado (guion ≈ espacio)
 
 
-@pytest.mark.asyncio
 async def test_sale_linked_to_product_by_sku(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -82,7 +79,6 @@ async def test_sale_linked_to_product_by_sku(
     assert sale.product_id == product.id  # SKU exacto gana sobre el nombre
 
 
-@pytest.mark.asyncio
 async def test_unknown_product_leaves_product_id_none(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -102,7 +98,6 @@ async def test_unknown_product_leaves_product_id_none(
     assert sale.product_id is None
 
 
-@pytest.mark.asyncio
 async def test_ambiguous_name_not_linked(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -124,7 +119,6 @@ async def test_ambiguous_name_not_linked(
     assert sale.product_id is None
 
 
-@pytest.mark.asyncio
 async def test_quantity_summed_does_not_break_linking(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -152,7 +146,6 @@ async def test_quantity_summed_does_not_break_linking(
 # ── FASE 3 (B1): vínculo de producto en GASTOS (compras de mercadería) ────────
 
 
-@pytest.mark.asyncio
 async def test_expense_linked_to_product_by_sku(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -176,7 +169,6 @@ async def test_expense_linked_to_product_by_sku(
     assert expense.product_id == product.id  # SKU exacto gana
 
 
-@pytest.mark.asyncio
 async def test_expense_linked_to_product_by_normalized_name(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -198,7 +190,6 @@ async def test_expense_linked_to_product_by_normalized_name(
     assert expense.product_id == product.id  # match por nombre normalizado (guion ≈ espacio)
 
 
-@pytest.mark.asyncio
 async def test_expense_unknown_product_leaves_product_id_none(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

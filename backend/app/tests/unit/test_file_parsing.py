@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.application.services.file_parsing import (
+    _decode_text_bytes,
+    _detect_header_row,
+    _sniff_delimiter,
     analyze_headers,
     detect_supported_mime,
     infer_spreadsheet_type,
     parse_uploaded_content,
+    rows_to_dicts,
 )
 
 
@@ -77,184 +83,220 @@ def test_detect_supported_mime_rejects_unknown_binary() -> None:
 # --- infer_spreadsheet_type ---
 
 
-def test_product_csv_with_date_and_price_classified_as_stock() -> None:
-    """Bug regression: fecha + nombre + precio → stock, no ventas."""
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=False,
-        has_gasto=False,
-        has_producto=True,
-        has_precio_ambiguo=True,
-        has_nombre=True,
-    )
-    assert result == "stock"
+@pytest.mark.parametrize(
+    ("senales", "esperado"),
+    [
+        # Bug regression: fecha + nombre + precio → stock, no ventas.
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": False,
+                "has_gasto": False,
+                "has_producto": True,
+                "has_precio_ambiguo": True,
+                "has_nombre": True,
+            },
+            "stock",
+            id="test_product_csv_with_date_and_price_classified_as_stock",
+        ),
+        # fecha + nombre + contexto de venta, SIN monto de operación → stock.
+        #
+        # (Antes el docstring decía "importe", que sí es un monto de operación
+        # —está en TRANSACCION_MONTO_COLS— pero el test nunca lo pasó: la evidencia
+        # transaccional está incompleta y por eso la señal de nombre gana. El caso con
+        # el monto presente es el de abajo.)
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": True,
+                "has_gasto": False,
+                "has_producto": True,
+                "has_precio_ambiguo": False,
+                "has_nombre": True,
+                "has_monto_transaccion": False,
+            },
+            "stock",
+            id="test_product_csv_with_date_and_venta_context_but_no_amount_is_stock",
+        ),
+        # fecha + monto de la operación + contexto de venta → ventas, aunque haya
+        # columna de producto. Una exportación de ventas trae las tres señales juntas;
+        # una lista de precios no llega nunca a tenerlas.
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": True,
+                "has_gasto": False,
+                "has_producto": True,
+                "has_precio_ambiguo": False,
+                "has_nombre": True,
+                "has_monto_transaccion": True,
+                "venta_score": 1,
+            },
+            "ventas",
+            id="test_product_col_with_full_transactional_evidence_is_ventas",
+        ),
+        # fecha + monto + descripcion → ventas (descripcion es señal débil, no es NOMBRE_COLS).
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": True,
+                "has_gasto": False,
+                # descripcion está en PRODUCTO_COLS pero no en NOMBRE_COLS/CATALOGO_COLS
+                "has_producto": True,
+                "has_precio_ambiguo": False,
+                "has_catalogo_fuerte": False,
+                "has_nombre": False,  # sin nombre/producto explícito
+            },
+            "ventas",
+            id="test_descripcion_col_alone_does_not_trigger_stock",
+        ),
+        # sku + fecha + monto → stock (señal fuerte de catálogo).
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": True,
+                "has_gasto": False,
+                "has_producto": True,
+                "has_precio_ambiguo": False,
+                "has_catalogo_fuerte": True,
+            },
+            "stock",
+            id="test_sku_col_always_classified_as_stock",
+        ),
+        # nombre + precio + stock → stock.
+        pytest.param(
+            {
+                "has_fecha": False,
+                "has_venta": False,
+                "has_gasto": False,
+                "has_producto": True,
+                "has_precio_ambiguo": True,
+                "has_nombre": True,
+            },
+            "stock",
+            id="test_product_csv_no_date_classified_as_stock",
+        ),
+        # fecha + monto (sin columna de producto) → ventas.
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": True,
+                "has_gasto": False,
+                "has_producto": False,
+                "has_precio_ambiguo": False,
+            },
+            "ventas",
+            id="test_sale_csv_without_product_classified_as_ventas",
+        ),
+        # FASE 3: solo precio/dinero sin señal fuerte de venta/gasto → ambiguo (general),
+        # NO venta silenciosa. El usuario confirma el tipo.
+        pytest.param(
+            {
+                "has_fecha": False,
+                "has_venta": False,
+                "has_gasto": False,
+                "has_producto": False,
+                "has_precio_ambiguo": True,
+            },
+            "general",
+            id="test_ambiguous_price_without_strong_signal_is_general",
+        ),
+        # Bug regression: un LIBRO DE COMPRAS de mercadería (monto de transacción + forma
+        # de pago + proveedor + fecha) debe clasificarse como gastos AUNQUE traiga
+        # sku/cantidad/costo_unitario. Antes, `has_catalogo_fuerte` (sku) ganaba y se perdía
+        # el COGS y la salida de caja.
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": False,
+                "has_gasto": True,
+                "has_producto": True,
+                "has_precio_ambiguo": True,  # "total" presente
+                "has_catalogo_fuerte": True,  # sku presente
+                "has_nombre": True,  # producto presente
+                "has_cantidad": True,  # cantidad presente
+                "has_monto_transaccion": True,  # total
+                "has_forma_pago": True,  # forma_pago (venta_score +1)
+                "has_proveedor": True,  # proveedor (gasto_score +1)
+                # proveedor + categoria + costo_unitario → 3 señales de gasto;
+                # forma_pago → 1 de venta
+                "gasto_score": 3,
+                "venta_score": 1,
+            },
+            "gastos",
+            id="test_libro_compras_with_sku_classified_as_gastos_not_stock",
+        ),
+        # Un catálogo real (sku+nombre+precio_venta+stock_actual+stock_minimo, sin
+        # forma_pago/proveedor/monto de transacción) sigue siendo stock — el guard de
+        # libro de compras NO se dispara.
+        pytest.param(
+            {
+                "has_fecha": False,
+                "has_venta": False,
+                "has_gasto": False,
+                "has_producto": True,
+                "has_precio_ambiguo": False,
+                "has_catalogo_fuerte": True,  # sku
+                "has_nombre": True,  # nombre
+                "has_monto_transaccion": False,
+                "has_forma_pago": False,
+                "has_proveedor": False,
+            },
+            "stock",
+            id="test_real_catalogo_still_classified_as_stock",
+        ),
+    ],
+)
+def test_infer_spreadsheet_type_clasifica_por_senales(
+    senales: dict[str, object], esperado: str
+) -> None:
+    assert infer_spreadsheet_type(**senales) == esperado  # type: ignore[arg-type]
 
 
-def test_product_csv_with_date_and_venta_context_but_no_amount_is_stock() -> None:
-    """fecha + nombre + contexto de venta, SIN monto de operación → stock.
-
-    (Antes el docstring decía "importe", que sí es un monto de operación
-    —está en TRANSACCION_MONTO_COLS— pero el test nunca lo pasó: la evidencia
-    transaccional está incompleta y por eso la señal de nombre gana. El caso con
-    el monto presente es el test de abajo.)
-    """
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=True,
-        has_gasto=False,
-        has_producto=True,
-        has_precio_ambiguo=False,
-        has_nombre=True,
-        has_monto_transaccion=False,
-    )
-    assert result == "stock"
-
-
-def test_product_col_with_full_transactional_evidence_is_ventas() -> None:
-    """fecha + monto de la operación + contexto de venta → ventas, aunque haya
-    columna de producto. Una exportación de ventas trae las tres señales juntas;
-    una lista de precios no llega nunca a tenerlas."""
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=True,
-        has_gasto=False,
-        has_producto=True,
-        has_precio_ambiguo=False,
-        has_nombre=True,
-        has_monto_transaccion=True,
-        venta_score=1,
-    )
-    assert result == "ventas"
-
-
-def test_descripcion_col_alone_does_not_trigger_stock() -> None:
-    """fecha + monto + descripcion → ventas (descripcion es señal débil, no es NOMBRE_COLS)."""
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=True,
-        has_gasto=False,
-        has_producto=True,  # descripcion está en PRODUCTO_COLS pero no en NOMBRE_COLS/CATALOGO_COLS
-        has_precio_ambiguo=False,
-        has_catalogo_fuerte=False,
-        has_nombre=False,  # sin nombre/producto explícito
-    )
-    assert result == "ventas"
-
-
-def test_sku_col_always_classified_as_stock() -> None:
-    """sku + fecha + monto → stock (señal fuerte de catálogo)."""
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=True,
-        has_gasto=False,
-        has_producto=True,
-        has_precio_ambiguo=False,
-        has_catalogo_fuerte=True,
-    )
-    assert result == "stock"
-
-
-def test_product_csv_no_date_classified_as_stock() -> None:
-    """nombre + precio + stock → stock."""
-    result = infer_spreadsheet_type(
-        has_fecha=False,
-        has_venta=False,
-        has_gasto=False,
-        has_producto=True,
-        has_precio_ambiguo=True,
-        has_nombre=True,
-    )
-    assert result == "stock"
-
-
-def test_sale_csv_without_product_classified_as_ventas() -> None:
-    """fecha + monto (sin columna de producto) → ventas."""
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=True,
-        has_gasto=False,
-        has_producto=False,
-        has_precio_ambiguo=False,
-    )
-    assert result == "ventas"
-
-
-def test_ambiguous_price_without_strong_signal_is_general() -> None:
-    """FASE 3: solo precio/dinero sin señal fuerte de venta/gasto → ambiguo (general),
-    NO venta silenciosa. El usuario confirma el tipo."""
-    result = infer_spreadsheet_type(
-        has_fecha=False,
-        has_venta=False,
-        has_gasto=False,
-        has_producto=False,
-        has_precio_ambiguo=True,
-    )
-    assert result == "general"
-
-
-def test_libro_compras_with_sku_classified_as_gastos_not_stock() -> None:
-    """Bug regression: un LIBRO DE COMPRAS de mercadería (monto de transacción + forma
-    de pago + proveedor + fecha) debe clasificarse como gastos AUNQUE traiga
-    sku/cantidad/costo_unitario. Antes, `has_catalogo_fuerte` (sku) ganaba y se perdía
-    el COGS y la salida de caja."""
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=False,
-        has_gasto=True,
-        has_producto=True,
-        has_precio_ambiguo=True,  # "total" presente
-        has_catalogo_fuerte=True,  # sku presente
-        has_nombre=True,  # producto presente
-        has_cantidad=True,  # cantidad presente
-        has_monto_transaccion=True,  # total
-        has_forma_pago=True,  # forma_pago (venta_score +1)
-        has_proveedor=True,  # proveedor (gasto_score +1)
-        # proveedor + categoria + costo_unitario → 3 señales de gasto; forma_pago → 1 de venta
-        gasto_score=3,
-        venta_score=1,
-    )
-    assert result == "gastos"
-
-
-def test_real_catalogo_still_classified_as_stock() -> None:
-    """Un catálogo real (sku+nombre+precio_venta+stock_actual+stock_minimo, sin
-    forma_pago/proveedor/monto de transacción) sigue siendo stock — el guard de
-    libro de compras NO se dispara."""
-    result = infer_spreadsheet_type(
-        has_fecha=False,
-        has_venta=False,
-        has_gasto=False,
-        has_producto=True,
-        has_precio_ambiguo=False,
-        has_catalogo_fuerte=True,  # sku
-        has_nombre=True,  # nombre
-        has_monto_transaccion=False,
-        has_forma_pago=False,
-        has_proveedor=False,
-    )
-    assert result == "stock"
-
-
-def test_csv_libro_compras_end_to_end_infers_gastos() -> None:
-    """End-to-end: el CSV del libro de compras reportado se rutea a gastos, no stock."""
-    csv = (
-        b"fecha,sku,producto,cantidad,costo_unitario,total,proveedor,forma_pago,categoria\n"
-        b"2024-01-15,SKU001,Coca-Cola 600ml,24,800,19200,Distribuidora SA,transferencia,Bebidas\n"
-        b"2024-01-16,SKU002,Agua 1.5L,12,300,3600,Distribuidora SA,efectivo,Bebidas\n"
-    )
-    summary = parse_uploaded_content(csv, "text/csv", "libro_compras.csv")
-    assert summary["inferred_type"] == "gastos"
-
-
-def test_csv_catalogo_end_to_end_infers_stock() -> None:
-    """End-to-end: un catálogo de productos sigue clasificándose como stock."""
-    csv = (
-        b"sku,nombre,precio_venta,stock_actual,stock_minimo\n"
-        b"SKU001,Coca-Cola 600ml,1200,48,10\n"
-        b"SKU002,Agua 1.5L,600,24,6\n"
-    )
-    summary = parse_uploaded_content(csv, "text/csv", "catalogo.csv")
-    assert summary["inferred_type"] == "stock"
+@pytest.mark.parametrize(
+    ("csv", "filename", "esperado"),
+    [
+        # End-to-end: el CSV del libro de compras reportado se rutea a gastos, no stock.
+        pytest.param(
+            b"fecha,sku,producto,cantidad,costo_unitario,total,proveedor,forma_pago,categoria\n"
+            b"2024-01-15,SKU001,Coca-Cola 600ml,24,800,19200,"
+            b"Distribuidora SA,transferencia,Bebidas\n"
+            b"2024-01-16,SKU002,Agua 1.5L,12,300,3600,Distribuidora SA,efectivo,Bebidas\n",
+            "libro_compras.csv",
+            "gastos",
+            id="test_csv_libro_compras_end_to_end_infers_gastos",
+        ),
+        # End-to-end: un catálogo de productos sigue clasificándose como stock.
+        pytest.param(
+            b"sku,nombre,precio_venta,stock_actual,stock_minimo\n"
+            b"SKU001,Coca-Cola 600ml,1200,48,10\n"
+            b"SKU002,Agua 1.5L,600,24,6\n",
+            "catalogo.csv",
+            "stock",
+            id="test_csv_catalogo_end_to_end_infers_stock",
+        ),
+        # FASE 3: fecha+monto+descripcion (sin señal fuerte de venta NI gasto) → ambiguo
+        # ('general'). 'monto' es dinero genérico y no decide el tipo solo; el usuario confirma.
+        pytest.param(
+            b"fecha,monto,descripcion\n"
+            b"2024-01-15,50000,Pago varios\n"
+            b"2024-01-16,35000,Otro\n",
+            "doc.csv",
+            "general",
+            id="test_csv_fecha_monto_descripcion_is_ambiguous",
+        ),
+        # fecha+cliente+monto (señal fuerte de venta) → ventas.
+        pytest.param(
+            b"fecha,cliente,monto\n2024-01-15,Juan,50000\n",
+            "ventas.csv",
+            "ventas",
+            id="test_csv_with_strong_venta_signal_is_ventas",
+        ),
+    ],
+)
+def test_csv_end_to_end_infiere_el_tipo(csv: bytes, filename: str, esperado: str) -> None:
+    summary = parse_uploaded_content(csv, "text/csv", filename)
+    assert summary["inferred_type"] == esperado
 
 
 def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) -> None:
@@ -265,25 +307,6 @@ def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) ->
     summary = parse_uploaded_content(product_csv, "text/csv", "productos.csv")
     assert summary["inferred_type"] == "stock"
     assert summary["confidence"] == "MEDIUM"
-
-
-def test_csv_fecha_monto_descripcion_is_ambiguous() -> None:
-    """FASE 3: fecha+monto+descripcion (sin señal fuerte de venta NI gasto) → ambiguo
-    ('general'). 'monto' es dinero genérico y no decide el tipo solo; el usuario confirma."""
-    csv = (
-        b"fecha,monto,descripcion\n"
-        b"2024-01-15,50000,Pago varios\n"
-        b"2024-01-16,35000,Otro\n"
-    )
-    summary = parse_uploaded_content(csv, "text/csv", "doc.csv")
-    assert summary["inferred_type"] == "general"
-
-
-def test_csv_with_strong_venta_signal_is_ventas() -> None:
-    """fecha+cliente+monto (señal fuerte de venta) → ventas."""
-    csv = b"fecha,cliente,monto\n2024-01-15,Juan,50000\n"
-    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
-    assert summary["inferred_type"] == "ventas"
 
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -470,68 +493,79 @@ def test_multisheet_content_first_libro_compras_still_expense() -> None:
 # --- F7a: maestros de clientes/proveedores ---
 
 
-def test_cliente_maestro_headers_classified_as_clientes() -> None:
-    """dni (CLIENTE_SIGNAL_COLS) sin señales transaccionales → clientes."""
-    result = infer_spreadsheet_type(
-        has_fecha=False,
-        has_venta=False,
-        has_gasto=False,
-        has_producto=False,
-        has_nombre=True,
-        cliente_score=1,
-        proveedor_master_score=0,
-        has_identidad_contacto=True,
-    )
-    assert result == "clientes"
-
-
-def test_proveedor_maestro_headers_classified_as_proveedores() -> None:
-    """cuil (PROVEEDOR_MASTER_COLS) sin señales transaccionales → proveedores."""
-    result = infer_spreadsheet_type(
-        has_fecha=False,
-        has_venta=False,
-        has_gasto=False,
-        has_producto=False,
-        has_nombre=True,
-        cliente_score=0,
-        proveedor_master_score=1,
-        has_identidad_contacto=True,
-    )
-    assert result == "proveedores"
-
-
-def test_maestro_signal_with_transaccion_does_not_intercept() -> None:
-    """Señal de maestro + monto/fecha (operación real) → NO se intercepta acá;
-    sigue el flujo normal de venta/gasto (disjunto con la regla -1/-0.5)."""
-    result = infer_spreadsheet_type(
-        has_fecha=True,
-        has_venta=False,
-        has_gasto=True,
-        has_producto=False,
-        has_nombre=False,
-        cliente_score=1,
-        proveedor_master_score=0,
-        has_monto_transaccion=True,
-        gasto_score=1,
-    )
-    assert result == "gastos"
-
-
-def test_maestro_signal_with_catalogo_fuerte_does_not_intercept() -> None:
-    """Review fix: catálogo fuerte (sku/codigo/articulo/item) + columna proveedor/
-    cliente, SIN cantidad/monto/fecha → sigue siendo 'stock' (regla 1), no se
-    reclasifica como maestro. Un catálogo con una columna 'proveedor' (quién lo
-    distribuye) no es un maestro de proveedores."""
-    result = infer_spreadsheet_type(
-        has_fecha=False,
-        has_venta=False,
-        has_gasto=False,
-        has_producto=True,
-        has_nombre=True,
-        has_catalogo_fuerte=True,
-        proveedor_master_score=1,
-    )
-    assert result == "stock"
+@pytest.mark.parametrize(
+    ("senales", "esperado"),
+    [
+        # dni (CLIENTE_SIGNAL_COLS) sin señales transaccionales → clientes.
+        pytest.param(
+            {
+                "has_fecha": False,
+                "has_venta": False,
+                "has_gasto": False,
+                "has_producto": False,
+                "has_nombre": True,
+                "cliente_score": 1,
+                "proveedor_master_score": 0,
+                "has_identidad_contacto": True,
+            },
+            "clientes",
+            id="test_cliente_maestro_headers_classified_as_clientes",
+        ),
+        # cuil (PROVEEDOR_MASTER_COLS) sin señales transaccionales → proveedores.
+        pytest.param(
+            {
+                "has_fecha": False,
+                "has_venta": False,
+                "has_gasto": False,
+                "has_producto": False,
+                "has_nombre": True,
+                "cliente_score": 0,
+                "proveedor_master_score": 1,
+                "has_identidad_contacto": True,
+            },
+            "proveedores",
+            id="test_proveedor_maestro_headers_classified_as_proveedores",
+        ),
+        # Señal de maestro + monto/fecha (operación real) → NO se intercepta acá;
+        # sigue el flujo normal de venta/gasto (disjunto con la regla -1/-0.5).
+        pytest.param(
+            {
+                "has_fecha": True,
+                "has_venta": False,
+                "has_gasto": True,
+                "has_producto": False,
+                "has_nombre": False,
+                "cliente_score": 1,
+                "proveedor_master_score": 0,
+                "has_monto_transaccion": True,
+                "gasto_score": 1,
+            },
+            "gastos",
+            id="test_maestro_signal_with_transaccion_does_not_intercept",
+        ),
+        # Review fix: catálogo fuerte (sku/codigo/articulo/item) + columna proveedor/
+        # cliente, SIN cantidad/monto/fecha → sigue siendo 'stock' (regla 1), no se
+        # reclasifica como maestro. Un catálogo con una columna 'proveedor' (quién lo
+        # distribuye) no es un maestro de proveedores.
+        pytest.param(
+            {
+                "has_fecha": False,
+                "has_venta": False,
+                "has_gasto": False,
+                "has_producto": True,
+                "has_nombre": True,
+                "has_catalogo_fuerte": True,
+                "proveedor_master_score": 1,
+            },
+            "stock",
+            id="test_maestro_signal_with_catalogo_fuerte_does_not_intercept",
+        ),
+    ],
+)
+def test_infer_spreadsheet_type_maestros_vs_operaciones(
+    senales: dict[str, object], esperado: str
+) -> None:
+    assert infer_spreadsheet_type(**senales) == esperado  # type: ignore[arg-type]
 
 
 def test_analyze_headers_catalogo_con_columna_proveedor_sigue_stock() -> None:
@@ -657,25 +691,59 @@ _HEADERS_CLIENTES_REAL = [
 ]
 
 
-def test_hoja_de_ventas_real_se_clasifica_como_ventas() -> None:
-    """Una exportación de ventas con columna de producto es una VENTA, no un catálogo.
-
-    Trae las tres señales de operación juntas: fecha + monto de la operación
-    ("Total", exacto en TRANSACCION_MONTO_COLS) + contexto de venta ("Cliente").
-    El catch-all `if has_nombre: return "stock"` la pisaba igual — y ese return
-    solo es alcanzable con nombre+venta+fecha, o sea exactamente sobre este caso.
-    """
-    assert analyze_headers(_HEADERS_VENTAS_REAL)["inferred_type"] == "ventas"
-
-
-def test_hoja_de_clientes_real_se_clasifica_como_clientes() -> None:
-    """Un maestro de clientes que identifica por "Documento" (no por "DNI").
-
-    Sin `documento` en CLIENTE_SIGNAL_COLS, cliente_score quedaba en 0, la regla
-    de maestros nunca se evaluaba y la hoja caía a stock por `has_nombre and not
-    has_fecha`.
-    """
-    assert analyze_headers(_HEADERS_CLIENTES_REAL)["inferred_type"] == "clientes"
+@pytest.mark.parametrize(
+    ("headers", "esperado"),
+    [
+        # Una exportación de ventas con columna de producto es una VENTA, no un catálogo.
+        #
+        # Trae las tres señales de operación juntas: fecha + monto de la operación
+        # ("Total", exacto en TRANSACCION_MONTO_COLS) + contexto de venta ("Cliente").
+        # El catch-all `if has_nombre: return "stock"` la pisaba igual — y ese return
+        # solo es alcanzable con nombre+venta+fecha, o sea exactamente sobre este caso.
+        pytest.param(
+            _HEADERS_VENTAS_REAL,
+            "ventas",
+            id="test_hoja_de_ventas_real_se_clasifica_como_ventas",
+        ),
+        # Un maestro de clientes que identifica por "Documento" (no por "DNI").
+        #
+        # Sin `documento` en CLIENTE_SIGNAL_COLS, cliente_score quedaba en 0, la regla
+        # de maestros nunca se evaluaba y la hoja caía a stock por `has_nombre and not
+        # has_fecha`.
+        pytest.param(
+            _HEADERS_CLIENTES_REAL,
+            "clientes",
+            id="test_hoja_de_clientes_real_se_clasifica_como_clientes",
+        ),
+        # Un catálogo con fecha pero SIN monto de operación tampoco se escapa a ventas:
+        # falta la evidencia transaccional completa.
+        pytest.param(
+            ["fecha_alta", "producto", "precio_venta", "stock"],
+            "stock",
+            id="test_catalogo_con_fecha_de_alta_sigue_siendo_stock",
+        ),
+        # `fecha_nacimiento` es una señal de CLIENTE, no de operación.
+        #
+        # Pero `has_fecha` matchea el substring "fecha", así que activaba el guard
+        # `not has_fecha` de la regla de maestros y la mataba: un maestro de clientes
+        # con cumpleaños escrito "Fecha de nacimiento" no podía clasificar como
+        # clientes — aunque `fecha_nacimiento` esté listada en CLIENTE_SIGNAL_COLS.
+        pytest.param(
+            ["nombre", "dni", "email", "fecha_nacimiento"],
+            "clientes",
+            id="test_maestro_de_clientes_con_fecha_de_nacimiento_sigue_siendo_clientes",
+        ),
+        # No-regresión del caso de arriba: una fecha de operación sigue bloqueando
+        # la regla de maestros (si no, una venta con cliente caería en 'clientes').
+        pytest.param(
+            ["fecha", "cliente", "total", "producto"],
+            "ventas",
+            id="test_venta_con_fecha_real_no_se_confunde_con_maestro",
+        ),
+    ],
+)
+def test_analyze_headers_clasifica_la_hoja(headers: list[str], esperado: str) -> None:
+    assert analyze_headers(headers)["inferred_type"] == esperado
 
 
 def test_hoja_de_clientes_gana_a_la_senal_de_venta_de_una_columna() -> None:
@@ -735,15 +803,6 @@ def test_lista_de_precios_sigue_siendo_stock() -> None:
         == "stock"
     )
     assert analyze_headers(["sku", "producto", "precio", "stock"])["inferred_type"] == "stock"
-
-
-def test_catalogo_con_fecha_de_alta_sigue_siendo_stock() -> None:
-    """Un catálogo con fecha pero SIN monto de operación tampoco se escapa a ventas:
-    falta la evidencia transaccional completa."""
-    assert (
-        analyze_headers(["fecha_alta", "producto", "precio_venta", "stock"])["inferred_type"]
-        == "stock"
-    )
 
 
 def test_forma_de_pago_no_es_senal_de_venta() -> None:
@@ -812,22 +871,159 @@ def test_medio_de_pago_desempata_un_libro_de_compras_con_sku() -> None:
     sin_preposicion = [c.replace("medio_de_pago", "forma_pago") for c in compras]
     assert analyze_headers(sin_preposicion)["inferred_type"] == "gastos"
 
+# ── Mecánica del parser (ex test_file_parsing_fase1.py, fusionado acá) ─────────
+# Bugs de la auditoría FASE 1: CSV con `;` leído como 1 columna, BOM en el primer
+# header, fila de título arriba del encabezado, truncamiento silencioso a 50
+# filas, filas irregulares, contaminación del bucket de ventas y preservación de
+# hojas no clasificables en multi-hoja.
 
-def test_maestro_de_clientes_con_fecha_de_nacimiento_sigue_siendo_clientes() -> None:
-    """`fecha_nacimiento` es una señal de CLIENTE, no de operación.
+_FASE1_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-    Pero `has_fecha` matchea el substring "fecha", así que activaba el guard
-    `not has_fecha` de la regla de maestros y la mataba: un maestro de clientes
-    con cumpleaños escrito "Fecha de nacimiento" no podía clasificar como
-    clientes — aunque `fecha_nacimiento` esté listada en CLIENTE_SIGNAL_COLS.
-    """
-    assert (
-        analyze_headers(["nombre", "dni", "email", "fecha_nacimiento"])["inferred_type"]
-        == "clientes"
+
+# ── Helpers unitarios ─────────────────────────────────────────────────────────
+
+
+def test_sniff_delimiter_detects_semicolon() -> None:
+    assert _sniff_delimiter("fecha;monto;cliente\n2026-01-01;100;Juan") == ";"
+
+
+def test_sniff_delimiter_detects_comma() -> None:
+    assert _sniff_delimiter("fecha,monto,cliente\n2026-01-01,100,Juan") == ","
+
+
+def test_sniff_delimiter_detects_tab() -> None:
+    assert _sniff_delimiter("fecha\tmonto\tcliente\n2026-01-01\t100\tJuan") == "\t"
+
+
+def test_decode_strips_utf8_bom() -> None:
+    raw = "﻿precio_venta,monto\n100,200".encode()  # UTF-8 con BOM
+    decoded = _decode_text_bytes(raw)
+    assert not decoded.startswith("﻿")
+    assert decoded.startswith("precio_venta")
+
+
+def test_decode_handles_latin1() -> None:
+    raw = "café,música\n1,2".encode("latin-1")
+    decoded = _decode_text_bytes(raw)
+    assert "caf" in decoded  # no crashea, decodifica algo razonable
+
+
+def test_detect_header_row_skips_title_and_blank() -> None:
+    rows = [
+        ["Ventas Mensuales - Junio 2026"],  # título
+        [],  # fila vacía
+        ["fecha", "producto", "monto"],  # encabezado real
+        ["2026-01-15", "Coca", "1500"],
+    ]
+    assert _detect_header_row(rows) == 2
+
+
+def test_detect_header_row_defaults_to_zero_when_clean() -> None:
+    rows = [["fecha", "monto"], ["2026-01-01", "100"]]
+    assert _detect_header_row(rows) == 0
+
+
+def test_rows_to_dicts_pads_ragged_rows() -> None:
+    headers = ["fecha", "producto", "monto", "cliente"]
+    rows = [["2026-01-16", "Pepsi"]]  # faltan monto y cliente
+    result = rows_to_dicts(headers, rows)
+    assert result == [
+        {"fecha": "2026-01-16", "producto": "Pepsi", "monto": None, "cliente": None}
+    ]
+
+
+def test_rows_to_dicts_ignores_none_row_and_extra_cells() -> None:
+    headers = ["a", "b"]
+    rows: list[Any] = [None, [1, 2, 3, 4]]  # fila None + celdas extra
+    result = rows_to_dicts(headers, rows)
+    assert result[0] == {"a": None, "b": None}
+    assert result[1] == {"a": "1", "b": "2"}  # celdas extra ignoradas
+
+
+# ── CSV end-to-end ────────────────────────────────────────────────────────────
+
+
+def test_csv_semicolon_parsed_with_multiple_columns() -> None:
+    csv = b"fecha;monto;descripcion\n2026-01-15;50000;Venta del dia\n2026-01-16;35000;Venta tarde"
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["columns"] == ["fecha", "monto", "descripcion"]
+    assert summary["delimiter"] == ";"
+    assert summary["row_count"] == 2
+
+
+def test_csv_with_bom_clean_first_header() -> None:
+    csv = "﻿fecha,monto\n2026-01-15,1000".encode()
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["columns"][0] == "fecha"  # sin
+
+
+def test_csv_with_title_row_detects_real_headers() -> None:
+    csv = (
+        b"Reporte de Ventas - Junio\n"
+        b"\n"
+        b"fecha,monto,descripcion\n"
+        b"2026-01-15,50000,Venta\n"
+        b"2026-01-16,35000,Venta"
     )
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["columns"] == ["fecha", "monto", "descripcion"]
+    assert summary["row_count"] == 2
 
 
-def test_venta_con_fecha_real_no_se_confunde_con_maestro() -> None:
-    """No-regresión del cambio de arriba: una fecha de operación sigue bloqueando
-    la regla de maestros (si no, una venta con cliente caería en 'clientes')."""
-    assert analyze_headers(["fecha", "cliente", "total", "producto"])["inferred_type"] == "ventas"
+def test_csv_over_50_rows_not_truncated() -> None:
+    lines = ["fecha,monto"] + [f"2026-01-{(i % 28) + 1:02d},{1000 + i}" for i in range(200)]
+    csv = "\n".join(lines).encode()
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["row_count"] == 200
+    # Todas las filas quedan en el bucket (no truncadas a 50). FASE F: un CSV
+    # sin señales de contexto (solo fecha+monto) es ambiguo → otros_detectados,
+    # ya no cae a ventas por default; la confirmación explícita lo importa.
+    assert len(summary["otros_detectados"]) == 200
+    assert summary["ventas_detectadas"] == []
+
+
+def test_gastos_csv_does_not_contaminate_ventas_bucket() -> None:
+    csv = b"fecha,gasto,proveedor\n2026-01-15,5000,ProvA\n2026-01-16,3000,ProvB"
+    summary = parse_uploaded_content(csv, "text/csv", "gastos.csv")
+    assert summary["inferred_type"] == "gastos"
+    assert summary["gastos_detectados"]  # tiene gastos
+    assert summary["ventas_detectadas"] == []  # NO contamina ventas
+
+
+# ── Multi-hoja: preservación de hojas no clasificables ────────────────────────
+
+
+def _build_multisheet_with_unclassified() -> bytes:
+    import io
+
+    import pytest
+
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ventas = wb.active
+    ventas.title = "Ventas"
+    ventas.append(["fecha", "monto"])
+    ventas.append(["2026-01-15", "50000"])
+    resumen = wb.create_sheet("Resumen")  # nombre + headers no clasificables
+    resumen.append(["Titulo", "Observaciones", "Estado"])
+    resumen.append(["Total mes", "sin novedad", "ok"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_multisheet_unclassified_sheet_preserved_with_warning() -> None:
+    content = _build_multisheet_with_unclassified()
+    summary = parse_uploaded_content(content, _FASE1_XLSX_MIME, "mixto.xlsx")
+    contexts = summary["mapping_contexts"]
+    by_label = {c["label"]: c for c in contexts}
+
+    # La hoja clasificable entra normal.
+    assert by_label["Ventas"]["entity_type"] == "sale"
+
+    # La hoja "Resumen" NO se descarta: queda como contexto unclassified + warning.
+    assert "Resumen" in by_label
+    assert by_label["Resumen"]["entity_type"] is None
+    assert by_label["Resumen"]["unclassified"] is True
+    assert by_label["Resumen"]["row_count"] == 1
+    assert any("Resumen" in w for w in summary["warnings"])

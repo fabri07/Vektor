@@ -25,8 +25,6 @@ import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.services import llm_column_mapper
 from app.application.services.column_mapping_service import (
     ColumnMappingService,
@@ -62,7 +60,6 @@ class TestLaCapaDeAbajoNoDeshaceLaCorreccion:
         assert target == "unit_price"
         assert ratio >= 0.70
 
-    @pytest.mark.asyncio
     async def test_pero_no_llega_a_correr(self) -> None:
         s = (await _sugerir("expense", ["Envío unitario"]))["Envío unitario"]
         assert s["target_field"] is None
@@ -71,14 +68,12 @@ class TestLaCapaDeAbajoNoDeshaceLaCorreccion:
 
 
 class TestUnAmbiguoNoSeResuelveSolo:
-    @pytest.mark.asyncio
     async def test_no_llega_como_mapped_con_un_target_elegido_a_dedo(self) -> None:
         s = (await _sugerir("expense", ["Precio con IVA"]))["Precio con IVA"]
         assert s["status"] == "ambiguo"
         assert s["target_field"] is None
         assert s["confidence"] == 0.0
 
-    @pytest.mark.asyncio
     async def test_viaja_con_los_candidatos_y_el_porque(self) -> None:
         """`ambiguo` es un estado propio, no un `unmapped` con suerte: la pantalla
         recibe los dos candidatos y la razón, sin tener que reconstruir ninguno."""
@@ -86,7 +81,6 @@ class TestUnAmbiguoNoSeResuelveSolo:
         assert set(s["options"]) == {"amount", "unit_price"}
         assert s["duda"]
 
-    @pytest.mark.asyncio
     async def test_un_concepto_sin_campo_explica_pero_no_ofrece_candidatos(self) -> None:
         """«Entiendo qué es y no tengo dónde ponerlo» no es una ambigüedad: no hay
         entre qué elegir, así que queda `unmapped` — pero con la explicación."""
@@ -95,13 +89,11 @@ class TestUnAmbiguoNoSeResuelveSolo:
         assert s["options"] == []
         assert s["duda"]
 
-    @pytest.mark.asyncio
     async def test_lo_desconocido_no_inventa_una_explicacion(self) -> None:
         s = (await _sugerir("sale", ["ColRara99"]))["ColRara99"]
         assert s["duda"] is None
         assert s["options"] == []
 
-    @pytest.mark.asyncio
     async def test_tampoco_lo_desempata_el_llm(self) -> None:
         """Baja confianza y ambigüedad no son lo mismo: la primera dice «no sé» y
         el LLM puede ayudar; la segunda dice «entendí, y siguen siendo dos». Una
@@ -134,7 +126,6 @@ class TestElInvarianteDelContrato:
     podía resolver.
     """
 
-    @pytest.mark.asyncio
     async def test_resolver_una_columna_le_saca_la_duda(self) -> None:
         sugerencia = {
             "source_column": "Precio con IVA",
@@ -165,7 +156,6 @@ class TestElInvarianteDelContrato:
 
 
 class TestLoQueNoSeReconocioSigueSuCamino:
-    @pytest.mark.asyncio
     async def test_un_header_desconocido_sigue_llegando_al_llm(self) -> None:
         recibidas: list[str] = []
 
@@ -184,7 +174,6 @@ class TestLoQueNoSeReconocioSigueSuCamino:
         assert s["source"] == "llm"
         assert s["target_field"] == "amount"
 
-    @pytest.mark.asyncio
     async def test_un_header_claro_sigue_resolviendo(self) -> None:
         s = (await _sugerir("sale", ["Fecha"]))["Fecha"]
         assert s["source"] == "heuristic"
@@ -193,7 +182,6 @@ class TestLoQueNoSeReconocioSigueSuCamino:
 
 
 class TestElHistorialDelTenantSigueMandando:
-    @pytest.mark.asyncio
     async def test_una_decision_previa_del_usuario_desempata_el_ambiguo(self) -> None:
         """La única cosa que SÍ demuestra la intención: que ese tenant ya lo
         resolvió antes. El historial es la capa 1 y le gana al reconocedor."""

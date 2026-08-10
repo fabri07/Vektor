@@ -120,7 +120,6 @@ async def _all_unclassified(
 # ── 1. SKU desambigua nombre repetido ──────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sku_disambiguates_repeated_name(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -154,7 +153,6 @@ async def test_sku_disambiguates_repeated_name(
 # ── 2. Marca desambigua nombre repetido ────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_brand_disambiguates_repeated_name(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -186,7 +184,6 @@ async def test_brand_disambiguates_repeated_name(
 # ── 3. Ambiguo sin desambiguador ────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_ambiguous_without_disambiguator_goes_to_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -231,7 +228,6 @@ async def test_ambiguous_without_disambiguator_goes_to_otros(
 # ── 4. Conflicto: sku y nombre+marca apuntan a productos DISTINTOS ────────────
 
 
-@pytest.mark.asyncio
 async def test_conflict_sku_and_name_brand_point_to_different_products(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -287,7 +283,6 @@ async def test_conflict_sku_and_name_brand_point_to_different_products(
 # ── 5. Create + caché intra-corrida (camino multisheet) ───────────────────────
 
 
-@pytest.mark.asyncio
 async def test_create_new_product_and_second_identical_row_uses_cache(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -334,7 +329,6 @@ async def test_create_new_product_and_second_identical_row_uses_cache(
 # ── 6. Acentos: el name_normalized ignora diacríticos ──────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_accented_name_matches_existing_no_duplicate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -364,7 +358,6 @@ async def test_accented_name_matches_existing_no_duplicate(
 # ── 7. Aislamiento entre tenants ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_other_tenant_product_is_not_a_resolution_candidate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -411,7 +404,6 @@ async def test_other_tenant_product_is_not_a_resolution_candidate(
 # ── 8. Forma de match_candidates persistido ────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_match_candidates_persisted_shape(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -468,7 +460,6 @@ async def test_match_candidates_persisted_shape(
 # SOLO cuando la fila no trae marca (misma semántica que el motor).
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_sku_then_no_sku_same_run_creates_one_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -500,7 +491,6 @@ async def test_single_sheet_sku_then_no_sku_same_run_creates_one_product(
     assert products[0].stock_units == 3  # la 2da fila (sin sku) actualizó el mismo
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_no_sku_then_sku_same_run_creates_one_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -544,7 +534,6 @@ async def test_single_sheet_no_sku_then_sku_same_run_creates_one_product(
     assert products[0].stock_units == 3
 
 
-@pytest.mark.asyncio
 async def test_multisheet_sku_then_no_sku_same_run_creates_one_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -580,7 +569,6 @@ async def test_multisheet_sku_then_no_sku_same_run_creates_one_product(
     assert products[0].stock_units == 3
 
 
-@pytest.mark.asyncio
 async def test_single_sheet_two_brands_same_name_same_run_creates_two_products(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -627,7 +615,6 @@ async def test_single_sheet_two_brands_same_name_same_run_creates_two_products(
 # en /otros.
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_ambiguous_candidates_exclude_id_narrowed_out_by_other_tier(
     db_session: AsyncSession, sample_tenant: Tenant
@@ -661,7 +648,6 @@ async def test_ambiguous_candidates_exclude_id_narrowed_out_by_other_tier(
     assert str(prod_c.id) not in candidate_ids  # descartado por narrowing
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("legacy_pre_f5_schema")
 async def test_conflict_candidates_are_exactly_the_conflicting_set(
     db_session: AsyncSession, sample_tenant: Tenant
@@ -716,7 +702,6 @@ async def test_conflict_candidates_are_exactly_the_conflicting_set(
 # ── F2 review — casos peligrosos del deploy-gate ────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_legacy_null_normalized_still_resolves(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -755,7 +740,6 @@ async def test_legacy_null_normalized_still_resolves(
     assert products[0].sale_price_ars == Decimal("2500")
 
 
-@pytest.mark.asyncio
 async def test_barcode_from_file_creates_and_resolves(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -790,7 +774,6 @@ async def test_barcode_from_file_creates_and_resolves(
     assert products[0].sale_price_ars == Decimal("1600")
 
 
-@pytest.mark.asyncio
 async def test_partial_sku_rows_same_file_no_duplicate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -811,7 +794,6 @@ async def test_partial_sku_rows_same_file_no_duplicate(
     assert len(products) == 1  # una sola identidad pese al sku parcial
 
 
-@pytest.mark.asyncio
 async def test_partial_sku_rows_reverse_order_no_duplicate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -830,7 +812,6 @@ async def test_partial_sku_rows_reverse_order_no_duplicate(
     assert len(products) == 1
 
 
-@pytest.mark.asyncio
 async def test_resolve_product_link_is_accent_tolerant(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -851,7 +832,6 @@ async def test_resolve_product_link_is_accent_tolerant(
 # ── F2 review ronda 2 — compras ambiguas + link por barcode ─────────────────────
 
 
-@pytest.mark.asyncio
 async def test_ambiguous_purchase_goes_to_otros_not_new_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -894,7 +874,6 @@ async def test_ambiguous_purchase_goes_to_otros_not_new_product(
     assert {c["id"] for c in records[0].match_candidates} == {str(p1.id), str(p2.id)}
 
 
-@pytest.mark.asyncio
 async def test_sale_links_by_barcode(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -938,7 +917,6 @@ async def test_sale_links_by_barcode(
 # ── F2 review ronda 3 — fixes de compras ambiguas / índices / idempotencia ──────
 
 
-@pytest.mark.asyncio
 async def test_ambiguous_purchase_mixed_file_captured_to_otros_once(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -977,7 +955,6 @@ async def test_ambiguous_purchase_mixed_file_captured_to_otros_once(
     assert len(records) == 1
 
 
-@pytest.mark.asyncio
 async def test_repeated_purchase_new_product_counts_created_once(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -1006,7 +983,6 @@ async def test_repeated_purchase_new_product_counts_created_once(
     assert counts["gastos"] == 2  # ambos gastos registrados
 
 
-@pytest.mark.asyncio
 async def test_ambiguous_purchase_idempotent_on_reimport(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -1039,7 +1015,6 @@ async def test_ambiguous_purchase_idempotent_on_reimport(
     assert len(records) == 1  # un solo registro, no dos
 
 
-@pytest.mark.asyncio
 async def test_sale_links_to_same_file_purchased_product(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

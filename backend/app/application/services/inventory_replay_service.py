@@ -62,6 +62,14 @@ logger = get_logger(__name__)
 #: hoja vinieron, y por eso el alcance del apply deja de ser por hoja.
 CONTEXTO_DESCONOCIDO = "__sin_hoja__"
 
+#: Claves por query al buscar los descuentos ya vivos. Un archivo NO tiene tope de
+#: filas (`file_parsing`: "Sin límite de filas") y Postgres corta en 65.535
+#: parámetros por statement: con un archivo de esa escala, un solo ``IN (...)`` con
+#: una clave por venta revienta en asyncpg en pleno apply de inventario. Mismo
+#: tamaño que el re-apuntado de FKs del dedup
+#: (``product_dedup_service.REPOINT_CHUNK_SIZE``).
+CLAVES_CHUNK_SIZE = 500
+
 
 @dataclass
 class VentaPendiente:
@@ -129,19 +137,28 @@ async def _ya_descontadas(
     tenant_id: uuid.UUID,
     ventas: list[SaleEntry],
 ) -> set[str]:
-    """``source_event_id`` de los descuentos de venta ya vivos, del lote que sea."""
-    if not ventas:
-        return set()
+    """``source_event_id`` de los descuentos de venta ya vivos, del lote que sea.
+
+    Se consulta por lotes de ``CLAVES_CHUNK_SIZE``: la lista de ventas no tiene
+    tope y un ``IN (...)`` con una clave por venta se pasa del límite de binds de
+    Postgres justo en los archivos grandes, que son los que más tardan en llegar
+    hasta acá. Sin ventas el bucle no itera y no se consulta nada.
+    """
     claves = [sale_source_event_id(v.id) for v in ventas]
-    filas = await session.execute(
-        select(InventoryMovement.source_event_id).where(
-            InventoryMovement.tenant_id == tenant_id,
-            InventoryMovement.movement_type == "sale",
-            InventoryMovement.voided_at.is_(None),
-            InventoryMovement.source_event_id.in_(claves),
+    encontradas: set[str] = set()
+    for inicio in range(0, len(claves), CLAVES_CHUNK_SIZE):
+        filas = await session.execute(
+            select(InventoryMovement.source_event_id).where(
+                InventoryMovement.tenant_id == tenant_id,
+                InventoryMovement.movement_type == "sale",
+                InventoryMovement.voided_at.is_(None),
+                InventoryMovement.source_event_id.in_(
+                    claves[inicio : inicio + CLAVES_CHUNK_SIZE]
+                ),
+            )
         )
-    )
-    return {row[0] for row in filas if row[0]}
+        encontradas.update(row[0] for row in filas if row[0])
+    return encontradas
 
 
 async def run_inventory_replay(

@@ -119,7 +119,6 @@ def _week_history(
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_weekly_delta_calculated_correctly(session: AsyncSession) -> None:
     """
     Given a score of 70 this week and a previous week history of 60,
@@ -153,7 +152,6 @@ async def test_weekly_delta_calculated_correctly(session: AsyncSession) -> None:
     assert float(row.delta) == pytest.approx(10.0)  # type: ignore[arg-type]  # test double / fixture
 
 
-@pytest.mark.asyncio
 async def test_trend_label_improving(session: AsyncSession) -> None:
     """
     delta >= 3 should produce trend_label = 'improving'.
@@ -168,7 +166,6 @@ async def test_trend_label_improving(session: AsyncSession) -> None:
     assert compute_trend_label(Decimal("-10")) == "declining"
 
 
-@pytest.mark.asyncio
 async def test_milestone_m1_unlocks_on_first_improvement(session: AsyncSession) -> None:
     """
     M1 should unlock when delta > 0 and was not already in milestones_json.
@@ -206,7 +203,6 @@ async def test_milestone_m1_unlocks_on_first_improvement(session: AsyncSession) 
     assert any("M1" in n.title or "Primera" in n.body for n in notifications)
 
 
-@pytest.mark.asyncio
 async def test_run_momentum_update_no_crashea_con_milestone_sin_code(
     session: AsyncSession,
 ) -> None:
@@ -253,7 +249,6 @@ async def test_run_momentum_update_no_crashea_con_milestone_sin_code(
     assert "M1" in codes
 
 
-@pytest.mark.asyncio
 async def test_value_protected_increases_with_margin_improvement(session: AsyncSession) -> None:
     """
     When margin score improves from 30 days ago and monthly_sales_estimate is set,

@@ -4,7 +4,6 @@ import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,7 +92,6 @@ def _req(tenant_id: uuid.UUID, msg: str = "") -> AgentRequest:
     return AgentRequest(user_id=str(uuid.uuid4()), business_id=str(tenant_id), message=msg)
 
 
-@pytest.mark.asyncio
 async def test_analizar_margenes(db_session, seeded_tenant):
     agent = AgentStock(db=db_session)
     resp = await agent.process(
@@ -105,7 +103,6 @@ async def test_analizar_margenes(db_session, seeded_tenant):
     assert "Coca" in resp.message
 
 
-@pytest.mark.asyncio
 async def test_sugerir_precios(db_session, seeded_tenant):
     agent = AgentStock(db=db_session)
     resp = await agent.process(_req(seeded_tenant), task=_task("sugerir_precios_venta"))
@@ -113,7 +110,6 @@ async def test_sugerir_precios(db_session, seeded_tenant):
     assert resp.result["structured_data"]["suggestions"]
 
 
-@pytest.mark.asyncio
 async def test_simular_sin_pct_pide_aclaracion(db_session, seeded_tenant):
     agent = AgentStock(db=db_session)
     resp = await agent.process(
@@ -122,7 +118,6 @@ async def test_simular_sin_pct_pide_aclaracion(db_session, seeded_tenant):
     assert resp.status == "requires_clarification"
 
 
-@pytest.mark.asyncio
 async def test_simular_con_pct(db_session, seeded_tenant):
     agent = AgentStock(db=db_session)
     resp = await agent.process(
@@ -133,7 +128,6 @@ async def test_simular_con_pct(db_session, seeded_tenant):
     assert resp.result["structured_data"]["simulation"]["pct"] == 12.0
 
 
-@pytest.mark.asyncio
 async def test_detectar_quiebres(db_session, seeded_tenant):
     agent = AgentStock(db=db_session)
     resp = await agent.process(_req(seeded_tenant), task=_task("detectar_quiebres_stock"))
@@ -142,7 +136,6 @@ async def test_detectar_quiebres(db_session, seeded_tenant):
     assert "Pan lactal" in resp.message
 
 
-@pytest.mark.asyncio
 async def test_estimar_dias_stock(db_session, seeded_tenant):
     agent = AgentStock(db=db_session)
     resp = await agent.process(_req(seeded_tenant), task=_task("estimar_dias_stock"))
@@ -212,7 +205,6 @@ def _req_att(tenant_id, file_id, msg=""):
     )
 
 
-@pytest.mark.asyncio
 async def test_detectar_aumentos_proveedor(db_session, tenant_with_price_file):
     tid, fid = tenant_with_price_file
     agent = AgentStock(db=db_session)
@@ -228,7 +220,6 @@ async def test_detectar_aumentos_proveedor(db_session, tenant_with_price_file):
     assert incs and incs[0]["delta_pct"] == 20.0  # 600 → 720
 
 
-@pytest.mark.asyncio
 async def test_analizar_lista_precios_con_margen(db_session, tenant_with_price_file):
     tid, fid = tenant_with_price_file
     agent = AgentStock(db=db_session)
@@ -244,7 +235,6 @@ async def test_analizar_lista_precios_con_margen(db_session, tenant_with_price_f
     assert resp.result["structured_data"]["matched"] >= 1
 
 
-@pytest.mark.asyncio
 async def test_importar_archivo_productos_routed_to_income():
     # fix: importar_archivo_productos debe rutear a agent_income (stock no maneja IMPORT)
     from app.application.agents.ceo.team_plan_builder import INTENT_TO_AGENT, build_plan
@@ -255,7 +245,6 @@ async def test_importar_archivo_productos_routed_to_income():
     assert plan.tasks[0].action_type == ActionType.IMPORT_TABULAR_FILE
 
 
-@pytest.mark.asyncio
 async def test_empty_catalog(db_session):
     from app.persistence.models.tenant import Tenant
 

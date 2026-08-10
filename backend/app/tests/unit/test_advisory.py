@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.agents.shared.advisory import (
     assess_data_sufficiency,
     build_advisory_system_prompt,
@@ -189,7 +187,6 @@ def _make_request(message: str = "dame una idea para las ventas") -> AgentReques
     )
 
 
-@pytest.mark.asyncio
 async def test_handle_advice_empty_mode_skips_llm(monkeypatch) -> None:
     """Gate no-invention: sin datos, NUNCA se llama al LLM."""
     import uuid
@@ -227,7 +224,6 @@ async def test_handle_advice_empty_mode_skips_llm(monkeypatch) -> None:
     assert response.result["advisory_mode"] == "empty"
 
 
-@pytest.mark.asyncio
 async def test_handle_advice_grounded_calls_llm_and_returns_high(monkeypatch) -> None:
     import uuid
 
@@ -264,7 +260,6 @@ async def test_handle_advice_grounded_calls_llm_and_returns_high(monkeypatch) ->
     assert response.usage.calls[0].source == "advisory_narrator"
 
 
-@pytest.mark.asyncio
 async def test_handle_advice_llm_failure_degrades_gracefully(monkeypatch) -> None:
     import uuid
 
@@ -296,7 +291,6 @@ async def test_handle_advice_llm_failure_degrades_gracefully(monkeypatch) -> Non
     assert "no pude armar el consejo" in response.message.lower()
 
 
-@pytest.mark.asyncio
 async def test_handle_advice_facts_load_failure_degrades_gracefully(monkeypatch) -> None:
     import uuid
 

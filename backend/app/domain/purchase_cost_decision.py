@@ -201,10 +201,12 @@ def hojas_que_necesitan_aviso(
         ignorados: list[str] = []
         if (TARGETS_DE_AJUSTE & presentes) and (dec is None or dec.base == BASE_INCLUYE):
             ignorados.extend(sorted(TARGETS_DE_AJUSTE & presentes))
-        if TARGET_FLETE_LINEA in presentes and (
-            dec is None or dec.line_shipping == LINEA_GASTO
-        ):
-            ignorados.append(TARGET_FLETE_LINEA)
+        # `shipping_cost_line` salió de este aviso en F-H6.e, por la MISMA razón
+        # por la que `shipping_cost` nunca estuvo: ya tiene consumidor en los dos
+        # modos. Con `al_costo` entra al costo del producto y con `gasto_aparte`
+        # se registra como gasto de logística — antes no hacía ninguna de las dos
+        # y el aviso decía «declarálo para que se apliquen», prometiendo algo que
+        # al declararlo tampoco pasaba.
         if ignorados:
             aviso[context_id] = ignorados
     return aviso

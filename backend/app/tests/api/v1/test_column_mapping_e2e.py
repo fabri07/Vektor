@@ -106,7 +106,6 @@ async def product_file(db_session: AsyncSession, sample_tenant: Tenant) -> Uploa
 # ── Tests: GET /column-mappings ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestGetColumnMappings:
     async def test_returns_suggestion_per_header(
         self,
@@ -198,7 +197,6 @@ def mock_score_trigger_e2e():
         yield mock
 
 
-@pytest.mark.asyncio
 class TestConfirmWithColumnMappings:
     async def test_explicit_mappings_import_with_correct_date(
         self,
@@ -396,7 +394,6 @@ class TestConfirmWithColumnMappings:
 # ── Tests: GET/DELETE /ingestion/column-mappings ──────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestLearnedMappings:
     async def test_list_returns_empty_initially(
         self,
@@ -584,7 +581,6 @@ async def multisheet_file(db_session: AsyncSession, sample_tenant: Tenant) -> Up
     return record
 
 
-@pytest.mark.asyncio
 class TestConfirmWithContextMappings:
     async def test_get_mappings_by_context_uses_sheet_headers_and_entity(
         self,
@@ -843,7 +839,6 @@ async def ambiguous_file(db_session: AsyncSession, sample_tenant: Tenant) -> Upl
     return record
 
 
-@pytest.mark.asyncio
 class TestUnaColumnaIndecidibleNoLlegaMapeada:
     """La regla rectora de F-M, verificada donde el usuario la ve: sobre el HTTP.
 

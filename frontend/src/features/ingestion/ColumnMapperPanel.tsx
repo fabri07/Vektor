@@ -26,6 +26,8 @@ import {
   type PurchaseCostBase,
   type PurchaseCostDecision,
   type PurchaseLineShipping,
+  type PurchaseSharedShipping,
+  type SheetPurchaseGroups,
 } from "@/services/ingestion.service";
 import { Button } from "@/components/ui/Button";
 import { InventoryImpactPanel } from "./InventoryImpactPanel";
@@ -33,11 +35,13 @@ import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { InventoryEffectChoice } from "./InventoryEffectChoice";
 import { ShippingDecisionChoice } from "./ShippingDecisionChoice";
 import { PurchaseCostChoice } from "./PurchaseCostChoice";
+import { PurchaseGroupsPreview } from "./PurchaseGroupsPreview";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 import {
   customFieldCollisions,
+  explainMissing,
   missingRequiredFields,
   scalarCollisions,
   type SheetIssues,
@@ -122,6 +126,19 @@ const SOURCE_LABELS: Record<string, string> = {
 function isTransientConfirmError(error: unknown): boolean {
   const e = error as { response?: { status?: number }; code?: string } | null;
   return e?.response?.status === 409 || e?.code === "ECONNABORTED";
+}
+
+/**
+ * F-H6.d: el tenant no tiene habilitado el motor de costos de compra.
+ *
+ * `/purchase-groups` responde 403 y eso NO es un error que haya que mostrar: es
+ * la compuerta de rollout, y la degradación correcta es que el tercer eje y la
+ * vista previa del reparto simplemente no aparezcan. Lo que sí hay que evitar es
+ * seguir preguntando: la clave de la consulta cambia con cada edición del mapeo,
+ * así que sin este freno un tenant fuera de la lista se come un 403 por tecla.
+ */
+function esMotorDeCostosDeshabilitado(error: unknown): boolean {
+  return (error as { response?: { status?: number } } | null)?.response?.status === 403;
 }
 
 // Maneja el error transitorio del confirm: avisa amable y refresca la lista.
@@ -476,6 +493,8 @@ function SheetMapperSection({
   onShippingChange,
   costoValue,
   onCostoChange,
+  grupos,
+  resaltada,
 }: {
   fileId: string;
   context: MappingContext;
@@ -504,11 +523,26 @@ function SheetMapperSection({
   // `null` = todavía no eligió → no se registran.
   shippingValue: ShippingAction | null;
   onShippingChange: (ctxId: string, value: ShippingAction | null) => void;
-  costoValue: { base: PurchaseCostBase; line: PurchaseLineShipping };
+  costoValue: {
+    base: PurchaseCostBase;
+    shared: PurchaseSharedShipping;
+    line: PurchaseLineShipping;
+  };
   onCostoChange: (
     ctxId: string,
-    patch: { base?: PurchaseCostBase; line?: PurchaseLineShipping },
+    patch: {
+      base?: PurchaseCostBase;
+      shared?: PurchaseSharedShipping;
+      line?: PurchaseLineShipping;
+    },
   ) => void;
+  // F-H6.d: cómo agrupa el servidor las líneas de ESTA hoja por comprobante y
+  // cómo repartiría el envío. `undefined` mientras la consulta está en vuelo o
+  // cuando la hoja no declara envío compartido.
+  grupos?: SheetPurchaseGroups;
+  // El banner de faltantes mandó acá pero no pudo señalar una columna: se marca
+  // la tarjeta para que la persona sepa dónde aterrizó.
+  resaltada?: boolean;
 }) {
   // Texto/imagen no tiene columnas: se mapea el grupo a un tipo, sin dropdowns.
   const isText = context.headers == null;
@@ -619,9 +653,12 @@ function SheetMapperSection({
 
   return (
     <div
+      // A dónde salta el banner de faltantes cuando NO puede señalar una columna
+      // concreta. Por atributo y no por `id`: el `context_id` es texto libre.
+      data-sheet-card={context.context_id}
       className={`rounded-lg border bg-vk-surface-w ${
         included ? "border-vk-border-w" : "border-vk-border-w/40 opacity-60"
-      }`}
+      } ${resaltada ? "ring-2 ring-vk-danger/60" : ""}`}
     >
       <div className="flex items-center justify-between gap-3 border-b border-vk-border-w bg-vk-bg-light px-3 py-2">
         <label className="flex cursor-pointer items-center gap-2">
@@ -807,6 +844,13 @@ function SheetMapperSection({
                     <select
                       value={customFor === s.source_column ? "__custom__" : target}
                       onChange={(e) => selectTarget(s.source_column, e.target.value)}
+                      // Por dónde entra el salto del banner de faltantes: dice a
+                      // qué hoja pertenece este select y qué campo SUGERÍA
+                      // Véktor para esta columna. Se busca por atributo y no por
+                      // `id` porque el nombre de la columna es texto libre del
+                      // archivo (espacios, acentos, comillas).
+                      data-sheet={context.context_id}
+                      data-suggests={s.target_field ?? ""}
                       // Deshabilitado —no vacío— mientras carga el catálogo: un
                       // select sin opciones es justamente el fallo que se está
                       // corrigiendo (mostraría "Sin mapear" sobre un target real).
@@ -902,14 +946,36 @@ function SheetMapperSection({
       {included && (
         <PurchaseCostChoice
           base={costoValue.base}
+          sharedShipping={costoValue.shared}
           lineShipping={costoValue.line}
           onBaseChange={(v) => onCostoChange(context.context_id, { base: v })}
+          onSharedShippingChange={(v) =>
+            onCostoChange(context.context_id, { shared: v })
+          }
           onLineShippingChange={(v) => onCostoChange(context.context_id, { line: v })}
           mostrarAjustes={
             Object.values(mappings).includes("discount") ||
             Object.values(mappings).includes("taxes")
           }
+          // F-H6.d: mapear el envío es condición necesaria pero no suficiente —
+          // quien decide si un reparto es posible es el servidor. Ofrecerlo por
+          // el solo hecho de tener la columna dejaría al usuario eligiendo algo
+          // que el importador no va a hacer.
+          mostrarEnvioCompartido={
+            Object.values(mappings).includes("shipping_cost") &&
+            grupos?.puede_distribuir === true
+          }
           mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
+          className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
+        />
+      )}
+
+      {/* F-H6.d: el reparto es la parte del costo que no se puede auditar después
+          —el envío queda adentro del costo unitario—, así que se muestra antes
+          de confirmar, con los números que devolvió el servidor. */}
+      {included && grupos && (
+        <PurchaseGroupsPreview
+          hoja={grupos}
           className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
         />
       )}
@@ -986,7 +1052,14 @@ function MultiContextMapper({
   // se apartaron de un default — mandar los defaults sería ruido, y el backend ya
   // los aplica igual.
   const [costoByCtx, setCostoByCtx] = useState<
-    Record<string, { base: PurchaseCostBase; line: PurchaseLineShipping }>
+    Record<
+      string,
+      {
+        base: PurchaseCostBase;
+        shared: PurchaseSharedShipping;
+        line: PurchaseLineShipping;
+      }
+    >
   >({});
   const [shippingByCtx, setShippingByCtx] = useState<
     Record<string, ShippingAction | null>
@@ -1046,6 +1119,10 @@ function MultiContextMapper({
     [parserWarnings, contexts],
   );
 
+  // Mismo catálogo que usan las secciones (react-query dedupea por `queryKey`):
+  // acá alimenta el banner con el nombre y el motivo de cada requerido.
+  const { data: catalogoDeCampos } = useFieldCatalog();
+
   // Sección efectiva de una hoja: la que eligió el usuario, si no la que trajo
   // el backend, si no NINGUNA. Fuente única — antes cada lugar repetía el
   // `?? "sale"` y ese default silencioso es el bug que estamos cerrando.
@@ -1086,13 +1163,58 @@ function MultiContextMapper({
   const riesgoDobleConteo =
     hojasDeGasto.length > 0 && hojasMarcadasCompra.length > 0;
 
+  /**
+   * F-C: llevar a la persona al DESTINO del campo que falta.
+   *
+   * La regla es la misma que la de la corrección V10: se señala una columna sólo
+   * cuando NO hay ambigüedad. Si entre las sugerencias de la hoja hay
+   * exactamente UNA que apuntaba a ese campo, esa es la columna de la que salió
+   * el dato y ahí va el foco. Si hay varias —o ninguna— elegir una sería elegir
+   * al azar, así que se salta a la tarjeta de la hoja y se la resalta: la
+   * persona ve dónde tiene que mirar y decide ella cuál es.
+   *
+   * Se lee el DOM en vez de mantener un índice en estado porque lo que hay que
+   * enfocar es exactamente lo que está renderizado; un índice paralelo puede
+   * quedar viejo justo cuando la hoja acaba de cambiar de sección.
+   */
+  const [hojaResaltada, setHojaResaltada] = useState<string | null>(null);
+  const irAlDestino = useCallback((ctxId: string, target: string) => {
+    const candidatos = Array.from(
+      document.querySelectorAll<HTMLSelectElement>("select[data-sheet][data-suggests]"),
+    ).filter((el) => el.dataset.sheet === ctxId && el.dataset.suggests === target);
+    const unico = candidatos.length === 1 ? candidatos[0] : undefined;
+    if (unico) {
+      // `scrollIntoView` no existe en jsdom: el foco es lo que importa y no se
+      // puede perder por un salto de scroll que el entorno de test no implementa.
+      unico.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      unico.focus();
+      setHojaResaltada(null);
+      return;
+    }
+    const tarjeta = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-sheet-card]"),
+    ).find((el) => el.dataset.sheetCard === ctxId);
+    tarjeta?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setHojaResaltada(ctxId);
+  }, []);
+
   // Solo cuentan las hojas INCLUIDAS: una destildada no se importa, así que sus
   // problemas no pueden bloquear nada.
   const hojasConProblemas = contexts
     .filter((c) => included[c.context_id])
-    .map((c) => ({ label: c.label ?? c.context_id, issues: issuesByCtx[c.context_id] }))
+    .map((c) => ({
+      ctxId: c.context_id,
+      label: c.label ?? c.context_id,
+      issues: issuesByCtx[c.context_id],
+      // El motivo de cada requerido depende de la ENTIDAD de la hoja: la misma
+      // fecha se pierde distinto en una venta que en un gasto.
+      faltantes: explainMissing(
+        issuesByCtx[c.context_id]?.missingRequired ?? [],
+        catalogoDeCampos?.[entityFor(c)],
+      ),
+    }))
     .filter(
-      (h): h is { label: string; issues: SheetIssues } =>
+      (h): h is typeof h & { issues: SheetIssues } =>
         !!h.issues &&
         (h.issues.missingRequired.length > 0 || h.issues.collisions.length > 0),
     );
@@ -1178,6 +1300,99 @@ function MultiContextMapper({
     [effectsByCtx, effectByCtx],
   );
 
+  /**
+   * F-H6.d: las decisiones de costo tal como las eligió el usuario, para PEDIR
+   * el reparto.
+   *
+   * Se manda el estado CRUDO y no el efectivo a propósito: el efectivo depende
+   * de `puede_distribuir`, que es justo lo que devuelve esta consulta. Derivarlo
+   * antes de preguntar cerraría el círculo sobre sí mismo. El confirm sí manda
+   * el efectivo — ahí ya se sabe qué puede hacer el importador.
+   */
+  const costoDraft = useMemo(
+    () =>
+      Object.entries(costoByCtx)
+        .filter(([ctxId]) => included[ctxId])
+        .map(([ctxId, d]) => ({
+          context_id: ctxId,
+          base: d.base,
+          shared_shipping: d.shared,
+          line_shipping: d.line,
+        })),
+    [costoByCtx, included],
+  );
+  /**
+   * F-H6.b: sólo las hojas donde el usuario eligió. Sin entrada, sus envíos sin
+   * comprobante no se registran — que es el default seguro.
+   *
+   * Se calcula acá y no adentro del confirm porque el PREVIEW del reparto
+   * también depende de esto: una hoja sin número de comprobante puede formar un
+   * grupo si el usuario declaró «toda la hoja es una compra», y mostrarla como
+   * no repartible sería contradecir lo que ya eligió.
+   */
+  const envioPayload = useMemo(
+    () =>
+      Object.entries(shippingByCtx)
+        .filter(([ctxId, action]) => action !== null && included[ctxId])
+        .map(([ctxId, action]) => ({
+          context_id: ctxId,
+          action: action as ShippingAction,
+        })),
+    [shippingByCtx, included],
+  );
+  const draftKey = useMemo(
+    () => JSON.stringify([costoDraft, envioPayload]),
+    [costoDraft, envioPayload],
+  );
+  // Sin ninguna columna de envío compartido no hay reparto posible: se evita una
+  // consulta por archivo que no la necesita.
+  const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
+    (m) => m.target_field === "shipping_cost",
+  );
+  // Se recuerda aunque cambie la clave: `error` de react-query vuelve a `null`
+  // con cada clave nueva, y la compuerta es del TENANT, no del mapeo.
+  const [sinMotor, setSinMotor] = useState(false);
+  const { data: purchaseGroups = [], error: errorGrupos } = useQuery({
+    queryKey: ["purchase-groups", fileId, riskRecomputeKey, draftKey],
+    queryFn: ({ signal }) =>
+      ingestionService.fetchPurchaseGroups(
+        fileId,
+        {
+          ...riskRecomputeInput,
+          shippingDecisions: envioPayload,
+          purchaseCostDecisions: costoDraft,
+        },
+        signal,
+      ),
+    enabled: hayEnvioCompartido && !sinMotor,
+    // Mismo motivo que en `/inventory-effects`: la clave cambia con cada edición
+    // del mapeo, y sin conservar lo anterior el selector del tercer eje
+    // desaparecería en cada recálculo.
+    placeholderData: (prev) => prev,
+    retry: false,
+  });
+  useEffect(() => {
+    if (esMotorDeCostosDeshabilitado(errorGrupos)) setSinMotor(true);
+  }, [errorGrupos]);
+  const gruposByCtx = useMemo(
+    () => Object.fromEntries(purchaseGroups.map((h) => [h.context_id, h])),
+    [purchaseGroups],
+  );
+  /**
+   * Reparto EFECTIVO de una hoja: lo que eligió el usuario sólo si el servidor
+   * dice que esa hoja se puede repartir; si no, el default que no toca ningún
+   * costo. Mismo criterio que `efectoDe`: mandar un modo que el backend ya no
+   * ofrece sería mandar algo que no va a pasar.
+   */
+  const compartidoDe = useCallback(
+    (ctxId: string): PurchaseSharedShipping =>
+      costoByCtx[ctxId]?.shared === "por_subtotal" &&
+      gruposByCtx[ctxId]?.puede_distribuir
+        ? "por_subtotal"
+        : "no_distribuir",
+    [costoByCtx, gruposByCtx],
+  );
+
   const { registrar: registrarImpacto, vista: vistaImpacto } =
     useImpactoPostConfirm(onDone, fileId);
 
@@ -1224,18 +1439,18 @@ function MultiContextMapper({
       const costoPayload: PurchaseCostDecision[] = Object.entries(costoByCtx)
         .filter(
           ([ctxId, d]) =>
-            included[ctxId] && (d.base !== "monto_incluye" || d.line !== "gasto_aparte"),
+            included[ctxId] &&
+            (d.base !== "monto_incluye" ||
+              compartidoDe(ctxId) !== "no_distribuir" ||
+              d.line !== "gasto_aparte"),
         )
         .map(([ctxId, d]) => ({
           context_id: ctxId,
           base: d.base,
+          // Efectivo, no lo crudo: si el servidor dice que esta hoja no se puede
+          // repartir, declarar `por_subtotal` sería pedir algo imposible.
+          shared_shipping: compartidoDe(ctxId),
           line_shipping: d.line,
-        }));
-      const shippingPayload = Object.entries(shippingByCtx)
-        .filter(([ctxId, action]) => action !== null && included[ctxId])
-        .map(([ctxId, action]) => ({
-          context_id: ctxId,
-          action: action as ShippingAction,
         }));
       return ingestionService.confirmFile(
         fileId,
@@ -1250,7 +1465,7 @@ function MultiContextMapper({
         Object.keys(inventoryEffectPayload).length > 0
           ? inventoryEffectPayload
           : undefined,
-        shippingPayload,
+        envioPayload,
         costoPayload,
       );
     },
@@ -1348,14 +1563,22 @@ function MultiContextMapper({
             effectValue={efectoDe(ctx.context_id)}
             onEffectChange={handleEffectChange}
             shippingValue={shippingByCtx[ctx.context_id] ?? null}
-            costoValue={
-              costoByCtx[ctx.context_id] ?? { base: "monto_incluye", line: "gasto_aparte" }
-            }
+            grupos={gruposByCtx[ctx.context_id]}
+            resaltada={hojaResaltada === ctx.context_id}
+            costoValue={{
+              base: costoByCtx[ctx.context_id]?.base ?? "monto_incluye",
+              // El efectivo, no el crudo: el radio tiene que mostrar lo que
+              // realmente se va a mandar, no una elección que el servidor ya
+              // dijo que no puede honrar.
+              shared: compartidoDe(ctx.context_id),
+              line: costoByCtx[ctx.context_id]?.line ?? "gasto_aparte",
+            }}
             onCostoChange={(ctxId, patch) =>
               setCostoByCtx((prev) => ({
                 ...prev,
                 [ctxId]: {
                   base: patch.base ?? prev[ctxId]?.base ?? "monto_incluye",
+                  shared: patch.shared ?? prev[ctxId]?.shared ?? "no_distribuir",
                   line: patch.line ?? prev[ctxId]?.line ?? "gasto_aparte",
                 },
               }))
@@ -1402,18 +1625,57 @@ function MultiContextMapper({
           el usuario descubría el problema recién con un 422 que no decía cómo
           salir (incidente ASTERIA: tres confirms rechazados seguidos). */}
       {hojasConProblemas.length > 0 && (
-        <div className="mt-3 space-y-1">
-          {hojasConProblemas.map(({ label, issues }) => (
-            <p key={label} className="flex gap-1.5 text-xs text-vk-danger">
-              <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-              <span>
-                <strong>«{label}»</strong>:{" "}
-                {issues.missingRequired.length > 0
-                  ? "falta un dato obligatorio"
-                  : "hay dos columnas para el mismo campo"}
-                . Revisá la hoja más arriba.
-              </span>
-            </p>
+        <div className="mt-3 space-y-2">
+          {hojasConProblemas.map(({ ctxId, label, issues, faltantes }) => (
+            <div key={ctxId} className="text-xs text-vk-danger">
+              <p className="flex gap-1.5">
+                <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+                <span>
+                  <strong>«{label}»</strong>:{" "}
+                  {[
+                    faltantes.length === 1
+                      ? "falta un dato obligatorio"
+                      : faltantes.length > 1
+                        ? "faltan datos obligatorios"
+                        : null,
+                    // Las dos cosas pueden pasar a la vez y antes la segunda se
+                    // perdía: el mensaje era un o-lo-uno-o-lo-otro y la hoja
+                    // seguía bloqueada por algo que el banner no nombró.
+                    issues.collisions.length > 0
+                      ? "hay dos columnas para el mismo campo"
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" y ")}
+                  .{issues.collisions.length > 0 && " Revisá la hoja más arriba."}
+                </span>
+              </p>
+              {/* Cada faltante se nombra, se explica QUÉ SE PIERDE la persona si
+                  no lo mapea, y lleva al lugar donde se arregla. Antes esto
+                  decía «falta un dato obligatorio, revisá la hoja más arriba»:
+                  no decía cuál, no decía por qué, y dejaba el botón apagado sin
+                  una acción concreta. */}
+              {faltantes.length > 0 && (
+                <ul className="mt-1 space-y-1 pl-5">
+                  {faltantes.map((f) => (
+                    <li key={f.field}>
+                      <button
+                        type="button"
+                        onClick={() => irAlDestino(ctxId, f.field)}
+                        className="text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus:outline-none focus-visible:ring-1 focus-visible:ring-vk-danger"
+                      >
+                        <strong>{f.label}</strong> — ir a la hoja
+                      </button>
+                      {f.reason && (
+                        <span className="mt-0.5 block text-[11px] leading-snug text-vk-text-secondary">
+                          {f.reason}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -1565,12 +1827,36 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   });
   const hojaEfecto = inventoryEffects[0];
   const [effectElegido, setEffectElegido] = useState<string | null>(null);
-  // F-H6.c: el equivalente de `costoByCtx` para el archivo de una sola tabla,
-  // que no tiene contextos. Default en «no toca nada», igual que allá.
-  const [costoTablaUnica, setCostoTablaUnica] = useState<{
-    base: PurchaseCostBase;
-    line: PurchaseLineShipping;
-  }>({ base: "monto_incluye", line: "gasto_aparte" });
+  /**
+   * Este camino NO puede traer costos de compra, y por eso no los ofrece.
+   *
+   * El importador plano no cobra el envío ni aplica las decisiones de costo —el
+   * cobro vive en un closure del camino multi-hoja y la decisión se busca bajo
+   * otra clave—, así que el confirm rechaza el archivo con 422 en cuanto ve una
+   * columna de envío mapeada O una decisión de costo declarada. Arreglar el
+   * camino plano de verdad es otra fase.
+   *
+   * Mientras tanto, lo que la pantalla NO puede hacer es ofrecer los tres ejes
+   * acá: cada decisión que tomara terminaría en un rechazo, y antes de ese guard
+   * terminaba en algo peor —el import aceptaba el archivo y la ignoraba en
+   * silencio, dejando el costo más bajo que el real y el margen inflado—. Se
+   * nombra el problema y se dicen las dos salidas, que son las mismas del 422.
+   *
+   * El predicado del backend (`_plano`) es más AMPLIO que este `!isMultiContext`,
+   * así que todo lo que la pantalla manda por acá cae adentro de su rechazo: no
+   * hay archivo que la UI deje pasar y el confirm frene por sorpresa.
+   */
+  const columnasDeCostoEnTablaUnica = [
+    ...new Set(
+      riskRecomputeInput.columnMappings
+        .filter(
+          (m) =>
+            m.target_field === "shipping_cost" ||
+            m.target_field === "shipping_cost_line",
+        )
+        .map((m) => m.source_column),
+    ),
+  ];
   // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
   // cantidad puede dejar a la hoja sin poder mover inventario.
   const efectoActual =
@@ -1655,18 +1941,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           ? { [hojaEfecto.context_id]: efectoActual }
           : undefined,
         undefined,
-        // F-H6.c: sólo si se apartó de un default. `context_id: ""` es la tabla
-        // única — el backend la indexa así, igual que el resto de las decisiones
-        // por contexto en este camino.
-        costoTablaUnica.base !== "monto_incluye" || costoTablaUnica.line !== "gasto_aparte"
-          ? [
-              {
-                context_id: "",
-                base: costoTablaUnica.base,
-                line_shipping: costoTablaUnica.line,
-              },
-            ]
-          : undefined,
+        // Nunca. El importador plano no aplica las decisiones de costo, y el
+        // confirm rechaza el archivo con 422 en cuanto ve una: mandar algo acá
+        // sólo puede terminar en un rechazo. Ver el comentario de
+        // `columnasDeCostoEnTablaUnica`.
+        undefined,
       ),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
@@ -2130,16 +2409,34 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
       {faltanRequeridos.length > 0 && (
         <div className="mb-2 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
           <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-          <span>
-            Falta un dato obligatorio:{" "}
-            <strong>
-              {faltanRequeridos
-                .map((r) => fields.find((f) => f.value === r)?.label ?? r)
-                .join(", ")}
-            </strong>
-            . Elegí ese campo en la columna que lo contiene. Un campo personalizado
-            guarda el dato pero no reemplaza al obligatorio.
-          </span>
+          <div>
+            <p>
+              {faltanRequeridos.length === 1
+                ? "Falta un dato obligatorio:"
+                : "Faltan datos obligatorios:"}
+            </p>
+            {/* Mismo criterio que el banner del mapeo por hoja: se nombra el
+                campo y se dice qué se pierde la persona si no lo mapea. Acá no
+                hay a dónde saltar —la misma columna aparece en dos selects, el
+                de "Revisá antes de confirmar" y el de la tabla—, y elegir uno
+                de los dos sería elegir al azar. */}
+            <ul className="mt-1 space-y-1">
+              {explainMissing(faltanRequeridos, catalog?.[entityType]).map((f) => (
+                <li key={f.field}>
+                  <strong>{f.label}</strong>
+                  {f.reason && (
+                    <span className="mt-0.5 block text-[11px] leading-snug text-vk-text-secondary">
+                      {f.reason}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1">
+              Elegí ese campo en la columna que lo contiene. Un campo personalizado
+              guarda el dato pero no reemplaza al obligatorio.
+            </p>
+          </div>
         </div>
       )}
 
@@ -2181,24 +2478,32 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         />
       )}
 
-      {/* F-H6.c: la tabla única también puede declarar cómo se calcula el costo.
-          El backend lo soporta en los DOS caminos —el mismo archivo tiene que dar
-          el mismo costo venga como tabla o como solapa—, así que dejarlo sólo en
-          el multi-hoja habría hecho inalcanzable desde acá lo que el importador
-          sí sabe hacer. Es el agujero exacto de F-H3.e, en otra fase. */}
-      {!needsPurpose && (
-        <PurchaseCostChoice
-          base={costoTablaUnica.base}
-          lineShipping={costoTablaUnica.line}
-          onBaseChange={(v) => setCostoTablaUnica((p) => ({ ...p, base: v }))}
-          onLineShippingChange={(v) => setCostoTablaUnica((p) => ({ ...p, line: v }))}
-          mostrarAjustes={
-            Object.values(mappings).includes("discount") ||
-            Object.values(mappings).includes("taxes")
-          }
-          mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
-          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
-        />
+      {/* Un archivo de una sola tabla no puede traer costos de compra: el
+          importador plano no cobra el envío y el confirm lo rechaza. Se dice
+          acá, con las dos salidas, en vez de ofrecer tres ejes cuyo único
+          desenlace posible es un 422. */}
+      {!needsPurpose && columnasDeCostoEnTablaUnica.length > 0 && (
+        <div className="mb-3 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
+          <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+          <div>
+            <p>
+              Este archivo es una sola tabla y trae{" "}
+              {columnasDeCostoEnTablaUnica.length === 1 ? "una columna" : "columnas"}{" "}
+              de envío (
+              <span className="font-mono">
+                {columnasDeCostoEnTablaUnica.join(", ")}
+              </span>
+              ). Véktor todavía no sabe cobrar ni repartir el envío en este
+              formato: si lo importara, la compra quedaría con un costo más bajo
+              que el real y el margen inflado.
+            </p>
+            <p className="mt-1 text-vk-text-secondary">
+              Dos salidas: subilo como libro con hojas separadas (una por
+              sección), o sacá esas columnas del mapeo —marcalas «Ignorar»— y
+              cargá ese envío como un gasto aparte.
+            </p>
+          </div>
+        </div>
       )}
 
       {/* Error de API (excluye 409/timeout: los maneja el toast, no el banner) */}
@@ -2219,6 +2524,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             !Object.values(confirmedFields).some(Boolean) ||
             faltanRequeridos.length > 0 ||
             colisiones.length > 0 ||
+            // El confirm lo va a rechazar igual: descubrirlo con un 422 después
+            // de apretar es exactamente lo que este panel existe para evitar.
+            columnasDeCostoEnTablaUnica.length > 0 ||
             needsPurpose
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"

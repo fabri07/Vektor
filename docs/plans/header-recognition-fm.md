@@ -4,8 +4,9 @@
 > no se puede construir sobre un reconocedor que convierte un flete en un precio
 > de compra.
 
-> **Estado (2026-08-09): sub-commits 1–6 entregados en `feat/ingestion-contract-f0`.**
-> Falta el 7. El camino no fue recto: el cableado se revirtió a mitad porque la
+> **Estado (2026-08-10): CERRADA, 7/7.** El 7 entró en `309bd0f2` (targets de
+> compra `discount`/`taxes`/`shipping_cost_line`) y sus consumidores en F-H6.c/d.
+> El camino no fue recto: el cableado se revirtió a mitad porque la
 > tabla nueva sabía menos que la vieja. Lo que se aprendió está incorporado abajo
 > y marcado con «CORRECCIÓN» — el plan original decía otra cosa en tres puntos, y
 > re-litigarlos costaría repetir el incidente.

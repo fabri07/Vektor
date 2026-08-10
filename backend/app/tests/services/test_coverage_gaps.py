@@ -104,7 +104,6 @@ def mock_redis():
 # ── CoverageGapService ────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_log_gap_persists_row(db_session: AsyncSession, sample_tenant) -> None:
     """El gap se persiste con todos los campos (round-trip real sobre el ORM)."""
     svc = CoverageGapService()
@@ -133,7 +132,6 @@ async def test_log_gap_persists_row(db_session: AsyncSession, sample_tenant) -> 
     assert row.reviewed is False
 
 
-@pytest.mark.asyncio
 async def test_log_gap_truncates_long_message(
     db_session: AsyncSession, sample_tenant
 ) -> None:
@@ -150,7 +148,6 @@ async def test_log_gap_truncates_long_message(
     assert len(row.original_message) == 4000
 
 
-@pytest.mark.asyncio
 async def test_log_gap_unknown_reason_is_dropped(
     db_session: AsyncSession, sample_tenant
 ) -> None:
@@ -206,7 +203,6 @@ def test_sanitize_ui_context_bounds_client_payload() -> None:
     assert _sanitize_ui_context({"blob": object()}) is None
 
 
-@pytest.mark.asyncio
 async def test_log_gap_never_raises_on_db_error() -> None:
     """Fallo de commit → se traga: el contrato es best-effort."""
     broken_session = AsyncMock()
@@ -249,7 +245,6 @@ def _enter_orchestrator_patches(
     stack.enter_context(patch(f"{ORCHESTRATOR}.AgentMemoryService"))
 
 
-@pytest.mark.asyncio
 async def test_out_of_scope_logs_gap_and_keeps_message(mock_db, mock_redis) -> None:
     request = _make_request("cuál es la capital de Francia")
     with ExitStack() as stack:
@@ -270,7 +265,6 @@ async def test_out_of_scope_logs_gap_and_keeps_message(mock_db, mock_redis) -> N
     assert kwargs["original_message"] == "cuál es la capital de Francia"
 
 
-@pytest.mark.asyncio
 async def test_low_confidence_gate_logs_baja_confianza(mock_db, mock_redis) -> None:
     """CEO clasifica con confianza < 0.72 → requires_clarification + gap logueado."""
     plan = {
@@ -310,7 +304,6 @@ async def test_low_confidence_gate_logs_baja_confianza(mock_db, mock_redis) -> N
     assert kwargs["classified_intent"] == "consulta_libre"
 
 
-@pytest.mark.asyncio
 async def test_gap_logging_failure_does_not_break_response(mock_db, mock_redis) -> None:
     """Si el logging explota (constructor incluido), el usuario ve su mensaje igual."""
     request = _make_request("cuál es la capital de Francia")

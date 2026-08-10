@@ -193,7 +193,6 @@ def test_resolve_direct_fact_id_no_longer_red() -> None:
 # ── explain_alerts (narrador) ────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_explain_alerts_prompt_and_llm_call() -> None:
     caja = _fact("caja_liquida_últimos_30_días", "caja_liquida", 15000.0, "warning")
     blocks = [
@@ -293,7 +292,6 @@ def _enter_common_patches(stack: ExitStack, ceo_intent: str) -> None:
     stack.enter_context(patch(f"{ORCHESTRATOR}.AgentMemoryService"))
 
 
-@pytest.mark.asyncio
 async def test_explain_with_ui_context_returns_explanation(mock_db, mock_redis) -> None:
     """ui_context con alerta activa + pedido de explicación → explica con datos."""
     from app.application.agents.shared.schemas import LLMCall
@@ -351,7 +349,6 @@ async def test_explain_with_ui_context_returns_explanation(mock_db, mock_redis) 
     assert response.confidence == Confidence.HIGH  # min(confidence)=1.0 → HIGH
 
 
-@pytest.mark.asyncio
 async def test_dispatchable_intent_is_never_hijacked(mock_db, mock_redis) -> None:
     """Invariante 1: un intent despachable gana SIEMPRE, aunque el mensaje
     matchee el regex y haya alertas activas en ui_context."""
@@ -379,7 +376,6 @@ async def test_dispatchable_intent_is_never_hijacked(mock_db, mock_redis) -> Non
     explain_mock.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 async def test_malformed_alert_ids_do_not_crash(mock_db, mock_redis) -> None:
     """active_alert_ids no-lista (int) o string → se ignora, sin TypeError/500."""
     bad_ids_cases: list[object] = [42, "CASH_LOW", {"x": 1}, [None, "", {}]]
@@ -399,7 +395,6 @@ async def test_malformed_alert_ids_do_not_crash(mock_db, mock_redis) -> None:
         assert response.message == _UI_CONTEXT_MISSING_MESSAGE
 
 
-@pytest.mark.asyncio
 async def test_aclaracion_archivo_is_not_derailed(mock_db, mock_redis) -> None:
     """pedir_aclaracion_sobre_archivo conserva su pregunta específica aunque el
     mensaje matchee el regex de explicación y no haya ui_context."""
@@ -420,7 +415,6 @@ async def test_aclaracion_archivo_is_not_derailed(mock_db, mock_redis) -> None:
     assert response.message == _NO_AGENT_MESSAGES["pedir_aclaracion_sobre_archivo"]
 
 
-@pytest.mark.asyncio
 async def test_llm_failure_degrades_gracefully(mock_db, mock_redis) -> None:
     """Un error de Anthropic en explain_alerts NO escapa como 500: respuesta
     amable + confidence LOW, mismo degrade que el resto de los paths."""
@@ -462,7 +456,6 @@ async def test_llm_failure_degrades_gracefully(mock_db, mock_redis) -> None:
     assert response.confidence == Confidence.LOW
 
 
-@pytest.mark.asyncio
 async def test_explain_without_ui_context_logs_gap(mock_db, mock_redis) -> None:
     """Pide explicar el rojo pero sin ui_context → gap + pedido amable, sin LLM."""
     request = _make_request("explicame el mensaje en rojo", ui_context=None)
@@ -480,7 +473,6 @@ async def test_explain_without_ui_context_logs_gap(mock_db, mock_redis) -> None:
     assert await_args.kwargs["fallback_reason"] == "ui_context_missing"
 
 
-@pytest.mark.asyncio
 async def test_unresolvable_alert_ids_get_honest_message(mock_db, mock_redis) -> None:
     """ui_context con id irresoluble → mensaje honesto + gap sin_datos."""
     request = _make_request(

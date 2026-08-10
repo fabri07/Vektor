@@ -128,7 +128,6 @@ def test_registry_agent_marketing_returns_instance():
 # ── Sin DB → mensaje claro, no reventar ──────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sin_db_devuelve_mensaje_claro():
     from app.application.agents.marketing.agent import AgentMarketing
 
@@ -143,7 +142,6 @@ async def test_sin_db_devuelve_mensaje_claro():
 # ── Dashboard con datos → cifras del service ─────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_dashboard_con_datos_contiene_cifras():
     """Con has_data=True → message contiene seguidores/ads y summary correcto."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -174,7 +172,6 @@ async def test_dashboard_con_datos_contiene_cifras():
 # ── has_data=False → no-invention ────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_dashboard_sin_datos_no_inventa():
     """has_data=False → 'todavía no hay datos', confidence MEDIUM, sin cifras."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -200,7 +197,6 @@ async def test_dashboard_sin_datos_no_inventa():
 # ── sugerir_campana con clientes → top clientes ──────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sugerir_campana_con_clientes():
     """sugerir_campana con ventas → top clientes en el mensaje."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -236,7 +232,6 @@ async def test_sugerir_campana_con_clientes():
 # ── sugerir_campana sin ventas → no-invention ────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_sugerir_campana_sin_clientes_no_inventa():
     """Sin ventas con clientes → mensaje no-invention, no muestra top."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -262,7 +257,6 @@ async def test_sugerir_campana_sin_clientes_no_inventa():
 # ── ROI ads con datos completos ───────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_roi_ads_con_datos():
     """analizar_roi_ads con ads y ventas → ratio en el mensaje."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -289,7 +283,6 @@ async def test_roi_ads_con_datos():
 # ── ROI ads sin gasto en ads → no dividir por cero ───────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_roi_ads_sin_gasto_mensaje_claro():
     """ROI ads sin gasto en ads → mensaje claro, sin dividir por cero."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -331,7 +324,6 @@ async def test_roi_ads_sin_gasto_mensaje_claro():
 # ── ROI ads con ads pero sin ventas → no dividir por cero ────────────────────
 
 
-@pytest.mark.asyncio
 async def test_roi_ads_sin_ventas_mensaje_claro():
     """ROI ads: con gasto en ads pero sin ventas → mensaje sin dividir por cero."""
     from app.application.agents.marketing.agent import AgentMarketing
@@ -382,7 +374,6 @@ async def test_roi_ads_sin_ventas_mensaje_claro():
 # ── Cross-tenant: tenant B no ve métricas de tenant A ────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_cross_tenant_no_ve_metricas_ajenas():
     """Dashboard de tenant B devuelve has_data=False (no ve métricas de tenant A)."""
     from app.application.agents.marketing.agent import AgentMarketing

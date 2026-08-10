@@ -76,18 +76,22 @@ class TestNoParseables:
 
 
 class TestParseBusinessDate:
-    def test_devuelve_date(self) -> None:
-        assert parse_business_date("05/06/2026") == date(2026, 6, 5)
-
-    def test_descarta_la_hora(self) -> None:
-        assert parse_business_date("2026-06-05T14:30:00") == date(2026, 6, 5)
-
-    def test_passthrough_de_date(self) -> None:
-        d = date(2026, 6, 5)
-        assert parse_business_date(d) == d
-
-    def test_passthrough_de_datetime(self) -> None:
-        assert parse_business_date(datetime(2026, 6, 5, 14, 30)) == date(2026, 6, 5)
+    @pytest.mark.parametrize(
+        ("raw", "esperado"),
+        [
+            pytest.param("05/06/2026", date(2026, 6, 5), id="test_devuelve_date"),
+            pytest.param("2026-06-05T14:30:00", date(2026, 6, 5), id="test_descarta_la_hora"),
+            # Un `date`/`datetime` que ya viene tipado pasa derecho, sin re-parsear.
+            pytest.param(date(2026, 6, 5), date(2026, 6, 5), id="test_passthrough_de_date"),
+            pytest.param(
+                datetime(2026, 6, 5, 14, 30),
+                date(2026, 6, 5),
+                id="test_passthrough_de_datetime",
+            ),
+        ],
+    )
+    def test_devuelve_el_date(self, raw: object, esperado: date) -> None:
+        assert parse_business_date(raw) == esperado
 
     def test_no_parseable(self) -> None:
         assert parse_business_date("basura") is None
@@ -99,11 +103,24 @@ class TestPivoteDeSiglo:
     nunca implícita.
     """
 
-    def test_default_usa_strptime(self) -> None:
-        assert parse_business_date("01/01/26") == date(2026, 1, 1)
-
-    def test_pivote_explicito_manda_al_1900(self) -> None:
-        assert parse_business_date("15/08/50", century_pivot=30) == date(1950, 8, 15)
-
-    def test_pivote_explicito_deja_reciente_en_2000(self) -> None:
-        assert parse_business_date("15/08/26", century_pivot=30) == date(2026, 8, 15)
+    @pytest.mark.parametrize(
+        ("raw", "pivote", "esperado"),
+        [
+            # `None` = sin pivote explícito, o sea el default de strptime.
+            pytest.param("01/01/26", None, date(2026, 1, 1), id="test_default_usa_strptime"),
+            pytest.param(
+                "15/08/50",
+                30,
+                date(1950, 8, 15),
+                id="test_pivote_explicito_manda_al_1900",
+            ),
+            pytest.param(
+                "15/08/26",
+                30,
+                date(2026, 8, 15),
+                id="test_pivote_explicito_deja_reciente_en_2000",
+            ),
+        ],
+    )
+    def test_pivote(self, raw: str, pivote: int | None, esperado: date) -> None:
+        assert parse_business_date(raw, century_pivot=pivote) == esperado

@@ -72,14 +72,17 @@ seed-vertical-fields: ## Upsert vertical field definitions from JSON files (idem
 	$(PYTHON) scripts/seed_vertical_fields.py
 
 # ── Testing ───────────────────────────────────────────────────────────────────
-test: ## Run all tests with coverage
+test: ## Run all tests (parallel, no coverage — the default fast loop)
 	pytest
 
-test-fast: ## Run tests without coverage (faster feedback)
-	pytest -o addopts="" -p no:cov
+test-cov: ## Run tests with the SAME coverage gate as CI (--cov-fail-under=60)
+	pytest --cov=app --cov-report=term-missing --cov-fail-under=60
+
+test-fast: ## Alias of `test` (kept for muscle memory; the old version ran SEQUENTIAL)
+	pytest
 
 test-watch: ## Run tests in watch mode
-	watchfiles "pytest -o addopts='' -p no:cov" app
+	watchfiles "pytest" app
 
 test-file: ## Run a specific test file (use: make test-file FILE=app/tests/api/v1/test_auth.py)
 	pytest $(FILE) -v

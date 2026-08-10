@@ -120,7 +120,6 @@ def mock_redis():
 ORCHESTRATOR = "app.application.services.chat_orchestrator"
 
 
-@pytest.mark.asyncio
 async def test_gate_low_confidence_returns_clarification(mock_db, mock_redis):
     """confidence_float < 0.72 con intent válido → requires_clarification (no dispatch)."""
     request = _make_request()
@@ -154,7 +153,6 @@ async def test_gate_low_confidence_returns_clarification(mock_db, mock_redis):
     mock_executor_instance.execute.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_gate_low_confidence_question_mentions_alternatives(mock_db, mock_redis):
     """El gate usa las descripciones amigables del INTENT_CATALOG, no los keys técnicos."""
     request = _make_request()
@@ -190,7 +188,6 @@ async def test_gate_low_confidence_question_mentions_alternatives(mock_db, mock_
     assert "ingresar_gasto" not in q, f"No debe exponer el key técnico: {q!r}"
 
 
-@pytest.mark.asyncio
 async def test_gate_low_confidence_no_alternatives_generic_question(mock_db, mock_redis):
     """El gate con ambiguous_with=[] devuelve una pregunta genérica pidiendo más detalle."""
     request = _make_request()
@@ -229,7 +226,6 @@ async def test_gate_low_confidence_no_alternatives_generic_question(mock_db, moc
     assert "ingresar_venta" not in q, f"No debe exponer el key técnico: {q!r}"
 
 
-@pytest.mark.asyncio
 async def test_gate_more_than_two_alternatives(mock_db, mock_redis):
     """Con >2 alternativas la pregunta usa join de descripciones amigables (no keys técnicos)."""
     request = _make_request()
@@ -267,7 +263,6 @@ async def test_gate_more_than_two_alternatives(mock_db, mock_redis):
     assert "actualizar_stock" not in q
 
 
-@pytest.mark.asyncio
 async def test_gate_low_confidence_preserves_ceo_llm_call(mock_db, mock_redis):
     """La LLMCall del CEO se incluye en usage aunque el gate corte temprano."""
     request = _make_request()
@@ -298,7 +293,6 @@ async def test_gate_low_confidence_preserves_ceo_llm_call(mock_db, mock_redis):
     assert ceo_call.source == "ceo"
 
 
-@pytest.mark.asyncio
 async def test_gate_high_confidence_dispatches_normally(mock_db, mock_redis):
     """confidence_float >= 0.72 → despacha al sub-agente normalmente."""
     request = _make_request()
@@ -341,7 +335,6 @@ async def test_gate_high_confidence_dispatches_normally(mock_db, mock_redis):
     assert response.status == "success"
 
 
-@pytest.mark.asyncio
 async def test_gate_confidence_float_absent_dispatches_normally(mock_db, mock_redis):
     """Si confidence_float no está en el result del CEO (backward compat), despacha normalmente."""
     request = _make_request()
@@ -384,7 +377,6 @@ async def test_gate_confidence_float_absent_dispatches_normally(mock_db, mock_re
     assert response.status == "success"
 
 
-@pytest.mark.asyncio
 async def test_gate_does_not_clobber_successful_rescue(mock_db, mock_redis):
     """Regresión (review B3): un intent_desconocido con confianza baja (0.3) que el
     rescate determinístico convierte en un intent válido NO debe caer en el gate de
@@ -435,7 +427,6 @@ async def test_gate_does_not_clobber_successful_rescue(mock_db, mock_redis):
     assert response.status != "requires_clarification"
 
 
-@pytest.mark.asyncio
 async def test_gate_exact_threshold_dispatches(mock_db, mock_redis):
     """confidence_float == 0.72 (umbral exacto) → despacha (no activa el gate)."""
     request = _make_request()

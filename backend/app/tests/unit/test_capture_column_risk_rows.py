@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +30,6 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.unclassified_record import UnclassifiedRecord
 
 
-@pytest.mark.asyncio
 async def test_one_record_per_row_combines_all_bad_fields(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -75,7 +73,6 @@ async def test_one_record_per_row_combines_all_bad_fields(
     assert record.row_data["vencimiento"] == "31/13/2026"
 
 
-@pytest.mark.asyncio
 async def test_fingerprint_registered_after_persist_retry_does_not_duplicate(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -134,7 +131,6 @@ async def test_fingerprint_registered_after_persist_retry_does_not_duplicate(
     assert len(result.scalars().all()) == 1
 
 
-@pytest.mark.asyncio
 async def test_captura_guarda_clave_de_correlacion_pii_free(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -167,7 +163,6 @@ async def test_captura_guarda_clave_de_correlacion_pii_free(
     assert ref == {"context_id": "sheet:Clientes", "row_index": 9}
 
 
-@pytest.mark.asyncio
 async def test_different_contexts_same_row_index_do_not_collide(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -203,7 +198,6 @@ async def test_different_contexts_same_row_index_do_not_collide(
     assert entities == {"customer", "supplier"}
 
 
-@pytest.mark.asyncio
 async def test_context_label_has_no_pii(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -240,7 +234,6 @@ async def test_context_label_has_no_pii(
     assert record.row_data["telefono"] == pii_phone
 
 
-@pytest.mark.asyncio
 async def test_empty_capture_does_not_register_phantom_fingerprint(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -284,7 +277,6 @@ async def test_empty_capture_does_not_register_phantom_fingerprint(
     assert len(result.scalars().all()) == 1
 
 
-@pytest.mark.asyncio
 async def test_uploaded_file_id_distinguishes_anchor_from_none(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

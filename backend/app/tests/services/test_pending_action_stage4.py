@@ -11,8 +11,6 @@ import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.application.agents.google.agent import AgentGoogle
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTask
 from app.application.services.pending_action_service import execute_pending_action
@@ -49,7 +47,6 @@ def _make_broker(**overrides):
 # ── UPLOAD_TO_DRIVE ───────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_upload_to_drive_calls_broker():
     action = _make_action(
         ActionType.UPLOAD_TO_DRIVE,
@@ -70,7 +67,6 @@ async def test_upload_to_drive_calls_broker():
     assert action.external_system == "GOOGLE_DRIVE"
 
 
-@pytest.mark.asyncio
 async def test_upload_to_drive_default_name_when_no_filename():
     action = _make_action(
         ActionType.UPLOAD_TO_DRIVE,
@@ -86,7 +82,6 @@ async def test_upload_to_drive_default_name_when_no_filename():
     assert call_kwargs["name"] == "archivo.bin"  # default cuando no hay filename ni name
 
 
-@pytest.mark.asyncio
 async def test_upload_to_drive_with_folder_id():
     action = _make_action(
         ActionType.UPLOAD_TO_DRIVE,
@@ -114,7 +109,6 @@ async def test_upload_to_drive_with_folder_id():
 # ── CREATE_GOOGLE_DOC ─────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_create_google_doc_with_content():
     action = _make_action(
         ActionType.CREATE_GOOGLE_DOC,
@@ -134,7 +128,6 @@ async def test_create_google_doc_with_content():
     assert action.external_system == "GOOGLE_DOCS"
 
 
-@pytest.mark.asyncio
 async def test_create_google_doc_without_content_skips_append():
     action = _make_action(
         ActionType.CREATE_GOOGLE_DOC,
@@ -150,7 +143,6 @@ async def test_create_google_doc_without_content_skips_append():
     broker.append_doc_content.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_create_google_doc_default_title():
     action = _make_action(ActionType.CREATE_GOOGLE_DOC, {})
     broker = _make_broker()
@@ -165,7 +157,6 @@ async def test_create_google_doc_default_title():
 # ── APPEND_TO_SHEET ───────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_append_to_sheet_calls_broker():
     rows = [[100, "gaseosa", "2026-05-26"], [200, "agua", "2026-05-26"]]
     action = _make_action(
@@ -186,7 +177,6 @@ async def test_append_to_sheet_calls_broker():
     assert action.external_system == "GOOGLE_SHEETS"
 
 
-@pytest.mark.asyncio
 async def test_append_to_sheet_default_range():
     action = _make_action(
         ActionType.APPEND_TO_SHEET,

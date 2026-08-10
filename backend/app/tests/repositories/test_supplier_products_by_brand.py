@@ -120,7 +120,6 @@ def test_group_label_is_most_frequent_variant() -> None:
 # ── Repo: derivación de brand desde custom_fields ─────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_brand_none_when_marca_missing_empty_or_whitespace(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -145,7 +144,6 @@ async def test_brand_none_when_marca_missing_empty_or_whitespace(
     }
 
 
-@pytest.mark.asyncio
 async def test_brand_from_legacy_proveedor_key(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -174,7 +172,6 @@ async def test_brand_from_legacy_proveedor_key(
     assert rows[0].brand == "Coca Cola"
 
 
-@pytest.mark.asyncio
 async def test_marca_wins_over_legacy_proveedor_key(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -203,7 +200,6 @@ async def test_marca_wins_over_legacy_proveedor_key(
     assert rows[0].brand == "Pepsi"
 
 
-@pytest.mark.asyncio
 async def test_grouped_two_brands_plus_generic(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -230,7 +226,6 @@ async def test_grouped_two_brands_plus_generic(
     assert all(g.is_official is False for g in groups)
 
 
-@pytest.mark.asyncio
 async def test_official_match_only_from_this_supplier(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -253,7 +248,6 @@ async def test_official_match_only_from_this_supplier(
     assert groups[0].is_official is False
 
 
-@pytest.mark.asyncio
 async def test_official_match_true_with_accents(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -273,7 +267,6 @@ async def test_official_match_true_with_accents(
     assert groups[0].is_official is True
 
 
-@pytest.mark.asyncio
 async def test_sentinel_supplier_groups_normally(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -301,7 +294,6 @@ async def test_sentinel_supplier_groups_normally(
     assert all(g.is_official is False for g in groups)
 
 
-@pytest.mark.asyncio
 async def test_ultima_compra_por_fecha_de_negocio_no_por_carga(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -346,7 +338,6 @@ async def test_ultima_compra_por_fecha_de_negocio_no_por_carga(
     assert rows[0].unit_price == Decimal("200")
 
 
-@pytest.mark.asyncio
 async def test_ultima_compra_desempate_por_id_es_deterministico(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
@@ -382,7 +373,6 @@ async def test_ultima_compra_desempate_por_id_es_deterministico(
     assert rows[0].unit_price == Decimal("200")
 
 
-@pytest.mark.asyncio
 async def test_voided_movements_excluded(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

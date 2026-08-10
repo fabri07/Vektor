@@ -34,7 +34,6 @@ async def engine() -> AsyncEngine:  # type: ignore[misc]
     await eng.dispose()
 
 
-@pytest.mark.asyncio
 async def test_un_tenant_roto_no_frena_a_los_demas(
     engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -59,7 +58,6 @@ async def test_un_tenant_roto_no_frena_a_los_demas(
     assert recalculados == [ok, otro]
 
 
-@pytest.mark.asyncio
 async def test_sin_fallos_devuelve_cero(
     engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

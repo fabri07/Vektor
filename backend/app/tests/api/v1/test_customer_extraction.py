@@ -100,7 +100,6 @@ def _mock_anthropic_factory(
 # ── Servicio determinístico (planilla) ─────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestTabularExtraction:
     async def test_csv_company_first_record(self) -> None:
         extraction, usage = await extract_customer(_csv_clientes(), "clientes.csv")
@@ -146,7 +145,6 @@ class TestTabularExtraction:
 # ── Servicio IA (foto / PDF) ───────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestAIExtraction:
     _TOOL_INPUT = {
         "customer_type": "person",
@@ -281,7 +279,6 @@ class TestImportPreview:
         assert preview.to_update == 0
 
 
-@pytest.mark.asyncio
 class TestApplyImport:
     async def test_upsert_idempotent_and_no_sentinel(
         self, db_session: Any, sample_tenant: Any
@@ -375,7 +372,6 @@ def mock_s3_upload():
         yield mock
 
 
-@pytest.mark.asyncio
 class TestCustomerFileEndpoints:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

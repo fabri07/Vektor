@@ -50,7 +50,6 @@ def _sales_summary() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
 async def test_import_tabular_file_inserta_en_sale_entry(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -95,7 +94,6 @@ async def test_import_tabular_file_inserta_en_sale_entry(
     assert log.uploaded_file_id == uploaded.id
 
 
-@pytest.mark.asyncio
 async def test_import_tabular_file_stampea_ingestion_version(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -144,7 +142,6 @@ async def test_import_tabular_file_stampea_ingestion_version(
     assert uploaded.ingestion_version == INGESTION_VERSION
 
 
-@pytest.mark.asyncio
 async def test_import_tabular_file_sin_file_id_lanza_error(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -161,7 +158,6 @@ async def test_import_tabular_file_sin_file_id_lanza_error(
         await execute_pending_action(action, db_session)
 
 
-@pytest.mark.asyncio
 async def test_register_sale_registra_data_loaded(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -185,7 +181,6 @@ async def test_register_sale_registra_data_loaded(
     assert log.entity_type == "sale"
 
 
-@pytest.mark.asyncio
 async def test_contexto_proxima_sesion_incluye_ultima_carga(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -252,7 +247,6 @@ def test_conversation_id_no_pisa_payload_existente() -> None:
     assert "structured_data" not in response.result
 
 
-@pytest.mark.asyncio
 async def test_import_tabular_file_google_sheets_parsed_records_inserta_sale(
     db_session: AsyncSession,
     sample_tenant: Tenant,
@@ -287,7 +281,6 @@ async def test_import_tabular_file_google_sheets_parsed_records_inserta_sale(
     assert log.uploaded_file_id is None
 
 
-@pytest.mark.asyncio
 async def test_agent_cash_adjunto_genera_import_tabular_file(
     db_session: AsyncSession,
     sample_tenant: Tenant,

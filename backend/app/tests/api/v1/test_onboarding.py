@@ -66,7 +66,6 @@ async def _register_and_token(client: AsyncClient) -> str:
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 class TestOnboarding:
     async def test_onboarding_submit_kiosco(self, client: AsyncClient) -> None:
         """POST /onboarding/submit with valid kiosco data returns snapshot_id and message."""
@@ -245,7 +244,6 @@ class TestOnboarding:
         assert response.status_code == 200
 
 
-@pytest.mark.asyncio
 class TestOnboardingStatusMainConcern:
     """`GET /onboarding/status` expone la preocupación ya declarada.
 
@@ -355,7 +353,6 @@ class TestOnboardingStatusMainConcern:
         assert "main_concern" not in crudos
 
 
-@pytest.mark.asyncio
 class TestOnboardingMontosAusentes:
     """Dejar un monto en blanco NO es lo mismo que contestar cero.
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -150,7 +149,6 @@ def _five_entity_context_mappings() -> dict[str, dict[str, str]]:
     }
 
 
-@pytest.mark.asyncio
 async def test_confirm_unico_con_5_entidades_orden_maestro_transaccion_y_contadores(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:

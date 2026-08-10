@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -97,7 +96,6 @@ _BASE = [
 ]
 
 
-@pytest.mark.asyncio
 class TestColisionDeCampoPropio:
     async def test_dos_columnas_al_mismo_campo_propio_rechaza_con_422(
         self,

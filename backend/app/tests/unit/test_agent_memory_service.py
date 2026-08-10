@@ -4,8 +4,6 @@ import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.application.services.agent_memory_service import AgentMemoryService
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
@@ -39,7 +37,6 @@ def _make_service(db_rows=None, redis_hit=None):
 # ── Tests: get() ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_get_returns_redis_cache_when_available():
     """Si Redis tiene datos, no consulta DB."""
     cached = {
@@ -55,7 +52,6 @@ async def test_get_returns_redis_cache_when_available():
     svc._db.execute.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_get_falls_back_to_db_on_redis_miss():
     """Sin cache Redis, carga desde DB y devuelve dict vacío cuando no hay filas."""
     svc = _make_service(redis_hit=None, db_rows=[])
@@ -64,7 +60,6 @@ async def test_get_falls_back_to_db_on_redis_miss():
     svc._db.execute.assert_called()
 
 
-@pytest.mark.asyncio
 async def test_get_builds_dict_from_db_rows():
     """_load_from_db construye el dict correctamente a partir de filas ORM."""
     row1 = MagicMock()
@@ -83,7 +78,6 @@ async def test_get_builds_dict_from_db_rows():
 # ── Tests: record_action() ────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_record_sale_updates_payment_method():
     """record_action con REGISTER_SALE actualiza preferred_payment_method."""
     svc = _make_service()
@@ -98,7 +92,6 @@ async def test_record_sale_updates_payment_method():
     svc._redis.delete.assert_called()
 
 
-@pytest.mark.asyncio
 async def test_record_sale_updates_avg_amount():
     """record_action con REGISTER_SALE actualiza avg_sale_amount."""
     svc = _make_service()
@@ -110,7 +103,6 @@ async def test_record_sale_updates_avg_amount():
     svc._db.flush.assert_called()
 
 
-@pytest.mark.asyncio
 async def test_record_expense_updates_categories():
     """record_action con REGISTER_EXPENSE actualiza common_expense_categories."""
     svc = _make_service()
@@ -122,7 +114,6 @@ async def test_record_expense_updates_categories():
     svc._db.flush.assert_called()
 
 
-@pytest.mark.asyncio
 async def test_record_purchase_updates_expense_categories():
     """REGISTER_PURCHASE también actualiza common_expense_categories."""
     svc = _make_service()
@@ -135,7 +126,6 @@ async def test_record_purchase_updates_expense_categories():
     svc._redis.delete.assert_called()
 
 
-@pytest.mark.asyncio
 async def test_record_action_always_updates_top_action_types():
     """Cualquier action_type actualiza top_action_types."""
     svc = _make_service()
@@ -152,7 +142,6 @@ async def test_record_action_always_updates_top_action_types():
 # ── Tests: get_context_fragment() ────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_get_context_fragment_returns_string():
     """get_context_fragment retorna string no vacío cuando hay patrones."""
     cached = {
@@ -168,7 +157,6 @@ async def test_get_context_fragment_returns_string():
     assert "alquiler" in fragment
 
 
-@pytest.mark.asyncio
 async def test_get_context_fragment_empty_when_no_patterns():
     """get_context_fragment retorna string vacío si no hay patrones."""
     svc = _make_service(redis_hit={}, db_rows=[])
@@ -176,7 +164,6 @@ async def test_get_context_fragment_empty_when_no_patterns():
     assert fragment == ""
 
 
-@pytest.mark.asyncio
 async def test_get_context_fragment_partial_patterns():
     """get_context_fragment funciona aunque falten algunos patrones."""
     cached = {
@@ -188,7 +175,6 @@ async def test_get_context_fragment_partial_patterns():
     # No debe reventar aunque no haya payment_method ni categories
 
 
-@pytest.mark.asyncio
 async def test_get_context_fragment_includes_header():
     """El fragmento siempre empieza con la línea de cabecera cuando hay datos."""
     cached = {
@@ -202,7 +188,6 @@ async def test_get_context_fragment_includes_header():
 # ── Tests: fail-silencioso ────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_record_action_is_fail_silent():
     """Si la DB falla, record_action no lanza excepción."""
     svc = _make_service()
@@ -211,7 +196,6 @@ async def test_record_action_is_fail_silent():
     await svc.record_action(TENANT_ID, "REGISTER_SALE", {"amount": 1000})
 
 
-@pytest.mark.asyncio
 async def test_get_returns_empty_dict_on_redis_and_db_failure():
     """Si tanto Redis como DB fallan, get() retorna dict vacío sin lanzar."""
     svc = _make_service()
@@ -221,7 +205,6 @@ async def test_get_returns_empty_dict_on_redis_and_db_failure():
     assert result == {}
 
 
-@pytest.mark.asyncio
 async def test_get_context_fragment_returns_empty_on_exception():
     """Si get() falla internamente, get_context_fragment devuelve string vacío."""
     svc = _make_service()

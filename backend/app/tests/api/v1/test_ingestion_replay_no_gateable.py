@@ -23,7 +23,6 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -161,7 +160,6 @@ async def _cuantas(db_session: AsyncSession, tenant: Tenant, modelo: Any) -> int
     return len(list(result.scalars().all()))
 
 
-@pytest.mark.asyncio
 class TestReplayNoGateable:
     async def test_rechaza_el_replay_que_no_puede_validar(
         self,
@@ -390,7 +388,6 @@ async def archivo_compras_y_ventas(
     return record
 
 
-@pytest.mark.asyncio
 class TestUnaCompraDelMismoArchivoTampocoSePuedeGatear:
     """Review #3 — el alta de productos no era la única forma de declarar stock.
 
@@ -463,7 +460,6 @@ class TestUnaCompraDelMismoArchivoTampocoSePuedeGatear:
         assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
 
 
-@pytest.mark.asyncio
 class TestElBloqueoSeAlcanzaDesdeLaPantalla:
     """F-H3.e — la compuerta de la fase.
 

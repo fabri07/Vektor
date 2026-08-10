@@ -7,6 +7,8 @@ contable — que es lo que convertía un flete en un precio de compra.
 
 from __future__ import annotations
 
+import pytest
+
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
     RESOLUCION,
@@ -31,16 +33,24 @@ class TestLosCincoEncabezadosDelProblema:
         assert r.concept == "envio"
         assert "envío por unidad" in r.duda
 
-    def test_bonificacion_proveedor_no_es_el_nombre_del_proveedor(self) -> None:
-        r = _leer("Bonificación proveedor", "expense")
-        assert r.concept == "descuento"
-        # F-M.7: desde que `discount` existe llega a destino. Lo que este test
-        # cuida sigue siendo lo mismo: que el calificador de entidad no se lleve
-        # el campo (antes resolvía a `supplier_name`).
-        assert r.target == "discount"
-
-    def test_descuento_por_producto_no_es_el_nombre_del_producto(self) -> None:
-        r = _leer("Descuento por producto", "expense")
+    @pytest.mark.parametrize(
+        "header",
+        [
+            # F-M.7: desde que `discount` existe llega a destino. Lo que este caso
+            # cuida sigue siendo lo mismo: que el calificador de entidad no se lleve
+            # el campo (antes resolvía a `supplier_name`).
+            pytest.param(
+                "Bonificación proveedor",
+                id="test_bonificacion_proveedor_no_es_el_nombre_del_proveedor",
+            ),
+            pytest.param(
+                "Descuento por producto",
+                id="test_descuento_por_producto_no_es_el_nombre_del_producto",
+            ),
+        ],
+    )
+    def test_el_calificador_de_entidad_no_se_lleva_el_descuento(self, header: str) -> None:
+        r = _leer(header, "expense")
         assert r.concept == "descuento"
         assert r.target == "discount"
 
@@ -62,19 +72,41 @@ class TestLosCincoEncabezadosDelProblema:
 
 
 class TestLosEmpatesQueResolviaElOrdenDelDict:
-    def test_la_fecha_de_una_planilla_de_gastos_es_una_fecha(self) -> None:
-        assert _leer("Fecha del gasto", "expense").target == "expense_date"
-
-    def test_la_fecha_de_una_planilla_de_ventas_tambien(self) -> None:
-        assert _leer("Fecha de venta", "sale").target == "transaction_date"
-
-    def test_el_codigo_de_barras_no_entra_al_campo_sku(self) -> None:
-        """El SKU es identidad de producto (F2/F5): meterle un código de barras
-        fusiona o duplica productos."""
-        assert _leer("Código de barras", "product").target == "barcode"
-
-    def test_una_descripcion_no_es_un_nombre(self) -> None:
-        assert _leer("Descripción", "product").target == "description"
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            pytest.param(
+                "Fecha del gasto",
+                "expense",
+                "expense_date",
+                id="test_la_fecha_de_una_planilla_de_gastos_es_una_fecha",
+            ),
+            pytest.param(
+                "Fecha de venta",
+                "sale",
+                "transaction_date",
+                id="test_la_fecha_de_una_planilla_de_ventas_tambien",
+            ),
+            # El SKU es identidad de producto (F2/F5): meterle un código de barras
+            # fusiona o duplica productos.
+            pytest.param(
+                "Código de barras",
+                "product",
+                "barcode",
+                id="test_el_codigo_de_barras_no_entra_al_campo_sku",
+            ),
+            pytest.param(
+                "Descripción",
+                "product",
+                "description",
+                id="test_una_descripcion_no_es_un_nombre",
+            ),
+        ],
+    )
+    def test_el_header_resuelve_al_campo_de_su_entidad(
+        self, header: str, entidad: str, target: str
+    ) -> None:
+        assert _leer(header, entidad).target == target
 
 
 class TestLoQueYaAndabaSigueAndando:
@@ -84,27 +116,44 @@ class TestLoQueYaAndabaSigueAndando:
         assert targets == ["unit_cost_ars", "list_price_ars", "sale_price_ars"]
         assert len(set(targets)) == 3
 
-    def test_el_mismo_header_va_a_campos_distintos_segun_la_hoja(self) -> None:
-        assert _leer("Precio unitario", "sale").target == "unit_price"
-        assert _leer("Precio unitario", "product").target == "unit_cost_ars"
+    @pytest.mark.parametrize(
+        ("entidad", "target"),
+        [("sale", "unit_price"), ("product", "unit_cost_ars")],
+    )
+    def test_el_mismo_header_va_a_campos_distintos_segun_la_hoja(
+        self, entidad: str, target: str
+    ) -> None:
+        assert _leer("Precio unitario", entidad).target == target
 
-    def test_los_headers_comunes(self) -> None:
-        assert _leer("Forma de pago", "expense").target == "payment_method"
-        assert _leer("Monto", "sale").target == "amount"
-        assert _leer("Cantidad", "sale").target == "quantity"
-        assert _leer("Stock", "product").target == "stock_units"
-        assert _leer("Proveedor", "expense").target == "supplier_name"
-        assert _leer("DNI", "customer").target == "dni"
-        assert _leer("DNI", "sale").target == "customer_dni"
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            ("Forma de pago", "expense", "payment_method"),
+            ("Monto", "sale", "amount"),
+            ("Cantidad", "sale", "quantity"),
+            ("Stock", "product", "stock_units"),
+            ("Proveedor", "expense", "supplier_name"),
+            ("DNI", "customer", "dni"),
+            ("DNI", "sale", "customer_dni"),
+        ],
+    )
+    def test_los_headers_comunes(self, header: str, entidad: str, target: str) -> None:
+        assert _leer(header, entidad).target == target
 
 
 class TestLosAcentosDejanDeSerUnAgujero:
-    def test_los_headers_con_tilde_resuelven(self) -> None:
-        assert _leer("Envío", "expense").target == "shipping_cost"
-        assert _leer("Artículo", "sale").target == "product_name"
-        assert _leer("Categoría", "expense").target == "category"
-        assert _leer("Método de pago", "sale").target == "payment_method"
-        assert _leer("Teléfono", "customer").target == "phone"
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            ("Envío", "expense", "shipping_cost"),
+            ("Artículo", "sale", "product_name"),
+            ("Categoría", "expense", "category"),
+            ("Método de pago", "sale", "payment_method"),
+            ("Teléfono", "customer", "phone"),
+        ],
+    )
+    def test_los_headers_con_tilde_resuelven(self, header: str, entidad: str, target: str) -> None:
+        assert _leer(header, entidad).target == target
 
 
 class TestSinEvidencia:
@@ -188,31 +237,62 @@ class TestLosPadronesDeMaestros:
     con la tabla vacía.
     """
 
-    def test_cliente_en_un_padron_de_clientes_es_el_nombre(self) -> None:
-        r = _leer("Cliente", "customer")
+    @pytest.mark.parametrize(
+        ("header", "entidad"),
+        [
+            pytest.param(
+                "Cliente",
+                "customer",
+                id="test_cliente_en_un_padron_de_clientes_es_el_nombre",
+            ),
+            pytest.param(
+                "Proveedor",
+                "supplier",
+                id="test_proveedor_en_un_padron_de_proveedores_es_el_nombre",
+            ),
+        ],
+    )
+    def test_la_entidad_en_su_propio_padron_es_el_nombre(self, header: str, entidad: str) -> None:
+        r = _leer(header, entidad)
         assert r.outcome == "unico"
         assert r.target == "name"
 
-    def test_pero_tipo_cliente_es_su_clasificacion(self) -> None:
-        assert _leer("Tipo cliente", "customer").target == "customer_type"
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            pytest.param(
+                "Tipo cliente",
+                "customer",
+                "customer_type",
+                id="test_pero_tipo_cliente_es_su_clasificacion",
+            ),
+            pytest.param(
+                "Condición de pago",
+                "supplier",
+                "payment_method",
+                id="test_la_condicion_de_pago_de_un_proveedor_es_el_metodo",
+            ),
+        ],
+    )
+    def test_el_calificador_manda_a_otro_campo(
+        self, header: str, entidad: str, target: str
+    ) -> None:
+        assert _leer(header, entidad).target == target
 
-    def test_proveedor_en_un_padron_de_proveedores_es_el_nombre(self) -> None:
-        r = _leer("Proveedor", "supplier")
-        assert r.outcome == "unico"
-        assert r.target == "name"
-
-    def test_el_iva_de_una_persona_es_su_condicion_fiscal_no_un_monto(self) -> None:
-        for h in ("IVA", "Condición IVA", "Situación IVA"):
-            assert _leer(h, "customer").target == "iva_condition", h
-
-    def test_la_condicion_de_pago_de_un_proveedor_es_el_metodo(self) -> None:
-        assert _leer("Condición de pago", "supplier").target == "payment_method"
+    @pytest.mark.parametrize("header", ["IVA", "Condición IVA", "Situación IVA"])
+    def test_el_iva_de_una_persona_es_su_condicion_fiscal_no_un_monto(self, header: str) -> None:
+        assert _leer(header, "customer").target == "iva_condition"
 
 
 class TestCompraYVentaNombranCualDeLosTresPrecios:
-    def test_en_un_catalogo_compra_es_el_costo_y_venta_el_precio(self) -> None:
-        assert _leer("Compra", "product").target == "unit_cost_ars"
-        assert _leer("Venta", "product").target == "sale_price_ars"
+    @pytest.mark.parametrize(
+        ("header", "target"),
+        [("Compra", "unit_cost_ars"), ("Venta", "sale_price_ars")],
+    )
+    def test_en_un_catalogo_compra_es_el_costo_y_venta_el_precio(
+        self, header: str, target: str
+    ) -> None:
+        assert _leer(header, "product").target == target
 
     def test_un_monto_pelado_no_dice_cual_de_los_tres_es(self) -> None:
         """Adivinarlo es el bug que F10 cerró: no hay regla, y está bien."""
@@ -226,13 +306,13 @@ class TestLosTresCostosDeUnaCompra:
     la aritmética existía (`domain/purchase_cost.py`) y el campo no.
     """
 
-    def test_un_descuento_es_un_descuento_aunque_nombre_al_proveedor(self) -> None:
-        assert _leer("Bonificación proveedor", "expense").target == "discount"
-        assert _leer("Descuento", "expense").target == "discount"
+    @pytest.mark.parametrize("header", ["Bonificación proveedor", "Descuento"])
+    def test_un_descuento_es_un_descuento_aunque_nombre_al_proveedor(self, header: str) -> None:
+        assert _leer(header, "expense").target == "discount"
 
-    def test_un_impuesto_de_la_linea_tiene_campo_propio(self) -> None:
-        assert _leer("IVA", "expense").target == "taxes"
-        assert _leer("Impuestos", "expense").target == "taxes"
+    @pytest.mark.parametrize("header", ["IVA", "Impuestos"])
+    def test_un_impuesto_de_la_linea_tiene_campo_propio(self, header: str) -> None:
+        assert _leer(header, "expense").target == "taxes"
 
     def test_pero_un_precio_con_iva_sigue_siendo_un_precio(self) -> None:
         """El caso que da nombre a la fase. `con`/`sin` declaran inclusión: si al
@@ -243,19 +323,19 @@ class TestLosTresCostosDeUnaCompra:
         assert r.target != "taxes"
         assert set(r.options) == {"amount", "unit_price"}
 
-    def test_el_flete_por_linea_no_es_el_del_comprobante(self) -> None:
+    @pytest.mark.parametrize("header", ["Flete por línea", "Envío prorrateado"])
+    def test_el_flete_por_linea_no_es_el_del_comprobante(self, header: str) -> None:
         """Semántica OPUESTA y por eso son campos distintos: el del comprobante se
         cobra una vez (la cifra repetida se colapsa) y éste se SUMA, porque el
         reparto ya lo hizo quien armó la planilla."""
-        assert _leer("Flete por línea", "expense").target == "shipping_cost_line"
-        assert _leer("Envío prorrateado", "expense").target == "shipping_cost_line"
+        assert _leer(header, "expense").target == "shipping_cost_line"
 
-    def test_envio_a_secas_sigue_siendo_el_del_comprobante(self) -> None:
+    @pytest.mark.parametrize("header", ["Envío", "Flete"])
+    def test_envio_a_secas_sigue_siendo_el_del_comprobante(self, header: str) -> None:
         """Decisión declarada: no se vuelve ambiguo. F-H6.b ya pregunta la
         granularidad cuando la hoja no trae comprobante, y ahí el número está a la
         vista. Preguntarlo dos veces es fricción en el header más común."""
-        assert _leer("Envío", "expense").target == "shipping_cost"
-        assert _leer("Flete", "expense").target == "shipping_cost"
+        assert _leer(header, "expense").target == "shipping_cost"
 
     def test_y_el_flete_por_unidad_sigue_sin_tener_campo(self) -> None:
         """Tres granularidades no son dos: Véktor lee la del comprobante y la de

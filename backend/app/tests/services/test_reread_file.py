@@ -55,6 +55,19 @@ from app.persistence.models.unclassified_record import (
 )
 from app.tests.conftest import add_business_profile
 
+
+@pytest.fixture(autouse=True)
+def _sin_broker(mock_score_trigger: Any) -> None:
+    """El reread encola el recálculo de score (`_trigger_score` → `.delay()`).
+
+    Sin broker en tests, kombu reintenta la conexión con backoff: ~4,75s de
+    `time.sleep` POR llamada, ~38s en los tests que aplican y deshacen varias
+    veces (medido con cProfile: 76 sleeps = 38,2s de los ~40s del test). El
+    servicio ya traga el error (fail-safe), así que ningún assert dependía del
+    encolado real. Mismo patrón que `test_file_deletion_end_to_end.py`.
+    """
+
+
 # CSV original (2 filas). El reread vuelve a leer ESTE contenido salvo cuando el
 # test pide una variante (fila extra).
 _CSV_BASE = (
@@ -146,7 +159,6 @@ async def _active_expenses(
     return list(res.scalars().all())
 
 
-@pytest.mark.asyncio
 async def test_initial_import_sets_source_row_ref(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -161,7 +173,6 @@ async def test_initial_import_sets_source_row_ref(
         assert len(e.source_row_ref) == 64  # sha256 hex
 
 
-@pytest.mark.asyncio
 async def test_reread_preserves_edited_and_reimports_others(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -209,7 +220,6 @@ async def test_reread_preserves_edited_and_reimports_others(
     assert sum(1 for e in after if e.source_row_ref == edited_ref) == 1
 
 
-@pytest.mark.asyncio
 async def test_reread_imports_new_rows_no_duplicate(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -239,7 +249,6 @@ async def test_reread_imports_new_rows_no_duplicate(
     assert total == 5
 
 
-@pytest.mark.asyncio
 async def test_reread_idempotent_no_change(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -257,7 +266,6 @@ async def test_reread_idempotent_no_change(
     assert len(after) == 2
 
 
-@pytest.mark.asyncio
 async def test_preview_does_not_write(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -288,7 +296,6 @@ async def test_preview_does_not_write(
         assert e.voided_at is None
 
 
-@pytest.mark.asyncio
 async def test_preview_counts_edited_and_new(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -313,7 +320,6 @@ async def test_preview_counts_edited_and_new(
     assert len(after) == 2
 
 
-@pytest.mark.asyncio
 async def test_undo_restores_previous_state(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,7 +355,6 @@ async def test_undo_restores_previous_state(
         assert e.void_reason is None
 
 
-@pytest.mark.asyncio
 async def test_reread_wrong_tenant_not_found(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -362,7 +367,6 @@ async def test_reread_wrong_tenant_not_found(
         await reread_service.preview_reread(db_session, file.id, other_tenant)
 
 
-@pytest.mark.asyncio
 async def test_persist_import_fingerprints_is_idempotent(
     db_session: AsyncSession, tenant: Tenant
 ) -> None:
@@ -383,7 +387,6 @@ async def test_persist_import_fingerprints_is_idempotent(
     }
 
 
-@pytest.mark.asyncio
 async def test_preview_returns_before_after_sample(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -409,7 +412,6 @@ async def test_preview_returns_before_after_sample(
     assert void_items[0]["before"] is not None
 
 
-@pytest.mark.asyncio
 async def test_batch_fingerprints_preloaded_and_idempotent(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -443,7 +445,6 @@ async def test_batch_fingerprints_preloaded_and_idempotent(
     assert len(await _active_expenses(db_session, tenant, file)) == 2
 
 
-@pytest.mark.asyncio
 async def test_background_apply_run_status_and_guard(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -487,7 +488,6 @@ async def test_background_apply_run_status_and_guard(
     )
 
 
-@pytest.mark.asyncio
 async def test_get_reread_run_rechaza_file_id_incompatible(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -624,7 +624,6 @@ async def _active_movement_state(
     return int(active or 0), product.stock_units
 
 
-@pytest.mark.asyncio
 async def test_reread_does_not_duplicate_inventory_movements(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -669,7 +668,6 @@ async def test_reread_does_not_duplicate_inventory_movements(
     assert total == 3
 
 
-@pytest.mark.asyncio
 async def test_undo_reread_restores_inventory(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -797,7 +795,6 @@ async def _first_confirm_with_risk(
     return file
 
 
-@pytest.mark.asyncio
 async def test_reread_fila_corregida_importa_y_resuelve_otros(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -826,7 +823,6 @@ async def test_reread_fila_corregida_importa_y_resuelve_otros(
     assert dismissed[0].resolved_at is not None
 
 
-@pytest.mark.asyncio
 async def test_reread_conserva_decision_y_no_duplica_otros(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -848,7 +844,6 @@ async def test_reread_conserva_decision_y_no_duplica_otros(
     assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 1
 
 
-@pytest.mark.asyncio
 async def test_reread_reapplied_outcome_bumps_version_and_status(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -870,7 +865,6 @@ async def test_reread_reapplied_outcome_bumps_version_and_status(
     assert file.reread_summary["algorithm_version"] == INGESTION_VERSION
 
 
-@pytest.mark.asyncio
 async def test_undo_reread_reverts_ingestion_version_and_status(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -934,7 +928,6 @@ _CSV_AMBIGUOUS_RISK = (
 )
 
 
-@pytest.mark.asyncio
 async def test_reread_forced_unverified_does_not_auto_apply(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1007,7 +1000,6 @@ async def test_reread_forced_unverified_does_not_auto_apply(
     assert file.reread_summary["risk_columns"]["ambiguous"] == []
 
 
-@pytest.mark.asyncio
 async def test_reread_ambiguous_does_not_touch_summary(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1039,7 +1031,6 @@ async def test_reread_ambiguous_does_not_touch_summary(
     assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
 
 
-@pytest.mark.asyncio
 async def test_reread_no_risk_found_does_not_bump_without_confirmation(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1064,7 +1055,6 @@ async def test_reread_no_risk_found_does_not_bump_without_confirmation(
     assert file.reread_status == REREAD_STATUS_NEEDS_REVIEW
 
 
-@pytest.mark.asyncio
 async def test_resolve_risk_decisions_degrades_on_derive_context_mapping_failure(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1131,7 +1121,6 @@ async def _make_bare_file(session: AsyncSession, tenant: Tenant) -> UploadedFile
     return f
 
 
-@pytest.mark.asyncio
 async def test_file_has_user_edits_false_without_any_edit(
     db_session: AsyncSession, tenant: Tenant
 ) -> None:
@@ -1155,7 +1144,6 @@ async def test_file_has_user_edits_false_without_any_edit(
     )
 
 
-@pytest.mark.asyncio
 async def test_file_has_user_edits_true_for_sale_entry(
     db_session: AsyncSession, tenant: Tenant
 ) -> None:
@@ -1177,7 +1165,6 @@ async def test_file_has_user_edits_true_for_sale_entry(
     )
 
 
-@pytest.mark.asyncio
 async def test_file_has_user_edits_true_for_expense_entry(
     db_session: AsyncSession, tenant: Tenant
 ) -> None:
@@ -1201,7 +1188,6 @@ async def test_file_has_user_edits_true_for_expense_entry(
     )
 
 
-@pytest.mark.asyncio
 async def test_file_has_user_edits_true_for_product_via_expense_link(
     db_session: AsyncSession, tenant: Tenant
 ) -> None:
@@ -1240,7 +1226,6 @@ async def test_file_has_user_edits_true_for_product_via_expense_link(
     )
 
 
-@pytest.mark.asyncio
 async def test_file_has_user_edits_ignores_voided_records(
     db_session: AsyncSession, tenant: Tenant
 ) -> None:
@@ -1308,7 +1293,6 @@ def _patch_reread_fresh_summary(
     monkeypatch.setattr(reread_service, "parse_uploaded_content", lambda *a, **k: fresh)
 
 
-@pytest.mark.asyncio
 async def test_reread_audita_masters_creados_y_actualizados(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1370,7 +1354,6 @@ async def test_reread_audita_masters_creados_y_actualizados(
     assert create_item.after_json["name"] == "Maria Lopez"
 
 
-@pytest.mark.asyncio
 async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1468,7 +1451,6 @@ async def _make_stock_file(
     return f
 
 
-@pytest.mark.asyncio
 async def test_reread_audita_productos_creados_y_actualizados(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1546,7 +1528,6 @@ async def test_reread_audita_productos_creados_y_actualizados(
     assert create_item.after_json["updated_at"] is not None
 
 
-@pytest.mark.asyncio
 async def test_reread_multisheet_audita_productos_creados_y_actualizados(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1640,7 +1621,6 @@ async def test_reread_multisheet_audita_productos_creados_y_actualizados(
 # ── Task 7: undo_reread restaura maestros/productos con política touched-since ─
 
 
-@pytest.mark.asyncio
 async def test_undo_reread_restaura_master_no_tocado_y_saltea_editado(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1713,7 +1693,6 @@ async def test_undo_reread_restaura_master_no_tocado_y_saltea_editado(
     assert cliente_b.deactivated_at is not None  # creado por la relectura -> desactivado
 
 
-@pytest.mark.asyncio
 async def test_undo_reread_restaura_supplier_no_tocado_y_saltea_editado(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1790,7 +1769,6 @@ async def test_undo_reread_restaura_supplier_no_tocado_y_saltea_editado(
     assert proveedor_b.deactivated_at is not None  # creado por la relectura -> desactivado
 
 
-@pytest.mark.asyncio
 async def test_undo_reread_restaura_producto_no_tocado_y_saltea_editado(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1902,7 +1880,6 @@ async def test_undo_reread_restaura_producto_no_tocado_y_saltea_editado(
     assert producto_b.is_active is False
 
 
-@pytest.mark.asyncio
 async def test_undo_master_and_product_items_producto_tocado_dos_veces_usa_item_mas_reciente(
     db_session: AsyncSession, tenant: Tenant
 ) -> None:
@@ -2006,7 +1983,6 @@ async def test_undo_master_and_product_items_producto_tocado_dos_veces_usa_item_
     assert producto.stock_units == 10  # NUNCA se toca por setattr, sea el item que sea
 
 
-@pytest.mark.asyncio
 async def test_undo_reread_producto_creado_y_actualizado_en_mismo_run_se_desactiva(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
