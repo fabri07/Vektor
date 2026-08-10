@@ -1353,14 +1353,40 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
 });
 
 /**
- * F-H6.c — que la decisión de costo LLEGUE al servicio.
+ * Un archivo de UNA SOLA TABLA no puede traer costos de compra.
  *
- * Los tests de `PurchaseCostChoice` prueban el componente y los de
- * `ingestion_confirm_payload` prueban el cuerpo del POST. Falta el tramo del
- * medio: que el panel arme el payload y se lo pase. Las mutaciones lo mostraron
- * — sacar `costoPayload` de la llamada dejaba todo en verde.
+ * El importador plano no cobra el envío ni aplica las decisiones de costo —el
+ * cobro vive en un closure del camino multi-hoja y la decisión se busca bajo
+ * otra clave—, así que el confirm rechaza el archivo con 422 en cuanto ve una
+ * columna de envío mapeada o una decisión declarada.
+ *
+ * Antes de ese guard el import lo ACEPTABA y las ignoraba en silencio: la
+ * compra quedaba con un costo más bajo que el real y el margen inflado. La
+ * pantalla no puede seguir ofreciendo los tres ejes acá —cada decisión termina
+ * en un rechazo— así que nombra el problema y da las dos salidas.
  */
-describe("ColumnMapperPanel — F-H6.c: la decisión de costo llega al confirm", () => {
+describe("ColumnMapperPanel — tabla única: los costos de compra no se ofrecen", () => {
+  function preview(headers: string[]) {
+    return {
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "gastos", headers },
+      columns_at_risk: [],
+    };
+  }
+
+  function sugerencia(source_column: string, target_field: string) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["1000"],
+      target_field,
+      confidence: 0.9,
+      source: "heuristic",
+      status: "mapped",
+    };
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
@@ -1368,84 +1394,87 @@ describe("ColumnMapperPanel — F-H6.c: la decisión de costo llega al confirm",
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
     mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
-    mockGetPreview.mockResolvedValue({
-      file_id: "file-1",
-      processing_status: "NEEDS_CONFIRMATION",
-      parsed_summary_json: {
-        inferred_type: "gastos",
-        headers: ["Fecha", "Monto", "Descuento"],
-      },
-      columns_at_risk: [],
-    });
+  });
+
+  test("con una columna de envío se explica el rechazo y no se deja confirmar", async () => {
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Envio"]));
     mockGetColumnMappings.mockResolvedValue([
-      {
-        source_column: "Fecha",
-        normalized_column: "fecha",
-        sample_values: ["2024-03-05"],
-        target_field: "expense_date",
-        confidence: 0.9,
-        source: "heuristic",
-        status: "mapped",
-      },
-      {
-        source_column: "Monto",
-        normalized_column: "monto",
-        sample_values: ["12000"],
-        target_field: "amount",
-        confidence: 0.9,
-        source: "heuristic",
-        status: "mapped",
-      },
-      {
-        source_column: "Descuento",
-        normalized_column: "descuento",
-        sample_values: ["2000"],
-        target_field: "discount",
-        confidence: 0.9,
-        source: "heuristic",
-        status: "mapped",
-      },
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Envio", "shipping_cost"),
     ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/todavía no sabe cobrar ni repartir el envío/i),
+      ).toBeInTheDocument();
+    });
+    // Las dos salidas que ofrece el 422, dichas ANTES de apretar.
+    expect(screen.getByText(/libro con hojas separadas/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Confirmar/i })).toBeDisabled();
+    // Y ningún eje de costo: cada decisión que tomara terminaría en un rechazo.
+    expect(screen.queryByText(/cobra una sola vez/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/viene asignado a cada línea/i)).not.toBeInTheDocument();
   });
 
-  test("el selector aparece porque la hoja mapea un descuento", async () => {
+  test("el flete por línea también lo dispara, y se nombra la columna", async () => {
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Flete linea"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Flete linea", "shipping_cost_line"),
+    ]);
     renderPanel();
+
     await waitFor(() => {
-      expect(screen.getByText(/ya incluye el descuento/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Confirmar/i })).toBeDisabled();
     });
+    // Nombrar la columna es lo que vuelve accionable la salida «sacala del
+    // mapeo»: sin eso hay que adivinar cuál de todas es.
+    expect(screen.getAllByText("Flete linea").length).toBeGreaterThan(0);
   });
 
-  test("declarar que el monto es bruto viaja en el confirm", async () => {
+  test("el mismo archivo SIN columnas de envío importa igual", async () => {
+    // El rechazo alcanza a los costos, no al formato. Si esto fuera rojo, el
+    // guard estaría bloqueando archivos que el backend acepta.
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Descuento"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Descuento", "discount"),
+    ]);
     renderPanel();
+
     await waitFor(() => {
-      expect(screen.getByRole("radio", { name: /El monto es el bruto/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Confirmar/i })).toBeEnabled();
     });
-    fireEvent.click(screen.getByRole("radio", { name: /El monto es el bruto/ }));
+    expect(
+      screen.queryByText(/todavía no sabe cobrar ni repartir el envío/i),
+    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
 
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
-    const decisiones = mockConfirmFile.mock.calls[0]?.[9];
-    expect(decisiones).toEqual([
-      {
-        context_id: "",
-        base: "monto_sin_ajustes",
-        shared_shipping: "no_distribuir",
-        line_shipping: "gasto_aparte",
-      },
-    ]);
-  });
-
-  test("sin tocar nada no se manda ninguna decisión", async () => {
-    renderPanel();
-    await waitFor(() => {
-      expect(screen.getByText(/ya incluye el descuento/i)).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
-
-    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
-    // `undefined`, no una lista con los defaults: mandar lo que el backend ya
-    // aplica solo es ruido, y omitirlo deja claro en la traza que no hubo decisión.
+    // Nunca una decisión de costo por este camino: el importador plano no la
+    // aplica y el confirm rechaza el archivo apenas la ve.
     expect(mockConfirmFile.mock.calls[0]?.[9]).toBeUndefined();
+  });
+
+  test("tampoco se le pide el reparto al servidor para un archivo que no puede tenerlo", async () => {
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Envio"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Envio", "shipping_cost"),
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/todavía no sabe cobrar ni repartir el envío/i),
+      ).toBeInTheDocument();
+    });
+    expect(mockPurchaseGroups).not.toHaveBeenCalled();
   });
 });
 

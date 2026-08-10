@@ -1827,62 +1827,36 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   });
   const hojaEfecto = inventoryEffects[0];
   const [effectElegido, setEffectElegido] = useState<string | null>(null);
-  // F-H6.c: el equivalente de `costoByCtx` para el archivo de una sola tabla,
-  // que no tiene contextos. Default en «no toca nada», igual que allá.
-  const [costoTablaUnica, setCostoTablaUnica] = useState<{
-    base: PurchaseCostBase;
-    shared: PurchaseSharedShipping;
-    line: PurchaseLineShipping;
-  }>({ base: "monto_incluye", shared: "no_distribuir", line: "gasto_aparte" });
-  // F-H6.d: el mismo archivo tiene que dar el mismo costo venga como tabla o
-  // como solapa, así que el reparto también se consulta acá. Se manda el estado
-  // crudo (ver `costoDraft` del camino multi-hoja).
-  const costoDraft = useMemo(
-    () => [
-      {
-        context_id: "",
-        base: costoTablaUnica.base,
-        shared_shipping: costoTablaUnica.shared,
-        line_shipping: costoTablaUnica.line,
-      },
-    ],
-    [costoTablaUnica],
-  );
-  const costoDraftKey = useMemo(() => JSON.stringify(costoDraft), [costoDraft]);
-  const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
-    (m) => m.target_field === "shipping_cost",
-  );
-  // Mismo freno que en el camino multi-hoja: un 403 es la compuerta de rollout,
-  // no un error que mostrar, y no hay que volver a preguntar por cada edición.
-  const [sinMotor, setSinMotor] = useState(false);
-  const { data: purchaseGroups = [], error: errorGrupos } = useQuery({
-    queryKey: ["purchase-groups", fileId, riskRecomputeKey, costoDraftKey],
-    queryFn: ({ signal }) =>
-      ingestionService.fetchPurchaseGroups(
-        fileId,
-        {
-          ...riskRecomputeInput,
-          // Este camino no ofrece la decisión de envío sin comprobante (F-H6.b
-          // vive en el mapeo por hoja), así que no hay ninguna que declarar.
-          shippingDecisions: [],
-          purchaseCostDecisions: costoDraft,
-        },
-        signal,
-      ),
-    enabled: hayEnvioCompartido && !sinMotor,
-    placeholderData: (prev) => prev,
-    retry: false,
-  });
-  useEffect(() => {
-    if (esMotorDeCostosDeshabilitado(errorGrupos)) setSinMotor(true);
-  }, [errorGrupos]);
-  const hojaGrupos = purchaseGroups[0];
-  // Lo elegido sólo vale mientras el servidor diga que esta hoja se puede
-  // repartir; si no, el default que no toca ningún costo.
-  const compartidoActual: PurchaseSharedShipping =
-    costoTablaUnica.shared === "por_subtotal" && hojaGrupos?.puede_distribuir
-      ? "por_subtotal"
-      : "no_distribuir";
+  /**
+   * Este camino NO puede traer costos de compra, y por eso no los ofrece.
+   *
+   * El importador plano no cobra el envío ni aplica las decisiones de costo —el
+   * cobro vive en un closure del camino multi-hoja y la decisión se busca bajo
+   * otra clave—, así que el confirm rechaza el archivo con 422 en cuanto ve una
+   * columna de envío mapeada O una decisión de costo declarada. Arreglar el
+   * camino plano de verdad es otra fase.
+   *
+   * Mientras tanto, lo que la pantalla NO puede hacer es ofrecer los tres ejes
+   * acá: cada decisión que tomara terminaría en un rechazo, y antes de ese guard
+   * terminaba en algo peor —el import aceptaba el archivo y la ignoraba en
+   * silencio, dejando el costo más bajo que el real y el margen inflado—. Se
+   * nombra el problema y se dicen las dos salidas, que son las mismas del 422.
+   *
+   * El predicado del backend (`_plano`) es más AMPLIO que este `!isMultiContext`,
+   * así que todo lo que la pantalla manda por acá cae adentro de su rechazo: no
+   * hay archivo que la UI deje pasar y el confirm frene por sorpresa.
+   */
+  const columnasDeCostoEnTablaUnica = [
+    ...new Set(
+      riskRecomputeInput.columnMappings
+        .filter(
+          (m) =>
+            m.target_field === "shipping_cost" ||
+            m.target_field === "shipping_cost_line",
+        )
+        .map((m) => m.source_column),
+    ),
+  ];
   // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
   // cantidad puede dejar a la hoja sin poder mover inventario.
   const efectoActual =
@@ -1967,21 +1941,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
           ? { [hojaEfecto.context_id]: efectoActual }
           : undefined,
         undefined,
-        // F-H6.c: sólo si se apartó de un default. `context_id: ""` es la tabla
-        // única — el backend la indexa así, igual que el resto de las decisiones
-        // por contexto en este camino.
-        costoTablaUnica.base !== "monto_incluye" ||
-        compartidoActual !== "no_distribuir" ||
-        costoTablaUnica.line !== "gasto_aparte"
-          ? [
-              {
-                context_id: "",
-                base: costoTablaUnica.base,
-                shared_shipping: compartidoActual,
-                line_shipping: costoTablaUnica.line,
-              },
-            ]
-          : undefined,
+        // Nunca. El importador plano no aplica las decisiones de costo, y el
+        // confirm rechaza el archivo con 422 en cuanto ve una: mandar algo acá
+        // sólo puede terminar en un rechazo. Ver el comentario de
+        // `columnasDeCostoEnTablaUnica`.
+        undefined,
       ),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
@@ -2514,40 +2478,32 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         />
       )}
 
-      {/* F-H6.c: la tabla única también puede declarar cómo se calcula el costo.
-          El backend lo soporta en los DOS caminos —el mismo archivo tiene que dar
-          el mismo costo venga como tabla o como solapa—, así que dejarlo sólo en
-          el multi-hoja habría hecho inalcanzable desde acá lo que el importador
-          sí sabe hacer. Es el agujero exacto de F-H3.e, en otra fase. */}
-      {!needsPurpose && (
-        <PurchaseCostChoice
-          base={costoTablaUnica.base}
-          sharedShipping={compartidoActual}
-          lineShipping={costoTablaUnica.line}
-          onBaseChange={(v) => setCostoTablaUnica((p) => ({ ...p, base: v }))}
-          onSharedShippingChange={(v) =>
-            setCostoTablaUnica((p) => ({ ...p, shared: v }))
-          }
-          onLineShippingChange={(v) => setCostoTablaUnica((p) => ({ ...p, line: v }))}
-          mostrarAjustes={
-            Object.values(mappings).includes("discount") ||
-            Object.values(mappings).includes("taxes")
-          }
-          mostrarEnvioCompartido={
-            Object.values(mappings).includes("shipping_cost") &&
-            hojaGrupos?.puede_distribuir === true
-          }
-          mostrarFleteDeLinea={Object.values(mappings).includes("shipping_cost_line")}
-          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
-        />
-      )}
-
-      {/* F-H6.d: el reparto que devolvió el servidor, antes de confirmar. */}
-      {!needsPurpose && hojaGrupos && (
-        <PurchaseGroupsPreview
-          hoja={hojaGrupos}
-          className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
-        />
+      {/* Un archivo de una sola tabla no puede traer costos de compra: el
+          importador plano no cobra el envío y el confirm lo rechaza. Se dice
+          acá, con las dos salidas, en vez de ofrecer tres ejes cuyo único
+          desenlace posible es un 422. */}
+      {!needsPurpose && columnasDeCostoEnTablaUnica.length > 0 && (
+        <div className="mb-3 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
+          <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+          <div>
+            <p>
+              Este archivo es una sola tabla y trae{" "}
+              {columnasDeCostoEnTablaUnica.length === 1 ? "una columna" : "columnas"}{" "}
+              de envío (
+              <span className="font-mono">
+                {columnasDeCostoEnTablaUnica.join(", ")}
+              </span>
+              ). Véktor todavía no sabe cobrar ni repartir el envío en este
+              formato: si lo importara, la compra quedaría con un costo más bajo
+              que el real y el margen inflado.
+            </p>
+            <p className="mt-1 text-vk-text-secondary">
+              Dos salidas: subilo como libro con hojas separadas (una por
+              sección), o sacá esas columnas del mapeo —marcalas «Ignorar»— y
+              cargá ese envío como un gasto aparte.
+            </p>
+          </div>
+        </div>
       )}
 
       {/* Error de API (excluye 409/timeout: los maneja el toast, no el banner) */}
@@ -2568,6 +2524,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             !Object.values(confirmedFields).some(Boolean) ||
             faltanRequeridos.length > 0 ||
             colisiones.length > 0 ||
+            // El confirm lo va a rechazar igual: descubrirlo con un 422 después
+            // de apretar es exactamente lo que este panel existe para evitar.
+            columnasDeCostoEnTablaUnica.length > 0 ||
             needsPurpose
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"
