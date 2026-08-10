@@ -58,12 +58,11 @@ addopts = [
     "-n", "auto",
 ]
 asyncio_default_fixture_loop_scope = "session"
+# Solo markers que se USAN. `unit`/`integration`/`redis`/`celery` estuvieron
+# declarados sin un solo uso en 266 archivos — un marker muerto invita a creer
+# que filtra algo.
 markers = [
-    "unit: tests rápidos, sin infraestructura externa",
-    "integration: tests con SQLite + FakeRedis",
     "postgres: requiere PostgreSQL real (docker)",
-    "redis: requiere Redis real (docker)",
-    "celery: requiere Celery worker activo",
     "slow: e2e pesados (>15s); excluibles en local con -m 'not slow'",
 ]
 
