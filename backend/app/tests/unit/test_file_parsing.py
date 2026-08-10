@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.application.services.file_parsing import (
+    _decode_text_bytes,
+    _detect_header_row,
+    _sniff_delimiter,
     analyze_headers,
     detect_supported_mime,
     infer_spreadsheet_type,
     parse_uploaded_content,
+    rows_to_dicts,
 )
 
 
@@ -864,3 +870,160 @@ def test_medio_de_pago_desempata_un_libro_de_compras_con_sku() -> None:
     # Misma hoja escrita sin la preposición: ya funcionaba, y tiene que seguir igual.
     sin_preposicion = [c.replace("medio_de_pago", "forma_pago") for c in compras]
     assert analyze_headers(sin_preposicion)["inferred_type"] == "gastos"
+
+# ── Mecánica del parser (ex test_file_parsing_fase1.py, fusionado acá) ─────────
+# Bugs de la auditoría FASE 1: CSV con `;` leído como 1 columna, BOM en el primer
+# header, fila de título arriba del encabezado, truncamiento silencioso a 50
+# filas, filas irregulares, contaminación del bucket de ventas y preservación de
+# hojas no clasificables en multi-hoja.
+
+_FASE1_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+# ── Helpers unitarios ─────────────────────────────────────────────────────────
+
+
+def test_sniff_delimiter_detects_semicolon() -> None:
+    assert _sniff_delimiter("fecha;monto;cliente\n2026-01-01;100;Juan") == ";"
+
+
+def test_sniff_delimiter_detects_comma() -> None:
+    assert _sniff_delimiter("fecha,monto,cliente\n2026-01-01,100,Juan") == ","
+
+
+def test_sniff_delimiter_detects_tab() -> None:
+    assert _sniff_delimiter("fecha\tmonto\tcliente\n2026-01-01\t100\tJuan") == "\t"
+
+
+def test_decode_strips_utf8_bom() -> None:
+    raw = "﻿precio_venta,monto\n100,200".encode()  # UTF-8 con BOM
+    decoded = _decode_text_bytes(raw)
+    assert not decoded.startswith("﻿")
+    assert decoded.startswith("precio_venta")
+
+
+def test_decode_handles_latin1() -> None:
+    raw = "café,música\n1,2".encode("latin-1")
+    decoded = _decode_text_bytes(raw)
+    assert "caf" in decoded  # no crashea, decodifica algo razonable
+
+
+def test_detect_header_row_skips_title_and_blank() -> None:
+    rows = [
+        ["Ventas Mensuales - Junio 2026"],  # título
+        [],  # fila vacía
+        ["fecha", "producto", "monto"],  # encabezado real
+        ["2026-01-15", "Coca", "1500"],
+    ]
+    assert _detect_header_row(rows) == 2
+
+
+def test_detect_header_row_defaults_to_zero_when_clean() -> None:
+    rows = [["fecha", "monto"], ["2026-01-01", "100"]]
+    assert _detect_header_row(rows) == 0
+
+
+def test_rows_to_dicts_pads_ragged_rows() -> None:
+    headers = ["fecha", "producto", "monto", "cliente"]
+    rows = [["2026-01-16", "Pepsi"]]  # faltan monto y cliente
+    result = rows_to_dicts(headers, rows)
+    assert result == [
+        {"fecha": "2026-01-16", "producto": "Pepsi", "monto": None, "cliente": None}
+    ]
+
+
+def test_rows_to_dicts_ignores_none_row_and_extra_cells() -> None:
+    headers = ["a", "b"]
+    rows: list[Any] = [None, [1, 2, 3, 4]]  # fila None + celdas extra
+    result = rows_to_dicts(headers, rows)
+    assert result[0] == {"a": None, "b": None}
+    assert result[1] == {"a": "1", "b": "2"}  # celdas extra ignoradas
+
+
+# ── CSV end-to-end ────────────────────────────────────────────────────────────
+
+
+def test_csv_semicolon_parsed_with_multiple_columns() -> None:
+    csv = b"fecha;monto;descripcion\n2026-01-15;50000;Venta del dia\n2026-01-16;35000;Venta tarde"
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["columns"] == ["fecha", "monto", "descripcion"]
+    assert summary["delimiter"] == ";"
+    assert summary["row_count"] == 2
+
+
+def test_csv_with_bom_clean_first_header() -> None:
+    csv = "﻿fecha,monto\n2026-01-15,1000".encode()
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["columns"][0] == "fecha"  # sin
+
+
+def test_csv_with_title_row_detects_real_headers() -> None:
+    csv = (
+        b"Reporte de Ventas - Junio\n"
+        b"\n"
+        b"fecha,monto,descripcion\n"
+        b"2026-01-15,50000,Venta\n"
+        b"2026-01-16,35000,Venta"
+    )
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["columns"] == ["fecha", "monto", "descripcion"]
+    assert summary["row_count"] == 2
+
+
+def test_csv_over_50_rows_not_truncated() -> None:
+    lines = ["fecha,monto"] + [f"2026-01-{(i % 28) + 1:02d},{1000 + i}" for i in range(200)]
+    csv = "\n".join(lines).encode()
+    summary = parse_uploaded_content(csv, "text/csv", "ventas.csv")
+    assert summary["row_count"] == 200
+    # Todas las filas quedan en el bucket (no truncadas a 50). FASE F: un CSV
+    # sin señales de contexto (solo fecha+monto) es ambiguo → otros_detectados,
+    # ya no cae a ventas por default; la confirmación explícita lo importa.
+    assert len(summary["otros_detectados"]) == 200
+    assert summary["ventas_detectadas"] == []
+
+
+def test_gastos_csv_does_not_contaminate_ventas_bucket() -> None:
+    csv = b"fecha,gasto,proveedor\n2026-01-15,5000,ProvA\n2026-01-16,3000,ProvB"
+    summary = parse_uploaded_content(csv, "text/csv", "gastos.csv")
+    assert summary["inferred_type"] == "gastos"
+    assert summary["gastos_detectados"]  # tiene gastos
+    assert summary["ventas_detectadas"] == []  # NO contamina ventas
+
+
+# ── Multi-hoja: preservación de hojas no clasificables ────────────────────────
+
+
+def _build_multisheet_with_unclassified() -> bytes:
+    import io
+
+    import pytest
+
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ventas = wb.active
+    ventas.title = "Ventas"
+    ventas.append(["fecha", "monto"])
+    ventas.append(["2026-01-15", "50000"])
+    resumen = wb.create_sheet("Resumen")  # nombre + headers no clasificables
+    resumen.append(["Titulo", "Observaciones", "Estado"])
+    resumen.append(["Total mes", "sin novedad", "ok"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_multisheet_unclassified_sheet_preserved_with_warning() -> None:
+    content = _build_multisheet_with_unclassified()
+    summary = parse_uploaded_content(content, _FASE1_XLSX_MIME, "mixto.xlsx")
+    contexts = summary["mapping_contexts"]
+    by_label = {c["label"]: c for c in contexts}
+
+    # La hoja clasificable entra normal.
+    assert by_label["Ventas"]["entity_type"] == "sale"
+
+    # La hoja "Resumen" NO se descarta: queda como contexto unclassified + warning.
+    assert "Resumen" in by_label
+    assert by_label["Resumen"]["entity_type"] is None
+    assert by_label["Resumen"]["unclassified"] is True
+    assert by_label["Resumen"]["row_count"] == 1
+    assert any("Resumen" in w for w in summary["warnings"])
