@@ -148,8 +148,21 @@ TRANSACCION_MONTO_COLS = {"total", "monto", "importe", "monto_total", "importe_t
 # alcanza con la forma canónica: "medio_de_pago" entra por "medio_pago". La
 # variante con tilde sí hay que declararla — la clave no normaliza acentos.
 FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago", "método_pago"}
-# Columna de proveedor (contraparte de una compra).
+# Columna de proveedor (contraparte de una compra). Se matchea por SUBSTRING: en
+# los archivos reales el header casi nunca viene pelado — "Proveedor (tal cual se
+# anotó)", "Nombre del Proveedor" o "Razón Social Proveedor" son todos la misma
+# columna. Con coincidencia exacta, un libro de compras con el header decorado
+# perdía la señal de contraparte y sólo entraba en la regla -1 si además traía
+# "Forma de Pago"; sin esa columna volvía a clasificarse como catálogo.
 PROVEEDOR_COLS = {"proveedor", "proveedores"}
+# Nº de comprobante de la operación (remito, factura, recibo). Es el discriminante
+# más fuerte contra un catálogo: una lista de precios no numera comprobantes. Se
+# usa como evidencia ALTERNATIVA al monto de la operación — un libro de compras
+# que factura por remito puede no traer una columna "Total".
+# "facturacion"/"factura_emitida" quedan afuera a propósito: son columnas de total
+# facturado (señal de VENTA), no el identificador del documento.
+COMPROBANTE_COLS = {"remito", "factura", "comprobante", "recibo"}
+COMPROBANTE_EXCLUDE_KEYS = {"facturacion", "facturación", "factura_emitida"}
 
 # Columnas que nombran un PRECIO. Aparecen en el catálogo tanto como en una
 # transacción, así que una señal de venta/gasto que salga de una de ellas
@@ -452,7 +465,12 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     # para no disparar con sufijos espurios.
     has_monto_transaccion = any(col in TRANSACCION_MONTO_COLS for col in normalized)
     has_forma_pago = any(key in FORMA_PAGO_COLS for key in collapsed)
-    has_proveedor = any(col in PROVEEDOR_COLS for col in normalized)
+    has_proveedor = any(any(k in col for k in PROVEEDOR_COLS) for col in normalized)
+    has_comprobante = any(
+        any(k in col for k in COMPROBANTE_COLS)
+        and not any(x in col for x in COMPROBANTE_EXCLUDE_KEYS)
+        for col in normalized
+    )
 
     # F7a: señales de maestro de clientes/proveedores (identidad fiscal/contacto).
     cliente_score = sum(any(k in col for k in CLIENTE_SIGNAL_COLS) for col in normalized)
@@ -480,6 +498,7 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_monto_transaccion=has_monto_transaccion,
         has_forma_pago=has_forma_pago,
         has_proveedor=has_proveedor,
+        has_comprobante=has_comprobante,
         cliente_score=cliente_score,
         proveedor_master_score=proveedor_master_score,
         has_identidad_contacto=has_identidad_contacto,
@@ -514,6 +533,7 @@ def infer_spreadsheet_type(
     has_monto_transaccion: bool = False,
     has_forma_pago: bool = False,
     has_proveedor: bool = False,
+    has_comprobante: bool = False,
     cliente_score: int = 0,
     proveedor_master_score: int = 0,
     has_identidad_contacto: bool = False,
@@ -523,11 +543,12 @@ def infer_spreadsheet_type(
     """Determina el tipo más probable del archivo tabular.
 
     Reglas (en orden de prioridad):
-    -1. LIBRO DE COMPRAS: catálogo (sku/producto/cantidad) + monto de transacción +
-        fecha + (forma de pago O proveedor) Y contexto de gasto dominante → gastos,
-        aunque traiga sku/cantidad/costo_unitario. Una compra de mercadería es a la vez
-        gasto (COGS) y salida de caja; el catálogo no la captura. CONSERVADOR: solo se
-        dispara cuando, sin esta regla, el archivo caería en "stock" por error.
+    -1. LIBRO DE COMPRAS: catálogo (sku/producto/cantidad) + (monto de transacción O
+        nº de comprobante) + fecha + (forma de pago O proveedor) Y contexto de gasto
+        dominante → gastos, aunque traiga sku/cantidad/costo_unitario. Una compra de
+        mercadería es a la vez gasto (COGS) y salida de caja; el catálogo no la captura.
+        CONSERVADOR: solo se dispara cuando, sin esta regla, el archivo caería en
+        "stock" por error.
     -0.5 (F7a). MAESTRO DE CLIENTES/PROVEEDORES: señal de identidad fiscal/contacto
         (dni/documento/cliente para clientes; cuil/proveedor para proveedores) SIN
         ninguna señal transaccional (monto de operación, cantidad, fecha de
@@ -563,16 +584,26 @@ def infer_spreadsheet_type(
     # como "stock" y se perdería el gasto (COGS) y la salida de caja. Solo se dispara si:
     #   (a) hay señal de catálogo (sku/articulo/… o producto/nombre o cantidad) — si no la
     #       hay, el scoring venta/gasto de abajo ya resuelve bien y no hay que intervenir;
-    #   (b) hay monto de transacción + fecha + (forma de pago O proveedor) — patrón de
-    #       operación, no de lista de precios; y
+    #   (b) hay evidencia de operación documentada (monto de transacción O nº de
+    #       comprobante) + fecha + (forma de pago O proveedor) — patrón de operación, no
+    #       de lista de precios; y
     #   (c) el contexto de GASTO domina al de VENTA (gasto_score > venta_score) — así una
     #       venta con cliente+forma_pago+total NO cae acá.
     # Un catálogo real (precio_venta/stock_actual/stock_minimo, sin forma_pago/proveedor
     # ni monto de operación) NO cumple (b) y sigue siendo "stock".
+    #
+    # El comprobante entra como alternativa al monto porque un libro de compras que
+    # factura por remito puede no traer una columna "Total" — y numerar remitos es algo
+    # que un catálogo no hace nunca. Sin esa alternativa, la regla dependía de que el
+    # archivo trajera JUSTO las columnas pelada "total" y "forma de pago": un libro real
+    # (fecha + nº de remito + proveedor + cantidad + costo) volvía a caer en "stock",
+    # perdiendo el COGS, la salida de caja y los movimientos de stock fechados que
+    # respaldan las ventas del mismo archivo.
     has_catalogo_signal_any = has_catalogo_fuerte or has_nombre or has_cantidad
+    has_operacion_documentada = has_monto_transaccion or has_comprobante
     if (
         has_catalogo_signal_any
-        and has_monto_transaccion
+        and has_operacion_documentada
         and has_fecha
         and (has_forma_pago or has_proveedor)
         and gasto_score > venta_score
