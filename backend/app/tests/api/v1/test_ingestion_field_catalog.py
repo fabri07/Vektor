@@ -156,6 +156,68 @@ class TestFieldCatalog:
             for campo in ("unit_price", "quantity"):
                 assert campos[campo]["required_reason"], f"{entidad}.{campo}"
 
+    async def test_la_regla_contextual_viaja_en_el_catalogo(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """F-C.c3b — `required: bool` contesta una pregunta sola para todos los
+        archivos, y por eso contesta mal en los dos sentidos.
+
+        `required_when` es lo que le permite a la pantalla decir "el monto sólo
+        hace falta si no mapeaste precio × cantidad" y "el producto sólo hace
+        falta si la hoja mueve unidades", sin que ninguna de las dos cosas se
+        vuelva bloqueante.
+        """
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        catalog = response.json()
+
+        for entidad in ("sale", "expense"):
+            campos = {f["value"]: f for f in catalog[entidad]["fields"]}
+
+            monto = campos["amount"]["required_when"]
+            assert monto is not None, entidad
+            assert monto["condition"] == "covered_by_alternative"
+            assert monto["explanation"]
+            # La alternativa concreta NO se duplica acá: vive en
+            # `required_alternatives` y una segunda copia podría divergir.
+            assert monto["signals"] == []
+
+            for campo in ("product_name", "quantity"):
+                regla = campos[campo]["required_when"]
+                assert regla is not None, f"{entidad}.{campo}"
+                assert regla["condition"] == "sheet_moves_units"
+                assert regla["explanation"]
+                # Las señales nombran las columnas que gobiernan la condición, y
+                # llegan ordenadas para que el mismo catálogo se lea siempre igual.
+                assert regla["signals"]
+                assert all(g == sorted(g) for g in regla["signals"]), f"{entidad}.{campo}"
+
+    async def test_un_campo_sin_regla_contextual_no_inventa_una(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Control: la mayoría de los campos no tienen regla, y ahí `required`
+        alcanza. Sin esto, devolver una condición para todos pasaría igual."""
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        catalog = response.json()
+
+        venta = {f["value"]: f for f in catalog["sale"]["fields"]}
+        assert venta["transaction_date"]["required_when"] is None
+        producto = {f["value"]: f for f in catalog["product"]["fields"]}
+        assert producto["name"]["required_when"] is None
+
+    async def test_la_regla_contextual_no_vuelve_obligatorio_nada(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """El catálogo DESCRIBE la regla; no la impone.
+
+        `required` tiene que seguir siendo exactamente `REQUIRED_FIELDS`: si
+        `product_name` se colara ahí, el confirm rechazaría con 422 toda planilla
+        de servicios u honorarios que hoy entra bien.
+        """
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        for entity, entry in response.json().items():
+            assert entry["required"] == REQUIRED_FIELDS.get(entity, []), entity
+            assert "product_name" not in entry["required"], entity
+
     async def test_requiere_autenticacion(self, client: AsyncClient) -> None:
         response = await client.get("/api/v1/ingestion/field-catalog")
         assert response.status_code in (401, 403)

@@ -197,6 +197,31 @@ class ColumnMappingSuggestion(BaseModel):
     duda: str | None = None
 
 
+class ConditionalRequirement(BaseModel):
+    """F-C.c3 — por qué un campo puede hacer falta en una hoja y no en la de al lado.
+
+    Espeja `column_mapping_service.ConditionalRequirement`, que es la fuente. Viaja
+    en el catálogo porque `required: bool` contesta una sola pregunta para todos
+    los archivos y por eso contesta mal en los dos sentidos: dice que el monto de
+    una venta es obligatorio cuando la planilla trae precio × cantidad, y no dice
+    nada del producto en una hoja que sí mueve inventario.
+
+    **Describe, no bloquea.** `required` no cambia y la validación del confirm no
+    lo mira: volver bloqueante "producto si la venta es inventariable" rechazaría
+    con 422 toda planilla de servicios u honorarios que hoy entra bien.
+    """
+
+    #: `covered_by_alternative` | `sheet_moves_units`. Set cerrado en el dominio;
+    #: acá viaja como str para que sumar una condición no rompa un cliente viejo.
+    condition: str
+    #: Copy en castellano, listo para mostrar.
+    explanation: str
+    #: Conjuntos de campos que gobiernan la condición, para que la pantalla pueda
+    #: nombrar las columnas involucradas. Ordenados: la UI los muestra tal cual y
+    #: un orden que cambia entre requests se lee como si cambiara la regla.
+    signals: list[list[str]] = Field(default_factory=list)
+
+
 class FieldCatalogEntry(BaseModel):
     """Un campo canónico al que se puede mapear una columna."""
 
@@ -216,6 +241,9 @@ class FieldCatalogEntry(BaseModel):
     # sin tener que distinguir dos ausencias. Y con default, para que un cliente
     # viejo que no conoce el campo siga deserializando.
     required_reason: str = ""
+    # F-C.c3b: la regla CONTEXTUAL del campo, cuando tiene una. `None` = el campo
+    # hace falta siempre o no hace falta nunca, y `required` ya lo dice.
+    required_when: ConditionalRequirement | None = None
 
 
 class EntityFieldCatalog(BaseModel):

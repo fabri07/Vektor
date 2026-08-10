@@ -39,6 +39,7 @@ from app.application.services.column_mapping_service import (
     REQUIRED_FIELDS,
     SINGLE_VALUE_FIELDS,
     ColumnMappingService,
+    conditional_requirement,
     missing_required_fields,
     parse_target,
     required_reason,
@@ -149,6 +150,7 @@ from app.schemas.ingestion import (
     ColumnMappingSuggestion,
     ColumnRiskDecision,
     ColumnRiskRequest,
+    ConditionalRequirement,
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     ContextualColumnRisk,
@@ -1077,6 +1079,26 @@ async def get_field_catalog(
     Estático por deploy (no depende del tenant ni del archivo); el auth se pide
     igual porque el catálogo describe la forma de los datos de negocio.
     """
+
+    def _condicion(entity: str, field: str) -> ConditionalRequirement | None:
+        """F-C.c3b: la regla contextual del campo, si tiene una.
+
+        Se sirve pero NO se aplica: `required` sigue igual y el confirm sigue
+        validando con `missing_required_fields`. La pantalla puede explicar
+        "el producto sólo hace falta si la hoja mueve unidades" sin que el
+        importador rechace la planilla de honorarios que no lo trae.
+        """
+        regla = conditional_requirement(entity, field)
+        if regla is None:
+            return None
+        return ConditionalRequirement(
+            condition=regla.condition,
+            explanation=regla.explanation,
+            # `signals` son frozensets: sin ordenar, el JSON cambia de orden entre
+            # requests y la misma regla se lee como si fuera otra.
+            signals=[sorted(grupo) for grupo in regla.signals],
+        )
+
     return {
         entity: EntityFieldCatalog(
             required=list(REQUIRED_FIELDS.get(entity, [])),
@@ -1090,6 +1112,7 @@ async def get_field_catalog(
                     label=label,
                     single_value=value in SINGLE_VALUE_FIELDS.get(entity, frozenset()),
                     required_reason=required_reason(entity, value),
+                    required_when=_condicion(entity, value),
                 )
                 for value, label in fields.items()
             ],
