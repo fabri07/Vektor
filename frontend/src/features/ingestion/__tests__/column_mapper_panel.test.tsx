@@ -1824,6 +1824,38 @@ describe("ColumnMapperPanel — F-H6.d: el preview ve la decisión de envío", (
     ]);
   });
 
+  test("un tenant sin el motor de costos deja de preguntar en vez de comerse un 403 por tecla", async () => {
+    /**
+     * `/purchase-groups` responde 403 mientras el motor de costos está detrás de
+     * la compuerta de rollout. Eso NO es un error que mostrar: la degradación
+     * correcta es que el tercer eje y la vista previa no aparezcan. Lo que sí
+     * hay que evitar es reintentar: la clave de la consulta cambia con cada
+     * edición del mapeo, así que sin freno es un 403 por cada cambio.
+     */
+    mockPurchaseGroups.mockRejectedValue({ response: { status: 403 } });
+    renderPanel();
+
+    await waitFor(() => expect(mockPurchaseGroups).toHaveBeenCalled());
+    const llamadasTrasEl403 = mockPurchaseGroups.mock.calls.length;
+
+    // Se cambia el mapeo: sin el freno, esto dispara otra consulta.
+    const select = await waitFor(() => {
+      const el = document.querySelector<HTMLSelectElement>(
+        'select[data-suggests="shipping_cost"]',
+      );
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    fireEvent.change(select, { target: { value: "ignore" } });
+    fireEvent.change(select, { target: { value: "shipping_cost" } });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Es un solo envío/ })).toBeInTheDocument();
+    });
+    expect(mockPurchaseGroups).toHaveBeenCalledTimes(llamadasTrasEl403);
+    expect(screen.queryByText(/cobra una sola vez/i)).not.toBeInTheDocument();
+  });
+
   test("declarar «es un solo envío» se le pregunta también al preview", async () => {
     renderPanel();
     await waitFor(() => {

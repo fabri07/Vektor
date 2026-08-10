@@ -128,6 +128,19 @@ function isTransientConfirmError(error: unknown): boolean {
   return e?.response?.status === 409 || e?.code === "ECONNABORTED";
 }
 
+/**
+ * F-H6.d: el tenant no tiene habilitado el motor de costos de compra.
+ *
+ * `/purchase-groups` responde 403 y eso NO es un error que haya que mostrar: es
+ * la compuerta de rollout, y la degradación correcta es que el tercer eje y la
+ * vista previa del reparto simplemente no aparezcan. Lo que sí hay que evitar es
+ * seguir preguntando: la clave de la consulta cambia con cada edición del mapeo,
+ * así que sin este freno un tenant fuera de la lista se come un 403 por tecla.
+ */
+function esMotorDeCostosDeshabilitado(error: unknown): boolean {
+  return (error as { response?: { status?: number } } | null)?.response?.status === 403;
+}
+
 // Maneja el error transitorio del confirm: avisa amable y refresca la lista.
 // Devuelve true si lo manejó (para no caer en el banner de error de mapeo).
 function handleTransientConfirmError(
@@ -1336,7 +1349,10 @@ function MultiContextMapper({
   const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
     (m) => m.target_field === "shipping_cost",
   );
-  const { data: purchaseGroups = [] } = useQuery({
+  // Se recuerda aunque cambie la clave: `error` de react-query vuelve a `null`
+  // con cada clave nueva, y la compuerta es del TENANT, no del mapeo.
+  const [sinMotor, setSinMotor] = useState(false);
+  const { data: purchaseGroups = [], error: errorGrupos } = useQuery({
     queryKey: ["purchase-groups", fileId, riskRecomputeKey, draftKey],
     queryFn: ({ signal }) =>
       ingestionService.fetchPurchaseGroups(
@@ -1348,13 +1364,16 @@ function MultiContextMapper({
         },
         signal,
       ),
-    enabled: hayEnvioCompartido,
+    enabled: hayEnvioCompartido && !sinMotor,
     // Mismo motivo que en `/inventory-effects`: la clave cambia con cada edición
     // del mapeo, y sin conservar lo anterior el selector del tercer eje
     // desaparecería en cada recálculo.
     placeholderData: (prev) => prev,
     retry: false,
   });
+  useEffect(() => {
+    if (esMotorDeCostosDeshabilitado(errorGrupos)) setSinMotor(true);
+  }, [errorGrupos]);
   const gruposByCtx = useMemo(
     () => Object.fromEntries(purchaseGroups.map((h) => [h.context_id, h])),
     [purchaseGroups],
@@ -1833,7 +1852,10 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const hayEnvioCompartido = riskRecomputeInput.columnMappings.some(
     (m) => m.target_field === "shipping_cost",
   );
-  const { data: purchaseGroups = [] } = useQuery({
+  // Mismo freno que en el camino multi-hoja: un 403 es la compuerta de rollout,
+  // no un error que mostrar, y no hay que volver a preguntar por cada edición.
+  const [sinMotor, setSinMotor] = useState(false);
+  const { data: purchaseGroups = [], error: errorGrupos } = useQuery({
     queryKey: ["purchase-groups", fileId, riskRecomputeKey, costoDraftKey],
     queryFn: ({ signal }) =>
       ingestionService.fetchPurchaseGroups(
@@ -1847,10 +1869,13 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         },
         signal,
       ),
-    enabled: hayEnvioCompartido,
+    enabled: hayEnvioCompartido && !sinMotor,
     placeholderData: (prev) => prev,
     retry: false,
   });
+  useEffect(() => {
+    if (esMotorDeCostosDeshabilitado(errorGrupos)) setSinMotor(true);
+  }, [errorGrupos]);
   const hojaGrupos = purchaseGroups[0];
   // Lo elegido sólo vale mientras el servidor diga que esta hoja se puede
   // repartir; si no, el default que no toca ningún costo.
