@@ -74,7 +74,10 @@ from app.domain.line_amount import (
 from app.domain.product_categories import normalize_product_category
 from app.domain.purchase_cost import (
     ATRIBUIDO_A_INVENTARIO_FIELD,
+    CON_FLETE,
+    COSTO_BASE_FIELD,
     LINEA_AL_COSTO,
+    SIN_FLETE,
     CostLine,
     LineCost,
     build_line_costs,
@@ -2046,6 +2049,7 @@ async def _apply_purchase_to_stock(
     source_type: str = SOURCE_PURCHASE_IMPORT,
     source_row_ref: str | None = None,
     costo_final: Decimal | None = None,
+    costo_incluye_flete: bool | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
 
@@ -2095,6 +2099,15 @@ async def _apply_purchase_to_stock(
     _costo_facturado = unit_cost if unit_cost is not None else costo_final
     if _costo_de_referencia is not None:
         product.unit_cost_ars = _costo_de_referencia
+        # F-H6.d: la procedencia se escribe en la MISMA operación que el costo.
+        # Separarlas deja que un costo y su procedencia se desincronicen, y una
+        # procedencia que miente es peor que ninguna: el guard de V5 decide con
+        # ella si una compra nueva puede pisar el costo guardado.
+        if costo_incluye_flete is not None:
+            product.custom_fields = {
+                **(product.custom_fields or {}),
+                COSTO_BASE_FIELD: CON_FLETE if costo_incluye_flete else SIN_FLETE,
+            }
     # A2: identidad lógica estable de la fila de origen (idempotencia + reconciliación).
     _row_hash = compute_source_row_hash(
         product_key=product.name,
@@ -3846,8 +3859,14 @@ async def _insert_confirmed_data_impl(
                     # cantidad: sin divisor no se inventa un costo unitario.
                     _costo_calculado = _costos_por_fila.get(row_index)
                     _costo_final_fila: Decimal | None = None
-                    if _costo_calculado is not None and _costo_calculado.unit_cost_final:
-                        _costo_final_fila = _costo_calculado.unit_cost_final
+                    _incluye_flete_fila: bool | None = None
+                    if _costo_calculado is not None:
+                        _incluye_flete_fila = bool(
+                            _costo_calculado.shipping_allocated
+                            or _costo_calculado.shipping_line_applied
+                        )
+                        if _costo_calculado.unit_cost_final:
+                            _costo_final_fila = _costo_calculado.unit_cost_final
                     # Compra de mercadería = gasto COGS+caja Y alta/reposición de
                     # producto. Señal a nivel de fila: nombre de producto + cantidad>0
                     # (un libro de compras con esas columnas). Se CREA el producto
@@ -3980,6 +3999,7 @@ async def _insert_confirmed_data_impl(
                             product_cache=_product_cache,
                             source_row_ref=_source_row_ref(_row_anchor),
                             costo_final=_costo_final_fila,
+                            costo_incluye_flete=_incluye_flete_fila,
                         )
                         # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
                         # stock (producto ligado + cantidad>0), marcarla para que el
@@ -5440,8 +5460,16 @@ async def _insert_multisheet_data(
         # `unit_cost_final` es None cuando la fila no trae cantidad: sin divisor
         # no se inventa un costo unitario.
         _costo_final: Decimal | None = None
-        if costo_calculado is not None and costo_calculado.unit_cost_final:
-            _costo_final = costo_calculado.unit_cost_final
+        _incluye_flete: bool | None = None
+        if costo_calculado is not None:
+            # Sin plan de costos no se declara procedencia: la ausencia de la
+            # clave significa «no sé», que no es lo mismo que «sin flete».
+            _incluye_flete = bool(
+                costo_calculado.shipping_allocated
+                or costo_calculado.shipping_line_applied
+            )
+            if costo_calculado.unit_cost_final:
+                _costo_final = costo_calculado.unit_cost_final
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
@@ -5557,6 +5585,7 @@ async def _insert_multisheet_data(
             product_cache=product_cache,
             source_row_ref=row_ref,
             costo_final=_costo_final,
+            costo_incluye_flete=_incluye_flete,
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D

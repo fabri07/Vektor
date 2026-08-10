@@ -469,6 +469,83 @@ def _linea_de(articulo: str, total: str, **over: Any) -> dict[str, Any]:
     return _fila(articulo=articulo, cantidad="1", precio_unitario=total, total=total, **over)
 
 
+async def _procedencia_del_costo(db: AsyncSession, tenant: Tenant) -> str | None:
+    """Qué declara el producto sobre su propio costo: si incluye flete o no."""
+    prods = (
+        (
+            await db.execute(
+                select(Product).where(Product.tenant_id == tenant.tenant_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(prods) == 1, f"se esperaba 1 producto, hay {len(prods)}"
+    valor = (prods[0].custom_fields or {}).get("_vektor_costo_base")
+    return str(valor) if valor is not None else None
+
+
+class TestElProductoDeclaraSiSuCostoIncluyeFlete:
+    """F-H6.d — sin procedencia, comparar dos costos es comparar cosas distintas.
+
+    Un costo de 110 con el flete adentro y uno de 100 facturado describen la misma
+    compra, y el segundo no es más barato. El guard de V5 decide con este dato si
+    una compra nueva puede pisar el costo guardado; por eso la procedencia se
+    escribe en la MISMA operación que el costo y no después.
+    """
+
+    async def test_con_flete_capitalizado_lo_declara(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(flete_linea="300")],
+            costos={"line_shipping": "al_costo"},
+        )
+        assert await _procedencia_del_costo(db_session, sample_tenant) == "con_flete"
+
+    async def test_con_el_envio_repartido_tambien(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(envio="500")],
+            costos={"shared_shipping": "por_subtotal"},
+        )
+        assert await _procedencia_del_costo(db_session, sample_tenant) == "con_flete"
+
+    async def test_sin_flete_en_el_costo_tambien_se_declara(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Hubo cálculo de costo y el flete NO entró: es una afirmación, no un
+        hueco. `gasto_aparte` deja el envío afuera del costo, a propósito."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(flete_linea="300")],
+            costos={"line_shipping": "gasto_aparte"},
+        )
+        assert await _procedencia_del_costo(db_session, sample_tenant) == "sin_flete"
+
+    async def test_sin_columnas_de_costo_no_se_inventa_procedencia(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """La ausencia de la clave significa «no sé», que NO es «sin flete». Un
+        archivo que no trae ninguna columna de ajuste no permite afirmar nada
+        sobre qué contiene el precio que declara."""
+        mapeo_pelado = {
+            "fecha": "expense_date",
+            "articulo": "product_name",
+            "cantidad": "quantity",
+            "precio_unitario": "unit_price",
+            "total": "amount",
+        }
+        await _importar(db_session, sample_tenant, [_fila()], mapeo=mapeo_pelado)
+        assert await _procedencia_del_costo(db_session, sample_tenant) is None
+
+
 class TestElFleteDeLineaSaleDeLaCaja:
     """F-H6.e — el flete asignado a la línea nunca generaba un gasto.
 

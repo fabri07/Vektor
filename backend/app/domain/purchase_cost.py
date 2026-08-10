@@ -68,6 +68,13 @@ COST_BASES: frozenset[str] = frozenset({BASE_INCLUYE, BASE_APLICAR})
 #: namespace con los campos propios que mapeó el usuario, cuyas claves salen de los
 #: headers y nunca arrancan con guión bajo.
 COSTO_BASE_FIELD = "_vektor_costo_base"
+
+#: Valores de ``COSTO_BASE_FIELD`` en el PRODUCTO. Sin esto, comparar dos costos
+#: es comparar cosas distintas sin saberlo: un costo de 110 con el flete adentro y
+#: uno de 100 facturado describen la misma compra, y el segundo no es más barato.
+#: La ausencia de la clave significa «no sé», que NO es lo mismo que ``SIN_FLETE``.
+CON_FLETE = "con_flete"
+SIN_FLETE = "sin_flete"
 DESCUENTO_FIELD = "_vektor_descuento"
 IMPUESTOS_FIELD = "_vektor_impuestos"
 ENVIO_ASIGNADO_FIELD = "_vektor_envio_asignado"
@@ -112,6 +119,11 @@ class LineCost:
     base: Decimal
     #: Parte de la cifra COMPARTIDA que le tocó. ``0`` si no se distribuyó.
     shipping_allocated: Decimal
+    #: Envío propio de la línea que SE CAPITALIZÓ (``0`` con ``gasto_aparte``).
+    #: Se expone aparte de ``total`` porque el importador necesita poder afirmar
+    #: si el costo incluye flete, y desde el total no se puede reconstruir: un
+    #: `propio` de 0 y un modo `gasto_aparte` dan el mismo número.
+    shipping_line_applied: Decimal
     #: ``base`` + el envío de línea (si se capitaliza) + lo asignado.
     total: Decimal
     #: ``total / quantity``. ``None`` sin cantidad: no se inventa un divisor.
@@ -229,6 +241,7 @@ def build_line_costs(
                 row_index=row_index,
                 base=base,
                 shipping_allocated=asignado,
+                shipping_line_applied=propio,
                 total=total,
                 unit_cost_final=(
                     (total / line.quantity).quantize(CENTAVO, rounding=ROUND_HALF_UP)
