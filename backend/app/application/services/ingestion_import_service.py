@@ -74,6 +74,7 @@ from app.domain.line_amount import (
 from app.domain.product_categories import normalize_product_category
 from app.domain.purchase_cost import (
     ATRIBUIDO_A_INVENTARIO_FIELD,
+    COMPARTIDO_SUBTOTAL,
     CON_FLETE,
     COSTO_BASE_FIELD,
     LINEA_AL_COSTO,
@@ -5138,6 +5139,7 @@ async def _insert_multisheet_data(
         ctx_id: str | None,
         rows: list[dict[str, Any]],
         cols: dict[str, str],
+        grupos: PurchaseGroupPlan | None = None,
     ) -> None:
         """F-H6.b: crea UN gasto de logística por envío declarado en la hoja.
 
@@ -5284,6 +5286,18 @@ async def _insert_multisheet_data(
                     counts["envios_cifras_distintas"] = counts.get(
                         "envios_cifras_distintas", 0
                     ) + len(plan.cifras_distintas)
+                _dec_hoja = (purchase_cost_decisions or {}).get(
+                    ctx_id or ""
+                ) or PurchaseCostDecision(context_id=ctx_id or "")
+                _repartidos: set[tuple[str, str]] = (
+                    {
+                        (g.key[0], g.key[1])
+                        for g in (grupos.groups if grupos else [])
+                        if g.distribuible and g.key is not None
+                    }
+                    if _dec_hoja.shared_shipping == COMPARTIDO_SUBTOTAL
+                    else set()
+                )
                 for _cargo in plan.charges:
                     if not await _emitir_cargo(
                         _cargo,
@@ -5293,10 +5307,14 @@ async def _insert_multisheet_data(
                             if _cargo.invoice
                             else "Envío (sin comprobante en el archivo)"
                         ),
-                        # El envío del comprobante que SÍ se repartió también queda
-                        # capitalizado y hay que marcarlo: lo cablea el commit del
-                        # doble conteo, que es donde entra además el lector.
-                        atribuido_a_inventario=False,
+                        # El envío que SÍ se repartió quedó adentro del costo de
+                        # los productos: se marca por el HECHO CONSUMADO (el grupo
+                        # repartió), no por la intención (el usuario pidió
+                        # repartir). Un grupo no distribuible pidió reparto y no
+                        # lo tuvo: ese flete sigue siendo gasto del período.
+                        atribuido_a_inventario=(
+                            (_cargo.supplier, _cargo.invoice) in _repartidos
+                        ),
                     ):
                         continue
                     counts["envios"] = counts.get("envios", 0) + 1
@@ -6384,7 +6402,7 @@ async def _insert_multisheet_data(
             # entera: la misma cifra repetida en diez filas del mismo remito es un
             # flete, no diez.
             if entity == "expense":
-                await _cobrar_envios_de_la_hoja(ctx_id, rows, cols)
+                await _cobrar_envios_de_la_hoja(ctx_id, rows, cols, _grupos_de_compra)
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
         if confirmed_fields.get("ventas"):

@@ -546,6 +546,89 @@ class TestElProductoDeclaraSiSuCostoIncluyeFlete:
         assert await _procedencia_del_costo(db_session, sample_tenant) is None
 
 
+class TestElEnvioCapitalizadoNoSeCuentaDosVeces:
+    """F-H6.d — el corte es resultado vs caja, y elegir mal da un número que miente.
+
+    $100 de mercadería + $10 de flete, mismo comprobante:
+
+        no distribuir  → gastos 110 · stock 100    el 10 vive en el resultado
+        por subtotal   → gastos 100 · stock 110    el 10 vive en el activo
+        por subtotal, sin el filtro
+                       → gastos 110 · stock 110    el 10 vive en los dos
+
+    La tercera fila es el doble conteo que este filtro cierra, y sólo aparece
+    desde que el reparto reparte de verdad.
+    """
+
+    async def _gastos_del_resultado(
+        self, db: AsyncSession, tenant: Tenant
+    ) -> Decimal:
+        from app.persistence.repositories.transaction_repository import (
+            ExpenseRepository,
+        )
+
+        return Decimal(str(await ExpenseRepository(db).total_expenses(tenant.tenant_id)))
+
+    async def _plata_que_salio(self, db: AsyncSession, tenant: Tenant) -> Decimal:
+        """Suma cruda, sin filtro: la vista de CAJA."""
+        return sum(
+            (Decimal(str(g.amount)) for g in await _gastos(db, tenant)),
+            Decimal("0"),
+        )
+
+    async def test_repartido_el_flete_sale_del_resultado_pero_no_de_la_caja(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_linea_de("Vela aromatica", "100", envio="10")],
+            costos={"shared_shipping": "por_subtotal"},
+        )
+
+        # El 10 está adentro del costo del producto…
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("110")
+        # …así que el resultado no lo cuenta otra vez.
+        assert await self._gastos_del_resultado(db_session, sample_tenant) == Decimal("100")
+        # Pero la plata salió: el gasto existe y la caja lo ve. Sin esto, el
+        # arqueo no cuadraría con lo que hay en el cajón, y la reversa del
+        # archivo no tendría qué revertir.
+        assert await self._plata_que_salio(db_session, sample_tenant) == Decimal("110")
+
+    async def test_sin_repartir_el_flete_es_gasto_del_periodo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Control con el default: acá el 10 NO está en el stock, así que tiene
+        que estar en el resultado. Si el filtro lo sacara también en este caso,
+        el gasto desaparecería de los dos lados."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_linea_de("Vela aromatica", "100", envio="10")],
+        )
+
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("100")
+        assert await self._gastos_del_resultado(db_session, sample_tenant) == Decimal("110")
+
+    async def test_un_grupo_que_pidio_reparto_y_no_pudo_sigue_siendo_gasto(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """La marca es el HECHO CONSUMADO, no la intención. Sin comprobante el
+        reparto no ocurre, así que ese flete sigue siendo gasto del período —
+        marcarlo por lo que el usuario pidió lo borraría de los dos lados."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_linea_de("Vela aromatica", "100", envio="10", comprobante="")],
+            costos={"shared_shipping": "por_subtotal"},
+        )
+
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("100")
+        # El envío sin comprobante no se cobra (F-H6.b, no-invention), así que
+        # acá el resultado son sólo los 100 de mercadería.
+        assert await self._gastos_del_resultado(db_session, sample_tenant) == Decimal("100")
+
+
 class TestUnaCompraNuevaNoPisaUnCostoQueIncluiaFlete:
     """V5, end-to-end. El mismo producto entra dos veces con formatos distintos.
 
