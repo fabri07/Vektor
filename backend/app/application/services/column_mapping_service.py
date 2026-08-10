@@ -456,7 +456,13 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "total",
             "valor",
         },
-        "transaction_date": {"fecha", "date", "dia", "mes", "periodo"},
+        # `mes` NO está: un mes es un período y no dice qué día (ver el concepto
+        # `mes` en `header_semantics`). Como keyword seguía afirmando lo
+        # contrario en las dos capas de abajo — fuzzy le pondría el campo a un
+        # «Meses», y el aviso de requerido-sin-cubrir señalaría la columna «Mes»
+        # como la candidata a ser la fecha, empujando al usuario justo al mapeo
+        # que el reconocedor acaba de declarar indemostrable.
+        "transaction_date": {"fecha", "date", "dia", "periodo"},
         "quantity": {"cantidad", "qty", "unidades", "cant", "items", "unidad"},
         # Precio REALMENTE vendido en esta fila (≠ `amount`, que es el total de la
         # venta, y ≠ `Product.sale_price_ars`, que es el vigente configurado).
@@ -503,7 +509,8 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "total",
             "valor",
         },
-        "expense_date": {"fecha", "date", "dia", "mes", "periodo"},
+        # Sin `mes`, por el mismo motivo que en `sale`.
+        "expense_date": {"fecha", "date", "dia", "periodo"},
         "category": {"categoria", "tipo", "rubro", "clasificacion", "concepto"},
         "payment_method": {
             "forma_pago",
@@ -798,6 +805,28 @@ _MONTO_DEL_COMPROBANTE = (
     "Parece el total del comprobante, no el de esta línea. Importarlo como el monto "
     "de la fila repetiría el total en cada línea del remito."
 )
+#: Un mes es un período: no dice el día, y el día no se completa solo. Mapearlo
+#: al campo de fecha además le disputaba el campo a la columna de fecha real de
+#: la hoja —«Mes» y «Fecha de Pago» conviven en la misma planilla de gastos fijos
+#: y las dos son escalares, así que el confirm cortaba con un 422— y el usuario
+#: terminaba mandando `Mes` a un campo propio a mano. Se reconoce, se explica, y
+#: si de verdad trae fechas la elige la persona: es la única que puede saberlo.
+_MES_NO_DICE_EL_DIA = (
+    "Es un mes, que es un período y no una fecha: «Marzo» no dice qué día. Véktor "
+    "no completa el día que falta, así que no la toma como la fecha de la hoja. Si "
+    "la columna en realidad trae fechas, elegí el campo de fecha a mano; si no, se "
+    "guarda como campo propio."
+)
+#: `transaction_date`/`expense_date` son DATETIME (migración `20260625_0001`)
+#: justamente para soportar intradía, así que la hora TIENE dónde vivir — lo que
+#: todavía no existe es el paso que combina una columna de hora con una de fecha,
+#: y eso es del importador. Prometerlo acá sería mentir; callarlo dejaba el
+#: encabezado sin ninguna lectura (y a «Hora de venta» entrando como monto).
+_HORA_NO_SE_COMBINA_CON_LA_FECHA = (
+    "Es la hora del movimiento. Véktor guarda la fecha con hora, pero todavía no "
+    "combina una columna de hora con una de fecha: se guarda como campo propio, "
+    "aparte de la fecha."
+)
 #: El margen NO tiene campo canónico, y no es un campo que falte: es una decisión.
 #: Sale de restar el costo al precio de venta, así que importarlo además como dato
 #: deja dos números para la misma métrica y ninguna regla para saber cuál gana —
@@ -814,6 +843,8 @@ _MARGEN_ES_DERIVADO = (
 RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
     "sale": {
         "fecha": (_r(target="transaction_date"),),
+        "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
+        "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "monto": (
             _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
             _r(
@@ -848,6 +879,8 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
     },
     "expense": {
         "fecha": (_r(target="expense_date"),),
+        "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
+        "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "monto": (
             _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
             _r(target="amount"),
@@ -943,6 +976,11 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "descripcion": (_r(target="description"),),
         "vencimiento": (_r(target="expiry_date"),),
         "fecha": (_r(target="acquired_at"),),
+        # Sin la entrada explícita, el genérico dice «esta hoja no tiene un campo
+        # para eso», que acá es falso: el catálogo TIENE `acquired_at`. Lo que no
+        # se puede es derivarlo de un mes ni de una hora sueltos.
+        "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
+        "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "marca": (
             _r(
                 duda=(
