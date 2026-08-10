@@ -229,7 +229,7 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     expect(screen.queryByText(/^1% vacío/)).not.toBeInTheDocument();
   });
 
-  test("muestra el source 'llm' como IA con su confianza", async () => {
+  test("el source 'llm' se cuenta como «Sugerido por Véktor», sin porcentaje", async () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -250,10 +250,12 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
 
     renderPanel();
 
+    // F-B.1: la capa que resolvió el mapeo se cuenta en castellano y sin el
+    // porcentaje, que no medía nada.
     await waitFor(() => {
-      expect(screen.getByText(/IA/)).toBeInTheDocument();
+      expect(screen.getByText("Sugerido por Véktor")).toBeInTheDocument();
     });
-    expect(screen.getByText(/80%/)).toBeInTheDocument();
+    expect(screen.queryByText(/80\s*%/)).not.toBeInTheDocument();
   });
 
   test("confirm con 409 → toast amable (ya se está importando / ya se importó)", async () => {
@@ -562,11 +564,12 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     });
     expect(screen.getByText("obs")).toBeInTheDocument();
     expect(screen.getByText(/80% vacío/i)).toBeInTheDocument();
-    // source llm visible en al menos una sección de hoja.
+    // source llm visible en al menos una sección de hoja, contado en castellano
+    // y sin el porcentaje de confianza (F-B.1).
     await waitFor(() => {
-      expect(screen.getAllByText(/IA/).length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Sugerido por Véktor").length).toBeGreaterThan(0);
     });
-    expect(screen.getAllByText(/77%/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/77\s*%/)).not.toBeInTheDocument();
   });
 
   test("user_selected: sugerencia inicial NO cuenta como manual; cambiar el mapeo sí", async () => {
@@ -2248,5 +2251,179 @@ describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a m
     });
     expect(selectDe("Detalle").value).toBe("category");
     expect(selectDe("Monto").value).toBe("amount");
+  });
+});
+
+/**
+ * F-B.1 — la procedencia de un mapeo se cuenta en castellano, sin porcentaje.
+ *
+ * El «Heurística · 75%» de abajo de cada columna fue lo primero que el usuario
+ * reportó no entender, y con razón: el 75% está hardcodeado para TODO lo que
+ * resuelve la heurística (`column_mapping_service.py`) y el fuzzy escala su
+ * ratio a un techo de 65%, así que ningún fuzzy podía superar nunca a ningún
+ * heurístico. El número no era la probabilidad calibrada de nada.
+ */
+describe("ColumnMapperPanel — F-B.1: la procedencia se dice en castellano", () => {
+  const PREVIEW = {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: { inferred_type: "ventas", headers: ["Monto"] },
+    columns_at_risk: [],
+  };
+
+  function sugerencia(
+    source: string,
+    target_field: string | null,
+    confidence = 0.75,
+  ) {
+    return {
+      source_column: "Monto",
+      normalized_column: "monto",
+      sample_values: ["1500"],
+      target_field,
+      confidence,
+      source,
+      status: target_field ? "mapped" : "unmapped",
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetPreview.mockResolvedValue(PREVIEW);
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+  });
+
+  test("no queda NINGÚN porcentaje visible en el panel", async () => {
+    // Es el criterio de aceptación de F-B.1 y lo que evita que el número
+    // vuelva por descuido: cualquier reintroducción del `%` rompe acá.
+    mockGetPreview.mockResolvedValue({
+      ...PREVIEW,
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["Monto", "Fecha", "Detalle", "ColX"],
+      },
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      { ...sugerencia("heuristic", "amount"), source_column: "Monto" },
+      {
+        ...sugerencia("tenant_history", "transaction_date", 0.95),
+        source_column: "Fecha",
+        normalized_column: "fecha",
+      },
+      {
+        ...sugerencia("fuzzy", "notes", 0.46),
+        source_column: "Detalle",
+        normalized_column: "detalle",
+      },
+      {
+        ...sugerencia("llm", "payment_method", 0.8),
+        source_column: "ColX",
+        normalized_column: "colx",
+      },
+    ]);
+
+    const { container } = renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+    expect(container.textContent ?? "").not.toMatch(/\d+\s*%/);
+  });
+
+  test.each([
+    ["tenant_history", "Usado antes por tu negocio"],
+    ["heuristic", "Sugerido por el nombre de la columna"],
+    // «nombre parecido» y no «los valores»: `_fuzzy_match` compara el NOMBRE
+    // normalizado del encabezado contra los keywords, nunca las celdas.
+    ["fuzzy", "Sugerido por un nombre parecido"],
+    ["llm", "Sugerido por Véktor"],
+  ])("source %s → «%s»", async (source, frase) => {
+    mockGetColumnMappings.mockResolvedValue([sugerencia(source, "amount")]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(frase)).toBeInTheDocument();
+    });
+  });
+
+  test("elegir otro destino dice «Lo elegiste vos», y volver al sugerido NO", async () => {
+    // El caso que obliga a comparar valores en vez de llevar un flag `touched`:
+    // si alguien prueba otro campo y termina dejando el que propuso Véktor, ese
+    // dato no salió de esa persona y la pantalla no puede decir que sí.
+    mockGetColumnMappings.mockResolvedValue([sugerencia("heuristic", "amount")]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole("combobox")[0]!;
+    fireEvent.change(select, { target: { value: "quantity" } });
+    await waitFor(() => {
+      expect(screen.getByText("Lo elegiste vos")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Sugerido por el nombre de la columna"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "amount" } });
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Lo elegiste vos")).not.toBeInTheDocument();
+  });
+
+  test("mandar la columna a «Ignorar» no cuenta ninguna procedencia", async () => {
+    mockGetColumnMappings.mockResolvedValue([sugerencia("heuristic", "amount")]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getAllByRole("combobox")[0]!, {
+      target: { value: "ignore" },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("Sugerido por el nombre de la columna"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("Lo elegiste vos")).not.toBeInTheDocument();
+  });
+
+  test("una columna sin mapear y sin procedencia no renderiza nada", async () => {
+    mockGetColumnMappings.mockResolvedValue([sugerencia("none", null, 0)]);
+
+    renderPanel();
+
+    // La columna se dibuja; lo que no aparece es la línea de procedencia.
+    await waitFor(() =>
+      expect(screen.getAllByText("Monto").length).toBeGreaterThan(0),
+    );
+    for (const frase of [
+      "Lo elegiste vos",
+      "Usado antes por tu negocio",
+      "Sugerido por el nombre de la columna",
+      "Sugerido por un nombre parecido",
+      "Sugerido por Véktor",
+    ]) {
+      expect(screen.queryByText(frase)).not.toBeInTheDocument();
+    }
   });
 });

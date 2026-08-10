@@ -8,6 +8,7 @@
  */
 
 import type {
+  ColumnMappingSuggestion,
   EntityFieldCatalog,
   FieldCatalogEntry,
 } from "@/services/ingestion.service";
@@ -133,6 +134,45 @@ export function scalarCollisions(
       label: escalares.get(target) ?? target,
       columns,
     }));
+}
+
+/**
+ * De dónde salió el destino que hoy tiene una columna.
+ *
+ * `null` = no hay nada que contar (la columna no quedó mapeada, o el backend no
+ * reconoció nada y el usuario tampoco eligió).
+ */
+export type MappingOrigin =
+  | "user"
+  | "tenant_history"
+  | "heuristic"
+  | "fuzzy"
+  | "llm"
+  | null;
+
+/**
+ * F-B.1 — quién decidió el destino de esta columna.
+ *
+ * Se resuelve COMPARANDO el destino actual contra el que sugirió el backend, no
+ * con un flag de "el usuario tocó esto". La diferencia importa: si alguien abre
+ * el select, prueba otro campo y termina dejando el mismo que había sugerido
+ * Véktor, un flag `touched` diría «Lo elegiste vos» sobre un dato que no salió
+ * de esa persona. Comparar el valor no puede mentir — o coincide con la
+ * sugerencia o no.
+ *
+ * Una columna sin destino, o mandada a «Ignorar», no tiene procedencia que
+ * contar: el importador no va a guardar nada desde ahí.
+ */
+export function mappingOrigin(
+  suggestion: Pick<ColumnMappingSuggestion, "source" | "target_field">,
+  currentTarget: string,
+): MappingOrigin {
+  const actual = currentTarget?.trim() ?? "";
+  if (!actual || actual === "ignore") return null;
+  // `target_field` viaja como `null` cuando el backend no propuso nada; ahí
+  // cualquier destino actual es del usuario.
+  if (actual !== (suggestion.target_field ?? "")) return "user";
+  return suggestion.source === "none" ? null : suggestion.source;
 }
 
 const CUSTOM_FIELD_PREFIX = "custom_field:";
