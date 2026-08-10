@@ -108,6 +108,14 @@ CONCEPTOS: dict[str, str] = {
     "recurring": "recurrencia",
     "frecuencia": "recurrencia",
     "marca": "marca",
+    # El margen es un concepto propio y NO una magnitud de dinero (ver MAGNITUDES):
+    # es lo que queda ENTRE el costo y el precio. Por eso «Margen sobre costo» es
+    # un margen —y no el costo, que es lo que resolvía antes de reconocerlo—.
+    # Adónde va lo decide la tabla de resolución: a ningún campo, porque Véktor lo
+    # calcula (invariante 2c, una sola fuente por métrica).
+    "margen": "margen",
+    "rentabilidad": "margen",
+    "markup": "margen",
 }
 
 #: Bigramas que son UN concepto y no la suma de sus partes. Se buscan antes que
@@ -161,6 +169,17 @@ DEBILES: dict[str, tuple[str, str]] = {
     "compra": ("monto", "de_compra"),
     "venta": ("monto", "de_venta"),
     "pago": ("monto", "de_pago"),
+    # `ganancia` es débil y no un concepto fuerte por «Impuesto a las ganancias»:
+    # ahí la palabra sólo dice de qué es el impuesto. Como núcleo fuerte quedaba de
+    # rival de `impuesto`, el encabezado se volvía ambiguo y una columna que hoy
+    # llega a `taxes` dejaba de mapear. Sola sí es el margen.
+    #
+    # SÓLO el singular, a propósito: en castellano rioplatense el plural es del
+    # léxico fiscal («Retención Ganancias», «Percepción Ganancias»), donde ni
+    # `retención` ni `percepción` alcanzan para que gane `impuesto`. Reconocerlo
+    # como margen sería explicarle mal al usuario una columna de impuestos; una
+    # columna de margen por fila se llama en singular.
+    "ganancia": ("margen", "de_margen"),
     # Entidades: nunca identifican el concepto de la columna, sólo lo ubican.
     "producto": ("producto", "de_producto"),
     "articulo": ("producto", "de_producto"),

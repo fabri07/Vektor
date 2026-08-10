@@ -344,3 +344,84 @@ class TestLosTresCostosDeUnaCompra:
         assert r.outcome == "sin_evidencia"
         assert r.concept == "envio"
         assert r.duda
+
+
+class TestElMargenSeReconoceYSeExplica:
+    """F-B — el margen no tiene campo, y eso es una decisión, no un campo que falte.
+
+    Sale de restar el costo al precio de venta. Importarlo ADEMÁS como dato deja
+    dos números para la misma métrica sin ninguna regla para saber cuál gana —lo
+    que el invariante de una sola fuente por métrica viene a evitar—, así que la
+    columna se reconoce, se explica y se guarda como campo propio. Callarse era lo
+    único inaceptable: el usuario veía la columna caer a campo propio sin motivo.
+    """
+
+    @pytest.mark.parametrize(
+        "header",
+        ["Margen %", "% Margen", "Margen", "Margen bruto", "Margen de ganancia",
+         "Rentabilidad", "Ganancia", "Markup"],
+    )
+    def test_el_margen_de_un_catalogo_se_reconoce_sin_darle_campo(self, header: str) -> None:
+        r = _leer(header, "product")
+        assert r.outcome == "sin_evidencia"
+        assert r.target is None
+        assert r.concept == "margen"
+        # Y la explicación es la del margen, no el genérico "esta hoja no tiene un
+        # campo para eso": lo que hay que decir es POR QUÉ no lo va a tener.
+        assert r.duda
+        assert "lo calcula" in r.duda
+
+    @pytest.mark.parametrize("entidad", ["sale", "expense"])
+    def test_tambien_en_ventas_y_gastos_por_el_mismo_motivo(self, entidad: str) -> None:
+        """Una hoja de ventas con «Margen» plantea el mismo problema que un
+        catálogo: el número ya sale de los datos de la fila. Sin la entrada, la
+        pantalla decía «esta hoja no tiene un campo para eso», que insinúa que
+        alguna otra hoja sí — y ninguna lo tiene."""
+        r = _leer("Margen", entidad)
+        assert r.concept == "margen"
+        assert r.duda
+        assert "lo calcula" in r.duda
+
+    def test_margen_sobre_costo_es_un_margen_y_no_el_costo(self) -> None:
+        """El calificador no se lleva el campo. Antes de reconocer el concepto,
+        `costo` quedaba de núcleo y la columna entraba a `unit_cost_ars`: un
+        porcentaje pisando el costo unitario del producto."""
+        r = _leer("Margen sobre costo", "product")
+        assert r.concept == "margen"
+        assert r.target is None
+        assert "de_costo" in r.qualifiers
+
+
+class TestElMargenNoLeRobaEncabezadosAlDinero:
+    """No-regresión de colisiones: el concepto nuevo comparte familia semántica con
+    precio, costo y monto, que son los encabezados más comunes que existen."""
+
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            ("precio_de_venta", "product", "sale_price_ars"),
+            ("precio_de_compra", "product", "unit_cost_ars"),
+            ("precio_de_compra", "expense", "unit_price"),
+            ("costo_unitario", "product", "unit_cost_ars"),
+            ("costo_unitario", "expense", "unit_price"),
+            ("total", "sale", "amount"),
+            ("total", "expense", "amount"),
+            ("importe", "sale", "amount"),
+            ("importe", "expense", "amount"),
+        ],
+    )
+    def test_los_encabezados_de_dinero_siguen_en_su_campo(
+        self, header: str, entidad: str, target: str
+    ) -> None:
+        assert _leer(header, entidad).target == target
+
+    @pytest.mark.parametrize("header", ["Impuesto a las ganancias", "IVA", "Percepciones"])
+    def test_un_impuesto_que_nombra_la_ganancia_sigue_siendo_un_impuesto(
+        self, header: str
+    ) -> None:
+        """Por esto `ganancia` es un débil y no un núcleo fuerte: como fuerte era
+        rival de `impuesto`, el encabezado quedaba ambiguo y la columna dejaba de
+        llegar a `taxes`."""
+        r = _leer(header, "expense")
+        assert r.concept == "impuesto"
+        assert r.target == "taxes"

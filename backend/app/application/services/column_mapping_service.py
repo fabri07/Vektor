@@ -798,6 +798,18 @@ _MONTO_DEL_COMPROBANTE = (
     "Parece el total del comprobante, no el de esta línea. Importarlo como el monto "
     "de la fila repetiría el total en cada línea del remito."
 )
+#: El margen NO tiene campo canónico, y no es un campo que falte: es una decisión.
+#: Sale de restar el costo al precio de venta, así que importarlo además como dato
+#: deja dos números para la misma métrica y ninguna regla para saber cuál gana —
+#: exactamente lo que el invariante de una sola fuente por métrica viene a evitar
+#: (``FactsService``). Se reconoce y se explica; el valor se conserva como campo
+#: propio, que es lo mismo que se hace con la marca.
+_MARGEN_ES_DERIVADO = (
+    "Es el margen de ganancia. Véktor lo calcula desde el costo y el precio de "
+    "venta: si además se importa como dato, quedan dos números para lo mismo que "
+    "pueden no coincidir (redondeo, un valor viejo, o un porcentaje calculado "
+    "sobre el costo y no sobre el precio). Se guarda como campo propio."
+)
 
 RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
     "sale": {
@@ -832,6 +844,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "metodo_pago": (_r(target="payment_method"),),
         "nota": (_r(target="notes"),),
         "descripcion": (_r(target="product_name"),),
+        "margen": (_r(duda=_MARGEN_ES_DERIVADO),),
     },
     "expense": {
         "fecha": (_r(target="expense_date"),),
@@ -892,6 +905,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "telefono": (_r(target="supplier_phone"),),
         "nota": (_r(target="notes"),),
         "descripcion": (_r(target="notes"),),
+        "margen": (_r(duda=_MARGEN_ES_DERIVADO),),
     },
     "product": {
         "precio": (
@@ -938,6 +952,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
                 )
             ),
         ),
+        "margen": (_r(duda=_MARGEN_ES_DERIVADO),),
     },
     "customer": {
         # Una columna «Cliente» en un padrón de clientes ES el nombre; «Tipo
