@@ -16,11 +16,14 @@ from app.domain.purchase_cost import (
     BASE_INCLUYE,
     COMPARTIDO_NO,
     COMPARTIDO_SUBTOTAL,
+    CON_FLETE,
     LINEA_AL_COSTO,
     LINEA_GASTO,
     MOTIVO_SIN_BASE,
+    SIN_FLETE,
     CostLine,
     build_line_costs,
+    debe_pisar_costo_de_referencia,
 )
 
 
@@ -304,3 +307,49 @@ class TestElIndicePorFila:
         indice = plan.by_row()
         assert set(indice) == {7, 3}
         assert indice[7].base == Decimal("100")
+
+
+class TestUnaCompraNuevaNoPisaCualquierCosto:
+    """V5 — el caso peor: 110 con flete implícito pisado por 100 facturado.
+
+    El mismo producto entra una vez sin desglose (el proveedor cargó el flete en
+    el precio) y después desglosado. El costo "baja" y nada se abarató: cambió el
+    formato de la planilla. El margen que se calcula contra ese costo pasa a
+    mentir, y no hay ninguna señal de que algo se rompió.
+    """
+
+    @pytest.mark.parametrize(
+        ("entrante", "guardado", "costo_guardado", "pisa"),
+        [
+            # El costo final CON flete es lo que el negocio pagó: manda siempre.
+            pytest.param(True, CON_FLETE, "110", True, id="con_flete_sobre_con_flete"),
+            pytest.param(True, SIN_FLETE, "100", True, id="con_flete_sobre_sin_flete"),
+            # El caso de V5: bajaría de 110 a 100 sin que nada se abarate.
+            pytest.param(False, CON_FLETE, "110", False, id="facturado_no_pisa_con_flete"),
+            pytest.param(None, CON_FLETE, "110", False, id="desconocido_tampoco_pisa"),
+            # Sin nada que preservar, entra.
+            pytest.param(False, SIN_FLETE, "100", True, id="facturado_sobre_sin_flete"),
+            pytest.param(False, None, "100", True, id="facturado_sobre_desconocido"),
+            # Control obligatorio: sin estas dos filas el guard apagaría la carga
+            # inicial de costos y el stock quedaría valuado en cero.
+            pytest.param(False, CON_FLETE, None, True, id="producto_sin_costo"),
+            pytest.param(False, CON_FLETE, "0", True, id="costo_cero_es_sin_costo"),
+        ],
+    )
+    def test_tabla(
+        self,
+        entrante: bool | None,
+        guardado: str | None,
+        costo_guardado: str | None,
+        pisa: bool,
+    ) -> None:
+        assert (
+            debe_pisar_costo_de_referencia(
+                entrante_incluye_flete=entrante,
+                guardado_incluye_flete=guardado,
+                costo_guardado=(
+                    Decimal(costo_guardado) if costo_guardado is not None else None
+                ),
+            )
+            is pisa
+        )

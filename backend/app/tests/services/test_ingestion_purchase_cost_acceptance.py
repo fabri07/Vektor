@@ -546,6 +546,69 @@ class TestElProductoDeclaraSiSuCostoIncluyeFlete:
         assert await _procedencia_del_costo(db_session, sample_tenant) is None
 
 
+class TestUnaCompraNuevaNoPisaUnCostoQueIncluiaFlete:
+    """V5, end-to-end. El mismo producto entra dos veces con formatos distintos.
+
+    Primero con el flete capitalizado (1230) y después con una factura que sólo
+    declara el renglón (1100). Antes la segunda pisaba a la primera y el costo
+    "bajaba" sin que nada se abaratara: cambió el formato de la planilla.
+    """
+
+    async def test_el_costo_con_flete_sobrevive_a_una_factura_sin_flete(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_fila(flete_linea="300")],
+            costos={"line_shipping": "al_costo"},
+        )
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1230.00")
+
+        await _importar(
+            db_session,
+            sample_tenant,
+            [
+                _fila(
+                    fecha="2024-04-05",
+                    comprobante="A-0002",
+                    precio_unitario="1100",
+                    total="11000",
+                )
+            ],
+        )
+
+        # No se pisó: 1100 facturado no es más barato que 1230 con flete adentro.
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1230.00")
+        # …y la procedencia tampoco, que si no describirían cosas distintas.
+        assert await _procedencia_del_costo(db_session, sample_tenant) == "con_flete"
+        # El precio de ESTA compra no se perdió: vive en su movimiento.
+        movs = (
+            (
+                await db_session.execute(
+                    select(InventoryMovement).where(
+                        InventoryMovement.tenant_id == sample_tenant.tenant_id,
+                        InventoryMovement.movement_type == "purchase",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert sorted(Decimal(str(m.unit_cost)) for m in movs) == [
+            Decimal("1100.00"),
+            Decimal("1200.00"),
+        ]
+
+    async def test_un_producto_sin_costo_si_recibe_el_de_la_compra(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Control obligatorio: sin esto el guard apagaría la carga inicial de
+        costos y el stock quedaría valuado en cero."""
+        await _importar(db_session, sample_tenant, [_fila()])
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1200.00")
+
+
 class TestElFleteDeLineaSaleDeLaCaja:
     """F-H6.e — el flete asignado a la línea nunca generaba un gasto.
 

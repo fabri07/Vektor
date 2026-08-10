@@ -81,6 +81,7 @@ from app.domain.purchase_cost import (
     CostLine,
     LineCost,
     build_line_costs,
+    debe_pisar_costo_de_referencia,
 )
 from app.domain.purchase_cost_decision import (
     AJUSTE_ILEGIBLE,
@@ -2097,7 +2098,18 @@ async def _apply_purchase_to_stock(
     # que hay sobre esa compra.
     _costo_de_referencia = costo_final if costo_final is not None else unit_cost
     _costo_facturado = unit_cost if unit_cost is not None else costo_final
-    if _costo_de_referencia is not None:
+    # V5: una compra nueva no pisa un costo que incluía flete con uno que no lo
+    # incluye. Si no se pisa el costo, TAMPOCO se pisa la procedencia: quedarían
+    # describiendo cosas distintas.
+    if _costo_de_referencia is not None and debe_pisar_costo_de_referencia(
+        entrante_incluye_flete=costo_incluye_flete,
+        guardado_incluye_flete=(product.custom_fields or {}).get(COSTO_BASE_FIELD),
+        costo_guardado=(
+            Decimal(str(product.unit_cost_ars))
+            if product.unit_cost_ars is not None
+            else None
+        ),
+    ):
         product.unit_cost_ars = _costo_de_referencia
         # F-H6.d: la procedencia se escribe en la MISMA operación que el costo.
         # Separarlas deja que un costo y su procedencia se desincronicen, y una

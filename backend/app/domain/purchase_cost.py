@@ -92,6 +92,49 @@ ATRIBUIDO_A_INVENTARIO_FIELD = "attributed_to_inventory"
 MOTIVO_SIN_BASE = "sin_base_para_repartir"
 
 
+def debe_pisar_costo_de_referencia(
+    *,
+    entrante_incluye_flete: bool | None,
+    guardado_incluye_flete: str | None,
+    costo_guardado: Decimal | None,
+) -> bool:
+    """¿Esta compra puede reemplazar el costo de referencia que ya tenía el producto?
+
+    **V5.** Hasta acá la respuesta era «siempre», y eso rompe el caso más común de
+    todos: el mismo producto entra una vez con el flete implícito en el precio
+    (110, porque el proveedor no lo desglosa) y después con el flete desglosado
+    (100 facturado + envío aparte). El costo "baja" de 110 a 100 sin que nada se
+    haya abaratado — cambió el formato de la planilla, nada más. Y el margen que
+    se calcula contra ese costo pasa a mentir.
+
+    La decisión NO se puede tomar mirando sólo la columna entrante: hay que saber
+    qué contiene el costo que ya está guardado. De ahí que la procedencia se
+    escriba junto con el costo (ver ``COSTO_BASE_FIELD``).
+
+    ===========================  ======================  ======
+    costo entrante               costo guardado          ¿pisa?
+    ===========================  ======================  ======
+    incluye flete                cualquiera              sí
+    sin flete / desconocido      ``con_flete``           no
+    sin flete / desconocido      ``sin_flete`` / no sé   sí
+    cualquiera                   sin costo               sí
+    ===========================  ======================  ======
+
+    La última fila es un control obligatorio, no una cortesía: sin ella el guard
+    apagaría la carga inicial de costos y el stock quedaría valuado en cero. Un
+    costo guardado de ``0`` cuenta como «sin costo» — no es un precio de compra
+    válido, es el placeholder de un producto incompleto.
+    """
+    if costo_guardado is None or costo_guardado <= 0:
+        return True
+    if entrante_incluye_flete:
+        return True
+    # El entrante no incluye flete (o no se sabe) y el guardado sí: pisarlo
+    # cambiaría el costo por uno que describe menos cosas. Ante la duda, se
+    # conserva — el precio facturado de esta compra igual queda en su movimiento.
+    return guardado_incluye_flete != CON_FLETE
+
+
 @dataclass(frozen=True)
 class CostLine:
     """Lo que una fila de compra declara sobre su propio costo.
