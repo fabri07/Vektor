@@ -1412,23 +1412,48 @@ async def get_field_catalog(
 )
 async def get_column_mappings(
     file_id: uuid.UUID,
-    entity_type: str = Query(
-        default="sale",
-        description="Tipo de entidad: sale | expense | product | customer | supplier",
+    entity_type: str | None = Query(
+        default=None,
+        description="Override explícito de la entidad: sale | expense | product | "
+        "customer | supplier. Si se manda, GANA sobre la entidad del contexto — es "
+        "la entidad que el usuario eligió en el selector de sección. Si se omite, "
+        "se usa la del contexto (o 'sale' en archivos planos).",
     ),
     context_id: str | None = Query(
         default=None,
         description="Contexto (hoja/tabla) en archivos multi-contexto. Si se da, "
-        "se usan sus headers/preview y su entity_type (se ignora el param entity_type).",
+        "se usan sus headers/preview y, salvo override, su entity_type.",
     ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ColumnMappingSuggestion]:
+    """Sugerencias de mapeo para las columnas de un archivo (o de una de sus hojas).
+
+    La entidad efectiva se resuelve con la MISMA prioridad que la inserción real
+    (ver ``derive_context_mapping_entries`` y el confirm): **override del usuario →
+    entidad original del ``mapping_contexts`` → default ``"sale"``**.
+
+    El override es obligatorio acá porque el frontend renderiza los targets contra
+    el catálogo de la entidad que el usuario eligió en el selector de sección.
+    Mientras este endpoint invertía la prioridad (la entidad del summary le ganaba
+    al param), devolvía sugerencias de la entidad ORIGINAL: el ``<select>`` no tenía
+    esas opciones, la pantalla mostraba "(campo desconocido)" y los requeridos de la
+    entidad elegida quedaban sin cubrir → 422 al confirmar.
+    """
     # F7d: "customer"/"supplier" sumados — sin esto, un archivo flat (legacy, sin
     # mapping_contexts) de clientes/proveedores no podía pedir sugerencias de
     # mapeo (context_id resuelve el entity_type real igual, pero el query param
     # por default "sale" ya rebotaba acá antes de llegar a esa resolución).
-    if entity_type not in ("sale", "expense", "product", "inventory", "customer", "supplier"):
+    # `None` = "no lo mandó" (se cae a la entidad del contexto), distinto de
+    # mandar "sale" explícitamente, que sí es un override.
+    if entity_type is not None and entity_type not in (
+        "sale",
+        "expense",
+        "product",
+        "inventory",
+        "customer",
+        "supplier",
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
@@ -1445,7 +1470,7 @@ async def get_column_mappings(
     summary = record.parsed_summary_json or {}
 
     # Resolver headers/sample_rows/entity_type por contexto si se pidió uno.
-    resolved_entity = entity_type
+    resolved_entity = entity_type or "sale"
     if context_id:
         ctx = next(
             (
@@ -1465,7 +1490,10 @@ async def get_column_mappings(
             return []
         headers = ctx["headers"]
         sample_rows = ctx.get("preview_rows") or []
-        resolved_entity = ctx.get("entity_type") or entity_type
+        # Override del usuario primero: es la entidad EFECTIVA de la sección, la
+        # misma que el frontend usa para renderizar los targets y la misma que el
+        # confirm usa para insertar.
+        resolved_entity = entity_type or ctx.get("entity_type") or "sale"
     else:
         headers = summary.get("headers", [])
         sample_rows = (

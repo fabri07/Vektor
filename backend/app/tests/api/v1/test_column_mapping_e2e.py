@@ -588,10 +588,16 @@ class TestConfirmWithContextMappings:
         auth_headers: dict[str, Any],
         multisheet_file: UploadedFile,
     ) -> None:
-        """GET con context_id usa los headers/entity_type de esa hoja."""
+        """GET con context_id usa los headers/entity_type de esa hoja.
+
+        Sin ``entity_type`` a propósito: con el override explícito el param le gana
+        a la entidad del contexto, así que mandarlo acá probaría lo contrario de lo
+        que dice el nombre del test. La prioridad completa se cubre en
+        ``TestColumnMappingsEntityOverride``.
+        """
         resp = await client.get(
             f"/api/v1/ingestion/files/{multisheet_file.id}/column-mappings"
-            "?entity_type=sale&context_id=sheet:Gastos",
+            "?context_id=sheet:Gastos",
             headers=auth_headers,
         )
         assert resp.status_code == 200
@@ -896,3 +902,160 @@ class TestUnaColumnaIndecidibleNoLlegaMapeada:
         for s in (await self._pedir(client, auth_headers, ambiguous_file)).values():
             if s["status"] == "mapped":
                 assert s["duda"] is None and s["options"] == [], s["source_column"]
+
+
+# ── La entidad que eligió el usuario le gana a la que trae el archivo ─────────
+
+
+def _make_reclassified_file(tenant_id: uuid.UUID) -> UploadedFile:
+    """Una hoja que el parser leyó como GASTOS y el usuario reasigna a PRODUCTOS.
+
+    Los encabezados sirven a las dos lecturas a propósito: `Importe`/`Proveedor`
+    solo tienen destino en gastos y `Precio Venta`/`Stock` solo en productos, así
+    que la entidad con la que se pidan las sugerencias se ve en el resultado.
+    """
+    headers = ["Fecha", "Producto", "Importe", "Proveedor", "Precio Venta", "Stock"]
+    filas = [
+        {
+            "Fecha": "2024-03-01", "Producto": "Coca Cola 500ml", "Importe": "8000",
+            "Proveedor": "Distribuidora Sur", "Precio Venta": "1200", "Stock": "50",
+        },
+    ]
+    return UploadedFile(
+        tenant_id=tenant_id,
+        uploaded_by=None,
+        original_filename="compras.xlsx",
+        s3_key=f"uploads/{tenant_id}/uuid/compras.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=1024,
+        purpose="gastos",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json={
+            "file_type": "spreadsheet",
+            "inferred_type": "gastos",
+            "confidence": "HIGH",
+            "headers": headers,
+            "mapping_contexts": [
+                {
+                    "context_id": "sheet:Compras",
+                    "label": "Compras",
+                    "source_kind": "sheet",
+                    "entity_type": "expense",
+                    "headers": headers,
+                    "fields": None,
+                    "preview_rows": filas,
+                    "row_count": len(filas),
+                },
+            ],
+            "preview_rows": filas,
+            "ventas_detectadas": [],
+            "gastos_detectados": filas,
+            "stock_detectado": [],
+            "row_count": len(filas),
+        },
+    )
+
+
+@pytest_asyncio.fixture
+async def reclassified_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    record = _make_reclassified_file(sample_tenant.tenant_id)
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+class TestColumnMappingsEntityOverride:
+    """La prioridad de la entidad efectiva: override → contexto → 'sale'.
+
+    Es la misma que aplican `derive_context_mapping_entries` y el confirm. Cuando
+    este endpoint la invertía, el usuario que reasignaba una hoja veía todos los
+    targets como "(campo desconocido)" — el `<select>` se renderiza contra el
+    catálogo de la entidad elegida y las sugerencias venían de la otra.
+    """
+
+    #: Campos que solo existen en `expense`: si alguno aparece pidiendo `product`,
+    #: el override se perdió.
+    SOLO_DE_EXPENSE = {"expense_date", "invoice_number", "amount", "supplier_name"}
+
+    async def _targets(
+        self, client: AsyncClient, auth_headers: dict[str, Any], url: str
+    ) -> set[str]:
+        """Los `target_field` canónicos devueltos (sin custom_fields ni sin mapear)."""
+        response = await client.get(url, headers=auth_headers)
+        assert response.status_code == 200, response.text
+        return {
+            s["target_field"]
+            for s in response.json()
+            if s["target_field"] and not s["target_field"].startswith("custom_field:")
+        }
+
+    async def test_el_override_del_usuario_le_gana_a_la_entidad_del_archivo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        reclassified_file: UploadedFile,
+    ) -> None:
+        from app.application.services.column_mapping_service import (  # noqa: PLC0415
+            CANONICAL_FIELDS,
+        )
+
+        targets = await self._targets(
+            client,
+            auth_headers,
+            f"/api/v1/ingestion/files/{reclassified_file.id}/column-mappings"
+            "?context_id=sheet:Compras&entity_type=product",
+        )
+        assert targets, "sin ninguna columna mapeada el test no probaría nada"
+        assert targets <= set(CANONICAL_FIELDS["product"]), (
+            f"targets ajenos al catálogo de producto: {targets - set(CANONICAL_FIELDS['product'])}"
+        )
+        assert not (targets & self.SOLO_DE_EXPENSE), (
+            f"llegaron campos de la entidad original: {targets & self.SOLO_DE_EXPENSE}"
+        )
+
+    async def test_sin_override_manda_la_entidad_del_contexto(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        reclassified_file: UploadedFile,
+    ) -> None:
+        from app.application.services.column_mapping_service import (  # noqa: PLC0415
+            CANONICAL_FIELDS,
+        )
+
+        targets = await self._targets(
+            client,
+            auth_headers,
+            f"/api/v1/ingestion/files/{reclassified_file.id}/column-mappings"
+            "?context_id=sheet:Compras",
+        )
+        assert targets <= set(CANONICAL_FIELDS["expense"])
+        # La hoja es de gastos: al menos un campo que SOLO existe ahí.
+        assert targets & self.SOLO_DE_EXPENSE
+
+    async def test_archivo_plano_sin_params_sigue_cayendo_a_sale(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        sale_file: UploadedFile,
+    ) -> None:
+        """Retrocompat: sin `context_id` ni `entity_type`, el default sigue siendo 'sale'."""
+        targets = await self._targets(
+            client,
+            auth_headers,
+            f"/api/v1/ingestion/files/{sale_file.id}/column-mappings",
+        )
+        assert "transaction_date" in targets, "el default 'sale' dejó de aplicarse"
+
+    async def test_entity_type_invalido_sigue_rebotando_con_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        sale_file: UploadedFile,
+    ) -> None:
+        response = await client.get(
+            f"/api/v1/ingestion/files/{sale_file.id}/column-mappings?entity_type=basura",
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
