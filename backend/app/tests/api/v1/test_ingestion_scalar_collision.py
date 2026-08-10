@@ -15,11 +15,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.settings import get_settings
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -346,7 +348,21 @@ class TestUnaDecisionDeCostoQueNoSePuedeHonrar:
     Mismo criterio que la decisión de envíos: declarar un efecto sobre el costo
     que no va a ocurrir no se ignora en silencio, porque el usuario cree haber
     resuelto algo. Y un archivo que va a rebotar no debería tomar el lease.
+
+    El tenant se habilita a mano en la compuerta de rollout (F-H6.d): sin eso el
+    confirm rebota antes con «el motor de costos no está habilitado» y este test
+    mediría el gate en vez de la validación que le importa.
     """
+
+    @pytest.fixture(autouse=True)
+    def _con_motor_de_costos(
+        self, monkeypatch: pytest.MonkeyPatch, sample_tenant: Tenant
+    ) -> None:
+        monkeypatch.setattr(
+            get_settings(),
+            "PURCHASE_COST_ROLLOUT_TENANT_IDS",
+            [str(sample_tenant.tenant_id)],
+        )
 
     async def test_aplicar_ajustes_sin_columna_de_descuento_rechaza(
         self,
