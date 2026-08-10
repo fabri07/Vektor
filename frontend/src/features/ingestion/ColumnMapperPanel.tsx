@@ -920,8 +920,12 @@ function SheetMapperSection({
                       fields={fields}
                       onPick={(t) => selectTarget(s.source_column, t)}
                     />
-                    {/* A3: source + confidence (mismo criterio que el flujo single). */}
-                    <MappingOriginHint suggestion={s} mapped={eff === "mapped"} />
+                    {/* Procedencia del destino (mismo criterio que el flujo single). */}
+                    <MappingOriginHint
+                      suggestion={s}
+                      mapped={eff === "mapped"}
+                      currentTarget={target}
+                    />
                   </div>
                 </div>
               );
@@ -2354,6 +2358,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                     <MappingOriginHint
                       suggestion={s}
                       mapped={isMapped}
+                      currentTarget={currentTarget}
                       className="mt-0.5 pl-5"
                     />
                   </div>

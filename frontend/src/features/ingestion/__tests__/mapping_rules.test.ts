@@ -9,6 +9,7 @@ import {
   coversRequired,
   customFieldCollisions,
   explainMissing,
+  mappingOrigin,
   missingRequiredFields,
   scalarCollisions,
 } from "../mappingRules";
@@ -346,5 +347,57 @@ describe("explainMissing", () => {
 
   it("sin faltantes no devuelve nada", () => {
     expect(explainMissing([], CATALOGO_VENTA)).toEqual([]);
+  });
+});
+
+describe("mappingOrigin", () => {
+  // Lo que sugirió el backend para la columna «Monto».
+  const SUGERIDO = { source: "heuristic" as const, target_field: "amount" };
+
+  it("el destino que coincide con la sugerencia conserva la procedencia", () => {
+    expect(mappingOrigin(SUGERIDO, "amount")).toBe("heuristic");
+  });
+
+  it.each([
+    ["tenant_history" as const],
+    ["heuristic" as const],
+    ["fuzzy" as const],
+    ["llm" as const],
+  ])("devuelve la capa que resolvió el mapeo: %s", (source) => {
+    expect(mappingOrigin({ source, target_field: "amount" }, "amount")).toBe(source);
+  });
+
+  it("cambiar el destino a otro campo pasa a ser decisión del usuario", () => {
+    expect(mappingOrigin(SUGERIDO, "unit_price")).toBe("user");
+  });
+
+  it("volver al valor sugerido devuelve la procedencia original, no «lo elegiste vos»", () => {
+    // El caso que hace que comparar valores no sea lo mismo que un flag
+    // `touched`: alguien probó otro campo y terminó dejando el que Véktor
+    // propuso. Ese dato NO salió de esa persona.
+    expect(mappingOrigin(SUGERIDO, "unit_price")).toBe("user");
+    expect(mappingOrigin(SUGERIDO, "amount")).toBe("heuristic");
+  });
+
+  it("un campo personalizado elegido a mano es del usuario", () => {
+    expect(mappingOrigin(SUGERIDO, "custom_field:obs")).toBe("user");
+  });
+
+  it("sin sugerencia del backend, cualquier destino es del usuario", () => {
+    expect(mappingOrigin({ source: "none", target_field: null }, "amount")).toBe("user");
+  });
+
+  it("sin destino no hay procedencia que contar", () => {
+    expect(mappingOrigin(SUGERIDO, "")).toBeNull();
+    expect(mappingOrigin({ source: "none", target_field: null }, "")).toBeNull();
+  });
+
+  it("«ignorar» tampoco tiene procedencia: no se guarda nada desde ahí", () => {
+    expect(mappingOrigin(SUGERIDO, "ignore")).toBeNull();
+  });
+
+  it("`source: none` con destino igual al sugerido no cuenta procedencia", () => {
+    // El backend no reconoció nada; decir «sugerido por X» sería inventar un X.
+    expect(mappingOrigin({ source: "none", target_field: "amount" }, "amount")).toBeNull();
   });
 });
