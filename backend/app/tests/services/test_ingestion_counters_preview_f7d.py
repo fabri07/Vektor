@@ -40,6 +40,13 @@ _VALID_DNI = "30111222"
 _OTHER_DNI = "40987654"
 
 
+@pytest.fixture(autouse=True)
+def _sin_broker(mock_score_trigger: Any) -> None:
+    """Sin broker en tests, el trigger de score post-import/reread paga ~5s de
+    reintentos de kombu por llamada (fail-safe: el error se traga igual).
+    Mismo patrón que `test_reread_file.py`."""
+
+
 # ── 1. Desglose de maestro (creados/actualizados/needs_review/invalidos) ───────
 
 
