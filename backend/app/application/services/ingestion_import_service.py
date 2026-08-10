@@ -700,7 +700,7 @@ async def _import_master_entities(
         mapping = (context_mappings or {}).get(ctx_id) or (
             column_mappings if ctx_id == "table" else None
         ) or {}
-        target_to_col, _ = _resolve_target_cols(mapping)
+        target_to_col, _, _ = _resolve_target_cols(mapping)
         if not target_to_col:
             continue  # sin mapeo explícito: no se adivina el shape de la fila
 
@@ -2740,12 +2740,26 @@ def _row_val(
     return None
 
 
-def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+def _resolve_target_cols(
+    mapping: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """Desde un mapeo explícito source_col→target, resuelve columnas por target canónico.
 
-    Devuelve (target_to_col, custom_field_cols): el primero mapea campo canónico
-    (amount, transaction_date, name, sale_price_ars, ...) → source_col; el segundo
-    mapea cf_key → source_col para los targets `custom_field:{key}`. Ignora "ignore".
+    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados)``: el
+    primero mapea campo canónico (amount, transaction_date, name, ...) →
+    source_col; el segundo mapea cf_key → source_col para los targets
+    `custom_field:{key}`; el tercero, source_col → target, son los targets
+    CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe escribir.
+    Ignora "ignore".
+
+    Los cruzados se descartan porque F-D no está entregada, pero hasta acá se
+    evaporaban: `parse_target` puede devolver ``kind="cross"`` y no había rama
+    para ese caso, así que la columna que el usuario mapeó a mano simplemente no
+    se importaba y nadie se enteraba — ni él ni el operador. Es la clase exacta
+    del incidente ASTERIA: un valor que desaparece y una heurística que lo
+    reemplaza con otra cosa (ver el fallback de `unit_cost_ars` en el camino
+    plano). No se rechaza —hay imports vivos que dependen de ese fallback— pero
+    deja de ser silencioso.
     """
     from app.application.services.column_mapping_service import (  # noqa: PLC0415
         parse_target,
@@ -2753,6 +2767,7 @@ def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[
 
     target_to_col: dict[str, str] = {}
     custom_field_cols: dict[str, str] = {}
+    cruzados: dict[str, str] = {}
     for src_col, target in mapping.items():
         parsed = parse_target(target)
         if parsed.kind in ("ignore", "none"):
@@ -2767,7 +2782,15 @@ def _resolve_target_cols(mapping: dict[str, str]) -> tuple[dict[str, str], dict[
                 custom_field_cols[parsed.field] = src_col
         elif parsed.kind == "canonical" and target not in target_to_col:
             target_to_col[target] = src_col
-    return target_to_col, custom_field_cols
+        elif parsed.kind == "cross":
+            cruzados[src_col] = target
+    if cruzados:
+        logger.warning(
+            "ingestion.cross_entity_targets_descartados",
+            columnas=sorted(cruzados),
+            targets=sorted(set(cruzados.values())),
+        )
+    return target_to_col, custom_field_cols, cruzados
 
 
 def _resolve_stock_treatment(
@@ -3233,9 +3256,15 @@ async def _insert_confirmed_data_impl(
             # Construir lookup: target_field → primer source_col que lo mapee
             # Misma resolución que `_resolve_target_cols` (incluido el first-wins
             # de la rama custom): son el mismo contrato en dos caminos distintos.
-            _canon, _custom = _resolve_target_cols(column_mappings)
+            _canon, _custom, _cruzados = _resolve_target_cols(column_mappings)
             target_to_col.update(_canon)
             custom_field_cols.update(_custom)
+            if _cruzados:
+                # Se descartan (F-D no está entregada) pero el usuario tiene
+                # que enterarse: mapeó una columna a mano y no se importó.
+                counts["targets_cruzados_descartados"] = counts.get(
+                    "targets_cruzados_descartados", 0
+                ) + len(_cruzados)
 
             # Remapear columnas de fecha y monto usando el mapeo explícito
             fecha_col = (
@@ -6104,7 +6133,13 @@ async def _insert_multisheet_data(
             _bucket = summary.get(_bucket_key, [])
             _rows = [r for r in _bucket if r.get("__context__") == _cid]
             _mapping = context_mappings.get(_cid or "", {})
-            _cols, _cf_cols = _resolve_target_cols(_mapping) if _mapping else ({}, {})
+            _cols, _cf_cols, _cruzados = (
+                _resolve_target_cols(_mapping) if _mapping else ({}, {}, {})
+            )
+            if _cruzados:
+                counts["targets_cruzados_descartados"] = counts.get(
+                    "targets_cruzados_descartados", 0
+                ) + len(_cruzados)
             return _rows, _cols, _cf_cols
 
         def _hoja_incluida(ctx: dict[str, Any]) -> bool:

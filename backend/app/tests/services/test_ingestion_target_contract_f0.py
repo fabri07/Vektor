@@ -212,7 +212,7 @@ class TestResolucionDeColumnas:
         primera en silencio: el valor guardado pasa a depender del orden de las
         columnas del Excel. Es el incidente ASTERIA en versión campo propio.
         """
-        _, custom = _resolve_target_cols(
+        _, custom, _ = _resolve_target_cols(
             {
                 "Observaciones": "custom_field:obs",
                 "Obs.": "custom_field:obs",
@@ -221,12 +221,40 @@ class TestResolucionDeColumnas:
         assert custom["obs"] == "Observaciones"
 
     def test_la_rama_canonica_sigue_siendo_first_wins(self) -> None:
-        canonicos, _ = _resolve_target_cols(
+        canonicos, _, _ = _resolve_target_cols(
             {"Total": "amount", "Importe": "amount"}
         )
         assert canonicos["amount"] == "Total"
 
     def test_ignorar_no_ocupa_ningun_campo(self) -> None:
-        canonicos, custom = _resolve_target_cols({"Notas internas": "ignore"})
+        canonicos, custom, _ = _resolve_target_cols({"Notas internas": "ignore"})
         assert canonicos == {}
         assert custom == {}
+
+
+class TestLosCruzadosDejanRastro:
+    """#10 del review — `kind="cross"` caía sin rama y la columna se evaporaba.
+
+    F-D no está entregada, así que un target `{entidad}:{campo}` no se puede
+    escribir todavía. Lo que no puede pasar es que el usuario mapee una columna a
+    mano, el importador la tire y nadie se entere: es la clase exacta del
+    incidente ASTERIA —un valor que desaparece y una heurística que lo reemplaza
+    con otra cosa—. No se rechaza (hay imports vivos que dependen del fallback
+    heurístico de `unit_cost_ars`), pero se reporta.
+    """
+
+    def test_un_target_cruzado_se_descarta_pero_se_reporta(self) -> None:
+        canonicos, custom, cruzados = _resolve_target_cols(
+            {"Costo": "product:unit_cost_ars", "Total": "amount"}
+        )
+
+        assert "product:unit_cost_ars" not in canonicos.values()
+        assert cruzados == {"Costo": "product:unit_cost_ars"}
+        # …y no contamina las otras dos ramas.
+        assert canonicos == {"amount": "Total"}
+        assert custom == {}
+
+    def test_sin_cruzados_no_hay_nada_que_reportar(self) -> None:
+        """Control: si esto no fuera vacío, el aviso saldría en todo import."""
+        _, _, cruzados = _resolve_target_cols({"Total": "amount"})
+        assert cruzados == {}
