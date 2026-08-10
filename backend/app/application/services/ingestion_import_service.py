@@ -81,6 +81,11 @@ from app.domain.purchase_cost_decision import (
     texto_del_ajuste_ilegible,
     texto_del_aviso,
 )
+from app.domain.purchase_group import (
+    GroupLine,
+    PurchaseGroupPlan,
+    build_purchase_groups,
+)
 from app.domain.purchase_shipping import ShippingLine, plan_shipping_charges
 from app.domain.text_norm import (
     normalize_barcode,
@@ -2378,8 +2383,10 @@ def _planificar_costos_de_la_hoja(
     rows: list[dict[str, Any]],
     cols: dict[str, str],
     decisiones: dict[str, PurchaseCostDecision] | None = None,
-) -> tuple[dict[int, LineCost], dict[str, int]]:
-    """F-H6.c — qué costó realmente cada línea de esta hoja.
+    *,
+    sin_comprobante: str | None = None,
+) -> tuple[dict[int, LineCost], dict[str, int], PurchaseGroupPlan]:
+    """F-H6.c/d — qué costó realmente cada línea de esta hoja.
 
     Corre ANTES del bucle de filas, no después: distribuir un costo compartido
     exige ver el grupo entero, y el bucle necesita el resultado para escribir
@@ -2387,9 +2394,16 @@ def _planificar_costos_de_la_hoja(
     `_cobrar_envios_de_la_hoja` es una pasada aparte, sólo que al revés — aquél
     puede correr al final porque no cambia ninguna fila.
 
-    Devuelve ``({row_index: LineCost}, {columna: celdas_ilegibles})``. El
-    segundo no es un detalle: una celda que no se pudo leer se cuenta y se
-    avisa, nunca se trata como «sin descuento» (ver `parse_ajuste`).
+    **El reparto es por GRUPO, no por hoja** (F-H6.d). Una sola llamada a
+    `build_line_costs` con todas las filas le cargaría a una compra el flete de
+    otra — lo que el docstring de esa función ya prohíbe por escrito. Se arma un
+    grupo por comprobante y cada uno reparte lo suyo.
+
+    Devuelve ``({row_index: LineCost}, {columna: celdas_ilegibles},
+    PurchaseGroupPlan)``. El segundo no es un detalle: una celda que no se pudo
+    leer se cuenta y se avisa, nunca se trata como «sin descuento» (ver
+    `parse_ajuste`). El tercero lo necesita quien cobra el envío, para saber cuál
+    cargo terminó capitalizado en el costo y no contarlo dos veces.
     """
     dec = (decisiones or {}).get(ctx_id or "") or PurchaseCostDecision(
         context_id=ctx_id or ""
@@ -2397,10 +2411,15 @@ def _planificar_costos_de_la_hoja(
     _desc_col = cols.get("discount")
     _imp_col = cols.get("taxes")
     _flete_col = cols.get("shipping_cost_line")
-    if not (_desc_col or _imp_col or _flete_col):
+    _envio_col = cols.get("shipping_cost")
+    if not (_desc_col or _imp_col or _flete_col or _envio_col):
         # Sin ninguna columna de ajuste no hay nada que calcular que el
         # importador no supiera ya: se deja el camino de siempre intacto.
-        return {}, {}
+        #
+        # `shipping_cost` entra a este guard desde F-H6.d: antes, una hoja que
+        # sólo mapeaba el envío del comprobante ni siquiera llegaba acá, así que
+        # elegir «repartir por subtotal» no tenía dónde ocurrir.
+        return {}, {}, PurchaseGroupPlan()
 
     _monto_col = cols.get("amount")
     _qty_col = cols.get("quantity")
@@ -2415,9 +2434,35 @@ def _planificar_costos_de_la_hoja(
             return Decimal("0")
         return val
 
+    _comp_col = cols.get("invoice_number")
+    _prov_col = cols.get("supplier_name")
+
+    def _clave(row: dict[str, Any], col: str | None) -> str:
+        # Misma normalización que `_cobrar_envios_de_la_hoja`: la clave del
+        # comprobante tiene que ser insensible a mayúsculas y espacios, y las dos
+        # pasadas TIENEN que agrupar igual o el preview miente sobre el import.
+        return (_clean_str(row.get(col), 199) or "").strip().lower() if col else ""
+
     lineas: list[CostLine] = []
+    del_grupo: list[GroupLine] = []
     for _idx, _row in enumerate(rows):
         _monto = _parse_amount(_row.get(_monto_col)) if _monto_col else None
+        # El grupo se arma con TODAS las filas, tengan monto o no: el envío del
+        # comprobante se reparte entre todas sus líneas, y una fila sin monto
+        # igual puede ser la que trae la cifra de envío.
+        del_grupo.append(
+            GroupLine(
+                row_index=_idx,
+                supplier=_clave(_row, _prov_col),
+                invoice=_clave(_row, _comp_col),
+                subtotal=_monto or Decimal("0"),
+                shipping=(
+                    _parse_amount(_row.get(_envio_col)) or Decimal("0")
+                    if _envio_col
+                    else Decimal("0")
+                ),
+            )
+        )
         if _monto is None:
             # Sin monto no hay base sobre la cual ajustar nada. La fila ya la
             # resuelve (o captura) el camino normal.
@@ -2432,16 +2477,32 @@ def _planificar_costos_de_la_hoja(
                 shipping_line=_ajuste(_row, _flete_col),
             )
         )
+    grupos = build_purchase_groups(del_grupo, sin_comprobante=sin_comprobante)
     if not lineas:
-        return {}, _ilegibles
+        return {}, _ilegibles, grupos
 
-    plan = build_line_costs(
-        lineas,
-        shared_mode=dec.shared_shipping,
-        line_mode=dec.line_shipping,
-        basis=dec.base,
-    )
-    return plan.by_row(), _ilegibles
+    por_fila: dict[int, CostLine] = {line.row_index: line for line in lineas}
+    resultado: dict[int, LineCost] = {}
+    for grupo in grupos.groups:
+        del_grupo_lineas = [
+            por_fila[row] for row in grupo.row_indexes if row in por_fila
+        ]
+        if not del_grupo_lineas:
+            continue
+        plan = build_line_costs(
+            del_grupo_lineas,
+            # Sin `shared_shipping=` esto era un no-op: `build_line_costs` exige
+            # que la cifra sea > 0 para repartir, y el default es 0. Elegir
+            # «por subtotal» validaba, devolvía 200 y no repartía un centavo.
+            shared_shipping=(
+                grupo.shared_shipping if grupo.distribuible else Decimal("0")
+            ),
+            shared_mode=dec.shared_shipping,
+            line_mode=dec.line_shipping,
+            basis=dec.base,
+        )
+        resultado.update(plan.by_row())
+    return resultado, _ilegibles, grupos
 
 
 def _parse_amount(raw: Any) -> Decimal | None:
@@ -3400,8 +3461,13 @@ async def _insert_confirmed_data_impl(
         # el mismo costo entre como tabla suelta o como solapa. Esa asimetría este
         # importador ya la pagó dos veces.
         _costos_por_fila: dict[int, LineCost] = {}
+        _grupos_de_compra = PurchaseGroupPlan()
         if wants_gastos:
-            _costos_por_fila, _celdas_ilegibles = _planificar_costos_de_la_hoja(
+            (
+                _costos_por_fila,
+                _celdas_ilegibles,
+                _grupos_de_compra,
+            ) = _planificar_costos_de_la_hoja(
                 None, rows, target_to_col, purchase_cost_decisions
             )
             for _col, _cuantas in _celdas_ilegibles.items():
@@ -6016,9 +6082,22 @@ async def _insert_multisheet_data(
             # porque repartir un costo compartido exige ver el grupo entero y el
             # bucle necesita el resultado para escribir el costo de cada compra.
             _costos_por_fila: dict[int, LineCost] = {}
+            _grupos_de_compra = PurchaseGroupPlan()
             if entity == "expense":
-                _costos_por_fila, _celdas_ilegibles = _planificar_costos_de_la_hoja(
-                    ctx_id, rows, cols, purchase_cost_decisions
+                (
+                    _costos_por_fila,
+                    _celdas_ilegibles,
+                    _grupos_de_compra,
+                ) = _planificar_costos_de_la_hoja(
+                    ctx_id,
+                    rows,
+                    cols,
+                    purchase_cost_decisions,
+                    # La MISMA decisión del usuario que gobierna el cobro del
+                    # flete gobierna si se puede repartir sobre filas sin
+                    # comprobante. Leerla de dos lados distintos las dejaría
+                    # divergir.
+                    sin_comprobante=(shipping_decisions or {}).get(ctx_id or ""),
                 )
                 for _col, _cuantas in _celdas_ilegibles.items():
                     counts["ajustes_ilegibles"] = (

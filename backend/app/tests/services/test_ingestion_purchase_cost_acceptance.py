@@ -250,8 +250,8 @@ class TestLosDosFletesNoSonElMismoCargo:
             db_session,
             sample_tenant,
             [
-                _fila(envio="500", articulo="Vela A", total="6000", cantidad="5"),
-                _fila(envio="500", articulo="Vela B", total="6000", cantidad="5"),
+                _fila(envio="500", articulo="Vela aromatica", total="6000", cantidad="5"),
+                _fila(envio="500", articulo="Taza ceramica", total="6000", cantidad="5"),
             ],
         )
         fletes = [
@@ -403,3 +403,121 @@ class TestUnaCeldaQueNoSePudoLeerSeCuentaYSeAvisa:
         )
         assert counts.get("ajustes_ilegibles", 0) == 0
         assert not [a for a in (counts.get("avisos") or []) if "no se pudieron leer" in a]
+
+
+async def _costos_por_producto(
+    db: AsyncSession, tenant: Tenant
+) -> dict[str, Decimal]:
+    """El costo de referencia con el que quedó cada producto de la compra."""
+    productos = (
+        (
+            await db.execute(
+                select(Product).where(Product.tenant_id == tenant.tenant_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        str(p.name): Decimal(str(p.unit_cost_ars))
+        for p in productos
+        if p.unit_cost_ars is not None
+    }
+
+
+def _linea_de(articulo: str, total: str, **over: Any) -> dict[str, Any]:
+    """Una línea de UNA unidad, para que el costo unitario sea el total."""
+    return _fila(articulo=articulo, cantidad="1", precio_unitario=total, total=total, **over)
+
+
+class TestElEnvioDelComprobanteSeReparteEntreSusLineas:
+    """F-H6.d — el reparto por subtotal era un no-op silencioso.
+
+    `build_line_costs` sólo reparte si `shared_shipping > 0`, y el importador
+    nunca le pasaba ese argumento: caía al default `Decimal("0")`. Elegir
+    «repartir por subtotal» pasaba la validación, devolvía 200 y no movía un
+    centavo. La aritmética estaba probada; lo que faltaba era el caller.
+    """
+
+    async def test_el_reparto_cuadra_al_centavo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Tres líneas de 100 y un flete de 10: 3,33 + 3,33 + 3,34 = 10 exacto.
+
+        El redondeo por línea no cierra solo (3,33 × 3 = 9,99). El centavo que
+        falta va a la línea de mayor base, determinístico. Que la suma dé el
+        flete original es la compuerta de la fase: si no cuadra, el costo total
+        de la compra no es el que salió de la caja.
+        """
+        await _importar(
+            db_session,
+            sample_tenant,
+            [
+                _linea_de("Vela aromatica", "100", envio="10"),
+                _linea_de("Taza ceramica", "100", envio="10"),
+                _linea_de("Mantel lino", "100", envio="10"),
+            ],
+            costos={"shared_shipping": "por_subtotal"},
+        )
+
+        costos = await _costos_por_producto(db_session, sample_tenant)
+        repartido = sum(costos.values()) - Decimal("300")
+        assert repartido == Decimal("10"), f"el reparto no cuadra: {costos}"
+        assert sorted(costos.values()) == [
+            Decimal("103.33"),
+            Decimal("103.33"),
+            Decimal("103.34"),
+        ]
+
+    async def test_cada_comprobante_reparte_lo_suyo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Una sola llamada sobre la hoja entera le cargaría a una compra el
+        flete de la otra. Los totales de la hoja cerrarían igual y el error
+        quedaría escondido en el costo por producto."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [
+                _linea_de("Vela aromatica", "100", envio="10", comprobante="A-0001"),
+                _linea_de("Taza ceramica", "100", envio="60", comprobante="B-0002"),
+            ],
+            costos={"shared_shipping": "por_subtotal"},
+        )
+
+        costos = await _costos_por_producto(db_session, sample_tenant)
+        assert costos["Vela aromatica"] == Decimal("110")
+        assert costos["Taza ceramica"] == Decimal("160")
+
+    async def test_no_distribuir_es_el_default_y_no_toca_el_costo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Control de V6: cambiar el default alteraría el costo de todos los
+        imports que ya existen. Sin decisión, el flete no entra al producto."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [_linea_de("Vela aromatica", "100", envio="10")],
+        )
+
+        costos = await _costos_por_producto(db_session, sample_tenant)
+        assert costos["Vela aromatica"] == Decimal("100")
+
+    async def test_sin_comprobante_no_reparte_aunque_se_pida(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Un 2.000 repetido en diez filas sin comprobante es indistinguible de
+        diez envíos de 2.000. No se reparte, igual que no se cobra."""
+        await _importar(
+            db_session,
+            sample_tenant,
+            [
+                _linea_de("Vela aromatica", "100", envio="10", comprobante=""),
+                _linea_de("Taza ceramica", "100", envio="10", comprobante=""),
+            ],
+            costos={"shared_shipping": "por_subtotal"},
+        )
+
+        costos = await _costos_por_producto(db_session, sample_tenant)
+        assert costos["Vela aromatica"] == Decimal("100")
+        assert costos["Taza ceramica"] == Decimal("100")
