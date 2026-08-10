@@ -107,6 +107,55 @@ class TestFieldCatalog:
             if entity not in ("sale", "expense"):
                 assert entry["required_alternatives"] == {}, entity
 
+    async def test_todo_requerido_llega_con_su_motivo(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """F-C.c2 — el catálogo no dice sólo QUÉ falta, dice por qué hace falta.
+
+        Un asterisco rojo comunica "esto es obligatorio" y nada más; la persona
+        que no mapeó el monto no sabe si su planilla no entra o si entra distinta.
+        El motivo es lo que le permite decidir, así que ningún requerido puede
+        salir sin él.
+        """
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        catalog = response.json()
+
+        for entity, entry in catalog.items():
+            campos = {f["value"]: f for f in entry["fields"]}
+            for requerido in entry["required"]:
+                motivo = campos[requerido]["required_reason"]
+                assert motivo, f"{entity}.{requerido} es obligatorio y no explica por qué"
+                # En castellano y sobre el negocio: nunca el nombre técnico del
+                # campo, que es justo lo que el mensaje viene a reemplazar.
+                assert requerido not in motivo, f"{entity}.{requerido}"
+
+    async def test_un_campo_sin_motivo_devuelve_cadena_vacia(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Control del test de arriba: sin esto, servir el mismo texto para todos
+        los campos lo daría por bueno igual.
+
+        Y vacío en vez de `null`: la UI renderiza nada sin distinguir ausencias.
+        """
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        gasto = {f["value"]: f for f in response.json()["expense"]["fields"]}
+
+        assert "payment_method" not in response.json()["expense"]["required"]
+        assert gasto["payment_method"]["required_reason"] == ""
+
+    async def test_la_alternativa_del_monto_tambien_explica(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """`unit_price`/`quantity` no están en `required`, pero cubren al monto:
+        quien no mapeó el total tiene que poder leer por qué estos dos alcanzan."""
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        catalog = response.json()
+
+        for entidad in ("sale", "expense"):
+            campos = {f["value"]: f for f in catalog[entidad]["fields"]}
+            for campo in ("unit_price", "quantity"):
+                assert campos[campo]["required_reason"], f"{entidad}.{campo}"
+
     async def test_requiere_autenticacion(self, client: AsyncClient) -> None:
         response = await client.get("/api/v1/ingestion/field-catalog")
         assert response.status_code in (401, 403)

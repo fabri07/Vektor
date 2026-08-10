@@ -41,6 +41,7 @@ from app.application.services.column_mapping_service import (
     ColumnMappingService,
     missing_required_fields,
     parse_target,
+    required_reason,
     validate_required_date_mapping,
 )
 from app.application.services.column_risk import (
@@ -1088,6 +1089,7 @@ async def get_field_catalog(
                     value=value,
                     label=label,
                     single_value=value in SINGLE_VALUE_FIELDS.get(entity, frozenset()),
+                    required_reason=required_reason(entity, value),
                 )
                 for value, label in fields.items()
             ],

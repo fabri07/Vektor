@@ -206,6 +206,16 @@ class FieldCatalogEntry(BaseModel):
     # se pueden desempatar sin inventar, así que el confirm las rechaza y la UI
     # bloquea. Ver SINGLE_VALUE_FIELDS en column_mapping_service.
     single_value: bool = False
+    # F-C.c2: POR QUÉ el importador necesita este campo, en castellano y como
+    # consecuencia ("Véktor necesita saber cuánta plata entró"), no como imperativo
+    # ("el monto es obligatorio"). Un asterisco rojo dice que falta algo; no dice
+    # qué se pierde la persona si no lo mapea, que es lo único que le permite
+    # decidir. Fuente única: `REQUIRED_REASONS` en `column_mapping_service`.
+    #
+    # Cadena vacía —no `null`— cuando no hay motivo escrito: la UI renderiza nada
+    # sin tener que distinguir dos ausencias. Y con default, para que un cliente
+    # viejo que no conoce el campo siga deserializando.
+    required_reason: str = ""
 
 
 class EntityFieldCatalog(BaseModel):
