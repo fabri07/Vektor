@@ -299,6 +299,85 @@ def test_csv_end_to_end_infiere_el_tipo(csv: bytes, filename: str, esperado: str
     assert summary["inferred_type"] == esperado
 
 
+# Encabezados REALES de Vektor_Test_DistribuidoraLimpieza_3meses.xlsx, tal cual
+# los devuelve openpyxl (con "Nº", tildes y las aclaraciones entre paréntesis que
+# el usuario escribió). Se parte de los headers y no de las banderas porque el
+# bug de esta familia vive justo ahí: las banderas se derivan del texto del
+# encabezado, y un header "decorado" ("Proveedor (tal cual se anotó)") no matchea
+# igual que el pelado ("Proveedor").
+_COMPRAS_MERCADERIA_HEADERS = [
+    "Fecha",
+    "Nº Remito/Factura",
+    "Proveedor (tal cual se anotó)",
+    "Producto (tal cual se anotó)",
+    "Cantidad",
+    "Costo Unitario",
+    "Total",
+    "Forma de Pago",
+]
+
+
+@pytest.mark.parametrize(
+    ("headers", "esperado"),
+    [
+        # El caso reportado: un libro de compras de mercadería es una OPERACIÓN
+        # (fecha + comprobante + proveedor + forma de pago + cantidad + costo),
+        # no un catálogo — aunque nombre productos. Si cae en "stock" no genera
+        # movimientos de stock fechados y las ventas que respalda se quedan sin
+        # respaldo → "Otros".
+        pytest.param(
+            _COMPRAS_MERCADERIA_HEADERS,
+            "gastos",
+            id="test_compras_mercaderia_headers_reales_son_gastos",
+        ),
+        # Mismo libro SIN "Forma de Pago": el proveedor sigue estando, con el
+        # header decorado. Con match exacto de "proveedor" esta hoja caía en
+        # "stock" — el caso reportado estaba a UNA columna de fallar.
+        pytest.param(
+            [h for h in _COMPRAS_MERCADERIA_HEADERS if h != "Forma de Pago"],
+            "gastos",
+            id="test_compras_mercaderia_sin_forma_de_pago_sigue_siendo_gastos",
+        ),
+        # Mismo libro SIN "Total": el Nº de remito/factura alcanza como evidencia
+        # de que hay una operación documentada. Un catálogo no numera comprobantes.
+        pytest.param(
+            [h for h in _COMPRAS_MERCADERIA_HEADERS if h != "Total"],
+            "gastos",
+            id="test_compras_mercaderia_sin_total_sigue_siendo_gastos",
+        ),
+        # No-regresión: el catálogo del MISMO archivo sigue siendo productos.
+        pytest.param(
+            ["SKU", "Nombre Canónico", "Categoría", "Precio Costo", "Precio Venta", "Margen %"],
+            "stock",
+            id="test_productos_catalogo_headers_reales_siguen_siendo_stock",
+        ),
+        # No-regresión: las compras de insumos del MISMO archivo siguen siendo gastos.
+        pytest.param(
+            ["Fecha", "Nº Factura", "Ítem", "Cantidad", "Precio Unitario", "Total", "Proveedor"],
+            "gastos",
+            id="test_compras_insumos_headers_reales_siguen_siendo_gastos",
+        ),
+        # El discriminante es la OPERACIÓN, no el costo: un catálogo con costo
+        # unitario sigue siendo catálogo mientras no traiga fecha de operación,
+        # comprobante ni forma de pago.
+        pytest.param(
+            ["Producto", "Costo Unitario", "Precio Venta", "Stock"],
+            "stock",
+            id="test_catalogo_con_costo_sin_operacion_sigue_siendo_stock",
+        ),
+        # Idem con SKU y columna de proveedor (quién lo distribuye): sin señales
+        # de operación es catálogo, no un libro de compras ni un maestro.
+        pytest.param(
+            ["SKU", "Producto", "Costo Unitario", "Precio Venta", "Stock", "Proveedor"],
+            "stock",
+            id="test_catalogo_con_costo_y_proveedor_sin_operacion_sigue_siendo_stock",
+        ),
+    ],
+)
+def test_analyze_headers_libro_de_compras_vs_catalogo(headers: list[str], esperado: str) -> None:
+    assert analyze_headers(headers)["inferred_type"] == esperado
+
+
 def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) -> None:
     """CSV con columnas fecha+nombre+precio → inferred_type='stock' (bug regression end-to-end)."""
     product_csv = (
