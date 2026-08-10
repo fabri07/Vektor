@@ -770,8 +770,15 @@ _LD_SUB_EGRESO = {"egreso", "egresos", "salida", "salidas"}
 _LD_DETALLE_KEYS = {"detalle", "descripcion", "concepto", "glosa", "movimiento", "observa"}
 # Filas de cierre que no son movimientos (subtotales del libro).
 _LD_TOTAL_PREFIXES = ("total", "subtotal", "saldo", "acumulado")
-# Hojas derivadas del Libro Diario: importarlas además duplicaría las ventas.
-_LD_DERIVED_SHEET_PREFIXES = ("ganancia", "resumen", "balance")
+# Hojas DERIVADAS: agregados que Véktor recalcula solo desde los movimientos
+# (resúmenes por medio de pago, ganancias, balances). Importarlas además de las
+# hojas de movimientos del mismo archivo suma esos totales por segunda vez —
+# facturación fantasma, y encima con la fila "TOTAL" sumando otra vez las de
+# arriba. Mismo criterio que el margen en `column_mapping_service`: lo que el
+# sistema CALCULA no se importa como dato. No se descartan: se preservan sin
+# clasificar y destildadas, así el usuario puede asignarles sección a mano si de
+# verdad las quiere (la regla cambia el default, no el permiso).
+_DERIVED_SHEET_PREFIXES = ("ganancia", "resumen", "balance")
 
 
 def _ld_norm_cell(value: Any) -> str:
@@ -1323,9 +1330,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             contexts: list[dict[str, Any]] = []
             total_rows = 0
 
-            # Pre-pass: materializar hojas y detectar Libro Diario antes de
-            # clasificar — las hojas derivadas ("Ganancias", "Resumen") solo se
-            # excluyen si el libro fuente está presente en el mismo archivo.
+            # Pre-pass: materializar cada hoja junto con su detección de Libro
+            # Diario, para no volver a leer el workbook durante la clasificación.
             sheets_data: list[tuple[str, list[list[Any]], tuple[int, dict[str, int]] | None]] = []
             for sheet_name in sheet_names:
                 ws = workbook[sheet_name]
@@ -1333,7 +1339,6 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                 if len(rows) < 2:
                     continue
                 sheets_data.append((sheet_name, rows, detect_libro_diario_header(rows)))
-            has_libro_diario = any(ld is not None for _, _, ld in sheets_data)
 
             for sheet_name, rows, ld in sheets_data:
                 if ld is not None:
@@ -1344,12 +1349,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     )
                     total_rows += sum(len(v) for v in parsed.values())
                     continue
-                if has_libro_diario and _ld_norm_cell(sheet_name).startswith(
-                    _LD_DERIVED_SHEET_PREFIXES
-                ):
-                    # Hoja derivada del Libro Diario (resumen/ganancias):
-                    # importarla además del libro duplicaría los movimientos.
-                    # Se preserva sin clasificar por si el usuario la quiere.
+                if _ld_norm_cell(sheet_name).startswith(_DERIVED_SHEET_PREFIXES):
+                    # Hoja derivada (resumen/ganancias/balance): es un agregado de
+                    # los movimientos que ya vienen en el archivo, así que importarla
+                    # los contaría dos veces. Se preserva sin clasificar por si el
+                    # usuario la quiere.
                     _hdr = _detect_header_row(rows)
                     _headers = [
                         str(c) if c is not None else f"col_{i}"
@@ -1374,9 +1378,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                         {**d, "__context__": context_id} for d in _dicts
                     )
                     summary["warnings"].append(
-                        f"La hoja '{sheet_name}' parece derivada del Libro Diario "
-                        "(resumen): no se importa automáticamente para no duplicar "
-                        "movimientos. Podés reclasificarla manualmente si hace falta."
+                        f"La hoja '{sheet_name}' es un resumen que Véktor calcula solo "
+                        "desde tus movimientos. Importarla sumaría esos totales otra "
+                        "vez, encima de los movimientos del mismo archivo. Por eso no "
+                        "se importa; podés asignarle una sección a mano si de verdad "
+                        "la necesitás."
                     )
                     continue
 

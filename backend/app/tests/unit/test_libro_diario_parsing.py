@@ -161,7 +161,10 @@ def test_xlsx_ganancias_sheet_excluded_when_libro_diario_present() -> None:
     # La hoja derivada queda sin clasificar (importarla duplicaría las ventas).
     assert by_label["Ganancias"]["entity_type"] is None
     assert by_label["Ganancias"]["unclassified"] is True
-    assert any("Ganancias" in w and "duplicar" in w for w in summary["warnings"])
+    assert any(
+        "Ganancias" in w and "sumaría esos totales otra vez" in w
+        for w in summary["warnings"]
+    )
     # El libro fuente sí se clasifica.
     assert len(summary["ventas_detectadas"]) == 1
 
