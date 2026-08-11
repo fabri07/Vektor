@@ -7,12 +7,16 @@ from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTasks
 
 from app.jobs.celery_app import celery_app
 
 
 def trigger_score_recalculation_after_commit(
-    db: AsyncSession, tenant_id: str, triggered_by: str
+    db: AsyncSession,
+    tenant_id: str,
+    triggered_by: str,
+    background: BackgroundTasks | None = None,
 ) -> None:
     """Dispara el recálculo SOLO después de que la transacción commitee.
 
@@ -25,15 +29,28 @@ def trigger_score_recalculation_after_commit(
     Mismo mecanismo que ``EventBus.emit_after_commit`` (``stock_service``,
     ``pending_action_service``): el listener ``after_commit`` de SQLAlchemy. Si la
     transacción hace rollback, el task nunca se encola.
+
+    ``background`` (las ``BackgroundTasks`` del endpoint) saca además el
+    ``.delay()`` del camino de la respuesta. Sin él, la llamada al broker corre
+    dentro del request —en el commit de ``get_db_session``— y un broker lento o
+    caído lo paga el usuario esperando, en una operación que ya terminó. Con él,
+    el commit solo AGENDA el encolado y Starlette lo ejecuta después de haber
+    enviado la respuesta. El orden lo garantiza FastAPI ≥0.106: las dependencias
+    con ``yield`` (y por lo tanto el commit) cierran ANTES de que se envíe la
+    respuesta, y las background tasks corren después.
+
+    Fuera de un request (worker de Celery, scripts) se llama sin ``background``:
+    ahí no hay respuesta que proteger y el encolado va en línea con el commit.
     """
     sync_session = db.sync_session
 
-    @event.listens_for(sync_session, "after_commit", once=True)
-    def _disparar(_session: Any) -> None:
+    def _encolar() -> None:
         # Fail-safe OBLIGATORIO: acá la transacción YA commiteó. Si el broker está
         # caído, dejar propagar la excepción le devolvería un 500 al usuario por
         # una operación que sí se completó — y encima lo invitaría a repetirla.
         # El score se recalcula igual en el próximo evento o por el job periódico.
+        # Vale igual como background task: ahí la excepción ni siquiera llegaría
+        # al usuario (la respuesta ya salió), solo ensuciaría el log como error.
         try:
             trigger_score_recalculation.delay(tenant_id, triggered_by)
         except Exception:  # noqa: BLE001 — el recálculo nunca rompe la respuesta
@@ -44,6 +61,15 @@ def trigger_score_recalculation_after_commit(
                 tenant_id=tenant_id,
                 triggered_by=triggered_by,
             )
+
+    @event.listens_for(sync_session, "after_commit", once=True)
+    def _disparar(_session: Any) -> None:
+        if background is not None:
+            # `_encolar` es sync: Starlette lo corre en un threadpool, así que el
+            # I/O bloqueante del broker no traba el event loop.
+            background.add_task(_encolar)
+            return
+        _encolar()
 
 
 @celery_app.task(name="jobs.trigger_score_recalculation", queue="scores")  # type: ignore[misc]
