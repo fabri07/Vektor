@@ -74,12 +74,24 @@ F-M  reconocimiento de encabezados en dos capas                     ✅ entregad
 F-H6 costos de compra agrupados (envío, costo final)  a·b·c·d       ✅ entregado
 F-H6.e el flete de línea genera su gasto                            ✅ entregado
 F-C  obligatorios explicados                                        ✅ entregado
+F-T  medir el confirm antes de agregarle trabajo
+F-F  fechas mandan: todo movimiento afecta el inventario
 F-A  nombre original + preservación de edición
 F-B  claridad visual + extracción del monolito
+F-I  identidad por código: IDs y comprobantes
+F-N  nombre y apellido en una sola columna
 F-D  ruteo cross-sección
 F-E  simetría cliente/proveedor (paralelo desde F-0; no se activa hasta cerrar defaults)
 F-H6.f el camino plano cobra el envío y honra las decisiones de costo
 ```
+
+**F-T, F-F, F-I y F-N se agregaron el 2026-08-10**, después de que el usuario probara un
+archivo real de 9 hojas y 1.187 ventas (`Vektor_Test_DistribuidoraLimpieza_3meses.xlsx`).
+El orden no es el que él enunció: pidió la velocidad primero, y va primera **la medición** de
+lo que está lento, porque las otras tres fases le agregan trabajo al confirm y sin línea de
+base no se puede distinguir «lo aceleré» de «lo empeoré tanto que se comió la mejora».
+F-A y F-B quedan entre F-F y F-I porque tocan la misma pantalla que F-F acaba de simplificar:
+hacerlo al revés es pintarla dos veces.
 
 **F-M** se insertó a mitad de F-H6.c y no estaba en el plan original: su plan propio
 vive en `docs/plans/header-recognition-fm.md`.
@@ -93,7 +105,9 @@ decisión explícita) salen globales. Ver `docs/runbooks/purchase_cost_rollout.m
 
 ### Alcance de migraciones — declaración explícita
 
-**El programa F-0 → F-E es aditivo y sin migraciones.** Todo viaja en columnas existentes (`target_field` es `String`, `inventory_movements` ya tiene `qty`/`unit_cost`/`source_type`), en el payload del confirm o en `custom_fields`.
+**El programa F-0 → F-E era aditivo y sin migraciones**, y dejó de serlo con **F-I**. Todo lo demás sigue viajando en columnas existentes (`target_field` es `String`, `inventory_movements` ya tiene `qty`/`unit_cost`/`source_type`), en el payload del confirm o en `custom_fields`.
+
+**La excepción es F-I y es deliberada:** un código externo (`CLI-01`, `PROV-03`) es identidad, y la identidad no puede vivir en `custom_fields` — necesita un índice único por tenant para que re-importar el mismo archivo no duplique maestros, y `custom_fields` es JSONB sin restricción de unicidad. Migración aditiva: columna `external_code` en `customers`, `suppliers` y `products` (detalle en F-I). Se declara acá para que la promesa de "sin migraciones" no se lea como vigente cuando ya no lo es.
 
 **F-H6-b queda FUERA de este programa.** Es una fase analítica posterior con migración aditiva, no una excepción interna. Los dos alcances:
 
@@ -553,6 +567,89 @@ Dos piezas, las dos dentro de F-H6.c/d:
 
 ---
 
+# F-T · Tiempo de confirmación
+
+**Medir antes de tocar.** El usuario reportó que el traspaso de la pantalla de mapeo a la
+importación es lento, y al preguntarle dónde duele contestó: **en el confirm**. No al abrir el
+mapeo, no al tocarlo.
+
+Instrumentar `POST /files/{id}/confirm` por etapa y publicar el desglose en `pipeline_events`,
+que ya es la traza del pipeline: `STAGE_CONFIRM` se emite en `api/v1/ingestion.py`, y
+`_emit_confirm_failure` ya distingue las fases `lease_lost` / `import`. Etapas: lectura del
+summary · validaciones pre-lease · resolución de maestros · inserción por hoja · decisiones de
+costo · derivados post-commit.
+
+**Va primera porque F-F, F-I y F-N le agregan trabajo al confirm** —replay por fechas,
+resolución por código, split por fila—. Sin línea de base, la próxima vez que el usuario diga
+"sigue lento" nadie va a poder decir si el trabajo nuevo se comió la mejora o si nunca hubo
+mejora.
+
+**Sospechas anotadas para atacar DESPUÉS de medir, nunca antes:** la resolución de maestros
+fila por fila, y el recálculo de score que se encola en el `after_commit`
+(`score_trigger_service.trigger_score_recalculation_after_commit`). Cualquiera de las dos puede
+ser irrelevante; el orden "medir → optimizar" existe justamente porque la intuición sobre
+dónde se va el tiempo suele estar mal.
+
+**Aceptación:** el confirm publica su desglose por etapa · hay un número antes y otro después,
+sobre el mismo archivo real (9 hojas, 1.187 ventas, 162 compras, 30 productos).
+
+---
+
+# F-F · Fechas mandan: todo movimiento afecta el inventario
+
+**Lo que pidió el usuario, textual:** «eliminá todo lo que dice "no afecta el inventario"
+porque todos los movimientos afectan el inventario; es vital detectar las fechas, lo que se
+compró primero y lo que se vendió después, en períodos de tiempo».
+
+`inventory_effect` baja de cuatro modos a dos:
+
+| Modo | Cuándo es default |
+|---|---|
+| `historical_replay` — las compras suman y las ventas restan | ventas y compras que mueven unidades |
+| `current_snapshot` — el archivo declara el saldo absoluto | catálogo con cantidad |
+
+Desaparecen `INFORMATIONAL` y `NO_INVENTORY` de `domain/inventory_effect.py` y de sus
+consumidores: `schemas/ingestion.py`, `api/v1/ingestion.py`, `ingestion_import_service.py`,
+`_import_projection.py`, `inventory_integrity_service.py`, `domain/inventory_replay_gate.py`,
+`jobs/recalculate_health_score.py`, `InventoryImpactPanel.tsx`.
+
+**Una hoja que no identifica producto Y cantidad no muestra la pregunta**
+(`SheetInventoryProfile.moves_units` ya sabe decidirlo). Hoy Gastos_Fijos, Clientes y
+Proveedores muestran «Estas cantidades no afectan el inventario», que es el cartel que el
+usuario pidió sacar. Y tiene razón en el fondo: el problema no es que la frase sea falsa, es
+que esas hojas **no hablan de inventario**, así que la respuesta correcta es no preguntar.
+
+**El ancla del catálogo sigue ignorando su fecha, y eso NO es una omisión.**
+`inventory_temporal_service` lo declara: `catalog_initial_stock` es un snapshot sin fecha de
+negocio, y anclarlo en la fecha del import marcaría como divergentes todas las ventas
+anteriores. Se aplica como saldo de apertura **antes de todos los eventos**; la cronología
+gobierna a las compras y ventas **entre sí**. Esa separación es la que evita el doble descuento
+del incidente don pedro, y es exactamente la condición que faltaba para poder cambiar el
+default.
+
+**La parte grande: levantar el límite del archivo plano.** `inventory_replay_gate` hoy rechaza
+pre-lease un archivo de una sola tabla que declara stock *y* ventas, porque no hay saldo contra
+el cual validar: lo está cargando el propio archivo en la misma pasada. Con `historical_replay`
+por default, ese rechazo dejaría de ser excepcional y rompería archivos que hoy importan bien.
+El importador tiene que armar **identidades y saldos provisionales en memoria antes de
+construir los movimientos** — el arreglo que el docstring del gate ya anticipaba como
+definitivo, y que el camino multi-hoja hace de facto (catálogos → compras → ventas).
+
+**Lo que se re-litiga y por qué, para que no vuelva a discutirse.** El test
+`test_historical_replay_nunca_es_un_default` y el docstring de `inventory_effect.py` congelaron
+el default después del incidente don pedro: un archivo de 10.931 ventas movió el inventario
+entero en una confirmación y la parte ya contada en el saldo de apertura se descontó dos veces.
+La regla **no se levanta por conveniencia ni porque el usuario lo pidió**: se levanta porque el
+replay pasa a aplicarse por fecha y el ancla se aplica antes de todo, que era la condición que
+en su momento no existía. Si alguna de esas dos piezas se cae, el default tiene que volver.
+
+**Aceptación:** ningún archivo se rechaza por ser plano · el orden de aplicación es por fecha y
+no por solapa (dos libros con las mismas ventas y las solapas invertidas dan el mismo
+resultado) · una hoja sin producto+cantidad no muestra una sola línea sobre inventario · el
+caso don pedro sigue en rojo si se rompe el anclaje.
+
+---
+
 # F-A · Preservar primero, clasificar después
 
 Cada columna arranca visible **con su nombre original**.
@@ -606,6 +703,70 @@ Copy: **"Para importar ventas, Véktor necesita saber qué columna contiene la f
 El 422 pasa a usar labels humanos (`CANONICAL_FIELDS[entity][field]`), como ya hace `_collision_detail`.
 
 **Test:** todo campo de `REQUIRED_FIELDS` tiene motivo no vacío. El copy no puede afirmar lo que el importador no hace: sin fecha la fila va a /otros, **sin monto se descarta** (`:4186-4187`).
+
+---
+
+# F-I · Identidad por código: IDs y comprobantes
+
+**El síntoma que la motiva.** En el archivo real, la columna `ID` de Proveedores y de Clientes
+termina en `custom_field:id_proveedor` con el cartel «esta hoja no tiene un campo para eso
+(codigo)». Véktor entiende el concepto y no tiene dónde ponerlo. Mientras tanto, «Almacén Doña
+Rosa», «Almacen Doña Rosa» y «ALMACEN D ROSA» —las tres variantes que el propio archivo declara
+en la columna *Variantes de nombre vistas en ventas*— son tres clientes distintos.
+
+**Migración aditiva** (la excepción declarada arriba): columna `external_code VARCHAR(64) NULL`
+en `customers`, `suppliers` y `products`, con índice único parcial por `(tenant_id,
+external_code)` donde no es null. Verificado: hoy no existe ninguna columna equivalente en los
+tres modelos.
+
+**Jerarquía del resolvedor de maestros:** `código externo → documento/CUIT → nombre
+normalizado`. Un código siempre le gana a un nombre parecido. Espeja lo que `_resolve_product`
+ya hace con `barcode → sku → nombre+marca` (F2): la regla no es nueva, faltaba la clave.
+
+**Vínculo entre hojas**, que es lo que resuelve el archivo real: una venta cuya columna Cliente
+trae `CLI-01` encuentra al cliente que la hoja Clientes declaró con ese ID. El orden
+maestro→transacción ya existe (F7c); lo que falta es la clave por la cual buscar. Lo mismo con
+el Nº de comprobante: las líneas que lo comparten son **una** compra — el agrupamiento ya existe
+en F-H6 y se reusa, no se reescribe.
+
+**Targets nuevos** en `GET /ingestion/field-catalog` para las tres entidades, más el target de
+referencia cruzada del lado de la transacción. Sin eso la columna sigue cayendo a campo propio.
+
+**Dos códigos iguales dentro del mismo archivo → 422 legible**, nunca last-wins. Misma regla que
+`SINGLE_VALUE_FIELDS`: si el archivo se contradice, lo dice, no elige por orden de fila.
+
+**Límite honesto:** un código es identidad **dentro de un tenant**. `CLI-01` de dos negocios
+distintos son dos clientes distintos, y por eso el índice lleva `tenant_id`. Un archivo sin
+columna de ID sigue resolviendo por documento y nombre como hoy — F-I no vuelve obligatorio
+tener códigos.
+
+**Aceptación:** re-importar el mismo archivo no duplica maestros · una venta con código resuelve
+al cliente correcto aunque el nombre venga escrito distinto · el código se ve en la ficha ·
+borrar el archivo revierte lo que creó (F11 sigue valiendo sobre las entidades nuevas).
+
+---
+
+# F-N · Nombre y apellido en una sola columna
+
+**Parte sólo si la ficha es persona**: por la columna Tipo, o porque el documento es DNI y no
+CUIT. Empresa o comercio → el nombre queda entero como razón social. Es lo correcto para
+`Almacén Doña Rosa` y `Kiosco El Sol`, que partidos por el primer espacio darían el apellido
+«Doña Rosa».
+
+**Si no se puede saber, no parte y lo dice en pantalla.** Misma regla de no-invención que ya
+gobierna las fechas (F6-A2), las filas sin monto (F-H4) y el envío sin comprobante (F-H6.b):
+entre elegir mal y no elegir, Véktor conserva el dato y pregunta.
+
+**Corte:** con coma, lo de antes es el apellido (`Pérez, Juan`); sin coma, primera palabra
+nombre y el resto apellido, con las partículas (`de`, `del`, `de la`, `van`) pegadas al
+apellido.
+
+**Sin migración:** `last_name` ya existe en `customers` y `suppliers`, nullable, con el
+docstring que dice que para empresas queda NULL. F-N usa lo que ya está.
+
+**Aceptación:** una razón social nunca se parte · una persona con DNI sí · el caso indecidible
+se ve en pantalla y no se resuelve solo · el split es visible antes de confirmar, no una sorpresa
+en la ficha.
 
 ---
 
@@ -734,6 +895,15 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H6.b ✅ | re-confirmar no cobra el flete dos veces, tampoco con «cada fila es un envío» |
 | F-H6.b ✅ | una decisión sobre una hoja sin columna de envío → 422 antes del lease |
 | F-H6 | distribución por subtotal cuadra al centavo; no distribuido no toca `unit_cost_ars`; el gasto atribuido a inventario no se cuenta dos veces |
+| F-T | el confirm publica su desglose por etapa en `pipeline_events`, con el mismo archivo antes y después |
+| F-F | dos libros con las mismas ventas y las solapas invertidas dan el mismo stock final |
+| F-F | un archivo plano con stock y ventas juntos **importa**: ya no se rechaza pre-lease |
+| F-F | una hoja sin producto+cantidad no renderiza ninguna pregunta ni cartel de inventario |
+| F-F | el ancla del catálogo se aplica antes de todos los eventos: el caso don pedro no descuenta dos veces |
+| F-I | re-importar el mismo archivo no duplica maestros (el código externo matchea) |
+| F-I | una venta con `CLI-01` resuelve al cliente aunque su nombre esté escrito de tres formas distintas |
+| F-I | dos filas con el mismo código en el mismo archivo → 422, nunca last-wins |
+| F-N | `Almacén Doña Rosa` no se parte; `Pérez, Juan` sí; el indecidible se ve en pantalla |
 | F-A | una hoja cuya única columna candidata a fecha se auto-propone como custom **sigue** reportando `required_missing` (**V10**) |
 | F-A | cambiar la sección preserva lo tocado |
 | F-B | no aparece ningún `%` en el DOM del panel |
