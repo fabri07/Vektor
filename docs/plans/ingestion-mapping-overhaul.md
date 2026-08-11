@@ -222,7 +222,7 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
         d.3 gate al confirmar (cola + /otros) ✅ entregado
         d.4 endpoint de apply                 ✅ entregado
         d.5 botón en el panel de impacto      ✅ entregado
-        d.6 el replay que no se puede validar no se confirma  ✅ entregado
+        d.6 el replay que no se puede validar no se confirma  ⛔ REVERTIDO por F-F.1
 F-H3.e  selector de efecto por hoja en la UI                      ✅ entregado
 ```
 
@@ -851,7 +851,7 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3.d.3 ✅ | el gate corre para el ARCHIVO, no por hoja: dos hojas de ventas comparten el mismo stock (mutation-testeado) |
 | F-H3.d.3 ✅ | una fila rechazada NO consume stock: no arrastra a las que sí entraban |
 | F-H3.d.3 ✅ | re-confirmar no duplica la captura en `/otros` (mutation-testeado: sin huella → dos filas) |
-| F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos, ver F-H3.d.6 |
+| F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos, ver las filas de F-F.1 |
 | F-H3.d.4 ✅ | aplicar dos veces no descuenta dos veces (`source_event_id="sale:{id}"`, mutation-testeado) |
 | F-H3.d.4 ✅ | una venta ya descontada EN VIVO no se vuelve a descontar acá (**V13**) |
 | F-H3.d.4 ✅ | el impacto que devuelve el apply se recalcula contra el stock actual, no el del confirm |
@@ -861,12 +861,13 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3.d.4 ✅ | `dry_run` calcula y no escribe; sólo aplica las hojas pedidas; una venta sin hoja registrada lo **declara** |
 | F-H3.d.5 ✅ | el panel sin `fileId` es sólo informativo; con sólo compras no ofrece aplicar (no hay nada que hacer) |
 | F-H3.d.5 ✅ | tras aplicar muestra lo que devolvió el SERVIDOR, y dice que las ventas sin stock **no se anularon** |
-| F-H3.d.6 ✅ | archivo plano que crea productos + `historical_replay` → **422 antes del lease**, con la hoja y las dos salidas en el mensaje (mutation-testeado) |
-| F-H3.d.6 ✅ | el rechazo deja `STAGE_REJECT` con `motivo=replay_no_gateable`; nada a medio importar |
-| F-H3.d.6 ✅ | el MISMO archivo en `informational` entra: la salida que el mensaje ofrece existe |
-| F-H3.d.6 ✅ | sin alta de productos el gate corre normalmente (control: si no, el bloqueo apagó el replay entero) |
-| F-H3.d.6 ✅ | el respaldo del importador degrada a `informational`, cuenta `replay_degradado` y deja `hojas_con_replay=0` (mutation-testeado) |
+| ~~F-H3.d.6~~ | **REVERTIDO POR F-F.1.** El rechazo pre-lease del archivo plano (422 `replay_no_gateable`), su `STAGE_REJECT` y la degradación a `informational` del importador (`replay_degradado`) se eliminaron: existían porque el gate miraba un saldo estático, y las compras del archivo ahora entran como créditos datados. Las filas de abajo son las que las reemplazan. |
 | F-H3.d.6 ✅ | archivo de UNA tabla con mapeo por contexto: `quantity` llega al importador (antes se perdía y toda venta valía 1 unidad) |
+| F-F.1 ✅ | ningún archivo se rechaza por ser plano: el que declara stock y ventas juntas se confirma, y no deja `STAGE_REJECT` (control por el otro lado) |
+| F-F.1 ✅ | la compra del archivo del **01/03** respalda la venta del 10/03; con las fechas invertidas (compra 20/03) la misma venta se va a «Otros» (mutation-testeado: créditos sin fecha → rojo) |
+| F-F.1 ✅ | a igual fecha el crédito entra antes que el débito, mismo desempate que `replay_timeline` |
+| F-F.1 ✅ | el saldo de partida es el PREVIO al archivo, no el de hoy: pasar un saldo que ya incluye las compras **y** los créditos las contaría dos veces |
+| F-F.1 ✅ | que el archivo también cargue productos ya no apaga el gate ni degrada la hoja (`hojas_con_replay=1`) |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** ✅ | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11, cruzando `.xlsx` real → confirm → apply → saldo persistido** |
 | F-H3 ✅ | re-confirmar el mismo archivo no aplica el movimiento dos veces |
@@ -875,7 +876,7 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3.e ✅ | el endpoint propone un modo por hoja y sólo ofrece los que tienen sentido para esa hoja |
 | F-H3.e ✅ | sacar `cantidad` del mapeo deja a la hoja sin poder aplicar su historia (el default se recalcula con el borrador) |
 | F-H3.e ✅ | el modo elegido VIAJA en el confirm — argumento del componente y cuerpo del POST, mutation-testeado por capa |
-| F-H3.e ✅ | el 422 de d.6 se alcanza desde el payload que manda la pantalla, no sólo desde un curl |
+| F-H3.e ✅ | el modo que ofrece el selector CAMBIA lo que hace el confirm, desde el payload que manda la pantalla y no sólo desde un curl (antes se verificaba contra el 422 de d.6; ahora contra el gate corriendo) |
 | F-H3 | `current_snapshot` fija absoluto; `no_inventory` no crea movimiento |
 | F-H3 | replay histórico negativo → advertencia, **no** `InsufficientStockError` |
 | **F-H4** ✅ | **las 7 filas de la tabla de precio, incluida la discrepancia con tolerancia de 1 centavo** |

@@ -1,20 +1,21 @@
-"""F-H3.d.6 — un replay que no se puede validar no se confirma.
+"""F-F — las compras del propio archivo respaldan a sus ventas, por fecha.
 
-En un archivo de UNA sola tabla donde las mismas filas dan la venta y dan de alta
-el producto, el gate de `historical_replay` no tiene saldo contra el cual evaluar:
-lo carga el propio archivo, en la misma pasada. Antes el importador se abstenía —
-lo dejaba anotado en `counts["replay_sin_gatear"]` y seguía—, así que las ventas
-sin respaldo entraban a los libros igual y el import se reportaba como un replay.
-Justo lo contrario de lo que el modo promete.
+Este archivo probaba lo contrario: hasta F-F, un libro de UNA sola tabla que
+declaraba el stock *y* las ventas se **rechazaba con 422** antes del lease
+(F-H3.d.6). No era un capricho: el gate miraba un saldo estático previo al
+archivo, y las compras de la fila de abajo todavía no se habían aplicado, así que
+"validar cada venta contra el stock" habría mandado a «Otros» ventas que el propio
+archivo respalda.
 
-Se rechaza con 422 en vez de degradar a `informational` en silencio, por la misma
-regla que ya rige en `resolve_inventory_effects`: un override que no se puede
-honrar no se ignora, porque significa que el usuario cree haber decidido algo
-sobre su inventario que no va a pasar.
+Con el gate cronológico ese rechazo dejó de tener razón de ser: las compras entran
+como créditos CON FECHA (`CreditEvent`), se intercalan con las ventas y el archivo
+plano se evalúa igual que uno multi-hoja. Lo que antes era un 422 ahora es un
+import que respeta el orden de los movimientos.
 
-El rechazo va ANTES del lease, donde no hay nada a medio importar ni lease que
-compensar — y deja `STAGE_REJECT` en `pipeline_events`, que es lo que hace
-diagnosticable un 422 sin reconstruir el caso a mano.
+Lo que este camino todavía no gatea —y por eso hay un test que lo fija— es la
+venta de un producto que el propio archivo CREA: al pre-escanear no existe, no
+entra como candidata y la venta se importa sin validar. F-F.2 lo convierte en un
+descuento pendiente contado, en vez del silencio actual.
 """
 
 from __future__ import annotations
@@ -160,8 +161,8 @@ async def _cuantas(db_session: AsyncSession, tenant: Tenant, modelo: Any) -> int
     return len(list(result.scalars().all()))
 
 
-class TestReplayNoGateable:
-    async def test_rechaza_el_replay_que_no_puede_validar(
+class TestUnArchivoPlanoYaNoSeRechaza:
+    async def test_el_archivo_que_declara_stock_y_ventas_se_confirma(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
@@ -169,27 +170,21 @@ class TestReplayNoGateable:
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
+        """El 422 de F-H3.d.6 ya no existe: ningún archivo se rechaza por ser plano.
+
+        Este archivo crea el producto desde las mismas filas que venden, así que al
+        pre-escanear no hay identidad todavía y las ventas entran sin validar contra
+        stock. Eso es una limitación conocida y acotada de este camino —F-F.2 la
+        convierte en un descuento pendiente contado—, no el silencio que motivaba el
+        rechazo: antes el usuario no podía importar el archivo en absoluto.
+        """
         response = await _confirmar(
             client, auth_headers, archivo, _payload("historical_replay")
         )
 
-        assert response.status_code == 422
-        detalle = response.json()["detail"]
-        # El mensaje tiene que explicar QUÉ pasa con el archivo y ofrecer las dos
-        # salidas, no nombrar el modo técnico que el usuario eligió.
-        assert _LABEL in detalle
-        assert "da de alta productos" in detalle
-        # La salida de dos pasos va nombrada: el replay del panel recalcula contra
-        # el stock del momento, así que el objetivo SÍ es alcanzable sin
-        # reestructurar el archivo. Mandar a partir las hojas como si fuera el
-        # único camino es un mensaje falso.
-        assert "panel de impacto" in detalle
-        assert "quedar pendiente" in detalle
-        assert "separá el saldo inicial" in detalle
-
-        # Un rechazo pre-lease no deja NADA a medio importar.
-        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
-        assert await _cuantas(db_session, sample_tenant, Product) == 0
+        assert response.status_code == 200, response.text
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 2
+        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
 
     async def test_efecto_sin_hoja_no_se_descarta_en_silencio(
         self,
@@ -228,15 +223,18 @@ class TestReplayNoGateable:
         assert "por hoja" in response.json()["detail"]
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
 
-    async def test_el_rechazo_deja_traza(
+    async def test_ya_no_se_rechaza_por_ser_plano(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
         archivo: UploadedFile,
         db_session: AsyncSession,
     ) -> None:
-        """Sin `STAGE_REJECT` un 422 es indistinguible de un confirm que nunca
-        llegó: diagnosticarlo obliga a reconstruir el caso desde capturas."""
+        """Control del anterior por el otro lado: ni un `STAGE_REJECT` en la traza.
+
+        Sin esto, un 200 podría venir de que el rechazo se movió de lugar en vez de
+        haber desaparecido.
+        """
         await _confirmar(client, auth_headers, archivo, _payload("historical_replay"))
 
         eventos = list(
@@ -248,13 +246,7 @@ class TestReplayNoGateable:
             .scalars()
             .all()
         )
-        assert len(eventos) == 1
-        detail = eventos[0].detail
-        assert detail is not None
-        assert detail["motivo"] == "replay_no_gateable"
-        assert detail["http_status"] == 422
-        assert detail["context_id"] == _CTX
-        assert detail["inventory_effect"] == "historical_replay"
+        assert eventos == []
 
     async def test_el_mismo_archivo_sin_replay_entra(
         self,
@@ -313,151 +305,188 @@ class TestReplayNoGateable:
         assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 1
 
 
-def _summary_compras_y_ventas() -> dict[str, Any]:
-    """Un libro plano donde la compra que respalda la venta viene DESPUÉS.
+_CTX_COMPRAS = "sheet:Compras"
+_CTX_VENTAS = "sheet:Ventas"
+_HEADERS_COMPRAS = ["fecha", "producto", "cantidad", "monto", "proveedor"]
+_HEADERS_VENTAS = ["fecha", "producto", "cantidad", "monto"]
 
-    El caso real: una tabla de movimientos con la compra del 01/03 y la venta del
-    10/03. El stock previo del producto es 0 — todo lo que hay lo trae este mismo
-    archivo, igual que en el catálogo+ventas, pero por otra puerta.
+
+def _summary_dos_hojas(dia_compra: str, dia_venta: str) -> dict[str, Any]:
+    """Un libro con la compra en una hoja y la venta en otra.
+
+    Es el camino donde la propiedad cronológica es OBSERVABLE de punta a punta: la
+    hoja de compras declara unidades que entran con su fecha, y la de ventas las
+    consume. En el archivo plano no se puede montar el mismo caso —con `amount`
+    mapeado, venta y gasto salen de la misma columna, así que cada fila suma y resta
+    lo mismo— y por eso ese camino se cubre con los tests de "ya no se rechaza".
     """
     compras = [
         {
-            "fecha": "2024-03-01",
+            "fecha": dia_compra,
             "producto": _PRODUCTO,
             "cantidad": "10",
             "monto": "12000",
             "proveedor": "Distribuidora Sur",
-            "__context__": _CTX,
+            "__context__": _CTX_COMPRAS,
         }
     ]
     ventas = [
         {
-            "fecha": "2024-03-10",
+            "fecha": dia_venta,
             "producto": _PRODUCTO,
             "cantidad": "6",
             "monto": "12600",
-            "__context__": _CTX,
+            "__context__": _CTX_VENTAS,
         }
     ]
-    headers = ["fecha", "producto", "cantidad", "monto", "proveedor"]
     return {
         "confidence": "HIGH",
         "file_type": "spreadsheet",
-        "inferred_type": "general",
-        "multi_sheet": False,
+        "inferred_type": "mixed",
+        "multi_sheet": True,
         "has_venta": True,
         "has_gasto": True,
         "row_count": 2,
-        "headers": headers,
         "ventas_detectadas": ventas,
         "gastos_detectados": compras,
         "preview_rows": [*compras, *ventas],
         "mapping_contexts": [
             {
-                "context_id": _CTX,
-                "label": _LABEL,
-                "source_kind": "table",
-                "entity_type": "sale",
-                "headers": headers,
+                "context_id": _CTX_COMPRAS,
+                "label": "Compras",
+                "source_kind": "sheet",
+                "entity_type": "expense",
+                "headers": _HEADERS_COMPRAS,
                 "fields": None,
-                "preview_rows": [*compras, *ventas],
-                "row_count": 2,
-            }
+                "preview_rows": compras,
+                "row_count": 1,
+            },
+            {
+                "context_id": _CTX_VENTAS,
+                "label": "Ventas",
+                "source_kind": "sheet",
+                "entity_type": "sale",
+                "headers": _HEADERS_VENTAS,
+                "fields": None,
+                "preview_rows": ventas,
+                "row_count": 1,
+            },
         ],
     }
 
 
-@pytest_asyncio.fixture
-async def archivo_compras_y_ventas(
-    db_session: AsyncSession, sample_tenant: Tenant
+async def _archivo_dos_hojas(
+    db_session: AsyncSession, tenant: Tenant, dia_compra: str, dia_venta: str
 ) -> UploadedFile:
     record = UploadedFile(
-        tenant_id=sample_tenant.tenant_id,
+        tenant_id=tenant.tenant_id,
         uploaded_by=None,
-        original_filename="movimientos_2024.xlsx",
-        s3_key=f"uploads/test/{uuid.uuid4()}/movimientos_2024.xlsx",
+        original_filename="compras_y_ventas_2024.xlsx",
+        s3_key=f"uploads/test/{uuid.uuid4()}/compras_y_ventas_2024.xlsx",
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        size_bytes=1024,
+        size_bytes=2048,
         purpose="ingestion",
         status="uploaded",
         processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
-        parsed_summary_json=_summary_compras_y_ventas(),
+        parsed_summary_json=_summary_dos_hojas(dia_compra, dia_venta),
     )
     db_session.add(record)
     await db_session.commit()
     return record
 
 
-class TestUnaCompraDelMismoArchivoTampocoSePuedeGatear:
-    """Review #3 — el alta de productos no era la única forma de declarar stock.
+async def _producto_sin_stock(db_session: AsyncSession, tenant: Tenant) -> None:
+    """El producto ya existe y está en cero: todo lo que entre lo trae el archivo."""
+    db_session.add(
+        Product(
+            id=uuid.uuid4(),
+            tenant_id=tenant.tenant_id,
+            name=_PRODUCTO,
+            sale_price_ars=Decimal("2100"),
+            unit_cost_ars=Decimal("1200"),
+            stock_units=0,
+        )
+    )
+    await db_session.commit()
 
-    El gate del camino plano se calcula ANTES del bucle de filas, con el saldo
-    previo al archivo; las compras del propio archivo lo suman recién DENTRO del
-    bucle (`_apply_purchase_to_stock`). Así que un libro de una tabla con compras
-    y ventas mandaba a "Otros" ventas que sus propias compras respaldan — y el
-    mismo libro partido en dos hojas importaba bien, porque el orden de pasada
-    (catálogos → compras → ventas) garantiza que el stock ya esté.
 
-    Se rechaza por la misma razón que el catálogo+ventas: elegir
-    `historical_replay` es pedir que Véktor valide cada venta contra el stock, y
-    validar contra un saldo que todavía no incorporó lo que el archivo declara no
-    es validar.
+def _map_en(ctx: str, entidad: str, source: str, target: str) -> dict[str, Any]:
+    return {
+        "source_column": source,
+        "target_field": target,
+        "context_id": ctx,
+        "entity_type": entidad,
+    }
+
+
+_PAYLOAD_DOS_HOJAS = {
+    "column_mappings": [
+        _map_en(_CTX_COMPRAS, "expense", "fecha", "expense_date"),
+        _map_en(_CTX_COMPRAS, "expense", "producto", "product_name"),
+        _map_en(_CTX_COMPRAS, "expense", "cantidad", "quantity"),
+        _map_en(_CTX_COMPRAS, "expense", "monto", "amount"),
+        _map_en(_CTX_VENTAS, "sale", "fecha", "transaction_date"),
+        _map_en(_CTX_VENTAS, "sale", "producto", "product_name"),
+        _map_en(_CTX_VENTAS, "sale", "cantidad", "quantity"),
+        _map_en(_CTX_VENTAS, "sale", "monto", "amount"),
+    ],
+    "confirmed_fields": {"ventas": True, "gastos": True},
+    "context_confirmed": {_CTX_COMPRAS: True, _CTX_VENTAS: True},
+    "inventory_effect": {_CTX_VENTAS: "historical_replay"},
+}
+
+
+class TestLaCompraDelArchivoRespaldaSuVentaPorFecha:
+    """F-F — el respaldo se evalúa por fecha, no como un saldo sin tiempo.
+
+    Antes las compras del archivo llegaban al gate metidas dentro del saldo inicial
+    (el `stock_units` de ese momento, que ya las incluía) y por lo tanto SIN fecha:
+    una compra del 20/03 respaldaba una venta del 10/03. Ahora entran como créditos
+    datados y el saldo de partida es el previo al archivo.
     """
 
-    async def test_compras_y_ventas_en_una_tabla_no_se_confirma_con_replay(
+    async def test_la_compra_anterior_respalda_la_venta(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
-        archivo_compras_y_ventas: UploadedFile,
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
-        response = await _confirmar(
-            client,
-            auth_headers,
-            archivo_compras_y_ventas,
-            {
-                "column_mappings": _MAPEOS,
-                "confirmed_fields": {"ventas": True, "gastos": True},
-                "context_confirmed": {_CTX: True},
-                "inventory_effect": {_CTX: "historical_replay"},
-            },
+        await _producto_sin_stock(db_session, sample_tenant)
+        archivo = await _archivo_dos_hojas(
+            db_session, sample_tenant, dia_compra="2024-03-01", dia_venta="2024-03-10"
         )
 
-        assert response.status_code == 422, response.text
-        assert _LABEL in response.json()["detail"]
-        # Nada a medio importar: el rechazo va antes del lease.
-        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
-
-    async def test_el_mismo_libro_sin_replay_entra_entero(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        archivo_compras_y_ventas: UploadedFile,
-        db_session: AsyncSession,
-        sample_tenant: Tenant,
-    ) -> None:
-        """Control: la salida que ofrece el mensaje existe de verdad.
-
-        Y acá se ve el bug que motivó el rechazo: la venta de 6 unidades entra
-        porque la compra de 10 del mismo archivo la respalda. Bajo el gate viejo
-        esa misma venta se iba a "Otros".
-        """
-        response = await _confirmar(
-            client,
-            auth_headers,
-            archivo_compras_y_ventas,
-            {
-                "column_mappings": _MAPEOS,
-                "confirmed_fields": {"ventas": True, "gastos": True},
-                "context_confirmed": {_CTX: True},
-                "inventory_effect": {_CTX: "informational"},
-            },
-        )
+        response = await _confirmar(client, auth_headers, archivo, _PAYLOAD_DOS_HOJAS)
 
         assert response.status_code == 200, response.text
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
         assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
+
+    async def test_la_compra_posterior_no_respalda_la_venta(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """El control del anterior, y la propiedad que pidió el usuario.
+
+        Mismas dos filas, fechas invertidas: se compró DESPUÉS de vender. Las
+        unidades que la venta necesitaba no existían todavía, así que la fila no
+        entra y queda en «Otros». Bajo el gate viejo esta venta entraba, porque la
+        compra ya estaba sumada al saldo contra el que se la validaba.
+        """
+        await _producto_sin_stock(db_session, sample_tenant)
+        archivo = await _archivo_dos_hojas(
+            db_session, sample_tenant, dia_compra="2024-03-20", dia_venta="2024-03-10"
+        )
+
+        response = await _confirmar(client, auth_headers, archivo, _PAYLOAD_DOS_HOJAS)
+
+        assert response.status_code == 200, response.text
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
+        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 1
 
 
 class TestElBloqueoSeAlcanzaDesdeLaPantalla:
@@ -481,6 +510,25 @@ class TestElBloqueoSeAlcanzaDesdeLaPantalla:
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
+        """El modo que ofrece la pantalla tiene que CAMBIAR lo que hace el confirm.
+
+        Antes esto se verificaba contra el 422 de F-H3.d.6, que ya no existe. La
+        evidencia equivalente es el gate corriendo: con el producto ya cargado con 2
+        unidades, de las dos ventas entra la del 03/03 y la del 10/03 queda en
+        «Otros». Si el modo no llegara al backend, entrarían las dos.
+        """
+        db_session.add(
+            Product(
+                id=uuid.uuid4(),
+                tenant_id=sample_tenant.tenant_id,
+                name=_PRODUCTO,
+                sale_price_ars=Decimal("2100"),
+                unit_cost_ars=Decimal("1200"),
+                stock_units=2,
+            )
+        )
+        await db_session.commit()
+
         # Lo que la pantalla ofrece para esta hoja, servido por el endpoint nuevo.
         opciones = await client.post(
             f"/api/v1/ingestion/files/{archivo.id}/inventory-effects",
@@ -491,17 +539,15 @@ class TestElBloqueoSeAlcanzaDesdeLaPantalla:
         hoja = opciones.json()[0]
         assert "historical_replay" in [o["value"] for o in hoja["options"]]
 
-        # Elegirlo desde la pantalla dispara el bloqueo: este archivo declara el
-        # stock y las ventas en las mismas filas.
         respuesta = await _confirmar(
             client,
             auth_headers,
             archivo,
-            _payload("historical_replay"),
+            _payload("historical_replay", productos=False),
         )
-        assert respuesta.status_code == 422, respuesta.text
-        assert _LABEL in respuesta.json()["detail"]
-        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
+        assert respuesta.status_code == 200, respuesta.text
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
+        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 1
 
     async def test_el_default_que_muestra_la_pantalla_es_el_que_aplica_el_backend(
         self,

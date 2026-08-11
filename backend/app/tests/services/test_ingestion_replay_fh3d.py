@@ -530,21 +530,20 @@ class TestElGateTambienCorreEnElArchivoPlano:
         assert counts["ventas"] == 2
         assert counts.get("ventas_sin_stock", 0) == 0
 
-    async def test_si_el_archivo_tambien_carga_productos_degrada_y_no_dice_que_aplico(
+    async def test_que_el_archivo_tambien_cargue_productos_ya_no_apaga_el_gate(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """F-H3.d.6 — el respaldo del importador, no el camino normal.
+        """F-F — acá vivía la degradación a `informational` (F-H3.d.6).
 
-        No hay pasadas separadas acá: el stock que el archivo declara todavía no
-        existe cuando el gate mira, así que rechazaría ventas contra un saldo que el
-        propio archivo está por cargar. Ese archivo el confirm lo rechaza con 422
-        antes de tomar el lease (ver `test_ingestion_replay_no_gateable.py`); si
-        igual llega hasta acá —el confirm mira el mapeo declarado y el importador
-        las columnas ya resueltas— la hoja se degrada a `informational`.
+        Mientras el gate miraba un saldo estático, un archivo que además declaraba
+        stock no se podía validar: el saldo contra el cual hacerlo lo cargaba el
+        propio archivo. Se degradaba la hoja y las dos ventas entraban.
 
-        Antes se abstenía y seguía marcada como `historical_replay`: las ventas sin
-        respaldo entraban a los libros igual y el import se reportaba como un replay.
-        Lo que se afirma acá es lo segundo — que NO se reporta como replay aplicado.
+        Ahora las compras del archivo entran como créditos datados, así que la
+        degradación desapareció junto con su contador. El producto de este caso ya
+        existe con 10 unidades y el archivo no declara compras, de modo que el gate
+        corre con ese saldo: de las dos ventas de 6 entra la primera y la segunda
+        queda en «Otros».
         """
         await _crear_producto(db_session, sample_tenant, stock=10)
         summary = self._summary("6", "6")
@@ -559,12 +558,8 @@ class TestElGateTambienCorreEnElArchivoPlano:
         )
         await db_session.flush()
 
-        assert counts["replay_degradado"] == 1
-        # La degradación tiene que verse en el contador que el confirm traza: si
-        # dijera 1, la traza afirmaría un replay que no ocurrió.
-        assert counts["hojas_con_replay"] == 0
-        assert "replay_sin_gatear" not in counts
-        # El import se preserva entero (no se aborta) y ninguna venta se rechaza:
-        # sin saldo previo confiable, rechazar sería inventar el criterio.
-        assert counts["ventas"] == 2
-        assert counts.get("ventas_sin_stock", 0) == 0
+        assert "replay_degradado" not in counts
+        # El replay se reporta como lo que es: una hoja que sí lo aplicó.
+        assert counts["hojas_con_replay"] == 1
+        assert counts["ventas"] == 1
+        assert counts["ventas_sin_stock"] == 1
