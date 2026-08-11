@@ -111,3 +111,32 @@ async def test_dos_hojas_que_mapean_distinto_no_aprenden_esa_columna(
         await db_session.flush()
 
     assert await _contar(db_session, sample_tenant.tenant_id, "fecha") == 0
+
+
+async def test_ignorar_la_columna_en_otra_hoja_no_borra_el_mapeo_bueno(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Ignorar una columna en una hoja no dice NADA sobre qué significa esa
+    columna. Tratarlo como contradicción descartaba el mapeo legítimo de la otra
+    hoja — y si el alias ya existía, lo dejaba sin refrescar."""
+    svc = ColumnMappingService(db_session)
+    with db_session.no_autoflush:
+        await svc.save_mappings(
+            sample_tenant.tenant_id,
+            "expense",
+            [
+                {"source_column": "Fecha", "target_field": "expense_date"},
+                {"source_column": "Fecha", "target_field": "ignore"},
+            ],
+        )
+        await db_session.flush()
+
+    fila = (
+        await db_session.execute(
+            select(TenantColumnMapping).where(
+                TenantColumnMapping.tenant_id == sample_tenant.tenant_id,
+                TenantColumnMapping.source_column == "fecha",
+            )
+        )
+    ).scalar_one()
+    assert fila.target_field == "expense_date"

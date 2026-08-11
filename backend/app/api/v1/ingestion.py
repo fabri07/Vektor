@@ -2499,8 +2499,11 @@ async def confirm_file(
             ),
             # F-T: un confirm que muere es donde más importa saber dónde tardó —
             # si se fue en validar o en insertar cambia por completo qué mirar.
-            # Las etapas ya cerradas están registradas: `stage`/`mark` anotan en
-            # `finally`, así que el bloque que explotó también deja su tiempo.
+            # Las etapas cerradas están registradas, y el import además está
+            # envuelto en `stage()`, que anota en `finally`: si explota ahí, su
+            # tiempo queda. Un `mark()` NO lo haría —no es un context manager—, y
+            # por eso el import no usa uno: era la etapa más larga y más probable
+            # de fallar, o sea la única que no podía faltar.
             "timings_ms": _timings.as_detail(),
         }
         if isinstance(exc, HTTPException):
@@ -2555,6 +2558,11 @@ async def confirm_file(
                         _mapping.source_column,  # nombre de la columna como label inicial
                     )
 
+        # Un checkpoint propio: crear las definiciones de campos personalizados
+        # cuesta un round-trip POR mapeo `custom_field:`, y sin este corte ese
+        # tiempo se le cargaba al snapshot de maestros, que puede ni haber corrido.
+        _timings.mark("campos_propios")
+
         # ── F8b (Task 4): aplicar las decisiones de riesgo sobre una COPIA del
         # summary, DENTRO del savepoint. drop_column filtra columnas del summary
         # (y, más abajo, de los mapeos); route recalcula las filas afectadas y las
@@ -2569,6 +2577,11 @@ async def confirm_file(
             if _effective_risk_decisions
             else None
         )
+
+        # `apply_column_risk_decisions` recorre el summary ENTERO (todas las hojas,
+        # todas las filas) para recalcular las afectadas: con un archivo grande no
+        # es despreciable y merece su propia etiqueta.
+        _timings.mark("riesgo_columnas")
 
         # Insert parsed rows into business tables, then mark done
         updated_summary = (
@@ -2656,62 +2669,69 @@ async def confirm_file(
             _before_customers, _before_suppliers = await snapshot_masters_before_import(
                 session, tenant.tenant_id
             )
-        # Se marca SIEMPRE, traiga maestros o no: un cero acá es el dato de que
-        # el archivo no los trae, y saltear el checkpoint mezclaría ese tiempo
-        # con el del import.
+        # Se marca SIEMPRE, traiga maestros o no. Con los checkpoints previos
+        # (`campos_propios`, `riesgo_columnas`) esta etapa ya mide sólo el
+        # snapshot y el armado del summary efectivo, así que un valor chico acá
+        # es interpretable; sin ellos cargaba trabajo ajeno y no se podía leer.
         _timings.mark("snapshot_maestros")
 
-        _t0 = time.monotonic()
-        counts = await insert_confirmed_data(
-            session,
-            tenant.tenant_id,
-            updated_summary,
-            body.confirmed_fields,
-            column_mappings=explicit_mappings,
-            context_mappings=context_mappings,
-            context_confirmed=body.context_confirmed or None,
-            context_entity=cast("dict[str, str]", body.context_entity) or None,
-            source="ingestion",
-            uploaded_file_id=file_id,
-            # El schema lo tipa con Literals (valida la entrada); el importador
-            # acepta el tipo ancho porque también lee el valor guardado en el
-            # summary por una relectura anterior, que llega como str/dict plano.
-            stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
-            # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
-            # el default no viaja en el payload y el importador no sabe calcularlo.
-            inventory_effect=_inventory_effects,
-            # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
-            # se cobran. El dict va tal cual: acá no hay default que resolver.
-            shipping_decisions={d.context_id: d.action for d in body.shipping_decisions},
-            purchase_cost_decisions={
-                d.context_id: CostDecision(
-                    context_id=d.context_id,
-                    base=d.base,
-                    shared_shipping=d.shared_shipping,
-                    line_shipping=d.line_shipping,
-                )
-                for d in body.purchase_cost_decisions
-            },
-            # Ledger de reversa: `products` no tiene columna de origen, así que
-            # sin este detalle no hay forma de saber qué productos creó este
-            # archivo — y borrarlo no podría deshacerlos.
-            return_details=True,
-        )
-        _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
-        # `latency_ms` del evento NO cambia de significado: sigue siendo el import
-        # y sólo el import. Redefinirlo a "todo el confirm" volvería incomparables
-        # las filas ya escritas, que son la única serie histórica que hay. El
-        # desglose completo viaja aparte, en `detail.timings_ms`.
-        _timings.mark(
-            "import",
-            rows=(
+        # `stage()` y no `mark()`: registra en `finally`, así que un import que
+        # EXPLOTA igual deja su tiempo. Con `mark()` la etapa más larga y más
+        # probable de fallar era justo la única que no quedaba en la traza del
+        # rechazo — medido: el 500 por la FK de proveedor no dejó ningún `import`.
+        with _timings.stage("import") as _etapa_import:
+            counts = await insert_confirmed_data(
+                session,
+                tenant.tenant_id,
+                updated_summary,
+                body.confirmed_fields,
+                column_mappings=explicit_mappings,
+                context_mappings=context_mappings,
+                context_confirmed=body.context_confirmed or None,
+                context_entity=cast("dict[str, str]", body.context_entity) or None,
+                source="ingestion",
+                uploaded_file_id=file_id,
+                # El schema lo tipa con Literals (valida la entrada); el importador
+                # acepta el tipo ancho porque también lee el valor guardado en el
+                # summary por una relectura anterior, que llega como str/dict plano.
+                stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
+                # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
+                # el default no viaja en el payload y el importador no sabe calcularlo.
+                inventory_effect=_inventory_effects,
+                # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
+                # se cobran. El dict va tal cual: acá no hay default que resolver.
+                shipping_decisions={d.context_id: d.action for d in body.shipping_decisions},
+                purchase_cost_decisions={
+                    d.context_id: CostDecision(
+                        context_id=d.context_id,
+                        base=d.base,
+                        shared_shipping=d.shared_shipping,
+                        line_shipping=d.line_shipping,
+                    )
+                    for d in body.purchase_cost_decisions
+                },
+                # Ledger de reversa: `products` no tiene columna de origen, así que
+                # sin este detalle no hay forma de saber qué productos creó este
+                # archivo — y borrarlo no podría deshacerlos.
+                return_details=True,
+            )
+            # Las filas que el import REALMENTE procesó, incluidas las que
+            # terminaron en "Otros": son trabajo hecho, y dejarlas afuera daba un
+            # denominador más chico que el real justo en los archivos ambiguos,
+            # que son los que más tardan.
+            _etapa_import.rows = (
                 counts["ventas"]
                 + counts["gastos"]
                 + counts["productos"]
                 + counts["clientes"]
                 + counts["proveedores"]
-            ),
-        )
+                + counts.get("otros", 0)
+            )
+        # `latency_ms` del evento NO cambia de significado: sigue siendo el import
+        # y sólo el import. Redefinirlo a "todo el confirm" volvería incomparables
+        # las filas ya escritas, que son la única serie histórica que hay. El
+        # desglose completo viaja aparte, en `detail.timings_ms`.
+        _confirm_latency_ms = _timings.as_detail()["stages"]["import"]["ms"]
 
         # `product_details` sale de `counts` ANTES de cualquier otra cosa: más
         # abajo `counts` se serializa entero en `compact_summary`, y meter ahí el
@@ -2805,6 +2825,12 @@ async def confirm_file(
                         created_at=datetime.now(UTC),
                     )
                 )
+
+        # La captura de "Otros" hace un insert POR FILA ruteada, más el audit log:
+        # en un archivo ambiguo son miles y no pueden viajar dentro de
+        # "aprendizaje_mapeos", que hace un puñado de upserts — leer eso mandaba a
+        # optimizar el código equivocado.
+        _timings.mark("captura_otros")
 
         # Import vacío → 422; el compensador (except) restaura NEEDS_CONFIRMATION
         # y limpia el lease para reintentar con mapeo manual. F8c: las filas
